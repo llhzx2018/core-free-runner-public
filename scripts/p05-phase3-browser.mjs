@@ -23,6 +23,7 @@ try {
   await page.getByPlaceholder('密码').fill(password);
   await page.getByRole('button', { name: '登录' }).click();
   await page.getByRole('heading', { name: '决策总览' }).waitFor();
+  consoleErrors.length = 0;
   watchApi = true;
 
   for (const label of ['网站中心', 'Observed 关键词', '页面中心', 'SEO Audit', '设置', '备份 / 升级']) {
