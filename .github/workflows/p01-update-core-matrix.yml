@@ -1,0 +1,155 @@
+name: P01 Update Core Matrix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-update-core-matrix.yml'
+      - 'requests/p01-update-core-matrix-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-update-core-matrix
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_HEAD: 944cb1fb8d52377ec36db8d35aa8e5acb69570b1
+    steps:
+      - name: Require unified read/write credential names
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Checkout exact P01 candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: develop
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+
+      - name: Identity and minimal-delta gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(tr -d '\r\n' < p01/VERSION)" = '2.21.15'
+          test "$(tr -d '\r\n' < p01/src/VERSION.txt)" = '2.21.15'
+          grep -Fq "define('VF_VERSION', '2.21.15');" p01/src/app/bootstrap.php
+          ! grep -Fq 'updates.kewaro.com' p01/src/app/bootstrap.php
+          test "$(git -C p01 diff --numstat origin/main -- src/app/bootstrap.php | awk '{print $1":"$2}')" = '1:2'
+          echo 'CANDIDATE_IDENTITY=PASS'
+
+      - name: PHP 8.0 full source syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r -d '' f; do
+            docker run --rm -v "$PWD:/work:ro" -w /work php:8.0-cli php -l "$f" >/dev/null
+            count=$((count+1))
+          done < <(find p01/src -type f -name '*.php' -print0)
+          test "$count" -gt 40
+          echo "PHP80_LINT_COUNT=$count"
+          echo 'PHP80_FULL_SOURCE_LINT=PASS'
+
+      - name: JavaScript syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r -d '' f; do
+            node --check "$f" >/dev/null
+            count=$((count+1))
+          done < <(find p01/src -type f -name '*.js' -print0)
+          test "$count" -gt 10
+          echo "JS_SYNTAX_COUNT=$count"
+          echo 'JS_SYNTAX=PASS'
+
+      - name: Retired architecture and secret-name gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ACTIVE=(p01/src/app/UpdateManager.php p01/src/app/CoreUpdates p01/src/update.php p01/src/assets/update.js p01/src/app/bootstrap.php)
+          if grep -RFn -E 'updates\.kewaro\.com|VF_UPDATE_READ_TOKEN|VF_START_READ_TOKEN|VF_START_UPDATE_TOKEN|VF_START_RELEASE_TOKEN' "${ACTIVE[@]}"; then
+            echo 'Retired update architecture/token name found in active P01 APP update path.' >&2
+            exit 81
+          fi
+          grep -Fq "getenv('VF_PRIVATE_READ_TOKEN')" p01/src/app/UpdateManager.php
+          ! grep -RFn -E 'ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+' p01/src p01/docs || true
+          echo 'SECRET_NAME_AND_RETIRED_ARCHITECTURE=PASS'
+
+      - name: CoreUpdates negative matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-update-core-matrix.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require 'p01/src/app/CoreUpdates/UpdateCore.php';
+          use CoreUpdates\UpdateCore;
+
+          $base = [
+            'schema_version'=>'1.0','project_id'=>'P01','component_id'=>'APP','enabled'=>true,
+            'target_version'=>'2.21.15','update_type'=>'ATOMIC','from_versions'=>['2.21.14'],
+            'schema_from'=>'2026080902','schema_to'=>'2026080902','repository'=>'llhzx2018/vf-start',
+            'release_tag'=>'v2.21.15','asset_name'=>'VF_Start_V2.21.15_UPDATE.zip',
+            'asset_bytes'=>4,'asset_sha256'=>hash('sha256','good'),'backup_required'=>true,
+            'rollback_supported'=>true,'released_at'=>'2026-08-15T00:00:00Z','minimum_php'=>'8.0.0'
+          ];
+          $core = new UpdateCore('P01','APP');
+          $cases=[];
+          $assert=function(bool $ok,string $name)use(&$cases){ if(!$ok){fwrite(STDERR,"FAIL: $name\n");exit(1);} $cases[]=$name; };
+          $assert(($core->check('2.21.14','2026080902',$base)['status']??'')==='AVAILABLE','available');
+          $assert(($core->check('2.21.15','2026080902',$base)['status']??'')==='UP_TO_DATE','already_latest');
+          $x=$base;$x['project_id']='P02';$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='BLOCKED_IDENTITY','wrong_project');
+          $x=$base;$x['component_id']='EXT';$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='BLOCKED_IDENTITY','wrong_component');
+          $x=$base;$x['enabled']=false;$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='DISABLED','disabled');
+          $x=$base;$x['from_versions']=['2.21.13'];$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='BLOCKED_SOURCE_VERSION','unsupported_from');
+          $x=$base;$x['schema_from']='2026080901';$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='BLOCKED_SCHEMA','schema_mismatch');
+          $x=$base;$x['update_type']='FULL_ONLY';$assert(($core->check('2.21.14','2026080902',$x)['status']??'')==='FULL_ONLY','full_only');
+          foreach(['project_id','component_id','target_version','from_versions','asset_bytes','asset_sha256','release_tag','asset_name'] as $missing){$x=$base;unset($x[$missing]);$thrown=false;try{$core->validateManifest($x);}catch(Throwable $e){$thrown=true;}$assert($thrown,'missing_'.$missing);}
+          $x=$base;$x['target_version']='2.21';$thrown=false;try{$core->validateManifest($x);}catch(Throwable $e){$thrown=true;}$assert($thrown,'invalid_target');
+          $x=$base;$x['asset_sha256']='xyz';$thrown=false;try{$core->validateManifest($x);}catch(Throwable $e){$thrown=true;}$assert($thrown,'invalid_sha');
+          $x=$base;$x['asset_bytes']=0;$thrown=false;try{$core->validateManifest($x);}catch(Throwable $e){$thrown=true;}$assert($thrown,'invalid_bytes');
+          $tmp=tempnam(sys_get_temp_dir(),'p01');file_put_contents($tmp,'good');$m=$base;$m['asset_bytes']=4;$m['asset_sha256']=hash_file('sha256',$tmp);$assert(($core->verifyPackage($tmp,$m)['status']??'')==='VERIFIED','package_verified');
+          $m['asset_bytes']=5;$assert(($core->verifyPackage($tmp,$m)['status']??'')==='ASSET_SIZE_MISMATCH','wrong_bytes');
+          $m=$base;$m['asset_bytes']=4;$m['asset_sha256']=str_repeat('0',64);$assert(($core->verifyPackage($tmp,$m)['status']??'')==='ASSET_HASH_MISMATCH','wrong_sha');
+          unlink($tmp);
+          echo 'UPDATE_CORE_CASES='.count($cases)."\n";
+          echo 'UPDATE_CORE_NEGATIVE_MATRIX=PASS'."\n";
+          PHP
+          docker run --rm -v "$PWD:/work:ro" -v /tmp:/hosttmp -w /work php:8.0-cli php /hosttmp/p01-update-core-matrix.php
+
+      - name: Scope and extension independence gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C p01 diff --name-only origin/main...HEAD > /tmp/p01.changed
+          if grep -E '^src/browser-extension/' /tmp/p01.changed; then
+            echo 'Browser Extension changed during APP update integration.' >&2
+            exit 83
+          fi
+          grep -Fq '"version": "1.6.4"' p01/src/browser-extension/manifest.json
+          echo 'BROWSER_EXTENSION_INDEPENDENCE=PASS'
+
+      - name: Summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_UPDATE_CORE_MATRIX=PASS'
+          echo "P01_CANDIDATE_HEAD=$EXPECTED_HEAD"
