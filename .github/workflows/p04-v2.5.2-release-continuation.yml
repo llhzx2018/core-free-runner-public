@@ -1,0 +1,201 @@
+name: P04 V2.5.2 Release Continuation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v2.5.2-release-continuation.yml'
+      - 'requests/p04-v2.5.2-release-continuation-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p04-v2.5.2-release-continuation
+  cancel-in-progress: false
+
+jobs:
+  continue-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE: 91984268ffe66781700db9da10de8d509c878c0b
+      VERSION: 2.5.2
+      SOURCE_VERSION: 2.5.1
+      SCHEMA: '14'
+      TAG: v2.5.2
+      EXPECTED_UPDATE_BYTES: '41442'
+      EXPECTED_UPDATE_SHA256: 3431cae2a905110669c8437fd2e2270bc74eacfe297ed4d9768eb3902a94eb10
+
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Re-read exact formal Release truth
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "/repos/llhzx2018/vf-infra/git/ref/tags/${TAG}" > /tmp/p04-tag.json
+          gh api "/repos/llhzx2018/vf-infra/releases/tags/${TAG}" > /tmp/p04-release.json
+          python3 - <<'PY'
+          import json,os
+          tag=json.load(open('/tmp/p04-tag.json'))
+          rel=json.load(open('/tmp/p04-release.json'))
+          assert tag['object']['type']=='commit' and tag['object']['sha']==os.environ['CANDIDATE']
+          assert rel['tag_name']==os.environ['TAG'] and not rel['draft'] and not rel['prerelease']
+          expected={'VF_Infra_V2.5.2_ATOMIC.zip','VF_Infra_V2.5.2_UPDATE.zip','PACKAGE_MANIFEST.json','SHA256SUMS.txt'}
+          assert {a['name'] for a in rel['assets']}==expected
+          asset=next(a for a in rel['assets'] if a['name']=='VF_Infra_V2.5.2_UPDATE.zip')
+          assert asset['size']==int(os.environ['EXPECTED_UPDATE_BYTES'])
+          json.dump({'tag':rel['tag_name'],'published_at':rel['published_at'],'asset_id':asset['id'],'asset_name':asset['name'],'asset_bytes':asset['size']},open('/tmp/p04-release-truth.json','w'))
+          PY
+          id="$(python3 -c "import json;print(json.load(open('/tmp/p04-release-truth.json'))['asset_id'])")"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-infra/releases/assets/$id" > /tmp/P04_UPDATE.zip
+          test "$(stat -c%s /tmp/P04_UPDATE.zip)" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum /tmp/P04_UPDATE.zip | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          echo 'FORMAL_RELEASE_REMOTE_TRUTH=PASS'
+
+      - name: Checkout core-updates main for controlled publish
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: core-updates
+
+      - name: Publish exact P04 manifest with untracked-file-safe logic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib,os
+          meta=json.load(open('/tmp/p04-release-truth.json'))
+          doc={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.5.2','update_type':'ATOMIC','from_versions':['2.5.1'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra','release_tag':'v2.5.2',
+            'asset_name':meta['asset_name'],'asset_bytes':meta['asset_bytes'],'asset_sha256':os.environ['EXPECTED_UPDATE_SHA256'],
+            'backup_required':True,'rollback_supported':True,'released_at':meta['published_at'],
+            'minimum_php':'8.0.0','notes':'P04 V2.5.2 unified online update infrastructure maintenance release.'
+          }
+          p=pathlib.Path('core-updates/projects/P04.json')
+          encoded=json.dumps(doc,ensure_ascii=False,indent=2)+'\n'
+          if p.exists():
+              old=json.loads(p.read_text(encoding='utf-8'))
+              if old!=doc: raise SystemExit('P04.json exists with different formal truth; refusing replacement')
+          else:
+              p.write_text(encoded,encoding='utf-8')
+          pathlib.Path('/tmp/P04.expected.json').write_text(encoded,encoding='utf-8')
+          PY
+          cd core-updates
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          if ! git ls-files --error-unmatch projects/P04.json >/dev/null 2>&1 || ! git diff --quiet -- projects/P04.json; then
+            git add projects/P04.json
+            git diff --cached --check
+            git commit -m 'release(P04): publish VF Infra 2.5.2 update manifest'
+            for i in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$i" -lt 3 || exit 87
+              git pull --rebase origin main
+            done
+          else
+            echo 'CORE_UPDATES_P04_ALREADY_TRACKED_EXACT=PASS'
+          fi
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)"
+          echo 'CORE_UPDATES_P04_PUBLISH=PASS'
+
+      - name: Remote manifest exact readback with release write credential
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api -H 'Accept: application/vnd.github.raw+json' '/repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' > /tmp/P04.remote.write.json
+          cmp -s /tmp/P04.expected.json /tmp/P04.remote.write.json
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('/tmp/P04.remote.write.json'))
+          assert m['project_id']=='P04' and m['component_id']=='APP' and m['target_version']=='2.5.2'
+          assert m['from_versions']==['2.5.1'] and m['schema_from']=='14' and m['schema_to']=='14'
+          assert m['asset_bytes']==int(os.environ['EXPECTED_UPDATE_BYTES']) and m['asset_sha256']==os.environ['EXPECTED_UPDATE_SHA256']
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          PY
+          echo 'CORE_UPDATES_REMOTE_WRITE_READBACK=PASS'
+
+      - name: Unified private-read credential must access core-updates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if ! gh api -H 'Accept: application/vnd.github.raw+json' '/repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' > /tmp/P04.remote.read.json; then
+            echo 'BLOCKED_EXTERNAL: VF_PRIVATE_READ_TOKEN cannot read llhzx2018/core-updates.' >&2
+            echo 'Required fix: add read-only repository access for llhzx2018/core-updates to the existing unified VF_PRIVATE_READ_TOKEN.' >&2
+            exit 90
+          fi
+          cmp -s /tmp/P04.expected.json /tmp/P04.remote.read.json
+          echo 'VF_PRIVATE_READ_TOKEN_CORE_UPDATES_ACCESS=PASS'
+
+      - name: Live manifest and Release discovery with unified read credential
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          manifest=/tmp/P04.live.json
+          gh api -H 'Accept: application/vnd.github.raw+json' '/repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' > "$manifest"
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('/tmp/P04.live.json'))
+          assert m['project_id']=='P04' and m['component_id']=='APP'
+          assert m['target_version']=='2.5.2' and m['from_versions']==['2.5.1']
+          assert m['repository']=='llhzx2018/vf-infra' and m['release_tag']=='v2.5.2'
+          assert m['asset_name']=='VF_Infra_V2.5.2_UPDATE.zip'
+          assert m['asset_bytes']==int(os.environ['EXPECTED_UPDATE_BYTES']) and m['asset_sha256']==os.environ['EXPECTED_UPDATE_SHA256']
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          PY
+          gh api '/repos/llhzx2018/vf-infra/releases/tags/v2.5.2' > /tmp/P04.live.release.json
+          id="$(python3 - <<'PY'
+          import json
+          r=json.load(open('/tmp/P04.live.release.json'))
+          a=[x for x in r['assets'] if x['name']=='VF_Infra_V2.5.2_UPDATE.zip']
+          assert len(a)==1 and a[0]['size']==41442
+          print(a[0]['id'])
+          PY
+          )"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-infra/releases/assets/$id" > /tmp/P04.live.update.zip
+          test "$(stat -c%s /tmp/P04.live.update.zip)" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum /tmp/P04.live.update.zip | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          echo 'ONLINE_UPDATE_DISCOVERY_CONTRACT=PASS'
+
+      - name: Production main must remain V2.5.1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          main="$(gh api '/repos/llhzx2018/vf-infra/git/ref/heads/main' --jq '.object.sha')"
+          test "$main" = 'bc23fcaca79f20f91f058b5de164a4a42c73bae6'
+          echo 'PRODUCTION_MAIN_NOT_ADVANCED=PASS'
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -rf core-updates /tmp/P04* /tmp/p04-* || true
+          echo 'CLEANUP_PASS'
