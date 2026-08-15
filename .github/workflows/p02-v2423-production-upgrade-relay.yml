@@ -1,0 +1,60 @@
+name: P02 V2.4.23 Production Upgrade Relay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2423-production-upgrade-relay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      STATUS_URL: https://lib.kewaro.com/VF_Library_V2.4.22_TO_V2.4.23_PRODUCTION_UPGRADE_EXECUTOR.php?mode=status
+      EXEC_URL: https://lib.kewaro.com/VF_Library_V2.4.22_TO_V2.4.23_PRODUCTION_UPGRADE_EXECUTOR.php?mode=execute
+      TRIGGER_NONCE: c6b1054937f985cc53c53db0c30d9470
+    steps:
+      - name: Require existing unified read token
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+
+      - name: Wait for Production upgrade executor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p02-v2423-status.json
+          for i in $(seq 1 120); do
+            if curl -fsS --connect-timeout 5 --max-time 10 -H 'Accept: application/json' "$STATUS_URL" -o /tmp/p02-v2423-status.json; then
+              ready="$(php -r '$d=json_decode(file_get_contents("/tmp/p02-v2423-status.json"),true); echo is_array($d)&&($d["ready"]??false)===true?"yes":"no";')"
+              version="$(php -r '$d=json_decode(file_get_contents("/tmp/p02-v2423-status.json"),true); echo is_array($d)?($d["disk_version"]??""):"";')"
+              if [ "$version" = "2.4.23" ]; then echo 'P02_PRODUCTION_ALREADY_2_4_23'; exit 0; fi
+              if [ "$ready" = "yes" ] && [ "$version" = "2.4.22" ]; then echo 'P02_PRODUCTION_UPGRADE_EXECUTOR_READY'; exit 0; fi
+            fi
+            sleep 10
+          done
+          echo 'Production upgrade executor was not uploaded within the relay window.' >&2
+          exit 1
+
+      - name: Authorize and execute Atomic Production Upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r '
+          $token=(string)getenv("VF_PRIVATE_READ_TOKEN");
+          $nonce=(string)getenv("TRIGGER_NONCE");
+          if($token===""||$nonce==="")throw new RuntimeException("authorization input missing");
+          $mac=hash_hmac("sha256","P02|2.4.22|2.4.23|".$nonce,$token);
+          file_put_contents("/tmp/p02-v2423-exec.json",json_encode(["nonce"=>$nonce,"hmac"=>$mac],JSON_UNESCAPED_SLASHES));
+          '
+          curl -fsS --connect-timeout 10 --max-time 300 -H 'Content-Type: application/json' --data-binary @/tmp/p02-v2423-exec.json "$EXEC_URL" -o /tmp/p02-v2423-result.json
+          php -r '$d=json_decode(file_get_contents("/tmp/p02-v2423-result.json"),true); if(!is_array($d)||($d["ok"]??false)!==true||($d["status"]??"")!=="success"||($d["to_version"]??"")!=="2.4.23")throw new RuntimeException("Production upgrade response invalid"); echo "P02_PRODUCTION_V2_4_23_UPGRADE_PASS\n";'
+
+      - name: Cleanup
+        if: always()
+        run: rm -f /tmp/p02-v2423-status.json /tmp/p02-v2423-exec.json /tmp/p02-v2423-result.json
