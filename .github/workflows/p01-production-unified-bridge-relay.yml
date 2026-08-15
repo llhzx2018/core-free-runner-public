@@ -1,0 +1,97 @@
+name: P01 One-Time Production Unified Bridge Relay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-production-unified-bridge-relay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-production-unified-bridge-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      INFO_URL: https://start.kewaro.com/P01_V2.21.14_TO_UNIFIED_UPDATE_BRIDGE.php?relay=info
+      TOKEN_URL: https://start.kewaro.com/P01_V2.21.14_TO_UNIFIED_UPDATE_BRIDGE.php?relay=token
+    steps:
+      - name: Require existing unified private read credential
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          echo 'P01_EXISTING_PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Wait for one-time Production Bridge
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p01-unified-info.json
+          for i in $(seq 1 720); do
+            if curl -fsS --connect-timeout 5 --max-time 10 -H 'Accept: application/json' "$INFO_URL" -o /tmp/p01-unified-info.json; then
+              status="$(php -r '$d=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true); echo is_array($d)?($d["status"]??""):"";')"
+              if [ "$status" = "success" ]; then
+                echo 'P01_PRODUCTION_UNIFIED_BRIDGE_ALREADY_READY'
+                exit 0
+              fi
+              if [ "$status" = "ready" ]; then
+                test "$(php -r '$d=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true); echo $d["project_id"]??"";')" = 'P01'
+                test "$(php -r '$d=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true); echo $d["component_id"]??"";')" = 'APP'
+                test "$(php -r '$d=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true); echo $d["current_version"]??"";')" = '2.21.14'
+                test "$(php -r '$d=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true); echo $d["current_schema"]??"";')" = '2026080902'
+                echo 'P01_PRODUCTION_UNIFIED_BRIDGE_ENDPOINT_READY'
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo 'P01 one-time Production Bridge was not available within the relay window.' >&2
+          exit 78
+
+      - name: Seal existing credential to Production one-time public key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r '
+          $info=json_decode(file_get_contents("/tmp/p01-unified-info.json"),true);
+          $token=(string)getenv("VF_PRIVATE_READ_TOKEN");
+          $pk=base64_decode((string)($info["public_key_b64"]??""),true);
+          $nonce=(string)($info["nonce"]??"");
+          if(!is_array($info)||$token===""||!is_string($pk)||strlen($pk)!==SODIUM_CRYPTO_BOX_PUBLICKEYBYTES||$nonce==="")throw new RuntimeException("relay input invalid");
+          $sealed=sodium_crypto_box_seal($token,$pk);
+          file_put_contents("/tmp/p01-unified-payload.json",json_encode(["nonce"=>$nonce,"sealed_token_b64"=>base64_encode($sealed)],JSON_UNESCAPED_SLASHES));
+          sodium_memzero($token);
+          '
+          echo 'P01_PRODUCTION_CREDENTIAL_SEALED=PASS'
+
+      - name: Deliver sealed credential and activate unified discovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 90 -H 'Content-Type: application/json' --data-binary @/tmp/p01-unified-payload.json "$TOKEN_URL" -o /tmp/p01-unified-result.json
+          php -r '
+          $d=json_decode(file_get_contents("/tmp/p01-unified-result.json"),true);
+          if(!is_array($d)||($d["ok"]??false)!==true||($d["ready"]??false)!==true)throw new RuntimeException("P01 unified bridge activation failed");
+          $checks=[
+            ["current","2.21.14"],["latest","2.21.15"],["update_source","core-updates"],["repository","core-updates + GitHub Release"],
+            ["release","v2.21.15"],["asset","VF_Start_V2.21.15_UPDATE.zip"],["asset_sha256","7562fbc82b59de09c1f1b0dc77e0ca2e2f73ad556f969d6225a7cca5fd1b5947"],
+            ["production_upgrade","NOT_EXECUTED"],["credential_runtime","PASS"]
+          ];
+          foreach($checks as [$k,$v])if((string)($d[$k]??"")!==$v)throw new RuntimeException("identity mismatch: ".$k);
+          if((int)($d["asset_bytes"]??0)!==1073031||empty($d["available"])||empty($d["can_update"]))throw new RuntimeException("availability/asset mismatch");
+          echo "P01_PRODUCTION_ONLINE_DISCOVERY=PASS\n";
+          echo "P01_PRODUCTION_UPGRADE=NOT_EXECUTED\n";
+          '
+
+      - name: Cleanup sealed relay temporaries
+        if: always()
+        shell: bash
+        run: rm -f /tmp/p01-unified-info.json /tmp/p01-unified-payload.json /tmp/p01-unified-result.json
