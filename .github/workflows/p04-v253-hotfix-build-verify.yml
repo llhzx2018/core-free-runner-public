@@ -1,0 +1,326 @@
+name: P04 V2.5.3 Hotfix Build Verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-hotfix-build-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      HOTFIX_BRANCH: hotfix/p04-v2.5.3-settings-maintenance-ui-20260816
+      V252_COMMIT: 91984268ffe66781700db9da10de8d509c878c0b
+    steps:
+      - name: Require controlled write credential
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          echo 'VF_RELEASE_WRITE_TOKEN_PRESENT=PASS'
+
+      - name: Install runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","openssl","json"] as $x){if($x==="zip"){if(!class_exists("ZipArchive"))exit(2);}elseif(!extension_loaded($x))exit(3);} echo "PHP_RUNTIME=PASS\n";'
+
+      - name: Checkout exact V2.5.3 hotfix branch
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-infra.git" repo
+          cd repo
+          git checkout -q "$HOTFIX_BRANCH"
+          test "$(git rev-parse HEAD)" = "$V252_COMMIT"
+          echo 'HOTFIX_BASE_EXACT_V252=PASS'
+
+      - name: Apply minimal V2.5.3 hotfix
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              actual=s.count(old)
+              if actual != count:
+                  raise SystemExit(f'{path}: sentinel count {actual}, expected {count}: {old[:100]!r}')
+              p.write_text(s.replace(old,new,count),encoding='utf-8')
+
+          Path('VERSION').write_text('2.5.3\n',encoding='utf-8')
+
+          # Settings 500: remove obsolete Ed25519 PRIMARY_KEY_ID contract and expose only secret-safe unified-source readiness.
+          old="""                'update_trust' => (function (): array {
+                    $keys = new \\VFInfra\\Core\\Update\\TrustedReleaseKeys();
+                    $required = \\VFInfra\\Core\\Update\\UpdateContract::PRIMARY_KEY_ID;
+                    return ['key_ids' => $keys->keyIds(), 'required_key_id' => $required, 'ready' => $keys->hasUsable($required)];
+                })(),"""
+          new="""                'update_trust' => (function (): array {
+                    $label = 'core-updates + GitHub Release';
+                    $env = \\VFInfra\\Core\\Update\\UpdateContract::READ_TOKEN_ENV;
+                    $value = getenv($env);
+                    if ($value === false || trim((string) $value) === '') {
+                        $value = $_ENV[$env] ?? ($_SERVER[$env] ?? '');
+                    }
+                    $ready = trim((string) $value) !== '';
+                    return ['mode' => $label, 'key_ids' => $ready ? [$label] : [], 'required_key_id' => $label, 'ready' => $ready];
+                })(),"""
+          replace('public/api.php',old,new)
+
+          # Update UI semantics: unified source, not retired static signing key.
+          replace('public/assets/app.js',
+              "const updateTrust = payload.update_trust || { key_ids: [], required_key_id: 'vf-release-2026-01', ready: false };",
+              "const updateTrust = payload.update_trust || { mode: 'core-updates + GitHub Release', key_ids: [], required_key_id: 'core-updates + GitHub Release', ready: false };")
+          replace('public/assets/app.js',
+              "const trustReady = (updateTrust.key_ids || []).includes(updateTrust.required_key_id);",
+              "const trustReady = updateTrust.ready === true || (updateTrust.key_ids || []).includes(updateTrust.required_key_id);")
+          replace('public/assets/app.js',
+              "${trustReady ? '数字签名验证已就绪' : '发布公钥尚未绑定'}",
+              "${trustReady ? '统一发布源验证已就绪' : '统一私有读取凭据未就绪'}")
+          replace('public/assets/app.js',
+              "${trustReady ? `${escapeHtml(updateTrust.required_key_id || 'VF Release Key')} 已绑定。` : `缺少 ${escapeHtml(updateTrust.required_key_id || 'VF Release Key')} 时更新会安全阻断。`}",
+              "${trustReady ? `更新源 ${escapeHtml(updateTrust.mode || updateTrust.required_key_id || 'core-updates + GitHub Release')} 已就绪。` : `统一更新源私有读取凭据未就绪时，更新会安全阻断；不会影响现有业务。`}")
+
+          # Maintenance UI: existing stylesheet was blocked by CSP. Use Web nonce and remove inline style attribute.
+          replace('public/maintenance.php',
+              "require_once __DIR__ . '/bootstrap.php';\nWeb::headers();",
+              "require_once __DIR__ . '/bootstrap.php';\n$nonce = rtrim(strtr(base64_encode(random_bytes(24)), '+/', '-_'), '=');\nWeb::headers($nonce);")
+          replace('public/maintenance.php','<title>VF Infra · 系统维护</title><style>',
+              '<title>VF Infra · 系统维护</title><style nonce="<?=htmlspecialchars($nonce, ENT_QUOTES, \'UTF-8\')?>">')
+          replace('public/maintenance.php',
+              '@media(max-width:640px){body{padding:22px 10px}.head{display:block}.back{margin-top:14px}.card{padding:18px}.button{width:100%}}',
+              '.footer{padding:18px;text-align:center;color:#91a0a7;font-size:12px}@media(max-width:640px){body{padding:22px 10px}.head{display:block}.back{margin-top:14px}.card{padding:18px}.button{width:100%}}')
+          replace('public/maintenance.php','<footer style="padding:18px;text-align:center;color:#91a0a7;font-size:12px">','<footer class="footer">')
+
+          # Fail-safe error paths must not require undeclared mbstring.
+          replace('src/app/Core/Update/UpdateManifestService.php','return mb_substr($m,0,180);','return substr($m,0,180);')
+          replace('src/app/Core/Update/UpdateRepositoryClient.php','return mb_substr($v,0,120);','return substr($v,0,120);')
+
+          # Proven Atomic template: same engine, but fix undeclared mbstring dependency and CSP/UI rendering.
+          replace('scripts/build-v251-maintenance-release.py',"return $m!==''?mb_substr($m,0,300):'未知错误';","return $m!==''?substr($m,0,300):'未知错误';")
+          replace('scripts/build-v251-maintenance-release.py',
+              "$cls='state-'.$state;?><!doctype html>",
+              "$cspNonce=rtrim(strtr(base64_encode(random_bytes(24)),'+/','-_'),'=');if(class_exists('Web')){Web::headers($cspNonce);}else{header(\"Content-Security-Policy: default-src 'self'; style-src 'nonce-\".$cspNonce.\"'; script-src 'none'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'\");header('Cache-Control: no-store, private');}$cls='state-'.$state;?><!doctype html>")
+          replace('scripts/build-v251-maintenance-release.py',
+              '<title>VF Infra V2.5.1 原子升级</title><style>',
+              '<title>VF Infra V2.5.1 原子升级</title><style nonce="<?=vfi251_e($cspNonce)?>">')
+          replace('scripts/build-v251-maintenance-release.py',
+              'body{{font-family:system-ui,"Microsoft YaHei",sans-serif;background:#f3f7f5;color:#17211d;margin:0}}main{{max-width:780px;margin:50px auto;padding:28px;background:#fff;border:1px solid #dbe6e1;border-radius:16px}}.button{{display:inline-block;padding:12px 18px;border:0;border-radius:10px;background:#079a75;color:#fff;text-decoration:none;font-weight:700}}p,li{{color:#65756d}}.err{{color:#b62c25}}',
+              ':root{{font-family:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;color:#173029;background:#f4f8f6;--brand:#079a75;--muted:#667c74;--line:#dce8e2;--soft:#edf8f3;--danger:#b62c25}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;padding:44px 18px;background:linear-gradient(180deg,#eef7f3 0,#f7faf8 45%,#f4f8f6 100%);font-size:15px;line-height:1.65}}main{{max-width:760px;margin:0 auto;padding:32px;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 18px 50px rgba(31,72,57,.08)}}main:before{{content:"VF";display:grid;place-items:center;width:42px;height:42px;margin-bottom:22px;border-radius:12px;background:var(--brand);color:#fff;font-weight:800}}small{{display:inline-flex;padding:5px 10px;border-radius:999px;background:var(--soft);color:#26715d;font-weight:700}}h1{{margin:14px 0 8px;font-size:30px;line-height:1.2}}p{{color:var(--muted)}}ul{{margin:22px 0;padding:0;list-style:none;border-top:1px solid var(--line)}}li{{padding:11px 4px;border-bottom:1px solid var(--line);color:#425a52}}.button{{display:inline-flex;min-height:44px;align-items:center;justify-content:center;padding:0 18px;border:0;border-radius:11px;background:var(--brand);color:#fff;text-decoration:none;font-weight:750;cursor:pointer}}.button:hover{{filter:brightness(.94)}}.err{{padding:12px 14px;border-radius:10px;background:#fff1f0;color:var(--danger)}}.state-success main{{border-top:4px solid var(--brand)}}.state-failed main{{border-top:4px solid var(--danger)}}@media(max-width:640px){{body{{padding:22px 10px}}main{{padding:22px;border-radius:16px}}h1{{font-size:25px}}.button{{width:100%}}}}')
+          replace('scripts/build-v251-maintenance-release.py','<body><main>','<body class="<?=vfi251_e($cls)?>"><main>')
+
+          # Release tree metadata recognizes V2.5.3 as maintenance hotfix.
+          replace('scripts/build-release-tree.py',"maintenance_versions={'2.5.1','2.5.2'}","maintenance_versions={'2.5.1','2.5.2','2.5.3'}")
+          replace('scripts/build-release-tree.py',
+              "'V2.5.2 replaces the legacy online discovery source with core-updates + GitHub Release while preserving the proven Backup/Atomic/Rollback/Maintenance execution layer.' if version=='2.5.2' else 'Adds authenticated manual Atomic upload and Production Source Manifest export through /maintenance.php.',",
+              "('V2.5.3 hotfixes the Settings unified-update trust contract, update error fallback, and Maintenance/Atomic CSP rendering without changing Schema or business authority.' if version=='2.5.3' else ('V2.5.2 replaces the legacy online discovery source with core-updates + GitHub Release while preserving the proven Backup/Atomic/Rollback/Maintenance execution layer.' if version=='2.5.2' else 'Adds authenticated manual Atomic upload and Production Source Manifest export through /maintenance.php.')),")
+
+          # V2.5.3 Atomic builder from the proven V2.5.2 builder pattern.
+          s=Path('scripts/build-v252-update-release.py').read_text(encoding='utf-8')
+          s=s.replace("TARGET='2.5.2'\nSOURCE='2.5.1'", "TARGET='2.5.3'\nSOURCE='2.5.2'",1)
+          old="""PAYLOAD_PATHS=[
+              'VERSION.txt',
+              'app/Core/Update/UpdateSourceInterface.php',
+              'app/Core/Update/UpdateContract.php',
+              'app/Core/Update/UpdateRepositoryClient.php',
+              'app/Core/Update/UpdateManifestService.php',
+              'release-manifest.json',
+          ]"""
+          new="""PAYLOAD_PATHS=[
+              'VERSION.txt',
+              'api.php',
+              'assets/app.js',
+              'maintenance.php',
+              'app/Core/Update/UpdateRepositoryClient.php',
+              'app/Core/Update/UpdateManifestService.php',
+              'release-manifest.json',
+          ]"""
+          if old not in s: raise SystemExit('V253 builder payload sentinel missing')
+          s=s.replace(old,new,1)
+          s=s.replace("source=source.replace('2.5.1','__P04_TARGET__').replace('2.5.0','__P04_SOURCE__')",
+                      "source=source.replace('2.5.1','__P04_TARGET__').replace('2.5.0','__P04_SOURCE__')",1)
+          s=s.replace("source=source.replace('vfi251','vfi252').replace('atomic_251','atomic_252')",
+                      "source=source.replace('vfi251','vfi253').replace('atomic_251','atomic_253')",1)
+          s=s.replace("'V2.5.2 接入统一在线更新源；Schema 与业务模型保持不变。'",
+                      "'V2.5.3 修复统一更新设置与维护体验；Schema 与业务模型保持不变。'")
+          s=s.replace('build-v252-generated.py','build-v253-generated.py')
+          s=s.replace('p04-v252-builder-','p04-v253-builder-')
+          Path('scripts/build-v253-update-release.py').write_text(s,encoding='utf-8')
+
+          # Changelog entry.
+          p=Path('CHANGELOG.md'); cs=p.read_text(encoding='utf-8')
+          marker='# 变更记录\n'
+          entry="""
+
+          ## [2.5.3] - Hotfix · Settings / Maintenance UI
+
+          - 修复 V2.5.2 设置工作区仍引用已移除 `UpdateContract::PRIMARY_KEY_ID` 导致的 Production 500。
+          - 设置页发布信任语义改为 `core-updates + GitHub Release`，只显示统一私有读取凭据是否就绪，不暴露 Token。
+          - 修复 `/maintenance.php` 与 Atomic repair 内联样式被 CSP 拦截的问题，统一使用 nonce。
+          - Update Core 错误清理不再依赖未声明的 mbstring；更新源失败时必须安全降级而不是拖垮设置页。
+          - Schema 保持 14；不修改 Domain / Provider / VPS / Cron / RDAP 业务模型，不增加 Provider 写权限。
+          """
+          if marker not in cs: raise SystemExit('CHANGELOG marker missing')
+          p.write_text(cs.replace(marker,marker+entry,1),encoding='utf-8')
+          PY
+
+          test "$(cat VERSION)" = '2.5.3'
+          ! grep -R "UpdateContract::PRIMARY_KEY_ID" public src/app/Core/Update
+          ! grep -R "mb_substr" src/app/Core/Update scripts/build-v251-maintenance-release.py
+          echo 'HOTFIX_PATCH=PASS'
+
+      - name: Build V2.5.2 and V2.5.3 runtime trees
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          rm -rf "$RUNNER_TEMP/v252-source" "$RUNNER_TEMP/v252-runtime" "$RUNNER_TEMP/v253-runtime" "$RUNNER_TEMP/v253-release"
+          mkdir -p "$RUNNER_TEMP/v252-source"
+          git archive "$V252_COMMIT" | tar -x -C "$RUNNER_TEMP/v252-source"
+          python3 "$RUNNER_TEMP/v252-source/scripts/build-release-tree.py" "$RUNNER_TEMP/v252-runtime"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v253-runtime"
+          test "$(cat "$RUNNER_TEMP/v252-runtime/VERSION.txt")" = 2.5.2
+          test "$(cat "$RUNNER_TEMP/v253-runtime/VERSION.txt")" = 2.5.3
+          python3 scripts/build-v253-update-release.py --target-runtime "$RUNNER_TEMP/v253-runtime" --output "$RUNNER_TEMP/v253-release"
+          php "$RUNNER_TEMP/v253-release/repair-v2.5.3.php" --self-test
+          echo 'V253_BUILD=PASS'
+
+      - name: PHP JavaScript and contract regression
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          find src public -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          node --check public/assets/app.js
+          php tests/unit/core_updates_contract_v252.php
+          grep -Fq "core-updates + GitHub Release" public/api.php
+          grep -Fq "统一发布源验证已就绪" public/assets/app.js
+          grep -Fq 'Web::headers($nonce)' public/maintenance.php
+          grep -Fq 'style nonce=' public/maintenance.php
+          echo 'STATIC_REGRESSION=PASS'
+
+      - name: Real V2.5.2 to V2.5.3 Atomic and Settings E2E
+        run: |
+          set -Eeuo pipefail
+          SITE_ROOT="$RUNNER_TEMP/v253-site-root"
+          SITE="$SITE_ROOT/site"
+          rm -rf "$SITE_ROOT"; mkdir -p "$SITE"
+          cp -a "$RUNNER_TEMP/v252-runtime"/. "$SITE"/
+          PORT=18523
+          PASS='P04V253HotfixTest'
+          php -S 127.0.0.1:$PORT -t "$SITE" >"$RUNNER_TEMP/v253-http.log" 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 80); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .2; done
+          curl -fsS -c "$RUNNER_TEMP/v253.cookie" "http://127.0.0.1:$PORT/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/none','w') if False else open(__import__('os').environ['RUNNER_TEMP']+'/setup.html',encoding='utf-8')
+          m=re.search(r'name="csrf" value="([^"]+)"',s.read()); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$RUNNER_TEMP/v253.cookie" -c "$RUNNER_TEMP/v253.cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V253 Fixture' --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "http://127.0.0.1:$PORT/setup.php" >"$RUNNER_TEMP/setup-post.txt"
+          grep -Eq '^HTTP/.* 30[23]' "$RUNNER_TEMP/setup-post.txt"
+
+          DATA="$SITE_ROOT/.vfinfra-data"
+          DB="$DATA/database/vf-domain.sqlite"
+          test "$(sqlite3 "$DB" "select value from settings where key='installed_version';")" = 2.5.2
+          test "$(sqlite3 "$DB" "select coalesce(max(version),0) from schema_migrations where status='success';")" = 14
+          sqlite3 "$DB" <<'SQL'
+          PRAGMA foreign_keys=ON;
+          INSERT INTO domains(domain,project_name,registrar,registration_price,renewal_price,currency,auto_renew,manual_expiry_date,effective_expiry_date,effective_expiry_source,tags_json,notes,created_at,updated_at)
+          VALUES('preserve-v253.example','P04 V253','Synthetic Registrar',9.99,12.34,'USD',1,'2031-08-16','2031-08-16','manual','["hotfix"]','V253 preservation','2026-08-15 23:00:00','2026-08-15 23:00:00');
+          INSERT INTO providers(provider_key,display_name,category,status,capabilities_json,created_at,updated_at)
+          VALUES('synthetic-v253','Synthetic Read-only Provider','test','active','["inventory.read"]','2026-08-15 23:00:00','2026-08-15 23:00:00');
+          INSERT INTO provider_accounts(provider_id,display_name,external_account_id,status,last_verified_at,created_at,updated_at)
+          VALUES((SELECT id FROM providers WHERE provider_key='synthetic-v253'),'Synthetic V253','acct-v253-preserve','unverified',NULL,'2026-08-15 23:00:00','2026-08-15 23:00:00');
+          INSERT INTO credentials(provider_account_id,credential_type,display_name,encrypted_payload,key_version,status,last_verified_at,last_used_at,created_at,updated_at)
+          VALUES((SELECT id FROM provider_accounts WHERE external_account_id='acct-v253-preserve'),'api_token','Synthetic Credential Ref','SYNTHETIC_NOT_A_SECRET',1,'unverified',NULL,NULL,'2026-08-15 23:00:00','2026-08-15 23:00:00');
+          SQL
+          BEFORE=$(sqlite3 -batch -noheader "$DB" "select domain,notes from domains where domain='preserve-v253.example'; select p.provider_key,pa.external_account_id from provider_accounts pa join providers p on p.id=pa.provider_id where pa.external_account_id='acct-v253-preserve'; select c.display_name,c.status from credentials c join provider_accounts pa on pa.id=c.provider_account_id where pa.external_account_id='acct-v253-preserve';" | sha256sum | awk '{print $1}')
+
+          # Login first so maintenance and repair reuse the authenticated session.
+          curl -fsS -b "$RUNNER_TEMP/v253.cookie" -c "$RUNNER_TEMP/v253.cookie" "http://127.0.0.1:$PORT/login.php?return=maintenance.php" -o "$RUNNER_TEMP/login.html"
+          LCSRF=$(python3 - <<'PY'
+          import os,re
+          s=open(os.environ['RUNNER_TEMP']+'/login.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$RUNNER_TEMP/v253.cookie" -c "$RUNNER_TEMP/v253.cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$LCSRF" --data-urlencode "password=$PASS" --data-urlencode 'return=maintenance.php' "http://127.0.0.1:$PORT/login.php" >"$RUNNER_TEMP/login-post.txt"
+          grep -Eq '^HTTP/.* 30[23]' "$RUNNER_TEMP/login-post.txt"
+
+          # Settings must work before the hotfix too only if old contract is available; after hotfix it is the key assertion.
+          cat > "$RUNNER_TEMP/publish-v253.php" <<'PHP'
+          <?php
+          require $argv[1].'/bootstrap.php';
+          $s=new \VFInfra\Core\MaintenanceUpdateService();
+          $r=$s->inspectAndPublishPath($argv[2],hash_file('sha256',$argv[2]),false);
+          echo $r['target_version']," ",$r['target_schema']," ",$r['payload_file_count'],PHP_EOL;
+          PHP
+          php "$RUNNER_TEMP/publish-v253.php" "$SITE" "$RUNNER_TEMP/v253-release/VF_Infra_V2.5.3_ATOMIC.zip" | grep -Fq '2.5.3 14 7'
+
+          curl -fsS -D "$RUNNER_TEMP/repair.headers" -b "$RUNNER_TEMP/v253.cookie" -c "$RUNNER_TEMP/v253.cookie" "http://127.0.0.1:$PORT/repair-v2.5.3.php" -o "$RUNNER_TEMP/repair.html"
+          grep -Fiq "style-src 'self' 'nonce-" "$RUNNER_TEMP/repair.headers"
+          grep -Fq '<style nonce=' "$RUNNER_TEMP/repair.html"
+          RCSRF=$(python3 - <<'PY'
+          import os,re
+          s=open(os.environ['RUNNER_TEMP']+'/repair.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -b "$RUNNER_TEMP/v253.cookie" -c "$RUNNER_TEMP/v253.cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$RCSRF" "http://127.0.0.1:$PORT/repair-v2.5.3.php" -o "$RUNNER_TEMP/repair-post.html"
+          grep -Fq '升级完成' "$RUNNER_TEMP/repair-post.html"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.3
+          test "$(sqlite3 "$DB" "select value from settings where key='installed_version';")" = 2.5.3
+          test "$(sqlite3 "$DB" "select coalesce(max(version),0) from schema_migrations where status='success';")" = 14
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          AFTER=$(sqlite3 -batch -noheader "$DB" "select domain,notes from domains where domain='preserve-v253.example'; select p.provider_key,pa.external_account_id from provider_accounts pa join providers p on p.id=pa.provider_id where pa.external_account_id='acct-v253-preserve'; select c.display_name,c.status from credentials c join provider_accounts pa on pa.id=c.provider_account_id where pa.external_account_id='acct-v253-preserve';" | sha256sum | awk '{print $1}')
+          test "$BEFORE" = "$AFTER"
+          test ! -e "$SITE/repair-v2.5.3.php"
+
+          curl -fsS -b "$RUNNER_TEMP/v253.cookie" "http://127.0.0.1:$PORT/api.php?action=settings" -o "$RUNNER_TEMP/settings.json"
+          python3 - <<'PY'
+          import json,os
+          d=json.load(open(os.environ['RUNNER_TEMP']+'/settings.json',encoding='utf-8'))
+          assert d.get('ok') is True, d
+          assert d['system']['version']=='2.5.3', d.get('system')
+          assert d['system']['schema_version']==14, d.get('system')
+          assert d['update_trust']['required_key_id']=='core-updates + GitHub Release', d.get('update_trust')
+          assert 'provider_accounts' in d and 'backups' in d and 'diagnostics' in d
+          print('SETTINGS_API_V253=PASS')
+          PY
+
+          curl -fsS -D "$RUNNER_TEMP/maint.headers" -b "$RUNNER_TEMP/v253.cookie" "http://127.0.0.1:$PORT/maintenance.php" -o "$RUNNER_TEMP/maint.html"
+          grep -Fiq "style-src 'self' 'nonce-" "$RUNNER_TEMP/maint.headers"
+          grep -Fq '<style nonce=' "$RUNNER_TEMP/maint.html"
+          ! grep -Fq '<footer style=' "$RUNNER_TEMP/maint.html"
+
+          diff -u <(tail -n +6 "$RUNNER_TEMP/v253-release/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt") <(tail -n +6 "$RUNNER_TEMP/v253-release/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt") >/dev/null
+          echo 'V253_ATOMIC_DATA_SETTINGS_CSP_E2E=PASS'
+          kill $PID; trap - EXIT
+
+      - name: Commit verified hotfix source
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add VERSION CHANGELOG.md public/api.php public/assets/app.js public/maintenance.php src/app/Core/Update/UpdateManifestService.php src/app/Core/Update/UpdateRepositoryClient.php scripts/build-release-tree.py scripts/build-v251-maintenance-release.py scripts/build-v253-update-release.py
+          git commit -m 'fix(P04): V2.5.3 settings and maintenance hotfix'
+          git push -q origin "$HOTFIX_BRANCH"
+          echo "HOTFIX_COMMIT=$(git rev-parse HEAD)"
+          echo "HOTFIX_TREE=$(git rev-parse HEAD^{tree})"
+
+      - name: Cleanup private checkout
+        if: always()
+        run: rm -rf repo "$RUNNER_TEMP/v252-source" "$RUNNER_TEMP/v252-runtime" "$RUNNER_TEMP/v253-runtime" "$RUNNER_TEMP/v253-release" "$RUNNER_TEMP/v253-site-root" "$RUNNER_TEMP"/v253.* "$RUNNER_TEMP"/setup* "$RUNNER_TEMP"/login* "$RUNNER_TEMP"/repair* "$RUNNER_TEMP"/maint* "$RUNNER_TEMP"/settings.json "$RUNNER_TEMP"/publish-v253.php
