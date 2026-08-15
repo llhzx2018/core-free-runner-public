@@ -1,0 +1,112 @@
+name: P02 V2.4.22 Production Discovery Bridge Verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2422-discovery-bridge-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE_SHA: 48444542607d829dfea8c0e241619d3ed14157f4
+      VF_UPDATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Checkout public runner shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require isolated read credential
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_UPDATE_READ_TOKEN"
+
+      - name: Checkout exact P02 bridge commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 48444542607d829dfea8c0e241619d3ed14157f4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          persist-credentials: false
+
+      - name: Guard bridge scope and Production identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p02 rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < p02/VERSION)" = '2.4.22'
+          changed="$(git -C p02 diff --name-only 17f2d3256dbe6d47c141b01e11e1d95c4ac92720..HEAD)"
+          test "$changed" = 'src/app/UpdateService.php'
+
+      - name: PHP syntax gate
+        run: php -l p02/src/app/UpdateService.php
+
+      - name: Real core-updates and GitHub Release discovery test
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p02-discovery-test.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('VFTB_VERSION','2.4.22');
+          define('VFTB_PRIVATE_ROOT',sys_get_temp_dir().'/vf-library-discovery-'.bin2hex(random_bytes(4)));
+          @mkdir(VFTB_PRIVATE_ROOT,0700,true);
+          final class VfLibrarySchemaMigration { public const CURRENT=2401; public static function currentVersion($pdo): int { return 2401; } }
+          function vftb_is_installed(): bool { return true; }
+          function vftb_db() { return null; }
+          require getcwd().'/p02/src/app/UpdateService.php';
+
+          $token=(string)getenv('VF_UPDATE_READ_TOKEN');
+          if($token==='')throw new RuntimeException('test token missing');
+          $service=new VfLibraryUpdateService();
+          $result=$service->check(true);
+          $status=$result['status']??[];
+          $discovery=$result['discovery']??[];
+          $checks=[
+            ($result['checked']??false)===true,
+            ($discovery['result']??'')==='AVAILABLE',
+            ($discovery['current_version']??'')==='2.4.22',
+            (int)($discovery['current_schema']??0)===2401,
+            ($discovery['target_version']??'')==='2.4.23',
+            ($discovery['release_tag']??'')==='v2.4.23',
+            ($discovery['release_commit']??'')==='333d4fd52150f1c15e9911bce312bb2b6775f856',
+            ($discovery['asset_name']??'')==='VF_Library_V2.4.23_UPDATE.zip',
+            (int)($discovery['asset_bytes']??0)===293214,
+            ($discovery['asset_sha256']??'')==='34166f1d1031de00e5bcf5c5f116e93a11a63e11c3771ff4931c310f22957ed4',
+            ($status['current_version']??'')==='2.4.22',
+            (int)($status['current_schema']??0)===2401,
+            ($status['latest_version']??'')==='2.4.23',
+            ($status['update_available']??false)===true,
+            ($status['can_update']??false)===true,
+            ($status['credential_configured']??false)===true,
+            ($status['update_source']??'')==='core-updates',
+            ($status['bridge_mode']??'')==='DISCOVERY_ONLY',
+          ];
+          foreach($checks as $index=>$ok)if(!$ok)throw new RuntimeException('discovery assertion failed #'.$index);
+
+          $statePath=VFTB_PRIVATE_ROOT.'/.updates/production-discovery-bridge.json';
+          $state=(string)file_get_contents($statePath);
+          if($state===''||strpos($state,$token)!==false)throw new RuntimeException('credential leaked to bridge state');
+
+          $executeBlocked=false;
+          try{$service->execute();}catch(RuntimeException $e){$executeBlocked=strpos($e->getMessage(),'禁止执行 Production Upgrade')!==false;}
+          if(!$executeBlocked)throw new RuntimeException('execute is not fail-closed');
+
+          putenv('VF_UPDATE_READ_TOKEN');
+          $missingCredential=false;
+          try{(new VfLibraryUpdateService())->check(true);}catch(RuntimeException $e){$missingCredential=strpos($e->getMessage(),'VF_UPDATE_READ_TOKEN')!==false;}
+          if(!$missingCredential)throw new RuntimeException('missing credential is not fail-closed');
+
+          echo "P02_DISCOVERY_BRIDGE_REAL_GITHUB_PASS\n";
+          PHP
+          php /tmp/p02-discovery-test.php
+
+      - name: Cleanup private checkout
+        if: always()
+        run: rm -rf p02 /tmp/p02-discovery-test.php /tmp/vf-library-discovery-*
