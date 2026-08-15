@@ -1,0 +1,349 @@
+name: P01 V2.21.15 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.15-formal-release.yml'
+      - 'requests/p01-v2.21.15-formal-release-*.txt'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p01-v2.21.15-formal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE: e6d71b3309fb24b11139c6febf7dcaf0f9106e87
+      CANDIDATE_TREE: 3b784e34c3519992bd7cd9087d9652f8229fac46
+      PRODUCTION: 7c7ad1da3e8dcd49fa49313317c389948f40d4de
+      VERSION: 2.21.15
+      SOURCE_VERSION: 2.21.14
+      SCHEMA: 2026080902
+      TAG: v2.21.15
+      TESTED_ARTIFACT_ID: '9249525403'
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Checkout exact release builder
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Checkout exact Production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Rebuild final bytes and prove identity with tested Candidate evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          python3 runner/scripts/p01-build-release-v2.py \
+            --candidate candidate/src \
+            --production production/src \
+            --out release-dist \
+            --candidate-commit "$CANDIDATE" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION"
+          mkdir -p tested-evidence
+          gh api -H 'Accept: application/vnd.github+json' "/repos/llhzx2018/core-free-runner-public/actions/artifacts/${TESTED_ARTIFACT_ID}/zip" > /tmp/p01-tested-evidence.zip
+          unzip -q /tmp/p01-tested-evidence.zip -d tested-evidence
+          tested_sums="$(find tested-evidence -type f -name SHA256SUMS.txt -print -quit)"
+          test -n "$tested_sums"
+          cmp -s release-dist/SHA256SUMS.txt "$tested_sums" || {
+            echo 'Rebuilt formal bytes differ from the Candidate-tested dist set.' >&2
+            diff -u "$tested_sums" release-dist/SHA256SUMS.txt || true
+            exit 84
+          }
+          (cd release-dist && sha256sum -c SHA256SUMS.txt)
+          python3 - <<'PY'
+          import pathlib,zipfile
+          root=pathlib.Path('release-dist')
+          expected={
+            'VF_Start_V2.21.15_FULL.zip','VF_Start_V2.21.15_SOURCE.zip','VF_Start_V2.21.15_ATOMIC.zip','VF_Start_V2.21.15_UPDATE.zip',
+            'repair-v2.21.15.php','P01_V2.21.14_DISCOVERY_BRIDGE.php','VF_Start_V2.21.15_RELEASE_MANIFEST.json','VF_Start_V2.21.15_RELEASE_NOTES.md','SHA256SUMS.txt'
+          }
+          got={p.name for p in root.iterdir() if p.is_file()}
+          if got != expected: raise SystemExit(f'formal release set mismatch: {sorted(got^expected)}')
+          for kind in ('UPDATE','ATOMIC'):
+              p=root/f'VF_Start_V2.21.15_{kind}.zip'
+              with zipfile.ZipFile(p) as z:
+                  if z.namelist()!=['repair-v2.21.15.php']: raise SystemExit(f'{kind} member contract failed')
+                  if z.read('repair-v2.21.15.php')!=(root/'repair-v2.21.15.php').read_bytes(): raise SystemExit(f'{kind} repair bytes differ')
+          PY
+          echo 'FORMAL_BYTES_EQUAL_TESTED_CANDIDATE=PASS'
+
+      - name: Confirm release identity is unused
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" -R llhzx2018/vf-start >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to overwrite formal release identity.' >&2
+            exit 85
+          fi
+          if gh api "/repos/llhzx2018/vf-start/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo 'Tag already exists; refusing to reuse formal release identity.' >&2
+            exit 86
+          fi
+          echo 'FORMAL_RELEASE_IDENTITY_UNUSED=PASS'
+
+      - name: Publish exact Git tag, GitHub Release and formal assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release create "$TAG" release-dist/* \
+            -R llhzx2018/vf-start \
+            --target "$CANDIDATE" \
+            --title "VF Start V${VERSION}" \
+            --notes-file "release-dist/VF_Start_V${VERSION}_RELEASE_NOTES.md" \
+            --latest
+          echo 'GITHUB_RELEASE_PUBLISHED=PASS'
+
+      - name: Remote Release and asset byte readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "/repos/llhzx2018/vf-start/git/ref/tags/${TAG}" > /tmp/p01-tag.json
+          gh api "/repos/llhzx2018/vf-start/releases/tags/${TAG}" > /tmp/p01-release.json
+          python3 - <<'PY'
+          import json,os,sys
+          tag=json.load(open('/tmp/p01-tag.json'))
+          rel=json.load(open('/tmp/p01-release.json'))
+          expected=os.environ['CANDIDATE']
+          if tag.get('object',{}).get('type')!='commit' or tag.get('object',{}).get('sha')!=expected: raise SystemExit('tag does not point to exact Candidate commit')
+          if rel.get('tag_name')!=os.environ['TAG'] or rel.get('draft') or rel.get('prerelease'): raise SystemExit('release identity/state mismatch')
+          names={a['name'] for a in rel.get('assets',[])}
+          expected_names={
+            'VF_Start_V2.21.15_FULL.zip','VF_Start_V2.21.15_SOURCE.zip','VF_Start_V2.21.15_ATOMIC.zip','VF_Start_V2.21.15_UPDATE.zip',
+            'repair-v2.21.15.php','P01_V2.21.14_DISCOVERY_BRIDGE.php','VF_Start_V2.21.15_RELEASE_MANIFEST.json','VF_Start_V2.21.15_RELEASE_NOTES.md','SHA256SUMS.txt'
+          }
+          if names!=expected_names: raise SystemExit(f'remote release asset set mismatch: {sorted(names^expected_names)}')
+          asset=next(a for a in rel['assets'] if a['name']=='VF_Start_V2.21.15_UPDATE.zip')
+          json.dump(asset,open('/tmp/p01-update-asset.json','w'),ensure_ascii=False,indent=2)
+          open('/tmp/p01-update-asset-url','w').write(asset['url'])
+          PY
+          asset_url="$(cat /tmp/p01-update-asset-url)"
+          gh api -H 'Accept: application/octet-stream' "$asset_url" > /tmp/P01_REMOTE_UPDATE.zip
+          local_bytes="$(stat -c%s release-dist/VF_Start_V${VERSION}_UPDATE.zip)"
+          remote_bytes="$(stat -c%s /tmp/P01_REMOTE_UPDATE.zip)"
+          test "$local_bytes" = "$remote_bytes"
+          local_sha="$(sha256sum release-dist/VF_Start_V${VERSION}_UPDATE.zip | awk '{print $1}')"
+          remote_sha="$(sha256sum /tmp/P01_REMOTE_UPDATE.zip | awk '{print $1}')"
+          test "$local_sha" = "$remote_sha"
+          python3 - <<'PY'
+          import json,os,hashlib,pathlib
+          rel=json.load(open('/tmp/p01-release.json'))
+          asset=json.load(open('/tmp/p01-update-asset.json'))
+          p=pathlib.Path('/tmp/P01_REMOTE_UPDATE.zip')
+          if asset['size']!=p.stat().st_size: raise SystemExit('Release asset metadata bytes mismatch downloaded bytes')
+          meta={
+            'release_id':rel['id'],'tag':rel['tag_name'],'published_at':rel['published_at'],
+            'asset_id':asset['id'],'asset_name':asset['name'],'asset_bytes':asset['size'],
+            'asset_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),
+            'candidate_commit':os.environ['CANDIDATE']
+          }
+          json.dump(meta,open('/tmp/p01-release-readback.json','w'),ensure_ascii=False,indent=2)
+          print(json.dumps(meta,ensure_ascii=False))
+          PY
+          echo 'REMOTE_RELEASE_ASSET_READBACK=PASS'
+
+      - name: Checkout core-updates main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: core-updates
+
+      - name: Generate P01.json only from remote Release truth and publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib
+          meta=json.load(open('/tmp/p01-release-readback.json'))
+          doc={
+            'schema_version':'1.0',
+            'project_id':'P01',
+            'component_id':'APP',
+            'enabled':True,
+            'target_version':'2.21.15',
+            'update_type':'ATOMIC',
+            'from_versions':['2.21.14'],
+            'schema_from':'2026080902',
+            'schema_to':'2026080902',
+            'repository':'llhzx2018/vf-start',
+            'release_tag':'v2.21.15',
+            'asset_name':meta['asset_name'],
+            'asset_bytes':meta['asset_bytes'],
+            'asset_sha256':meta['asset_sha256'],
+            'backup_required':True,
+            'rollback_supported':True,
+            'released_at':meta['published_at'],
+            'minimum_php':'8.0.0'
+          }
+          p=pathlib.Path('core-updates/projects/P01.json')
+          if p.exists(): raise SystemExit('P01.json already exists; refusing silent replacement')
+          p.write_text(json.dumps(doc,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          python3 -m json.tool core-updates/projects/P01.json >/dev/null
+          cd core-updates
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add projects/P01.json
+          git diff --cached --check
+          git commit -m 'release(P01): publish VF Start 2.21.15 update manifest'
+          git push origin HEAD:main
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" | tee /tmp/p01-core-updates-commit.txt
+          echo 'CORE_UPDATES_P01_PUBLISH=PASS'
+
+      - name: core-updates remote exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api -H 'Accept: application/vnd.github.raw+json' '/repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' > /tmp/P01.remote.json
+          cmp -s /tmp/P01.remote.json core-updates/projects/P01.json
+          python3 - <<'PY'
+          import json,hashlib,pathlib
+          m=json.load(open('/tmp/P01.remote.json'))
+          r=json.load(open('/tmp/p01-release-readback.json'))
+          assert m['project_id']=='P01' and m['component_id']=='APP'
+          assert m['target_version']=='2.21.15' and m['from_versions']==['2.21.14']
+          assert m['schema_from']=='2026080902' and m['schema_to']=='2026080902'
+          assert m['release_tag']==r['tag'] and m['asset_name']==r['asset_name']
+          assert m['asset_bytes']==r['asset_bytes'] and m['asset_sha256']==r['asset_sha256']
+          print('MANIFEST_RELEASE_EXACT_EQUALITY=PASS')
+          PY
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Install runtime dependencies for live discovery integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml sqlite3 unzip >/dev/null
+          php -r 'foreach(["pdo_sqlite","curl","zip"] as $x){if(!extension_loaded($x))exit(1);}echo "DISCOVERY_RUNTIME=PASS\n";'
+
+      - name: Live core-updates + GitHub Release discovery and private asset prepare
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-live-discovery && cp -a production/src /tmp/p01-live-discovery
+          php -S 127.0.0.1:18121 -t /tmp/p01-live-discovery >/tmp/p01-live-discovery-server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-live-discovery.cookies http://127.0.0.1:18121/setup.php -o /tmp/p01-live-discovery-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-live-discovery-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf"
+          curl -fsS -b /tmp/p01-live-discovery.cookies -c /tmp/p01-live-discovery.cookies -X POST http://127.0.0.1:18121/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=P01 Live Discovery' \
+            --data-urlencode 'admin_password=P01LiveDiscovery!22114' \
+            --data-urlencode 'admin_password_confirm=P01LiveDiscovery!22114' \
+            -o /tmp/p01-live-discovery-result.html
+          kill "$pid" || true
+          wait "$pid" 2>/dev/null || true
+          php "release-dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --run=/tmp/p01-live-discovery | tee /tmp/p01-live-bridge.json
+          test "$(tr -d '\r\n' < /tmp/p01-live-discovery/VERSION.txt)" = "$SOURCE_VERSION"
+          cat >/tmp/p01-live-discovery-check.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require '/tmp/p01-live-discovery/app/bootstrap.php';
+          $u=new VfUpdateManager(vf_db());
+          $r=$u->check(true);
+          $s=$u->status();
+          if(empty($r['available'])||empty($r['can_update'])||($r['latest_version']??'')!=='2.21.15') { fwrite(STDERR,json_encode([$r,$s],JSON_UNESCAPED_UNICODE)); exit(1); }
+          if(($s['project_id']??'')!=='P01'||($s['component_id']??'')!=='APP'||($s['repository']??'')!=='core-updates + GitHub Release') exit(2);
+          $p=$u->prepare();
+          if(empty($p['ok'])||($p['to_version']??'')!=='2.21.15') exit(3);
+          foreach(['manifest_identity','release_tag','release_asset','bytes','sha256','atomic_self_test','recovery_point'] as $k){if(($p['checks'][$k]??'')!=='pass')exit(4);}
+          echo json_encode(['check'=>$r,'status'=>$s,'prepare'=>$p],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          echo "LIVE_ONLINE_DISCOVERY_AND_PRIVATE_ASSET_PREPARE=PASS\n";
+          PHP
+          php /tmp/p01-live-discovery-check.php | tee /tmp/p01-live-discovery.json
+          grep -q 'LIVE_ONLINE_DISCOVERY_AND_PRIVATE_ASSET_PREPARE=PASS' /tmp/p01-live-discovery.json
+
+      - name: Release summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat /tmp/p01-release-readback.json
+          cat /tmp/p01-core-updates-commit.txt
+          echo 'P01_FORMAL_RELEASE=PASS'
+          echo 'P01_CORE_UPDATES=PASS'
+          echo 'P01_NON_PRODUCTION_ONLINE_DISCOVERY=PASS'
+          echo 'PRODUCTION_DISCOVERY_BRIDGE=NOT_EXECUTED'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
+          echo "MAIN_REMAINS_PRODUCTION=$PRODUCTION"
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: p01-v2.21.15-formal-release-evidence
+          path: |
+            release-dist/
+            /tmp/p01-release-readback.json
+            /tmp/P01.remote.json
+            /tmp/p01-live-discovery.json
+            /tmp/p01-live-bridge.json
+            /tmp/p01-core-updates-commit.txt
+          if-no-files-found: warn
+          retention-days: 30
