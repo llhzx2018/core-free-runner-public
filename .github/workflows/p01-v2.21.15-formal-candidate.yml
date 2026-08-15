@@ -1,0 +1,312 @@
+name: P01 V2.21.15 Formal Candidate Gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.15-formal-candidate.yml'
+      - 'scripts/p01-build-release.py'
+      - 'scripts/p01-build-release-v2.py'
+      - 'requests/p01-v2.21.15-formal-candidate-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.15-formal-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE: e6d71b3309fb24b11139c6febf7dcaf0f9106e87
+      CANDIDATE_TREE: 3b784e34c3519992bd7cd9087d9652f8229fac46
+      PRODUCTION: 7c7ad1da3e8dcd49fa49313317c389948f40d4de
+      VERSION: 2.21.15
+      SOURCE_VERSION: 2.21.14
+      SCHEMA: 2026080902
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || exit 78
+          test -n "$WRITE_TOKEN" || exit 79
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Checkout runner scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Checkout exact Production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(git -C candidate diff --name-only "$PRODUCTION"...HEAD | grep -c '^src/browser-extension/' || true)" = '0'
+          echo 'EXACT_CANDIDATE_AND_PRODUCTION_IDENTITY=PASS'
+
+      - name: Install runtime test dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml sqlite3 unzip >/dev/null
+          php -r 'foreach(["pdo_sqlite","curl","zip","SimpleXML"] as $x){if(!extension_loaded($x)&&!class_exists($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION,"\n";'
+          echo 'REAL_RUNTIME_DEPENDENCIES=PASS'
+
+      - name: Build deterministic formal candidate bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner/scripts/p01-build-release-v2.py \
+            --candidate candidate/src \
+            --production production/src \
+            --out dist \
+            --candidate-commit "$CANDIDATE" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION"
+          test -f "dist/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "dist/repair-v${VERSION}.php"
+          test -f "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php"
+          echo 'FORMAL_CANDIDATE_BUILD=PASS'
+
+      - name: Final byte structure and privacy gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib, zipfile, re, sys
+          root=pathlib.Path('dist')
+          for p in root.glob('*.zip'):
+              with zipfile.ZipFile(p) as z:
+                  names=z.namelist()
+                  if len(names)!=len(set(names)): raise SystemExit(f'duplicate member: {p}')
+                  for n in names:
+                      q=pathlib.PurePosixPath(n)
+                      if n.startswith('/') or '..' in q.parts or '\\' in n: raise SystemExit(f'unsafe path: {p}:{n}')
+                      mode=(z.getinfo(n).external_attr>>16)&0o170000
+                      if mode==0o120000: raise SystemExit(f'symlink: {p}:{n}')
+          for kind in ['UPDATE','ATOMIC']:
+              p=root/f'VF_Start_V2.21.15_{kind}.zip'
+              with zipfile.ZipFile(p) as z:
+                  if z.namelist()!=['repair-v2.21.15.php']: raise SystemExit(f'{kind} must contain only repair')
+                  if z.read('repair-v2.21.15.php')!=(root/'repair-v2.21.15.php').read_bytes(): raise SystemExit(f'{kind} repair bytes differ')
+          bad=re.compile(rb'(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|VF_PRIVATE_READ_TOKEN\s*=\s*[^\s]+|VF_RELEASE_WRITE_TOKEN\s*=\s*[^\s]+)')
+          for p in root.iterdir():
+              if p.is_file() and bad.search(p.read_bytes()): raise SystemExit(f'secret-like payload in {p.name}')
+          PY
+          sha256sum -c dist/SHA256SUMS.txt
+          unzip -t "dist/VF_Start_V${VERSION}_FULL.zip" >/dev/null
+          unzip -t "dist/VF_Start_V${VERSION}_SOURCE.zip" >/dev/null
+          unzip -t "dist/VF_Start_V${VERSION}_ATOMIC.zip" >/dev/null
+          unzip -t "dist/VF_Start_V${VERSION}_UPDATE.zip" >/dev/null
+          echo 'FINAL_BYTES_STRUCTURE_PRIVACY=PASS'
+
+      - name: PHP 8.0 Atomic and Bridge syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD:/work:ro" -w /work php:8.0-cli php -l "dist/repair-v${VERSION}.php" >/dev/null
+          docker run --rm -v "$PWD:/work:ro" -w /work php:8.0-cli php -l "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" >/dev/null
+          php "dist/repair-v${VERSION}.php" --self-test | tee /tmp/atomic-selftest.json
+          php "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --self-test | tee /tmp/bridge-selftest.json
+          grep -q '"global_barrier":true' /tmp/atomic-selftest.json
+          grep -q '"interruption_recovery":true' /tmp/atomic-selftest.json
+          echo 'PHP80_ATOMIC_BRIDGE=PASS'
+
+      - name: Exact source and target manifest verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/final-target && mkdir -p /tmp/final-target
+          unzip -q "dist/VF_Start_V${VERSION}_FULL.zip" -d /tmp/final-target
+          php "dist/repair-v${VERSION}.php" --verify-source="production/src" | tee /tmp/source-verify.json
+          php "dist/repair-v${VERSION}.php" --verify-target=/tmp/final-target | tee /tmp/target-verify.json
+          grep -q '"ok":true' /tmp/source-verify.json
+          grep -q '"ok":true' /tmp/target-verify.json
+          php /tmp/final-target/cli/verify.php | tee /tmp/final-seed-verify.txt
+          grep -q 'VERIFY_PASS=YES' /tmp/final-seed-verify.txt
+          echo 'SOURCE_TARGET_MANIFEST=PASS'
+
+      - name: Discovery Bridge exact-production test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/bridge && cp -a production/src /tmp/bridge
+          BEFORE_VERSION="$(sha256sum /tmp/bridge/VERSION.txt | awk '{print $1}')"
+          BEFORE_MIGRATIONS="$(find /tmp/bridge/migrations -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          php "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --run=/tmp/bridge | tee /tmp/bridge-run.json
+          test "$(tr -d '\r\n' < /tmp/bridge/VERSION.txt)" = "$SOURCE_VERSION"
+          test "$(sha256sum /tmp/bridge/VERSION.txt | awk '{print $1}')" = "$BEFORE_VERSION"
+          test "$(find /tmp/bridge/migrations -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')" = "$BEFORE_MIGRATIONS"
+          test -f /tmp/bridge/app/CoreUpdates/UpdateCore.php
+          test -f /tmp/bridge/app/CoreUpdates/GitHubClient.php
+          php "dist/repair-v${VERSION}.php" --verify-source=/tmp/bridge | grep -q '"ok":true'
+          echo 'DISCOVERY_BRIDGE_VERSION_SCHEMA_SOURCE_GATE=PASS'
+
+      - name: Fresh install from final FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/fresh && mkdir -p /tmp/fresh
+          unzip -q "dist/VF_Start_V${VERSION}_FULL.zip" -d /tmp/fresh
+          php -S 127.0.0.1:18081 -t /tmp/fresh >/tmp/fresh-server.log 2>&1 & echo $! >/tmp/fresh.pid
+          for i in {1..30}; do curl -fsS -c /tmp/fresh.cookies http://127.0.0.1:18081/setup.php -o /tmp/fresh-setup.html && break; sleep 1; done
+          CSRF="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/fresh-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/fresh.cookies -c /tmp/fresh.cookies -X POST http://127.0.0.1:18081/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start Runner' \
+            --data-urlencode 'admin_password=Runner-P01-2.21.15!Strong' --data-urlencode 'admin_password_confirm=Runner-P01-2.21.15!Strong' \
+            -o /tmp/fresh-result.html
+          kill "$(cat /tmp/fresh.pid)" || true
+          php /tmp/fresh/cli/verify.php | tee /tmp/fresh-verify.txt
+          grep -q 'VERIFY_PASS=YES' /tmp/fresh-verify.txt
+          php -r 'require "/tmp/fresh/app/bootstrap.php";$d=vf_db();$c=(int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn();$l=(int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn();if($c!==0||$l!==0){fwrite(STDERR,"business data not zero\n");exit(1);}echo "FRESH_BUSINESS_DATA_ZERO=PASS\n";'
+          echo 'FRESH_INSTALL_FINAL_FULL=PASS'
+
+      - name: Exact 2.21.14 to 2.21.15 upgrade with business data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/upgrade && cp -a production/src /tmp/upgrade
+          php -S 127.0.0.1:18082 -t /tmp/upgrade >/tmp/upgrade-server.log 2>&1 & echo $! >/tmp/upgrade.pid
+          for i in {1..30}; do curl -fsS -c /tmp/upgrade.cookies http://127.0.0.1:18082/setup.php -o /tmp/upgrade-setup.html && break; sleep 1; done
+          CSRF="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/upgrade.cookies -c /tmp/upgrade.cookies -X POST http://127.0.0.1:18082/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start Upgrade Runner' \
+            --data-urlencode 'admin_password=Runner-P01-2.21.14!Strong' --data-urlencode 'admin_password_confirm=Runner-P01-2.21.14!Strong' \
+            -o /tmp/upgrade-result.html
+          kill "$(cat /tmp/upgrade.pid)" || true
+          php -r 'require "/tmp/upgrade/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"Runner Sentinel","description"=>"upgrade preservation","is_private"=>1]);$x=$r->saveLink(null,["category_id"=>$c,"title"=>"Runner Link","url"=>"https://example.com/?p01=22114","description"=>"keep me","is_private"=>1]);$b=(new VfBackupManager(vf_db()))->create("P01 pre-upgrade runner","pre-update",true);file_put_contents("/tmp/p01-backup-key",$b["backup_key"]);echo "SENTINEL_CREATED=PASS\n";'
+          php "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --run=/tmp/upgrade | tee /tmp/upgrade-bridge.json
+          test "$(tr -d '\r\n' < /tmp/upgrade/VERSION.txt)" = "$SOURCE_VERSION"
+          php "dist/repair-v${VERSION}.php" --run=/tmp/upgrade | tee /tmp/upgrade-run.json
+          test "$(tr -d '\r\n' < /tmp/upgrade/VERSION.txt)" = "$VERSION"
+          php /tmp/upgrade/cli/verify.php | tee /tmp/upgrade-verify.txt
+          grep -q 'VERIFY_PASS=YES' /tmp/upgrade-verify.txt
+          php -r 'require "/tmp/upgrade/app/bootstrap.php";$d=vf_db();$s=$d->query("SELECT COUNT(*) FROM links WHERE title=\"Runner Link\" AND url=\"https://example.com/?p01=22114\"")->fetchColumn();if((int)$s!==1)exit(1);$key=trim(file_get_contents("/tmp/p01-backup-key"));$v=(new VfBackupManager($d))->verify($key);if(($v["validation_status"]??"")!=="valid")exit(2);echo "DATA_PRESERVED_AND_BACKUP_VALID=PASS\n";'
+          php "dist/repair-v${VERSION}.php" --run=/tmp/upgrade | tee /tmp/upgrade-repeat.json
+          grep -q '"already_current":true' /tmp/upgrade-repeat.json
+          echo 'EXACT_UPGRADE_DATA_BACKUP_REPEAT=PASS'
+
+      - name: Failure rollback injection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/rollback && cp -a /tmp/upgrade /tmp/rollback
+          # Turn the already-current copy back into a true exact bridged source by using production + install state.
+          rm -rf /tmp/rollback && cp -a production/src /tmp/rollback
+          cp -a "$(php -r '$x=include "/tmp/upgrade/app/.runtime.php";echo $x["data_dir"];')" /tmp/rollback-data-copy || true
+          # Build a fresh installed source to avoid borrowing any target source bytes.
+          php -S 127.0.0.1:18083 -t /tmp/rollback >/tmp/rollback-server.log 2>&1 & echo $! >/tmp/rollback.pid
+          for i in {1..30}; do curl -fsS -c /tmp/rollback.cookies http://127.0.0.1:18083/setup.php -o /tmp/rollback-setup.html && break; sleep 1; done
+          CSRF="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/rollback-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/rollback.cookies -c /tmp/rollback.cookies -X POST http://127.0.0.1:18083/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Rollback' --data-urlencode 'admin_password=Runner-Rollback!Strong22114' --data-urlencode 'admin_password_confirm=Runner-Rollback!Strong22114' -o /tmp/rollback-result.html
+          kill "$(cat /tmp/rollback.pid)" || true
+          php -r 'require "/tmp/rollback/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"Rollback Sentinel","is_private"=>1]);$r->saveLink(null,["category_id"=>$c,"title"=>"Rollback Link","url"=>"https://example.org/rollback","is_private"=>1]);'
+          php "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --run=/tmp/rollback >/dev/null
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "dist/repair-v${VERSION}.php" --run=/tmp/rollback >/tmp/rollback-run.out 2>/tmp/rollback-run.err
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n' < /tmp/rollback/VERSION.txt)" = "$SOURCE_VERSION"
+          php "dist/repair-v${VERSION}.php" --verify-source=/tmp/rollback | grep -q '"ok":true'
+          php -r 'require "/tmp/rollback/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE title=\"Rollback Link\"")->fetchColumn()!==1)exit(1);echo "ROLLBACK_DATA=PASS\n";'
+          echo 'FAILURE_ROLLBACK=PASS'
+
+      - name: Hard interruption recovery then successful retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/interrupted && cp -a production/src /tmp/interrupted
+          php -S 127.0.0.1:18084 -t /tmp/interrupted >/tmp/interrupted-server.log 2>&1 & echo $! >/tmp/interrupted.pid
+          for i in {1..30}; do curl -fsS -c /tmp/interrupted.cookies http://127.0.0.1:18084/setup.php -o /tmp/interrupted-setup.html && break; sleep 1; done
+          CSRF="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/interrupted-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/interrupted.cookies -c /tmp/interrupted.cookies -X POST http://127.0.0.1:18084/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Interrupted' --data-urlencode 'admin_password=Runner-Interrupted!Strong22114' --data-urlencode 'admin_password_confirm=Runner-Interrupted!Strong22114' -o /tmp/interrupted-result.html
+          kill "$(cat /tmp/interrupted.pid)" || true
+          php -r 'require "/tmp/interrupted/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"Interrupted Sentinel","is_private"=>1]);$r->saveLink(null,["category_id"=>$c,"title"=>"Interrupted Link","url"=>"https://example.net/interrupted","is_private"=>1]);'
+          php "dist/P01_V${SOURCE_VERSION}_DISCOVERY_BRIDGE.php" --run=/tmp/interrupted >/dev/null
+          set +e
+          VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "dist/repair-v${VERSION}.php" --run=/tmp/interrupted >/tmp/interrupted-hard.out 2>/tmp/interrupted-hard.err
+          rc=$?
+          set -e
+          test "$rc" = '97'
+          # Source may currently show target bytes; the next run must detect Journal, recover, and then complete.
+          php "dist/repair-v${VERSION}.php" --run=/tmp/interrupted | tee /tmp/interrupted-retry.json
+          grep -q '"interrupted_recovered":true' /tmp/interrupted-retry.json
+          test "$(tr -d '\r\n' < /tmp/interrupted/VERSION.txt)" = "$VERSION"
+          php -r 'require "/tmp/interrupted/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE title=\"Interrupted Link\"")->fetchColumn()!==1)exit(1);echo "INTERRUPTED_DATA=PASS\n";'
+          php /tmp/interrupted/cli/verify.php | grep -q 'VERIFY_PASS=YES'
+          echo 'HARD_INTERRUPTION_RECOVERY_RETRY=PASS'
+
+      - name: Backup Restore capability discovery and smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r 'require "/tmp/upgrade/app/bootstrap.php";$r=new ReflectionClass("VfBackupManager");foreach($r->getMethods(ReflectionMethod::IS_PUBLIC) as $m)echo $m->getName(),"\n";' | tee /tmp/backup-methods.txt
+          grep -q '^create$' /tmp/backup-methods.txt
+          grep -q '^verify$' /tmp/backup-methods.txt
+          # Existing Backup/Restore subsystem source is unchanged; verify the backup created before upgrade still opens as SQLite and preserves the sentinel.
+          php -r 'require "/tmp/upgrade/app/bootstrap.php";$d=vf_db();$key=trim(file_get_contents("/tmp/p01-backup-key"));$x=(new VfBackupManager($d))->downloadPath($key);$p=new PDO("sqlite:".$x["path"]);$i=strtolower((string)$p->query("PRAGMA integrity_check")->fetchColumn());$n=(int)$p->query("SELECT COUNT(*) FROM links WHERE title=\"Runner Link\"")->fetchColumn();if($i!=="ok"||$n!==1)exit(1);echo "BACKUP_RESTORE_INPUT_VALID=PASS\n";'
+          echo 'BACKUP_RESTORE_UNCHANGED_SUBSYSTEM_SMOKE=PASS'
+
+      - name: Final candidate summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_V2.21.15_FORMAL_CANDIDATE=PASS'
+          echo "CANDIDATE_COMMIT=$CANDIDATE"
+          echo "CANDIDATE_TREE=$CANDIDATE_TREE"
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
