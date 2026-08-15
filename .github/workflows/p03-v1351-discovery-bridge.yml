@@ -1,0 +1,300 @@
+name: P03 V1.35.1 Discovery Bridge
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p03-v1351-discovery-bridge.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1351-discovery-bridge
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPOSITORY: llhzx2018/vf-forge
+      PRODUCTION_HEAD: 57781a2613269f5308dfe183d84ad4575279cdd5
+      CANDIDATE_HEAD: ee3cabb849ac8820d5d69a68bf15830739f270ce
+      BRIDGE_BRANCH: bridge/p03-v1.35.1-core-updates-20260816
+      FIXTURE_PASS: VfP03-Discovery-Bridge-Synthetic-2026!
+      PHP_TEST_IMAGE: vf-forge-v1351-discovery-bridge-php84
+    steps:
+      - name: Require unified zero-cost credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'ZERO_COST_UNIFIED_CREDENTIAL_GATE=PASS'
+
+      - name: Exact Production source checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: 57781a2613269f5308dfe183d84ad4575279cdd5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: production
+
+      - name: Exact Candidate reader source checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ee3cabb849ac8820d5d69a68bf15830739f270ce
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: candidate
+
+      - name: Lock exact Bridge scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_HEAD"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(tr -d '\r\n' < production/VERSION)" = '1.35.1'
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" production/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" production/src/app/bootstrap.php
+          test "$(tr -d '\r\n' < production/database/schema/SCHEMA_VERSION)" = '29'
+          test -f candidate/src/app/UpdateService.php
+          test -f candidate/src/app/CoreUpdates/GitHubClient.php
+          test -f candidate/src/app/CoreUpdates/UpdateCore.php
+          ! grep -Fq 'updates.kewaro.com' candidate/src/app/UpdateService.php
+          grep -Fq 'core-updates' candidate/src/app/UpdateService.php
+          grep -Fq 'VF_PRIVATE_READ_TOKEN' candidate/src/app/UpdateService.php
+          echo 'BRIDGE_SCOPE_LOCK=PASS'
+
+      - name: Prepare PHP 8.4 bridge runtime with GitHub cURL reader
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip php-curl sqlite3
+          cat >"$RUNNER_TEMP/Dockerfile.p03-bridge" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev libcurl4-openssl-dev sqlite3 && docker-php-ext-install zip curl && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-bridge" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium","curl"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," BRIDGE_RUNTIME_PASS\n";'
+
+      - name: Build exact same-version Bridge runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE="$RUNNER_TEMP/p03-v1351-base-runtime"
+          BRIDGE="$RUNNER_TEMP/p03-v1351-bridge-runtime"
+          python3 production/scripts/build_runtime.py "$BASE" >/dev/null
+          cp -a "$BASE" "$BRIDGE"
+          mkdir -p "$BRIDGE/app/CoreUpdates"
+          cp candidate/src/app/UpdateService.php "$BRIDGE/app/UpdateService.php"
+          cp candidate/src/app/CoreUpdates/GitHubClient.php "$BRIDGE/app/CoreUpdates/GitHubClient.php"
+          cp candidate/src/app/CoreUpdates/UpdateCore.php "$BRIDGE/app/CoreUpdates/UpdateCore.php"
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" "$BRIDGE/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" "$BRIDGE/app/bootstrap.php"
+          php -l "$BRIDGE/app/UpdateService.php"
+          php -l "$BRIDGE/app/CoreUpdates/GitHubClient.php"
+          php -l "$BRIDGE/app/CoreUpdates/UpdateCore.php"
+          python3 - "$BASE" "$BRIDGE" <<'PY'
+          import hashlib,sys
+          from pathlib import Path
+          base,bridge=map(Path,sys.argv[1:])
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root).as_posix()
+                      out[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+              return out
+          a,b=files(base),files(bridge)
+          changed=sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))
+          expected=['app/CoreUpdates/GitHubClient.php','app/CoreUpdates/UpdateCore.php','app/UpdateService.php']
+          assert changed==expected,(changed,expected)
+          print('BRIDGE_RUNTIME_EXACT_DIFF=PASS',changed)
+          PY
+          echo 'BRIDGE_VERSION=1.35.1'
+          echo 'BRIDGE_SCHEMA=29'
+          echo 'BRIDGE_BUSINESS_SOURCE_CHANGE=0'
+
+      - name: Same-version Bridge failure rollback rehearsal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE="$RUNNER_TEMP/p03-v1351-base-runtime"
+          BRIDGE="$RUNNER_TEMP/p03-v1351-bridge-runtime"
+          WORK="$RUNNER_TEMP/p03-v1351-bridge-rollback"
+          rm -rf "$WORK"; cp -a "$BASE" "$WORK"
+          python3 - "$BASE" "$BRIDGE" "$WORK" <<'PY'
+          import hashlib,shutil,sys
+          from pathlib import Path
+          base,bridge,work=map(Path,sys.argv[1:])
+          rels=['app/UpdateService.php','app/CoreUpdates/GitHubClient.php','app/CoreUpdates/UpdateCore.php']
+          backup={}
+          absent=set()
+          for rel in rels:
+              p=work/rel
+              if p.exists(): backup[rel]=p.read_bytes()
+              else: absent.add(rel)
+          try:
+              rel=rels[0]
+              p=work/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes((bridge/rel).read_bytes())
+              raise RuntimeError('synthetic failpoint after first bridge file')
+          except RuntimeError:
+              for rel,data in backup.items():
+                  p=work/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
+              for rel in absent:
+                  p=work/rel
+                  if p.exists(): p.unlink()
+              for d in [work/'app/CoreUpdates']:
+                  if d.exists() and not any(d.iterdir()): d.rmdir()
+          def manifest(root):
+              rows=[]
+              for p in sorted(root.rglob('*')):
+                  if p.is_file() and not p.is_symlink():
+                      rows.append((p.relative_to(root).as_posix(),hashlib.sha256(p.read_bytes()).hexdigest()))
+              return rows
+          assert manifest(base)==manifest(work),'failure rollback did not restore exact Production runtime'
+          for rel in rels:
+              p=work/rel;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes((bridge/rel).read_bytes())
+          assert manifest(bridge)==manifest(work),'successful bridge apply does not equal expected bridge runtime'
+          print('BRIDGE_FAILURE_AUTO_RECOVERY_REHEARSAL=PASS')
+          PY
+
+      - name: Install synthetic V1.35.1 bridge fixture
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/p03-v1351-bridge-runtime"
+          DATA="$RUNNER_TEMP/p03-v1351-bridge-data"
+          COOKIE="$RUNNER_TEMP/p03-v1351-bridge-cookie"
+          BASE_URL='http://127.0.0.1:18151'
+          rm -rf "$DATA" "$COOKIE"; mkdir -p "$DATA"
+          docker rm -f p03-v1351-bridge-http >/dev/null 2>&1 || true
+          docker run -d --rm --name p03-v1351-bridge-http -p 18151:18151 --env VF_PRIVATE_READ_TOKEN \
+            -v "$RUNTIME:/app" -v "$DATA:$DATA" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18151 -t /app >/dev/null
+          trap 'docker logs p03-v1351-bridge-http 2>/dev/null | tail -n 120 || true; docker rm -f p03-v1351-bridge-http >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" -o "$RUNNER_TEMP/bridge-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/bridge-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Discovery Bridge Synthetic' \
+            --data-urlencode "data_root=$DATA" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" \
+            "$BASE_URL/setup.php" >"$RUNNER_TEMP/bridge-setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/bridge-setup-post.txt"
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" "$RUNTIME/app/bootstrap.php"
+          test "$(sqlite3 "$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1)" 'pragma integrity_check;')" = ok
+          docker rm -f p03-v1351-bridge-http >/dev/null; trap - EXIT
+          echo 'SYNTHETIC_BRIDGE_INSTALL=PASS'
+
+      - name: Missing and invalid credential Fail-Closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/p03-v1351-bridge-runtime"
+          DATA="$RUNNER_TEMP/p03-v1351-bridge-data"
+          docker run --rm -v "$RUNTIME:/app" -v "$DATA:$DATA" -w /app "$PHP_TEST_IMAGE" php -r '
+            require "app/bootstrap.php";require "app/UpdateService.php";$s=new VfUpdateService(vfab_db());
+            if(($s->status()["credential_ready"]??true)!==false)exit(1);
+            try{$s->check(true);exit(2);}catch(Throwable $e){if(!str_contains($e->getMessage(),"凭据"))exit(3);}
+            $x=$s->status();if(($x["last_error_code"]??"")!=="UPDATE_CREDENTIAL_MISSING"||($x["has_update"]??true)!==false)exit(4);
+            echo "BRIDGE_MISSING_CREDENTIAL_FAIL_CLOSED=PASS\n";'
+          docker run --rm -e VF_PRIVATE_READ_TOKEN='invalid-synthetic-credential' -v "$RUNTIME:/app" -v "$DATA:$DATA" -w /app "$PHP_TEST_IMAGE" php -r '
+            require "app/bootstrap.php";require "app/UpdateService.php";$s=new VfUpdateService(vfab_db());
+            try{$s->check(true);exit(1);}catch(Throwable $e){}
+            $x=$s->status();if(($x["has_update"]??true)!==false)exit(2);echo "BRIDGE_INVALID_CREDENTIAL_FAIL_CLOSED=PASS\n";'
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" "$RUNTIME/app/bootstrap.php"
+          echo 'BRIDGE_FAIL_CLOSED_GATE=PASS'
+
+      - name: Real core-updates and Release discovery from synthetic Production
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/p03-v1351-bridge-runtime"
+          DATA="$RUNNER_TEMP/p03-v1351-bridge-data"
+          docker run --rm --env VF_PRIVATE_READ_TOKEN -v "$RUNTIME:/app" -v "$DATA:$DATA" -w /app "$PHP_TEST_IMAGE" php -r '
+            require "app/bootstrap.php";require "app/UpdateService.php";$s=new VfUpdateService(vfab_db());$x=$s->check(true);
+            $required=[
+              "current_version"=>"V1.35.1","current_schema"=>29,"latest_version"=>"1.35.2","latest_schema"=>29,
+              "has_update"=>true,"direct_update"=>true,"availability_status"=>"AVAILABLE","credential_ready"=>true,
+              "release_tag"=>"v1.35.2","asset_name"=>"VF_Forge_V1.35.2_UPDATE.zip","asset_bytes"=>707142,
+              "asset_sha256"=>"6b2f88cdc5f8d4352c124deef14896ddf52e46731916c3825b7cf8cf3112817a"
+            ];
+            foreach($required as $k=>$v){if(!array_key_exists($k,$x)||$x[$k]!==$v){fwrite(STDERR,"mismatch:$k\n");exit(10);}}
+            if(($x["update_source"]??"")!=="core-updates + GitHub Release")exit(11);
+            if(($x["manifest_verified"]??false)!==true)exit(12);
+            echo "BRIDGE_REAL_ONLINE_DISCOVERY_SYNTHETIC=PASS\n";'
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" "$RUNTIME/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" "$RUNTIME/app/bootstrap.php"
+          test ! -e "$RUNTIME/repair-v1.35.2.php"
+          echo 'BRIDGE_DID_NOT_EXECUTE_TARGET_UPGRADE=PASS'
+
+      - name: Solidify exact private Bridge branch after PASS
+        shell: bash
+        working-directory: production
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/$PRODUCT_REPOSITORY/branches/$BRIDGE_BRANCH" >/dev/null 2>&1; then
+            echo 'Bridge branch already exists; refusing mutable bridge branch reuse.' >&2
+            exit 80
+          fi
+          mkdir -p src/app/CoreUpdates
+          cp ../candidate/src/app/UpdateService.php src/app/UpdateService.php
+          cp ../candidate/src/app/CoreUpdates/GitHubClient.php src/app/CoreUpdates/GitHubClient.php
+          cp ../candidate/src/app/CoreUpdates/UpdateCore.php src/app/CoreUpdates/UpdateCore.php
+          test "$(tr -d '\r\n' < VERSION)" = '1.35.1'
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" src/app/bootstrap.php
+          test -z "$(git diff -- database src/app/bootstrap.php VERSION)"
+          CHANGED=$(git status --porcelain | awk '{print $2}' | sort)
+          EXPECTED=$(printf '%s\n' src/app/CoreUpdates/GitHubClient.php src/app/CoreUpdates/UpdateCore.php src/app/UpdateService.php | sort)
+          test "$CHANGED" = "$EXPECTED"
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add src/app/UpdateService.php src/app/CoreUpdates/GitHubClient.php src/app/CoreUpdates/UpdateCore.php
+          git diff --cached --check
+          git commit -m 'chore(bridge): add P03 V1.35.1 core-updates discovery compatibility'
+          BRIDGE_COMMIT=$(git rev-parse HEAD)
+          gh auth setup-git
+          git push https://github.com/$PRODUCT_REPOSITORY.git "HEAD:$BRIDGE_BRANCH"
+          echo "P03_DISCOVERY_BRIDGE_COMMIT=$BRIDGE_COMMIT"
+          echo 'PRIVATE_BRIDGE_BRANCH_SOLIDIFIED=PASS'
+
+      - name: Remote Bridge branch exact scope readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          BRIDGE_HEAD=$(gh api "repos/$PRODUCT_REPOSITORY/branches/$BRIDGE_BRANCH" --jq .commit.sha)
+          FILES=$(gh api "repos/$PRODUCT_REPOSITORY/compare/$PRODUCTION_HEAD...$BRIDGE_HEAD" --jq '.files[].filename' | sort)
+          EXPECTED=$(printf '%s\n' src/app/CoreUpdates/GitHubClient.php src/app/CoreUpdates/UpdateCore.php src/app/UpdateService.php | sort)
+          test "$FILES" = "$EXPECTED"
+          VERSION_REMOTE=$(gh api "repos/$PRODUCT_REPOSITORY/contents/VERSION?ref=$BRIDGE_HEAD" -H 'Accept: application/vnd.github.raw+json' | tr -d '\r\n')
+          test "$VERSION_REMOTE" = '1.35.1'
+          echo "P03_DISCOVERY_BRIDGE_HEAD=$BRIDGE_HEAD"
+          echo 'BRIDGE_REMOTE_EXACT_SCOPE=PASS'
+          echo 'BRIDGE_SCHEMA_CHANGE=0'
+          echo 'BRIDGE_PRODUCTION_DATA_USED=0'
+          echo 'PUBLIC_PRIVATE_SOURCE_ARTIFACT=0'
+          echo 'P03_V1.35.1_DISCOVERY_BRIDGE_VERIFIED=PASS'
