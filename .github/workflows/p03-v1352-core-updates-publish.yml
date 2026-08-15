@@ -1,0 +1,178 @@
+name: P03 V1.35.2 core-updates Publish
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p03-v1352-core-updates-publish.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1352-core-updates-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REPOSITORY: llhzx2018/vf-forge
+      CORE_REPOSITORY: llhzx2018/core-updates
+      CORE_BASE: e1ca0a3462d2193710ab195c01cb0ded4aec564f
+      CANDIDATE_HEAD: ee3cabb849ac8820d5d69a68bf15830739f270ce
+      TAG: v1.35.2
+      UPDATE_ASSET: VF_Forge_V1.35.2_UPDATE.zip
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'UNIFIED_CREDENTIAL_GATE=PASS'
+
+      - name: Checkout core-updates exact current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: e1ca0a3462d2193710ab195c01cb0ded4aec564f
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: core
+
+      - name: Checkout P03 exact Candidate validation code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ee3cabb849ac8820d5d69a68bf15830739f270ce
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p03
+
+      - name: Resolve Manifest exclusively from Release Remote Truth
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test ! -e core/projects/P03.json
+          CURRENT_CORE=$(gh api repos/$CORE_REPOSITORY/branches/main --jq .commit.sha)
+          test "$CURRENT_CORE" = "$CORE_BASE"
+          REF=$(gh api "repos/$PRODUCT_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+          TYPE=$(gh api "repos/$PRODUCT_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)
+          if [ "$TYPE" = tag ]; then PEELED=$(gh api "repos/$PRODUCT_REPOSITORY/git/tags/$REF" --jq .object.sha); else PEELED="$REF"; fi
+          test "$PEELED" = "$CANDIDATE_HEAD"
+          RELEASE=$(gh api "repos/$PRODUCT_REPOSITORY/releases/tags/$TAG")
+          test "$(printf '%s' "$RELEASE" | jq -r .draft)" = false
+          test "$(printf '%s' "$RELEASE" | jq -r .prerelease)" = false
+          PUBLISHED=$(printf '%s' "$RELEASE" | jq -r .published_at)
+          ASSET=$(printf '%s' "$RELEASE" | jq -c '.assets[] | select(.name=="VF_Forge_V1.35.2_UPDATE.zip")')
+          BYTES=$(printf '%s' "$ASSET" | jq -r .size)
+          DIGEST=$(printf '%s' "$ASSET" | jq -r .digest)
+          SHA=${DIGEST#sha256:}
+          test "$BYTES" -gt 0
+          test "${#SHA}" = 64
+          python3 - "$PUBLISHED" "$BYTES" "$SHA" <<'PY'
+          import json,sys
+          published,bytes_,sha=sys.argv[1:]
+          d={
+            'schema_version':'1.0',
+            'project_id':'P03',
+            'component_id':'APP',
+            'enabled':True,
+            'target_version':'1.35.2',
+            'update_type':'ATOMIC',
+            'from_versions':['1.35.1'],
+            'schema_from':'29',
+            'schema_to':'29',
+            'repository':'llhzx2018/vf-forge',
+            'release_tag':'v1.35.2',
+            'asset_name':'VF_Forge_V1.35.2_UPDATE.zip',
+            'asset_bytes':int(bytes_),
+            'asset_sha256':sha,
+            'backup_required':True,
+            'rollback_supported':True,
+            'released_at':published,
+            'notes':'P03 V1.35.2 unified core-updates maintenance release; Schema 29 -> 29; Production remains V1.35.1 until authorized upgrade.'
+          }
+          open('core/projects/P03.json','w',encoding='utf-8',newline='\n').write(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+          PY
+          echo "REMOTE_RELEASED_AT=$PUBLISHED"
+          echo "REMOTE_UPDATE_BYTES=$BYTES"
+          echo "REMOTE_UPDATE_SHA256=$SHA"
+          echo 'REMOTE_TRUTH_TO_MANIFEST=PASS'
+
+      - name: Validate P03.json with exact product UpdateCore and exact Release Asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p03-release"
+          gh release download "$TAG" --repo "$PRODUCT_REPOSITORY" --pattern "$UPDATE_ASSET" --dir "$RUNNER_TEMP/p03-release"
+          MANIFEST="$GITHUB_WORKSPACE/core/projects/P03.json"
+          PACKAGE="$RUNNER_TEMP/p03-release/$UPDATE_ASSET"
+          php -r '
+            require "p03/src/app/CoreUpdates/UpdateCore.php";
+            $m=json_decode(file_get_contents("core/projects/P03.json"),true,512,JSON_THROW_ON_ERROR);
+            $c=new CoreUpdates\UpdateCore("P03","APP");
+            $a=$c->check("1.35.1","29",$m);
+            if(($a["status"]??"")!=="AVAILABLE"){fwrite(STDERR,json_encode($a));exit(1);}
+            $v=$c->verifyPackage(getenv("RUNNER_TEMP")."/p03-release/VF_Forge_V1.35.2_UPDATE.zip",$m);
+            if(($v["status"]??"")!=="VERIFIED"){fwrite(STDERR,json_encode($v));exit(2);}
+            $wrong=$c->check("1.35.0","29",$m);
+            if(($wrong["status"]??"")!=="BLOCKED_SOURCE_VERSION")exit(3);
+            echo "P03_MANIFEST_UPDATECORE_VALIDATION=PASS\n";
+          '
+          python3 - <<'PY'
+          import json
+          d=json.load(open('core/projects/P03.json',encoding='utf-8'))
+          assert d['project_id']=='P03' and d['component_id']=='APP'
+          assert d['target_version']=='1.35.2' and d['from_versions']==['1.35.1']
+          assert d['schema_from']=='29' and d['schema_to']=='29'
+          assert d['asset_name']=='VF_Forge_V1.35.2_UPDATE.zip'
+          assert d['backup_required'] is True and d['rollback_supported'] is True
+          print('P03_MANIFEST_SCHEMA=PASS')
+          PY
+
+      - name: Commit only P03.json to core-updates main
+        shell: bash
+        working-directory: core
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -z "$(git status --porcelain | grep -v '^?? projects/P03.json$' || true)"
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add projects/P03.json
+          test "$(git diff --cached --name-only)" = 'projects/P03.json'
+          git diff --cached --check
+          git commit -m 'release(P03): publish VF Forge 1.35.2 update manifest'
+          NEW=$(git rev-parse HEAD)
+          gh auth setup-git
+          git push https://github.com/$CORE_REPOSITORY.git "HEAD:main"
+          echo "CORE_UPDATES_P03_COMMIT=$NEW"
+          echo 'CORE_UPDATES_PUBLISH=PASS'
+
+      - name: Remote P03.json exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          REMOTE=$(gh api "repos/$CORE_REPOSITORY/contents/projects/P03.json?ref=main" -H 'Accept: application/vnd.github.raw+json')
+          LOCAL=$(cat core/projects/P03.json)
+          test "$REMOTE" = "$LOCAL"
+          NEW_HEAD=$(gh api repos/$CORE_REPOSITORY/branches/main --jq .commit.sha)
+          test "$NEW_HEAD" != "$CORE_BASE"
+          echo "CORE_UPDATES_MAIN=$NEW_HEAD"
+          echo 'P03_JSON_REMOTE_READBACK=PASS'
+          echo 'PUBLIC_PRIVATE_SOURCE_ARTIFACT=0'
+          echo 'PRIVATE_DATA_LEAKAGE=0'
