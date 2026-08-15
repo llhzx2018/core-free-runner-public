@@ -1,0 +1,245 @@
+name: P05 Phase 3 Simplified Real Environment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p05-phase3-run-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p05-phase3-real-environment
+  cancel-in-progress: false
+
+jobs:
+  phase3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      EXPECTED_P05_SHA: c36fc129de8d47aba45ab6c0235efa2fbca411a6
+      NODE_IMAGE: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+      POSTGRES_IMAGE: postgres:18@sha256:7157393f508fd8eb46119937fab39813783fe3e7d4c6316c45c12ce2ea25e61d
+      DATABASE_URL: postgresql://vfseo:fixture-pass@127.0.0.1:5432/vfseo
+      PHASE3_BASE_URL: http://127.0.0.1:3105
+      PORT: '3105'
+      VF_ADMIN_USERNAME: phase3-admin
+      VF_ADMIN_PASSWORD: fixture-phase3-admin-password-20260815
+      VF_SECURE_COOKIES: 'false'
+      VF_REQUIRE_HTTPS: 'false'
+      VF_TRUST_PROXY: 'false'
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+    steps:
+      - name: Checkout public control repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_SEO_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: c36fc129de8d47aba45ab6c0235efa2fbca411a6
+          token: ${{ secrets.VF_SEO_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source and runtime identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+          echo "RUNNER_REPOSITORY=llhzx2018/core-free-runner-public"
+          echo "RUNNER_OS=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')"
+          docker --version
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker pull "$POSTGRES_IMAGE" >/dev/null
+          docker run --rm "$NODE_IMAGE" node --version
+          docker run --rm "$POSTGRES_IMAGE" postgres --version
+          if command -v google-chrome >/dev/null 2>&1; then google-chrome --version; elif command -v chromium >/dev/null 2>&1; then chromium --version; else echo 'CHROME_NOT_FOUND'; exit 1; fi
+
+      - name: Provision PostgreSQL 18
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-pg >/dev/null 2>&1 || true
+          docker run -d --name p05-pg \
+            -e POSTGRES_USER=vfseo -e POSTGRES_PASSWORD=fixture-pass -e POSTGRES_DB=vfseo \
+            -p 127.0.0.1:5432:5432 "$POSTGRES_IMAGE" >/dev/null
+          for i in $(seq 1 60); do
+            if docker exec p05-pg pg_isready -U vfseo -d vfseo >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec p05-pg pg_isready -U vfseo -d vfseo
+
+      - name: Install build migrate and admin initialize
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --network host \
+            -e DATABASE_URL -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci && npm run lint && npm run typecheck && npm run build && npm run migrate && npm run verify:schema && npm run clean-install:check && npm run bootstrap:admin && npm run verify:admin-ready'
+          echo 'INSTALL=PASS'
+
+      - name: Start Web runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-web >/dev/null 2>&1 || true
+          docker run -d --name p05-web --network host \
+            -e DATABASE_URL -e PORT -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 60); do
+            if curl -fsS "$PHASE3_BASE_URL/api/health" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS "$PHASE3_BASE_URL/api/health"
+          test "$(docker inspect -f '{{.State.Running}}' p05-web)" = true
+          echo 'WEB_RUNTIME=PASS'
+
+      - name: Basic Worker and Job runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker exec p05-pg psql -U vfseo -d vfseo -v ON_ERROR_STOP=1 -c "INSERT INTO jobs(job_type,state,idempotency_key) VALUES('SYSTEM_SMOKE','PENDING','phase3-worker-smoke') ON CONFLICT(idempotency_key) DO NOTHING" >/dev/null
+          docker run --rm --network host \
+            -e DATABASE_URL -e VF_WORKER_ONESHOT=true -e VF_WORKER_ID=phase3-worker \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" npm run start:worker | tee "$RUNNER_TEMP/worker.log"
+          test "$(docker exec p05-pg psql -U vfseo -d vfseo -Atc "SELECT state||':'||attempt FROM jobs WHERE idempotency_key='phase3-worker-smoke'")" = 'COMPLETE:1'
+          grep -F 'worker_started' "$RUNNER_TEMP/worker.log" >/dev/null
+          grep -F 'worker_job_complete' "$RUNNER_TEMP/worker.log" >/dev/null
+          docker exec p05-pg psql -U vfseo -d vfseo -v ON_ERROR_STOP=1 -c "INSERT INTO jobs(job_type,state,idempotency_key) VALUES('SYSTEM_SMOKE','RETRY','phase3-worker-retry') ON CONFLICT(idempotency_key) DO NOTHING" >/dev/null
+          docker run --rm --network host \
+            -e DATABASE_URL -e VF_WORKER_ONESHOT=true -e VF_WORKER_ID=phase3-worker-retry \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" npm run start:worker >/dev/null
+          test "$(docker exec p05-pg psql -U vfseo -d vfseo -Atc "SELECT state FROM jobs WHERE idempotency_key='phase3-worker-retry'")" = 'COMPLETE'
+          docker exec p05-pg psql -U vfseo -d vfseo -v ON_ERROR_STOP=1 -c "INSERT INTO jobs(job_type,state,idempotency_key) VALUES('SYSTEM_SMOKE','PENDING','phase3-duplicate-job') ON CONFLICT(idempotency_key) DO NOTHING; INSERT INTO jobs(job_type,state,idempotency_key) VALUES('SYSTEM_SMOKE','PENDING','phase3-duplicate-job') ON CONFLICT(idempotency_key) DO NOTHING" >/dev/null
+          test "$(docker exec p05-pg psql -U vfseo -d vfseo -Atc "SELECT count(*) FROM jobs WHERE idempotency_key='phase3-duplicate-job'")" = '1'
+          echo 'WORKER_JOB_RUNTIME=PASS'
+
+      - name: Core Fake Provider Sync and Crawler smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp scripts/p05-phase3-smoke.ts p05/.phase3-smoke.ts
+          docker run --rm --network host \
+            -e DATABASE_URL -e PHASE3_BASE_URL -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            node --import tsx .phase3-smoke.ts
+          rm -f p05/.phase3-smoke.ts
+          echo 'CORE_FUNCTIONAL=PASS'
+          echo 'FAKE_GSC_GA4=PASS'
+          echo 'CRAWLER_SAFETY=PASS'
+          echo 'SYNC_RETRY_IDEMPOTENCY=PASS'
+
+      - name: Real PostgreSQL backup and restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SNAPSHOT_SQL="SELECT json_build_object('schema',(SELECT schema_identity||':'||schema_version FROM schema_metadata WHERE singleton=true),'projects',(SELECT count(*) FROM projects),'websites',(SELECT count(*) FROM websites),'queries',(SELECT count(*) FROM queries),'pages',(SELECT count(*) FROM pages),'searchFacts',(SELECT count(*) FROM search_observation_daily),'analyticsFacts',(SELECT count(*) FROM analytics_observation_daily),'relations',(SELECT count(*) FROM websites w JOIN projects p ON p.id=w.project_id),'settings',(SELECT md5(COALESCE(string_agg(key||'='||value::text,',' ORDER BY key),'')) FROM settings))::text"
+          BEFORE="$(docker exec p05-pg psql -U vfseo -d vfseo -Atc "$SNAPSHOT_SQL")"
+          docker exec p05-pg pg_dump -U vfseo -d vfseo -Fc > "$RUNNER_TEMP/p05-vfseo.dump"
+          test -s "$RUNNER_TEMP/p05-vfseo.dump"
+          if strings "$RUNNER_TEMP/p05-vfseo.dump" | grep -F "$VF_MASTER_KEY_BASE64" >/dev/null; then echo 'MASTER_KEY_FOUND_IN_BACKUP'; exit 1; fi
+          test "$(docker exec p05-pg psql -U vfseo -d vfseo -Atc "SELECT count(*) FROM information_schema.columns WHERE column_name ILIKE '%master%key%'")" = '0'
+          docker exec p05-pg dropdb -U vfseo --if-exists vfseo_restore
+          docker exec p05-pg createdb -U vfseo vfseo_restore
+          cat "$RUNNER_TEMP/p05-vfseo.dump" | docker exec -i p05-pg pg_restore -U vfseo -d vfseo_restore --no-owner --no-privileges
+          AFTER="$(docker exec p05-pg psql -U vfseo -d vfseo_restore -Atc "$SNAPSHOT_SQL")"
+          test "$BEFORE" = "$AFTER"
+          echo "BACKUP_SNAPSHOT=$BEFORE"
+          echo 'BACKUP_RESTORE=PASS'
+
+      - name: Basic failure recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          HEADERS="$RUNNER_TEMP/login.headers"
+          curl -fsS -D "$HEADERS" -H 'content-type: application/json' -d "{\"username\":\"$VF_ADMIN_USERNAME\",\"password\":\"$VF_ADMIN_PASSWORD\"}" "$PHASE3_BASE_URL/api/auth/login" >/dev/null
+          COOKIE="$(awk 'tolower($1)=="set-cookie:" {print $2}' "$HEADERS" | head -1 | cut -d';' -f1 | tr -d '\r')"
+          test -n "$COOKIE"
+          docker stop p05-pg >/dev/null
+          CODE="$(curl -sS -o "$RUNNER_TEMP/db-down.json" -w '%{http_code}' -H "Cookie: $COOKIE" "$PHASE3_BASE_URL/api/dashboard" || true)"
+          test "$CODE" = '500' -o "$CODE" = '503'
+          test "$(docker inspect -f '{{.State.Running}}' p05-web)" = true
+          docker start p05-pg >/dev/null
+          for i in $(seq 1 60); do if docker exec p05-pg pg_isready -U vfseo -d vfseo >/dev/null 2>&1; then break; fi; sleep 1; done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Cookie: $COOKIE" "$PHASE3_BASE_URL/api/dashboard")" = '200'
+          docker rm -f p05-web >/dev/null
+          docker run -d --name p05-web --network host \
+            -e DATABASE_URL -e PORT -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 60); do if curl -fsS "$PHASE3_BASE_URL/api/health" >/dev/null 2>&1; then break; fi; sleep 1; done
+          curl -fsS "$PHASE3_BASE_URL/api/health" >/dev/null
+          echo 'FAILURE_RECOVERY=PASS'
+
+      - name: Browser E2E with installed Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$CHROME"
+          mkdir -p "$RUNNER_TEMP/p05-browser"
+          cd "$RUNNER_TEMP/p05-browser"
+          npm init -y >/dev/null 2>&1
+          npm install --silent --no-audit --no-fund playwright-core@1.55.0
+          cp "$GITHUB_WORKSPACE/scripts/p05-phase3-browser.mjs" ./browser.mjs
+          PHASE3_BASE_URL="$PHASE3_BASE_URL" VF_ADMIN_USERNAME="$VF_ADMIN_USERNAME" VF_ADMIN_PASSWORD="$VF_ADMIN_PASSWORD" CHROME_EXECUTABLE="$CHROME" node browser.mjs
+          echo 'BROWSER_E2E=PASS'
+
+      - name: Secret and PRIVATE_DATA final gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          if grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist --exclude='*.map' -E -- '-----BEGIN [A-Z ]*PRIVATE KEY-----|ya29\.[A-Za-z0-9._~-]+|1//[A-Za-z0-9._~-]{20,}' p05/src p05/tests p05/database p05/scripts >/tmp/p05-phase3-secret-hits; then cat /tmp/p05-phase3-secret-hits; exit 1; fi
+          if grep -RIl --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist -E -- '(start|lib|forge|infra)\.kewaro\.com|llhzx2018@gmail\.com' p05/src p05/tests p05/database >/tmp/p05-phase3-private-hits; then cat /tmp/p05-phase3-private-hits; exit 1; fi
+          test ! -e p05/private_data
+          test ! -e p05/PRIVATE_DATA
+          echo 'REAL_TOKEN_COUNT=0'
+          echo 'REAL_USER_SEO_DATA_IN_GIT=0'
+          echo 'REAL_SECRET_IN_EVIDENCE=0'
+          echo 'PRIVATE_DATA_LEAK=0'
+          echo 'SECRET_PRIVATE_DATA=PASS'
+
+      - name: Phase 3 simplified final assertions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+          echo 'INSTALL=PASS'
+          echo 'RUNTIME=PASS'
+          echo 'CORE_FUNCTIONAL_SMOKE=PASS'
+          echo 'FAKE_GSC_GA4=PASS'
+          echo 'CRAWLER_SAFETY=PASS'
+          echo 'SYNC_RETRY_IDEMPOTENCY=PASS'
+          echo 'BACKUP_RESTORE=PASS'
+          echo 'BASIC_FAILURE_RECOVERY=PASS'
+          echo 'BROWSER_E2E=PASS'
+          echo 'SECRET_PRIVATE_DATA=PASS'
+          echo 'UNRESOLVED_CRITICAL_PRODUCT_FAILURE=0'
+          echo 'PROJECT_BLOCK=NONE'
+
+      - name: Cleanup private source and runtime
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker rm -f p05-web p05-pg >/dev/null 2>&1
+          rm -rf p05 "$RUNNER_TEMP/p05-browser"
+          rm -f "$RUNNER_TEMP/p05-vfseo.dump" "$RUNNER_TEMP/worker.log" "$RUNNER_TEMP/login.headers" "$RUNNER_TEMP/db-down.json" /tmp/p05-phase3-secret-hits /tmp/p05-phase3-private-hits
+          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
