@@ -1,0 +1,63 @@
+name: P04 V2.5.2 Readback Trigger
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v252-post-upgrade-readback-trigger.yml'
+permissions:
+  contents: write
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Production readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base='https://infra.kewaro.com'
+          code=$(curl -sS --max-time 20 -o /tmp/version -w '%{http_code}' "$base/VERSION.txt" || true)
+          v=$(tr -d '\r\n' </tmp/version 2>/dev/null || true)
+          echo "VERSION_HTTP=$code"
+          echo "PRODUCTION_VERSION=$v"
+          test "$code" = '200'
+          test "$v" = '2.5.2'
+
+          bridge_code=$(curl -sS --max-time 20 -o /tmp/bridge -w '%{http_code}' "$base/P04_V2.5.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=info" || true)
+          echo "BRIDGE_HTTP=$bridge_code"
+          if [ "$bridge_code" = '200' ]; then
+            python3 - <<'PY'
+import json
+try:
+ d=json.load(open('/tmp/bridge',encoding='utf-8'))
+ print('BRIDGE_STATUS='+str(d.get('status','UNKNOWN')))
+except Exception:
+ print('BRIDGE_STATUS=UNREADABLE')
+PY
+          fi
+
+          repair_code=$(curl -sS --max-time 20 -o /tmp/repair -w '%{http_code}' "$base/repair-v2.5.2.php" || true)
+          echo "REPAIR_HTTP=$repair_code"
+
+          mcode=$(curl -sS --max-time 20 -D /tmp/mh -o /tmp/mb -w '%{http_code}' "$base/maintenance.php" || true)
+          echo "MAINTENANCE_HTTP=$mcode"
+          loc=$(awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/^[^:]+:[[:space:]]*/,"");gsub(/\r/,"");print;exit}' /tmp/mh || true)
+          [ -z "$loc" ] || echo "MAINTENANCE_LOCATION=$loc"
+          echo 'POST_UPGRADE_PUBLIC_READBACK=PASS'
+      - name: Retire trigger and previous probe workflows
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git pull --ff-only origin main
+          rm -f .github/workflows/p04-v252-post-upgrade-readback-trigger.yml .github/workflows/p04-v252-post-upgrade-public-readback.yml
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'ops(P04): retire V2.5.2 post-upgrade readback workflows [skip ci]'
+            git push origin HEAD:main
+          fi
