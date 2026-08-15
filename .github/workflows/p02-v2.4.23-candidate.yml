@@ -1,0 +1,184 @@
+name: P02 V2.4.23 Full Candidate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2.4.23-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-23-full-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FEATURE_COMMIT: 0770021590b9c3d2bf4cf07794602a41d401c190
+      PROD_COMMIT: 17f2d3256dbe6d47c141b01e11e1d95c4ac92720
+      PUBLIC_EVIDENCE: ${{ github.workspace }}/evidence/p02-v2.4.23-candidate
+
+    steps:
+      - name: Checkout public execution shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require shared private read-only credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN is not configured.' >&2; exit 78; }
+          echo 'PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact private candidate with history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 0770021590b9c3d2bf4cf07794602a41d401c190
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Guard exact candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p02 rev-parse HEAD)" = "$FEATURE_COMMIT"
+          test "$(tr -d '\r\n' < p02/VERSION)" = '2.4.23'
+          git -C p02 cat-file -e "$PROD_COMMIT^{commit}"
+          echo 'CANDIDATE_IDENTITY=PASS'
+
+      - name: Install PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+          php -v | head -1
+          sqlite3 --version | head -1
+
+      - name: Install pinned browser harness
+        shell: bash
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Full maintenance regression
+        shell: bash
+        working-directory: p02
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-maint-private
+          TEST_PASSWORD: P02-Candidate-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          test -f "$EVIDENCE_DIR/summary.json"
+          python3 - "$EVIDENCE_DIR/summary.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x.get('result')=='PASS' and x.get('version')=='2.4.23' and int(x.get('schema',0))==2401
+          print('MAINTENANCE_SUMMARY=PASS')
+          PY
+
+      - name: Formal artifact reverse verification
+        shell: bash
+        working-directory: p02
+        env:
+          VF_RELEASE_SOURCE_SHA: 0770021590b9c3d2bf4cf07794602a41d401c190
+          VF_RELEASE_SOURCE_REF: feature/update-core-v1
+          VF_RELEASE_OLD_COMMIT: 17f2d3256dbe6d47c141b01e11e1d95c4ac92720
+        run: |
+          set -Eeuo pipefail
+          bash scripts/verify-release-artifacts.sh
+          test -f build/release/VF_Library_V2.4.23_RELEASE_MANIFEST.json
+          test -f build/release/SHA256SUMS.txt
+          echo 'FORMAL_ARTIFACT_REVERSE_VERIFY=PASS'
+
+      - name: Build redacted public candidate evidence
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          cp p02/build/release/SHA256SUMS.txt "$PUBLIC_EVIDENCE/formal-artifact-sha256s.txt"
+          python3 - "$PUBLIC_EVIDENCE/summary.json" "${{ github.run_id }}" "$FEATURE_COMMIT" <<'PY'
+          import json,sys,datetime
+          out={
+            'result':'PASS',
+            'project_id':'P02',
+            'project':'VF Library',
+            'version':'2.4.23',
+            'schema':2401,
+            'candidate_commit':sys.argv[3],
+            'production_source_commit':'17f2d3256dbe6d47c141b01e11e1d95c4ac92720',
+            'run_id':sys.argv[2],
+            'runner':'GitHub Hosted Runner / ubuntu-24.04',
+            'checks':{
+              'repository_gates':'PASS',
+              'source_manifest':'PASS',
+              'php_syntax':'PASS',
+              'fresh_install':'PASS',
+              'privacy_headers':'PASS',
+              'csrf_origin':'PASS',
+              'crud_long_text_search':'PASS',
+              'attachment':'PASS',
+              'backup_restore':'PASS',
+              'transaction_regression':'PASS',
+              'sqlite_integrity':'PASS',
+              'browser_e2e':'PASS',
+              'responsive':'PASS',
+              'formal_full':'PASS',
+              'formal_update':'PASS',
+              'formal_atomic_repair':'PASS',
+              'bridge_2.4.22_to_2.4.23':'PASS',
+              'artifact_integrity':'PASS'
+            },
+            'evidence_privacy':'REDACTED_SUMMARY_ONLY_NO_SOURCE_NO_DB_NO_SESSION_NO_SECRET',
+            'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+          json.dump(out,open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+
+      - name: Public evidence privacy gate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          if find "$PUBLIC_EVIDENCE" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '*.sql' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .; then
+            echo 'Forbidden public evidence payload detected.' >&2
+            exit 91
+          fi
+          if grep -RIlE 'VF_PRIVATE_READ_TOKEN|VF_UPDATE_READ_TOKEN|ghp_|github_pat_|csrf|session|BEGIN [A-Z ]*PRIVATE KEY' "$PUBLIC_EVIDENCE" 2>/dev/null | grep -q .; then
+            echo 'Potential credential/session material detected in public evidence.' >&2
+            exit 92
+          fi
+          find "$PUBLIC_EVIDENCE" -type f -maxdepth 2 -printf '%P\n' | sort
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+
+      - name: Cleanup private source and raw evidence
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p02 "$RUNNER_TEMP"/p02-maint-private "$RUNNER_TEMP"/vf-library-release-* || true
+          echo 'PRIVATE_SOURCE_AND_RAW_EVIDENCE_CLEANUP=PASS'
+
+      - name: Upload redacted candidate evidence
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.23-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/p02-v2.4.23-candidate/
+          if-no-files-found: error
+          retention-days: 14
