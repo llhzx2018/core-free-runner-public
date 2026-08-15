@@ -1,0 +1,192 @@
+name: P01 V2.21.16 Post-Release Read-Only Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - proof-triggers/P01_V2.21.16_POST_RELEASE
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_COMMIT: c9ab60f2a15be1e15ba7e80ee935da2bc8d4f1fa
+  PRODUCTION_COMMIT: 7c7ad1da3e8dcd49fa49313317c389948f40d4de
+  EXPECTED_UPDATE_BYTES: '1049243'
+  EXPECTED_UPDATE_SHA: 3a7bfae9ff96f6caf5759be8db9fe2b57f9659d9532252ebdf5f617b03dbb648
+  EXPECTED_RELEASE_ID: '371187274'
+
+jobs:
+  read-only-proof:
+    runs-on: ubuntu-24.04
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Require private read credential
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+
+      - name: Checkout exact Production Truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Checkout exact V2.21.16 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Install runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml sqlite3 >/dev/null
+
+      - name: Read exact Release and core-updates identities
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.16 > /tmp/release.json
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > /tmp/P01.json
+          python3 - <<'PY'
+          import json,os
+          rel=json.load(open('/tmp/release.json'))
+          p01=json.load(open('/tmp/P01.json'))
+          assert str(rel['id'])==os.environ['EXPECTED_RELEASE_ID'],rel['id']
+          assert rel['tag_name']=='v2.21.16' and rel['target_commitish']==os.environ['CANDIDATE_COMMIT']
+          assert rel['draft'] is False and rel['prerelease'] is False
+          assets={a['name']:a for a in rel['assets']}
+          a=assets['VF_Start_V2.21.16_UPDATE.zip']
+          assert int(a['size'])==int(os.environ['EXPECTED_UPDATE_BYTES'])
+          assert a.get('digest')=='sha256:'+os.environ['EXPECTED_UPDATE_SHA']
+          assert p01['project_id']=='P01' and p01['component_id']=='APP'
+          assert p01['target_version']=='2.21.16' and p01['from_versions']==['2.21.14']
+          assert p01['repository']=='llhzx2018/vf-start' and p01['release_tag']=='v2.21.16'
+          assert p01['asset_name']=='VF_Start_V2.21.16_UPDATE.zip'
+          assert int(p01['asset_bytes'])==int(os.environ['EXPECTED_UPDATE_BYTES'])
+          assert p01['asset_sha256']==os.environ['EXPECTED_UPDATE_SHA']
+          assert p01['schema_from']=='2026080902' and p01['schema_to']=='2026080902'
+          print('RELEASE_AND_CORE_UPDATES_IDENTITY=PASS')
+          PY
+
+      - name: Build non-production V2.21.14 runtime with active Bridge
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-proof
+          cp -a production/src /tmp/p01-proof
+          mkdir -p /tmp/p01-proof/app/CoreUpdates
+          cp candidate/src/app/UpdateManager.php /tmp/p01-proof/app/UpdateManager.php
+          cp candidate/src/app/CoreUpdates/UpdateCore.php /tmp/p01-proof/app/CoreUpdates/UpdateCore.php
+          cp candidate/src/app/CoreUpdates/GitHubClient.php /tmp/p01-proof/app/CoreUpdates/GitHubClient.php
+
+          php -S 127.0.0.1:18128 -t /tmp/p01-proof >/tmp/p01-proof-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-proof.cookies http://127.0.0.1:18128/setup.php -o /tmp/p01-proof-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-proof-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf"
+          curl -fsS -b /tmp/p01-proof.cookies -c /tmp/p01-proof.cookies -X POST http://127.0.0.1:18128/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=P01 Post Release Proof' \
+            --data-urlencode 'admin_password=P01Proof!22116' \
+            --data-urlencode 'admin_password_confirm=P01Proof!22116' \
+            -o /tmp/p01-proof-setup-result.html
+          kill "$pid" || true
+          wait "$pid" 2>/dev/null || true
+          trap - EXIT
+          test "$(tr -d '\r\n' < /tmp/p01-proof/VERSION.txt)" = '2.21.14'
+
+      - name: Direct UpdateManager discovery using real online authorities
+        run: |
+          set -Eeuo pipefail
+          export VF_PRIVATE_READ_TOKEN="$READ_TOKEN"
+          cat > /tmp/p01-proof/check.php <<'PHP'
+          <?php
+          require __DIR__.'/app/bootstrap.php';
+          $u=new VfUpdateManager(vf_db());
+          echo json_encode($u->check(true),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n";
+          PHP
+          php /tmp/p01-proof/check.php | tee /tmp/discovery.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/discovery.json'))
+          assert x['ok'] is True,x
+          assert x['current_version']=='2.21.14',x
+          assert x['latest_version']=='2.21.16',x
+          assert x['available'] is True and x['can_update'] is True,x
+          req=x['requirements']
+          assert req['credential']['name']=='VF_PRIVATE_READ_TOKEN' and req['credential']['ok'] is True
+          assert req['schema']['from']=='2026080902' and req['schema']['target']=='2026080902' and req['schema']['current']=='2026080902' and req['schema']['ok'] is True
+          assert req['source_allowed'] is True
+          exts={r['name']:r['ok'] for r in req['extensions']}
+          assert exts.get('curl') is True and exts.get('zip') is True
+          print('UPDATE_MANAGER_LIVE_DISCOVERY=PASS')
+          PY
+
+      - name: Seal read-only post-release evidence
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib
+          d=json.load(open('/tmp/discovery.json'))
+          r=json.load(open('/tmp/release.json'))
+          p=json.load(open('/tmp/P01.json'))
+          evidence={
+            'project':'P01',
+            'version':'2.21.16',
+            'mode':'READ_ONLY_POST_RELEASE_PROOF',
+            'candidate_commit':os.environ['CANDIDATE_COMMIT'],
+            'production_commit':os.environ['PRODUCTION_COMMIT'],
+            'production_version':'2.21.14',
+            'schema':'2026080902',
+            'release_id':r['id'],
+            'release_tag':r['tag_name'],
+            'update_asset':{
+              'name':p['asset_name'],'bytes':p['asset_bytes'],'sha256':p['asset_sha256']
+            },
+            'current':d['current_version'],
+            'latest':d['latest_version'],
+            'available':d['available'],
+            'can_update':d['can_update'],
+            'credential_runtime':d['requirements']['credential']['ok'],
+            'schema_gate':d['requirements']['schema']['ok'],
+            'source_allowed':d['requirements']['source_allowed'],
+            'update_source':'core-updates',
+            'repository':'core-updates + GitHub Release',
+            'production_write':0,
+            'production_upgrade':'NOT EXECUTED',
+            'result':'PASS'
+          }
+          pathlib.Path('/tmp/P01_V2.21.16_POST_RELEASE_PROOF.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(evidence,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload proof evidence
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: p01-v2.21.16-post-release-proof
+          path: |
+            /tmp/P01_V2.21.16_POST_RELEASE_PROOF.json
+            /tmp/release.json
+            /tmp/P01.json
+            /tmp/discovery.json
+          retention-days: 30
