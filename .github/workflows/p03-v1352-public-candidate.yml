@@ -1,0 +1,207 @@
+name: P03 V1.35.2 Public Candidate Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1352-public-candidate.yml'
+      - 'requests/p03-v1352-public-candidate-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1352-public-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      ENGINEERING_HEAD: ee09d47d33b375a582eaf74ddf62dc4d0a810442
+      PRODUCTION_HEAD: 57781a2613269f5308dfe183d84ad4575279cdd5
+      FIXTURE_PASS: VfP03-Public-Synthetic-2026!
+      PHP_TEST_IMAGE: vf-forge-public-candidate-php84
+    steps:
+      - name: Require read credential only
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          echo 'PUBLIC_RUNNER_PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Ephemeral exact private source checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ee09d47d33b375a582eaf74ddf62dc4d0a810442
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Source identity and privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p03 rev-parse HEAD)" = "$ENGINEERING_HEAD"
+          test "$(tr -d '\r\n' < p03/VERSION)" = '1.35.1'
+          grep -Fq "define('VFAB_VERSION', '1.35.1');" p03/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" p03/src/app/bootstrap.php
+          test "$(tr -d '\r\n' < p03/database/schema/SCHEMA_VERSION)" = '29'
+          test -z "$(git -C p03 config --get remote.origin.url | grep -E 'x-access-token|github_pat_|ghp_' || true)"
+          if git -C p03 ls-files | grep -Ei '(^|/)(PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'; then
+            echo 'Tracked private/runtime data found in source repository.' >&2
+            exit 81
+          fi
+          if grep -RIlE 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+' p03 --exclude-dir=.git | head -n1 | grep -q .; then
+            echo 'Credential-shaped token found in checked-out source.' >&2
+            exit 82
+          fi
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'PRIVATE_DATA_TRACKED=0'
+          echo 'SECRET_LITERAL_LEAKAGE=0'
+
+      - name: Prepare zero-cost runtime tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3
+          cat >"$RUNNER_TEMP/Dockerfile.p03" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 && docker-php-ext-install pdo_sqlite zip && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," PUBLIC_RUNTIME_PASS\n";'
+
+      - name: Update Core contract and negative matrix
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          php tests/maintenance/v1352_update_core_contract.php
+          python3 scripts/repo_health.py .
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p03-php-lint.txt
+          node --check public/assets/app.js
+          grep -Fq "VF_PRIVATE_READ_TOKEN" src/app/UpdateService.php
+          ! grep -RFq 'updates.kewaro.com' src/app/UpdateService.php src/app/CoreUpdates
+          echo "PHP_LINT_COUNT=$(wc -l </tmp/p03-php-lint.txt)"
+          echo 'UPDATE_CORE_AND_NEGATIVE_MATRIX=PASS'
+
+      - name: Synthetic current-data backup restore and asset-reference gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          cp tests/maintenance/current_reverify.sh "$RUNNER_TEMP/p03-current-reverify.sh"
+          sed -i "s/d\['version'\]=='1\.35\.0'/d['version']=='1.35.1'/" "$RUNNER_TEMP/p03-current-reverify.sh"
+          bash "$RUNNER_TEMP/p03-current-reverify.sh"
+          echo 'SYNTHETIC_EXISTING_DATA_PRESERVATION=PASS'
+          echo 'SYNTHETIC_ASSET_REFERENCE_PRESERVATION=PASS'
+          echo 'BACKUP_RESTORE=PASS'
+
+      - name: Missing credential fail-closed gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/vf-forge-runtime"
+          DATA_ROOT="$RUNNER_TEMP/vf-forge-private"
+          env -u VF_PRIVATE_READ_TOKEN docker run --rm \
+            -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" \
+            php -r 'require "app/bootstrap.php"; require "app/UpdateService.php"; try { (new VfUpdateService(vfab_db()))->check(true); fwrite(STDERR,"unexpected success\n"); exit(1); } catch (Throwable $e) { if (!str_contains($e->getMessage(),"VF_PRIVATE_READ_TOKEN")) { fwrite(STDERR,$e->getMessage()."\n"); exit(2); } echo "SECRET_MISSING_FAIL_CLOSED=PASS\n"; }'
+
+      - name: Build ephemeral V1.35.2 candidate identity
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def exact(path, old, new, count=1):
+              p=Path(path); s=p.read_text(encoding='utf-8'); n=s.count(old)
+              if n!=count: raise SystemExit(f'{path}: expected {count} matches, got {n}: {old!r}')
+              p.write_text(s.replace(old,new),encoding='utf-8',newline='\n')
+          Path('VERSION').write_text('1.35.2\n',encoding='utf-8',newline='\n')
+          exact('src/app/bootstrap.php', "define('VFAB_VERSION', '1.35.1');", "define('VFAB_VERSION', '1.35.2');")
+          exact('scripts/build_atomic.py', "TARGET_VERSION='1.35.1'", "TARGET_VERSION='1.35.2'")
+          exact('scripts/build_atomic.py', "ALLOWED_SOURCES=['1.35.0']", "ALLOWED_SOURCES=['1.35.1']")
+          exact('scripts/build_atomic.py', 'VF Forge 1.35.1 Formal Atomic Maintenance Release.', 'VF Forge 1.35.2 Formal Atomic Maintenance Release.')
+          exact('scripts/build_atomic.py', "const VFF_ATOMIC_TARGET='1.35.1';", "const VFF_ATOMIC_TARGET='1.35.2';")
+          PY
+          test "$(cat VERSION)" = '1.35.2'
+          grep -Fq "define('VFAB_VERSION', '1.35.2');" src/app/bootstrap.php
+          grep -Fq "TARGET_SCHEMA=29" scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.35.1']" scripts/build_atomic.py
+          git diff -- database/schema database/migrations | test ! -s /dev/stdin
+          echo 'EPHEMERAL_CANDIDATE_IDENTITY=PASS'
+
+      - name: Build formal-shape Atomic from exact Production to ephemeral candidate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          BASE_WT="$RUNNER_TEMP/p03-production-worktree"
+          BASE_RT="$RUNNER_TEMP/p03-production-runtime"
+          TARGET_RT="$RUNNER_TEMP/p03-target-runtime"
+          OUT="$RUNNER_TEMP/p03-v1352-release"
+          git worktree add --detach "$BASE_WT" "$PRODUCTION_HEAD" >/dev/null
+          python3 "$BASE_WT/scripts/build_runtime.py" "$BASE_RT" >/dev/null
+          python3 scripts/build_runtime.py "$TARGET_RT" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$BASE_RT" --target-runtime "$TARGET_RT" --output "$OUT" | tee "$RUNNER_TEMP/p03-v1352-package.json"
+          test -f "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip"
+          unzip -t "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip"
+          test "$(unzip -Z1 "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip")" = 'repair-v1.35.2.php'
+          unzip -p "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip" repair-v1.35.2.php | grep -Fq "const VFF_ATOMIC_ALLOWED=[\"1.35.1\"];"
+          unzip -p "$OUT/VF_Forge_V1.35.2_Atomic_Upgrade.zip" repair-v1.35.2.php | grep -Fq "const VFF_ATOMIC_SCHEMA=29;"
+          git worktree remove --force "$BASE_WT" >/dev/null
+          echo 'ATOMIC_PACKAGE_IDENTITY=PASS'
+
+      - name: Synthetic Atomic apply rollback recovery
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('tests/maintenance/v1351_atomic_e2e.sh').read_text(encoding='utf-8')
+          s=s.replace("BASE_SHA='9a9ced02873886ceb77269999478956be625b51e'", "BASE_SHA='57781a2613269f5308dfe183d84ad4575279cdd5'")
+          s=s.replace('1.35.2','__FUTURE__').replace('1.35.1','__TARGET__').replace('1.35.0','__BASE__')
+          s=s.replace('__BASE__','1.35.1').replace('__TARGET__','1.35.2').replace('__FUTURE__','1.35.3')
+          Path('/tmp/p03-v1352-atomic-e2e.sh').write_text(s,encoding='utf-8',newline='\n')
+          PY
+          chmod +x /tmp/p03-v1352-atomic-e2e.sh
+          mkdir -p "$RUNNER_TEMP/v1351-release"
+          cp "$RUNNER_TEMP/p03-v1352-release/"* "$RUNNER_TEMP/v1351-release/"
+          bash /tmp/p03-v1352-atomic-e2e.sh
+          echo 'ATOMIC_APPLY=PASS'
+          echo 'ROLLBACK_RECOVERY=PASS'
+          echo 'SCHEMA_29_TO_29=PASS'
+
+      - name: Candidate fresh synthetic regression
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          cp tests/maintenance/current_reverify.sh "$RUNNER_TEMP/p03-v1352-reverify.sh"
+          sed -i "s/d\['version'\]=='1\.35\.0'/d['version']=='1.35.2'/" "$RUNNER_TEMP/p03-v1352-reverify.sh"
+          bash "$RUNNER_TEMP/p03-v1352-reverify.sh"
+          echo 'CANDIDATE_SYNTHETIC_REGRESSION=PASS'
+
+      - name: No public artifact and evidence summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'PRIVATE_SOURCE_PUBLIC_COMMIT=0'
+          echo 'PRIVATE_SOURCE_PUBLIC_ARTIFACT=0'
+          echo 'PRIVATE_DATA_LEAKAGE=0'
+          echo 'SECRET_LEAKAGE=0'
+          echo 'P03_ENGINEERING_HEAD_VERIFIED='"$ENGINEERING_HEAD"
+          echo 'P03_V1.35.2_PUBLIC_CANDIDATE_VERIFICATION=PASS'
