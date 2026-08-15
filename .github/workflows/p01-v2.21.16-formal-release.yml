@@ -1,0 +1,320 @@
+name: P01 V2.21.16 Formal Corrective Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - release-triggers/P01_V2.21.16_RELEASE
+
+permissions:
+  contents: read
+
+env:
+  VERSION: 2.21.16
+  SOURCE_VERSION: 2.21.14
+  SCHEMA: 2026080902
+  CANDIDATE_COMMIT: c9ab60f2a15be1e15ba7e80ee935da2bc8d4f1fa
+  CANDIDATE_TREE: 30ec1dccdd0c57a4f158313fe0a7e4ac6f709a7c
+  PRODUCTION_COMMIT: 7c7ad1da3e8dcd49fa49313317c389948f40d4de
+  CANDIDATE_RUN_ID: '31915756182'
+  CANDIDATE_ARTIFACT_ID: '9254852677'
+  V22115_UPDATE_SHA: 7562fbc82b59de09c1f1b0dc77e0ca2e2f73ad556f969d6225a7cca5fd1b5947
+  V22115_UPDATE_BYTES: '1073031'
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Checkout formal release builder
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact tested P01 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Verify exact Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          grep -q "define('VF_VERSION', '2.21.16');" candidate/src/app/bootstrap.php
+          echo 'EXACT_TESTED_CANDIDATE=PASS'
+
+      - name: Checkout exact Production Truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Install runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml sqlite3 unzip >/dev/null
+
+      - name: Download tested Candidate Evidence artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir candidate-evidence
+          gh run download "$CANDIDATE_RUN_ID" -R llhzx2018/core-free-runner-public -n p01-v2.21.16-candidate-evidence -D candidate-evidence
+          evidence="$(find candidate-evidence -type f -name P01_V2.21.16_CANDIDATE_EVIDENCE.json -print -quit)"
+          test -n "$evidence"
+          jq -e --arg c "$CANDIDATE_COMMIT" --arg t "$CANDIDATE_TREE" '.candidate_commit==$c and .candidate_tree==$t and .generator_fix=="PASS" and .original_v2_21_15_failure_replay=="PASS" and .corrected_v2_21_16_fixture_upgrade=="PASS" and .true_runtime_tamper_negative=="PASS"' "$evidence" >/dev/null
+          echo "TESTED_DIST=$(dirname "$(find candidate-evidence -type f -name VF_Start_V2.21.16_UPDATE.zip -print -quit)")" >> "$GITHUB_ENV"
+          echo 'TESTED_CANDIDATE_EVIDENCE=PASS'
+
+      - name: Protect immutable V2.21.15 release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          old="$(gh api repos/llhzx2018/vf-start/releases/tags/v2.21.15)"
+          id="$(jq -r '.id' <<<"$old")"
+          asset="$(jq -c '.assets[]|select(.name=="VF_Start_V2.21.15_UPDATE.zip")' <<<"$old")"
+          test -n "$asset"
+          test "$(jq -r '.size' <<<"$asset")" = "$V22115_UPDATE_BYTES"
+          test "$(jq -r '.digest' <<<"$asset")" = "sha256:$V22115_UPDATE_SHA"
+          test "$id" = '371096780'
+          echo 'V2.21.15_IMMUTABLE_IDENTITY=PASS'
+
+      - name: Refuse reused V2.21.16 release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh api repos/llhzx2018/vf-start/releases/tags/v2.21.16 >/dev/null 2>&1; then echo 'v2.21.16 release already exists' >&2; exit 1; fi
+          if gh api repos/llhzx2018/vf-start/git/ref/tags/v2.21.16 >/dev/null 2>&1; then echo 'v2.21.16 tag already exists' >&2; exit 1; fi
+          echo 'NEW_RELEASE_IDENTITY_GATE=PASS'
+
+      - name: Rebuild exact formal bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-dist
+          python3 runner/scripts/p01-build-release-v3.py \
+            --candidate candidate/src \
+            --production production/src \
+            --source-runtime-authority candidate/docs/evidence/P01_V2.21.14_APP_RUNTIME_AUTHORITY.json \
+            --out release-dist \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION_COMMIT" | tee /tmp/p01-v22116-formal-build.json
+          (cd release-dist && sha256sum -c SHA256SUMS.txt)
+          php release-dist/repair-v2.21.16.php --self-test | tee /tmp/p01-v22116-formal-selftest.json
+          echo 'FORMAL_REBUILD=PASS'
+
+      - name: Reverse verify formal bytes equal tested Candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d "$TESTED_DIST"
+          for p in "$TESTED_DIST"/*; do
+            n="$(basename "$p")"
+            test -f "release-dist/$n"
+            cmp -s "$p" "release-dist/$n" || { echo "formal byte drift: $n" >&2; exit 1; }
+          done
+          for p in release-dist/*; do
+            n="$(basename "$p")"
+            test -f "$TESTED_DIST/$n" || { echo "unexpected formal artifact: $n" >&2; exit 1; }
+          done
+          echo 'FORMAL_BYTES_EXACTLY_EQUAL_TESTED_CANDIDATE=PASS'
+
+      - name: Create immutable V2.21.16 tag and GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C candidate remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-start.git"
+          git -C candidate tag "v$VERSION" "$CANDIDATE_COMMIT"
+          git -C candidate push origin "refs/tags/v$VERSION"
+          gh release create "v$VERSION" release-dist/* \
+            -R llhzx2018/vf-start \
+            --target "$CANDIDATE_COMMIT" \
+            --title "VF Start V$VERSION" \
+            --notes-file "release-dist/VF_Start_V${VERSION}_RELEASE_NOTES.md"
+          echo 'GITHUB_RELEASE_CREATE=PASS'
+
+      - name: Remote Release asset exact readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.16 > /tmp/p01-v22116-release.json
+          jq -e --arg c "$CANDIDATE_COMMIT" '.tag_name=="v2.21.16" and .target_commitish==$c and .draft==false and .prerelease==false' /tmp/p01-v22116-release.json >/dev/null
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          rel=json.load(open('/tmp/p01-v22116-release.json'))
+          local=pathlib.Path('release-dist')
+          remote={a['name']:a for a in rel['assets']}
+          for p in sorted(local.iterdir()):
+              if not p.is_file(): continue
+              a=remote.get(p.name)
+              if not a: raise SystemExit(f'missing remote asset {p.name}')
+              h=hashlib.sha256(p.read_bytes()).hexdigest()
+              if int(a['size'])!=p.stat().st_size: raise SystemExit(f'bytes drift {p.name}')
+              if a.get('digest')!=f'sha256:{h}': raise SystemExit(f'sha drift {p.name}')
+          if set(remote)!=set(p.name for p in local.iterdir() if p.is_file()):
+              raise SystemExit('remote/local asset set drift')
+          print('REMOTE_RELEASE_ASSET_IDENTITY=PASS')
+          PY
+          echo "RELEASE_PUBLISHED_AT=$(jq -r '.published_at' /tmp/p01-v22116-release.json)" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(stat -c %s release-dist/VF_Start_V2.21.16_UPDATE.zip)" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA=$(sha256sum release-dist/VF_Start_V2.21.16_UPDATE.zip | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Publish core-updates P01 only after Release PASS
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: core-updates
+
+      - name: Advance P01 manifest to V2.21.16
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -e '.project_id=="P01" and .component_id=="APP" and .target_version=="2.21.15" and .asset_name=="VF_Start_V2.21.15_UPDATE.zip" and .asset_bytes==1073031 and .asset_sha256=="7562fbc82b59de09c1f1b0dc77e0ca2e2f73ad556f969d6225a7cca5fd1b5947"' core-updates/projects/P01.json >/dev/null
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('core-updates/projects/P01.json')
+          doc={
+            'schema_version':'1.0','project_id':'P01','component_id':'APP','enabled':True,
+            'target_version':'2.21.16','update_type':'ATOMIC','from_versions':['2.21.14'],
+            'schema_from':'2026080902','schema_to':'2026080902','repository':'llhzx2018/vf-start',
+            'release_tag':'v2.21.16','asset_name':'VF_Start_V2.21.16_UPDATE.zip',
+            'asset_bytes':int(os.environ['UPDATE_BYTES']),'asset_sha256':os.environ['UPDATE_SHA'],
+            'backup_required':True,'rollback_supported':True,'released_at':os.environ['RELEASE_PUBLISHED_AT'],
+            'minimum_php':'8.0.0'
+          }
+          p.write_text(json.dumps(doc,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          cd core-updates
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add projects/P01.json
+          git commit -m 'release(P01): advance unified update target to V2.21.16'
+          git push origin main
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo 'CORE_UPDATES_P01_PUBLISH=PASS'
+
+      - name: Remote core-updates readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main --jq .content | tr -d '\n' | base64 -d > /tmp/P01.remote.json
+          jq -e --arg sha "$UPDATE_SHA" --argjson bytes "$UPDATE_BYTES" '.target_version=="2.21.16" and .release_tag=="v2.21.16" and .asset_name=="VF_Start_V2.21.16_UPDATE.zip" and .asset_sha256==$sha and .asset_bytes==$bytes and .from_versions==["2.21.14"]' /tmp/P01.remote.json >/dev/null
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Live unified discovery and prepare proof on non-production V2.21.14 fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-live-discovery
+          cp -a production/src /tmp/p01-live-discovery
+          mkdir -p /tmp/p01-live-discovery/app/CoreUpdates
+          cp candidate/src/app/UpdateManager.php /tmp/p01-live-discovery/app/UpdateManager.php
+          cp candidate/src/app/CoreUpdates/UpdateCore.php /tmp/p01-live-discovery/app/CoreUpdates/UpdateCore.php
+          cp candidate/src/app/CoreUpdates/GitHubClient.php /tmp/p01-live-discovery/app/CoreUpdates/GitHubClient.php
+          php -S 127.0.0.1:18127 -t /tmp/p01-live-discovery >/tmp/p01-live-discovery-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do if curl -fsS -c /tmp/p01-live.cookies http://127.0.0.1:18127/setup.php -o /tmp/p01-live-setup.html; then break; fi; sleep 1; done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-live-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf"
+          curl -fsS -b /tmp/p01-live.cookies -c /tmp/p01-live.cookies -X POST http://127.0.0.1:18127/setup.php \
+            --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=P01 Discovery Proof' \
+            --data-urlencode 'admin_password=P01Discovery!22116' --data-urlencode 'admin_password_confirm=P01Discovery!22116' \
+            -o /tmp/p01-live-setup-result.html
+          kill "$pid" || true; wait "$pid" 2>/dev/null || true; trap - EXIT
+          export VF_PRIVATE_READ_TOKEN="$READ_TOKEN"
+          cat > /tmp/p01-live-discovery/check.php <<'PHP'
+          <?php
+          require __DIR__.'/app/bootstrap.php';
+          $u=new VfUpdateManager(vf_db());
+          $x=$u->check(true);
+          echo json_encode($x,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n";
+          PHP
+          php /tmp/p01-live-discovery/check.php | tee /tmp/p01-live-discovery.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/p01-live-discovery.json'))
+          assert x.get('current')=='2.21.14',x
+          assert x.get('latest')=='2.21.16',x
+          assert x.get('available') is True,x
+          assert x.get('can_update') is True,x
+          assert x.get('update_source')=='core-updates',x
+          assert x.get('repository')=='core-updates + GitHub Release',x
+          meta=x.get('meta') or {}
+          assert meta.get('release_tag')=='v2.21.16',x
+          assert meta.get('asset_name')=='VF_Start_V2.21.16_UPDATE.zip',x
+          assert int(meta.get('asset_bytes'))==int('${{ env.UPDATE_BYTES }}'),x
+          assert meta.get('asset_sha256')=='${{ env.UPDATE_SHA }}',x
+          print('LIVE_NONPRODUCTION_DISCOVERY=PASS')
+          PY
+
+      - name: Seal formal release evidence artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          d=pathlib.Path('release-dist')
+          ev={
+            'project':'P01','version':'2.21.16','candidate_commit':os.environ['CANDIDATE_COMMIT'],'candidate_tree':os.environ['CANDIDATE_TREE'],
+            'production_commit':os.environ['PRODUCTION_COMMIT'],'production_version':'2.21.14','schema':'2026080902',
+            'formal_bytes_equal_tested_candidate':'PASS','v2_21_15_identity_preserved':'PASS','release':'v2.21.16',
+            'core_updates':'2.21.16 VERIFIED','live_nonproduction_discovery':'PASS','production_upgrade':'NOT EXECUTED',
+            'update_asset':{'name':'VF_Start_V2.21.16_UPDATE.zip','bytes':int(os.environ['UPDATE_BYTES']),'sha256':os.environ['UPDATE_SHA']},
+            'artifacts':{p.name:{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()}
+          }
+          pathlib.Path('/tmp/P01_V2.21.16_FORMAL_RELEASE_EVIDENCE.json').write_text(json.dumps(ev,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(ev,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload formal evidence
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: p01-v2.21.16-formal-release-evidence
+          path: |
+            release-dist/
+            /tmp/P01_V2.21.16_FORMAL_RELEASE_EVIDENCE.json
+            /tmp/p01-v22116-release.json
+            /tmp/P01.remote.json
+            /tmp/p01-live-discovery.json
+          retention-days: 30
