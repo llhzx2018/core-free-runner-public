@@ -1,0 +1,89 @@
+name: P03 V1.35.2 Exact Candidate Verification
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p03-v1352-exact-candidate.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE_HEAD: faada885e49bd57d4f03ed09ae4b2ac26f2321b9
+      PRODUCTION_HEAD: 57781a2613269f5308dfe183d84ad4575279cdd5
+      FIXTURE_PASS: VfP03-Exact-Candidate-2026!
+      PHP_TEST_IMAGE: vf-forge-exact-v1352-php84
+    steps:
+      - name: Exact private candidate checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: faada885e49bd57d4f03ed09ae4b2ac26f2321b9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+      - name: Candidate identity and privacy gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p03 rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(tr -d '\r\n' < p03/VERSION)" = '1.35.2'
+          grep -Fq "define('VFAB_VERSION', '1.35.2');" p03/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" p03/src/app/bootstrap.php
+          test "$(tr -d '\r\n' < p03/database/schema/SCHEMA_VERSION)" = '29'
+          grep -Fq "TARGET_VERSION='1.35.2'" p03/scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.35.1']" p03/scripts/build_atomic.py
+          test -z "$(git -C p03 diff "$PRODUCTION_HEAD"..HEAD -- database/schema database/migrations)"
+          if git -C p03 ls-files | grep -Ei '(^|/)(PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'; then exit 81; fi
+          echo 'EXACT_CANDIDATE_IDENTITY=PASS'
+          echo 'PRIVATE_DATA_TRACKED=0'
+      - name: Prepare proven PHP 8.4 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3
+          cat >"$RUNNER_TEMP/Dockerfile.p03" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03" "$RUNNER_TEMP"
+      - name: Static core and synthetic regression
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          php tests/maintenance/v1352_update_core_contract.php
+          python3 scripts/repo_health.py .
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          node --check public/assets/app.js
+          cp tests/maintenance/current_reverify.sh "$RUNNER_TEMP/v1352-exact-reverify.sh"
+          sed -i "s/d\['version'\]=='1\.35\.0'/d['version']=='1.35.2'/" "$RUNNER_TEMP/v1352-exact-reverify.sh"
+          bash "$RUNNER_TEMP/v1352-exact-reverify.sh"
+          echo 'EXACT_CANDIDATE_SYNTHETIC_REGRESSION=PASS'
+      - name: Exact Atomic build from Production
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          git worktree add --detach "$RUNNER_TEMP/prod-wt" "$PRODUCTION_HEAD" >/dev/null
+          python3 "$RUNNER_TEMP/prod-wt/scripts/build_runtime.py" "$RUNNER_TEMP/prod-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/candidate-runtime" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/prod-runtime" --target-runtime "$RUNNER_TEMP/candidate-runtime" --output "$RUNNER_TEMP/release" >"$RUNNER_TEMP/package.json"
+          test -f "$RUNNER_TEMP/release/VF_Forge_V1.35.2_Atomic_Upgrade.zip"
+          test "$(unzip -Z1 "$RUNNER_TEMP/release/VF_Forge_V1.35.2_Atomic_Upgrade.zip")" = 'repair-v1.35.2.php'
+          unzip -p "$RUNNER_TEMP/release/VF_Forge_V1.35.2_Atomic_Upgrade.zip" repair-v1.35.2.php | grep -Fq 'const VFF_ATOMIC_SCHEMA=29;'
+          unzip -p "$RUNNER_TEMP/release/VF_Forge_V1.35.2_Atomic_Upgrade.zip" repair-v1.35.2.php | grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.35.1"];'
+          echo 'EXACT_CANDIDATE_ATOMIC_BUILD=PASS'
+      - name: No public artifact
+        shell: bash
+        run: |
+          echo 'PRIVATE_SOURCE_PUBLIC_ARTIFACT=0'
+          echo 'P03_EXACT_CANDIDATE=PASS'
