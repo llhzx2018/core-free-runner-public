@@ -1,0 +1,96 @@
+name: P01 PHP 8.0 Update Core Compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-php80-compat-hotfix.yml'
+      - 'requests/p01-php80-compat-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-php80-compat-hotfix
+  cancel-in-progress: false
+
+jobs:
+  php80:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      EXPECTED_HEAD: dd4260650c878c21a91a92e9338d47ffd1493a10
+    steps:
+      - name: Require unified write credential
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'VF_RELEASE_WRITE_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: develop
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: p01
+
+      - name: Apply exact PHP 8.0 compatibility patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+          replacements = {
+              'p01/src/app/CoreUpdates/UpdateCore.php': [
+                  ('private readonly string $projectId,', 'private string $projectId,'),
+                  ("private readonly string $componentId = 'APP'", "private string $componentId = 'APP'"),
+              ],
+              'p01/src/app/CoreUpdates/GitHubClient.php': [
+                  ('private readonly string $token,', 'private string $token,'),
+                  ("private readonly string $userAgent = 'vf-start-core-updates-v1'", "private string $userAgent = 'vf-start-core-updates-v1'"),
+              ],
+              'p01/src/app/UpdateManager.php': [
+                  ('if (array_is_list($value)) {', "if ($value === [] || array_keys($value) === range(0, count($value) - 1)) {"),
+              ],
+          }
+          for path, pairs in replacements.items():
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              for old,new in pairs:
+                  if s.count(old) != 1:
+                      raise SystemExit(f'{path}: expected one match for {old!r}, got {s.count(old)}')
+                  s=s.replace(old,new)
+              p.write_text(s,encoding='utf-8',newline='\n')
+          PY
+          if grep -RFn --include='*.php' -E '\breadonly\b|array_is_list\s*\(' p01/src/app/CoreUpdates p01/src/app/UpdateManager.php; then
+            echo 'PHP 8.1-only syntax/function remains in integrated update core.' >&2
+            exit 82
+          fi
+
+      - name: PHP 8.0 syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for f in p01/src/app/bootstrap.php p01/src/app/UpdateManager.php p01/src/app/CoreUpdates/UpdateCore.php p01/src/app/CoreUpdates/GitHubClient.php p01/src/update.php; do
+            docker run --rm -v "$PWD:/work:ro" -w /work php:8.0-cli php -l "$f" >/dev/null
+          done
+          echo 'PHP80_UPDATE_CORE_LINT=PASS'
+
+      - name: Commit PHP 8.0 compatibility patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add src/app/CoreUpdates/UpdateCore.php src/app/CoreUpdates/GitHubClient.php src/app/UpdateManager.php
+          git diff --cached --check
+          git commit -m 'fix(update): preserve PHP 8.0 compatibility'
+          git push origin HEAD:develop
+          echo "P01_PHP80_HEAD=$(git rev-parse HEAD)"
