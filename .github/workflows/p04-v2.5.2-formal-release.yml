@@ -1,0 +1,381 @@
+name: P04 V2.5.2 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v2.5.2-formal-release.yml'
+      - 'requests/p04-v2.5.2-formal-release-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p04-v2.5.2-formal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCTION: bc23fcaca79f20f91f058b5de164a4a42c73bae6
+      CANDIDATE: 91984268ffe66781700db9da10de8d509c878c0b
+      CANDIDATE_TREE: 03fad762f14e773f97873196008b0aad0302f391
+      VERSION: 2.5.2
+      SOURCE_VERSION: 2.5.1
+      SCHEMA: '14'
+      TAG: v2.5.2
+      EXPECTED_UPDATE_SHA256: 3431cae2a905110669c8437fd2e2270bc74eacfe297ed4d9768eb3902a94eb10
+      EXPECTED_UPDATE_BYTES: '41442'
+
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'UNIFIED_TWO_TOKEN_GATE=PASS'
+
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Checkout exact Production
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Exact Git identity and branch truth
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          gh api '/repos/llhzx2018/vf-infra/git/ref/heads/develop' > /tmp/p04-develop-ref.json
+          gh api '/repos/llhzx2018/vf-infra/git/ref/heads/main' > /tmp/p04-main-ref.json
+          python3 - <<'PY'
+          import json,os
+          d=json.load(open('/tmp/p04-develop-ref.json'))['object']['sha']
+          m=json.load(open('/tmp/p04-main-ref.json'))['object']['sha']
+          assert d==os.environ['CANDIDATE'],(d,os.environ['CANDIDATE'])
+          assert m==os.environ['PRODUCTION'],(m,os.environ['PRODUCTION'])
+          print('GIT_BRANCH_TRUTH=PASS')
+          PY
+
+      - name: Install real verification runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl php-mbstring sqlite3 curl unzip nodejs >/dev/null
+          php -r "foreach(['pdo_sqlite','sqlite3','zip','fileinfo','sodium','curl'] as \$x){if(!extension_loaded(\$x)){fwrite(STDERR,'missing:'.\$x.PHP_EOL);exit(1);}}"
+          echo 'REAL_RUNTIME_DEPENDENCIES=PASS'
+
+      - name: Exact Candidate source gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 candidate/scripts/repository-health-gate.py
+          python3 candidate/scripts/check-migrations.py
+          diff -qr production/database/migrations candidate/database/migrations
+          count=0
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; count=$((count+1)); done < <(find candidate/src candidate/public -type f -name '*.php' -print0)
+          python3 -m py_compile candidate/scripts/build-release-tree.py candidate/scripts/build-v252-update-release.py
+          bash -n candidate/tests/maintenance/v252_atomic_e2e.sh
+          php candidate/tests/unit/core_updates_contract_v252.php
+          node --check candidate/public/assets/app.js
+          echo "PHP_SYNTAX_FILES=$count"
+          echo 'EXACT_CANDIDATE_SOURCE_GATES=PASS'
+
+      - name: Business and safety boundary no-touch gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          diff -qr production/src/app/Modules candidate/src/app/Modules
+          diff -q production/src/app/DomainRepository.php candidate/src/app/DomainRepository.php
+          diff -q production/src/app/BackupService.php candidate/src/app/BackupService.php
+          diff -q production/src/app/CronRunner.php candidate/src/app/CronRunner.php
+          diff -q production/src/app/CronStatusService.php candidate/src/app/CronStatusService.php
+          diff -q production/src/app/RdapClient.php candidate/src/app/RdapClient.php
+          diff -qr production/src/app/Core/Release candidate/src/app/Core/Release
+          diff -q production/src/app/Core/Update/OnlineUpdateService.php candidate/src/app/Core/Update/OnlineUpdateService.php
+          diff -q production/src/app/Core/Update/OnlineUpdateHandoff.php candidate/src/app/Core/Update/OnlineUpdateHandoff.php
+          diff -qr production/public candidate/public
+          grep -Fq "READ_TOKEN_ENV = 'VF_PRIVATE_READ_TOKEN'" candidate/src/app/Core/Update/UpdateContract.php
+          ! grep -RIl 'updates\.kewaro\.com' candidate/src/app/Core/Update/UpdateContract.php candidate/src/app/Core/Update/UpdateManifestService.php candidate/src/app/Core/Update/UpdateRepositoryClient.php
+          ! grep -RIlE 'VF_UPDATE_READ_TOKEN|P04_GITHUB|P04_RELEASE_TOKEN' candidate/src/app/Core/Update candidate/.env.example
+          echo 'BUSINESS_PROVIDER_CRON_RDAP_ATOMIC_UI_NO_TOUCH=PASS'
+          echo 'UNIFIED_TOKEN_BOUNDARY=PASS'
+
+      - name: Clean install gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_INFRA_TEST_PORT: '18994'
+        run: bash scripts/run-clean-full-install-gate.sh
+
+      - name: Build exact runtime trees and formal release set
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 production/scripts/build-release-tree.py "$RUNNER_TEMP/p04-v251-runtime" | tee /tmp/p04-v251-runtime.json
+          python3 candidate/scripts/build-release-tree.py "$RUNNER_TEMP/p04-v252-runtime" | tee /tmp/p04-v252-runtime.json
+          diff -qr "$RUNNER_TEMP/p04-v251-runtime/migrations" "$RUNNER_TEMP/p04-v252-runtime/migrations"
+          python3 candidate/scripts/build-v252-update-release.py --target-runtime "$RUNNER_TEMP/p04-v252-runtime" --output "$RUNNER_TEMP/p04-v252-release" | tee /tmp/p04-v252-package.json
+          cd "$RUNNER_TEMP/p04-v252-release"
+          sha256sum -c SHA256SUMS.txt
+          cmp VF_Infra_V2.5.2_ATOMIC.zip VF_Infra_V2.5.2_UPDATE.zip
+          test "$(stat -c%s VF_Infra_V2.5.2_UPDATE.zip)" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum VF_Infra_V2.5.2_UPDATE.zip | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          test "$(unzip -Z1 VF_Infra_V2.5.2_UPDATE.zip)" = 'repair-v2.5.2.php'
+          test "$(unzip -Z1 VF_Infra_V2.5.2_ATOMIC.zip)" = 'repair-v2.5.2.php'
+          php -l repair-v2.5.2.php >/dev/null
+          php repair-v2.5.2.php --self-test
+          python3 - <<'PY'
+          import json,hashlib,pathlib
+          p=json.load(open('PACKAGE_MANIFEST.json',encoding='utf-8'))
+          expected={'VERSION.txt','app/Core/Update/UpdateSourceInterface.php','app/Core/Update/UpdateContract.php','app/Core/Update/UpdateRepositoryClient.php','app/Core/Update/UpdateManifestService.php','release-manifest.json'}
+          assert p['package_id']=='vf-infra' and p['package_type']=='app'
+          assert p['version']=='2.5.2' and p['schema']==14 and p['allowed_source_versions']==['2.5.1']
+          assert set(p['changed_files'])==expected and p['payload_file_count']==6
+          assert p['schema_change'] is False and p['business_model_change'] is False and p['provider_write_authority_change'] is False
+          assert p['update_infrastructure']=='core-updates + GitHub Release'
+          assert p['update_and_atomic_bytes_identical'] is True
+          for name,key in [('VF_Infra_V2.5.2_UPDATE.zip','update_sha256'),('VF_Infra_V2.5.2_ATOMIC.zip','atomic_sha256')]:
+              b=pathlib.Path(name).read_bytes(); assert hashlib.sha256(b).hexdigest()==p[key]
+          print('FORMAL_PACKAGE_IDENTITY=PASS')
+          PY
+          ! unzip -Z1 VF_Infra_V2.5.2_UPDATE.zip | grep -Ei '(^|/)(config\.php|\.env|private_data|backup|backups|cache|session|sessions|log|logs|temp|tmp)(/|$)|\.(sqlite3?|db|tar|tgz|gz|7z|rar)$'
+          ! grep -Eai 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_' repair-v2.5.2.php
+          cat > VF_Infra_V2.5.2_RELEASE_NOTES.md <<'EOF'
+          # VF Infra V2.5.2
+
+          - 接入统一 `core-updates + GitHub Release` 在线更新体系。
+          - 统一私有读取凭据使用 `VF_PRIVATE_READ_TOKEN`；Provider Credential 与软件工程 Token 保持完全隔离。
+          - Schema 保持 14，不新增 Migration。
+          - 不修改 Domain / Provider / VPS / Billing / Cron / RDAP 业务模型，不扩大 Provider 写权限。
+          - 保留既有 Backup / Atomic / Durable Journal / Rollback / Maintenance 执行层。
+          - 当前 Production V2.5.1 首次进入新体系需要通过 `/maintenance.php` 执行一次正式 ATOMIC Bridge；之后由统一在线更新体系继续发现后续版本。
+          EOF
+          echo 'FORMAL_RELEASE_SET_REVERSE_VERIFY=PASS'
+
+      - name: Exact V2.5.1 to V2.5.2 affected-scope E2E
+        shell: bash
+        working-directory: candidate
+        env:
+          BASE_RUNTIME: ${{ runner.temp }}/p04-v251-runtime
+          RELEASE_DIR: ${{ runner.temp }}/p04-v252-release
+        run: bash tests/maintenance/v252_atomic_e2e.sh
+
+      - name: Ensure formal GitHub Release identity and exact assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          R="$RUNNER_TEMP/p04-v252-release"
+          tag_exists=0; rel_exists=0
+          gh api "/repos/llhzx2018/vf-infra/git/ref/tags/${TAG}" > /tmp/p04-tag-before.json 2>/dev/null && tag_exists=1 || true
+          gh api "/repos/llhzx2018/vf-infra/releases/tags/${TAG}" > /tmp/p04-release-before.json 2>/dev/null && rel_exists=1 || true
+          if [ "$tag_exists" = 1 ]; then
+            python3 - <<'PY'
+          import json,os
+          t=json.load(open('/tmp/p04-tag-before.json'))
+          assert t['object']['type']=='commit' and t['object']['sha']==os.environ['CANDIDATE'], 'existing tag is not exact Candidate'
+          PY
+          fi
+          if [ "$rel_exists" = 1 ]; then
+            python3 - <<'PY'
+          import json,os
+          r=json.load(open('/tmp/p04-release-before.json'))
+          assert r['tag_name']==os.environ['TAG'] and not r['draft'] and not r['prerelease'], 'existing release state mismatch'
+          PY
+          else
+            if [ "$tag_exists" = 1 ]; then
+              gh release create "$TAG" -R llhzx2018/vf-infra --title "VF Infra V${VERSION}" --notes-file "$R/VF_Infra_V2.5.2_RELEASE_NOTES.md" --latest
+            else
+              gh release create "$TAG" -R llhzx2018/vf-infra --target "$CANDIDATE" --title "VF Infra V${VERSION}" --notes-file "$R/VF_Infra_V2.5.2_RELEASE_NOTES.md" --latest
+            fi
+          fi
+          for asset in VF_Infra_V2.5.2_ATOMIC.zip VF_Infra_V2.5.2_UPDATE.zip PACKAGE_MANIFEST.json SHA256SUMS.txt; do
+            if gh api "/repos/llhzx2018/vf-infra/releases/tags/${TAG}" --jq ".assets[] | select(.name==\"$asset\") | .id" | grep -q .; then
+              id="$(gh api "/repos/llhzx2018/vf-infra/releases/tags/${TAG}" --jq ".assets[] | select(.name==\"$asset\") | .id")"
+              gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-infra/releases/assets/$id" > "/tmp/$asset.remote"
+              cmp -s "$R/$asset" "/tmp/$asset.remote" || { echo "Existing formal asset differs: $asset" >&2; exit 86; }
+            else
+              gh release upload "$TAG" "$R/$asset" -R llhzx2018/vf-infra
+            fi
+          done
+          echo 'FORMAL_GITHUB_RELEASE_ENSURED=PASS'
+
+      - name: Remote Tag Release and UPDATE asset exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "/repos/llhzx2018/vf-infra/git/ref/tags/${TAG}" > /tmp/p04-tag.json
+          gh api "/repos/llhzx2018/vf-infra/releases/tags/${TAG}" > /tmp/p04-release.json
+          python3 - <<'PY'
+          import json,os
+          tag=json.load(open('/tmp/p04-tag.json')); rel=json.load(open('/tmp/p04-release.json'))
+          assert tag['object']['type']=='commit' and tag['object']['sha']==os.environ['CANDIDATE']
+          assert rel['tag_name']==os.environ['TAG'] and not rel['draft'] and not rel['prerelease']
+          expected={'VF_Infra_V2.5.2_ATOMIC.zip','VF_Infra_V2.5.2_UPDATE.zip','PACKAGE_MANIFEST.json','SHA256SUMS.txt'}
+          names={a['name'] for a in rel['assets']}
+          assert names==expected,(names,expected)
+          asset=next(a for a in rel['assets'] if a['name']=='VF_Infra_V2.5.2_UPDATE.zip')
+          json.dump(asset,open('/tmp/p04-update-asset.json','w'),ensure_ascii=False,indent=2)
+          open('/tmp/p04-update-id','w').write(str(asset['id']))
+          PY
+          id="$(cat /tmp/p04-update-id)"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-infra/releases/assets/$id" > /tmp/VF_Infra_V2.5.2_UPDATE.remote.zip
+          test "$(stat -c%s /tmp/VF_Infra_V2.5.2_UPDATE.remote.zip)" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum /tmp/VF_Infra_V2.5.2_UPDATE.remote.zip | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          python3 - <<'PY'
+          import json,hashlib,pathlib,os
+          rel=json.load(open('/tmp/p04-release.json')); asset=json.load(open('/tmp/p04-update-asset.json'))
+          p=pathlib.Path('/tmp/VF_Infra_V2.5.2_UPDATE.remote.zip')
+          assert asset['size']==p.stat().st_size==int(os.environ['EXPECTED_UPDATE_BYTES'])
+          sha=hashlib.sha256(p.read_bytes()).hexdigest(); assert sha==os.environ['EXPECTED_UPDATE_SHA256']
+          meta={'release_id':rel['id'],'tag':rel['tag_name'],'published_at':rel['published_at'],'asset_id':asset['id'],'asset_name':asset['name'],'asset_bytes':asset['size'],'asset_sha256':sha,'candidate_commit':os.environ['CANDIDATE']}
+          json.dump(meta,open('/tmp/p04-release-readback.json','w'),ensure_ascii=False,indent=2)
+          print(json.dumps(meta,ensure_ascii=False))
+          PY
+          echo 'REMOTE_RELEASE_ASSET_READBACK=PASS'
+
+      - name: Checkout core-updates main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: core-updates
+
+      - name: Generate P04.json only from remote Release truth and publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib
+          meta=json.load(open('/tmp/p04-release-readback.json'))
+          doc={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.5.2','update_type':'ATOMIC','from_versions':['2.5.1'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra','release_tag':'v2.5.2',
+            'asset_name':meta['asset_name'],'asset_bytes':meta['asset_bytes'],'asset_sha256':meta['asset_sha256'],
+            'backup_required':True,'rollback_supported':True,'released_at':meta['published_at'],
+            'minimum_php':'8.0.0','notes':'P04 V2.5.2 unified online update infrastructure maintenance release.'
+          }
+          p=pathlib.Path('core-updates/projects/P04.json')
+          encoded=json.dumps(doc,ensure_ascii=False,indent=2)+'\n'
+          if p.exists():
+              old=json.loads(p.read_text(encoding='utf-8'))
+              if old!=doc: raise SystemExit('P04.json exists with different formal truth; refusing silent replacement')
+              print('P04_JSON_ALREADY_EXACT=YES')
+          else:
+              p.write_text(encoded,encoding='utf-8')
+          PY
+          cd core-updates
+          if git diff --quiet -- projects/P04.json; then
+            echo 'CORE_UPDATES_P04_ALREADY_EXACT=PASS'
+          else
+            git config user.name 'VF Release Automation'
+            git config user.email 'vf-release-automation@users.noreply.github.com'
+            git add projects/P04.json
+            git diff --cached --check
+            git commit -m 'release(P04): publish VF Infra 2.5.2 update manifest'
+            for i in 1 2 3; do
+              if git push origin HEAD:main; then break; fi
+              test "$i" -lt 3 || exit 87
+              git pull --rebase origin main
+            done
+          fi
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" | tee /tmp/p04-core-updates-commit.txt
+          echo 'CORE_UPDATES_P04_PUBLISH=PASS'
+
+      - name: core-updates remote exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api -H 'Accept: application/vnd.github.raw+json' '/repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' > /tmp/P04.remote.json
+          python3 - <<'PY'
+          import json
+          m=json.load(open('/tmp/P04.remote.json')); r=json.load(open('/tmp/p04-release-readback.json'))
+          assert m['schema_version']=='1.0' and m['project_id']=='P04' and m['component_id']=='APP' and m['enabled'] is True
+          assert m['target_version']=='2.5.2' and m['from_versions']==['2.5.1']
+          assert m['schema_from']=='14' and m['schema_to']=='14'
+          assert m['repository']=='llhzx2018/vf-infra' and m['release_tag']==r['tag']
+          assert m['asset_name']==r['asset_name'] and m['asset_bytes']==r['asset_bytes'] and m['asset_sha256']==r['asset_sha256']
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          print('MANIFEST_RELEASE_EXACT_EQUALITY=PASS')
+          PY
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Live P04 core-updates discovery contract
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p04-live-discovery.php <<'PHP'
+          <?php
+          require 'src/app/Core/Update/UpdateSourceInterface.php';
+          require 'src/app/Core/Update/UpdateContract.php';
+          require 'src/app/Core/Update/UpdateRepositoryClient.php';
+          require 'src/app/Core/Update/UpdateManifestService.php';
+          $client=new \VFInfra\Core\Update\UpdateRepositoryClient();
+          $src=$client->fetchProjectManifest();
+          $m=$src['manifest'];
+          $asset=$client->resolveReleaseAsset((string)$m['repository'],(string)$m['release_tag'],(string)$m['asset_name']);
+          $svc=new \VFInfra\Core\Update\UpdateManifestService($client,'2.5.1',14);
+          $state=$svc->evaluate($m);
+          if(($state['status']??'')!=='update_available'||empty($state['can_update'])) throw new RuntimeException('P04 2.5.1 did not discover V2.5.2');
+          if((int)$asset['size']!==41442||(string)$asset['name']!=='VF_Infra_V2.5.2_UPDATE.zip') throw new RuntimeException('remote asset identity mismatch');
+          echo "P04_ONLINE_DISCOVERY_CONTRACT_READY=PASS\n";
+          PHP
+          php /tmp/p04-live-discovery.php
+
+      - name: Final main non-advancement gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api '/repos/llhzx2018/vf-infra/git/ref/heads/main' --jq '.object.sha')" = "$PRODUCTION"
+          test "$(gh api '/repos/llhzx2018/vf-infra/git/ref/heads/develop' --jq '.object.sha')" = "$CANDIDATE"
+          echo 'MAIN_REMAINS_PRODUCTION_TRUTH=PASS'
+          echo 'PRODUCTION_UPGRADE_NOT_EXECUTED=PASS'
+
+      - name: Cleanup private source and release bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate production core-updates "$RUNNER_TEMP"/p04-v25* /tmp/VF_Infra_V2.5.2_UPDATE.remote.zip /tmp/p04-live-discovery.php || true
+          echo 'PRIVATE_SOURCE_AND_RELEASE_TEMP_CLEANUP=PASS'
