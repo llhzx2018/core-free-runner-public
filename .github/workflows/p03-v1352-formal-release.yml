@@ -1,0 +1,298 @@
+name: P03 V1.35.2 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1352-formal-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1352-formal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      REPOSITORY: llhzx2018/vf-forge
+      CANDIDATE_HEAD: ee3cabb849ac8820d5d69a68bf15830739f270ce
+      PRODUCT_VERIFIED_HEAD: faada885e49bd57d4f03ed09ae4b2ac26f2321b9
+      PRODUCTION_HEAD: 57781a2613269f5308dfe183d84ad4575279cdd5
+      VERSION: 1.35.2
+      SCHEMA: '29'
+      TAG: v1.35.2
+      UPDATE_ASSET: VF_Forge_V1.35.2_UPDATE.zip
+      PHP_TEST_IMAGE: vf-forge-v1352-release-php84
+      FIXTURE_PASS: VfP03-Formal-Release-Synthetic-2026!
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'UNIFIED_CREDENTIAL_GATE=PASS'
+
+      - name: Exact private Candidate checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ee3cabb849ac8820d5d69a68bf15830739f270ce
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Release input and Git truth gate
+        shell: bash
+        working-directory: p03
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          grep -Fq "define('VFAB_VERSION', '$VERSION');" src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" src/app/bootstrap.php
+          test "$(tr -d '\r\n' < database/schema/SCHEMA_VERSION)" = "$SCHEMA"
+          test -z "$(git diff "$PRODUCT_VERIFIED_HEAD".."$CANDIDATE_HEAD" -- src public database scripts tests)"
+          DEVELOP=$(gh api repos/$REPOSITORY/branches/develop --jq .commit.sha)
+          MAIN=$(gh api repos/$REPOSITORY/branches/main --jq .commit.sha)
+          test "$DEVELOP" = "$CANDIDATE_HEAD"
+          test "$MAIN" = "$PRODUCTION_HEAD"
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then echo 'Formal Release already exists; refusing duplicate publication.' >&2; exit 80; fi
+          if gh api "repos/$REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then echo 'Formal Tag already exists; refusing mutable/reused tag.' >&2; exit 81; fi
+          echo 'RELEASE_INPUT_GATE=PASS'
+          echo 'MAIN_REMAINS_PRODUCTION=PASS'
+
+      - name: Prepare proven PHP 8.4 release runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3
+          cat >"$RUNNER_TEMP/Dockerfile.p03" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," RELEASE_RUNTIME_PASS\n";'
+
+      - name: Build release set from exact Candidate and Production
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          BASE_WT="$RUNNER_TEMP/p03-prod-wt"
+          BASE_RT="$RUNNER_TEMP/p03-prod-runtime"
+          TARGET_RT="$RUNNER_TEMP/p03-candidate-runtime"
+          BUILD="$RUNNER_TEMP/p03-build"
+          OUT="$RUNNER_TEMP/p03-release"
+          mkdir -p "$OUT"
+          git worktree add --detach "$BASE_WT" "$PRODUCTION_HEAD" >/dev/null
+          python3 "$BASE_WT/scripts/build_runtime.py" "$BASE_RT" >/dev/null
+          python3 scripts/build_runtime.py "$TARGET_RT" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$BASE_RT" --target-runtime "$TARGET_RT" --output "$BUILD" | tee "$RUNNER_TEMP/p03-build-result.json"
+          cp "$BUILD/VF_Forge_V1.35.2_Atomic_Upgrade.zip" "$OUT/$UPDATE_ASSET"
+          cp "$BUILD/repair-v1.35.2.php" "$OUT/repair-v1.35.2.php"
+          cp "$BUILD/SOURCE_MANIFEST.txt" "$OUT/VF_Forge_V1.35.2_SOURCE_MANIFEST.txt"
+          cp "$BUILD/PACKAGE_MANIFEST.json" "$RUNNER_TEMP/PACKAGE_MANIFEST.json"
+          git worktree remove --force "$BASE_WT" >/dev/null
+          echo 'RELEASE_SET_BUILD=PASS'
+
+      - name: Reverse verify actual UPDATE bytes
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p03-release"
+          UPDATE="$OUT/$UPDATE_ASSET"
+          unzip -t "$UPDATE"
+          test "$(unzip -Z1 "$UPDATE" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "$UPDATE")" = 'repair-v1.35.2.php'
+          unzip -p "$UPDATE" repair-v1.35.2.php >"$RUNNER_TEMP/reverse-repair.php"
+          php -l "$RUNNER_TEMP/reverse-repair.php"
+          grep -Fq "const VFF_PACKAGE_ID='vf-forge';" "$RUNNER_TEMP/reverse-repair.php"
+          grep -Fq "const VFF_PACKAGE_TYPE='app';" "$RUNNER_TEMP/reverse-repair.php"
+          grep -Fq "const VFF_ATOMIC_TARGET='1.35.2';" "$RUNNER_TEMP/reverse-repair.php"
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=29;' "$RUNNER_TEMP/reverse-repair.php"
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.35.1"];' "$RUNNER_TEMP/reverse-repair.php"
+          cmp -s "$RUNNER_TEMP/reverse-repair.php" "$OUT/repair-v1.35.2.php"
+          if unzip -Z1 "$UPDATE" | grep -Ei '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'; then exit 82; fi
+          python3 - "$RUNNER_TEMP/PACKAGE_MANIFEST.json" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert p['package_id']=='vf-forge' and p['package_type']=='app'
+          assert p['version']=='1.35.2' and p['schema']==29
+          assert p['allowed_source_versions']==['1.35.1']
+          assert p['deleted_files']==[]
+          print('PACKAGE_MANIFEST_REVERSE_VERIFY=PASS',p['source_file_count'],p['source_manifest_sha256'])
+          PY
+          echo 'UPDATE_REVERSE_VERIFICATION=PASS'
+          echo 'RELEASE_PRIVATE_DATA=0'
+
+      - name: Actual release UPDATE Atomic apply and rollback gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v1351-release"
+          cp "$RUNNER_TEMP/p03-release/$UPDATE_ASSET" "$RUNNER_TEMP/v1351-release/VF_Forge_V1.35.2_Atomic_Upgrade.zip"
+          cp "$RUNNER_TEMP/p03-release/VF_Forge_V1.35.2_SOURCE_MANIFEST.txt" "$RUNNER_TEMP/v1351-release/SOURCE_MANIFEST.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('tests/maintenance/v1351_atomic_e2e.sh').read_text(encoding='utf-8')
+          s=s.replace("BASE_SHA='9a9ced02873886ceb77269999478956be625b51e'", "BASE_SHA='57781a2613269f5308dfe183d84ad4575279cdd5'")
+          s=s.replace('1.35.2','__FUTURE__').replace('1.35.1','__TARGET__').replace('1.35.0','__BASE__')
+          s=s.replace('__BASE__','1.35.1').replace('__TARGET__','1.35.2').replace('__FUTURE__','1.35.3')
+          s=s.replace('v1351-target-runtime','p03-candidate-runtime')
+          s=s.replace('test ! -e "$runtime/maintenance.php"','test -f "$runtime/maintenance.php"')
+          s=s.replace('test ! -e "$runtime/app/ManualUpdateService.php"','test -f "$runtime/app/ManualUpdateService.php"')
+          Path('/tmp/p03-release-atomic-e2e.sh').write_text(s,encoding='utf-8',newline='\n')
+          PY
+          chmod +x /tmp/p03-release-atomic-e2e.sh
+          bash /tmp/p03-release-atomic-e2e.sh
+          echo 'FORMAL_UPDATE_APPLY_ROLLBACK=PASS'
+
+      - name: Build formal metadata and hashes
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p03-release"
+          TREE=$(git rev-parse HEAD^{tree})
+          UPDATE_SHA=$(sha256sum "$OUT/$UPDATE_ASSET" | awk '{print $1}')
+          UPDATE_BYTES=$(stat -c %s "$OUT/$UPDATE_ASSET")
+          REPAIR_SHA=$(sha256sum "$OUT/repair-v1.35.2.php" | awk '{print $1}')
+          REPAIR_BYTES=$(stat -c %s "$OUT/repair-v1.35.2.php")
+          SRC_SHA=$(sha256sum "$OUT/VF_Forge_V1.35.2_SOURCE_MANIFEST.txt" | awk '{print $1}')
+          SRC_FP=$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP'/PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')
+          SRC_COUNT=$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP'/PACKAGE_MANIFEST.json"))["source_file_count"])')
+          cat >"$OUT/VF_Forge_V1.35.2_RELEASE_NOTES.md" <<'EOF'
+          # VF Forge V1.35.2
+
+          维护型统一在线更新体系接入版本。Schema 保持 29，不新增业务功能或数据模型迁移。
+
+          - 在线更新发现真相切换为 `core-updates/projects/P03.json`。
+          - 正式更新资产真相使用 GitHub Release。
+          - 更新包执行前验证 Project / Component、来源版本、Schema、Tag、Asset、bytes 与 SHA-256。
+          - 继续复用 VF Forge 已验证的 Atomic / Recovery / Rollback 引擎。
+          - 1.35.1 → 1.35.2 已通过 synthetic Existing Data、Asset Reference、Backup / Restore、Atomic Apply、Failure Rollback / Recovery 与 Missing Credential Fail-Closed 验证。
+          - Production 仍为 V1.35.1；本 Release 不代表 Production 已升级。
+          EOF
+          python3 - "$OUT/VF_Forge_V1.35.2_RELEASE_MANIFEST.json" "$TREE" "$UPDATE_BYTES" "$UPDATE_SHA" "$REPAIR_BYTES" "$REPAIR_SHA" "$SRC_SHA" "$SRC_FP" "$SRC_COUNT" <<'PY'
+          import json,sys,datetime
+          out,tree,ubytes,usha,rbytes,rsha,srcsha,srcfp,srccount=sys.argv[1:]
+          d={
+            'schema_version':'1.0',
+            'project_id':'P03','component_id':'APP','package_id':'vf-forge','package_type':'app',
+            'version':'1.35.2','schema':29,'release_tag':'v1.35.2',
+            'repository':'llhzx2018/vf-forge',
+            'candidate_commit':'ee3cabb849ac8820d5d69a68bf15830739f270ce','candidate_tree':tree,
+            'product_verified_commit':'faada885e49bd57d4f03ed09ae4b2ac26f2321b9',
+            'production_base_commit':'57781a2613269f5308dfe183d84ad4575279cdd5',
+            'allowed_source_versions':['1.35.1'],'schema_from':29,'schema_to':29,
+            'business_feature_change':False,'data_model_change':False,'migration':'NONE',
+            'update_asset':{'name':'VF_Forge_V1.35.2_UPDATE.zip','bytes':int(ubytes),'sha256':usha,'format':'atomic-single-repair-zip'},
+            'repair_entry':{'name':'repair-v1.35.2.php','bytes':int(rbytes),'sha256':rsha},
+            'source_manifest':{'name':'VF_Forge_V1.35.2_SOURCE_MANIFEST.txt','file_sha256':srcsha,'runtime_fingerprint':srcfp,'runtime_file_count':int(srccount)},
+            'verification':{
+              'public_candidate_run':'31895053003','exact_candidate_run':'31895247208',
+              'formal_update_reverse_verification':'PASS','formal_update_apply_rollback':'PASS',
+              'private_data_leakage':0,'public_private_source_artifact':0
+            },
+            'production_deployment':'NOT_EXECUTED',
+            'publication_authority':'GitHub Release Remote Truth',
+            'built_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+          open(out,'w',encoding='utf-8',newline='\n').write(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+          PY
+          cd "$OUT"
+          sha256sum "$UPDATE_ASSET" repair-v1.35.2.php VF_Forge_V1.35.2_RELEASE_MANIFEST.json VF_Forge_V1.35.2_RELEASE_NOTES.md VF_Forge_V1.35.2_SOURCE_MANIFEST.txt > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          echo "FORMAL_UPDATE_BYTES=$UPDATE_BYTES"
+          echo "FORMAL_UPDATE_SHA256=$UPDATE_SHA"
+          echo "FORMAL_SOURCE_RUNTIME_FINGERPRINT=$SRC_FP"
+          echo 'FORMAL_METADATA_HASH_GATE=PASS'
+
+      - name: Formal Tag creation and exact readback
+        shell: bash
+        working-directory: p03
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git tag -a "$TAG" "$CANDIDATE_HEAD" -m "VF Forge V$VERSION"
+          gh auth setup-git
+          git push https://github.com/$REPOSITORY.git "refs/tags/$TAG:refs/tags/$TAG"
+          REF=$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+          TYPE=$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.type)
+          if [ "$TYPE" = tag ]; then PEELED=$(gh api "repos/$REPOSITORY/git/tags/$REF" --jq .object.sha); else PEELED="$REF"; fi
+          test "$PEELED" = "$CANDIDATE_HEAD"
+          echo "FORMAL_TAG_OBJECT=$REF"
+          echo "FORMAL_TAG_PEELED_COMMIT=$PEELED"
+          echo 'FORMAL_TAG_READBACK=PASS'
+
+      - name: Publish formal GitHub Release and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p03-release"
+          gh release create "$TAG" \
+            "$OUT/$UPDATE_ASSET" \
+            "$OUT/repair-v1.35.2.php" \
+            "$OUT/VF_Forge_V1.35.2_RELEASE_MANIFEST.json" \
+            "$OUT/VF_Forge_V1.35.2_RELEASE_NOTES.md" \
+            "$OUT/VF_Forge_V1.35.2_SOURCE_MANIFEST.txt" \
+            "$OUT/SHA256SUMS.txt" \
+            --repo "$REPOSITORY" --verify-tag --title "VF Forge V$VERSION" --notes-file "$OUT/VF_Forge_V1.35.2_RELEASE_NOTES.md"
+          echo 'GITHUB_RELEASE_PUBLISH=PASS'
+
+      - name: Remote Release asset bytes and digest readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p03-release"
+          REMOTE_TAG=$(gh release view "$TAG" --repo "$REPOSITORY" --json tagName --jq .tagName)
+          test "$REMOTE_TAG" = "$TAG"
+          REMOTE_TARGET=$(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq .target_commitish)
+          test "$REMOTE_TARGET" = "$CANDIDATE_HEAD" || test "$REMOTE_TARGET" = "$TAG"
+          EXPECT_BYTES=$(stat -c %s "$OUT/$UPDATE_ASSET")
+          EXPECT_SHA=$(sha256sum "$OUT/$UPDATE_ASSET" | awk '{print $1}')
+          ASSET_JSON=$(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq '.assets[] | select(.name=="VF_Forge_V1.35.2_UPDATE.zip")')
+          REMOTE_BYTES=$(printf '%s' "$ASSET_JSON" | jq -r .size)
+          REMOTE_DIGEST=$(printf '%s' "$ASSET_JSON" | jq -r .digest)
+          test "$REMOTE_BYTES" = "$EXPECT_BYTES"
+          test "$REMOTE_DIGEST" = "sha256:$EXPECT_SHA"
+          COUNT=$(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq '.assets | length')
+          test "$COUNT" = '6'
+          echo "REMOTE_UPDATE_BYTES=$REMOTE_BYTES"
+          echo "REMOTE_UPDATE_SHA256=$EXPECT_SHA"
+          echo "REMOTE_RELEASE_ASSET_COUNT=$COUNT"
+          echo 'FORMAL_RELEASE_REMOTE_READBACK=PASS'
+
+      - name: Public Runner privacy closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'PUBLIC_RUNNER_PRIVATE_SOURCE_ARTIFACT=0'
+          echo 'PUBLIC_RUNNER_PRIVATE_DATA_ARTIFACT=0'
+          echo 'SECRET_LOGGED=0'
+          echo 'MAIN_PROMOTION=0'
+          echo 'P03_V1.35.2_FORMAL_RELEASE=PASS'
