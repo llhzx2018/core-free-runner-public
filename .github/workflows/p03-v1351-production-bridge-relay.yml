@@ -1,0 +1,99 @@
+name: P03 V1.35.1 Production Bridge Sealed Relay
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1351-production-bridge-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      INFO_URL: https://forge.kewaro.com/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=info
+      TOKEN_URL: https://forge.kewaro.com/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=token
+      VERIFY_URL: https://forge.kewaro.com/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=verify
+    steps:
+      - name: Probe uploaded one-time bridge
+        id: probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -sS --connect-timeout 10 --max-time 20 -o "$RUNNER_TEMP/p03-info.json" -w '%{http_code}' "$INFO_URL" || true)
+          if [ "$code" != '200' ]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo 'P03_PRODUCTION_BRIDGE=NOT_PRESENT_OR_NOT_READY'
+            exit 0
+          fi
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/p03-info.json"),true);if(!is_array($d)||($d["ok"]??false)!==true)exit(1);$status=(string)($d["status"]??"");if($status==="success"){exit(0);}if($status!=="ready"||($d["project_id"]??"")!=="P03"||($d["component_id"]??"")!=="APP"||($d["current_version"]??"")!=="1.35.1"||(int)($d["current_schema"]??0)!==29||!in_array(($d["discovery_source"]??""),["LEGACY","CORE-UPDATES"],true)||($d["root_candidate_count"]??0)!==1||($d["document_root_match"]??false)!==true||($d["production_upgrade"]??"")!=="NOT_EXECUTED")throw new RuntimeException("P03 bridge pre-write identity mismatch");'
+          status=$(php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/p03-info.json"),true);echo (string)($d["status"]??"");')
+          if [ "$status" = 'success' ]; then
+            echo 'ready=already-success' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Seal existing unified read credential
+        if: steps.probe.outputs.ready == 'true'
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          php -r '
+          $d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/p03-info.json"),true);
+          $pk=base64_decode((string)($d["public_key_b64"]??""),true);
+          $nonce=(string)($d["nonce"]??"");
+          $token=(string)getenv("VF_PRIVATE_READ_TOKEN");
+          if(!is_string($pk)||strlen($pk)!==SODIUM_CRYPTO_BOX_PUBLICKEYBYTES||$nonce===""||$token==="")throw new RuntimeException("relay material invalid");
+          $sealed=sodium_crypto_box_seal($token,$pk);
+          file_put_contents(getenv("RUNNER_TEMP")."/p03-payload.json",json_encode(["nonce"=>$nonce,"sealed_token_b64"=>base64_encode($sealed)],JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR));
+          sodium_memzero($token);
+          '
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/p03-payload.json"
+          echo 'P03_SEALED_CREDENTIAL_PAYLOAD=PASS'
+
+      - name: Deliver sealed credential and verify exact discovery result
+        if: steps.probe.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 120 -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/p03-payload.json" "$TOKEN_URL" -o "$RUNNER_TEMP/p03-result.json"
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/p03-result.json"),true);if(!is_array($d)||($d["ok"]??false)!==true||($d["status"]??"")!=="success"||($d["ready"]??false)!==true||($d["project_id"]??"")!=="P03"||($d["current"]??"")!=="1.35.1"||($d["latest"]??"")!=="1.35.2"||($d["available"]??false)!==true||($d["can_update"]??false)!==true||($d["update_source"]??"")!=="core-updates"||($d["release"]??"")!=="v1.35.2"||($d["asset"]??"")!=="VF_Forge_V1.35.2_UPDATE.zip"||(int)($d["bytes"]??0)!==707142||($d["sha256"]??"")!=="6b2f88cdc5f8d4352c124deef14896ddf52e46731916c3825b7cf8cf3112817a"||(int)($d["schema"]??0)!==29||($d["production_upgrade"]??"")!=="NOT_EXECUTED")throw new RuntimeException("P03 production discovery result mismatch");'
+          echo 'P03_PRODUCTION_BRIDGE_RELAY=PASS'
+          echo 'P03_ONLINE_UPDATE_DISCOVERY_READY=PASS'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
+
+      - name: Verify persistent readback and force activator cleanup
+        if: steps.probe.outputs.ready == 'true' || steps.probe.outputs.ready == 'already-success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 30 "$VERIFY_URL" -o "$RUNNER_TEMP/p03-verify.json"
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/p03-verify.json"),true);if(!is_array($d)||($d["ok"]??false)!==true||($d["ready"]??false)!==true||($d["current"]??"")!=="1.35.1"||($d["latest"]??"")!=="1.35.2"||($d["available"]??false)!==true||($d["can_update"]??false)!==true||($d["update_source"]??"")!=="core-updates"||($d["production_upgrade"]??"")!=="NOT_EXECUTED")throw new RuntimeException("P03 persistent bridge readback mismatch");'
+          echo 'P03_PRODUCTION_PERSISTENT_DISCOVERY_READBACK=PASS'
+          echo 'P03_ACTIVATOR_CLEANUP_REQUESTED=PASS'
+
+      - name: Secret leakage gate
+        if: always()
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          for f in "$RUNNER_TEMP/p03-info.json" "$RUNNER_TEMP/p03-payload.json" "$RUNNER_TEMP/p03-result.json" "$RUNNER_TEMP/p03-verify.json"; do
+            [ -f "$f" ] || continue
+            ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$f"
+          done
+          rm -f "$RUNNER_TEMP/p03-info.json" "$RUNNER_TEMP/p03-payload.json" "$RUNNER_TEMP/p03-result.json" "$RUNNER_TEMP/p03-verify.json"
+          echo 'SECRET_LEAKAGE=0'
+          echo 'PRIVATE_SOURCE_PUBLIC_ARTIFACT=0'
