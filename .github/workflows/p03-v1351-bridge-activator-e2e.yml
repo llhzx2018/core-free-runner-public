@@ -1,0 +1,202 @@
+name: P03 V1.35.1 Bridge Activator E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1351-bridge-activator-e2e.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      PRODUCTION_COMMIT: 57781a2613269f5308dfe183d84ad4575279cdd5
+      ACTIVATOR_BLOB: b27fb846347ba3b05c97b3ac2dc5410a55f9b24d
+      ACTIVATOR_SHA256: 70fcda1dcb2cd8340c8f7ddf750606ac932caefd61780979ef497824fec4b727
+      FIXTURE_PASS: P03-Bridge-Synthetic-2026!
+      PORT: '18135'
+    steps:
+      - name: Require existing unified read token
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+
+      - name: Ephemeral exact Production source checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: 57781a2613269f5308dfe183d84ad4575279cdd5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p03
+
+      - name: Prepare synthetic Production runtime and final activator bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-curl php-zip sqlite3 jq
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}}'
+          SITE="$RUNNER_TEMP/p03-site"
+          DATA="$RUNNER_TEMP/p03-data"
+          python3 p03/scripts/build_runtime.py "$SITE" >/dev/null
+          mkdir -p "$DATA"
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/llhzx2018/core-free-runner-public/git/blobs/$ACTIVATOR_BLOB" \
+            -o "$RUNNER_TEMP/activator-blob.json"
+          jq -r '.content' "$RUNNER_TEMP/activator-blob.json" | tr -d '\n' | base64 -d | gzip -d > "$SITE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php"
+          test "$(sha256sum "$SITE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php" | awk '{print $1}')" = "$ACTIVATOR_SHA256"
+          php -l "$SITE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php"
+          test "$(sha256sum "$SITE/app/bootstrap.php" | awk '{print $1}')" = '9830db3d1764d8c1388fc380d1b8c68969f991563014091f1b2cbddea0a3271f'
+          test "$(sha256sum "$SITE/app/UpdateService.php" | awk '{print $1}')" = '73332f791fce3b820ab5668f333753b06d06b71423baaf82703beb1d6f48ad3b'
+          test ! -e "$SITE/app/CoreUpdates/GitHubClient.php"
+          test ! -e "$SITE/app/CoreUpdates/UpdateCore.php"
+          echo "SITE=$SITE" >> "$GITHUB_ENV"
+          echo "DATA=$DATA" >> "$GITHUB_ENV"
+
+      - name: Install isolated V1.35.1 synthetic Production
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE="http://127.0.0.1:$PORT"
+          COOKIE="$RUNNER_TEMP/p03-cookie"
+          php -S "127.0.0.1:$PORT" -t "$SITE" >"$RUNNER_TEMP/p03-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/p03-server.pid"
+          for i in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf" value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Forge Bridge Synthetic' \
+            --data-urlencode "data_root=$DATA" \
+            --data-urlencode "password=$FIXTURE_PASS" \
+            --data-urlencode "password_confirm=$FIXTURE_PASS" \
+            "$BASE/setup.php" > "$RUNNER_TEMP/setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"
+          LOGIN=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" -H 'Content-Type: application/json' \
+            --data "$LOGIN" "$BASE/api.php?action=login" -o "$RUNNER_TEMP/login.json"
+          TOKEN=$(python3 - "$RUNNER_TEMP/login.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['ok'] and d['version']=='1.35.1'; print(d['csrf'])
+          PY
+          )
+          curl -fsS -b "$COOKIE" -H "Origin: $BASE" -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' \
+            --data '{"name":"Bridge Preserve Project","development_stage":"maintenance"}' \
+            "$BASE/api.php?action=project_save" -o "$RUNNER_TEMP/project.json"
+          python3 - "$RUNNER_TEMP/project.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['ok']
+          PY
+          DB=$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1)
+          test -f "$DB"
+          test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '29'
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+          echo "COOKIE=$COOKIE" >> "$GITHUB_ENV"
+          echo "DB=$DB" >> "$GITHUB_ENV"
+
+      - name: Relay info exact pre-write identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "$BASE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=info" -o "$RUNNER_TEMP/info.json"
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/info.json"),true); if(!is_array($d)||($d["ok"]??false)!==true||($d["status"]??"")!=="ready"||($d["project_id"]??"")!=="P03"||($d["current_version"]??"")!=="1.35.1"||(int)($d["current_schema"]??0)!==29||($d["discovery_source"]??"")!=="LEGACY"||($d["root_candidate_count"]??0)!==1||($d["document_root_match"]??false)!==true||($d["production_upgrade"]??"")!=="NOT_EXECUTED")throw new RuntimeException("relay info mismatch");'
+
+      - name: Build sealed payload without exposing plaintext token
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r '
+          $d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/info.json"),true);
+          $pk=base64_decode((string)$d["public_key_b64"],true); if(!is_string($pk)||strlen($pk)!==SODIUM_CRYPTO_BOX_PUBLICKEYBYTES)throw new RuntimeException("pk invalid");
+          $token=(string)getenv("VF_PRIVATE_READ_TOKEN"); if($token==="")throw new RuntimeException("token missing");
+          $sealed=sodium_crypto_box_seal($token,$pk);
+          file_put_contents(getenv("RUNNER_TEMP")."/payload.json",json_encode(["nonce"=>(string)$d["nonce"],"sealed_token_b64"=>base64_encode($sealed)],JSON_UNESCAPED_SLASHES));
+          sodium_memzero($token);
+          '
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/payload.json"
+
+      - name: Injected post-recovery failure proves rollback to legacy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ln -s "$RUNNER_TEMP/reject-core-updates" "$SITE/app/CoreUpdates"
+          set +e
+          code=$(curl -sS -o "$RUNNER_TEMP/failure.json" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/payload.json" "$BASE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=token")
+          set -e
+          test "$code" = '409'
+          rm -f "$SITE/app/CoreUpdates"
+          test "$(sha256sum "$SITE/app/UpdateService.php" | awk '{print $1}')" = '73332f791fce3b820ab5668f333753b06d06b71423baaf82703beb1d6f48ad3b'
+          test ! -e "$SITE/app/CoreUpdates/GitHubClient.php"
+          test ! -e "$SITE/app/CoreUpdates/UpdateCore.php"
+          ! grep -Fq 'P03_VF_PRIVATE_READ_TOKEN_RUNTIME_ADAPTER_V1' "$SITE/app/.runtime.php"
+          test ! -e "$DATA/runtime-secrets/vf-private-read-token.php"
+          test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '29'
+          echo 'ACTIVATOR_FAILURE_RECOVERY=PASS'
+
+      - name: Real sealed relay installs discovery bridge and verifies formal UPDATE bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/payload.json" \
+            "$BASE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=token" -o "$RUNNER_TEMP/result.json"
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/result.json"),true); if(!is_array($d)||($d["ok"]??false)!==true||($d["status"]??"")!=="success"||($d["ready"]??false)!==true||($d["current"]??"")!=="1.35.1"||($d["latest"]??"")!=="1.35.2"||($d["available"]??false)!==true||($d["can_update"]??false)!==true||($d["update_source"]??"")!=="core-updates"||($d["release"]??"")!=="v1.35.2"||($d["asset"]??"")!=="VF_Forge_V1.35.2_UPDATE.zip"||(int)($d["bytes"]??0)!==707142||($d["sha256"]??"")!=="6b2f88cdc5f8d4352c124deef14896ddf52e46731916c3825b7cf8cf3112817a"||(int)($d["schema"]??0)!==29||($d["production_upgrade"]??"")!=="NOT_EXECUTED")throw new RuntimeException("activation result mismatch");'
+          test "$(sha256sum "$SITE/app/UpdateService.php" | awk '{print $1}')" = 'de0cf01c0e3cf6eeb5f82b6c7bcd050a3ef22db2265393ef4b0b5707f8c7e299'
+          test "$(sha256sum "$SITE/app/CoreUpdates/GitHubClient.php" | awk '{print $1}')" = '33861192078dedaf7724c84798c9b05df902530571a8703c3cebbdc4bb28baa2'
+          test "$(sha256sum "$SITE/app/CoreUpdates/UpdateCore.php" | awk '{print $1}')" = '851feca44e6483024872dbdb9e5084a86c309a250e90f65eacf138db37926d9b'
+          test "$(sha256sum "$SITE/app/bootstrap.php" | awk '{print $1}')" = '9830db3d1764d8c1388fc380d1b8c68969f991563014091f1b2cbddea0a3271f'
+          grep -Fq 'P03_VF_PRIVATE_READ_TOKEN_RUNTIME_ADAPTER_V1' "$SITE/app/.runtime.php"
+          test -f "$DATA/runtime-secrets/vf-private-read-token.php"
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$SITE/app/.runtime.php"
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/info.json"
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/result.json"
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/p03-server.log"
+          echo 'REAL_CORE_UPDATES_RELEASE_DISCOVERY=PASS'
+
+      - name: Product admin backend readback and data preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS -b "$COOKIE" "$BASE/api.php?action=system_update" -o "$RUNNER_TEMP/backend.json"
+          php -r '$d=json_decode(file_get_contents(getenv("RUNNER_TEMP")."/backend.json"),true); $u=$d["update"]??[]; if(($d["ok"]??false)!==true||ltrim((string)($u["current_version"]??""),"Vv")!=="1.35.1"||(string)($u["latest_version"]??"")!=="1.35.2"||($u["has_update"]??false)!==true||($u["direct_update"]??false)!==true||($u["release_tag"]??"")!=="v1.35.2"||($u["asset_name"]??"")!=="VF_Forge_V1.35.2_UPDATE.zip"||(int)($u["asset_bytes"]??0)!==707142||($u["asset_sha256"]??"")!=="6b2f88cdc5f8d4352c124deef14896ddf52e46731916c3825b7cf8cf3112817a")throw new RuntimeException("backend discovery mismatch");'
+          test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '29'
+          test "$(sqlite3 "$DB" "select count(*) from projects where name='Bridge Preserve Project';")" = '1'
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          ! grep -Fq -- "$VF_PRIVATE_READ_TOKEN" "$RUNNER_TEMP/backend.json"
+          echo 'PRODUCT_BACKEND_DISCOVERY_AND_DATA_PRESERVATION=PASS'
+
+      - name: Self cleanup and no Production upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "$BASE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php?relay=verify" -o "$RUNNER_TEMP/verify.json"
+          sleep 1
+          test ! -e "$SITE/P03_V1.35.1_TO_UNIFIED_UPDATE_BRIDGE.php"
+          test "$(php -r 'require getenv("SITE")."/app/bootstrap.php"; echo VFAB_VERSION;')" = '1.35.1'
+          test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '29'
+          ! find "$SITE" -maxdepth 1 -type f -name 'repair-v1.35.2.php' | grep -q .
+          echo 'P03_ONLINE_UPDATE_DISCOVERY_BRIDGE_ACTIVATOR_E2E=PASS'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/p03-server.pid" ]; then kill "$(cat "$RUNNER_TEMP/p03-server.pid")" >/dev/null 2>&1 || true; fi
+          rm -rf p03 "$RUNNER_TEMP/p03-site" "$RUNNER_TEMP/p03-data" "$RUNNER_TEMP"/activator-blob.json "$RUNNER_TEMP"/payload.json
