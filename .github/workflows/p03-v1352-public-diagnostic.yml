@@ -1,0 +1,62 @@
+name: P03 V1.35.2 Public Diagnostic
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p03-v1352-public-diagnostic.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HEAD_SHA: ee09d47d33b375a582eaf74ddf62dc4d0a810442
+      FIXTURE_PASS: VfP03-Public-Synthetic-2026!
+      PHP_TEST_IMAGE: vf-forge-public-diagnostic-php84
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ee09d47d33b375a582eaf74ddf62dc4d0a810442
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3
+          cat >"$RUNNER_TEMP/Dockerfile.p03" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," DIAGNOSTIC_RUNTIME_PASS\n";'
+      - name: Diagnose current synthetic reverify
+        shell: bash
+        working-directory: p03
+        run: |
+          set -uo pipefail
+          cp tests/maintenance/current_reverify.sh "$RUNNER_TEMP/p03-current-reverify.sh"
+          sed -i "s/d\['version'\]=='1\.35\.0'/d['version']=='1.35.1'/" "$RUNNER_TEMP/p03-current-reverify.sh"
+          grep -Fq "d['version']=='1.35.1'" "$RUNNER_TEMP/p03-current-reverify.sh" || { echo 'VERSION_PATCH_FAILED'; exit 91; }
+          echo 'DIAG_START_CURRENT_REVERIFY'
+          if bash "$RUNNER_TEMP/p03-current-reverify.sh" >"$RUNNER_TEMP/p03-current-reverify.log" 2>&1; then
+            cat "$RUNNER_TEMP/p03-current-reverify.log"
+            echo 'DIAG_CURRENT_REVERIFY=PASS'
+          else
+            rc=$?
+            echo "DIAG_CURRENT_REVERIFY=FAIL rc=$rc"
+            tail -n 200 "$RUNNER_TEMP/p03-current-reverify.log" || true
+            echo 'RUNTIME_FILES:'
+            find "$RUNNER_TEMP/vf-forge-runtime" -maxdepth 2 -type f 2>/dev/null | sed "s#$RUNNER_TEMP#<RUNNER_TEMP>#g" | head -n 80 || true
+            echo 'DATA_LAYOUT:'
+            find "$RUNNER_TEMP/vf-forge-private" -maxdepth 2 -type f 2>/dev/null | sed "s#$RUNNER_TEMP#<RUNNER_TEMP>#g" | head -n 80 || true
+            docker logs vf-forge-current-http 2>&1 | tail -n 120 || true
+            exit "$rc"
+          fi
