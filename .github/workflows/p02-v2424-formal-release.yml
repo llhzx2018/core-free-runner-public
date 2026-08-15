@@ -1,0 +1,131 @@
+name: P02 V2.4.24 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2424-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: f69346f00719a253a0f7c94121b7af2a975b74ee
+      TAG: v2.4.24
+      UPDATE_NAME: VF_Library_V2.4.24_UPDATE.zip
+      UPDATE_BYTES: '293345'
+      UPDATE_SHA256: c71c91d5f51e5a0c4fee8e0138555edae40f042865800f8545eb32a2c4d310bf
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout public shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require release write token
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+
+      - name: Checkout exact verified Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: f69346f00719a253a0f7c94121b7af2a975b74ee
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Guard exact source and Production parent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p02 rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C p02 rev-parse HEAD^)" = '333d4fd52150f1c15e9911bce312bb2b6775f856'
+          test "$(tr -d '\r\n' < p02/VERSION)" = '2.4.24'
+
+      - name: Install release verification runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+
+      - name: Rebuild and reverse verify formal Release Set
+        shell: bash
+        working-directory: p02
+        env:
+          VF_RELEASE_OLD_COMMIT: 333d4fd52150f1c15e9911bce312bb2b6775f856
+          VF_RELEASE_SOURCE_SHA: f69346f00719a253a0f7c94121b7af2a975b74ee
+          VF_RELEASE_SOURCE_REF: task/v2.4.24-live-category-counts
+        run: |
+          set -Eeuo pipefail
+          bash scripts/verify-release-artifacts.sh
+          test "$(stat -c '%s' build/release/$UPDATE_NAME)" = "$UPDATE_BYTES"
+          test "$(sha256sum build/release/$UPDATE_NAME | awk '{print $1}')" = "$UPDATE_SHA256"
+          echo 'FORMAL_RELEASE_SET_EXACT=PASS'
+
+      - name: Create exact Git Tag and GitHub Release
+        shell: bash
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+          if [ -n "$remote_tag" ]; then
+            test "$remote_tag" = "$CANDIDATE_SHA"
+          else
+            git tag "$TAG" "$CANDIDATE_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          if gh release view "$TAG" --repo llhzx2018/vf-library >/dev/null 2>&1; then
+            echo 'Release already exists; validating instead of recreating.'
+          else
+            gh release create "$TAG" build/release/* \
+              --repo llhzx2018/vf-library \
+              --target "$CANDIDATE_SHA" \
+              --title "VF Library V2.4.24" \
+              --notes-file build/release/VF_Library_V2.4.24_RELEASE_NOTES.md \
+              --latest
+          fi
+
+      - name: Remote Tag Release Asset exact readback
+        shell: bash
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')" = "$CANDIDATE_SHA"
+          gh api "repos/llhzx2018/vf-library/releases/tags/$TAG" > /tmp/p02-release.json
+          python3 - /tmp/p02-release.json "$CANDIDATE_SHA" "$UPDATE_NAME" "$UPDATE_BYTES" "$UPDATE_SHA256" <<'PY'
+          import json,sys
+          p,commit,name,size,sha=sys.argv[1:]
+          r=json.load(open(p,encoding='utf-8'))
+          assert r['tag_name']=='v2.4.24'
+          assert r['draft'] is False and r['prerelease'] is False
+          assert r['target_commitish']==commit
+          assets={a['name']:a for a in r.get('assets',[])}
+          assert name in assets,assets.keys()
+          a=assets[name]
+          assert a['state']=='uploaded'
+          assert int(a['size'])==int(size),(a['size'],size)
+          assert str(a.get('digest','')).lower()=='sha256:'+sha.lower(),a.get('digest')
+          print('RELEASE_ID='+str(r['id']))
+          print('RELEASED_AT='+str(r['published_at']))
+          print('UPDATE_ASSET_ID='+str(a['id']))
+          print('REMOTE_ASSET_METADATA=PASS')
+          PY
+          rm -rf /tmp/p02-release-download && mkdir /tmp/p02-release-download
+          gh release download "$TAG" --repo llhzx2018/vf-library --pattern "$UPDATE_NAME" --dir /tmp/p02-release-download
+          test "$(stat -c '%s' /tmp/p02-release-download/$UPDATE_NAME)" = "$UPDATE_BYTES"
+          test "$(sha256sum /tmp/p02-release-download/$UPDATE_NAME | awk '{print $1}')" = "$UPDATE_SHA256"
+          echo 'REMOTE_UPDATE_BYTES_SHA256=PASS'
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: rm -rf p02 /tmp/p02-release.json /tmp/p02-release-download "$RUNNER_TEMP"/vf-library-release-* || true
