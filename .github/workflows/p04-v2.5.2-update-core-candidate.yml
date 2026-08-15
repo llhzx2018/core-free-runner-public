@@ -17,10 +17,10 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       PROD_COMMIT: bc23fcaca79f20f91f058b5de164a4a42c73bae6
-      CANDIDATE_COMMIT: 37fac58435c46a7c702204164a6754df907c69d6
+      CANDIDATE_COMMIT: fa2a02e6a8bcfd19647a3080f468e57ca548591a
       EVIDENCE_DIR: ${{ github.workspace }}/evidence/p04-v252
 
     steps:
@@ -74,7 +74,7 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl php-mbstring sqlite3 curl unzip nodejs
-          php -r "exit(extension_loaded('sodium')?0:1);"
+          php -r "foreach(['pdo_sqlite','sqlite3','zip','fileinfo','sodium','curl'] as \$x){if(!extension_loaded(\$x)){fwrite(STDERR,'missing:'.\$x.PHP_EOL);exit(1);}}"
           php -v | head -1
           sqlite3 --version | head -1
 
@@ -93,6 +93,8 @@ jobs:
           set -Eeuo pipefail
           count=0
           while IFS= read -r -d '' file; do php -l "$file" >/dev/null; count=$((count+1)); done < <(find p04-candidate/src p04-candidate/public -type f -name '*.php' -print0)
+          python3 -m py_compile p04-candidate/scripts/build-release-tree.py p04-candidate/scripts/build-v252-update-release.py
+          bash -n p04-candidate/tests/maintenance/v252_atomic_e2e.sh
           php p04-candidate/tests/unit/core_updates_contract_v252.php
           node --check p04-candidate/public/assets/app.js
           echo "PHP_SYNTAX_FILES=$count"
@@ -132,6 +134,61 @@ jobs:
           set -Eeuo pipefail
           bash scripts/run-clean-full-install-gate.sh
 
+      - name: Build exact V2.5.1 and V2.5.2 runtimes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROD_RT="$RUNNER_TEMP/p04-v251-runtime"
+          TARGET_RT="$RUNNER_TEMP/p04-v252-runtime"
+          python3 p04-prod/scripts/build-release-tree.py "$PROD_RT" | tee "$RUNNER_TEMP/p04-v251-runtime.json"
+          python3 p04-candidate/scripts/build-release-tree.py "$TARGET_RT" | tee "$RUNNER_TEMP/p04-v252-runtime.json"
+          test "$(cat "$PROD_RT/VERSION.txt")" = '2.5.1'
+          test "$(cat "$TARGET_RT/VERSION.txt")" = '2.5.2'
+          diff -qr "$PROD_RT/migrations" "$TARGET_RT/migrations"
+          echo 'RUNTIME_SOURCE_IDENTITY=PASS'
+
+      - name: Build and reverse-verify V2.5.2 Atomic and UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/p04-v252-release"
+          python3 p04-candidate/scripts/build-v252-update-release.py --target-runtime "$RUNNER_TEMP/p04-v252-runtime" --output "$RELEASE_DIR" | tee "$RUNNER_TEMP/p04-v252-package.json"
+          cd "$RELEASE_DIR"
+          sha256sum -c SHA256SUMS.txt
+          cmp VF_Infra_V2.5.2_ATOMIC.zip VF_Infra_V2.5.2_UPDATE.zip
+          unzip -t VF_Infra_V2.5.2_ATOMIC.zip
+          test "$(unzip -Z1 VF_Infra_V2.5.2_ATOMIC.zip | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 VF_Infra_V2.5.2_ATOMIC.zip)" = 'repair-v2.5.2.php'
+          test "$(unzip -Z1 VF_Infra_V2.5.2_UPDATE.zip)" = 'repair-v2.5.2.php'
+          php -l repair-v2.5.2.php
+          php repair-v2.5.2.php --self-test
+          python3 - <<'PY'
+          import json, pathlib, hashlib
+          p=json.load(open('PACKAGE_MANIFEST.json',encoding='utf-8'))
+          expected={'VERSION.txt','app/Core/Update/UpdateSourceInterface.php','app/Core/Update/UpdateContract.php','app/Core/Update/UpdateRepositoryClient.php','app/Core/Update/UpdateManifestService.php','release-manifest.json'}
+          assert p['package_id']=='vf-infra' and p['package_type']=='app'
+          assert p['version']=='2.5.2' and p['schema']==14 and p['allowed_source_versions']==['2.5.1']
+          assert set(p['changed_files'])==expected and p['payload_file_count']==6
+          assert p['schema_change'] is False and p['business_model_change'] is False and p['provider_write_authority_change'] is False
+          assert p['update_infrastructure']=='core-updates + GitHub Release'
+          assert p['update_asset_name']=='VF_Infra_V2.5.2_UPDATE.zip' and p['atomic_asset_name']=='VF_Infra_V2.5.2_ATOMIC.zip'
+          assert p['update_and_atomic_bytes_identical'] is True
+          for name,key in [('VF_Infra_V2.5.2_UPDATE.zip','update_sha256'),('VF_Infra_V2.5.2_ATOMIC.zip','atomic_sha256')]:
+              b=pathlib.Path(name).read_bytes(); assert hashlib.sha256(b).hexdigest()==p[key]
+          print('V252_PACKAGE_IDENTITY_PASS',p['update_bytes'],p['update_sha256'])
+          PY
+          ! unzip -Z1 VF_Infra_V2.5.2_UPDATE.zip | grep -Ei '(^|/)(config\.php|\.env|private_data|backup|backups|cache|session|sessions|log|logs|temp|tmp)(/|$)|\.(sqlite3?|db|tar|tgz|gz|7z|rar)$'
+          ! grep -Eai 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_' repair-v2.5.2.php
+          echo 'V252_RELEASE_ASSET_SAFETY=PASS'
+
+      - name: V2.5.1 to V2.5.2 Atomic data preservation and rollback E2E
+        shell: bash
+        working-directory: p04-candidate
+        env:
+          BASE_RUNTIME: ${{ runner.temp }}/p04-v251-runtime
+          RELEASE_DIR: ${{ runner.temp }}/p04-v252-release
+        run: bash tests/maintenance/v252_atomic_e2e.sh
+
       - name: Redacted evidence
         if: always()
         shell: bash
@@ -145,15 +202,16 @@ jobs:
           CANDIDATE_COMMIT=$CANDIDATE_COMMIT
           CANDIDATE_VERSION=2.5.2
           SCHEMA=14
-          TEST_SCOPE=unified-update-core-source-contract-clean-install-no-touch
+          TEST_SCOPE=update-core-contract-clean-install-atomic-data-preservation-rollback-no-touch
           PRIVATE_SOURCE_PUBLISHED=NO
+          RELEASE_BINARY_PUBLISHED_BY_PUBLIC_RUNNER=NO
           PROVIDER_SECRET_USED=NO
           EOF
           if find "$EVIDENCE_DIR" -type f \( -name '*.php' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '*.pem' -o -name '*.key' -o -name '*.sql' \) -print -quit | grep -q .; then exit 91; fi
           if grep -RIlE 'ghp_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY|Authorization: Bearer ' "$EVIDENCE_DIR" 2>/dev/null | grep -q .; then exit 92; fi
           echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
 
-      - name: Upload redacted evidence
+      - name: Upload redacted evidence only
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -162,9 +220,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Cleanup private source
+      - name: Cleanup private source and private release bytes
         if: always()
         shell: bash
         run: |
-          rm -rf p04-prod p04-candidate "$RUNNER_TEMP"/vf-infra-clean-full-* || true
-          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
+          rm -rf p04-prod p04-candidate "$RUNNER_TEMP"/p04-v25* "$RUNNER_TEMP"/vf-infra-clean-full-* || true
+          echo 'PRIVATE_SOURCE_AND_RELEASE_CLEANUP=PASS'
