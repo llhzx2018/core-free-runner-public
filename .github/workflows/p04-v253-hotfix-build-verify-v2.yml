@@ -1,0 +1,172 @@
+name: P04 V2.5.3 Hotfix Build Verify V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-hotfix-build-verify-v2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      HOTFIX_BRANCH: hotfix/p04-v2.5.3-settings-maintenance-ui-20260816
+      V252_COMMIT: 91984268ffe66781700db9da10de8d509c878c0b
+    steps:
+      - name: Runtime and credentials
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","openssl","json","sodium"] as $x)if(!extension_loaded($x))exit(2);if(!class_exists("ZipArchive"))exit(3);echo "RUNTIME_GATE=PASS\n";'
+          if php -m | grep -qi '^mbstring$'; then echo 'MBSTRING_PRESENT=YES'; else echo 'MBSTRING_PRESENT=NO'; fi
+
+      - name: Checkout exact V2.5.2 base and apply hotfix
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-infra.git" repo
+          git clone -q https://github.com/llhzx2018/core-free-runner-public.git runner-tools
+          cd repo
+          git checkout -q "$HOTFIX_BRANCH"
+          test "$(git rev-parse HEAD)" = "$V252_COMMIT"
+          python3 ../runner-tools/ops/p04/v253_hotfix_patch.py .
+          test "$(cat VERSION)" = 2.5.3
+          ! grep -R "UpdateContract::PRIMARY_KEY_ID" public src/app/Core/Update
+          echo 'PATCH_GATE=PASS'
+
+      - name: Scope regression
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          test -z "$(git diff --name-only "$V252_COMMIT" -- src/app/DomainCheckService.php src/app/DomainRepository.php src/app/RdapClient.php src/app/Modules src/app/Core/Provider src/app/Core/ProviderAccountService.php src/app/Core/ProviderSyncService.php src/app/CronRunner.php src/app/CronStatusService.php migrations 2>/dev/null || true)"
+          find src public -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          node --check public/assets/app.js
+          php tests/unit/core_updates_contract_v252.php
+          echo 'BUSINESS_NO_TOUCH_AND_SYNTAX=PASS'
+
+      - name: Build exact V2.5.2 source and V2.5.3 target
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          mkdir -p "$RUNNER_TEMP/v252-src"
+          git archive "$V252_COMMIT" | tar -x -C "$RUNNER_TEMP/v252-src"
+          python3 "$RUNNER_TEMP/v252-src/scripts/build-release-tree.py" "$RUNNER_TEMP/v252-runtime"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v253-runtime"
+          python3 scripts/build-v253-update-release.py --target-runtime "$RUNNER_TEMP/v253-runtime" --output "$RUNNER_TEMP/v253-release"
+          test "$(cat "$RUNNER_TEMP/v252-runtime/VERSION.txt")" = 2.5.2
+          test "$(cat "$RUNNER_TEMP/v253-runtime/VERSION.txt")" = 2.5.3
+          php "$RUNNER_TEMP/v253-release/repair-v2.5.3.php" --self-test
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'v253-release/PACKAGE_MANIFEST.json'
+          d=json.loads(p.read_text())
+          assert d['version']=='2.5.3' and d['schema']==14
+          assert d['allowed_source_versions']==['2.5.2']
+          assert d['schema_change'] is False and d['business_model_change'] is False and d['provider_write_authority_change'] is False
+          assert d['payload_file_count']==7
+          assert d['update_and_atomic_bytes_identical'] is True
+          print('PACKAGE_CONTRACT=PASS')
+          PY
+
+      - name: Real V2.5.2 to V2.5.3 Atomic and Settings E2E
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/v253-site-root"; SITE="$ROOT/site"; DATA="$ROOT/.vfinfra-data"; PORT=18523; PASS='P04V253HotfixTest!'
+          rm -rf "$ROOT"; mkdir -p "$SITE"; cp -a "$RUNNER_TEMP/v252-runtime"/. "$SITE"/
+          php -S 127.0.0.1:$PORT -t "$SITE" >"$RUNNER_TEMP/v253-http.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 80); do if curl -fsS "http://127.0.0.1:$PORT/setup.php" -o "$RUNNER_TEMP/setup.html"; then break; fi; sleep .2; done
+          curl -fsS -c "$RUNNER_TEMP/cookie" "http://127.0.0.1:$PORT/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - <<'PY'
+          import os,re
+          s=open(os.environ['RUNNER_TEMP']+'/setup.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$RUNNER_TEMP/cookie" -c "$RUNNER_TEMP/cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V253 Fixture' --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "http://127.0.0.1:$PORT/setup.php" >"$RUNNER_TEMP/setup-post"
+          grep -Eq '^HTTP/.* 30[23]' "$RUNNER_TEMP/setup-post"
+          DB="$DATA/database/vf-domain.sqlite"; test -f "$DB"
+          test "$(sqlite3 "$DB" "select value from settings where key='installed_version';")" = 2.5.2
+          test "$(sqlite3 "$DB" "select coalesce(max(version),0) from schema_migrations where status='success';")" = 14
+          sqlite3 "$DB" "insert into domains(domain,created_at,updated_at) values('preserve-v253.example',datetime('now'),datetime('now'));"
+          BEFORE=$(sqlite3 "$DB" "select id,domain,created_at from domains where domain='preserve-v253.example';" | sha256sum | awk '{print $1}')
+
+          curl -fsS -b "$RUNNER_TEMP/cookie" -c "$RUNNER_TEMP/cookie" "http://127.0.0.1:$PORT/login.php?return=maintenance.php" -o "$RUNNER_TEMP/login.html"
+          LCSRF=$(python3 - <<'PY'
+          import os,re
+          s=open(os.environ['RUNNER_TEMP']+'/login.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$RUNNER_TEMP/cookie" -c "$RUNNER_TEMP/cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$LCSRF" --data-urlencode "password=$PASS" --data-urlencode 'return=maintenance.php' "http://127.0.0.1:$PORT/login.php" >"$RUNNER_TEMP/login-post"
+          grep -Eq '^HTTP/.* 30[23]' "$RUNNER_TEMP/login-post"
+
+          cat > "$RUNNER_TEMP/publish.php" <<'PHP'
+          <?php
+          require $argv[1].'/bootstrap.php';
+          $p=$argv[2];$s=new \VFInfra\Core\MaintenanceUpdateService();$r=$s->inspectAndPublishPath($p,hash_file('sha256',$p),false);
+          echo $r['target_version'],'|',$r['target_schema'],'|',$r['payload_file_count'],PHP_EOL;
+          PHP
+          php "$RUNNER_TEMP/publish.php" "$SITE" "$RUNNER_TEMP/v253-release/VF_Infra_V2.5.3_ATOMIC.zip" | grep -Fq '2.5.3|14|7'
+
+          curl -fsS -D "$RUNNER_TEMP/repair.headers" -b "$RUNNER_TEMP/cookie" "http://127.0.0.1:$PORT/repair-v2.5.3.php" -o "$RUNNER_TEMP/repair.html"
+          grep -Fiq "style-src 'self' 'nonce-" "$RUNNER_TEMP/repair.headers"
+          grep -Fq '<style nonce=' "$RUNNER_TEMP/repair.html"
+          RCSRF=$(python3 - <<'PY'
+          import os,re
+          s=open(os.environ['RUNNER_TEMP']+'/repair.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -b "$RUNNER_TEMP/cookie" -c "$RUNNER_TEMP/cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$RCSRF" "http://127.0.0.1:$PORT/repair-v2.5.3.php" -o "$RUNNER_TEMP/repair-post.html"
+          grep -Fq '升级完成' "$RUNNER_TEMP/repair-post.html"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.3
+          test "$(sqlite3 "$DB" "select value from settings where key='installed_version';")" = 2.5.3
+          test "$(sqlite3 "$DB" "select coalesce(max(version),0) from schema_migrations where status='success';")" = 14
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          AFTER=$(sqlite3 "$DB" "select id,domain,created_at from domains where domain='preserve-v253.example';" | sha256sum | awk '{print $1}')
+          test "$BEFORE" = "$AFTER"
+          test ! -e "$SITE/repair-v2.5.3.php"
+
+          curl -fsS -b "$RUNNER_TEMP/cookie" "http://127.0.0.1:$PORT/api.php?action=settings" -o "$RUNNER_TEMP/settings.json"
+          python3 - <<'PY'
+          import json,os
+          d=json.load(open(os.environ['RUNNER_TEMP']+'/settings.json',encoding='utf-8'))
+          assert d.get('ok') is True,d
+          assert d['system']['version']=='2.5.3'
+          assert d['system']['schema_version']==14
+          assert d['update_trust']['required_key_id']=='core-updates + GitHub Release'
+          assert 'backups' in d and 'diagnostics' in d and 'provider_accounts' in d
+          print('SETTINGS_RUNTIME=PASS')
+          PY
+          curl -fsS -D "$RUNNER_TEMP/maint.headers" -b "$RUNNER_TEMP/cookie" "http://127.0.0.1:$PORT/maintenance.php" -o "$RUNNER_TEMP/maint.html"
+          grep -Fiq "style-src 'self' 'nonce-" "$RUNNER_TEMP/maint.headers"
+          grep -Fq '<style nonce=' "$RUNNER_TEMP/maint.html"
+          ! grep -Fq '<footer style=' "$RUNNER_TEMP/maint.html"
+          echo 'V253_ATOMIC_SETTINGS_DATA_UI=PASS'
+          kill $PID; trap - EXIT
+
+      - name: Commit verified hotfix source
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION CHANGELOG.md public/api.php public/assets/app.js public/maintenance.php src/app/Core/Update/UpdateManifestService.php src/app/Core/Update/UpdateRepositoryClient.php scripts/build-release-tree.py scripts/build-v251-maintenance-release.py scripts/build-v253-update-release.py
+          git commit -m 'fix(P04): V2.5.3 settings and maintenance hotfix'
+          git push -q origin "$HOTFIX_BRANCH"
+          echo "HOTFIX_COMMIT=$(git rev-parse HEAD)"
+          echo "HOTFIX_TREE=$(git rev-parse HEAD^{tree})"
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf repo runner-tools "$RUNNER_TEMP/v252-src" "$RUNNER_TEMP/v252-runtime" "$RUNNER_TEMP/v253-runtime" "$RUNNER_TEMP/v253-release" "$RUNNER_TEMP/v253-site-root" "$RUNNER_TEMP"/setup* "$RUNNER_TEMP"/login* "$RUNNER_TEMP"/repair* "$RUNNER_TEMP"/maint* "$RUNNER_TEMP"/cookie "$RUNNER_TEMP"/settings.json "$RUNNER_TEMP"/publish.php "$RUNNER_TEMP"/v253-http.log
