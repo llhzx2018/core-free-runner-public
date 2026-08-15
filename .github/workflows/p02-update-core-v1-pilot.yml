@@ -1,0 +1,128 @@
+name: P02 Update Core V1 Pilot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-update-core-v1-pilot.yml'
+      - 'scripts/p02-update-core-v1-pilot.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-update-core-v1-pilot
+  cancel-in-progress: false
+
+jobs:
+  p02-update-core-v1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PROD_COMMIT: 17f2d3256dbe6d47c141b01e11e1d95c4ac92720
+      FEATURE_COMMIT: d5e215ae3e25d01be33ea3e462c93e6f7a21e786
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/p02-update-core-v1
+
+    steps:
+      - name: Checkout public execution shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require shared private read-only credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN is not configured in core-free-runner-public.' >&2; exit 78; }
+          echo 'PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact private production 2.4.22
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 17f2d3256dbe6d47c141b01e11e1d95c4ac92720
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02-prod
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact private feature 2.4.23
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: d5e215ae3e25d01be33ea3e462c93e6f7a21e786
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02-feature
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Guard private source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p02-prod rev-parse HEAD)" = "$PROD_COMMIT"
+          test "$(git -C p02-feature rev-parse HEAD)" = "$FEATURE_COMMIT"
+          test "$(tr -d '\r\n' < p02-prod/VERSION)" = '2.4.22'
+          test "$(tr -d '\r\n' < p02-feature/VERSION)" = '2.4.23'
+          echo 'PRIVATE_SOURCE_IDENTITY=PASS'
+
+      - name: Install isolated PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+          php -v | head -1
+          sqlite3 --version | head -1
+
+      - name: PHP syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r -d '' file; do php -l "$file" >/dev/null; count=$((count+1)); done < <(find p02-feature -type f -name '*.php' -print0)
+          echo "PHP_SYNTAX_FILES=$count"
+          echo 'PHP_SYNTAX=PASS'
+
+      - name: Run bridge and Update Core client pilot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          bash scripts/p02-update-core-v1-pilot.sh p02-prod p02-feature "$EVIDENCE_DIR"
+
+      - name: Public evidence privacy gate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          if find "$EVIDENCE_DIR" -type f \( -name '*.php' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '*.pem' -o -name '*.key' -o -name '*.sql' \) -print -quit | grep -q .; then
+            echo 'Forbidden public evidence payload detected.' >&2
+            exit 91
+          fi
+          if grep -RIlE 'VF_PRIVATE_READ_TOKEN|VF_UPDATE_READ_TOKEN|ghp_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY' "$EVIDENCE_DIR" 2>/dev/null | grep -q .; then
+            echo 'Potential credential material detected in public evidence.' >&2
+            exit 92
+          fi
+          find "$EVIDENCE_DIR" -type f -maxdepth 2 -printf '%P\n' | sort
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+
+      - name: Upload traceable redacted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-update-core-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/p02-update-core-v1/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup private source and temporary runtime
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p02-prod p02-feature "$RUNNER_TEMP"/p02-update-core-v1-* "$RUNNER_TEMP"/p02-bridge-* || true
+          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
