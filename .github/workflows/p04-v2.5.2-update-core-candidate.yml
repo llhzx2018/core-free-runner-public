@@ -1,0 +1,169 @@
+name: P04 V2.5.2 Unified Update Core Candidate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v2.5.2-update-core-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v252-update-core-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PROD_COMMIT: bc23fcaca79f20f91f058b5de164a4a42c73bae6
+      CANDIDATE_COMMIT: 37fac58435c46a7c702204164a6754df907c69d6
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/p04-v252
+
+    steps:
+      - name: Checkout public execution shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require shared private read-only credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN is not configured.' >&2; exit 78; }
+          echo 'PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact P04 Production and Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.PROD_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p04-prod
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p04-candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Source identity gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p04-prod rev-parse HEAD)" = "$PROD_COMMIT"
+          test "$(git -C p04-candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(tr -d '\r\n' < p04-prod/VERSION)" = '2.5.1'
+          test "$(tr -d '\r\n' < p04-candidate/VERSION)" = '2.5.2'
+          test "$(python3 -c 'import json; print(json.load(open("p04-candidate/VF_PROJECT.json"))["production_version"])')" = '2.5.1'
+          test "$(python3 -c 'import json; print(json.load(open("p04-candidate/VF_PROJECT.json"))["schema_version"])')" = '14'
+          echo 'P04_SOURCE_IDENTITY=PASS'
+
+      - name: Install real PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl php-mbstring php-sodium sqlite3 curl unzip nodejs
+          php -v | head -1
+          sqlite3 --version | head -1
+
+      - name: Repository health and migration gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 p04-candidate/scripts/repository-health-gate.py
+          python3 p04-candidate/scripts/check-migrations.py
+          diff -qr p04-prod/database/migrations p04-candidate/database/migrations
+          echo 'MIGRATION_UNCHANGED_SCHEMA14=PASS'
+
+      - name: Syntax and Update Core contract gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r -d '' file; do php -l "$file" >/dev/null; count=$((count+1)); done < <(find p04-candidate/src p04-candidate/public -type f -name '*.php' -print0)
+          php p04-candidate/tests/unit/core_updates_contract_v252.php
+          node --check p04-candidate/public/assets/app.js
+          echo "PHP_SYNTAX_FILES=$count"
+          echo 'SYNTAX_AND_UPDATE_CONTRACT=PASS'
+
+      - name: Business source no-touch gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          diff -qr p04-prod/src/app/Modules p04-candidate/src/app/Modules
+          diff -q p04-prod/src/app/DomainRepository.php p04-candidate/src/app/DomainRepository.php
+          diff -q p04-prod/src/app/BackupService.php p04-candidate/src/app/BackupService.php
+          diff -q p04-prod/src/app/CronRunner.php p04-candidate/src/app/CronRunner.php
+          diff -q p04-prod/src/app/CronStatusService.php p04-candidate/src/app/CronStatusService.php
+          diff -q p04-prod/src/app/RdapClient.php p04-candidate/src/app/RdapClient.php
+          diff -qr p04-prod/src/app/Core/Release p04-candidate/src/app/Core/Release
+          diff -q p04-prod/src/app/Core/Update/OnlineUpdateService.php p04-candidate/src/app/Core/Update/OnlineUpdateService.php
+          diff -q p04-prod/src/app/Core/Update/OnlineUpdateHandoff.php p04-candidate/src/app/Core/Update/OnlineUpdateHandoff.php
+          diff -qr p04-prod/public p04-candidate/public
+          echo 'DOMAIN_PROVIDER_VPS_CRON_RDAP_BACKUP_ATOMIC_UI_API_NO_TOUCH=PASS'
+
+      - name: Unified token and legacy source gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fq "READ_TOKEN_ENV = 'VF_PRIVATE_READ_TOKEN'" p04-candidate/src/app/Core/Update/UpdateContract.php
+          ! grep -RIl 'updates\.kewaro\.com' p04-candidate/src/app/Core/Update/UpdateContract.php p04-candidate/src/app/Core/Update/UpdateManifestService.php p04-candidate/src/app/Core/Update/UpdateRepositoryClient.php
+          ! grep -RIlE 'VF_UPDATE_READ_TOKEN|P04_GITHUB|P04_RELEASE_TOKEN' p04-candidate/src/app/Core/Update p04-candidate/.env.example
+          echo 'UNIFIED_GITHUB_TOKEN_BOUNDARY=PASS'
+
+      - name: Clean install runtime gate
+        shell: bash
+        working-directory: p04-candidate
+        env:
+          VF_INFRA_TEST_PORT: '18992'
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-clean-full-install-gate.sh
+
+      - name: Redacted evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          cat > "$EVIDENCE_DIR/RESULT.txt" <<EOF
+          PROJECT=P04
+          PRODUCTION_COMMIT=$PROD_COMMIT
+          PRODUCTION_VERSION=2.5.1
+          CANDIDATE_COMMIT=$CANDIDATE_COMMIT
+          CANDIDATE_VERSION=2.5.2
+          SCHEMA=14
+          TEST_SCOPE=unified-update-core-source-contract-clean-install-no-touch
+          PRIVATE_SOURCE_PUBLISHED=NO
+          PROVIDER_SECRET_USED=NO
+          EOF
+          if find "$EVIDENCE_DIR" -type f \( -name '*.php' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '*.pem' -o -name '*.key' -o -name '*.sql' \) -print -quit | grep -q .; then exit 91; fi
+          if grep -RIlE 'ghp_|github_pat_|BEGIN [A-Z ]*PRIVATE KEY|Authorization: Bearer ' "$EVIDENCE_DIR" 2>/dev/null | grep -q .; then exit 92; fi
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p04-v252-update-core-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/p04-v252/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Cleanup private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p04-prod p04-candidate "$RUNNER_TEMP"/vf-infra-clean-full-* || true
+          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
