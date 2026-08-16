@@ -1,0 +1,120 @@
+name: S01-C03 M3U8 Bootstrap First Hop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c03-m3u8-bootstrap-first-hop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-c03-m3u8-bootstrap-first-hop
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      M3U8_TEST_COMMIT: 7ba4dd4b0709d4dfc0b4a6f0376b28f6bbd1b89b
+      FORMAL_1250_ARTIFACT_ID: '9211467518'
+      PRIVATE_EVIDENCE: ${{ runner.temp }}/s01-c03-bootstrap-private
+      PUBLIC_EVIDENCE: ${{ github.workspace }}/evidence/s01-c03-bootstrap-first-hop
+    steps:
+      - name: Checkout public runner shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read credential
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN"
+          echo 'PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact private M3U8 test commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_TEST_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Guard tested product tree
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_TEST_COMMIT"
+          test "$(git -C m3u8 rev-parse HEAD:src)" = '9ed82a1224ddda19889d6db1302d62de912e6b15'
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = '1.25.1'
+          echo 'PRODUCT_SOURCE_DRIFT=NONE'
+
+      - name: Download exact sealed 1.25.0 formal artifact
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/formal1250" "$PRIVATE_EVIDENCE"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer $PRIVATE_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/llhzx2018/vf-tools-m3u8/actions/artifacts/${FORMAL_1250_ARTIFACT_ID}/zip" \
+            -o "$RUNNER_TEMP/formal1250/formal-gate.zip"
+          unzip -q "$RUNNER_TEMP/formal1250/formal-gate.zip" 'vf-tool-m3u8_V1.25.0.zip' -d "$RUNNER_TEMP/formal1250"
+          test "$(sha256sum "$RUNNER_TEMP/formal1250/vf-tool-m3u8_V1.25.0.zip" | awk '{print $1}')" = '1148d0048b0d70fd34e050e74096d93fb8600f556cc33ed369010bc24d17f430'
+          echo 'EXACT_1250_FORMAL_ARTIFACT=PASS'
+
+      - name: Execute dedicated WordPress upload-replace bootstrap fixture
+        working-directory: m3u8
+        env:
+          GITHUB_WORKSPACE_PRIVATE: ${{ github.workspace }}/m3u8
+          VF_BOOTSTRAP_SOURCE_ZIP: ${{ runner.temp }}/formal1250/vf-tool-m3u8_V1.25.0.zip
+          VF_BOOTSTRAP_EVIDENCE_DIR: ${{ runner.temp }}/s01-c03-bootstrap-private
+        run: |
+          set -Eeuo pipefail
+          bash tests/wp-bootstrap/run.sh
+          python3 - "$VF_BOOTSTRAP_EVIDENCE_DIR/result.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['result']=='PASS'; assert x['bootstrap_method']=='WORDPRESS_NATIVE_PLUGIN_UPLOAD_REPLACE'; assert x['native_online_update_claim']=='NO'; assert x['locator_cutover']=='NO'; assert all(v in ('PASS','PRESERVED','PRESENT','LOADED','REGISTERED','EXACT_PASS',0) for v in x['checks'].values())
+          print('BOOTSTRAP_FIRST_HOP=PASS')
+          PY
+
+      - name: Build redacted public evidence
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          python3 - "$PRIVATE_EVIDENCE/result.json" "$PUBLIC_EVIDENCE/result.json" "$M3U8_TEST_COMMIT" <<'PY'
+          import json,sys,datetime
+          x=json.load(open(sys.argv[1])); x['test_commit']=sys.argv[3]; x['tested_product_tree']='9ed82a1224ddda19889d6db1302d62de912e6b15'; x['runner']='core-free-runner-public / ubuntu-24.04 / WordPress 7.0.2 / PHP 8.4 / MariaDB 11.8.8'; x['evidence_privacy']='REDACTED_SUMMARY_ONLY_NO_SOURCE_NO_DB_NO_SECRET_NO_ZIP'; x['observed_at_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat(); json.dump(x,open(sys.argv[2],'w'),indent=2)
+          PY
+
+      - name: Public evidence privacy gate
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          if find "$PUBLIC_EVIDENCE" -type f \( -name '*.php' -o -name '*.js' -o -name '*.zip' -o -name '*.sql' -o -name '*.db' -o -name '*.sqlite' \) -print -quit | grep -q .; then exit 91; fi
+          if grep -RIlE 'VF_PRIVATE_READ_TOKEN[[:space:]]*[:=]|Bearer[[:space:]]+[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}' "$PUBLIC_EVIDENCE" 2>/dev/null | grep -q .; then exit 92; fi
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+
+      - name: Cleanup private material
+        if: always()
+        run: |
+          rm -rf m3u8 "$RUNNER_TEMP/formal1250" "$PRIVATE_EVIDENCE" "$RUNNER_TEMP/m3u8-bootstrap-build" || true
+          echo 'PRIVATE_MATERIAL_CLEANUP=PASS'
+
+      - name: Upload redacted bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-m3u8-bootstrap-first-hop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/s01-c03-bootstrap-first-hop/
+          if-no-files-found: error
+          retention-days: 30
