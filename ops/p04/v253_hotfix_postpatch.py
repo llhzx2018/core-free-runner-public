@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import re, sys
+import sys
 root=Path(sys.argv[1]).resolve()
 p=root/'scripts/build-v251-maintenance-release.py'
 s=p.read_text(encoding='utf-8')
@@ -16,14 +16,11 @@ if s.count(a)!=1: raise SystemExit(f'Atomic CSP close-brace sentinel count={s.co
 s=s.replace(a,b,1)
 
 # Atomic source replacement must invalidate runtime code/stat caches before the next
-# authenticated request. This is part of the existing P04 Atomic contract and avoids
-# executing pre-upgrade api.php bytecode against newly replaced UpdateContract classes.
-apply_matches=list(re.finditer(r"\$tx->apply\([^;]+\);", s))
-if len(apply_matches)!=1: raise SystemExit(f'Atomic apply sentinel count={len(apply_matches)}')
-m=apply_matches[0]
-apply_stmt=m.group(0)
-cache_reset=apply_stmt+"clearstatcache();if(function_exists('opcache_reset'))@opcache_reset();"
-s=s[:m.start()]+cache_reset+s[m.end():]
+# authenticated request. The transaction API is replace(array $targetFiles).
+old="$tx->replace($targetFiles);"
+new=old+"clearstatcache();if(function_exists('opcache_reset'))@opcache_reset();"
+if s.count(old)!=1: raise SystemExit(f'Atomic replace sentinel count={s.count(old)}')
+s=s.replace(old,new,1)
 
 # VF Atomic contract: after successful commit, remove current/old repair artifacts and
 # the exact one-time P04 bridge. Protected DB recovery points remain untouched.
