@@ -1,0 +1,195 @@
+name: P01 V2.21.17 Post-Release Closure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.17-post-release-closure.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.17-post-release-closure
+  cancel-in-progress: false
+
+env:
+  VERSION: 2.21.17
+  SOURCE_VERSION: 2.21.16
+  SCHEMA: 2026080902
+  CANDIDATE: 89f55e9a772904ebe03537ec54c2891e13a52c80
+  CANDIDATE_TREE: 184738a87e5bdf9a4d2cd912933f6a935dcc9038
+  PRODUCTION: 4c908ae6a32ed0855751bbe809c8b204d957aba1
+  RELEASE_ID: '371276138'
+  UPDATE_BYTES: '1043007'
+  UPDATE_SHA: dec98a321dcfba560f1055c34fabbcee454b37ea9ab41886c09fd0f4f5cddeac
+
+jobs:
+  closure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'POST_RELEASE_CREDENTIAL_GATE=PASS'
+
+      - name: Checkout exact public release infrastructure
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: runner
+
+      - name: Checkout exact Candidate and Production read-only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Checkout exact Production Truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+
+      - name: Rebuild deterministic release bytes for readback comparison only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          rm -rf release-dist && mkdir release-dist
+          python3 runner/scripts/p01-build-v22117-formal-release.py \
+            --candidate candidate/src --production production/src --out release-dist \
+            --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" \
+            > "$RUNNER_TEMP/rebuild.json"
+          (cd release-dist && sha256sum -c SHA256SUMS.txt >/dev/null)
+          test "$(stat -c %s release-dist/VF_Start_V2.21.17_UPDATE.zip)" = "$UPDATE_BYTES"
+          test "$(sha256sum release-dist/VF_Start_V2.21.17_UPDATE.zip | awk '{print $1}')" = "$UPDATE_SHA"
+          echo 'POST_RELEASE_DETERMINISTIC_REBUILD=PASS'
+
+      - name: Immutable Tag Release and all-asset exact readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.21.17 > "$RUNNER_TEMP/tag.json"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.17 > "$RUNNER_TEMP/release.json"
+          test "$(jq -r '.object.sha' "$RUNNER_TEMP/tag.json")" = "$CANDIDATE"
+          jq -e --arg c "$CANDIDATE" --argjson rid "$RELEASE_ID" '.id==$rid and .tag_name=="v2.21.17" and .target_commitish==$c and .draft==false and .prerelease==false' "$RUNNER_TEMP/release.json" >/dev/null
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          r=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'release.json'),encoding='utf-8'))
+          remote={a['name']:a for a in r['assets']}
+          local={p.name:p for p in pathlib.Path('release-dist').iterdir() if p.is_file()}
+          assert set(remote)==set(local),(sorted(set(remote)-set(local)),sorted(set(local)-set(remote)))
+          for n,p in local.items():
+              h=hashlib.sha256(p.read_bytes()).hexdigest(); a=remote[n]
+              assert int(a['size'])==p.stat().st_size,(n,'bytes',a['size'],p.stat().st_size)
+              assert a.get('digest')=='sha256:'+h,(n,'sha',a.get('digest'),h)
+          print('IMMUTABLE_REMOTE_ALL_ASSETS_EXACT=PASS')
+          PY
+          jq -e --argjson b "$UPDATE_BYTES" --arg s "sha256:$UPDATE_SHA" '.assets[]|select(.name=="VF_Start_V2.21.17_UPDATE.zip")|(.size==$b and .digest==$s)' "$RUNNER_TEMP/release.json" >/dev/null
+          echo 'TAG_RELEASE_REMOTE_READBACK=PASS'
+
+      - name: Checkout core-updates current main for exact advance
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Advance core-updates P01 only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -e '.target_version=="2.21.16" and .release_tag=="v2.21.16" and .asset_name=="VF_Start_V2.21.16_UPDATE.zip" and .asset_bytes==1049243 and .asset_sha256=="3a7bfae9ff96f6caf5759be8db9fe2b57f9659d9532252ebdf5f617b03dbb648"' updates/projects/P01.json >/dev/null
+          PUBLISHED_AT="$(jq -r '.published_at' "$RUNNER_TEMP/release.json")"
+          python3 - <<'PY'
+          import json,os,pathlib
+          r=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'release.json'),encoding='utf-8'))
+          p=pathlib.Path('updates/projects/P01.json')
+          x={
+            'schema_version':'1.0','project_id':'P01','component_id':'APP','enabled':True,
+            'target_version':'2.21.17','update_type':'ATOMIC','from_versions':['2.21.16'],
+            'schema_from':'2026080902','schema_to':'2026080902','repository':'llhzx2018/vf-start',
+            'release_tag':'v2.21.17','asset_name':'VF_Start_V2.21.17_UPDATE.zip',
+            'asset_bytes':1043007,'asset_sha256':'dec98a321dcfba560f1055c34fabbcee454b37ea9ab41886c09fd0f4f5cddeac',
+            'release_id':371276138,'release_identity':'v2.21.17@89f55e9a772904ebe03537ec54c2891e13a52c80',
+            'backup_required':True,'rollback_supported':True,'released_at':r['published_at'],'minimum_php':'8.0.0'
+          }
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          cd updates
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add projects/P01.json
+          git commit -m 'release(P01): advance unified update target to V2.21.17'
+          git push origin main
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: core-updates remote exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/P01.json"
+          jq -e '.target_version=="2.21.17" and .from_versions==["2.21.16"] and .schema_from=="2026080902" and .schema_to=="2026080902" and .repository=="llhzx2018/vf-start" and .release_tag=="v2.21.17" and .asset_name=="VF_Start_V2.21.17_UPDATE.zip" and .asset_bytes==1043007 and .asset_sha256=="dec98a321dcfba560f1055c34fabbcee454b37ea9ab41886c09fd0f4f5cddeac" and .release_id==371276138 and .release_identity=="v2.21.17@89f55e9a772904ebe03537ec54c2891e13a52c80"' "$RUNNER_TEMP/P01.json" >/dev/null
+          test "$(git -C updates rev-parse HEAD)" = "$CORE_UPDATES_COMMIT"
+          echo 'CORE_UPDATES_REMOTE_EXACT=PASS'
+
+      - name: Real Production public current-version readback only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' 'https://start.kewaro.com/api.php?action=bootstrap' -o "$RUNNER_TEMP/production-bootstrap.json"
+          jq -e '.ok==true and .version=="2.21.16"' "$RUNNER_TEMP/production-bootstrap.json" >/dev/null
+          echo 'PRODUCTION_CURRENT=2.21.16'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Closure summary
+        shell: bash
+        run: |
+          {
+            echo '# P01 V2.21.17 Post-Release Closure'
+            echo 'Tag: v2.21.17'
+            echo 'Release ID: 371276138'
+            echo 'Update: VF_Start_V2.21.17_UPDATE.zip'
+            echo 'Update bytes: 1043007'
+            echo 'Update SHA-256: dec98a321dcfba560f1055c34fabbcee454b37ea9ab41886c09fd0f4f5cddeac'
+            echo "core-updates commit: $CORE_UPDATES_COMMIT"
+            echo 'Production Current public readback: 2.21.16'
+            echo 'Production upgrade: NOT EXECUTED'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'POST_RELEASE_CLOSURE=PASS'
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -rf runner candidate production updates release-dist
+          rm -f "$RUNNER_TEMP"/rebuild.json "$RUNNER_TEMP"/tag.json "$RUNNER_TEMP"/release.json "$RUNNER_TEMP"/P01.json "$RUNNER_TEMP"/production-bootstrap.json
+          echo 'POST_RELEASE_CLEANUP=PASS'
