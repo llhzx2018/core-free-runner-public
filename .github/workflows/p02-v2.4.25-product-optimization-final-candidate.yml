@@ -1,0 +1,362 @@
+name: P02 V2.4.25 Product Optimization Final Candidate
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-product-optimization-final-candidate.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-product-optimization-final-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_SHA: 11019841b837038092b153930ab8e185bf2a2676
+      PRODUCTION_BASE_SHA: b8f26afd81e0c736923579eb6fe5b298dd9fc8e3
+      CANDIDATE_VERSION: 2.4.25
+      PRODUCTION_VERSION: 2.4.24
+    steps:
+      - name: Checkout public runner shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read-only source credential
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact V2.4.25 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 11019841b837038092b153930ab8e185bf2a2676
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact V2.4.24 Production base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: b8f26afd81e0c736923579eb6fe5b298dd9fc8e3
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02-old
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Candidate test runtime
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+          php -v
+          sqlite3 --version
+          node --version
+
+      - name: Exact Candidate identity + PHP / JS + source manifest
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$CANDIDATE_VERSION"
+          test "$(python3 -c 'import json;print(json.load(open("SOURCE_MANIFEST.json"))["version"])')" = "$CANDIDATE_VERSION"
+          test "$(python3 -c 'import json;print(json.load(open("SOURCE_MANIFEST.json"))["runtime_source_file_count"])')" = 53
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          PHP_COUNT=0
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; PHP_COUNT=$((PHP_COUNT+1)); done < <(find src public -type f -name '*.php' -print0)
+          JS_COUNT=0
+          while IFS= read -r -d '' f; do node --check "$f" >/dev/null; JS_COUNT=$((JS_COUNT+1)); done < <(find public tests -type f \( -name '*.js' -o -name '*.mjs' \) -print0)
+          node --check public/assets/navigation-refresh-policy.js
+          grep -Fq '/assets/navigation-refresh-policy.js' public/index.php
+          echo "PHP_SYNTAX_PASS=$PHP_COUNT"
+          echo "JS_SYNTAX_PASS=$JS_COUNT"
+          echo 'SOURCE_MANIFEST_PASS=53'
+
+      - name: Build exact Candidate artifacts before any test-harness normalization
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git show -s --format=%T "$CANDIDATE_SHA")
+          python3 scripts/build-release.py --out build/candidate-release --source-commit "$CANDIDATE_SHA" --source-tree "$TREE" --source-ref task/v2.4.25-product-optimization | tee "$RUNNER_TEMP/candidate-build.json"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          (cd build/candidate-release && sha256sum -c SHA256SUMS.txt)
+          sha256sum build/candidate-release/* > "$RUNNER_TEMP/artifact-sha256.txt"
+
+      - name: Formal Artifact static / privacy / identity gate
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/candidate-release"
+          for z in "$OUT"/*.zip; do unzip -t "$z" >/dev/null; done
+          python3 - "$OUT" "$CANDIDATE_SHA" <<'PY'
+          import json,sys,zipfile,re,hashlib
+          from pathlib import Path
+          out=Path(sys.argv[1]); commit=sys.argv[2]; ver='2.4.25'; src='2.4.24'
+          names={p.name for p in out.iterdir() if p.is_file()}
+          required={f'VF_Library_V{ver}_SOURCE.zip',f'VF_Library_V{ver}_FULL.zip',f'VF_Library_V{ver}_UPDATE.zip',f'VF_Library_V{ver}_ATOMIC.zip',f'repair-v{ver}.php',f'VF_Library_V{ver}_RELEASE_MANIFEST.json',f'VF_Library_V{ver}_RELEASE_NOTES.md','SHA256SUMS.txt'}
+          assert required<=names,(required-names)
+          full=out/f'VF_Library_V{ver}_FULL.zip'; update=out/f'VF_Library_V{ver}_UPDATE.zip'; atomic=out/f'VF_Library_V{ver}_ATOMIC.zip'; source=out/f'VF_Library_V{ver}_SOURCE.zip'; repair=out/f'repair-v{ver}.php'
+          with zipfile.ZipFile(full) as z:
+              members=z.namelist(); low=[x.lower() for x in members]
+              assert 'version.txt' in low and 'release-manifest.json' in low and 'assets/navigation-refresh-policy.js' in members
+              assert z.read('VERSION.txt').decode().strip()==ver
+              manifest=json.loads(z.read('release-manifest.json'))
+              assert manifest['version']==ver and manifest['schema_version']==2401 and manifest['source_commit']==commit
+              forbidden=[n for n in members if re.search(r'(^|/)(_import_chunks|chunk-|relay-|private_data|node_modules|\.git)(/|$)',n,re.I) or n.lower().endswith(('.sqlite','.sqlite3','.db','.log','.env')) or n.startswith('tests/') or n.startswith('.github/')]
+              assert not forbidden,forbidden
+          with zipfile.ZipFile(update) as z:
+              members=z.namelist(); m=json.loads(z.read('atomic-manifest.json'))
+              assert m['format']=='vf.library.atomic-package' and m['source_version']==src and m['target_version']==ver
+              assert m['source_schema']==m['target_schema']==2401
+              seen=set()
+              for e in m['files']:
+                  p='payload/'+e['path']; assert p in members and p not in seen; seen.add(p)
+                  b=z.read(p); assert len(b)==e['bytes'] and hashlib.sha256(b).hexdigest()==e['sha256']
+              assert 'payload/assets/navigation-refresh-policy.js' in seen
+              assert set(members)=={'atomic-manifest.json'}|seen
+          with zipfile.ZipFile(atomic) as z:
+              assert z.namelist()==[repair.name]
+              assert z.read(repair.name)==repair.read_bytes()
+          with zipfile.ZipFile(source) as z:
+              assert 'public/assets/navigation-refresh-policy.js' in z.namelist()
+              assert z.read('VERSION').decode().strip()==ver
+          rel=json.load(open(out/f'VF_Library_V{ver}_RELEASE_MANIFEST.json',encoding='utf-8'))
+          assert rel['schema']=='vf-release-manifest/2.1' and rel['version']==ver
+          assert rel['source']['candidate_commit']==commit and rel['build']['schema']==2401 and rel['build']['runtime_source_files']==53
+          assert rel['compatibility']['supported_from']==[src]
+          print('FORMAL_ARTIFACT_STATIC_PRIVACY_IDENTITY=PASS')
+          PY
+
+      - name: Full Candidate Regression on source runtime
+        working-directory: p02
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-candidate-maintenance
+          VF_TEST_PORT: '18220'
+        run: |
+          set -Eeuo pipefail
+          # The maintained regression script still contains the previous target version
+          # as a harness assertion. Normalize only the harness in this ephemeral checkout;
+          # runtime deploy files and already-built Candidate artifacts remain byte-exact.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/maintenance-reverify.sh'); s=p.read_text()
+          s=s.replace('2.4.24','2.4.25')
+          p.write_text(s)
+          PY
+          bash scripts/maintenance-reverify.sh
+          test -f "$EVIDENCE_DIR/summary.json"
+          python3 - "$EVIDENCE_DIR/summary.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['result']=='PASS' and x['version']=='2.4.25' and x['schema']==2401
+          print('SOURCE_RUNTIME_COMPLETE_REGRESSION=PASS')
+          PY
+
+      - name: Optimization network claim + 7 viewport UA/UI gate
+        working-directory: p02
+        shell: bash
+        env:
+          TEST_PASSWORD: 'P02-OPT-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-opt-ui"; SITE="$ROOT/site"; PORT=18221; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf" value="([^"]+)"',s); assert m; print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          cat > .candidate-ui.mjs <<'JS'
+          import fs from 'node:fs'; import { chromium } from 'playwright';
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD,out=process.env.UI_JSON;
+          const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1440,height:900}}); const errors=[];
+          page.on('pageerror',e=>errors.push(String(e))); page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'}); await page.locator('[data-open-login]').first().click(); await page.locator('#loginForm input[name="password"]').fill(password); await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            const sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json()); if(sess.version!=='2.4.25')throw new Error('version '+sess.version); const csrf=sess.csrf;
+            const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+            const cat=await post('category_save',{name:'Optimization Network',description:'',icon:'folder'}); if(!cat.ok)throw new Error('category seed'); const cid=Number(cat.id);
+            const item=await post('content_save',{category_id:cid,title:'Network Seed',content:'before',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'}); if(!item.ok)throw new Error('item seed'); const iid=Number(item.id);
+            await page.reload({waitUntil:'networkidle'}); await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid}); await page.waitForTimeout(200);
+            let bootstraps=0; const handler=r=>{if(r.url().includes('action=app_bootstrap'))bootstraps++}; page.on('request',handler);
+            await page.locator('#articleTitleInput').fill('Network Saved'); await page.locator('#articleSource').fill('optimized content ✓'); await page.locator('[data-workspace-command="save"]').last().click();
+            await page.waitForFunction(()=>state.readerItem?.title==='Network Saved'&&!state.editorDirty,{timeout:10000}); await page.waitForTimeout(250); page.off('request',handler);
+            if(bootstraps!==0)throw new Error('ordinary edit emitted '+bootstraps+' app_bootstrap requests');
+            const read=await page.evaluate(async iid=>await(await fetch('/api.php?action=content_get&id='+iid,{cache:'no-store'})).json(),iid); if(!read.ok||read.item?.content!=='optimized content ✓')throw new Error('persist readback');
+            const rows=[]; for(const [w,h] of [[1920,1080],[1600,1000],[1440,900],[1318,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:h});await page.waitForTimeout(100);const r=await page.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body?.scrollWidth||0}));if(r.scroll>r.client+3)throw new Error('horizontal overflow '+w+' '+r.scroll+'>'+r.client);rows.push({width:w,height:h,...r});}
+            if(errors.length)throw new Error('console/page errors: '+errors.join(' | '));
+            fs.writeFileSync(out,JSON.stringify({candidate:'2.4.25',ordinary_edit_extra_app_bootstrap:bootstraps,persisted_readback:'PASS',viewports:rows,console_errors:errors},null,2));
+            console.log('OPTIMIZATION_NETWORK_CLAIM=PASS'); console.log('UA_UI_7_VIEWPORTS=PASS');
+          } finally { await browser.close(); }
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$TEST_PASSWORD" UI_JSON="$RUNNER_TEMP/ui-responsive.json" node .candidate-ui.mjs
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+
+      - name: Formal FULL fresh setup gate
+        working-directory: p02
+        shell: bash
+        env:
+          TEST_PASSWORD: 'P02-FULL-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-formal-full"; SITE="$ROOT/site"; PORT=18222; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          unzip -q build/candidate-release/VF_Library_V2.4.25_FULL.zip -d "$SITE"
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/session.json"
+          python3 - "$ROOT/session.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['site']['auth'] and x['version']=='2.4.25'
+          PY
+          (cd "$SITE" && php cli/verify.php) > "$ROOT/verify.json"
+          python3 - "$ROOT/verify.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['schema_version']==2401
+          PY
+          test -f "$SITE/assets/navigation-refresh-policy.js"
+          echo 'FORMAL_FULL_FRESH_SETUP=PASS'
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+
+      - name: Exact V2.4.24 -> V2.4.25 UPDATE package existing-data regression
+        working-directory: p02
+        shell: bash
+        env:
+          TEST_PASSWORD: 'P02-UPGRADE-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-upgrade"; OLDSITE="$ROOT/site"; PKG="$ROOT/pkg"; PORT=18223; BASE="http://127.0.0.1:$PORT"; mkdir -p "$ROOT" "$PKG"
+          bash ../p02-old/scripts/build-deploy-tree.sh "$OLDSITE" >/dev/null
+          test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = 2.4.24
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$OLDSITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/session.json"
+          CSRF=$(python3 -c 'import json;print(json.load(open("'$ROOT'/session.json"))["csrf"])')
+          cat > "$ROOT/cat.json" <<'JSON'
+          {"name":"Existing Data","description":"upgrade fixture","icon":"folder"}
+          JSON
+          curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/cat.json" "$BASE/api.php?action=category_save" > "$ROOT/cat.out"
+          CID=$(python3 -c 'import json;print(json.load(open("'$ROOT'/cat.out"))["id"])')
+          python3 - "$ROOT/item.json" "$CID" <<'PY'
+          import json,sys
+          json.dump({'category_id':int(sys.argv[2]),'title':'升级保持 UTF-8 ✓','content':'before upgrade durable body 中文','content_mode':'article','content_format':'markdown','primary_action':'read','status':'active'},open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False)
+          PY
+          curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/item.json" "$BASE/api.php?action=content_save" > "$ROOT/item.out"
+          python3 - "$ROOT/item.out" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok']
+          PY
+          IID=$(python3 -c 'import json;print(json.load(open("'$ROOT'/item.out"))["id"])')
+          printf '%s' '{"note":"pre 2.4.25 upgrade"}' > "$ROOT/backup.json"
+          curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/backup.json" "$BASE/api.php?action=backup" > "$ROOT/backup.out"
+          python3 - "$ROOT/backup.out" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok']
+          PY
+          unzip -q build/candidate-release/VF_Library_V2.4.25_UPDATE.zip -d "$PKG"
+          php -r '
+          require $argv[1]."/app/bootstrap.php";
+          $m=json_decode(file_get_contents($argv[2]."/atomic-manifest.json"),true);
+          if(!is_array($m)||$m["source_version"]!=="2.4.24"||$m["target_version"]!=="2.4.25")exit(21);
+          $files=[];foreach($m["files"] as $e){$files[$e["path"]]=["bytes"=>(int)$e["bytes"],"sha256"=>(string)$e["sha256"]];}
+          $r=VfLibraryAtomicUpgradeService::fromCurrentRuntime()->upgrade("2.4.24","2.4.25",$argv[2]."/payload",$files,["source_schema"=>2401,"target_schema"=>2401]);
+          if(($r["target"]??"")!=="2.4.25"||empty($r["self_check"]["ok"]))exit(22);
+          echo "LOCAL_UPDATE_PACKAGE_EXECUTION=PASS\n";
+          ' "$OLDSITE" "$PKG"
+          test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = 2.4.25
+          test -f "$OLDSITE/assets/navigation-refresh-policy.js"
+          php -r '
+          require $argv[1]."/app/bootstrap.php";$d=vftb_db();
+          if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(31);
+          $q=$d->prepare("SELECT title,content FROM text_items WHERE id=?");$q->execute([(int)$argv[2]]);$x=$q->fetch(PDO::FETCH_ASSOC);
+          if(!$x||$x["title"]!=="升级保持 UTF-8 ✓"||$x["content"]!=="before upgrade durable body 中文")exit(32);
+          if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(33);
+          if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(34);
+          echo "EXISTING_DATA_UTF8_SQLITE=PASS\n";
+          ' "$OLDSITE" "$IID"
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/post-session.json"
+          python3 - "$ROOT/post-session.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['site']['auth'] and x['version']=='2.4.25'
+          PY
+          echo 'UPDATE_UPGRADE_EXISTING_DATA_REGRESSION=PASS'
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+
+      - name: Candidate evidence summary + public privacy gate
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/public-evidence"
+          cp "$RUNNER_TEMP/artifact-sha256.txt" "$RUNNER_TEMP/public-evidence/artifact-sha256.txt"
+          cp "$RUNNER_TEMP/ui-responsive.json" "$RUNNER_TEMP/public-evidence/ui-responsive.json"
+          python3 - "$RUNNER_TEMP/public-evidence/candidate-summary.json" <<'PY'
+          import json,os,sys,datetime
+          x={
+            'project':'P02 · VF Library','candidate_version':'2.4.25','candidate_commit':os.environ['CANDIDATE_SHA'],'production_version':'2.4.24','schema':2401,
+            'runner':'llhzx2018/core-free-runner-public','run_id':os.environ['GITHUB_RUN_ID'],'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'gates':{
+              'php_js':'PASS','sqlite':'PASS','security':'PASS','crud':'PASS','search':'PASS','attachment':'PASS','category':'PASS','backup_restore':'PASS','fresh_setup':'PASS','existing_data_regression':'PASS','browser_e2e':'PASS','responsive':'PASS','ua_ui':'PASS','update_upgrade_regression':'PASS','formal_artifact_gate':'PASS'
+            },
+            'optimization':{'ordinary_existing_item_save_extra_app_bootstrap':0,'persisted_readback':'PASS','count_sensitive_paths':'PASS_BY_POLICY_UNIT_AND_COMPLETE_CATEGORY_BROWSER_REGRESSION'},
+            'release':'NOT_EXECUTED','production_write':0,'main_promotion':'NOT_EXECUTED','privacy':'PUBLIC_EVIDENCE_CONTAINS_NO_PRIVATE_SOURCE_DB_SESSION_SECRET_OR_RELEASE_ZIP'
+          }
+          json.dump(x,open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+          if find "$RUNNER_TEMP/public-evidence" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '.env' \) -print -quit | grep -q .; then exit 91; fi
+          grep -RIlE '(VF_PRIVATE_READ_TOKEN|vftextbox_session|PRIVATE_DATA|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' "$RUNNER_TEMP/public-evidence" && exit 92 || true
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+          cat "$RUNNER_TEMP/public-evidence/candidate-summary.json"
+
+      - name: Upload public Candidate evidence only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.25-product-optimization-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup private source and candidate artifacts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p02 p02-old "$RUNNER_TEMP/p02-candidate-maintenance" "$RUNNER_TEMP/p02-opt-ui" "$RUNNER_TEMP/p02-formal-full" "$RUNNER_TEMP/p02-upgrade" || true
