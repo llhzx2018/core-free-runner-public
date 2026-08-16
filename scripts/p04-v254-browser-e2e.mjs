@@ -55,7 +55,7 @@ for (let i = 1; i <= 65; i++) {
   domainSql.push(`INSERT INTO domains(domain,project_name,registrar,renewal_price,currency,auto_renew,effective_expiry_date,effective_expiry_source,last_check_status,tags_json,created_at,updated_at) VALUES(${q(`fixture-${n}.example.test`)},${q(i%2?'演示项目 A':'演示项目 B')},'Example Registrar',12.50,'USD',${i%3===0?1:0},${q(expiry)},'manual','success','["E2E"]','2026-08-15 16:00:00','2026-08-15 16:00:00');`);
 }
 const sql = `PRAGMA foreign_keys=ON; BEGIN;\n${domainSql.join('\n')}
-INSERT INTO alerts(domain_id,alert_type,reminder_days,severity,title,message,fingerprint,status,triggered_at,last_seen_at,handled_note) VALUES(1,'expiry',30,'warning','域名即将到期','请确认续费安排','e2e-alert-1','pending','2026-08-15 16:05:00','2026-08-15 16:05:00','');
+INSERT INTO alerts(domain_id,alert_type,reminder_days,severity,title,message,fingerprint,status,triggered_at,last_seen_at,last_triggered_at,handled_note) VALUES(1,'expiry',30,'medium','域名即将到期','请确认续费安排','e2e-alert-1','pending','2026-08-15 16:05:00','2026-08-15 16:05:00','2026-08-15 16:05:00','');
 INSERT INTO cron_runs(run_type,started_at,finished_at,status,domain_count,success_count,failure_count,change_count,duration_ms,summary_json,error_message) VALUES('cron','2026-08-15 15:50:00','2026-08-15 15:51:00','success',65,65,0,0,60000,'{}','');
 INSERT INTO domain_checks(domain_id,cron_run_id,checked_at,status,http_status,duration_ms,rdap_server,expiry_date,statuses_json,nameservers_json,registrar,raw_summary_json,error_code,error_message,changed_fields_json) VALUES(1,1,'2026-08-15 15:50:10','success',200,120,'https://rdap.example.test','2026-08-20','[]','[]','Example Registrar','{}','','','{}');
 DELETE FROM update_history;
