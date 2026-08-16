@@ -1,0 +1,141 @@
+name: P01 V2.21.17 Production Closure Seal V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.17-production-closure-seal-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P01_BRANCH: maintenance/post-seal-health-2.21.17-20260816
+  PREV_AUTHORITY_HEAD: 761d0e94031ce116b11a534c4daee5ac8c782f78
+  PRODUCT_COMMIT: 89f55e9a772904ebe03537ec54c2891e13a52c80
+  PRODUCT_TREE: 184738a87e5bdf9a4d2cd912933f6a935dcc9038
+  REMOTE_MAIN: 4c908ae6a32ed0855751bbe809c8b204d957aba1
+  REMOTE_DEVELOP: 4c908ae6a32ed0855751bbe809c8b204d957aba1
+  RELEASE_ID: '371276138'
+  UPDATE_BYTES: '1043007'
+  UPDATE_SHA: dec98a321dcfba560f1055c34fabbcee454b37ea9ab41886c09fd0f4f5cddeac
+  FULL_BYTES: '479778'
+  FULL_SHA: 8bcd6765236ceab1e555f369a919192af3131ae7da0a27058adc847878c51c63
+  CORE_UPDATES_COMMIT: 92adb4319a720f31c35cd5fd270bc47e9f8d18a2
+
+jobs:
+  closure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact public closure writer
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: runner
+
+      - name: Checkout exact current P01 Authority branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_BRANCH }}
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: p01
+
+      - name: Reconfirm immutable remote truth and Production version
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN"
+          test "$(git -C p01 rev-parse HEAD)" = "$PREV_AUTHORITY_HEAD"
+          test "$(git -C p01 rev-parse "$PRODUCT_COMMIT^{tree}")" = "$PRODUCT_TREE"
+          test -z "$(git -C p01 diff --name-only "$PRODUCT_COMMIT" HEAD -- src)"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/main --jq .object.sha)" = "$REMOTE_MAIN"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/develop --jq .object.sha)" = "$REMOTE_DEVELOP"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.21.17 --jq .object.sha)" = "$PRODUCT_COMMIT"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.17 > /tmp/release.json
+          jq -e --argjson id "$RELEASE_ID" --arg c "$PRODUCT_COMMIT" '.id==$id and .target_commitish==$c and .tag_name=="v2.21.17"' /tmp/release.json >/dev/null
+          jq -e --arg sha "$UPDATE_SHA" --argjson bytes "$UPDATE_BYTES" '.assets[]|select(.name=="VF_Start_V2.21.17_UPDATE.zip")|(.size==$bytes and .digest==("sha256:"+$sha))' /tmp/release.json >/dev/null
+          jq -e --arg sha "$FULL_SHA" --argjson bytes "$FULL_BYTES" '.assets[]|select(.name=="VF_Start_V2.21.17_FULL.zip")|(.size==$bytes and .digest==("sha256:"+$sha))' /tmp/release.json >/dev/null
+          test "$(gh api repos/llhzx2018/core-updates/git/ref/heads/main --jq .object.sha)" = "$CORE_UPDATES_COMMIT"
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > /tmp/P01.json
+          jq -e --arg sha "$UPDATE_SHA" --argjson bytes "$UPDATE_BYTES" --argjson rid "$RELEASE_ID" '.target_version=="2.21.17" and .from_versions==["2.21.16"] and .asset_bytes==$bytes and .asset_sha256==$sha and .release_id==$rid' /tmp/P01.json >/dev/null
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' 'https://start.kewaro.com/api.php?action=bootstrap' -o /tmp/bootstrap.json
+          jq -e '.ok==true and .version=="2.21.17"' /tmp/bootstrap.json >/dev/null
+          echo 'RECONFIRM_REMOTE_TRUTH=PASS'
+          echo 'PRODUCTION_PUBLIC_VERSION=2.21.17'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Write final Authority state
+        run: |
+          set -Eeuo pipefail
+          python3 runner/scripts/p01-v22117-production-closure.py p01
+          python3 -m json.tool p01/VF_PROJECT.json >/dev/null
+          git -C p01 diff --check -- VF_PROJECT.json docs/authority/CURRENT.md docs/handoff/CURRENT_STATE.md docs/evidence/V2.21.17_PRODUCTION_CLOSURE_20260816.md
+          echo 'FINAL_AUTHORITY_WRITE=PASS'
+
+      - name: Commit Authority-only closure
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add VF_PROJECT.json docs/authority/CURRENT.md docs/authority/SSOT.md docs/authority/ACCEPTANCE_MATRIX.md docs/handoff/CURRENT_STATE.md docs/evidence/V2.21.17_PRODUCTION_CLOSURE_20260816.md
+          test -z "$(git diff --cached --name-only -- src)"
+          git diff --cached --name-only | tee /tmp/closure-files.txt
+          python3 - <<'PY'
+          allowed={
+            'VF_PROJECT.json','docs/authority/CURRENT.md','docs/authority/SSOT.md','docs/authority/ACCEPTANCE_MATRIX.md',
+            'docs/handoff/CURRENT_STATE.md','docs/evidence/V2.21.17_PRODUCTION_CLOSURE_20260816.md'
+          }
+          got={x.strip() for x in open('/tmp/closure-files.txt',encoding='utf-8') if x.strip()}
+          assert got==allowed,(got,allowed)
+          print('AUTHORITY_ONLY_SCOPE=PASS')
+          PY
+          git commit -m 'docs(authority): seal P01 V2.21.17 production closure'
+          git push origin HEAD:"$P01_BRANCH"
+          echo "CLOSURE_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Final remote readback
+        run: |
+          set -Eeuo pipefail
+          git -C p01 fetch origin "$P01_BRANCH"
+          test "$(git -C p01 rev-parse origin/$P01_BRANCH)" = "$CLOSURE_HEAD"
+          test -z "$(git -C p01 diff --name-only "$PRODUCT_COMMIT" "$CLOSURE_HEAD" -- src)"
+          git -C p01 diff --name-only "$PREV_AUTHORITY_HEAD" "$CLOSURE_HEAD" | tee /tmp/final-files.txt
+          python3 - <<'PY'
+          allowed={
+            'VF_PROJECT.json','docs/authority/CURRENT.md','docs/authority/SSOT.md','docs/authority/ACCEPTANCE_MATRIX.md',
+            'docs/handoff/CURRENT_STATE.md','docs/evidence/V2.21.17_PRODUCTION_CLOSURE_20260816.md'
+          }
+          got={x.strip() for x in open('/tmp/final-files.txt',encoding='utf-8') if x.strip()}
+          assert got==allowed,(got,allowed)
+          print('REMOTE_AUTHORITY_ONLY_READBACK=PASS')
+          PY
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/main --jq .object.sha)" = "$REMOTE_MAIN"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/develop --jq .object.sha)" = "$REMOTE_DEVELOP"
+          test "$(gh api repos/llhzx2018/core-updates/git/ref/heads/main --jq .object.sha)" = "$CORE_UPDATES_COMMIT"
+          echo 'P01_V2.21.17_PRODUCTION_CLOSURE=CLOSED'
+
+      - name: Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # P01 V2.21.17 Production Closure
+          Production: 2.21.17 / Latest 2.21.17 / CLOSED
+          Formal Release / Discovery / Upgrade / Version Readback: PASS
+          Release: v2.21.17 / ID $RELEASE_ID
+          core-updates: $CORE_UPDATES_COMMIT
+          Authority Head: $CLOSURE_HEAD
+          main: $REMOTE_MAIN
+          develop: $REMOTE_DEVELOP
+          Product Failure: NONE
+          Project Block: NONE
+          EOF
