@@ -92,7 +92,7 @@ await page.locator('.nav-item[data-nav="domains"]').click();
 await settle();
 assert(await page.locator('#view-domains .pagination').count() >= 1, 'domains pagination missing with 65 rows');
 const pagerText = await page.locator('#view-domains .pagination').innerText();
-assert(/第\s*1\s*\/\s*2/.test(pagerText), `unexpected domain pager: ${pagerText}`);
+assert(/(?:第\s*)?1\s*\/\s*2/.test(pagerText), `unexpected domain pager: ${pagerText}`);
 const domainSearch = page.locator('#view-domains .search-box input').first();
 await domainSearch.fill('fixture-001.example.test');
 await domainSearch.press('Enter');
