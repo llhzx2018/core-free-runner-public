@@ -131,6 +131,7 @@ await page.keyboard.press('Tab');
 assert(await page.locator('#drawer').evaluate((d) => d.contains(document.activeElement)), 'drawer tab focus escaped');
 await page.keyboard.press('Escape');
 await page.waitForFunction(() => document.querySelector('#drawer')?.getAttribute('aria-hidden') === 'true');
+await page.waitForFunction(() => document.querySelector('#page-actions [data-action="new-domain"]') === document.activeElement);
 assert(await newDomain.evaluate((b) => b === document.activeElement), 'drawer did not return focus to opener');
 
 // Settings subpages and save-state success.
