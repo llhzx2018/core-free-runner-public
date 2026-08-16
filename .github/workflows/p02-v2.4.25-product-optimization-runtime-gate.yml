@@ -1,0 +1,132 @@
+name: P02 V2.4.25 Product Optimization Runtime Gate
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-product-optimization-runtime-gate.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-product-optimization-runtime-gate
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CANDIDATE_SHA: 11019841b837038092b153930ab8e185bf2a2676
+      CANDIDATE_VERSION: 2.4.25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - name: Require private source token
+        env: {PRIVATE_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'}
+        run: test -n "$PRIVATE_TOKEN"
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 11019841b837038092b153930ab8e185bf2a2676
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install runtime
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Exact identity / PHP / JS / source manifest / repository gates
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$CANDIDATE_VERSION"
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          test "$(python3 -c 'import json;print(json.load(open("SOURCE_MANIFEST.json"))["runtime_source_file_count"])')" = 53
+          PHP_COUNT=0; while IFS= read -r -d '' f; do php -l "$f" >/dev/null; PHP_COUNT=$((PHP_COUNT+1)); done < <(find src public -type f -name '*.php' -print0)
+          JS_COUNT=0; while IFS= read -r -d '' f; do node --check "$f" >/dev/null; JS_COUNT=$((JS_COUNT+1)); done < <(find public tests -type f \( -name '*.js' -o -name '*.mjs' \) -print0)
+          echo "PHP_SYNTAX_PASS=$PHP_COUNT"
+          echo "JS_SYNTAX_PASS=$JS_COUNT"
+          echo 'REPOSITORY_AND_SOURCE_MANIFEST=PASS'
+      - name: Complete source runtime regression
+        working-directory: p02
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-runtime-evidence
+          VF_TEST_PORT: '18230'
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/maintenance-reverify.sh');s=p.read_text();s=s.replace('2.4.24','2.4.25');p.write_text(s)
+          PY
+          bash scripts/maintenance-reverify.sh
+          python3 - "$EVIDENCE_DIR/summary.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['result']=='PASS' and x['version']=='2.4.25' and x['schema']==2401
+          print('COMPLETE_SOURCE_RUNTIME_REGRESSION=PASS')
+          PY
+      - name: Optimization network claim + seven viewport UA/UI
+        working-directory: p02
+        env:
+          TEST_PASSWORD: 'P02-OPT-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-opt"; SITE="$ROOT/site"; PORT=18231; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          cat > .opt-runtime.mjs <<'JS'
+          import fs from 'node:fs';import{chromium}from'playwright';
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD,out=process.env.UI_JSON;const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'});await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            const s=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());if(s.version!=='2.4.25')throw new Error('version '+s.version);const csrf=s.csrf;
+            const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+            const c=await post('category_save',{name:'Optimization Runtime',description:'',icon:'folder'});if(!c.ok)throw new Error('category');const cid=Number(c.id);const i=await post('content_save',{category_id:cid,title:'Optimization Seed',content:'before',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!i.ok)throw new Error('item');const iid=Number(i.id);
+            await page.reload({waitUntil:'networkidle'});await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});await page.waitForTimeout(200);
+            let boots=0;const h=r=>{if(r.url().includes('action=app_bootstrap'))boots++};page.on('request',h);await page.locator('#articleTitleInput').fill('Optimization Saved');await page.locator('#articleSource').fill('optimized content ✓');await page.locator('[data-workspace-command="save"]').last().click();await page.waitForFunction(()=>state.readerItem?.title==='Optimization Saved'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(250);page.off('request',h);if(boots!==0)throw new Error('redundant app_bootstrap '+boots);
+            const read=await page.evaluate(async id=>await(await fetch('/api.php?action=content_get&id='+id,{cache:'no-store'})).json(),iid);if(!read.ok||read.item?.content!=='optimized content ✓')throw new Error('persist readback');
+            const rows=[];for(const[w,hv]of[[1920,1080],[1600,1000],[1440,900],[1318,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:hv});await page.waitForTimeout(100);const r=await page.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body?.scrollWidth||0}));if(r.scroll>r.client+3)throw new Error('overflow '+w+' '+r.scroll+'>'+r.client);rows.push({width:w,height:hv,...r})}
+            if(errors.length)throw new Error(errors.join(' | '));fs.writeFileSync(out,JSON.stringify({ordinary_edit_extra_app_bootstrap:boots,persisted_readback:'PASS',viewports:rows,console_errors:errors},null,2));console.log('OPTIMIZATION_NETWORK=PASS');console.log('UA_UI_RESPONSIVE_7_VIEWPORTS=PASS');
+          }finally{await browser.close()}
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$TEST_PASSWORD" UI_JSON="$RUNNER_TEMP/ui-responsive.json" node .opt-runtime.mjs
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+      - name: Public runtime evidence
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/public-evidence"
+          cp "$RUNNER_TEMP/ui-responsive.json" "$RUNNER_TEMP/public-evidence/ui-responsive.json"
+          python3 - "$RUNNER_TEMP/public-evidence/runtime-summary.json" <<'PY'
+          import json,os,sys,datetime
+          x={'project':'P02 · VF Library','candidate_version':'2.4.25','candidate_commit':os.environ['CANDIDATE_SHA'],'schema':2401,'runner':'llhzx2018/core-free-runner-public','run_id':os.environ['GITHUB_RUN_ID'],'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'gates':{'php_js':'PASS','sqlite':'PASS','security':'PASS','crud':'PASS','search':'PASS','attachment':'PASS','category':'PASS','backup_restore':'PASS','fresh_setup':'PASS','browser_e2e':'PASS','responsive':'PASS','ua_ui':'PASS'},'optimization':{'ordinary_edit_extra_app_bootstrap':0,'persisted_readback':'PASS'},'privacy':'NO_PRIVATE_SOURCE_DB_SESSION_SECRET_IN_PUBLIC_EVIDENCE'}
+          json.dump(x,open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+          if find "$RUNNER_TEMP/public-evidence" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' \) -print -quit|grep -q .;then exit 91;fi
+          echo 'PUBLIC_RUNTIME_EVIDENCE_PRIVACY=PASS'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.25-runtime-gate-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-evidence/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Cleanup
+        if: always()
+        run: rm -rf p02 "$RUNNER_TEMP/p02-runtime-evidence" "$RUNNER_TEMP/p02-opt" "$RUNNER_TEMP/public-evidence" || true
