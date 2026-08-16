@@ -1,0 +1,180 @@
+name: P05 Production Target Readback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-production-target-readback.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p05-production-target-readback
+  cancel-in-progress: false
+
+jobs:
+  target-readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      P05_SSH_HOST: ${{ secrets.P05_SSH_HOST }}
+      P05_SSH_USER: ${{ secrets.P05_SSH_USER }}
+      P05_SSH_PRIVATE_KEY: ${{ secrets.P05_SSH_PRIVATE_KEY }}
+      CLOUDPANEL_SSH_HOST: ${{ secrets.CLOUDPANEL_SSH_HOST }}
+      CLOUDPANEL_SSH_USER: ${{ secrets.CLOUDPANEL_SSH_USER }}
+      CLOUDPANEL_SSH_PRIVATE_KEY: ${{ secrets.CLOUDPANEL_SSH_PRIVATE_KEY }}
+      PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+      PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Public runner and credential channel gate
+        id: gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'PUBLIC_RUNNER_EXECUTION=PASS'
+          CHANNEL=''
+          if [ -n "${P05_SSH_HOST:-}" ] && [ -n "${P05_SSH_USER:-}" ] && [ -n "${P05_SSH_PRIVATE_KEY:-}" ]; then
+            CHANNEL='P05'
+          elif [ -n "${CLOUDPANEL_SSH_HOST:-}" ] && [ -n "${CLOUDPANEL_SSH_USER:-}" ] && [ -n "${CLOUDPANEL_SSH_PRIVATE_KEY:-}" ]; then
+            CHANNEL='CLOUDPANEL'
+          elif [ -n "${PRODUCTION_SSH_HOST:-}" ] && [ -n "${PRODUCTION_SSH_USER:-}" ] && [ -n "${PRODUCTION_SSH_PRIVATE_KEY:-}" ]; then
+            CHANNEL='PRODUCTION'
+          fi
+          if [ -z "$CHANNEL" ]; then
+            echo 'PRODUCTION_SSH_CHANNEL=INCOMPLETE'
+            echo 'PRODUCTION_TARGET_READBACK=BLOCKED'
+            echo 'PRODUCTION_WRITE=0'
+            echo 'channel=' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "PRODUCTION_SSH_CHANNEL=${CHANNEL}_EXISTING_CREDENTIAL_COMPLETE"
+          echo 'NEW_CREDENTIAL_CREATED=NO'
+          echo 'channel='"$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve selected existing SSH credential without printing secret values
+        if: steps.gate.outputs.channel != ''
+        id: creds
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          case '${{ steps.gate.outputs.channel }}' in
+            P05)
+              printf '%s' "$P05_SSH_HOST" > /tmp/host
+              printf '%s' "$P05_SSH_USER" > /tmp/user
+              printf '%s' "$P05_SSH_PRIVATE_KEY" > /tmp/key
+              ;;
+            CLOUDPANEL)
+              printf '%s' "$CLOUDPANEL_SSH_HOST" > /tmp/host
+              printf '%s' "$CLOUDPANEL_SSH_USER" > /tmp/user
+              printf '%s' "$CLOUDPANEL_SSH_PRIVATE_KEY" > /tmp/key
+              ;;
+            PRODUCTION)
+              printf '%s' "$PRODUCTION_SSH_HOST" > /tmp/host
+              printf '%s' "$PRODUCTION_SSH_USER" > /tmp/user
+              printf '%s' "$PRODUCTION_SSH_PRIVATE_KEY" > /tmp/key
+              ;;
+            *) exit 2 ;;
+          esac
+          chmod 600 /tmp/key
+          echo 'SSH_CREDENTIAL_RESOLUTION=PASS'
+          echo 'SECRET_VALUE_PRINTED=NO'
+
+      - name: Read-only CloudPanel target discovery
+        if: steps.gate.outputs.channel != ''
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          HOST="$(cat /tmp/host)"
+          USER="$(cat /tmp/user)"
+          ssh -i /tmp/key -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=accept-new "$USER@$HOST" 'bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          echo 'REMOTE_SSH_READBACK=PASS'
+          echo "SSH_LOGIN_USER=$(id -un)"
+          echo "SSH_LOGIN_HOME=$HOME"
+
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          for base in "$HOME" /home; do
+            [ -d "$base" ] || continue
+            find "$base" -maxdepth 5 -type f -path '*/htdocs/*/package.json' -print 2>/dev/null || true
+          done | sort -u | while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            if grep -Eq '"name"[[:space:]]*:[[:space:]]*"vf-seo"' "$pkg" 2>/dev/null; then
+              dirname "$pkg"
+            fi
+          done | sort -u > "$tmp"
+
+          count="$(grep -c . "$tmp" || true)"
+          echo "VF_SEO_SITE_CANDIDATE_COUNT=$count"
+          if [ "$count" -ne 1 ]; then
+            echo 'PRODUCTION_TARGET_UNIQUE=NO'
+            echo 'PRODUCTION_WRITE=0'
+            exit 0
+          fi
+
+          root="$(cat "$tmp")"
+          domain="$(basename "$root")"
+          site_user="$(stat -c '%U' "$root")"
+          site_home="$(getent passwd "$site_user" | cut -d: -f6 || true)"
+          [ -n "$site_home" ] || site_home="$(dirname "$(dirname "$root")")"
+
+          echo 'PRODUCTION_TARGET_UNIQUE=YES'
+          echo "PRODUCTION_DOMAIN=$domain"
+          echo "APPLICATION_ROOT=$root"
+          echo "SITE_USER=$site_user"
+          echo "SITE_HOME=$site_home"
+          echo "PERSISTENT_DATA_ROOT=$site_home/.local/share/vf-seo"
+          echo "SQLITE_PATH=$site_home/.local/share/vf-seo/vf-seo.sqlite3"
+          echo "BACKUP_ROOT=$site_home/.local/share/vf-seo/backups"
+          echo "SECRET_ROOT=$site_home/.config/vf-seo"
+          echo "RUNTIME_ENV=$site_home/.config/vf-seo/runtime.env"
+          echo "PM2_USER=$site_user"
+          echo "PM2_HOME=$site_home/.pm2"
+
+          run_as_site() {
+            if [ "$(id -un)" = "$site_user" ]; then
+              HOME="$site_home" bash -lc "$1"
+            elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              sudo -n -u "$site_user" -H bash -lc "$1"
+            else
+              return 126
+            fi
+          }
+
+          node_v="$(run_as_site 'node -v 2>/dev/null' || true)"
+          if [ -n "$node_v" ]; then echo "NODE_VERSION=$node_v"; else echo 'NODE_VERSION=UNRESOLVED'; fi
+          pm2_v="$(run_as_site 'pm2 -v 2>/dev/null' || true)"
+          if [ -n "$pm2_v" ]; then echo "PM2_VERSION=$pm2_v"; else echo 'PM2_VERSION=NOT_INSTALLED_OR_UNRESOLVED'; fi
+
+          nginx_text=''
+          if [ -r /etc/nginx/nginx.conf ]; then
+            nginx_text="$(grep -RIl -- "$domain" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null | head -n 5 | xargs -r cat 2>/dev/null || true)"
+          elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            nginx_text="$(sudo -n sh -c "grep -RIl -- '$domain' /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null | head -n 5 | xargs -r cat 2>/dev/null" || true)"
+          fi
+          if [ -n "$nginx_text" ]; then
+            echo 'NGINX_SITE_CONFIG=READABLE'
+            if grep -Eq 'listen[[:space:]].*443|ssl_certificate' <<<"$nginx_text"; then echo 'HTTPS_CONFIG=PASS'; else echo 'HTTPS_CONFIG=UNCONFIRMED'; fi
+            port="$(grep -Eo '127\.0\.0\.1:[0-9]+' <<<"$nginx_text" | head -n1 | cut -d: -f2 || true)"
+            if [ -n "$port" ]; then echo "RUNTIME_PORT=$port"; echo 'NGINX_REVERSE_PROXY=PASS'; else echo 'RUNTIME_PORT=UNRESOLVED'; echo 'NGINX_REVERSE_PROXY=UNCONFIRMED'; fi
+          else
+            echo 'NGINX_SITE_CONFIG=UNRESOLVED'
+            echo 'HTTPS_CONFIG=UNRESOLVED'
+            echo 'RUNTIME_PORT=UNRESOLVED'
+            echo 'NGINX_REVERSE_PROXY=UNRESOLVED'
+          fi
+
+          echo 'REMOTE_COMMAND_MODE=READ_ONLY'
+          echo 'PRODUCTION_WRITE=0'
+          REMOTE
+
+      - name: Safety seal
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -f /tmp/host /tmp/user /tmp/key
+          echo 'PRODUCTION_NETWORK_WRITE_EXECUTED=NO'
+          echo 'SECRET_VALUE_PRINTED=NO'
