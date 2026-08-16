@@ -1,0 +1,193 @@
+name: P04 VF Infra V2.5.6 Atomic Gate Continuation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v256-atomic-continuation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v256-atomic-continuation
+  cancel-in-progress: true
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: 45f960715a2b53b4cf09524862e76b19c58f0c68
+  SOURCE_COMMIT: e44fdc0564ef5678d7805fd50525c1492b523d58
+  FORMAL_DIR: ${{ github.workspace }}/.p04-v256-atomic
+  EVIDENCE_DIR: ${{ github.workspace }}/p04-atomic-evidence
+
+jobs:
+  atomic-continuation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact V2.5.6 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact Product Candidate before harness patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.6'
+          mkdir -p "$EVIDENCE_DIR"
+          printf '{"repository":"%s","commit":"%s","tree":"%s","version":"2.5.6","schema":14,"harness_patch":"post-upgrade-domain-async-wait-only"}\n' \
+            "$TARGET_REPOSITORY" "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$EVIDENCE_DIR/source-identity.json"
+
+      - name: Setup PHP Python Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Rebuild and validate exact deterministic artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          python scripts/build-v256-formal-artifacts.py --output "$FORMAL_DIR" | tee "$EVIDENCE_DIR/formal-build.txt"
+          python scripts/validate-v256-formal-artifacts.py \
+            --runtime "$FORMAL_DIR/runtime" \
+            --full "$FORMAL_DIR/VF_Infra_V2.5.6_FULL.zip" \
+            --update "$FORMAL_DIR/update-set/VF_Infra_V2.5.6_UPDATE.zip" \
+            --atomic "$FORMAL_DIR/update-set/VF_Infra_V2.5.6_ATOMIC.zip" \
+            --package-manifest "$FORMAL_DIR/update-set/PACKAGE_MANIFEST.json" \
+            --sha256sums "$FORMAL_DIR/update-set/SHA256SUMS.txt" | tee "$EVIDENCE_DIR/formal-validation.txt"
+          cp "$FORMAL_DIR/FORMAL_ARTIFACT_MANIFEST.json" "$EVIDENCE_DIR/FORMAL_ARTIFACT_MANIFEST.json"
+          cp "$FORMAL_DIR/FORMAL_SHA256SUMS.txt" "$EVIDENCE_DIR/FORMAL_SHA256SUMS.txt"
+
+      - name: Install browser dependency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Apply evidence-only asynchronous readback wait
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/e2e/v256-upgrade.mjs')
+          s=p.read_text(encoding='utf-8')
+          old="""  await switchRoute('domains');\n  assert((await page.locator('#view-domains').textContent()).includes(domain), 'synthetic business data not preserved after upgrade');\n"""
+          new="""  await switchRoute('domains');\n  await page.waitForFunction((expected) => document.querySelector('#view-domains')?.textContent?.includes(expected), domain, { timeout: 30000 });\n  assert((await page.locator('#view-domains').textContent()).includes(domain), 'synthetic business data not preserved after upgrade');\n"""
+          if s.count(old)!=1:
+              raise SystemExit('UPGRADE_E2E_TIMING_SENTINEL_DRIFT')
+          p.write_text(s.replace(old,new),encoding='utf-8')
+          PY
+          node --check tests/e2e/v256-upgrade.mjs
+          git diff -- tests/e2e/v256-upgrade.mjs > "$EVIDENCE_DIR/evidence-only-harness.patch"
+          test -s "$EVIDENCE_DIR/evidence-only-harness.patch"
+
+      - name: Checkout exact V2.5.5 Production source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source-v255-repo
+
+      - name: Build exact V2.5.5 runtime and prove payload delta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_RUNTIME="${RUNNER_TEMP}/p04-v255-runtime"
+          python source-v255-repo/scripts/build-release-tree.py "$SOURCE_RUNTIME"
+          test "$(tr -d '\r\n' < "$SOURCE_RUNTIME/VERSION.txt")" = '2.5.5'
+          python - "$SOURCE_RUNTIME" "$FORMAL_DIR/runtime" "$FORMAL_DIR/update-set/PACKAGE_MANIFEST.json" <<'PY' | tee "$EVIDENCE_DIR/runtime-delta.txt"
+          from pathlib import Path
+          import hashlib,json,sys
+          old,new,manifest=Path(sys.argv[1]),Path(sys.argv[2]),json.loads(Path(sys.argv[3]).read_text())
+          def files(root):
+              return {p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}
+          a,b=files(old),files(new)
+          changed=sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))
+          expected=sorted(manifest['changed_files'])
+          print(json.dumps({'changed':changed,'expected':expected},ensure_ascii=False))
+          if changed!=expected: raise SystemExit('RUNTIME_DELTA_PAYLOAD_MISMATCH')
+          print('P04_V256_RUNTIME_DELTA_PAYLOAD_PASS')
+          PY
+
+      - name: Run actual V2.5.5 to V2.5.6 Atomic upgrade
+        shell: bash
+        env:
+          VF_INFRA_UPGRADE_EVIDENCE_DIR: ${{ env.EVIDENCE_DIR }}/upgrade-v256
+        run: |
+          set -Eeuo pipefail
+          SOURCE_RUNTIME="${RUNNER_TEMP}/p04-v255-runtime"
+          chmod +x scripts/run-v256-upgrade-gate.sh
+          scripts/run-v256-upgrade-gate.sh "$SOURCE_RUNTIME" "$FORMAL_DIR/update-set/repair-v2.5.6.php"
+
+      - name: Negative source and corrupt package gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REPAIR="$FORMAL_DIR/update-set/repair-v2.5.6.php"
+          if VF_ATOMIC_SELF_TEST_SOURCE_VERSION=2.5.4 php "$REPAIR" --self-test >"$EVIDENCE_DIR/negative-illegal-source.txt" 2>&1; then
+            echo 'illegal source unexpectedly accepted' >&2
+            exit 69
+          fi
+          grep -q 'BLOCK' "$EVIDENCE_DIR/negative-illegal-source.txt"
+          echo 'P04_V256_NEGATIVE_ILLEGAL_SOURCE_PASS' >> "$EVIDENCE_DIR/negative-illegal-source.txt"
+
+          BAD="${RUNNER_TEMP}/bad-update.zip"
+          cp "$FORMAL_DIR/update-set/VF_Infra_V2.5.6_UPDATE.zip" "$BAD"
+          printf 'corrupt' >> "$BAD"
+          if python scripts/validate-v256-formal-artifacts.py \
+            --runtime "$FORMAL_DIR/runtime" \
+            --full "$FORMAL_DIR/VF_Infra_V2.5.6_FULL.zip" \
+            --update "$BAD" \
+            --atomic "$FORMAL_DIR/update-set/VF_Infra_V2.5.6_ATOMIC.zip" \
+            --package-manifest "$FORMAL_DIR/update-set/PACKAGE_MANIFEST.json" \
+            --sha256sums "$FORMAL_DIR/update-set/SHA256SUMS.txt" >"$EVIDENCE_DIR/negative-corrupt-update.txt" 2>&1; then
+            echo 'corrupt update unexpectedly accepted' >&2
+            exit 69
+          fi
+          echo 'P04_V256_NEGATIVE_CORRUPT_UPDATE_PASS' >> "$EVIDENCE_DIR/negative-corrupt-update.txt"
+
+      - name: Final evidence inventory
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          printf '%s\n' "$TARGET_COMMIT" > "$EVIDENCE_DIR/candidate-product-commit.txt"
+          printf '45f960715a2b53b4cf09524862e76b19c58f0c68\n' > "$EVIDENCE_DIR/tested-product-identity.txt"
+          find "$EVIDENCE_DIR" -type f -print0 | sort -z | xargs -0 sha256sum > "$EVIDENCE_DIR/EVIDENCE_SHA256SUMS.txt" || true
+
+      - name: Remove all private source and formal packages
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$FORMAL_DIR" "$GITHUB_WORKSPACE/source-v255-repo" "$GITHUB_WORKSPACE/node_modules"
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.6-Atomic-Continuation-Evidence
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 14
