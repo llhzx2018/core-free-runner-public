@@ -1,0 +1,194 @@
+name: S01-C02 V1.21.790 Real Online Update Candidate
+
+on:
+  push:
+    branches:
+      - task/s01-c02-v121790-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPS_REPOSITORY: llhzx2018/vf-tools-ops
+  SOURCE_789_REF: task/wp-native-update-1.21.789
+  SOURCE_789_PRODUCT_COMMIT: 9183c05b058e0b80411e3f329b6d34636dcd9a72
+  CANDIDATE_790_REF: task/v121790-real-online-update-verification
+  CANDIDATE_790_COMMIT: 91bf324193095846a0ff546a9dca716daf44b4de
+  CANDIDATE_790_TREE: 529e86d6f10623762865dc2f6d1c73598b34aaa6
+  ASSET_NAME: vf-tools-ops_V1.21.790.zip
+
+jobs:
+  candidate:
+    name: 1.21.789 -> 1.21.790 Native Plugin_Upgrader / Preservation / Fresh Runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_ops_update
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - name: Require existing unified private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'VF_PRIVATE_READ_TOKEN_PRESENT=PASS'
+
+      - name: Checkout sealed 1.21.789 update harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.OPS_REPOSITORY }}
+          ref: ${{ env.SOURCE_789_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: source789
+
+      - name: Checkout exact 1.21.790 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.OPS_REPOSITORY }}
+          ref: ${{ env.CANDIDATE_790_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate790
+
+      - name: Verify source and target Git identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source789 show ${SOURCE_789_PRODUCT_COMMIT}:VERSION | tr -d '\r\n')" = '1.21.789'
+          git -C source789 diff --name-only "$SOURCE_789_PRODUCT_COMMIT" HEAD -- ':!/.github' > /tmp/source789-post-product.txt
+          test ! -s /tmp/source789-post-product.txt
+          test "$(git -C candidate790 rev-parse HEAD)" = "$CANDIDATE_790_COMMIT"
+          test "$(git -C candidate790 rev-parse HEAD^{tree})" = "$CANDIDATE_790_TREE"
+          test "$(tr -d '\r\n' < candidate790/VERSION)" = '1.21.790'
+          grep -q '^ \* Version: 1\.21\.790$' candidate790/vf-ops.php
+          test "$(git -C candidate790 diff --name-only develop...HEAD | sort | tr '\n' ' ')" = 'VERSION vf-ops.php '
+          echo 'SOURCE_1_21_789_IDENTITY=PASS'
+          echo 'CANDIDATE_1_21_790_IDENTITY=PASS'
+          echo 'BUSINESS_SOURCE_CHANGE=NO'
+          echo 'SCHEMA_CHANGE=NO'
+          echo 'LOCATOR_CUTOVER=NO'
+
+      - name: Provision PHP and tools
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.3'
+          extensions: mysqli, curl, zip, sodium, mbstring, xml, gd
+          coverage: none
+
+      - name: Install runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mariadb-client jq unzip curl >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp
+          sudo mv /tmp/wp /usr/local/bin/wp
+          for i in $(seq 1 30); do mariadb -h127.0.0.1 -uvf -pvf -e 'SELECT 1' vf_ops_update >/dev/null 2>&1 && break; sleep 1; done
+          php -v
+          wp --info
+          mariadb -h127.0.0.1 -uvf -pvf -e 'SELECT VERSION()' vf_ops_update
+
+      - name: Execute sealed full 1.21.789 to 1.21.790 native update harness
+        shell: bash
+        run: bash source789/.github/wp-update/run.sh source789 evidence/sealed-789-to-790
+
+      - name: Build exact 1.21.790 candidate artifact and prove byte identity with tested target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence/candidate790
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          repo=Path('candidate790'); out=Path('evidence/candidate790/vf-tools-ops_V1.21.790.zip')
+          def runtime(rel):
+              p=rel.as_posix().lstrip('/'); parts=p.split('/')
+              if not p or '..' in parts:return False
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts):return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I):return False
+              if '/' not in p:return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          files={}
+          for p in repo.rglob('*'):
+              if p.is_file() and not p.is_symlink() and runtime(p.relative_to(repo)):
+                  files[p.relative_to(repo).as_posix()]=p.read_bytes()
+          files=dict(sorted(files.items()))
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,b in files.items():
+                  zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,8,16,0,0,0));zi.compress_type=zipfile.ZIP_DEFLATED;zi.external_attr=0o100644<<16;z.writestr(zi,b)
+          h=hashlib.sha256()
+          for rel,b in files.items():
+              h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(b).hexdigest().encode());h.update(b'\n')
+          meta={'candidate_commit':'91bf324193095846a0ff546a9dca716daf44b4de','product_tree':'529e86d6f10623762865dc2f6d1c73598b34aaa6','artifact_name':out.name,'artifact_bytes':out.stat().st_size,'artifact_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_files':len(files),'runtime_fingerprint':h.hexdigest(),'schema':'6.0.0','database_tables':48,'physical_locator':'vf-ops/vf-ops.php','locator_cutover':False}
+          Path('evidence/candidate790/CANDIDATE_IDENTITY.json').write_text(json.dumps(meta,indent=2)+'\n')
+          print(json.dumps(meta,indent=2))
+          PY
+          TESTED_TARGET="${RUNNER_TEMP}/vf-ops-wp-update/mock/fixture.zip"
+          test -f "$TESTED_TARGET"
+          test -f "evidence/candidate790/$ASSET_NAME"
+          cmp -s "$TESTED_TARGET" "evidence/candidate790/$ASSET_NAME"
+          test "$(sha256sum "$TESTED_TARGET" | awk '{print $1}')" = "$(sha256sum "evidence/candidate790/$ASSET_NAME" | awk '{print $1}')"
+          unzip -tq "evidence/candidate790/$ASSET_NAME" >/dev/null
+          echo 'TESTED_TARGET_EQUALS_CANDIDATE_ARTIFACT=PASS'
+
+      - name: Fresh install exact 1.21.790 artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mariadb -h127.0.0.1 -uroot -proot -e "CREATE DATABASE vf_ops_fresh790; GRANT ALL PRIVILEGES ON vf_ops_fresh790.* TO 'vf'@'%'; FLUSH PRIVILEGES;"
+          FRESH="${RUNNER_TEMP}/vf-ops-fresh790"
+          rm -rf "$FRESH"; mkdir -p "$FRESH"
+          wp core download --path="$FRESH" --version=7.0.2 --force >/dev/null
+          wp config create --path="$FRESH" --dbname=vf_ops_fresh790 --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check >/dev/null
+          wp core install --path="$FRESH" --url=http://127.0.0.1:18093 --title='VF Ops 1.21.790 Fresh' --admin_user=admin --admin_password='Fixture-Admin-790!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          wp plugin install "$GITHUB_WORKSPACE/evidence/candidate790/$ASSET_NAME" --path="$FRESH" --activate >/dev/null
+          wp eval --path="$FRESH" '
+            do_action("admin_init");
+            if (VF_OPS_VERSION!=="1.21.790") exit(2);
+            $c=vf_tools_ops_v6_contract(); if(($c["schema_version"]??"")!=="6.0.0") exit(3);
+            $s=vf_tools_ops_v6_schema_state(); if(empty($s["current"])) exit(4);
+            if(count(vf_tools_ops_v6_table_suffixes())!==48) exit(5);
+            $a=VF_Ops_Runtime_Authority_V1::stored(); if(($a["version"]??"")!=="1.21.790") exit(6);
+            if(!is_plugin_active("vf-ops/vf-ops.php")) exit(7);
+            echo "FRESH_RUNTIME_1_21_790=PASS\nSCHEMA_6_0_0=PASS\nTABLES_48=PASS\nPLUGIN_ACTIVE=PASS\n";
+          '
+          test -d "$FRESH/wp-content/plugins/vf-ops"
+          test ! -e "$FRESH/wp-content/plugins/vf-tools-ops"
+          echo 'DUPLICATE_PLUGIN_COUNT=0'
+
+      - name: Seal candidate evidence summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp evidence/sealed-789-to-790/FINAL_EVIDENCE.json evidence/candidate790/SEALED_UPDATE_HARNESS_EVIDENCE.json
+          jq -n \
+            --slurpfile identity evidence/candidate790/CANDIDATE_IDENTITY.json \
+            --slurpfile harness evidence/candidate790/SEALED_UPDATE_HARNESS_EVIDENCE.json \
+            '{candidate:$identity[0],sealed_update_harness:$harness[0],gates:{fresh_runtime:"PASS",native_update_1_21_789_to_1_21_790:"PASS",update_plugins:"PASS",plugin_upgrader:"PASS",private_release_asset_auth:"PASS",bytes_sha:"PASS",pre_update_backup:"PASS",recovery:"PASS",tables_48_preserved:"PASS",options_preserved:"PASS",secrets_preserved:"PASS",cron_preserved:"PASS",hooks_preserved:"PASS",capabilities_preserved:"PASS",business_state_preserved:"PASS",plugin_active:"PASS",duplicate_plugin_count:0,schema_migration:"NONE",locator_cutover:"NO",production_update:"NOT_EXECUTED"}}' > evidence/candidate790/FINAL_V121790_CANDIDATE.json
+          cat evidence/candidate790/FINAL_V121790_CANDIDATE.json
+
+      - name: Upload exact tested candidate and evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.790-real-online-update-candidate
+          path: evidence/candidate790/
+          if-no-files-found: error
+          retention-days: 30
