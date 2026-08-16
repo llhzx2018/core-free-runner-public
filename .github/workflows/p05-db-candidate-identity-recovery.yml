@@ -1,0 +1,206 @@
+name: P05 Database Candidate Identity Recovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p05-db-candidate-identity-recovery.yml'
+      - 'requests/p05-db-candidate-identity-*'
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_P05_SHA: d2bfd4b984d554ced8e8879d46770b71dbc9d07a
+  EXPECTED_P05_TREE: 60feabec2a256cb0377c2fad77fb0895e9d83812
+  NODE_IMAGE: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+  VF_DATABASE_PROVIDER: sqlite
+  VF_SQLITE_PATH: /tmp/vf-seo-id-recovery/vf-seo.sqlite3
+  VF_BACKUP_DIR: /tmp/vf-seo-id-recovery/backups
+  VF_ADMIN_USERNAME: identity-admin
+  VF_ADMIN_PASSWORD: fixture-identity-recovery-password-20260816
+  VF_SECURE_COOKIES: 'false'
+  VF_REQUIRE_HTTPS: 'false'
+  VF_TRUST_PROXY: 'false'
+  VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  PORT: 3105
+
+jobs:
+  candidate-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout public control repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact remote P05 candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact remote source identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(git -C p05 rev-parse HEAD^{tree})" = "$EXPECTED_P05_TREE"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+          grep -q '"schema_identity": "VF-SEO-SCHEMA@1"' p05/VF_PROJECT.json
+          grep -q '"schema_version": 1' p05/VF_PROJECT.json
+          echo "SOURCE_COMMIT=$EXPECTED_P05_SHA"
+          echo "SOURCE_TREE=$EXPECTED_P05_TREE"
+          echo "VERSION=1.0.0"
+          echo "SCHEMA=VF-SEO-SCHEMA@1/1"
+
+      - name: Build boundary and targeted restore regression
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /tmp/vf-seo-id-recovery
+          mkdir -p /tmp/vf-seo-id-recovery
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci; npm run lint; npm run typecheck; npm run build; npm run database:boundary; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready; timeout 180s node --import tsx --test --test-concurrency=1 tests/integration/database-rebaseline.test.ts'
+          echo TARGETED_RESTORE_REGRESSION=PASS
+
+      - name: Assemble deterministic direct-root V1.0.0 FULL
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-stage install-smoke VF_SEO_V1.0.0_FULL.zip VF_SEO_V1.0.0_FULL.zip.sha256
+          mkdir -p release-stage/docs/authority
+          cd p05
+          cp .env.example VERSION VF_PROJECT.json README.md CHANGELOG.md package.json package-lock.json tsconfig.json tsconfig.server.json vite.config.ts index.html ../release-stage/
+          cp install-cloudpanel.sh ecosystem.config.cjs ../release-stage/
+          cp -a bin config database scripts src public dist ../release-stage/
+          cp docs/authority/DATABASE_ARCHITECTURE.md ../release-stage/docs/authority/
+          cd ../release-stage
+          chmod +x install-cloudpanel.sh bin/*.sh
+          cat > RELEASE_SOURCE_IDENTITY.txt <<EOF
+          Product: P05 · VF SEO
+          Version: 1.0.0
+          Source Commit: $EXPECTED_P05_SHA
+          Source Tree: $EXPECTED_P05_TREE
+          Schema: VF-SEO-SCHEMA@1/1
+          Default Database: SQLite
+          EOF
+          find . -type f ! -name RELEASE_MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > RELEASE_MANIFEST.sha256
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root=Path('.')
+          out=Path('../VF_SEO_V1.0.0_FULL.zip')
+          epoch=(2026,8,16,0,0,0)
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix()
+                  zi=zipfile.ZipInfo(rel,epoch)
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  mode=0o755 if rel=='install-cloudpanel.sh' or (rel.startswith('bin/') and rel.endswith('.sh')) else 0o644
+                  zi.external_attr=(mode & 0xFFFF)<<16
+                  z.writestr(zi,p.read_bytes())
+          PY
+          cd ..
+          sha256sum VF_SEO_V1.0.0_FULL.zip | tee VF_SEO_V1.0.0_FULL.zip.sha256
+          echo "ARTIFACT_BYTES=$(stat -c %s VF_SEO_V1.0.0_FULL.zip)"
+          echo "ARTIFACT_FILES=$(unzip -Z1 VF_SEO_V1.0.0_FULL.zip | grep -c .)"
+          echo "ARTIFACT_SHA256=$(cut -d' ' -f1 VF_SEO_V1.0.0_FULL.zip.sha256)"
+
+      - name: FULL integrity privacy manifest and source gate
+        run: |
+          set -Eeuo pipefail
+          unzip -t VF_SEO_V1.0.0_FULL.zip >/dev/null
+          unzip -Z1 VF_SEO_V1.0.0_FULL.zip > release-files.txt
+          grep -qx 'install-cloudpanel.sh' release-files.txt
+          grep -qx 'ecosystem.config.cjs' release-files.txt
+          grep -qx 'RELEASE_SOURCE_IDENTITY.txt' release-files.txt
+          grep -qx 'database/migrations/sqlite/0001_initial.sql' release-files.txt
+          grep -qx 'database/migrations/0001_initial.sql' release-files.txt
+          ! grep -E '(^|/)(\.git|\.github|tests|node_modules|docs/evidence|private|PRIVATE_DATA)(/|$)' release-files.txt
+          ! grep -E '(^|/)\.env$|\.(sqlite|sqlite3|db|db-wal|db-shm|pem|key|p12|pfx)$' release-files.txt
+          ! grep -aERn --exclude='*.map' '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----)' release-stage
+          grep -Fq "$EXPECTED_P05_SHA" release-stage/RELEASE_SOURCE_IDENTITY.txt
+          grep -Fq "$EXPECTED_P05_TREE" release-stage/RELEASE_SOURCE_IDENTITY.txt
+          (cd release-stage && sha256sum -c RELEASE_MANIFEST.sha256 >/dev/null)
+          echo ZIP_INTEGRITY=PASS
+          echo RELEASE_MANIFEST=PASS
+          echo SECRET_GATE=PASS
+          echo PRIVATE_DATA_GATE=PASS
+          echo FULL_SOURCE_IDENTITY=PASS
+
+      - name: Fresh install and restore smoke from final ZIP
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /tmp/vf-seo-id-recovery install-smoke
+          mkdir -p /tmp/vf-seo-id-recovery install-smoke
+          unzip -q VF_SEO_V1.0.0_FULL.zip -d install-smoke
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" \
+            bash -lc 'node -e "import(\"node:sqlite\").then(()=>console.log(\"NODE_SQLITE=PASS\"))"; npm ci --omit=dev; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready; node dist/src/server/database/maintenance.js verify-live'
+          BACKUP_JSON=$(docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js backup)
+          echo "$BACKUP_JSON" | grep -q '"ok":true'
+          BACKUP_ID=$(printf '%s' "$BACKUP_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).manifest.id))')
+          test -n "$BACKUP_ID"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_MAINTENANCE_MODE=1 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js restore "$BACKUP_ID" | grep -q '"ok":true'
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js verify-live | grep -q '"ok":true'
+          echo SQLITE_FRESH_INSTALL=PASS
+          echo SQLITE_BACKUP_RESTORE=PASS
+          echo SQLITE_INTEGRITY=PASS
+
+      - name: Runtime boot from final ZIP
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-id-web >/dev/null 2>&1 || true
+          docker run -d --name p05-id-web --network host \
+            -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e PORT -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-id-recovery:/tmp/vf-seo-id-recovery -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 45); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS "http://127.0.0.1:$PORT/api/health" | grep -q '"ok":true'
+          echo RUNTIME_BOOT=PASS
+
+      - name: Upload verified SQLite candidate FULL
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_SEO_V1.0.0_DATABASE_IDENTITY_RECOVERY
+          path: |
+            VF_SEO_V1.0.0_FULL.zip
+            VF_SEO_V1.0.0_FULL.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Final identity verdict
+        run: |
+          set -Eeuo pipefail
+          echo CANDIDATE_IDENTITY_RECOVERY=PASS
+          echo FINAL_CANDIDATE_PRODUCT_COMMIT=$EXPECTED_P05_SHA
+          echo FINAL_CANDIDATE_PRODUCT_TREE=$EXPECTED_P05_TREE
+          echo VERSION=1.0.0
+          echo DEFAULT_DATABASE=SQLITE
+          echo FORMAL_PUBLICATION=NOT_EXECUTED
+          echo PRODUCTION=NOT_DEPLOYED
+
+      - name: Cleanup private source and runtime
+        if: always()
+        run: |
+          set +e
+          docker rm -f p05-id-web >/dev/null 2>&1
+          sudo rm -rf p05 install-smoke release-stage /tmp/vf-seo-id-recovery
+          if [ -e p05 ]; then echo PRIVATE_SOURCE_CLEANUP=FAIL; exit 1; fi
+          echo PRIVATE_SOURCE_CLEANUP=PASS
