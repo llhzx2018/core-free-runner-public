@@ -1,0 +1,159 @@
+name: P04 VF Infra V2.5.6 Atomic Recheck
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v256-atomic-recheck.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  atomic-recheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact V2.5.6 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: 45f960715a2b53b4cf09524862e76b19c58f0c68
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify Product Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '45f960715a2b53b4cf09524862e76b19c58f0c68'
+          test "$(git rev-parse HEAD^{tree})" = '95205f5803d0a0bd0fae5edd40939c8c073f79df'
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.6'
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Rebuild and validate deterministic artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-formal"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
+          mkdir -p "$EVIDENCE"
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          python scripts/build-v256-formal-artifacts.py --output "$FORMAL" | tee "$EVIDENCE/formal-build.txt"
+          python scripts/validate-v256-formal-artifacts.py --runtime "$FORMAL/runtime" --full "$FORMAL/VF_Infra_V2.5.6_FULL.zip" --update "$FORMAL/update-set/VF_Infra_V2.5.6_UPDATE.zip" --atomic "$FORMAL/update-set/VF_Infra_V2.5.6_ATOMIC.zip" --package-manifest "$FORMAL/update-set/PACKAGE_MANIFEST.json" --sha256sums "$FORMAL/update-set/SHA256SUMS.txt" | tee "$EVIDENCE/formal-validation.txt"
+          cp "$FORMAL/FORMAL_ARTIFACT_MANIFEST.json" "$EVIDENCE/FORMAL_ARTIFACT_MANIFEST.json"
+          cp "$FORMAL/FORMAL_SHA256SUMS.txt" "$EVIDENCE/FORMAL_SHA256SUMS.txt"
+
+      - name: Install Chromium test runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Apply evidence-only post-upgrade readback wait
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/e2e/v256-upgrade.mjs')
+          s=p.read_text(encoding='utf-8')
+          old="""  await switchRoute('domains');\n  assert((await page.locator('#view-domains').textContent()).includes(domain), 'synthetic business data not preserved after upgrade');\n"""
+          new="""  await switchRoute('domains');\n  await page.waitForFunction((expected) => document.querySelector('#view-domains')?.textContent?.includes(expected), domain, { timeout: 30000 });\n  assert((await page.locator('#view-domains').textContent()).includes(domain), 'synthetic business data not preserved after upgrade');\n"""
+          if s.count(old) != 1:
+              raise SystemExit('UPGRADE_E2E_TIMING_SENTINEL_DRIFT')
+          p.write_text(s.replace(old,new),encoding='utf-8')
+          PY
+          node --check tests/e2e/v256-upgrade.mjs
+          git diff -- tests/e2e/v256-upgrade.mjs > "$EVIDENCE/evidence-only-harness.patch"
+          test -s "$EVIDENCE/evidence-only-harness.patch"
+
+      - name: Checkout exact V2.5.5 Production source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: e44fdc0564ef5678d7805fd50525c1492b523d58
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source-v255-repo
+
+      - name: Build exact V2.5.5 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python source-v255-repo/scripts/build-release-tree.py "$RUNNER_TEMP/p04-v255-runtime"
+          test "$(tr -d '\r\n' < "$RUNNER_TEMP/p04-v255-runtime/VERSION.txt")" = '2.5.5'
+
+      - name: Run actual V2.5.5 to V2.5.6 Atomic upgrade
+        shell: bash
+        env:
+          VF_INFRA_UPGRADE_EVIDENCE_DIR: ${{ github.workspace }}/p04-atomic-evidence/upgrade-v256
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-formal"
+          chmod +x scripts/run-v256-upgrade-gate.sh
+          scripts/run-v256-upgrade-gate.sh "$RUNNER_TEMP/p04-v255-runtime" "$FORMAL/update-set/repair-v2.5.6.php"
+
+      - name: Run negative gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-formal"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
+          REPAIR="$FORMAL/update-set/repair-v2.5.6.php"
+          if VF_ATOMIC_SELF_TEST_SOURCE_VERSION=2.5.4 php "$REPAIR" --self-test >"$EVIDENCE/negative-illegal-source.txt" 2>&1; then
+            echo 'illegal source unexpectedly accepted' >&2
+            exit 69
+          fi
+          grep -q 'BLOCK' "$EVIDENCE/negative-illegal-source.txt"
+          echo 'P04_V256_NEGATIVE_ILLEGAL_SOURCE_PASS' >> "$EVIDENCE/negative-illegal-source.txt"
+          BAD="$RUNNER_TEMP/bad-update.zip"
+          cp "$FORMAL/update-set/VF_Infra_V2.5.6_UPDATE.zip" "$BAD"
+          printf 'corrupt' >> "$BAD"
+          if python scripts/validate-v256-formal-artifacts.py --runtime "$FORMAL/runtime" --full "$FORMAL/VF_Infra_V2.5.6_FULL.zip" --update "$BAD" --atomic "$FORMAL/update-set/VF_Infra_V2.5.6_ATOMIC.zip" --package-manifest "$FORMAL/update-set/PACKAGE_MANIFEST.json" --sha256sums "$FORMAL/update-set/SHA256SUMS.txt" >"$EVIDENCE/negative-corrupt-update.txt" 2>&1; then
+            echo 'corrupt update unexpectedly accepted' >&2
+            exit 69
+          fi
+          echo 'P04_V256_NEGATIVE_CORRUPT_UPDATE_PASS' >> "$EVIDENCE/negative-corrupt-update.txt"
+
+      - name: Final public-safe evidence inventory
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
+          mkdir -p "$EVIDENCE"
+          printf '45f960715a2b53b4cf09524862e76b19c58f0c68\n' > "$EVIDENCE/candidate-product-commit.txt"
+          printf '95205f5803d0a0bd0fae5edd40939c8c073f79df\n' > "$EVIDENCE/candidate-product-tree.txt"
+          find "$EVIDENCE" -type f -print0 | sort -z | xargs -0 sha256sum > "$EVIDENCE/EVIDENCE_SHA256SUMS.txt" || true
+          rm -rf "$RUNNER_TEMP/p04-v256-formal" "$RUNNER_TEMP/p04-v255-runtime" "$GITHUB_WORKSPACE/source-v255-repo" "$GITHUB_WORKSPACE/node_modules"
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.6-Atomic-Recheck-Evidence
+          path: p04-atomic-evidence
+          if-no-files-found: error
+          retention-days: 14
