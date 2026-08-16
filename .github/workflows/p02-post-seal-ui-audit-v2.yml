@@ -1,0 +1,130 @@
+name: P02 Post-Seal UI Audit V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-post-seal-ui-audit-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ui-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Require private read token
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_TOKEN"
+      - name: Checkout exact sealed Library source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: f69346f00719a253a0f7c94121b7af2a975b74ee
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          persist-credentials: false
+      - name: Install runtime and Chromium
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Build isolated installed site
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: P02-UI2-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-ui2"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S 127.0.0.1:18145 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18145/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          COOKIE="$ROOT/cookie.txt"
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18145/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf" value="([^"]+)"',s); assert m
+          print(html.unescape(m.group(1)))
+          PY
+          )
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18145' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18145/setup.php)
+          test "$code" = 303
+      - name: Dynamic UI state and scroll audit
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: P02-UI2-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          cat > .p02-ui-audit-v2.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18145', password=process.env.AUDIT_PASSWORD;
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage(); const errors=[];
+          page.on('pageerror',e=>errors.push('pageerror:'+String(e)));
+          page.on('console',m=>{if(m.type()==='error'&&!/409 \(Conflict\)/.test(m.text())) errors.push('console:'+m.text())});
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          let s=await page.evaluate(async()=>await (await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          if(!s?.site?.auth){await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));s=await page.evaluate(async()=>await (await fetch('/api.php?action=session',{cache:'no-store'})).json());}
+          const csrf=s.csrf;
+          const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)});return {status:r.status,j:await r.json()}},{a,b,csrf});
+          const cat=await post('category_save',{name:'UI Health Audit',description:'isolated',icon:'folder'}); if(!cat.j?.ok)throw new Error('category create failed'); const cid=Number(cat.j.id);
+          const article=await post('content_save',{category_id:cid,title:'UI Health Long Article',content:'# UI Health\n\n'+('## 小节\n长文本 English UTF-8 ✓\n\n'.repeat(500)),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!article.j?.ok)throw new Error('article create failed');const iid=Number(article.j.id);
+          await page.reload({waitUntil:'networkidle'});
+          const contentViewProbe=await page.evaluate(async cid=>{
+            const out={};
+            if(typeof setContentView!=='function'||typeof selectCategory!=='function')return {error:'view functions unavailable'};
+            await setContentView('notebook'); out.beforeNotebook=state.contentView; await selectCategory(cid); out.afterCategoryFromNotebook=state.contentView;
+            await setContentView('list'); out.beforeList=state.contentView; await selectCategory(cid); out.afterCategoryFromList=state.contentView;
+            return out;
+          },cid);
+          if(contentViewProbe.afterCategoryFromNotebook!=='notebook'||contentViewProbe.afterCategoryFromList!=='list')throw new Error('category changed content view unexpectedly '+JSON.stringify(contentViewProbe));
+          await page.evaluate(async iid=>{await openReader(iid,true)},iid); await page.waitForTimeout(350);
+          const responsive=[];
+          for(const [w,h] of [[1920,1080],[1600,1000],[1440,900],[1318,900],[1024,820],[768,900],[390,844]]){
+            await page.setViewportSize({width:w,height:h});await page.waitForTimeout(250);
+            const r=await page.evaluate(()=>{
+              const de=document.documentElement,b=document.body;
+              const vis=e=>{const q=e.getBoundingClientRect(),cs=getComputedStyle(e);return q.width>0&&q.height>0&&cs.display!=='none'&&cs.visibility!=='hidden'};
+              const vertical=[...document.querySelectorAll('*')].filter(e=>vis(e)&&/(auto|scroll)/.test(getComputedStyle(e).overflowY)&&e.scrollHeight>e.clientHeight+5).map(e=>({tag:e.tagName,id:e.id||'',cls:String(e.className||'').slice(0,90),client:e.clientHeight,scroll:e.scrollHeight})).slice(0,16);
+              return {client:de.clientWidth,scroll:de.scrollWidth,bodyOverflow:getComputedStyle(b).overflowY,bodyScroll:b.scrollHeight,bodyClient:b.clientHeight,vertical};
+            });
+            if(r.scroll>r.client+3)throw new Error(`horizontal overflow ${w}: ${r.scroll}/${r.client}`);
+            responsive.push({w,h,...r});
+          }
+          await page.setViewportSize({width:1440,height:720});await page.waitForTimeout(250);
+          await page.evaluate(async()=>{if(state.workspaceController?.setMode)await state.workspaceController.setMode('edit',true)});await page.waitForTimeout(250);
+          const editSmall=await page.evaluate(()=>{const t=document.querySelector('#articleSource'),d=document.querySelector('#notebookDetailScroll');const cs=t?getComputedStyle(t):null;return {textareaClient:t?.clientHeight||0,textareaScroll:t?.scrollHeight||0,overflowY:cs?.overflowY||'',detailClient:d?.clientHeight||0,detailScroll:d?.scrollHeight||0,htmlScroll:document.documentElement.scrollWidth,htmlClient:document.documentElement.clientWidth}});
+          await page.setViewportSize({width:1920,height:1080});await page.waitForTimeout(400);
+          const editLarge=await page.evaluate(()=>{const t=document.querySelector('#articleSource'),d=document.querySelector('#notebookDetailScroll');const cs=t?getComputedStyle(t):null;return {textareaClient:t?.clientHeight||0,textareaScroll:t?.scrollHeight||0,overflowY:cs?.overflowY||'',detailClient:d?.clientHeight||0,detailScroll:d?.scrollHeight||0,htmlScroll:document.documentElement.scrollWidth,htmlClient:document.documentElement.clientWidth}});
+          if(editLarge.htmlScroll>editLarge.htmlClient+3)throw new Error('editor maximize horizontal overflow');
+          if(/auto|scroll/.test(editLarge.overflowY)&&editLarge.textareaScroll>editLarge.textareaClient+5)throw new Error('editor textarea has nested vertical scroll');
+          if(editLarge.textareaClient<Math.min(520,Math.max(0,editLarge.detailClient-240)))throw new Error('editor failed to expand after maximize '+JSON.stringify(editLarge));
+          await page.evaluate(async()=>{if(state.workspaceController?.setMode)await state.workspaceController.setMode('split',true)});await page.waitForTimeout(300);
+          const split=await page.evaluate(()=>{const t=document.querySelector('#articleSource'),d=document.querySelector('#notebookDetailScroll'),p=document.querySelector('.article-preview-pane');return {textareaOverflow:t?getComputedStyle(t).overflowY:'',textareaClient:t?.clientHeight||0,textareaScroll:t?.scrollHeight||0,detailOverflow:d?getComputedStyle(d).overflowY:'',detailClient:d?.clientHeight||0,detailScroll:d?.scrollHeight||0,previewOverflow:p?getComputedStyle(p).overflowY:''}});
+          if(/auto|scroll/.test(split.textareaOverflow)&&split.textareaScroll>split.textareaClient+5)throw new Error('split textarea nested vertical scroll');
+          const title='UI Health Saved '+Date.now();
+          await page.evaluate(async()=>{if(state.workspaceController?.setMode)await state.workspaceController.setMode('edit',true)});await page.locator('#articleTitleInput').fill(title);await page.locator('#articleSource').fill('UI save state sync body');
+          const save=page.locator('[data-workspace-command="save"]').last();await save.click();await page.waitForFunction(t=>(document.body.innerText||'').includes(t),title,{timeout:10000});
+          const savedState=await page.evaluate(t=>({dirty:state.editorDirty,readerTitle:state.readerItem?.title||'',editorTitle:state.editorItem?.title||'',visible:(document.body.innerText||'').includes(t)}),title);
+          if(savedState.dirty||savedState.readerTitle!==title||savedState.editorTitle!==title||!savedState.visible)throw new Error('save state sync failed '+JSON.stringify(savedState));
+          console.log('UI_HEALTH_AUDIT_V2='+JSON.stringify({contentViewProbe,responsive,editSmall,editLarge,split,savedState,errors}));
+          if(errors.length)throw new Error(errors.join(' | '));
+          await browser.close();
+          JS
+          node .p02-ui-audit-v2.mjs
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: |
+          if test -f "$RUNNER_TEMP/p02-ui2/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-ui2/server.pid")" 2>/dev/null || true; fi
+          rm -rf "$RUNNER_TEMP/p02-ui2" .p02-ui-audit-v2.mjs node_modules package-lock.json package.json || true
