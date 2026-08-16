@@ -105,7 +105,7 @@ await settle(300);
 // Lightweight create action uses Modal.
 await page.locator('.nav-item[data-nav="projects"]').click();
 await settle(180);
-const newProject = page.getByRole('button', { name: '新增项目' });
+const newProject = page.locator('#page-actions [data-action="new-project"]');
 assert(await newProject.count() >= 1, 'new-project primary action missing');
 await newProject.click();
 await page.waitForFunction(() => document.querySelector('#modal')?.getAttribute('aria-hidden') === 'false');
@@ -121,7 +121,7 @@ assert(await newProject.evaluate((b) => b === document.activeElement), 'modal di
 // Complex domain editor uses Drawer by design.
 await page.locator('.nav-item[data-nav="domains"]').click();
 await settle(180);
-const newDomain = page.getByRole('button', { name: '新增域名' });
+const newDomain = page.locator('#page-actions [data-action="new-domain"]');
 assert(await newDomain.count() >= 1, 'new-domain primary action missing');
 await newDomain.click();
 await page.waitForFunction(() => document.querySelector('#drawer')?.getAttribute('aria-hidden') === 'false');
