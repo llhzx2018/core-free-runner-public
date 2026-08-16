@@ -1,0 +1,391 @@
+name: P01 V2.21.17 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.17-formal-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.17-formal-release
+  cancel-in-progress: false
+
+env:
+  VERSION: 2.21.17
+  SOURCE_VERSION: 2.21.16
+  SCHEMA: 2026080902
+  CANDIDATE: 89f55e9a772904ebe03537ec54c2891e13a52c80
+  CANDIDATE_TREE: 184738a87e5bdf9a4d2cd912933f6a935dcc9038
+  PRODUCTION: 4c908ae6a32ed0855751bbe809c8b204d957aba1
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Unified credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'RELEASE_CREDENTIAL_GATE=PASS'
+
+      - name: Checkout exact public release infrastructure
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: runner
+
+      - name: Checkout exact verified Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Checkout exact Production Truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+
+      - name: Exact source identity readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -F "define('VF_VERSION', '2.21.17');" candidate/src/app/bootstrap.php >/dev/null
+          echo 'EXACT_RELEASE_SOURCE_IDENTITY=PASS'
+
+      - name: Install release runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 unzip jq >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","SimpleXML","mbstring","openssl"] as $x){if(!extension_loaded($x)&&!class_exists($x))exit(1);} echo "RELEASE_RUNTIME=PASS\n";'
+
+      - name: Immutable identity preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! gh api repos/llhzx2018/vf-start/releases/tags/v2.21.17 >/dev/null 2>&1
+          ! gh api repos/llhzx2018/vf-start/git/ref/tags/v2.21.17 >/dev/null 2>&1
+          old="$(gh api repos/llhzx2018/vf-start/releases/tags/v2.21.16)"
+          old_asset="$(jq -c '.assets[]|select(.name=="VF_Start_V2.21.16_UPDATE.zip")' <<<"$old")"
+          test "$(jq -r '.id' <<<"$old")" = '371187274'
+          test "$(jq -r '.size' <<<"$old_asset")" = '1049243'
+          test "$(jq -r '.digest' <<<"$old_asset")" = 'sha256:3a7bfae9ff96f6caf5759be8db9fe2b57f9659d9532252ebdf5f617b03dbb648'
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/P01-before.json"
+          jq -e '.target_version=="2.21.16" and .release_tag=="v2.21.16" and .asset_name=="VF_Start_V2.21.16_UPDATE.zip" and .asset_bytes==1049243 and .asset_sha256=="3a7bfae9ff96f6caf5759be8db9fe2b57f9659d9532252ebdf5f617b03dbb648"' "$RUNNER_TEMP/P01-before.json" >/dev/null
+          echo 'V22116_IMMUTABLE_AND_V22117_NEW_IDENTITY=PASS'
+
+      - name: Deterministic formal build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-dist
+          mkdir -p release-dist
+          python3 runner/scripts/p01-build-v22117-formal-release.py \
+            --candidate candidate/src \
+            --production production/src \
+            --out release-dist \
+            --candidate-commit "$CANDIDATE" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION" \
+            > "$RUNNER_TEMP/formal-build.json"
+          jq -e '.status=="BUILD_PASS" and .release_authorized==true and .version=="2.21.17" and .source_version=="2.21.16" and .candidate_commit=="89f55e9a772904ebe03537ec54c2891e13a52c80" and .candidate_tree=="184738a87e5bdf9a4d2cd912933f6a935dcc9038" and .runtime_delta==["VERSION.txt","app/AdminShell.php","app/SecurityManager.php","app/bootstrap.php"]' "$RUNNER_TEMP/formal-build.json" >/dev/null
+          (cd release-dist && sha256sum -c SHA256SUMS.txt >/dev/null)
+          for f in release-dist/*.zip; do unzip -t "$f" >/dev/null; done
+          echo 'DETERMINISTIC_FORMAL_BUILD=PASS'
+
+      - name: Exact SHA ZIP and privacy verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re, zipfile
+          out=pathlib.Path('release-dist')
+          forbidden_parts={'.git','PRIVATE_DATA','private_data','node_modules'}
+          forbidden_suffixes=('.sqlite','.sqlite3','.db','.env','.log')
+          secret=re.compile(rb'(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|VF_PRIVATE_READ_TOKEN\s*=\s*[^\s]+|VF_RELEASE_WRITE_TOKEN\s*=\s*[^\s]+)')
+          for p in out.iterdir():
+              if not p.is_file(): continue
+              data=p.read_bytes()
+              if secret.search(data): raise SystemExit(f'secret-like material: {p.name}')
+              if p.suffix!='.zip': continue
+              with zipfile.ZipFile(p) as z:
+                  names=z.namelist()
+                  if len(names)!=len(set(names)): raise SystemExit(f'duplicate member: {p.name}')
+                  for n in names:
+                      q=pathlib.PurePosixPath(n)
+                      if n.startswith('/') or '\\' in n or '..' in q.parts: raise SystemExit(f'unsafe path: {p.name}:{n}')
+                      if any(x in forbidden_parts for x in q.parts): raise SystemExit(f'forbidden path: {p.name}:{n}')
+                      if n.lower().endswith(forbidden_suffixes): raise SystemExit(f'runtime/private file: {p.name}:{n}')
+                      if ((z.getinfo(n).external_attr>>16)&0o170000)==0o120000: raise SystemExit(f'symlink member: {p.name}:{n}')
+          repair='repair-v2.21.17.php'
+          for kind in ('ATOMIC','UPDATE'):
+              p=out/f'VF_Start_V2.21.17_{kind}.zip'
+              with zipfile.ZipFile(p) as z:
+                  assert z.namelist()==[repair]
+                  assert z.read(repair)==(out/repair).read_bytes()
+          m=json.loads((out/'VF_Start_V2.21.17_RELEASE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert m['release_authorized'] is True and m['formal_artifact_gate']=='PASS'
+          print('SHA_ZIP_PRIVACY_VERIFICATION=PASS')
+          PY
+
+      - name: PHP 8.0 Atomic and negative gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/release-dist:/work:ro" -w /work php:8.0-cli php -l repair-v2.21.17.php >/dev/null
+          php release-dist/repair-v2.21.17.php --self-test > "$RUNNER_TEMP/selftest.json"
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true and .source_files==.target_files' "$RUNNER_TEMP/selftest.json" >/dev/null
+          php release-dist/repair-v2.21.17.php --verify-source=production/src > "$RUNNER_TEMP/source.json"
+          jq -e '.ok==true' "$RUNNER_TEMP/source.json" >/dev/null
+          cp -a production/src /tmp/p01-release-gate-only
+          printf '\nFORMAL_RELEASE_GATE_ONLY_VARIANT\n' >> /tmp/p01-release-gate-only/README.md
+          php release-dist/repair-v2.21.17.php --verify-source=/tmp/p01-release-gate-only > "$RUNNER_TEMP/gate-only.json"
+          jq -e '.ok==true and (.errors|length)==0' "$RUNNER_TEMP/gate-only.json" >/dev/null
+          cp -a production/src /tmp/p01-release-tamper
+          printf '\n/* FORMAL_RELEASE_RUNTIME_TAMPER */\n' >> /tmp/p01-release-tamper/app/AdminShell.php
+          set +e
+          php release-dist/repair-v2.21.17.php --verify-source=/tmp/p01-release-tamper > "$RUNNER_TEMP/tamper.json" 2> "$RUNNER_TEMP/tamper.err"
+          rc=$?
+          set -e
+          test "$rc" -eq 1
+          jq -e '.ok==false and (.errors|index("app/AdminShell.php:sha") != null)' "$RUNNER_TEMP/tamper.json" >/dev/null
+          echo 'PHP80_ATOMIC_NEGATIVE_GATES=PASS'
+
+      - name: Fresh FULL final-byte gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-release-fresh && mkdir -p /tmp/p01-release-fresh
+          unzip -q release-dist/VF_Start_V2.21.17_FULL.zip -d /tmp/p01-release-fresh
+          php -S 127.0.0.1:18177 -t /tmp/p01-release-fresh > "$RUNNER_TEMP/fresh-server.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/fresh.cookies" http://127.0.0.1:18177/setup.php -o "$RUNNER_TEMP/fresh.html" && break; sleep 1; done
+          csrf=$(python3 - <<'PY'
+          import os,re
+          s=open(os.path.join(os.environ['RUNNER_TEMP'],'fresh.html'),encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -L -b "$RUNNER_TEMP/fresh.cookies" -c "$RUNNER_TEMP/fresh.cookies" -X POST http://127.0.0.1:18177/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start V2.21.17 Formal Fresh' \
+            --data-urlencode 'admin_password=FormalReleaseFresh-P01-22117!Strong' \
+            --data-urlencode 'admin_password_confirm=FormalReleaseFresh-P01-22117!Strong' \
+            -o "$RUNNER_TEMP/fresh-post.html"
+          kill "$pid" 2>/dev/null || true
+          php /tmp/p01-release-fresh/cli/verify.php > "$RUNNER_TEMP/fresh-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/fresh-verify.txt"
+          php -r 'require "/tmp/p01-release-fresh/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn()!==0)exit(1);if((int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn()!==0)exit(2);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(3);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(4);echo "FRESH_FULL_FINAL_BYTES=PASS\n";'
+
+      - name: Exact 2.21.16 to 2.21.17 final-byte upgrade gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-release-upgrade
+          cp -a production/src /tmp/p01-release-upgrade
+          php -S 127.0.0.1:18178 -t /tmp/p01-release-upgrade > "$RUNNER_TEMP/upgrade-server.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/upgrade.cookies" http://127.0.0.1:18178/setup.php -o "$RUNNER_TEMP/upgrade.html" && break; sleep 1; done
+          csrf=$(python3 - <<'PY'
+          import os,re
+          s=open(os.path.join(os.environ['RUNNER_TEMP'],'upgrade.html'),encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -L -b "$RUNNER_TEMP/upgrade.cookies" -c "$RUNNER_TEMP/upgrade.cookies" -X POST http://127.0.0.1:18178/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start V2.21.17 Formal Upgrade' \
+            --data-urlencode 'admin_password=FormalReleaseUpgrade-P01-22116!Strong' \
+            --data-urlencode 'admin_password_confirm=FormalReleaseUpgrade-P01-22116!Strong' \
+            -o "$RUNNER_TEMP/upgrade-post.html"
+          kill "$pid" 2>/dev/null || true
+          php -r 'require "/tmp/p01-release-upgrade/app/bootstrap.php";$r=new VfRepository(vf_db());$cid=$r->createCategory(["name"=>"Formal Release Sentinel","description"=>"synthetic","is_private"=>1]);$r->saveLink(null,["category_id"=>$cid,"title"=>"Formal Release Link","url"=>"https://example.com/p01-v22117-formal","description"=>"keep","is_private"=>1]);$b=(new VfBackupManager(vf_db()))->create("formal release pre-update","pre-update",true);file_put_contents(getenv("RUNNER_TEMP")."/backup-key",$b["backup_key"]);echo "PRE_RELEASE_UPGRADE_FIXTURE=PASS\n";'
+          php release-dist/repair-v2.21.17.php --run=/tmp/p01-release-upgrade > "$RUNNER_TEMP/upgrade.json"
+          jq -e '.ok==true and .already_current==false and .schema=="2026080902" and .integrity=="ok" and .fk==0' "$RUNNER_TEMP/upgrade.json" >/dev/null
+          test "$(tr -d '\r\n' < /tmp/p01-release-upgrade/VERSION.txt)" = "$VERSION"
+          php /tmp/p01-release-upgrade/cli/verify.php > "$RUNNER_TEMP/upgrade-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/upgrade-verify.txt"
+          php -r 'require "/tmp/p01-release-upgrade/app/bootstrap.php";$d=vf_db();$q=$d->prepare("SELECT COUNT(*) FROM links WHERE title=? AND url=?");$q->execute(["Formal Release Link","https://example.com/p01-v22117-formal"]);if((int)$q->fetchColumn()!==1)exit(1);$key=trim(file_get_contents(getenv("RUNNER_TEMP")."/backup-key"));$v=(new VfBackupManager($d))->verify($key);if(($v["validation_status"]??"")!=="valid")exit(2);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(3);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(4);echo "FINAL_UPGRADE_DATA_BACKUP_SQLITE=PASS\n";'
+          php release-dist/repair-v2.21.17.php --run=/tmp/p01-release-upgrade > "$RUNNER_TEMP/repeat.json"
+          jq -e '.ok==true and .already_current==true' "$RUNNER_TEMP/repeat.json" >/dev/null
+          echo 'EXACT_FINAL_BYTE_UPGRADE=PASS'
+
+      - name: Seal final local asset identities before publication
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          d=pathlib.Path('release-dist')
+          assets={p.name:{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()}
+          pathlib.Path('/tmp/p01-v22117-local-assets.json').write_text(json.dumps(assets,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(assets,indent=2))
+          PY
+          echo 'FINAL_LOCAL_ASSET_IDENTITIES=SEALED'
+
+      - name: Create immutable Tag and GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api -X POST repos/llhzx2018/vf-start/git/refs -f ref='refs/tags/v2.21.17' -f sha="$CANDIDATE" > "$RUNNER_TEMP/tag-create.json"
+          test "$(jq -r '.object.sha' "$RUNNER_TEMP/tag-create.json")" = "$CANDIDATE"
+          gh release create "v$VERSION" release-dist/* -R llhzx2018/vf-start --target "$CANDIDATE" --title "VF Start V$VERSION" --notes-file "release-dist/VF_Start_V${VERSION}_RELEASE_NOTES.md"
+          echo 'TAG_AND_RELEASE_CREATED=PASS'
+
+      - name: Remote exact Release readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.21.17 > "$RUNNER_TEMP/tag.json"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.17 > "$RUNNER_TEMP/release.json"
+          test "$(jq -r '.object.sha' "$RUNNER_TEMP/tag.json")" = "$CANDIDATE"
+          jq -e --arg c "$CANDIDATE" '.tag_name=="v2.21.17" and .target_commitish==$c and .draft==false and .prerelease==false' "$RUNNER_TEMP/release.json" >/dev/null
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          r=json.load(open(__import__('os').path.join(__import__('os').environ['RUNNER_TEMP'],'release.json'))
+          remote={a['name']:a for a in r['assets']}
+          d=pathlib.Path('release-dist')
+          local={p.name:p for p in d.iterdir() if p.is_file()}
+          assert set(remote)==set(local),(set(remote)-set(local),set(local)-set(remote))
+          for n,p in local.items():
+              h=hashlib.sha256(p.read_bytes()).hexdigest(); a=remote[n]
+              assert int(a['size'])==p.stat().st_size,(n,'bytes')
+              assert a.get('digest')=='sha256:'+h,(n,'sha')
+          print('REMOTE_RELEASE_EXACT_IDENTITY=PASS')
+          PY
+          echo "RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo "PUBLISHED_AT=$(jq -r '.published_at' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(jq -r '.assets[]|select(.name=="VF_Start_V2.21.17_UPDATE.zip")|.size' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA=$(jq -r '.assets[]|select(.name=="VF_Start_V2.21.17_UPDATE.zip")|.digest' "$RUNNER_TEMP/release.json" | sed 's/^sha256://')" >> "$GITHUB_ENV"
+
+      - name: Checkout core-updates current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Publish P01 V2.21.17 to core-updates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -e '.target_version=="2.21.16" and .release_tag=="v2.21.16" and .asset_name=="VF_Start_V2.21.16_UPDATE.zip" and .asset_bytes==1049243 and .asset_sha256=="3a7bfae9ff96f6caf5759be8db9fe2b57f9659d9532252ebdf5f617b03dbb648"' updates/projects/P01.json >/dev/null
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('updates/projects/P01.json')
+          x={
+            'schema_version':'1.0',
+            'project_id':'P01',
+            'component_id':'APP',
+            'enabled':True,
+            'target_version':'2.21.17',
+            'update_type':'ATOMIC',
+            'from_versions':['2.21.16'],
+            'schema_from':'2026080902',
+            'schema_to':'2026080902',
+            'repository':'llhzx2018/vf-start',
+            'release_tag':'v2.21.17',
+            'asset_name':'VF_Start_V2.21.17_UPDATE.zip',
+            'asset_bytes':int(os.environ['UPDATE_BYTES']),
+            'asset_sha256':os.environ['UPDATE_SHA'],
+            'release_id':int(os.environ['RELEASE_ID']),
+            'release_identity':'v2.21.17@89f55e9a772904ebe03537ec54c2891e13a52c80',
+            'backup_required':True,
+            'rollback_supported':True,
+            'released_at':os.environ['PUBLISHED_AT'],
+            'minimum_php':'8.0.0'
+          }
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          cd updates
+          git config user.name 'VF Release Automation'
+          git config user.email 'vf-release-automation@users.noreply.github.com'
+          git add projects/P01.json
+          git commit -m 'release(P01): advance unified update target to V2.21.17'
+          git push origin main
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: core-updates remote exact readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/P01-after.json"
+          jq -e --argjson b "$UPDATE_BYTES" --arg s "$UPDATE_SHA" --argjson rid "$RELEASE_ID" '.target_version=="2.21.17" and .from_versions==["2.21.16"] and .schema_from=="2026080902" and .schema_to=="2026080902" and .repository=="llhzx2018/vf-start" and .release_tag=="v2.21.17" and .asset_name=="VF_Start_V2.21.17_UPDATE.zip" and .asset_bytes==$b and .asset_sha256==$s and .release_id==$rid and .release_identity=="v2.21.17@89f55e9a772904ebe03537ec54c2891e13a52c80"' "$RUNNER_TEMP/P01-after.json" >/dev/null
+          test "$(git -C updates rev-parse HEAD)" = "$CORE_UPDATES_COMMIT"
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Read-only real Production current-version proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' 'https://start.kewaro.com/api.php?action=bootstrap' -o "$RUNNER_TEMP/production-bootstrap.json"
+          jq -e '.ok==true and .version=="2.21.16"' "$RUNNER_TEMP/production-bootstrap.json" >/dev/null
+          echo 'PRODUCTION_CURRENT_VERSION=2.21.16'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Formal release summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo '# P01 V2.21.17 Formal Release'
+            echo "Candidate: $CANDIDATE"
+            echo "Candidate Tree: $CANDIDATE_TREE"
+            echo "Tag: v$VERSION"
+            echo "Release ID: $RELEASE_ID"
+            echo "Update bytes: $UPDATE_BYTES"
+            echo "Update SHA-256: $UPDATE_SHA"
+            echo "core-updates commit: $CORE_UPDATES_COMMIT"
+            echo 'Production Current: 2.21.16'
+            echo 'Production Upgrade: NOT EXECUTED'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'FORMAL_RELEASE_AND_CORE_UPDATES=PASS'
+
+      - name: Cleanup private source and generated local material
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate production runner updates release-dist \
+            /tmp/p01-release-gate-only /tmp/p01-release-tamper /tmp/p01-release-fresh /tmp/p01-release-upgrade
+          rm -f "$RUNNER_TEMP"/formal-build.json "$RUNNER_TEMP"/P01-before.json "$RUNNER_TEMP"/P01-after.json \
+            "$RUNNER_TEMP"/selftest.json "$RUNNER_TEMP"/source.json "$RUNNER_TEMP"/gate-only.json "$RUNNER_TEMP"/tamper.json "$RUNNER_TEMP"/tamper.err \
+            "$RUNNER_TEMP"/fresh* "$RUNNER_TEMP"/upgrade* "$RUNNER_TEMP"/repeat.json "$RUNNER_TEMP"/backup-key \
+            "$RUNNER_TEMP"/tag-create.json "$RUNNER_TEMP"/tag.json "$RUNNER_TEMP"/release.json "$RUNNER_TEMP"/production-bootstrap.json \
+            /tmp/p01-v22117-local-assets.json
+          echo 'RELEASE_WORKSPACE_CLEANUP=PASS'
