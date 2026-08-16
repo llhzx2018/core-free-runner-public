@@ -1,0 +1,135 @@
+name: P04 VF Infra V2.5.6 Candidate Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v256-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v256-candidate
+  cancel-in-progress: true
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_REF: maintenance/v2.5.6-post-seal-health-ui
+  EXPECTED_COMMIT: 850e614f1b11959cbffff5eed770cc864ada0280
+  EVIDENCE_DIR: ${{ github.workspace }}/p04-evidence
+
+jobs:
+  candidate-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.EXPECTED_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$EXPECTED_COMMIT"
+          test "$(cat VERSION | tr -d '\r\n')" = '2.5.6'
+          printf '{"repository":"%s","commit":"%s","version":"2.5.6","schema":14}\n' "$TARGET_REPOSITORY" "$actual" > source-identity.json
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser test dependency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Repository and migration health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+
+      - name: Syntax and static contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l
+          node --check public/assets/app.js
+          node --check public/assets/v254-ui.js
+          node --check public/assets/v256-ui.js
+          node --check tests/e2e/v256-responsive.mjs
+          bash -n scripts/run-v256-browser-gate.sh
+
+      - name: Provider and job regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/core_updates_contract_v252.php
+          php tests/integration/provider_billing_contract_v250.php src
+          php tests/integration/provider_billing_pagination_v256.php src
+          php tests/unit/provider_currency_contract_v256.php src
+          php tests/unit/provider_billing_persistence_contract_v256.php .
+          php tests/unit/job_partial_health_contract_v256.php .
+          php tests/unit/ui_contract_v256.php .
+
+      - name: Fresh install and synthetic business chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run-clean-full-install-gate.sh
+          scripts/run-clean-full-install-gate.sh
+
+      - name: Browser E2E and eight-viewport responsive gate
+        shell: bash
+        env:
+          VF_INFRA_BROWSER_EVIDENCE_DIR: ${{ env.EVIDENCE_DIR }}/browser-v256
+        run: |
+          set -Eeuo pipefail
+          chmod +x scripts/run-v256-browser-gate.sh
+          scripts/run-v256-browser-gate.sh
+
+      - name: Collect candidate evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          cp source-identity.json "$EVIDENCE_DIR/source-identity.json" 2>/dev/null || true
+          git rev-parse HEAD > "$EVIDENCE_DIR/commit.txt" || true
+          git rev-parse HEAD^{tree} > "$EVIDENCE_DIR/tree.txt" || true
+          printf '2.5.6\n' > "$EVIDENCE_DIR/version.txt"
+          printf '14\n' > "$EVIDENCE_DIR/schema.txt"
+          find "$EVIDENCE_DIR" -type f -maxdepth 4 -print0 | sort -z | xargs -0 sha256sum > "$EVIDENCE_DIR/SHA256SUMS.txt" || true
+
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.6-Candidate-Evidence
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
