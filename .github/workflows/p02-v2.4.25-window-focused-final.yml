@@ -1,0 +1,62 @@
+name: P02 V2.4.25 Window Focused Final
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-window-focused-final.yml']
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: task/v2.4.25-attachment-ux
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          persist-credentials: false
+      - name: Install harness
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "TASK_HEAD=$(git rev-parse HEAD)"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl curl >/dev/null
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Verify final UX
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/site"; COOKIE="$RUNNER_TEMP/cookie"; PORT=18138; BASE="http://127.0.0.1:$PORT"; PASS="P02-Window-${GITHUB_RUN_ID}!"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S "127.0.0.1:$PORT" -t "$SITE" >"$RUNNER_TEMP/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .2; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import html,re,sys;s=open(sys.argv[1]).read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")" = 303
+          cat > .focused.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const b=await chromium.launch({headless:true}),p=await b.newPage({viewport:{width:1440,height:900}}),base=process.env.BASE_URL,password=process.env.TEST_PASSWORD;
+          const errors=[];p.on('pageerror',e=>errors.push(String(e)));p.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          await p.goto(base+'/',{waitUntil:'networkidle'});let s=await p.evaluate(async()=>await (await fetch('/api.php?action=session')).json());if(!s?.site?.auth){await p.locator('[data-open-login]').first().click();await p.locator('#loginForm input[name="password"]').fill(password);await p.locator('#loginSubmit').click();await p.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));}
+          await p.evaluate(()=>openEditor(null,{forceContentMode:'quick',forceContentFormat:'plain'}));await p.locator('#contentForm').waitFor({state:'visible'});
+          await p.evaluate(()=>{const e=document.querySelector('#contentForm [data-attachment-library]');e.focus({preventScroll:true});e.click();});await p.locator('[data-library-query]').waitFor({state:'visible'});await p.waitForFunction(()=>document.activeElement===document.querySelector('[data-library-query]'));
+          const labelled=await p.locator('.attachment-modal').evaluate(el=>{const id=el.getAttribute('aria-labelledby');return Boolean(id&&document.getElementById(id))});if(!labelled)throw new Error('aria-labelledby missing');
+          await p.keyboard.press('Escape');await p.locator('.attachment-modal-overlay').waitFor({state:'detached'});await p.waitForTimeout(100);
+          const esc=await p.evaluate(()=>{const op=document.querySelector('#contentForm [data-attachment-library]');return {editor:!!document.querySelector('#contentForm'),opener:!!op,focus:op===document.activeElement}});console.log('ESCAPE_STATE='+JSON.stringify(esc));if(!esc.editor||!esc.opener||!esc.focus)throw new Error('Escape propagation/focus regression '+JSON.stringify(esc));
+          await p.evaluate(()=>document.querySelector('#contentForm [data-attachment-library]').click());await p.locator('[data-library-cleanup]').waitFor({state:'visible'});await p.evaluate(()=>document.querySelector('[data-library-cleanup]').click());await p.locator('[data-dialog-confirm]').waitFor({state:'visible'});const rp=p.waitForResponse(r=>r.url().includes('action=attachment_cleanup')&&r.request().method()==='POST');await p.evaluate(()=>document.querySelector('[data-dialog-confirm]').click());const r=await rp;if(!r.ok())throw new Error('cleanup HTTP '+r.status());await p.waitForFunction(()=>{const x=document.querySelector('[data-library-cleanup]');return x&&!x.disabled&&(x.textContent||'').trim()==='清理孤儿文件'});
+          await p.setViewportSize({width:390,height:844});await p.waitForTimeout(100);const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>3)throw new Error('mobile overflow '+overflow);if(errors.length)throw new Error(errors.join(' | '));
+          console.log('WINDOW_ESCAPE_INTERCEPT=PASS');console.log('FOCUS_RESTORE=PASS');console.log('CLEANUP_BUSY_RECOVERY=PASS');console.log('MOBILE_390=PASS');await b.close();
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$PASS" node .focused.mjs
+          echo 'WINDOW_FOCUSED_FINAL=PASS'
+      - if: always()
+        run: rm -rf p02 "$RUNNER_TEMP/site" || true
