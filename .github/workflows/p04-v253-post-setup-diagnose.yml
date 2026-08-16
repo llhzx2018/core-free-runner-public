@@ -1,0 +1,53 @@
+name: P04 V2.5.3 Post Setup Diagnose
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-post-setup-diagnose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install exact V2.5.2 and inspect private state
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          git clone -q "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-infra.git" repo
+          cd repo; git checkout -q 91984268ffe66781700db9da10de8d509c878c0b
+          ROOT="$RUNNER_TEMP/p04-post-setup"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          python3 scripts/build-release-tree.py "$SITE" >/dev/null
+          PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+          php -S 127.0.0.1:$PORT -t "$SITE" >"$RUNNER_TEMP/p04-post-setup-http.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf "$ROOT" repo' EXIT
+          sleep .5
+          curl -sS -c "$RUNNER_TEMP/p04ps.cookie" "http://127.0.0.1:$PORT/setup.php" -o "$RUNNER_TEMP/p04ps.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/p04ps.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          CODE=$(curl -sS -b "$RUNNER_TEMP/p04ps.cookie" -c "$RUNNER_TEMP/p04ps.cookie" -o /dev/null -w '%{http_code}' -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V253 Fixture' --data-urlencode 'password=P04V253HotfixTest!' --data-urlencode 'password_confirm=P04V253HotfixTest!' "http://127.0.0.1:$PORT/setup.php")
+          test "$CODE" = 302 -o "$CODE" = 303
+          echo "SETUP=PASS HTTP=$CODE"
+          echo 'PRIVATE_FILES:'
+          find "$ROOT" -maxdepth 4 -type f -printf '%P\n' | sort | sed -E 's/(config\.php)/[CONFIG_FILE]/' | head -100
+          DB=$(find "$ROOT" -type f -name '*.sqlite' -print -quit)
+          test -n "$DB"; echo "DB_RELATIVE=${DB#$ROOT/}"
+          echo "DB_INTEGRITY=$(sqlite3 "$DB" 'pragma integrity_check;')"
+          echo "MIGRATION_SCHEMA:"
+          sqlite3 "$DB" "pragma table_info(schema_migrations);"
+          echo "MIGRATION_ROWS:"
+          sqlite3 "$DB" "select * from schema_migrations order by rowid desc limit 3;"
+          echo "DOMAIN_SCHEMA:"
+          sqlite3 "$DB" "pragma table_info(domains);" | head -80
+          echo 'POST_SETUP_DIAG=PASS'
