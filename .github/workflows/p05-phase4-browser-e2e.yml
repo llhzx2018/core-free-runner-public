@@ -1,0 +1,130 @@
+name: P05 Phase 4 Browser E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-phase4-browser-e2e.yml'
+      - 'scripts/p05-phase4-browser.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_P05_SHA: 9138485b5d6bf3d9484687c151d93c93a609ad34
+      NODE_IMAGE: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+      POSTGRES_IMAGE: postgres:18@sha256:7157393f508fd8eb46119937fab39813783fe3e7d4c6316c45c12ce2ea25e61d
+      DATABASE_URL: postgresql://vfseo:fixture-pass@127.0.0.1:5432/vfseo
+      PHASE4_BASE_URL: http://127.0.0.1:3105
+      PORT: 3105
+      VF_ADMIN_USERNAME: phase4-admin
+      VF_ADMIN_PASSWORD: fixture-phase4-admin-password-20260816
+      VF_SECURE_COOKIES: 'false'
+      VF_REQUIRE_HTTPS: 'false'
+      VF_TRUST_PROXY: 'false'
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+    steps:
+      - name: Checkout public control repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact source and version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+
+      - name: Provision PostgreSQL 18
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-phase4-pg >/dev/null 2>&1 || true
+          docker pull "$POSTGRES_IMAGE" >/dev/null
+          docker run -d --name p05-phase4-pg \
+            -e POSTGRES_USER=vfseo -e POSTGRES_PASSWORD=fixture-pass -e POSTGRES_DB=vfseo \
+            -p 127.0.0.1:5432:5432 "$POSTGRES_IMAGE" >/dev/null
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec p05-phase4-pg psql -U vfseo -d vfseo -Atc 'SELECT 1' 2>/dev/null | grep -qx '1'; then
+              ready=$((ready+1)); [ "$ready" -ge 2 ] && break
+            else
+              ready=0
+            fi
+            sleep 1
+          done
+          test "$ready" -ge 2
+
+      - name: Build migrate and initialize admin
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --network host \
+            -e DATABASE_URL -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci && npm run lint && npm run typecheck && npm run build && npm run migrate && npm run bootstrap:admin && npm run verify:admin-ready'
+
+      - name: Start Web runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-phase4-web >/dev/null 2>&1 || true
+          docker run -d --name p05-phase4-web --network host \
+            -e DATABASE_URL -e PORT -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 60); do curl -fsS "$PHASE4_BASE_URL/api/health" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS "$PHASE4_BASE_URL/api/health" >/dev/null
+
+      - name: Browser E2E desktop and mobile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$CHROME"
+          mkdir -p "$RUNNER_TEMP/p05-phase4-browser"
+          cd "$RUNNER_TEMP/p05-phase4-browser"
+          npm init -y >/dev/null 2>&1
+          npm install --silent --no-audit --no-fund playwright-core@1.55.0
+          cp "$GITHUB_WORKSPACE/scripts/p05-phase4-browser.mjs" ./browser.mjs
+          PHASE4_BASE_URL="$PHASE4_BASE_URL" VF_ADMIN_USERNAME="$VF_ADMIN_USERNAME" VF_ADMIN_PASSWORD="$VF_ADMIN_PASSWORD" CHROME_EXECUTABLE="$CHROME" node browser.mjs
+          echo 'PHASE4_BROWSER_E2E=PASS'
+          echo 'CONSOLE_ERROR=0'
+          echo 'KEY_API_ERROR=0'
+          echo 'CRITICAL_UI_BUG=0'
+
+      - name: Cleanup private source and runtime
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker rm -f p05-phase4-web p05-phase4-pg >/dev/null 2>&1
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" "$NODE_IMAGE" sh -lc 'rm -rf /workspace/p05' >/dev/null 2>&1
+          rm -rf "$RUNNER_TEMP/p05-phase4-browser"
+          if [ -e p05 ]; then echo 'PRIVATE_SOURCE_CLEANUP=FAIL'; exit 1; fi
+          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
