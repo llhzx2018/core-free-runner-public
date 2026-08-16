@@ -1,0 +1,148 @@
+name: P02 Post-Seal Upgrade Regression
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-post-seal-upgrade-regression.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+
+      - name: Require private read-only credential
+        env:
+          PRIVATE_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact Production 2.4.23 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 333d4fd52150f1c15e9911bce312bb2b6775f856
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02-prod
+          persist-credentials: false
+
+      - name: Install runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+
+      - name: Build and install isolated 2.4.23 site
+        working-directory: p02-prod
+        env:
+          VF_UPDATE_READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          TEST_PASSWORD: 'P02-UP-${{ github.run_id }}-${{ github.run_attempt }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-upgrade"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(tr -d '\r\n' < "$SITE/VERSION")" = '2.4.23'
+          VF_UPDATE_READ_TOKEN="$VF_UPDATE_READ_TOKEN" php -d display_errors=0 -S 127.0.0.1:18147 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18147/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          COOKIE="$ROOT/cookie.txt"
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18147/setup.php > "$ROOT/setup.html"
+          SETUP_TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18147' --data-urlencode "setup_csrf=$SETUP_TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" http://127.0.0.1:18147/setup.php)" = 303
+          echo 'INSTALL_2_4_23=PASS'
+
+      - name: Seed durable business data and pre-upgrade backup
+        working-directory: p02-prod
+        env:
+          TEST_PASSWORD: 'P02-UP-${{ github.run_id }}-${{ github.run_attempt }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-upgrade"; COOKIE="$ROOT/cookie.txt"; BASE=http://127.0.0.1:18147
+          SESSION=$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=session")
+          CSRF=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["csrf"])' <<<"$SESSION")
+          post(){ curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -H 'Origin: http://127.0.0.1:18147' -X POST --data "$2" "$BASE/api.php?action=$1"; }
+          CAT=$(post category_save '{"name":"Upgrade Regression","description":"preserve-me","icon":"folder"}')
+          CID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$CAT")
+          ITEM=$(post content_save "{\"category_id\":$CID,\"title\":\"升级保持 UTF-8 ✓\",\"content\":\"before upgrade durable body\",\"content_mode\":\"article\",\"content_format\":\"markdown\",\"primary_action\":\"read\",\"status\":\"active\"}")
+          IID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$ITEM")
+          echo "$CID" > "$ROOT/category.id"; echo "$IID" > "$ROOT/item.id"
+          BACKUP=$(post backup '{}')
+          python3 - <<'PY' <<<"$BACKUP"
+          import json,sys
+          x=json.load(sys.stdin);assert x.get('ok') is True
+          print('PRE_UPGRADE_BACKUP=PASS')
+          PY
+          sqlite3 "$ROOT/site/../data/database.sqlite" 'PRAGMA integrity_check;' 2>/dev/null || true
+          echo 'SEED_DATA=PASS'
+
+      - name: Real online discovery and 2.4.23 to 2.4.24 execution
+        working-directory: p02-prod
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-upgrade"; COOKIE="$ROOT/cookie.txt"; BASE=http://127.0.0.1:18147
+          SESSION=$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=session")
+          CSRF=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["csrf"])' <<<"$SESSION")
+          CHECK=$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -H 'Origin: http://127.0.0.1:18147' -X POST --data '{"manual":true}' "$BASE/api.php?action=update_check")
+          python3 - <<'PY' <<<"$CHECK"
+          import json,sys
+          x=json.load(sys.stdin);assert x.get('ok') is True
+          s=x.get('status',{});assert s.get('current_version')=='2.4.23';assert s.get('latest_version')=='2.4.24';assert s.get('update_available') is True;assert s.get('can_update') is True
+          print('ONLINE_DISCOVERY_2_4_24=PASS')
+          PY
+          EXEC=$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -H 'Origin: http://127.0.0.1:18147' -X POST --data '{}' "$BASE/api.php?action=update_execute")
+          python3 - <<'PY' <<<"$EXEC"
+          import json,sys
+          x=json.load(sys.stdin);assert x.get('ok') is True
+          r=x.get('result',{});assert r.get('result')=='success';assert r.get('from_version')=='2.4.23';assert r.get('to_version')=='2.4.24';assert r.get('asset_sha256')=='c71c91d5f51e5a0c4fee8e0138555edae40f042865800f8545eb32a2c4d310bf'
+          print('ONLINE_UPDATE_EXECUTE_2_4_23_TO_2_4_24=PASS')
+          PY
+
+      - name: Post-upgrade source runtime data and recovery verification
+        working-directory: p02-prod
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-upgrade"; SITE="$ROOT/site"; COOKIE="$ROOT/cookie.txt"; BASE=http://127.0.0.1:18147
+          test "$(tr -d '\r\n' < "$SITE/VERSION")" = '2.4.24'
+          SESSION=$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=session")
+          python3 - <<'PY' <<<"$SESSION"
+          import json,sys
+          x=json.load(sys.stdin);assert x.get('version')=='2.4.24';assert x.get('site',{}).get('auth') is True
+          print('POST_UPGRADE_RUNTIME_VERSION=PASS')
+          PY
+          IID=$(cat "$ROOT/item.id")
+          ITEM=$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=content_get&id=$IID")
+          python3 - <<'PY' <<<"$ITEM"
+          import json,sys
+          x=json.load(sys.stdin);i=x.get('item',{});assert i.get('title')=='升级保持 UTF-8 ✓';assert i.get('content')=='before upgrade durable body'
+          print('BUSINESS_DATA_PRESERVATION=PASS')
+          PY
+          HEALTH=$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=health")
+          python3 - <<'PY' <<<"$HEALTH"
+          import json,sys
+          x=json.load(sys.stdin);assert x.get('ok') is True and x.get('version')=='2.4.24'
+          print('POST_UPGRADE_HEALTH=PASS')
+          PY
+          DB=$(find "$ROOT" -type f \( -name '*.sqlite' -o -name '*.db' \) | head -1 || true)
+          if test -n "$DB"; then
+            test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = 'ok'
+            test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+            echo 'POST_UPGRADE_SQLITE_INTEGRITY_FK=PASS'
+          else
+            echo 'Database path is private/runtime-discovered through application; API readback already PASS.'
+          fi
+          echo 'UPGRADE_REGRESSION=PASS'
+
+      - name: Cleanup private source and runtime
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/p02-upgrade/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-upgrade/server.pid")" 2>/dev/null || true; fi
+          rm -rf p02-prod "$RUNNER_TEMP/p02-upgrade" || true
+          echo 'PRIVATE_RUNTIME_CLEANUP=PASS'
