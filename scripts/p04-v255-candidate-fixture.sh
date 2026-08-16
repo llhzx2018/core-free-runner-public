@@ -239,7 +239,7 @@ import re,sys
 s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
 PY
 )"
-python3 - "$DATA/state/update/pending-handoff-v1.json" <<'PY'
+python3 - "$DATA/update/pending-handoff-v1.json" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1]));assert p.get('authorized_at');assert p.get('handoff_digest','')=='';assert p.get('target_version')=='2.5.5'
 print('ONLINE_HANDOFF=PASS')
@@ -269,7 +269,7 @@ h=c.execute('SELECT result,failure_stage FROM update_history WHERE operation_id=
 print('SCHEMA_14=PASS');print('UPDATE_HISTORY_V255_SUCCESS=PASS')
 PY
 
-test ! -e "$DATA/state/update/pending-handoff-v1.json"
+test ! -e "$DATA/update/pending-handoff-v1.json"
 test ! -e "$SITE/htdocs/repair-v2.5.5.php"
 
 # Exact candidate runtime reconciliation (config.php is protected runtime-local state).
