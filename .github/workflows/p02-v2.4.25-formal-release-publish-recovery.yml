@@ -1,0 +1,174 @@
+name: P02 V2.4.25 Formal Release Publish Recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2.4.25-formal-release-publish-recovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-formal-release-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REPOSITORY: llhzx2018/vf-library
+      PRODUCT_SHA: 11019841b837038092b153930ab8e185bf2a2676
+      PRODUCTION_SHA: b8f26afd81e0c736923579eb6fe5b298dd9fc8e3
+      TAG: v2.4.25
+      VERSION: 2.4.25
+      SOURCE_REF: task/v2.4.25-product-optimization
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require governed credentials
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+
+      - name: Checkout exact Product Runtime Identity
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 11019841b837038092b153930ab8e185bf2a2676
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact existing Tag and Release recovery precondition
+        working-directory: p02
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          TAG_SHA=$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)
+          test "$TAG_SHA" = "$PRODUCT_SHA"
+          test "$(gh api repos/$REPOSITORY/branches/main --jq .commit.sha)" = "$PRODUCTION_SHA"
+          echo EXACT_EXISTING_TAG=PASS
+          echo MAIN_PRE_PUBLISH_UNCHANGED=PASS
+
+      - name: Rebuild exact immutable formal bytes
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git show -s --format=%T "$PRODUCT_SHA")
+          python3 scripts/build-release.py --out build/formal-publish --source-commit "$PRODUCT_SHA" --source-tree "$TREE" --source-ref "$SOURCE_REF" > "$RUNNER_TEMP/build.json"
+          (cd build/formal-publish && sha256sum -c SHA256SUMS.txt)
+          python3 - "$PWD/build/formal-publish" <<'PY'
+          import hashlib,sys,zipfile
+          from pathlib import Path
+          out=Path(sys.argv[1])
+          expected={
+            'VF_Library_V2.4.25_SOURCE.zip':(362270,'72da3658638276a683d60dbd58c620ae0197962abc65782db88ad7cb2f2e0f61'),
+            'VF_Library_V2.4.25_FULL.zip':(299444,'868193474e4f35dec2a1a860acd753aea7ac976cede04c781de1eff36057fe4f'),
+            'VF_Library_V2.4.25_UPDATE.zip':(294475,'64da5b48b365f9b558c0d5b628393a1716af9a708c88d498f0d7b3c32cd478e9'),
+            'VF_Library_V2.4.25_ATOMIC.zip':(431005,'c58c62ce443a56bbaaf10e2ca3fdeb5dbbb0c77728bcfdac31c21da6f4db61be'),
+            'repair-v2.4.25.php':(573729,'44f223c733a672782f7348211e17e7610dd98e6ce7f98c4a9332375d622ea67e'),
+            'VF_Library_V2.4.25_RELEASE_MANIFEST.json':(2622,'8b7f661a7704cde785267d34d121086154714284c161aa3620521b33eebe0f56'),
+            'VF_Library_V2.4.25_RELEASE_NOTES.md':(352,'8a7bfc7782174f06ee4fa7577f3c3d0e53f7ab11d87b9a87569648931eda500f'),
+            'SHA256SUMS.txt':(676,'eb8d4880fdb63017af507bfdcc13eb11a674867fc9e31a63e5ef9a513c7a19c6')}
+          assert set(p.name for p in out.iterdir() if p.is_file())==set(expected)
+          for n,(size,sha) in expected.items():
+              p=out/n; assert p.stat().st_size==size,(n,p.stat().st_size,size); assert hashlib.sha256(p.read_bytes()).hexdigest()==sha,n
+              if p.suffix=='.zip':
+                  with zipfile.ZipFile(p) as z: assert z.testzip() is None,n
+          print('EXACT_FORMAL_BYTES_RECOVERED=PASS')
+          PY
+
+      - name: Create Release through REST without mutating exact Tag
+        working-directory: p02
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/formal-publish"
+          if gh api "repos/$REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1])); assert r['tag_name']=='v2.4.25' and r['name']=='VF Library V2.4.25' and not r['draft'] and not r['prerelease']
+          print('EXISTING_RELEASE_RECOVERY_MODE=PASS')
+          PY
+          else
+            BODY=$(cat "$OUT/VF_Library_V2.4.25_RELEASE_NOTES.md")
+            gh api --method POST "repos/$REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$PRODUCT_SHA" -f name="VF Library V2.4.25" -f body="$BODY" -F draft=false -F prerelease=false > "$RUNNER_TEMP/release.json"
+            echo RELEASE_CREATED_BY_REST=PASS
+          fi
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1])); assert r['tag_name']=='v2.4.25' and r['name']=='VF Library V2.4.25' and not r['draft'] and not r['prerelease']; print('RELEASE_ID='+str(r['id']))
+          PY
+
+      - name: Upload missing assets only, never overwrite
+        working-directory: p02
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/formal-publish"
+          for f in "$OUT"/VF_Library_V2.4.25_SOURCE.zip "$OUT"/VF_Library_V2.4.25_FULL.zip "$OUT"/VF_Library_V2.4.25_UPDATE.zip "$OUT"/VF_Library_V2.4.25_ATOMIC.zip "$OUT"/repair-v2.4.25.php "$OUT"/VF_Library_V2.4.25_RELEASE_MANIFEST.json "$OUT"/VF_Library_V2.4.25_RELEASE_NOTES.md "$OUT"/SHA256SUMS.txt; do
+            n=$(basename "$f")
+            gh api "repos/$REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/current-release.json"
+            if python3 - "$RUNNER_TEMP/current-release.json" "$f" <<'PY'
+          import hashlib,json,sys
+          r=json.load(open(sys.argv[1])); p=__import__('pathlib').Path(sys.argv[2]); matches=[a for a in r['assets'] if a['name']==p.name]
+          if not matches: raise SystemExit(1)
+          assert len(matches)==1
+          a=matches[0]; sha=hashlib.sha256(p.read_bytes()).hexdigest(); assert a['size']==p.stat().st_size
+          if a.get('digest') is not None: assert a['digest']=='sha256:'+sha
+          print('EXISTING_EXACT_ASSET='+p.name)
+          PY
+            then
+              :
+            else
+              gh release upload "$TAG" "$f" --repo "$REPOSITORY"
+              echo "UPLOADED_NEW_ASSET=$n"
+            fi
+          done
+
+      - name: Exact immutable Release remote readback
+        working-directory: p02
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/formal-publish"
+          gh api "repos/$REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/final-release.json"
+          python3 - "$RUNNER_TEMP/final-release.json" "$OUT" <<'PY'
+          import hashlib,json,sys
+          from pathlib import Path
+          r=json.load(open(sys.argv[1])); out=Path(sys.argv[2]); assert r['tag_name']=='v2.4.25' and r['name']=='VF Library V2.4.25' and not r['draft'] and not r['prerelease']
+          expected={p.name:(p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()) for p in out.iterdir() if p.is_file()}
+          assets={a['name']:a for a in r['assets']}; assert set(assets)==set(expected),(set(assets),set(expected))
+          for n,(size,sha) in expected.items():
+              a=assets[n]; assert a['size']==size,(n,a['size'],size)
+              if a.get('digest') is not None: assert a['digest']=='sha256:'+sha,(n,a.get('digest'),sha)
+          print('RELEASE_ID='+str(r['id']))
+          print('TAG='+r['tag_name'])
+          for n in ['VF_Library_V2.4.25_FULL.zip','VF_Library_V2.4.25_UPDATE.zip','VF_Library_V2.4.25_ATOMIC.zip']:
+              size,sha=expected[n]; print(f'FINAL {n} {size} {sha}')
+          print('IMMUTABLE_RELEASE_READBACK=PASS')
+          PY
+          test "$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$PRODUCT_SHA"
+          test "$(gh api repos/$REPOSITORY/branches/main --jq .commit.sha)" = "$PRODUCTION_SHA"
+          echo TAG_EXACT_PRODUCT_IDENTITY=PASS
+          echo MAIN_POST_RELEASE_UNCHANGED=PASS
+
+      - name: Cleanup private source and release bytes
+        if: always()
+        run: rm -rf p02 "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/current-release.json" "$RUNNER_TEMP/final-release.json" "$RUNNER_TEMP/build.json" || true
