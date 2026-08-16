@@ -134,20 +134,66 @@ jobs:
           scripts/run-v256-upgrade-gate.sh "$RUNNER_TEMP/p04-v255-runtime" "$FORMAL/update-set/repair-v2.5.6.php"
           echo 'P04_V255_TO_V256_ATOMIC_PASS' > "$GITHUB_WORKSPACE/p04-atomic-evidence/atomic-upgrade.txt"
 
-      - name: Run negative gates
+      - name: Illegal source fail-closed gate on installed runtime
         shell: bash
         run: |
           set -Eeuo pipefail
           FORMAL="$RUNNER_TEMP/p04-v256-formal"
           EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
-          REPAIR="$FORMAL/update-set/repair-v2.5.6.php"
-          if VF_ATOMIC_SELF_TEST_SOURCE_VERSION=2.5.4 php "$REPAIR" --self-test >"$EVIDENCE/negative-illegal-source.txt" 2>&1; then
-            echo 'illegal source unexpectedly accepted' >&2
+          NEG="$RUNNER_TEMP/p04-v256-illegal-source"
+          SITE="$NEG/site"
+          NEG_SOURCE="$NEG/source"
+          PORT=18994
+          SERVER_LOG="$NEG/php-server.log"
+          rm -rf "$NEG"
+          mkdir -p "$NEG"
+          python source-v255-repo/scripts/build-release-tree.py "$NEG_SOURCE"
+          cp -a "$NEG_SOURCE" "$SITE"
+          cp "$FORMAL/update-set/repair-v2.5.6.php" "$SITE/repair-v2.5.6.php"
+          php -S "127.0.0.1:$PORT" -t "$SITE" >"$SERVER_LOG" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; rm -rf "$NEG"' EXIT
+          for _ in $(seq 1 80); do
+            if curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null; then break; fi
+            sleep 0.1
+          done
+          CRED="$(php -r 'echo "Vf" . bin2hex(random_bytes(18)) . "Aa1";')"
+          VF_NEG_BASE="http://127.0.0.1:$PORT" VF_NEG_CRED="$CRED" node --input-type=module - <<'NODE'
+          import { chromium } from 'playwright';
+          const base = process.env.VF_NEG_BASE;
+          const credential = process.env.VF_NEG_CRED;
+          const browser = await chromium.launch({headless:true});
+          const page = await browser.newPage();
+          await page.goto(`${base}/setup.php`, {waitUntil:'domcontentloaded'});
+          await page.locator('#site_name').fill('VF Infra Illegal Source Gate');
+          await page.locator('#password').fill(credential);
+          await page.locator('#password_confirm').fill(credential);
+          await Promise.all([
+            page.waitForURL(/login\.php\?installed=1/, {timeout:30000}),
+            page.getByRole('button', {name:'安装并进入系统'}).click(),
+          ]);
+          await browser.close();
+          NODE
+          printf '2.5.4\n' > "$SITE/VERSION.txt"
+          curl -fsS "http://127.0.0.1:$PORT/repair-v2.5.6.php" > "$EVIDENCE/negative-illegal-source.html"
+          grep -q '升级预检未通过' "$EVIDENCE/negative-illegal-source.html"
+          grep -q '当前版本不在来源白名单' "$EVIDENCE/negative-illegal-source.html"
+          if grep -q '执行原子升级' "$EVIDENCE/negative-illegal-source.html"; then
+            echo 'illegal source exposed upgrade action' >&2
             exit 69
           fi
-          grep -q 'BLOCK' "$EVIDENCE/negative-illegal-source.txt"
-          echo 'P04_V256_NEGATIVE_ILLEGAL_SOURCE_PASS' >> "$EVIDENCE/negative-illegal-source.txt"
+          echo 'P04_V256_NEGATIVE_ILLEGAL_SOURCE_FAIL_CLOSED_PASS' > "$EVIDENCE/negative-illegal-source.txt"
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          rm -rf "$NEG"
 
+      - name: Corrupt package fail-closed gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-formal"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
           BAD="$RUNNER_TEMP/bad-update.zip"
           cp "$FORMAL/update-set/VF_Infra_V2.5.6_UPDATE.zip" "$BAD"
           printf 'corrupt' >> "$BAD"
@@ -161,7 +207,7 @@ jobs:
             echo 'corrupt update unexpectedly accepted' >&2
             exit 69
           fi
-          echo 'P04_V256_NEGATIVE_CORRUPT_UPDATE_PASS' >> "$EVIDENCE/negative-corrupt-update.txt"
+          echo 'P04_V256_NEGATIVE_CORRUPT_UPDATE_FAIL_CLOSED_PASS' >> "$EVIDENCE/negative-corrupt-update.txt"
           echo 'P04_V256_NEGATIVE_GATE_CLOSURE_PASS' > "$EVIDENCE/negative-gate-closure.txt"
 
       - name: Cleanup private working material
@@ -170,9 +216,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           EVIDENCE="$GITHUB_WORKSPACE/p04-atomic-evidence"
-          rm -rf "$RUNNER_TEMP/p04-v256-formal" "$RUNNER_TEMP/p04-v255-runtime" "$GITHUB_WORKSPACE/source-v255-repo" "$GITHUB_WORKSPACE/node_modules"
+          rm -rf "$RUNNER_TEMP/p04-v256-formal" "$RUNNER_TEMP/p04-v255-runtime" "$RUNNER_TEMP/p04-v256-illegal-source" "$GITHUB_WORKSPACE/source-v255-repo" "$GITHUB_WORKSPACE/node_modules"
           test ! -e "$RUNNER_TEMP/p04-v256-formal"
           test ! -e "$RUNNER_TEMP/p04-v255-runtime"
+          test ! -e "$RUNNER_TEMP/p04-v256-illegal-source"
           test ! -e "$GITHUB_WORKSPACE/source-v255-repo"
           test ! -e "$GITHUB_WORKSPACE/node_modules"
           echo 'P04_V256_CLEANUP_PASS' > "$EVIDENCE/cleanup.txt"
