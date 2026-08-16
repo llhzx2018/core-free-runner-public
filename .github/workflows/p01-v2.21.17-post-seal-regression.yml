@@ -1,0 +1,282 @@
+name: P01 V2.21.17 Exact Post-Seal Regression
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.17-post-seal-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.17-exact-post-seal-regression
+  cancel-in-progress: false
+
+env:
+  P01_CANDIDATE: 89f55e9a772904ebe03537ec54c2891e13a52c80
+  P01_CANDIDATE_TREE: 184738a87e5bdf9a4d2cd912933f6a935dcc9038
+  P01_VERSION: 2.21.17
+  P01_SCHEMA: 2026080902
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'VF_PRIVATE_READ_TOKEN_GATE=PASS'
+
+      - name: Checkout exact private Candidate into ephemeral workspace
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Exact Candidate identity and public-runner privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$P01_CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$P01_CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$P01_VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$P01_VERSION"
+          grep -F "define('VF_VERSION', '2.21.17');" candidate/src/app/bootstrap.php >/dev/null
+          if git -C candidate config --get remote.origin.url | grep -Eq 'x-access-token|github_pat_|ghp_'; then
+            echo 'credential leaked into git remote url' >&2; exit 1
+          fi
+          if find candidate -path 'candidate/.git' -prune -o -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '.env' \) -print | grep -q .; then
+            echo 'private/runtime binary unexpectedly present in Candidate checkout' >&2; exit 1
+          fi
+          if find candidate -path '*/PRIVATE_DATA/*' -o -path '*/private_data/*' | grep -q .; then
+            echo 'PRIVATE_DATA path unexpectedly present in Candidate checkout' >&2; exit 1
+          fi
+          echo 'EXACT_CANDIDATE_IDENTITY=PASS'
+          echo 'PUBLIC_RUNNER_PRIVACY_BOUNDARY=PASS'
+
+      - name: Install PHP SQLite and browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 jq >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","SimpleXML","mbstring","openssl"] as $x){if(!extension_loaded($x)&&!class_exists($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION,"\n";'
+          mkdir -p "$RUNNER_TEMP/p01-node"
+          cd "$RUNNER_TEMP/p01-node"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+          echo 'RUNTIME_DEPENDENCIES=PASS'
+
+      - name: PHP and JavaScript regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo 'PHP_JS_REGRESSION=PASS'
+
+      - name: Fresh setup and SQLite baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/vf-p01-v22117-runtime
+          cp -a candidate/src /tmp/vf-p01-v22117-runtime
+          cd /tmp/vf-p01-v22117-runtime
+          php -S 127.0.0.1:18083 -t . > "$RUNNER_TEMP/p01-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/p01-server.pid"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18083/setup.php -o "$RUNNER_TEMP/p01-setup.html" && break; sleep 1; done
+          curl -fsS -c "$RUNNER_TEMP/p01.cookies" -b "$RUNNER_TEMP/p01.cookies" http://127.0.0.1:18083/setup.php -o "$RUNNER_TEMP/p01-setup.html"
+          CSRF=$(python3 - <<'PY'
+          import re, os
+          p=os.path.join(os.environ['RUNNER_TEMP'],'p01-setup.html')
+          text=open(p,encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c "$RUNNER_TEMP/p01.cookies" -b "$RUNNER_TEMP/p01.cookies" -X POST http://127.0.0.1:18083/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start Public Runner' \
+            --data-urlencode 'admin_password=PublicRunner-P01-22117!Strong' \
+            --data-urlencode 'admin_password_confirm=PublicRunner-P01-22117!Strong' \
+            -o "$RUNNER_TEMP/p01-setup-post.html"
+          test -f app/.runtime.php
+          php cli/verify.php | tee "$RUNNER_TEMP/p01-cli-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/p01-cli-verify.txt"
+          php -r 'require "app/bootstrap.php";$d=vf_db();$c=(int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn();$l=(int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn();if($c!==0||$l!==0)exit(1);echo "FRESH_BUSINESS_DATA_ZERO=PASS\n";'
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          echo 'FRESH_SETUP=PASS'
+          echo 'SQLITE_BASELINE=PASS'
+
+      - name: Security regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-v22117-runtime
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $db=vf_db();
+          $manager=new VfSecurityManager($db);
+          $result=$manager->updateSettings([
+            'failWindow'=>-999,
+            'failLimit'=>999,
+            'lockSeconds'=>999999999,
+            'idleSeconds'=>999999999,
+            'maxSeconds'=>1,
+          ]);
+          if($result['failWindow']!==300) throw new RuntimeException('failWindow clamp failed');
+          if($result['failLimit']!==20) throw new RuntimeException('failLimit clamp failed');
+          if($result['lockSeconds']!==86400) throw new RuntimeException('lockSeconds clamp failed');
+          if($result['idleSeconds']!==2592000) throw new RuntimeException('idleSeconds clamp failed');
+          if($result['maxSeconds']!==2592000) throw new RuntimeException('maxSeconds relation failed');
+          $raw=[];
+          foreach($db->query("SELECT setting_key,setting_value FROM settings WHERE setting_key LIKE 'security_%'") as $row){$raw[$row['setting_key']]=(int)$row['setting_value'];}
+          if(($raw['security_session_idle_seconds']??0)!==2592000) throw new RuntimeException('raw idle out of range');
+          if(($raw['security_session_max_seconds']??0)!==2592000) throw new RuntimeException('raw max out of range');
+          if($db->inTransaction()) throw new RuntimeException('transaction left open');
+          echo "SECURITY_REGRESSION=PASS\n";
+          PHP
+
+      - name: Browser E2E Responsive and UA UI reverification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p01-node/e2e.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18083/';
+          const widths=[390,480,640,768,1024,1280,1440,1920];
+          const adminPages=['manage.php','links-admin.php','health.php','duplicates.php','tags.php','affiliate.php','icons.php','plugins.php','browser-helper.php','data-safety.php','transfer.php','governance.php','system.php','security.php','jobs.php','update.php','settings.php','workbench.php'];
+          let browser;
+          try {
+            browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            const errors=[];
+            page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.click('#loginButton');
+            await page.fill('[name=password]','PublicRunner-P01-22117!Strong');
+            await page.click('#loginSubmit');
+            await page.waitForFunction(()=>{const b=document.querySelector('#addLinkButton');return b&&!b.classList.contains('hidden')});
+            console.log('FRONT_LOGIN=PASS');
+
+            for (const width of widths) {
+              await page.setViewportSize({width,height:900});
+              await page.waitForTimeout(80);
+              const overflow=await page.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+              if(overflow>1) throw new Error(`front overflow width=${width} delta=${overflow}`);
+            }
+            console.log('RESPONSIVE_390_480_640_768_1024_1280_1440_1920=PASS');
+
+            await page.setViewportSize({width:1440,height:900});
+            for (const path of adminPages) {
+              await page.goto(base+path,{waitUntil:'networkidle'});
+              const shell=await page.locator('[data-vf-admin-shell="server"]').count();
+              if(!shell) throw new Error(`admin shell missing: ${path}`);
+              const localAssets=await page.evaluate(()=>[...document.querySelectorAll('link[rel="stylesheet"],script[src]')].map(el=>el.href||el.src).filter(u=>u.includes('/assets/admin-')||u.includes('/assets/health.js')||u.includes('/assets/security.js')||u.includes('/assets/settings.js')));
+              for (const url of localAssets) if(!url.includes('v=2.21.17')) throw new Error(`stale admin asset identity ${path}: ${url}`);
+              for (const width of [390,768,1024,1440]) {
+                await page.setViewportSize({width,height:900});
+                await page.waitForTimeout(40);
+                const overflow=await page.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+                if(overflow>1) throw new Error(`admin overflow ${path} width=${width} delta=${overflow}`);
+              }
+            }
+            console.log('ADMIN_SHELL_RESPONSIVE=PASS');
+            console.log('ADMIN_ASSET_IDENTITY=PASS');
+
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.setViewportSize({width:1440,height:900});
+            await page.click('#addCategoryButton');
+            await page.waitForSelector('#categoryForm',{state:'visible'});
+            await page.fill('#categoryForm [name=name]','Public Runner E2E Category');
+            const cr=page.waitForResponse(r=>r.url().includes('action=category_save'));
+            await page.click('#saveCategory');
+            if((await cr).status()>=400) throw new Error('category_save failed');
+            const bootstrap=await page.evaluate(async()=>await (await fetch('api.php?action=bootstrap')).json());
+            if(!bootstrap.data.categories.some(x=>x.name==='Public Runner E2E Category')) throw new Error('category readback failed');
+            console.log('CATEGORY_WRITE_READBACK=PASS');
+            if(errors.length) throw new Error('page errors: '+errors.join(' | '));
+            console.log('PAGE_ERRORS=0');
+            console.log('BROWSER_E2E=PASS');
+            console.log('UA_UI_BROWSER_REVERIFICATION=PASS');
+          } finally {
+            if(browser) await browser.close();
+          }
+          JS
+          cd "$RUNNER_TEMP/p01-node"
+          node e2e.mjs
+
+      - name: Backup Restore and data regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-v22117-runtime
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $repo->createCategory(['name'=>'Backup Restore Sentinel','description'=>'public synthetic fixture','is_private'=>1]);
+          $manager=new VfBackupManager($db);
+          $backup=$manager->create('P01 2.21.17 public runner regression','regression',true);
+          $key=(string)$backup['backup_key'];
+          $verified=$manager->verify($key);
+          if(($verified['validation_status']??'')!=='valid') throw new RuntimeException('backup verify failed');
+          $repo->createCategory(['name'=>'Backup Restore Transient','description'=>'must disappear after restore','is_private'=>1]);
+          VfBackupManager::performRestore($key);
+          $db=vf_db();
+          $q=$db->prepare('SELECT COUNT(*) FROM categories WHERE name=?');
+          $q->execute(['Backup Restore Sentinel']); if((int)$q->fetchColumn()!==1) throw new RuntimeException('restore sentinel missing');
+          $q->execute(['Backup Restore Transient']); if((int)$q->fetchColumn()!==0) throw new RuntimeException('restore transient survived');
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());
+          $fk=$db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC);
+          if($integrity!=='ok'||$fk) throw new RuntimeException('post-restore SQLite verification failed');
+          echo "BACKUP_RESTORE=PASS\n";
+          echo "BACKUP_DATA_REGRESSION=PASS\n";
+          echo "SQLITE_REGRESSION=PASS\n";
+          PHP
+
+      - name: Final regression verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          # P01 V2.21.17 Exact Regression
+
+          - Candidate Product / Patch Identity: `89f55e9a772904ebe03537ec54c2891e13a52c80`
+          - Candidate Tree: `184738a87e5bdf9a4d2cd912933f6a935dcc9038`
+          - PHP / JS Regression: PASS
+          - Fresh Setup: PASS
+          - Security Regression: PASS
+          - SQLite Regression: PASS
+          - Backup / Restore / Data Regression: PASS
+          - Browser E2E: PASS
+          - Responsive 390 / 480 / 640 / 768 / 1024 / 1280 / 1440 / 1920: PASS
+          - UA/UI Browser Reverification: PASS
+          - PRIVATE_DATA: NONE
+          - Private source persistence in public repository/artifact: NONE
+          EOF
+          echo 'P01_V2_21_17_CANDIDATE_REGRESSION=PASS'
+
+      - name: Cleanup private source and runtime workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate /tmp/vf-p01-v22117-runtime "$RUNNER_TEMP/p01-node" "$RUNNER_TEMP/p01.cookies" "$RUNNER_TEMP/p01-setup.html" "$RUNNER_TEMP/p01-setup-post.html" "$RUNNER_TEMP/p01-cli-verify.txt" "$RUNNER_TEMP/p01-server.log" "$RUNNER_TEMP/p01-server.pid"
+          echo 'EPHEMERAL_PRIVATE_SOURCE_CLEANUP=DONE'
