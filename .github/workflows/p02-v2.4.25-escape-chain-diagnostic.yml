@@ -1,0 +1,64 @@
+name: P02 V2.4.25 Escape Chain Diagnostic
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-escape-chain-diagnostic.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 30df45d478d3b284c6b64e5ceaa36c6cd7579b5f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          persist-credentials: false
+      - name: Install
+        working-directory: p02
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl curl >/dev/null
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Trace Escape chain
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/site"; COOKIE="$RUNNER_TEMP/cookie"; PORT=18135; BASE="http://127.0.0.1:$PORT"; PASS="Trace-${GITHUB_RUN_ID}!"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S "127.0.0.1:$PORT" -t "$SITE" >"$RUNNER_TEMP/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .2; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import html,re,sys;s=open(sys.argv[1]).read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")" = 303
+          cat > .trace.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const b=await chromium.launch({headless:true}),p=await b.newPage({viewport:{width:1440,height:900}}),base=process.env.BASE_URL,password=process.env.TEST_PASSWORD;
+          await p.goto(base+'/',{waitUntil:'networkidle'});let s=await p.evaluate(async()=>await (await fetch('/api.php?action=session')).json());if(!s?.site?.auth){await p.locator('[data-open-login]').first().click();await p.locator('#loginForm input[name="password"]').fill(password);await p.locator('#loginSubmit').click();await p.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));}
+          await p.evaluate(()=>openEditor(null,{forceContentMode:'quick',forceContentFormat:'plain'}));await p.locator('#contentForm').waitFor({state:'visible'});
+          console.log('INSTRUMENT='+JSON.stringify(await p.evaluate(()=>{
+            window.__vfDiag=[];
+            const form=document.querySelector('#contentForm');
+            const ctrl=(typeof state!=='undefined'&&state.workspaceController)?state.workspaceController:null;
+            if(ctrl&&typeof ctrl.cancel==='function'){const original=ctrl.cancel.bind(ctrl);ctrl.cancel=(...args)=>{window.__vfDiag.push({type:'workspace-cancel',t:performance.now(),stack:new Error('workspace-cancel').stack});return original(...args);};}
+            const cancel=document.querySelector('#editorCancel');if(cancel)cancel.addEventListener('click',e=>window.__vfDiag.push({type:'editorCancel-click',trusted:e.isTrusted,t:performance.now(),stack:new Error('editorCancel-click').stack}),true);
+            const obs=new MutationObserver(()=>{if(form&&!form.isConnected){window.__vfDiag.push({type:'form-detached',t:performance.now()});obs.disconnect();}});obs.observe(document.body,{childList:true,subtree:true});
+            document.addEventListener('keydown',e=>window.__vfDiag.push({type:'late-doc-capture',key:e.key,phase:e.eventPhase,cancelBubble:e.cancelBubble,defaultPrevented:e.defaultPrevented,t:performance.now()}),true);
+            document.addEventListener('keydown',e=>window.__vfDiag.push({type:'late-doc-bubble',key:e.key,phase:e.eventPhase,cancelBubble:e.cancelBubble,defaultPrevented:e.defaultPrevented,t:performance.now()}),false);
+            return {ctrl:!!ctrl,cancel:!!cancel};
+          })));
+          await p.evaluate(()=>{const el=document.querySelector('#contentForm [data-attachment-library]');el.focus({preventScroll:true});el.click();});await p.locator('[data-library-query]').waitFor({state:'visible'});await p.waitForFunction(()=>document.activeElement===document.querySelector('[data-library-query]'));
+          await p.keyboard.press('Escape');await p.locator('.attachment-modal-overlay').waitFor({state:'detached'});await p.waitForTimeout(150);
+          console.log('TRACE='+JSON.stringify(await p.evaluate(()=>({diag:window.__vfDiag,editor:!!document.querySelector('#contentForm'),active:document.activeElement?.outerHTML?.slice(0,200)}))));
+          await b.close();
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$PASS" node .trace.mjs
+      - if: always()
+        run: rm -rf p02 "$RUNNER_TEMP/site" || true
