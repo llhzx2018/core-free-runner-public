@@ -1,0 +1,95 @@
+name: P01 V2.21.17 Production Discovery Read-Only Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2.21.17-production-discovery-readonly-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Public Production current truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' \
+            'https://start.kewaro.com/api.php?action=bootstrap' -o /tmp/bootstrap.json
+          jq -e '.ok==true and .version=="2.21.16"' /tmp/bootstrap.json >/dev/null
+          echo 'PRODUCTION_CURRENT=2.21.16'
+
+      - name: Probe admin update status without authentication read-only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          code="$(curl -sS --connect-timeout 10 --max-time 30 -o /tmp/update-status.json -w '%{http_code}' \
+            -H 'Accept: application/json' 'https://start.kewaro.com/api.php?action=update_status')"
+          echo "UPDATE_STATUS_HTTP=$code"
+          cat /tmp/update-status.json || true
+          case "$code" in
+            200) echo 'ADMIN_UPDATE_STATUS_PUBLICLY_READABLE=YES' ;;
+            401|403) echo 'ADMIN_UPDATE_STATUS_AUTH_REQUIRED=YES' ;;
+            *) echo 'ADMIN_UPDATE_STATUS_OTHER_RESPONSE=YES' ;;
+          esac
+
+      - name: Probe retired one-time discovery channels GET-only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for spec in \
+            'bridge_info|https://start.kewaro.com/P01_V2.21.14_TO_UNIFIED_UPDATE_BRIDGE.php?relay=info' \
+            'bridge_verify|https://start.kewaro.com/P01_V2.21.14_TO_UNIFIED_UPDATE_BRIDGE.php?relay=verify' \
+            'credential_verify|https://start.kewaro.com/P01_V2.21.14_CREDENTIAL_RUNTIME_ACTIVATOR.php?relay=verify'
+          do
+            name="${spec%%|*}"; url="${spec#*|}"
+            code="$(curl -sS --connect-timeout 10 --max-time 30 -o "/tmp/$name.out" -w '%{http_code}' "$url" || true)"
+            echo "${name^^}_HTTP=$code"
+            head -c 400 "/tmp/$name.out" 2>/dev/null || true
+            echo
+          done
+          echo 'PRODUCTION_WRITE=0'
+          echo 'UPDATE_PREPARE_CALLED=NO'
+          echo 'UPDATE_INSTALL_CALLED=NO'
+
+      - name: Evaluate whether real backend discovery is already readable
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib
+          candidates=[]
+          for n in ('update-status','bridge_info','bridge_verify','credential_verify'):
+              p=pathlib.Path('/tmp')/(n+'.json' if n=='update-status' else n+'.out')
+              if not p.exists(): continue
+              try: x=json.loads(p.read_text(encoding='utf-8'))
+              except Exception: continue
+              candidates.append((n,x))
+          def pick(x,*keys):
+              for k in keys:
+                  if isinstance(x,dict) and k in x: return x[k]
+              if isinstance(x,dict) and isinstance(x.get('status'),dict):
+                  for k in keys:
+                      if k in x['status']: return x['status'][k]
+              return None
+          for n,x in candidates:
+              current=pick(x,'current','current_version')
+              target=pick(x,'latest','latest_version','target','target_version')
+              available=pick(x,'available','update_available')
+              if str(current)=='2.21.16' and str(target)=='2.21.17' and available is True:
+                  print('REAL_PRODUCTION_BACKEND_DISCOVERY=PASS')
+                  print('DISCOVERY_CHANNEL='+n)
+                  raise SystemExit(0)
+          print('REAL_PRODUCTION_BACKEND_DISCOVERY=NOT_READABLE_WITH_EXISTING_UNAUTHENTICATED_GET_CHANNELS')
+          PY
+
+      - name: Read-only probe complete
+        shell: bash
+        run: |
+          echo 'PRODUCTION_DISCOVERY_PROBE=COMPLETE'
+          echo 'PRODUCTION_WRITE=0'
