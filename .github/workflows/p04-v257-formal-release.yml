@@ -1,0 +1,288 @@
+name: P04 VF Infra V2.5.7 Formal Release
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v257-formal-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v257-formal-release
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: 1390b84a69798eee05b9eabd9a8ec02308f80f62
+  TARGET_TREE: 1d5578b930af910ce167c65eb2ca8723dcf4e45c
+  SOURCE_COMMIT: 45f960715a2b53b4cf09524862e76b19c58f0c68
+  TARGET_VERSION: 2.5.7
+  SOURCE_VERSION: 2.5.6
+  TARGET_TAG: v2.5.7
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact V2.5.7 Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact V2.5.6 Production source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: v256-source
+
+      - name: Verify exact release identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(git -C v256-source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < v256-source/VERSION)" = "$SOURCE_VERSION"
+          echo 'P04_V257_RELEASE_EXACT_IDENTITIES_PASS'
+
+      - name: Setup PHP Python Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser and sqlite tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v sqlite3 >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y sqlite3; }
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Generate V2.5.7 proven Atomic builder adapter
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/build-v256-update-release.py')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace("TARGET='2.5.6'","TARGET='2.5.7'",1)
+          s=s.replace("SOURCE='2.5.5'","SOURCE='2.5.6'",1)
+          start=s.index('PAYLOAD_PATHS=[')
+          end=s.index(']\n\np=argparse.ArgumentParser()',start)+1
+          payload="""PAYLOAD_PATHS=[
+              'VERSION.txt',
+              'index.php',
+              'assets/v257-cn.js',
+              'assets/v257-mobile.js',
+              'assets/v257-nav.css',
+              'assets/v257-nav.js',
+              'assets/v257-ui.css',
+              'assets/v257-view.js',
+              'app/Core/ProjectService.php',
+              'release-manifest.json',
+          ]"""
+          s=s[:start]+payload+s[end:]
+          s=s.replace("source.replace('vfi251','vfi256').replace('atomic_251','atomic_256')","source.replace('vfi251','vfi257').replace('atomic_251','atomic_257')",1)
+          Path('scripts/build-v257-generated-release.py').write_text(s,encoding='utf-8')
+          PY
+          python3 -m py_compile scripts/build-v257-generated-release.py
+
+      - name: Build deterministic formal artifacts twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,shutil,subprocess,sys,zipfile
+          root=Path.cwd()
+          payload=[
+            'VERSION.txt','index.php','assets/v257-cn.js','assets/v257-mobile.js','assets/v257-nav.css',
+            'assets/v257-nav.js','assets/v257-ui.css','assets/v257-view.js','app/Core/ProjectService.php','release-manifest.json'
+          ]
+          def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          def build(out):
+              out=Path(out); shutil.rmtree(out,ignore_errors=True); out.mkdir(parents=True)
+              runtime=out/'runtime'; update=out/'update-set'
+              subprocess.run(['python3','scripts/build-release-tree.py',str(runtime)],check=True)
+              assert (runtime/'VERSION.txt').read_text().strip()=='2.5.7'
+              rm=json.loads((runtime/'release-manifest.json').read_text(encoding='utf-8'))
+              assert rm['version']=='2.5.7' and int(rm['target_schema'])==14
+              full=out/'VF_Infra_V2.5.7_FULL.zip'
+              with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+                  for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                      rel=f.relative_to(runtime).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                      mode=0o100755 if os.access(f,os.X_OK) else 0o100644; info.external_attr=(mode<<16); z.writestr(info,f.read_bytes())
+              subprocess.run(['python3','scripts/build-v257-generated-release.py','--target-runtime',str(runtime),'--output',str(update)],check=True)
+              pm=json.loads((update/'PACKAGE_MANIFEST.json').read_text(encoding='utf-8'))
+              assert pm['version']=='2.5.7' and pm['allowed_source_versions']==['2.5.6']
+              assert pm['changed_files']==payload and pm['payload_file_count']==10
+              assets=[full,update/'VF_Infra_V2.5.7_UPDATE.zip',update/'VF_Infra_V2.5.7_ATOMIC.zip',update/'repair-v2.5.7.php',update/'PACKAGE_MANIFEST.json']
+              formal={'project':'P04 · VF Infra','version':'2.5.7','schema':14,'source_commit':os.environ['TARGET_COMMIT'],'source_tree':os.environ['TARGET_TREE'],'runtime_fingerprint':rm['source_fingerprint'],'runtime_file_count':int(rm['file_count'])+1,'payload_file_count':10,'allowed_source_versions':['2.5.6'],'artifacts':{p.name:{'bytes':p.stat().st_size,'sha256':sha(p)} for p in assets}}
+              (out/'FORMAL_ARTIFACT_MANIFEST.json').write_text(json.dumps(formal,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              return formal
+          a=build(Path(os.environ['RUNNER_TEMP'])/'p04-v257-formal-a')
+          b=build(Path(os.environ['RUNNER_TEMP'])/'p04-v257-formal-b')
+          assert a['runtime_fingerprint']==b['runtime_fingerprint']
+          assert a['runtime_file_count']==b['runtime_file_count']
+          assert a['artifacts']==b['artifacts'],(a['artifacts'],b['artifacts'])
+          evidence=Path('p04-v257-release-evidence'); evidence.mkdir(exist_ok=True)
+          (evidence/'deterministic-build.json').write_text(json.dumps({'result':'PASS','build_a':a,'build_b':b},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(a,ensure_ascii=False))
+          print('P04_V257_DETERMINISTIC_FORMAL_BUILD_PASS')
+          PY
+
+      - name: V2.5.6 to V2.5.7 Atomic upgrade gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v257-formal-a"
+          SRC_RUNTIME="$RUNNER_TEMP/p04-v256-source-runtime"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence/atomic-upgrade"
+          python3 v256-source/scripts/build-release-tree.py "$SRC_RUNTIME"
+          test "$(tr -d '\r\n' < "$SRC_RUNTIME/VERSION.txt")" = '2.5.6'
+          php "$FORMAL/update-set/repair-v2.5.7.php" --self-test | tee "$GITHUB_WORKSPACE/p04-v257-release-evidence/repair-self-test.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tests/e2e/v256-upgrade.mjs')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('2.5.6','__TARGET__').replace('2.5.5','__SOURCE__')
+          s=s.replace('__TARGET__','2.5.7').replace('__SOURCE__','2.5.6').replace('v256','v257')
+          Path('tests/e2e/v257-release-upgrade.mjs').write_text(s,encoding='utf-8')
+          p=Path('scripts/run-v256-upgrade-gate.sh')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('2.5.6','__TARGET__').replace('2.5.5','__SOURCE__')
+          s=s.replace('__TARGET__','2.5.7').replace('__SOURCE__','2.5.6').replace('v256-upgrade.mjs','v257-release-upgrade.mjs').replace('v256','v257')
+          Path('scripts/run-v257-release-upgrade-gate.sh').write_text(s,encoding='utf-8')
+          PY
+          chmod +x scripts/run-v257-release-upgrade-gate.sh
+          VF_INFRA_UPGRADE_EVIDENCE_DIR="$EVIDENCE" scripts/run-v257-release-upgrade-gate.sh "$SRC_RUNTIME" "$FORMAL/update-set/repair-v2.5.7.php"
+          echo 'P04_V256_TO_V257_ATOMIC_ARTIFACT_GATE_PASS'
+
+      - name: Stage governed release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v257-formal-a"
+          ASSETS="$RUNNER_TEMP/p04-v257-release-assets"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence"
+          rm -rf "$ASSETS" && mkdir -p "$ASSETS"
+          cp "$FORMAL/VF_Infra_V2.5.7_FULL.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/VF_Infra_V2.5.7_UPDATE.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/VF_Infra_V2.5.7_ATOMIC.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/repair-v2.5.7.php" "$ASSETS/"
+          cp "$FORMAL/update-set/PACKAGE_MANIFEST.json" "$ASSETS/"
+          cp "$FORMAL/FORMAL_ARTIFACT_MANIFEST.json" "$ASSETS/"
+          cat > "$ASSETS/RELEASE_NOTES.md" <<'EOF'
+          # VF Infra V2.5.7
+
+          V2.5.7 是 P04 · VF Infra 的 Personal-first Infrastructure Console 结构重构正式版本。
+
+          核心原则：Personal-first；Reference-driven, not Reference-controlled；Personal System != Mini Enterprise SaaS。
+
+          主要变化：Project 升级为 Global Scope；首页改为到期/续费/费用/健康优先；Domain/DNS/VPS/Provider 升级为资源 Workspace；Finance 风险浅层暴露、流水次级；Mobile 采用 Portfolio-first → Resource Workspace；390/768/1024/1440/1920 响应式通过。
+
+          Schema 保持 14，无 Migration；未新增危险 Provider Remote Write。在线升级仅允许 V2.5.6 → V2.5.7。
+
+          Product Candidate Commit: 1390b84a69798eee05b9eabd9a8ec02308f80f62
+          Product Candidate Tree: 1d5578b930af910ce167c65eb2ca8723dcf4e45c
+          Final Gate Run: 31949339948 / PASS
+          EOF
+          python3 - "$ASSETS" "$FORMAL/FORMAL_ARTIFACT_MANIFEST.json" <<'PY'
+          import hashlib,json,pathlib,sys,os
+          root=pathlib.Path(sys.argv[1]); formal=json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+          def ident(p):
+              b=p.read_bytes(); return {'name':p.name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+          names=['VF_Infra_V2.5.7_FULL.zip','VF_Infra_V2.5.7_UPDATE.zip','VF_Infra_V2.5.7_ATOMIC.zip','repair-v2.5.7.php','PACKAGE_MANIFEST.json','FORMAL_ARTIFACT_MANIFEST.json','RELEASE_NOTES.md']
+          m={'project':'P04 · VF Infra','version':'2.5.7','schema':14,'tag':'v2.5.7','product_commit':os.environ['TARGET_COMMIT'],'product_tree':os.environ['TARGET_TREE'],'runtime_fingerprint':formal['runtime_fingerprint'],'runtime_file_count':formal['runtime_file_count'],'allowed_source_versions':['2.5.6'],'payload_file_count':10,'final_gate_run':31949339948,'atomic_artifact_gate':'PASS','assets':[ident(root/n) for n in names],'production_upgrade':'NOT_EXECUTED_AT_RELEASE_TIME'}
+          (root/'RELEASE_MANIFEST.json').write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          names.append('RELEASE_MANIFEST.json')
+          lines=[]
+          for n in sorted(names):
+              p=root/n; lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {n}")
+          (root/'SHA256SUMS.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
+          cp "$ASSETS/RELEASE_MANIFEST.json" "$EVIDENCE/"
+          cp "$ASSETS/SHA256SUMS.txt" "$EVIDENCE/"
+
+      - name: Create exact immutable-by-policy Tag and Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v257-release-assets"
+          if gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" >/dev/null 2>&1; then
+            echo 'V257_TAG_ALREADY_EXISTS_FAIL_CLOSED' >&2; exit 70
+          fi
+          if gh release view "$TARGET_TAG" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then
+            echo 'V257_RELEASE_ALREADY_EXISTS_FAIL_CLOSED' >&2; exit 71
+          fi
+          gh api --method POST "repos/$TARGET_REPOSITORY/git/refs" -f ref="refs/tags/$TARGET_TAG" -f sha="$TARGET_COMMIT" >/dev/null
+          gh release create "$TARGET_TAG" --repo "$TARGET_REPOSITORY" --verify-tag --title 'VF Infra V2.5.7' --notes-file "$ASSETS/RELEASE_NOTES.md" \
+            "$ASSETS/VF_Infra_V2.5.7_FULL.zip" "$ASSETS/VF_Infra_V2.5.7_UPDATE.zip" "$ASSETS/VF_Infra_V2.5.7_ATOMIC.zip" \
+            "$ASSETS/repair-v2.5.7.php" "$ASSETS/PACKAGE_MANIFEST.json" "$ASSETS/FORMAL_ARTIFACT_MANIFEST.json" \
+            "$ASSETS/RELEASE_MANIFEST.json" "$ASSETS/SHA256SUMS.txt" "$ASSETS/RELEASE_NOTES.md"
+          echo 'P04_V257_FORMAL_RELEASE_CREATED_PASS'
+
+      - name: Remote exact release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v257-release-assets"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence"
+          gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" > "$EVIDENCE/tag-readback.json"
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$TARGET_TAG" > "$EVIDENCE/release-readback.json"
+          python3 - "$ASSETS" "$EVIDENCE/tag-readback.json" "$EVIDENCE/release-readback.json" "$EVIDENCE/remote-release-verification.json" <<'PY'
+          import hashlib,json,pathlib,sys,os
+          root=pathlib.Path(sys.argv[1]); tag=json.loads(pathlib.Path(sys.argv[2]).read_text()); rel=json.loads(pathlib.Path(sys.argv[3]).read_text()); out=pathlib.Path(sys.argv[4])
+          assert tag['object']['sha']==os.environ['TARGET_COMMIT']; assert rel['tag_name']==os.environ['TARGET_TAG'] and rel['name']=='VF Infra V2.5.7'
+          remote={a['name']:a for a in rel.get('assets',[])}; local={p.name:(p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()) for p in root.iterdir() if p.is_file()}
+          assert set(remote)==set(local),(sorted(remote),sorted(local))
+          checked={}
+          for n,(size,sha) in local.items():
+              a=remote[n]; assert a['size']==size; digest=a.get('digest') or ''; assert not digest or digest=='sha256:'+sha
+              checked[n]={'id':a['id'],'bytes':size,'sha256':sha,'remote_digest':digest}
+          r={'tag':'v2.5.7','tag_target':tag['object']['sha'],'release_id':rel['id'],'release_name':rel['name'],'assets':checked,'remote_readback':'PASS','immutable_policy':'DO_NOT_OVERWRITE'}
+          out.write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); print(json.dumps(r,ensure_ascii=False)); print('P04_V257_REMOTE_RELEASE_READBACK_PASS')
+          PY
+
+      - name: Cleanup private source and formal bytes before public evidence
+        if: always()
+        shell: bash
+        run: |
+          rm -rf v256-source scripts/build-v257-generated-release.py tests/e2e/v257-release-upgrade.mjs scripts/run-v257-release-upgrade-gate.sh
+          rm -rf "$RUNNER_TEMP/p04-v257-formal-a" "$RUNNER_TEMP/p04-v257-formal-b" "$RUNNER_TEMP/p04-v256-source-runtime" "$RUNNER_TEMP/p04-v257-release-assets"
+
+      - name: Upload public-safe formal release evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.7-Formal-Release-Evidence
+          path: p04-v257-release-evidence
+          if-no-files-found: error
+          retention-days: 14
