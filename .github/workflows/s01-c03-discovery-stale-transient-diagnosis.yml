@@ -66,6 +66,8 @@ jobs:
           assert len(a)==1
           assert a[0]['size']==m['asset_bytes']
           assert a[0].get('digest') in (None,'sha256:'+m['asset_sha256'])
+          safe={'target_version':m['target_version'],'from_versions':m['from_versions'],'package_slug':m['package_slug'],'plugin_file':m['plugin_file'],'release_tag':r['tag_name'],'asset_name':a[0]['name'],'asset_bytes':a[0]['size'],'asset_digest':a[0].get('digest')}
+          json.dump(safe,open(sys.argv[1].replace('manifest.json','remote-contract-safe.json'),'w'),indent=2)
           print('REMOTE_DISCOVERY_CONTRACT=PASS')
           PY
 
@@ -98,43 +100,70 @@ jobs:
           test "$(wpcli plugin get vf-tool-m3u8 --field=version | tr -d '\r')" = '1.25.1'
           wpcli option update vf_private_update_credential_v1 "$PRIVATE_TOKEN" >/dev/null
 
-      - name: Reproduce stale update transient failure and forced-refresh recovery
+      - name: Inspect exact 1.25.1 updater registration
+        run: |
+          set -Eeuo pipefail
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli eval '$c=$GLOBALS["vf_m3u8_update_client_v1"]??null; $pre=$c?has_filter("pre_set_site_transient_update_plugins",[$c,"inject_plugin_update"]):false; $read=$c?has_filter("site_transient_update_plugins",[$c,"inject_plugin_update"]):false; echo wp_json_encode(["client_loaded"=>$c instanceof VF_M3U8_Update_Client_V1,"pre_set_hook"=>$pre!==false,"read_hook"=>$read!==false,"credential"=>VF_M3U8_Update_Credential_V1::redacted_status()]);' > "$OUT/hooks.json"
+          cat "$OUT/hooks.json"
+          python3 - "$OUT/hooks.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x['client_loaded'] is True, x
+          assert x['pre_set_hook'] is True, x
+          assert x['read_hook'] is False, x
+          assert x['credential']['configured'] is True, x
+          print('UPDATER_REGISTRATION=PASS')
+          PY
+
+      - name: Reproduce fresh-stale core update transient behavior
+        run: |
+          set -Eeuo pipefail
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli eval '$t=(object)["last_checked"=>time(),"checked"=>["vf-tool-m3u8/vf-tool-m3u8.php"=>"1.25.1"],"response"=>[],"no_update"=>[]]; update_site_option("_site_transient_update_plugins",$t); delete_site_option("_site_transient_timeout_update_plugins"); wp_cache_delete("_site_transient_update_plugins","site-options"); wp_cache_delete("_site_transient_update_plugins","options");' >/dev/null
+          wpcli eval 'wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; echo wp_json_encode(["offer"=>is_object($t)&&isset($t->response[$p]),"last_checked"=>is_object($t)?($t->last_checked??null):null,"checked_version"=>is_object($t)&&isset($t->checked[$p])?$t->checked[$p]:null]);' > "$OUT/stale.json"
+          cat "$OUT/stale.json"
+          python3 - "$OUT/stale.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x['offer'] is False, x
+          assert x['checked_version']=='1.25.1', x
+          print('STALE_TRANSIENT_DISCOVERY_FAILURE=REPRODUCED')
+          PY
+
+      - name: Force standard WordPress update check without product code changes
         env:
           PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           set -Eeuo pipefail
           wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
-          wpcli eval '$c=$GLOBALS["vf_m3u8_update_client_v1"]??null; $pre=$c?has_filter("pre_set_site_transient_update_plugins",[$c,"inject_plugin_update"]):false; $read=$c?has_filter("site_transient_update_plugins",[$c,"inject_plugin_update"]):false; echo wp_json_encode(["client_loaded"=>$c instanceof VF_M3U8_Update_Client_V1,"pre_set_hook"=>$pre!==false,"read_hook"=>$read!==false]);' > "$OUT/hooks.json"
-          python3 - "$OUT/hooks.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['client_loaded'] is True; assert x['pre_set_hook'] is True; assert x['read_hook'] is False
-          PY
-          wpcli eval '$t=(object)["last_checked"=>time(),"checked"=>["vf-tool-m3u8/vf-tool-m3u8.php"=>"1.25.1"],"response"=>[],"no_update"=>[]]; update_option("_site_transient_update_plugins",$t,false); delete_option("_site_transient_timeout_update_plugins"); wp_cache_delete("_site_transient_update_plugins","options");' >/dev/null
-          wpcli eval 'wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; echo wp_json_encode(["offer"=>is_object($t)&&isset($t->response[$p]),"last_checked"=>is_object($t)?($t->last_checked??null):null]);' > "$OUT/stale.json"
-          python3 - "$OUT/stale.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['offer'] is False
-          print('STALE_TRANSIENT_DISCOVERY_FAILURE=REPRODUCED')
-          PY
-          wpcli eval 'delete_site_transient("update_plugins"); VF_M3U8_Update_Source_V1::clear_cache(); wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; $r=is_object($t)&&isset($t->response[$p])?$t->response[$p]:null; echo wp_json_encode(["offer"=>is_object($r),"new_version"=>is_object($r)?($r->new_version??null):null,"plugin"=>is_object($r)?($r->plugin??null):null,"slug"=>is_object($r)?($r->slug??null):null]);' > "$OUT/forced-refresh.json"
+          wpcli eval 'delete_site_transient("update_plugins"); VF_M3U8_Update_Source_V1::clear_cache(); wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; $r=is_object($t)&&isset($t->response[$p])?$t->response[$p]:null; echo wp_json_encode(["offer"=>is_object($r),"new_version"=>is_object($r)?($r->new_version??null):null,"plugin"=>is_object($r)?($r->plugin??null):null,"slug"=>is_object($r)?($r->slug??null):null,"package_present"=>is_object($r)&&!empty($r->package),"history"=>VF_M3U8_Update_History_V1::status()]);' > "$OUT/forced-refresh.json"
+          cat "$OUT/forced-refresh.json"
           python3 - "$OUT/forced-refresh.json" <<'PY'
           import json,sys
-          x=json.load(open(sys.argv[1])); assert x['offer'] is True; assert x['new_version']=='1.25.2'; assert x['plugin']=='vf-tool-m3u8/vf-tool-m3u8.php'; assert x['slug']=='vf-tool-m3u8'
+          x=json.load(open(sys.argv[1]))
+          assert x['offer'] is True, x
+          assert x['new_version']=='1.25.2', x
+          assert x['plugin']=='vf-tool-m3u8/vf-tool-m3u8.php', x
+          assert x['slug']=='vf-tool-m3u8', x
+          assert x['package_present'] is True, x
           print('FORCED_CORE_UPDATE_CHECK_DISCOVERY=PASS')
           PY
           python3 - "$OUT/hooks.json" "$OUT/stale.json" "$OUT/forced-refresh.json" > "$OUT/diagnosis.json" <<'PY'
           import json,sys,datetime
           h,s,f=[json.load(open(x)) for x in sys.argv[1:]]
-          out={'result':'PASS','component_id':'S01-C03','production_version_model':'1.25.1','root_cause':'STALE_WORDPRESS_UPDATE_TRANSIENT_NOT_REEVALUATED_BY_1_25_1_CLIENT','client_loaded':h['client_loaded'],'pre_set_hook':h['pre_set_hook'],'read_time_hook':h['read_hook'],'stale_transient_failure_reproduced':not s['offer'],'forced_refresh_offer':f['offer'],'target_version':f['new_version'],'product_code_changed':False,'production_write':False,'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          out={'result':'PASS','component_id':'S01-C03','production_version_model':'1.25.1','root_cause':'STALE_WORDPRESS_UPDATE_TRANSIENT_NOT_REEVALUATED_UNTIL_CORE_REFRESH','client_loaded':h['client_loaded'],'pre_set_hook':h['pre_set_hook'],'read_time_hook':h['read_hook'],'credential_configured':h['credential']['configured'],'credential_source':h['credential']['source'],'stale_transient_failure_reproduced':not s['offer'],'forced_refresh_offer':f['offer'],'target_version':f['new_version'],'product_code_changed':False,'core_updates_changed':False,'release_changed':False,'production_write':False,'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
           print(json.dumps(out,indent=2))
           PY
+          cat "$OUT/diagnosis.json"
 
       - name: Upload redacted diagnosis evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: s01-c03-discovery-diagnosis
+          name: s01-c03-discovery-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/s01-c03-discovery/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Cleanup
