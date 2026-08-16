@@ -1,0 +1,155 @@
+name: P05 V1.0.0 Release Candidate Verify
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p05-v100-release-candidate.yml'
+      - 'requests/p05-v100-release-candidate-*'
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_P05_SHA: 242fe6bd79b9b7c6a6565a4ada3efe004d3282e7
+  NODE_IMAGE: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+  POSTGRES_IMAGE: postgres:18@sha256:7157393f508fd8eb46119937fab39813783fe3e7d4c6316c45c12ce2ea25e61d
+  DATABASE_URL: postgresql://vfseo:fixture-pass@127.0.0.1:5432/vfseo
+  PORT: 3105
+  VF_ADMIN_USERNAME: release-admin
+  VF_ADMIN_PASSWORD: fixture-release-admin-password-20260816
+  VF_SECURE_COOKIES: 'false'
+  VF_REQUIRE_HTTPS: 'false'
+  VF_TRUST_PROXY: 'false'
+  VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public control repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read credential
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact private P05 release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source version schema identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+          grep -q '"schema_identity": "VF-SEO-SCHEMA@1"' p05/VF_PROJECT.json
+          grep -q '"schema_version": 1' p05/VF_PROJECT.json
+          echo "CANDIDATE_SOURCE=$EXPECTED_P05_SHA"
+          echo "VERSION=1.0.0"
+          echo "SCHEMA=VF-SEO-SCHEMA@1/1"
+
+      - name: Provision PostgreSQL 18
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-release-pg >/dev/null 2>&1 || true
+          docker pull "$POSTGRES_IMAGE" >/dev/null
+          docker run -d --name p05-release-pg \
+            -e POSTGRES_USER=vfseo -e POSTGRES_PASSWORD=fixture-pass -e POSTGRES_DB=vfseo \
+            -p 127.0.0.1:5432:5432 "$POSTGRES_IMAGE" >/dev/null
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec p05-release-pg psql -U vfseo -d vfseo -Atc 'SELECT 1' 2>/dev/null | grep -qx '1'; then
+              ready=$((ready+1)); [ "$ready" -ge 2 ] && break
+            else
+              ready=0
+            fi
+            sleep 1
+          done
+          test "$ready" -ge 2
+
+      - name: Candidate build checks
+        run: |
+          set -Eeuo pipefail
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci && npm run lint && npm run typecheck && npm run build'
+
+      - name: Assemble V1.0.0 FULL package
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-stage VF_SEO_V1.0.0_FULL.zip VF_SEO_V1.0.0_FULL.zip.sha256
+          mkdir -p release-stage/VF_SEO_V1.0.0_FULL
+          cd p05
+          cp .env.example VERSION VF_PROJECT.json README.md CHANGELOG.md package.json package-lock.json tsconfig.json tsconfig.server.json vite.config.ts index.html ../release-stage/VF_SEO_V1.0.0_FULL/
+          cp -a config database scripts src public dist ../release-stage/VF_SEO_V1.0.0_FULL/
+          cd ../release-stage/VF_SEO_V1.0.0_FULL
+          find . -type f ! -name RELEASE_MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > RELEASE_MANIFEST.sha256
+          cd ..
+          zip -X -q -r ../VF_SEO_V1.0.0_FULL.zip VF_SEO_V1.0.0_FULL
+          cd ..
+          sha256sum VF_SEO_V1.0.0_FULL.zip | tee VF_SEO_V1.0.0_FULL.zip.sha256
+          test -s VF_SEO_V1.0.0_FULL.zip
+
+      - name: Release package content and privacy gate
+        run: |
+          set -Eeuo pipefail
+          unzip -t VF_SEO_V1.0.0_FULL.zip >/dev/null
+          unzip -Z1 VF_SEO_V1.0.0_FULL.zip > release-files.txt
+          ! grep -E '(^|/)(\.git|\.github|tests|node_modules|docs/evidence|private|PRIVATE_DATA)(/|$)' release-files.txt
+          ! grep -E '(^|/)\.env$|\.(sqlite|sqlite3|db|pem|key|p12|pfx)$' release-files.txt
+          ! grep -aERn --exclude='*.map' '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----)' release-stage/VF_SEO_V1.0.0_FULL
+          echo 'ARCHIVE_INTEGRITY=PASS'
+          echo 'SECRET_GATE=PASS'
+          echo 'PRIVATE_DATA_GATE=PASS'
+
+      - name: Install migration schema and boot smoke from final ZIP
+        run: |
+          set -Eeuo pipefail
+          rm -rf install-smoke
+          mkdir install-smoke
+          unzip -q VF_SEO_V1.0.0_FULL.zip -d install-smoke
+          docker run --rm --network host \
+            -e DATABASE_URL -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke/VF_SEO_V1.0.0_FULL:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci --omit=dev && npm run migrate && npm run verify:schema && npm run bootstrap:admin && npm run verify:admin-ready'
+          docker rm -f p05-release-web >/dev/null 2>&1 || true
+          docker run -d --name p05-release-web --network host \
+            -e DATABASE_URL -e PORT -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke/VF_SEO_V1.0.0_FULL:/work" -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 45); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null
+          echo 'INSTALL_BOOT_SMOKE=PASS'
+          echo 'SCHEMA_VERIFY=PASS'
+          echo 'CRITICAL_FAILURE=0'
+
+      - name: Upload verified release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_SEO_V1.0.0_RELEASE_CANDIDATE
+          path: |
+            VF_SEO_V1.0.0_FULL.zip
+            VF_SEO_V1.0.0_FULL.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Cleanup private source and runtime
+        if: always()
+        run: |
+          set +e
+          docker rm -f p05-release-web p05-release-pg >/dev/null 2>&1
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" "$NODE_IMAGE" sh -lc 'rm -rf /workspace/p05 /workspace/install-smoke /workspace/release-stage' >/dev/null 2>&1
+          if [ -e p05 ]; then echo 'PRIVATE_SOURCE_CLEANUP=FAIL'; exit 1; fi
+          echo 'PRIVATE_SOURCE_CLEANUP=PASS'
