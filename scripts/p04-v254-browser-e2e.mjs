@@ -116,6 +116,7 @@ await page.keyboard.press('Tab');
 assert(await page.locator('#modal').evaluate((m) => m.contains(document.activeElement)), 'modal tab focus escaped');
 await page.keyboard.press('Escape');
 await page.waitForFunction(() => document.querySelector('#modal')?.getAttribute('aria-hidden') === 'true');
+await page.waitForFunction(() => document.querySelector('#page-actions [data-action="new-project"]') === document.activeElement);
 assert(await newProject.evaluate((b) => b === document.activeElement), 'modal did not return focus to opener');
 
 // Complex domain editor uses Drawer by design.
