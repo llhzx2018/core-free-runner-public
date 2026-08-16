@@ -1,0 +1,104 @@
+name: P02 V2.4.25 Optimization UAUI Final
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-optimization-uaui-final.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-optimization-uaui-final
+  cancel-in-progress: false
+
+jobs:
+  uaui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE_SHA: 11019841b837038092b153930ab8e185bf2a2676
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - name: Require private source token
+        env: {PRIVATE_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'}
+        run: test -n "$PRIVATE_TOKEN"
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 11019841b837038092b153930ab8e185bf2a2676
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          persist-credentials: false
+      - name: Install test runtime
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Exact optimization network + seven viewport UA/UI
+        working-directory: p02
+        env: {TEST_PASSWORD: 'P02-UAUI-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-uaui"; SITE="$ROOT/site"; PORT=18250; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          cat > .uaui-final.mjs <<'JS'
+          import fs from 'node:fs';import{chromium}from'playwright';
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD,out=process.env.UI_JSON;
+          const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});
+          const errors=[],expected=[];let update409=false;
+          page.on('response',r=>{if(r.status()===409&&r.url().includes('/api.php?action=update_check')){update409=true;expected.push('EXPECTED_UPDATE_CHECK_409_NO_PRODUCTION_CREDENTIAL')}});
+          page.on('pageerror',e=>errors.push(String(e)));
+          page.on('console',m=>{if(m.type()!=='error')return;const t=m.text();if(update409&&/status of 409 \(Conflict\)/i.test(t)){expected.push(t);return}errors.push(t)});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'});await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            const s=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());if(s.version!=='2.4.25')throw new Error('version '+s.version);const csrf=s.csrf;
+            const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+            const c=await post('category_save',{name:'Optimization UAUI',description:'',icon:'folder'});if(!c.ok)throw new Error('category seed');const cid=Number(c.id);
+            const i=await post('content_save',{category_id:cid,title:'Optimization Seed',content:'before',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!i.ok)throw new Error('item seed');const iid=Number(i.id);
+            await page.reload({waitUntil:'networkidle'});await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});await page.waitForTimeout(200);
+            let boots=0;const h=r=>{if(r.url().includes('action=app_bootstrap'))boots++};page.on('request',h);
+            await page.locator('#articleTitleInput').fill('Optimization Saved');await page.locator('#articleSource').fill('optimized content ✓');await page.locator('[data-workspace-command="save"]').last().click();await page.waitForFunction(()=>state.readerItem?.title==='Optimization Saved'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(250);page.off('request',h);
+            if(boots!==0)throw new Error('ordinary edit emitted '+boots+' app_bootstrap requests');
+            const read=await page.evaluate(async id=>await(await fetch('/api.php?action=content_get&id='+id,{cache:'no-store'})).json(),iid);if(!read.ok||read.item?.content!=='optimized content ✓')throw new Error('persist readback');
+            const rows=[];for(const[w,hv]of[[1920,1080],[1600,1000],[1440,900],[1318,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:hv});await page.waitForTimeout(100);const r=await page.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body?.scrollWidth||0}));if(r.scroll>r.client+3)throw new Error('overflow '+w+' '+r.scroll+'>'+r.client);rows.push({width:w,height:hv,...r})}
+            if(errors.length)throw new Error('unexpected console/page errors: '+errors.join(' | '));
+            fs.writeFileSync(out,JSON.stringify({candidate:'2.4.25',candidate_commit:process.env.CANDIDATE_SHA,ordinary_edit_extra_app_bootstrap:boots,persisted_readback:'PASS',viewports:rows,expected_console_events:expected,unexpected_console_errors:errors},null,2));
+            console.log('ORDINARY_EDIT_EXTRA_APP_BOOTSTRAP=0');console.log('PERSISTED_READBACK=PASS');console.log('UA_UI_RESPONSIVE_7_VIEWPORTS=PASS');console.log('EXPECTED_UPDATE_409_FILTER=PASS');
+          }finally{await browser.close()}
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$TEST_PASSWORD" UI_JSON="$RUNNER_TEMP/uaui-final.json" CANDIDATE_SHA="$CANDIDATE_SHA" node .uaui-final.mjs
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+      - name: Public evidence privacy gate
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/public-evidence";cp "$RUNNER_TEMP/uaui-final.json" "$RUNNER_TEMP/public-evidence/uaui-final.json"
+          if find "$RUNNER_TEMP/public-evidence" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' \) -print -quit|grep -q .;then exit 91;fi
+          grep -RIlE '(VF_PRIVATE_READ_TOKEN|vftextbox_session|PRIVATE_DATA|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' "$RUNNER_TEMP/public-evidence" && exit 92 || true
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.25-optimization-uaui-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-evidence/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Cleanup
+        if: always()
+        run: rm -rf p02 "$RUNNER_TEMP/p02-uaui" "$RUNNER_TEMP/public-evidence" || true
