@@ -1,0 +1,45 @@
+name: P04 V2.5.3 Setup POST Diagnose
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-setup-post-diagnose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Prepare and inspect setup POST
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip >/dev/null
+          git clone -q "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-infra.git" repo
+          cd repo; git checkout -q 91984268ffe66781700db9da10de8d509c878c0b
+          ROOT="$RUNNER_TEMP/p04-setup-post"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          python3 scripts/build-release-tree.py "$SITE" >/dev/null
+          PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+          php -d display_errors=1 -d log_errors=1 -S 127.0.0.1:$PORT -t "$SITE" >"$RUNNER_TEMP/p04-post-http.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf "$ROOT" repo' EXIT
+          sleep .5
+          curl -sS -c "$RUNNER_TEMP/p04-post.cookie" "http://127.0.0.1:$PORT/setup.php" -o "$RUNNER_TEMP/p04-post-get.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/p04-post-get.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          CODE=$(curl -sS -b "$RUNNER_TEMP/p04-post.cookie" -c "$RUNNER_TEMP/p04-post.cookie" -D "$RUNNER_TEMP/p04-post.headers" -o "$RUNNER_TEMP/p04-post.body" -w '%{http_code}' -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V253 Fixture' --data-urlencode 'password=P04V253HotfixTest!' --data-urlencode 'password_confirm=P04V253HotfixTest!' "http://127.0.0.1:$PORT/setup.php" || true)
+          echo "SETUP_POST_HTTP=$CODE"
+          echo '--- HEADERS ---'; sed -n '1,30p' "$RUNNER_TEMP/p04-post.headers"
+          echo '--- BODY HEAD ---'; sed -n '1,120p' "$RUNNER_TEMP/p04-post.body" | sed -E 's#(/[A-Za-z0-9._-]+){3,}#[ABSOLUTE_PATH_REDACTED]#g'
+          echo '--- SERVER LOG ---'; sed -n '1,160p' "$RUNNER_TEMP/p04-post-http.log" | sed -E 's#(/[A-Za-z0-9._-]+){3,}#[ABSOLUTE_PATH_REDACTED]#g'
+          test "$CODE" = 302 -o "$CODE" = 303
+          echo 'SETUP_POST=PASS'
