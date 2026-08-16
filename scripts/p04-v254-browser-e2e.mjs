@@ -69,11 +69,8 @@ await page.goto(`${base}/login.php`, { waitUntil: 'domcontentloaded' });
 await shot('01-login');
 await axe('login');
 await page.locator('#admin-password').fill(password);
-await Promise.all([
-  page.waitForURL(/index\.php|\/$/, { timeout: 30000 }),
-  page.getByRole('button', { name: '登录' }).click(),
-]);
-await page.waitForSelector('.nav-item[data-nav="dashboard"]');
+await page.getByRole('button', { name: '登录' }).click();
+await page.waitForSelector('.nav-item[data-nav="dashboard"]', { timeout: 30000 });
 await settle(500);
 
 const views = [
