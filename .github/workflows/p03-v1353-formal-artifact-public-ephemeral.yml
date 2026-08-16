@@ -1,0 +1,417 @@
+name: P03 V1.35.3 Formal Artifact Gate Public Ephemeral
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1353-formal-artifact-public-ephemeral.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1353-formal-artifact-public-ephemeral
+  cancel-in-progress: false
+
+jobs:
+  formal-artifact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_COMMIT: 370c699d4e105a9035393bcfb4e0aef982131cde
+      CANDIDATE_TREE: 2652978e8f31f7d3fcc1ec3a315be15c0ce4066d
+      PRODUCTION_COMMIT: c074678fdad9856addb3d290b555b723ce7013ec
+      SOURCE_VERSION: 1.35.2
+      TARGET_VERSION: 1.35.3
+      TARGET_SCHEMA: '29'
+      FIXTURE_PASS: VfP03-Formal-2026!
+      PHP_TEST_IMAGE: vf-forge-v1353-formal-php84
+      GATE_ROOT: ${{ runner.temp }}/p03-formal-gate
+    steps:
+      - name: Require ephemeral private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+          echo 'PRIVATE_SOURCE_MODE=EPHEMERAL_ONLY'
+
+      - name: Checkout exact private candidate ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Exact Candidate identity and private-source boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p03 rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C p03 rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < p03/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "define('VFAB_VERSION', '1.35.3');" p03/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" p03/src/app/bootstrap.php
+          grep -Fq "TARGET_VERSION='1.35.3'" p03/scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.35.2']" p03/scripts/build_atomic.py
+          test -z "$(git -C p03 diff "$PRODUCTION_COMMIT"..HEAD -- database/schema database/migrations)"
+          ORIGIN=$(git -C p03 config --get remote.origin.url)
+          case "$ORIGIN" in *x-access-token*|*github_pat_*|*ghp_*) echo 'Credential persisted in origin URL' >&2; exit 80;; esac
+          if git -C p03 ls-files | grep -Ei '(^|/)(PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'; then
+            echo 'Tracked private/runtime data found' >&2; exit 81
+          fi
+          echo 'EXACT_CANDIDATE_IDENTITY=PASS'
+          echo 'SCHEMA_MIGRATION=NONE_29_TO_29'
+          echo 'PERSIST_CREDENTIALS=FALSE_PASS'
+
+      - name: Prepare PHP 8.4 SQLite Zip runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl unzip zip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-formal" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-formal" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," FORMAL_RUNTIME_PASS\n";'
+
+      - name: Build exact Production and Candidate runtimes
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$GATE_ROOT"
+          mkdir -p "$GATE_ROOT"
+          PROD="$GATE_ROOT/runtime-production"
+          TARGET="$GATE_ROOT/runtime-target"
+          git worktree add --detach "$GATE_ROOT/production-worktree" "$PRODUCTION_COMMIT" >/dev/null
+          python3 "$GATE_ROOT/production-worktree/scripts/build_runtime.py" "$PROD" >/dev/null
+          python3 scripts/build_runtime.py "$TARGET" >/dev/null
+          test "$(find "$PROD" -type f | wc -l | tr -d ' ')" = '35'
+          test "$(find "$TARGET" -type f | wc -l | tr -d ' ')" = '37'
+          grep -Fq "define('VFAB_VERSION', '1.35.2');" "$PROD/app/bootstrap.php"
+          grep -Fq "define('VFAB_VERSION', '1.35.3');" "$TARGET/app/bootstrap.php"
+          test ! -e "$PROD/app/.runtime.php"
+          test ! -e "$TARGET/app/.runtime.php"
+          echo 'PRODUCTION_RUNTIME_1.35.2_35_FILES=PASS'
+          echo 'CANDIDATE_RUNTIME_1.35.3_37_FILES=PASS'
+
+      - name: Deterministic FULL and UPDATE Atomic build
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          PROD="$GATE_ROOT/runtime-production"; TARGET="$GATE_ROOT/runtime-target"
+          for N in a b; do
+            OUT="$GATE_ROOT/build-$N"; mkdir -p "$OUT"
+            python3 - "$TARGET" "$OUT/VF_Forge_V1.35.3_FULL.zip" <<'PY'
+          import sys,zipfile
+          from pathlib import Path
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w') as z:
+              for p in sorted(root.rglob('*')):
+                  if not p.is_file() or p.is_symlink(): continue
+                  rel=p.relative_to(root).as_posix()
+                  zi=zipfile.ZipInfo(rel,date_time=(2020,1,1,0,0,0))
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  zi.external_attr=(0o100644 & 0xFFFF)<<16
+                  z.writestr(zi,p.read_bytes(),compresslevel=9)
+          PY
+            python3 scripts/build_atomic.py --base-runtime "$PROD" --target-runtime "$TARGET" --output "$OUT" >"$OUT/build-atomic.json"
+            cp "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" "$OUT/VF_Forge_V1.35.3_UPDATE.zip"
+          done
+          for F in VF_Forge_V1.35.3_FULL.zip VF_Forge_V1.35.3_UPDATE.zip VF_Forge_V1.35.3_Atomic_Upgrade.zip; do
+            cmp "$GATE_ROOT/build-a/$F" "$GATE_ROOT/build-b/$F"
+            echo "$F SHA256=$(sha256sum "$GATE_ROOT/build-a/$F" | awk '{print $1}') BYTES=$(stat -c%s "$GATE_ROOT/build-a/$F")"
+          done
+          test "$(sha256sum "$GATE_ROOT/build-a/VF_Forge_V1.35.3_UPDATE.zip"|awk '{print $1}')" = "$(sha256sum "$GATE_ROOT/build-a/VF_Forge_V1.35.3_Atomic_Upgrade.zip"|awk '{print $1}')"
+          echo 'DETERMINISTIC_FULL_BUILD=PASS'
+          echo 'DETERMINISTIC_UPDATE_BUILD=PASS'
+          echo 'DETERMINISTIC_ATOMIC_BUILD=PASS'
+
+      - name: Reverse verification ZIP path privacy and tamper fail-closed
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          OUT="$GATE_ROOT/build-a"; TARGET="$GATE_ROOT/runtime-target"
+          unzip -t "$OUT/VF_Forge_V1.35.3_FULL.zip" >/dev/null
+          unzip -t "$OUT/VF_Forge_V1.35.3_UPDATE.zip" >/dev/null
+          unzip -t "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" >/dev/null
+          test "$(unzip -Z1 "$OUT/VF_Forge_V1.35.3_FULL.zip" | wc -l | tr -d ' ')" = '37'
+          test "$(unzip -Z1 "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip")" = 'repair-v1.35.3.php'
+          unzip -p "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" repair-v1.35.3.php >"$GATE_ROOT/repair-v1.35.3.php"
+          php -l "$GATE_ROOT/repair-v1.35.3.php" >/dev/null
+          grep -Fq "const VFF_ATOMIC_TARGET='1.35.3';" "$GATE_ROOT/repair-v1.35.3.php"
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=29;' "$GATE_ROOT/repair-v1.35.3.php"
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.35.2"];' "$GATE_ROOT/repair-v1.35.3.php"
+          cat >"$GATE_ROOT/reverse_verify.py" <<'PY'
+          import base64,gzip,hashlib,json,re,sys,zipfile
+          from pathlib import Path
+          runtime=Path(sys.argv[1]); package=Path(sys.argv[2])
+          def die(x): print(x,file=sys.stderr); raise SystemExit(2)
+          def files(root):
+              out={}
+              for p in sorted(root.rglob('*')):
+                  if not p.is_file() or p.is_symlink(): continue
+                  rel=p.relative_to(root).as_posix(); top=rel.split('/',1)[0]
+                  if rel=='app/.runtime.php' or re.match(r'^repair-v[^/]+\.php$',rel): continue
+                  if rel in {'api.php','diagnose.php','download.php','index.html','index.php','maintenance.php','robots.txt','setup.php','share.php'} or top in {'app','assets','cli','mcp'}:
+                      b=p.read_bytes(); out[rel]=(len(b),hashlib.sha256(b).hexdigest())
+              return out
+          with zipfile.ZipFile(package) as z:
+              names=z.namelist()
+              if names!=['repair-v1.35.3.php']: die('atomic zip shape mismatch')
+              php=z.read(names[0]).decode()
+          def const(name):
+              m=re.search(r"const "+re.escape(name)+r"='([^']*)';",php)
+              if not m: die('missing '+name)
+              return m.group(1)
+          raw=gzip.decompress(base64.b64decode(const('VFF_ATOMIC_PAYLOAD')))
+          if hashlib.sha256(raw).hexdigest()!=const('VFF_ATOMIC_PAYLOAD_JSON_SHA256'): die('payload json sha mismatch')
+          obj=json.loads(raw)
+          want={k:(int(v['bytes']),v['sha256']) for k,v in obj['files'].items()}
+          got=files(runtime)
+          if got!=want: die('runtime payload mismatch')
+          rows=[f"{k}\t{v[0]}\t{v[1]}" for k,v in sorted(got.items())]
+          fp=hashlib.sha256(('\n'.join(rows)+'\n').encode()).hexdigest()
+          if fp!=obj['source_manifest_sha256'] or fp!=const('VFF_ATOMIC_SOURCE_MANIFEST_SHA256'): die('manifest mismatch')
+          print('ATOMIC_REVERSE_VERIFY_PASS',len(got),fp)
+          PY
+          python3 "$GATE_ROOT/reverse_verify.py" "$TARGET" "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip"
+          python3 - "$OUT/VF_Forge_V1.35.3_FULL.zip" <<'PY'
+          import re,sys,zipfile
+          z=zipfile.ZipFile(sys.argv[1])
+          for i in z.infolist():
+              n=i.filename.replace('\\','/')
+              assert n and not n.startswith('/') and not re.match(r'^[A-Za-z]:',n)
+              assert '..' not in n.split('/')
+              assert not (i.external_attr>>16)&0o120000==0o120000
+              assert not re.search(r'(^|/)(PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)',n,re.I)
+              assert not re.search(r'\.(sqlite3?|db)$|(^|/)\.env$',n,re.I)
+          print('FULL_PATH_PRIVACY_PASS',len(z.infolist()))
+          PY
+          cp -a "$TARGET" "$GATE_ROOT/runtime-tampered"
+          printf '\n/* formal-gate-tamper */\n' >>"$GATE_ROOT/runtime-tampered/assets/forge-ui.css"
+          if python3 "$GATE_ROOT/reverse_verify.py" "$GATE_ROOT/runtime-tampered" "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" >/dev/null 2>&1; then
+            echo 'Tampered runtime was incorrectly accepted by formal reverse verifier' >&2; exit 84
+          fi
+          echo 'ZIP_INTEGRITY=PASS'
+          echo 'PATH_SAFETY=PASS'
+          echo 'PRIVACY_GATE=PASS'
+          echo 'TAMPERED_RUNTIME_FAIL_CLOSED=PASS'
+
+      - name: FULL package fresh install existing data backup restore gate
+        shell: bash
+        working-directory: p03
+        env:
+          FORMAL_FULL: ${{ runner.temp }}/p03-formal-gate/build-a/VF_Forge_V1.35.3_FULL.zip
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('tests/maintenance/current_reverify.sh').read_text(encoding='utf-8')
+          old='rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"\nmkdir -p "$DATA_ROOT"\npython3 scripts/build_runtime.py "$RUNTIME" >/dev/null'
+          new='rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"\nmkdir -p "$RUNTIME" "$DATA_ROOT"\nunzip -q "$FORMAL_FULL" -d "$RUNTIME"'
+          if old not in s: raise SystemExit('current_reverify runtime bootstrap block drifted')
+          s=s.replace(old,new,1)
+          s=s.replace("d['version']=='1.35.0'","d['version']=='1.35.3'",1)
+          Path('/tmp/p03-formal-full-reverify.sh').write_text(s,encoding='utf-8',newline='\n')
+          PY
+          chmod +x /tmp/p03-formal-full-reverify.sh
+          bash /tmp/p03-formal-full-reverify.sh
+          echo 'FORMAL_FULL_FRESH_INSTALL=PASS'
+          echo 'FORMAL_FULL_EXISTING_DATA_STARTUP=PASS'
+          echo 'FORMAL_FULL_BACKUP_RESTORE=PASS'
+
+      - name: Exact 1.35.2 to 1.35.3 upgrade business preservation semantic and idempotency gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          PROD="$GATE_ROOT/runtime-production"; OUT="$GATE_ROOT/build-a"; TARGET_MANIFEST="$OUT/SOURCE_MANIFEST.txt"
+          RUNTIME="$GATE_ROOT/upgrade-runtime"; DATA="$GATE_ROOT/upgrade-data"; COOKIE="$GATE_ROOT/upgrade-cookie"; BASE='http://127.0.0.1:18082'; NAME='p03-v1353-upgrade'
+          rm -rf "$RUNTIME" "$DATA" "$COOKIE"; cp -a "$PROD" "$RUNTIME"; mkdir -p "$DATA"
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          docker run -d --rm --name "$NAME" -p 18082:18082 -v "$RUNTIME:/app" -v "$DATA:$DATA" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18082 -t /app >/dev/null
+          trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$GATE_ROOT/upgrade-setup.html"
+          SCSRF=$(python3 - "$GATE_ROOT/upgrade-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$SCSRF" --data-urlencode 'site_title=Formal Upgrade Fixture' --data-urlencode "data_root=$DATA" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$BASE/setup.php" >"$GATE_ROOT/upgrade-setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$GATE_ROOT/upgrade-setup-post.txt"
+          LOGIN=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" -H 'Content-Type: application/json' --data "$LOGIN" "$BASE/api.php?action=login" -o "$GATE_ROOT/upgrade-login.json"
+          TOKEN=$(python3 - "$GATE_ROOT/upgrade-login.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));assert d['ok'] and d['version']=='1.35.2';print(d['csrf'])
+          PY
+          )
+          curl -fsS -b "$COOKIE" -H "Origin: $BASE" -H "X-CSRF-Token: $TOKEN" -H 'Content-Type: application/json' --data '{"name":"Formal Preserve Project","development_stage":"maintenance"}' "$BASE/api.php?action=project_save" -o "$GATE_ROOT/preserve-project.json"
+          DB=$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1); test -f "$DB"
+          python3 - "$DB" "$GATE_ROOT/business-before.json" <<'PY'
+          import hashlib,json,sqlite3,sys
+          db=sqlite3.connect(sys.argv[1]); db.row_factory=sqlite3.Row
+          skip={'sqlite_sequence','search_documents','search_fts','search_fts_data','search_fts_idx','search_fts_docsize','search_fts_config'}
+          out={}
+          for (t,) in db.execute("select name from sqlite_master where type='table' order by name"):
+              if t in skip or t.startswith('search_fts'): continue
+              rows=[dict(r) for r in db.execute('select * from "'+t.replace('"','""')+'" order by rowid')]
+              out[t]=hashlib.sha256(json.dumps(rows,sort_keys=True,ensure_ascii=False,default=str,separators=(',',':')).encode()).hexdigest()
+          json.dump(out,open(sys.argv[2],'w'),sort_keys=True,indent=2)
+          print('BUSINESS_FINGERPRINT_BEFORE',len(out))
+          PY
+          unzip -p "$OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" repair-v1.35.3.php >"$RUNTIME/repair-v1.35.3.php"
+          curl -fsS -b "$COOKIE" "$BASE/repair-v1.35.3.php" -o "$GATE_ROOT/repair-form.html"
+          RCSRF=$(python3 - "$GATE_ROOT/repair-form.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -b "$COOKIE" -H "Origin: $BASE" --data-urlencode "_csrf=$RCSRF" --data-urlencode 'confirmation=UPGRADE' "$BASE/repair-v1.35.3.php" -o "$GATE_ROOT/repair-result.html"
+          grep -q '升级完成' "$GATE_ROOT/repair-result.html"
+          grep -Fq "define('VFAB_VERSION', '1.35.3');" "$RUNTIME/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" "$RUNTIME/app/bootstrap.php"
+          test ! -e "$RUNTIME/repair-v1.35.3.php"
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          test "$(sqlite3 "$DB" "select count(*) from projects where name='Formal Preserve Project';")" = '1'
+          python3 - "$DB" "$GATE_ROOT/business-before.json" <<'PY'
+          import hashlib,json,sqlite3,sys
+          before=json.load(open(sys.argv[2])); db=sqlite3.connect(sys.argv[1]); db.row_factory=sqlite3.Row
+          now={}
+          for t in before:
+              rows=[dict(r) for r in db.execute('select * from "'+t.replace('"','""')+'" order by rowid')]
+              now[t]=hashlib.sha256(json.dumps(rows,sort_keys=True,ensure_ascii=False,default=str,separators=(',',':')).encode()).hexdigest()
+          assert now==before, sorted(k for k in before if before[k]!=now.get(k))
+          print('BUSINESS_DATA_PRESERVATION=PASS',len(now))
+          PY
+          python3 scripts/semantic_consistency_audit.py "$DB" >"$GATE_ROOT/semantic-after-upgrade.json"
+          python3 - "$GATE_ROOT/semantic-after-upgrade.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));assert d['ok'] and d['finding_count']==0;print('SEMANTIC_CONSISTENCY_AFTER_UPGRADE=PASS',d['check_count'])
+          PY
+          curl -fsS -b "$COOKIE" "$BASE/maintenance.php?action=source-manifest" -o "$GATE_ROOT/runtime-source-manifest.txt"
+          python3 - "$GATE_ROOT/runtime-source-manifest.txt" "$TARGET_MANIFEST" <<'PY'
+          import sys
+          p=[x for x in open(sys.argv[1],encoding='utf-8').read().splitlines() if x and not x.startswith('# ')]
+          e=open(sys.argv[2],encoding='utf-8').read().splitlines();assert p==e,(len(p),len(e));print('UPGRADED_RUNTIME_SOURCE_EXACT=PASS',len(p))
+          PY
+          cp "$GATE_ROOT/repair-v1.35.3.php" "$RUNTIME/repair-v1.35.3.php"
+          BEFORE_REPEAT=$(find "$RUNTIME" -type f ! -name 'repair-v1.35.3.php' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          curl -fsS -b "$COOKIE" "$BASE/repair-v1.35.3.php" -o "$GATE_ROOT/repeat-result.html"
+          grep -q '版本不允许' "$GATE_ROOT/repeat-result.html"
+          AFTER_REPEAT=$(find "$RUNTIME" -type f ! -name 'repair-v1.35.3.php' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          test "$BEFORE_REPEAT" = "$AFTER_REPEAT"
+          rm -f "$RUNTIME/repair-v1.35.3.php"
+          docker rm -f "$NAME" >/dev/null; trap - EXIT
+          echo 'EXACT_UPGRADE_1.35.2_TO_1.35.3=PASS'
+          echo 'SCHEMA_29_PRESERVATION=PASS'
+          echo 'ATOMIC_REPEAT_IDEMPOTENCY_FAIL_CLOSED=PASS'
+
+      - name: Failure injection rollback and wrong source fail-closed
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          PROD="$GATE_ROOT/runtime-production"; TARGET="$GATE_ROOT/runtime-target"
+          FAIL_OUT="$GATE_ROOT/fail-build"; rm -rf "$FAIL_OUT"
+          python3 scripts/build_atomic.py --base-runtime "$PROD" --target-runtime "$TARGET" --output "$FAIL_OUT" --test-fail-stage after_source_switch >/dev/null
+          setup_case(){
+            local suffix="$1" port="$2" runtime="$GATE_ROOT/$suffix-runtime" data="$GATE_ROOT/$suffix-data" cookie="$GATE_ROOT/$suffix-cookie" base="http://127.0.0.1:$port" name="p03-$suffix"
+            rm -rf "$runtime" "$data" "$cookie"; cp -a "$PROD" "$runtime"; mkdir -p "$data"
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            docker run -d --rm --name "$name" -p "$port:$port" -v "$runtime:/app" -v "$data:$data" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:"$port" -t /app >/dev/null
+            for i in $(seq 1 60); do curl -fsS "$base/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+            curl -fsS -c "$cookie" "$base/setup.php" -o "$GATE_ROOT/$suffix-setup.html"
+            local scsrf; scsrf=$(python3 - "$GATE_ROOT/$suffix-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+            )
+            curl -fsS -i -b "$cookie" -c "$cookie" -H "Origin: $base" --data-urlencode "setup_csrf=$scsrf" --data-urlencode "site_title=$suffix" --data-urlencode "data_root=$data" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$base/setup.php" >"$GATE_ROOT/$suffix-setup-post.txt"
+            local login; login=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
+            curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H 'Content-Type: application/json' --data "$login" "$base/api.php?action=login" -o "$GATE_ROOT/$suffix-login.json"
+          }
+          setup_case rollback 18083
+          RR="$GATE_ROOT/rollback-runtime"; RD="$GATE_ROOT/rollback-data"; RC="$GATE_ROOT/rollback-cookie"; RB='http://127.0.0.1:18083'
+          RDB=$(find "$RD/database" -type f -name '*.sqlite' | head -1); sqlite3 "$RDB" 'pragma wal_checkpoint(truncate);' >/dev/null
+          DB_BEFORE=$(sha256sum "$RDB"|awk '{print $1}')
+          SRC_BEFORE=$(find "$RR" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          unzip -p "$FAIL_OUT/VF_Forge_V1.35.3_Atomic_Upgrade.zip" repair-v1.35.3.php >"$RR/repair-v1.35.3.php"
+          curl -fsS -b "$RC" "$RB/repair-v1.35.3.php" -o "$GATE_ROOT/rollback-form.html"
+          RCSRF=$(python3 - "$GATE_ROOT/rollback-form.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -b "$RC" -H "Origin: $RB" --data-urlencode "_csrf=$RCSRF" --data-urlencode 'confirmation=UPGRADE' "$RB/repair-v1.35.3.php" -o "$GATE_ROOT/rollback-result.html"
+          grep -q '原子升级失败，已执行回滚' "$GATE_ROOT/rollback-result.html"
+          rm -f "$RR/repair-v1.35.3.php"
+          grep -Fq "define('VFAB_VERSION', '1.35.2');" "$RR/app/bootstrap.php"
+          sqlite3 "$RDB" 'pragma wal_checkpoint(truncate);' >/dev/null
+          DB_AFTER=$(sha256sum "$RDB"|awk '{print $1}')
+          SRC_AFTER=$(find "$RR" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          test "$DB_BEFORE" = "$DB_AFTER"
+          test "$SRC_BEFORE" = "$SRC_AFTER"
+          test "$(sqlite3 "$RDB" 'pragma integrity_check;')" = 'ok'
+          docker rm -f p03-rollback >/dev/null
+          setup_case wrong-source 18084
+          WR="$GATE_ROOT/wrong-source-runtime"; WC="$GATE_ROOT/wrong-source-cookie"; WB='http://127.0.0.1:18084'
+          sed -i "s/define('VFAB_VERSION', '1.35.2');/define('VFAB_VERSION', '1.35.1');/" "$WR/app/bootstrap.php"
+          cp "$GATE_ROOT/repair-v1.35.3.php" "$WR/repair-v1.35.3.php"
+          WRONG_BEFORE=$(find "$WR" -type f ! -name 'repair-v1.35.3.php' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          curl -fsS -b "$WC" "$WB/repair-v1.35.3.php" -o "$GATE_ROOT/wrong-source-result.html"
+          grep -q '版本不允许' "$GATE_ROOT/wrong-source-result.html"
+          WRONG_AFTER=$(find "$WR" -type f ! -name 'repair-v1.35.3.php' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          test "$WRONG_BEFORE" = "$WRONG_AFTER"
+          docker rm -f p03-wrong-source >/dev/null
+          echo 'FAILURE_INJECTION_ROLLBACK=PASS'
+          echo 'WRONG_SOURCE_VERSION_FAIL_CLOSED=PASS'
+
+      - name: Public artifact zero and ephemeral cleanup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf p03 "$GATE_ROOT" /tmp/p03-formal-full-reverify.sh "$RUNNER_TEMP/Dockerfile.p03-formal"
+          test ! -e p03
+          test ! -e "$GATE_ROOT"
+          RESP=$(curl -fsS -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts")
+          COUNT=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["total_count"])' <<<"$RESP")
+          test "$COUNT" = '0'
+          echo 'UPLOADED_ACTIONS_ARTIFACTS=0'
+          echo 'PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'CANDIDATE_PACKAGES_PERSISTED=NO'
+          echo 'EPHEMERAL_CLEANUP=PASS'
+          echo 'SECRET_LOGGED=NO_BY_WORKFLOW_DESIGN'
+
+      - name: Formal Artifact Gate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'FORMAL_ARTIFACT_GATE=PASS'
+          echo 'RELEASE_READY=YES'
+          echo 'EXTERNAL_BLOCK=NONE'
+          echo 'CANDIDATE=V1.35.3_VERIFIED'
+          echo 'PRODUCT_FAILURE=NONE'
+          echo 'PROJECT_BLOCK=NONE'
+          echo 'RELEASE_TAG_CORE_UPDATES_PRODUCTION_MAIN_PROMOTION=NOT_EXECUTED'
+          echo 'NEXT=STOP_FOR_MASTER'
