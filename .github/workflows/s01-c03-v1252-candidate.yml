@@ -1,0 +1,191 @@
+name: S01-C03 M3U8 V1.25.2 Candidate
+
+on:
+  push:
+    branches: [task/s01-c03-v1252-candidate]
+    paths:
+      - '.github/workflows/s01-c03-v1252-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-c03-m3u8-v1252-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-m3u8
+      EXPECTED_DEVELOP: c04136b7b20f290f09e2347076c9a749f2fe6fbb
+      BASE_1251_COMMIT: 1c8ad3272ffbd7781136d05a4eb22376c2dfc67e
+      BASE_1251_TREE: 9ed82a1224ddda19889d6db1302d62de912e6b15
+      TARGET_VERSION: 1.25.2
+      TARGET_ROUND: R226
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'CREDENTIAL_GATE=PASS'
+
+      - name: Checkout exact develop with release write credential
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: develop
+          token: ${{ env.WRITE_TOKEN }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Prepare minimal 1.25.2 version identity and push develop
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_DEVELOP"
+          test "$(tr -d '\r\n' < VERSION)" = '1.25.1'
+          test "$(git rev-parse HEAD:src)" = "$BASE_1251_TREE"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          version='1.25.2'; round_name='R226'
+          Path('VERSION').write_text(version+'\n',encoding='utf-8')
+          p=Path('src/vf-tool-m3u8.php'); s=p.read_text(encoding='utf-8')
+          s=re.sub(r'(?m)^ \* Version: .*$',f' * Version: {version}',s)
+          s=re.sub(r"define\('VF_TOOL_M3U8_VERSION', '[^']+'\)",f"define('VF_TOOL_M3U8_VERSION', '{version}')",s)
+          s=re.sub(r"define\('VF_TOOL_M3U8_ROUND', '[^']+'\)",f"define('VF_TOOL_M3U8_ROUND', '{round_name}')",s)
+          p.write_text(s,encoding='utf-8')
+          for name in ['src/plugin-manifest.json','src/PACKAGE_PROFILE.json']:
+              q=Path(name); d=json.load(open(q,encoding='utf-8')); d['version']=version
+              if 'pluginVersion' in d: d['pluginVersion']=version
+              if 'round' in d: d['round']=round_name
+              q.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          mapfile -t changed < <(git diff --name-only | sort)
+          printf '%s\n' "${changed[@]}"
+          test "${#changed[@]}" -eq 4
+          printf '%s\n' "${changed[@]}" | diff -u <(printf '%s\n' VERSION src/PACKAGE_PROFILE.json src/plugin-manifest.json src/vf-tool-m3u8.php | sort) -
+          grep -q '^ \* Version: 1.25.2$' src/vf-tool-m3u8.php
+          grep -q "VF_TOOL_M3U8_VERSION', '1.25.2'" src/vf-tool-m3u8.php
+          grep -q "VF_TOOL_M3U8_ROUND', 'R226'" src/vf-tool-m3u8.php
+          ! grep -R "vf-tools-m3u8/vf-tools-m3u8.php" -n src/vf-tool-m3u8.php src/includes/update >/dev/null 2>&1 || true
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add VERSION src/vf-tool-m3u8.php src/plugin-manifest.json src/PACKAGE_PROFILE.json
+          git commit -m 'chore(release): prepare VF Tools M3U8 1.25.2 online update candidate'
+          git push origin HEAD:develop
+          echo "CANDIDATE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "CANDIDATE_TREE=$(git rev-parse HEAD:src)" >> "$GITHUB_ENV"
+          echo 'CANDIDATE_PUSH=PASS'
+
+      - name: Checkout exact 1.25.1 tested baseline
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.BASE_1251_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          path: baseline
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build candidate and prove byte identity with tested 1.25.2 fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C baseline rev-parse HEAD:src)" = "$BASE_1251_TREE"
+          sed -i "s/'R226-FIXTURE'/'R226'/g" baseline/tests/wp-update/build_packages.py
+          mkdir -p "$RUNNER_TEMP/baseline-build" "$RUNNER_TEMP/candidate-build"
+          python3 baseline/tests/wp-update/build_packages.py --repo baseline --out "$RUNNER_TEMP/baseline-build" > "$RUNNER_TEMP/baseline-meta.json"
+          python3 - candidate/src "$RUNNER_TEMP/candidate-build/vf-tools-m3u8_V1.25.2.zip" "$RUNNER_TEMP/candidate-meta.json" <<'PY'
+          from pathlib import Path
+          import zipfile,hashlib,json,sys
+          src=Path(sys.argv[1]); out=Path(sys.argv[2]); meta=Path(sys.argv[3])
+          files=sorted([p for p in src.rglob('*') if p.is_file()],key=lambda p:p.relative_to(src).as_posix())
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              zi=zipfile.ZipInfo('vf-tool-m3u8/');zi.date_time=(1980,1,1,0,0,0);zi.external_attr=(0o40755<<16)|0x10;z.writestr(zi,b'')
+              for p in files:
+                  zi=zipfile.ZipInfo('vf-tool-m3u8/'+p.relative_to(src).as_posix());zi.date_time=(1980,1,1,0,0,0);zi.compress_type=zipfile.ZIP_DEFLATED;zi.external_attr=0o100644<<16;z.writestr(zi,p.read_bytes())
+          def is_runtime(rel):
+              parts=rel.replace('\\','/').split('/');low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): return False
+              if len(parts)==1: return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+          rows=[]
+          for p in files:
+              rel=p.relative_to(src).as_posix()
+              if is_runtime(rel): rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canon=''.join(f'{p}\0{h}\n' for p,h in rows).encode()
+          m={'file':'vf-tools-m3u8_V1.25.2.zip','files':len(files),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_files':len(rows),'runtime_fingerprint':hashlib.sha256(canon).hexdigest()}
+          meta.write_text(json.dumps(m,indent=2)+'\n')
+          print(json.dumps(m,indent=2))
+          PY
+          cmp -s "$RUNNER_TEMP/candidate-build/vf-tools-m3u8_V1.25.2.zip" "$RUNNER_TEMP/baseline-build/vf-tools-m3u8_V1.25.2-fixture.zip"
+          echo 'TESTED_FIXTURE_EQUALS_CANDIDATE_ARTIFACT=PASS'
+
+      - name: Provision PHP validation runtime
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: fileinfo, sodium, zip
+          coverage: none
+
+      - name: Execute real WordPress Plugin_Upgrader 1.25.1 to exact 1.25.2 candidate fixture
+        shell: bash
+        env:
+          GITHUB_WORKSPACE_PRIVATE: ${{ github.workspace }}/baseline
+          VF_UPDATE_EVIDENCE_DIR: ${{ runner.temp }}/native-evidence
+        run: |
+          set -Eeuo pipefail
+          sed -i "s/'R226-FIXTURE'/'R226'/g" baseline/tests/wp-update/build_packages.py
+          bash baseline/tests/wp-update/run.sh
+          python3 - "$VF_UPDATE_EVIDENCE_DIR/result.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x['result']=='PASS'
+          assert x['fixture_semantics']=='SYNTHETIC_1.25.1_TO_1.25.2_NOT_PRODUCTION_PASS'
+          required=['private_asset_auth','update_plugins','plugin_upgrader_fixture','schema_noop','tables_preserved','capabilities_preserved','pipelines_preserved','options_preserved','cron_preserved','hooks_preserved','runtime_authority_exact','stateful_recovery','post_update_verify_recovery','attempt_final_result_semantics','admin_runtime','frontend_runtime']
+          for k in required: assert x['checks'][k]=='PASS',k
+          print('NATIVE_1251_TO_1252_GATE=PASS')
+          PY
+
+      - name: Build redacted candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          python3 - "$RUNNER_TEMP/candidate-meta.json" "$RUNNER_TEMP/native-evidence/result.json" evidence/result.json <<'PY'
+          import json,sys,datetime,os
+          m=json.load(open(sys.argv[1])); t=json.load(open(sys.argv[2]))
+          out={
+            'result':'PASS','component_id':'S01-C03','version':'1.25.2',
+            'candidate_commit':os.environ['CANDIDATE_COMMIT'],'product_tree':os.environ['CANDIDATE_TREE'],
+            'artifact':m,'tested_fixture_equals_candidate_artifact':'PASS',
+            'native_update_from':'1.25.1','native_update_to':'1.25.2','native_update_checks':t['checks'],
+            'provider_tables':14,'capabilities':13,'pipelines':11,'fixtures':3,'schema':'1.2.0',
+            'locator':'vf-tool-m3u8/vf-tool-m3u8.php','locator_cutover':False,
+            'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+          json.dump(out,open(sys.argv[3],'w'),indent=2)
+          PY
+          cat evidence/result.json
+
+      - name: Upload redacted candidate evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: s01-c03-v1252-candidate-evidence
+          path: evidence/result.json
+          if-no-files-found: error
+          retention-days: 30
