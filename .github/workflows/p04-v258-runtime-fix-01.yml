@@ -1,0 +1,119 @@
+name: P04 VF Infra V2.5.8 Runtime Fix 01
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-runtime-fix-01.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_BRANCH: feature/v2.5.8-personal-console-precision
+  INPUT_COMMIT: a9a372b22f8aaf71be498a98f9496cf48ccb2c40
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.INPUT_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - name: Apply exact runtime fixes
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('public/assets/v258-view.js')
+          s=p.read_text(encoding='utf-8')
+          replacements=[
+            ("assets: ['基础设施 / 全部资产', '全部资产', '统一 Portfolio → Selected Asset → Type-aware Workspace → Context。'],",
+             "assets: ['基础设施 / 全部资产', '全部资产', '统一使用资源列表 → 已选资产 → 按类型工作区 → 关联信息。'],"),
+            ("const list = portfolio(items, state.selected.assets, 'assets', '资产 Portfolio', `${currentProjectName()} · ${items.length} 项`,",
+             "const list = portfolio(items, state.selected.assets, 'assets', '全部资产', `${currentProjectName()} · ${items.length} 项`,"),
+          ]
+          for old,new in replacements:
+            if old not in s: raise SystemExit('V258_VIEW_PATCH_ANCHOR_MISSING: '+old[:60])
+            s=s.replace(old,new,1)
+          anchor="  function installObserver() {\n"
+          insert="  window.addEventListener('v258:route-enter', (event) => {\n    const view = String(event.detail?.view || '');\n    if (window.innerWidth <= 860 && ['domains', 'dns', 'vps', 'assets', 'providers'].includes(view)) state.selected[view] = 0;\n  });\n\n"
+          if anchor not in s: raise SystemExit('V258_ROUTE_RESET_ANCHOR_MISSING')
+          s=s.replace(anchor,insert+anchor,1)
+          p.write_text(s,encoding='utf-8')
+
+          p=Path('public/assets/v258-nav.js')
+          s=p.read_text(encoding='utf-8')
+          old="    if (!target) return false;\n    $$('.view').forEach((node) => node.classList.toggle('active', node === target));"
+          new="    if (!target) return false;\n    window.dispatchEvent(new CustomEvent('v258:route-enter', { detail: { view } }));\n    $$('.view').forEach((node) => node.classList.toggle('active', node === target));"
+          if old not in s: raise SystemExit('V258_NAV_PATCH_ANCHOR_MISSING')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          node --check public/assets/v258-view.js
+          node --check public/assets/v258-nav.js
+          php tests/unit/ui_contract_v258.php .
+          grep -q "'全部资产'" public/assets/v258-view.js
+          ! grep -q '资产 Portfolio' public/assets/v258-view.js
+          ! grep -q 'Type-aware Workspace' public/assets/v258-view.js
+          echo 'P04_V258_RUNTIME_FIX_01_STATIC_PASS'
+
+      - name: Commit product fix and push non-force
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Runtime Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add public/assets/v258-view.js public/assets/v258-nav.js
+          git diff --cached --check
+          git commit -m 'fix(P04): make assets and mobile entry match V2.5.8 contract'
+          OUTPUT_COMMIT="$(git rev-parse HEAD)"
+          OUTPUT_TREE="$(git rev-parse HEAD^{tree})"
+          git push origin "HEAD:$TARGET_BRANCH"
+          printf '%s\n%s\n' "$OUTPUT_COMMIT" "$OUTPUT_TREE" > "$RUNNER_TEMP/p04-v258-fix-output.txt"
+
+      - name: Remote exact readback
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          OUTPUT_COMMIT="$(sed -n '1p' "$RUNNER_TEMP/p04-v258-fix-output.txt")"
+          OUTPUT_TREE="$(sed -n '2p' "$RUNNER_TEMP/p04-v258-fix-output.txt")"
+          REMOTE="$(git ls-remote origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
+          test "$REMOTE" = "$OUTPUT_COMMIT"
+          cat > "$RUNNER_TEMP/p04-v258-runtime-fix-01.txt" <<EOF
+          Result: PASS
+          Input Commit: $INPUT_COMMIT
+          Output Commit: $OUTPUT_COMMIT
+          Output Tree: $OUTPUT_TREE
+          Assets Name: 全部资产
+          Mobile Route Entry: PORTFOLIO_FIRST
+          Push: NON-FORCE
+          EOF
+          cat "$RUNNER_TEMP/p04-v258-runtime-fix-01.txt"
+
+      - name: Remove private worktree
+        if: always()
+        shell: bash
+        run: rm -rf private-vf-infra
+
+      - name: Upload public-safe evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.8-Runtime-Fix-01
+          path: ${{ runner.temp }}/p04-v258-runtime-fix-01.txt
+          if-no-files-found: error
+          retention-days: 14
