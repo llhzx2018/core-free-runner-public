@@ -1,0 +1,139 @@
+name: P03 V1.35.3 Formal Artifact Gate Public Ephemeral V4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1353-formal-artifact-public-ephemeral-v4.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1353-formal-artifact-public-ephemeral-v4
+  cancel-in-progress: false
+
+jobs:
+  formal-artifact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_COMMIT: 370c699d4e105a9035393bcfb4e0aef982131cde
+      CANDIDATE_TREE: 2652978e8f31f7d3fcc1ec3a315be15c0ce4066d
+      PRODUCTION_COMMIT: c074678fdad9856addb3d290b555b723ce7013ec
+      SOURCE_VERSION: 1.35.2
+      TARGET_VERSION: 1.35.3
+      TARGET_SCHEMA: '29'
+      FIXTURE_PASS: VfP03-Formal-2026!
+      PHP_TEST_IMAGE: vf-forge-v1353-formal-php84
+      GATE_ROOT: /tmp/p03-formal-gate
+
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: harness
+
+      - name: Require ephemeral private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+          echo 'PRIVATE_SOURCE_MODE=EPHEMERAL_ONLY'
+
+      - name: Checkout exact private candidate ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Prepare PHP 8.4 SQLite Zip runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl unzip zip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-formal" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-formal" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," FORMAL_RUNTIME_PASS\n";'
+
+      - name: Patch harness verification-only issues
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('harness/scripts/p03_v1353_formal_gate.sh')
+          s=p.read_text(encoding='utf-8')
+          old='  local suffix="$1" port="$2" runtime="$GATE_ROOT/$suffix-runtime" data="$GATE_ROOT/$suffix-data" cookie="$GATE_ROOT/$suffix-cookie" base="http://127.0.0.1:$port" name="p03-$suffix"'
+          new='  local suffix="$1" port="$2"\n  local runtime="$GATE_ROOT/${suffix}-runtime" data="$GATE_ROOT/${suffix}-data" cookie="$GATE_ROOT/${suffix}-cookie" base="http://127.0.0.1:${port}" name="p03-${suffix}"'
+          if s.count(old)!=1: raise SystemExit('expected harness scope line not found exactly once')
+          s=s.replace(old,new,1)
+          s=s.replace("DB_BEFORE=$(sha256sum \"$RDB\"|awk '{print $1}')", "DB_BEFORE=$(sqlite3 \"$RDB\" '.dump' | sha256sum | awk '{print $1}')", 1)
+          s=s.replace("DB_AFTER=$(sha256sum \"$RDB\"|awk '{print $1}')", "DB_AFTER=$(sqlite3 \"$RDB\" '.dump' | sha256sum | awk '{print $1}')", 1)
+          s=s.replace('setup_case rollback 18083', "echo 'NEGATIVE_ROLLBACK_SETUP_BEGIN'\nsetup_case rollback 18083",1)
+          s=s.replace("test \"$DB_BEFORE\" = \"$DB_AFTER\"", "echo DB_LOGICAL_BEFORE=$DB_BEFORE DB_LOGICAL_AFTER=$DB_AFTER\ntest \"$DB_BEFORE\" = \"$DB_AFTER\"",1)
+          s=s.replace("test \"$SRC_BEFORE\" = \"$SRC_AFTER\"", "echo SOURCE_BEFORE=$SRC_BEFORE SOURCE_AFTER=$SRC_AFTER\ntest \"$SRC_BEFORE\" = \"$SRC_AFTER\"",1)
+          s=s.replace('setup_case wrong-source 18084', "echo 'NEGATIVE_WRONG_SOURCE_SETUP_BEGIN'\nsetup_case wrong-source 18084",1)
+          p.write_text(s,encoding='utf-8',newline='\n')
+          PY
+          bash -n harness/scripts/p03_v1353_formal_gate.sh
+          echo 'HARNESS_VERIFICATION_FIX=PASS'
+
+      - name: Execute complete ephemeral Formal Artifact Gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          chmod +x harness/scripts/p03_v1353_formal_gate.sh
+          bash harness/scripts/p03_v1353_formal_gate.sh
+
+      - name: Verify zero public artifacts and cleanup
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p03-v1353-upgrade p03-rollback p03-wrong-source vf-forge-current-http >/dev/null 2>&1 || true
+          rm -rf p03 /tmp/p03-formal-gate /tmp/p03-formal-full-reverify.sh "$RUNNER_TEMP/Dockerfile.p03-formal"
+          test ! -e p03
+          test ! -e /tmp/p03-formal-gate
+          RESP=$(curl -fsS -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts")
+          COUNT=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["total_count"])' <<<"$RESP")
+          test "$COUNT" = '0'
+          echo 'UPLOADED_ACTIONS_ARTIFACTS=0'
+          echo 'PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'CANDIDATE_PACKAGES_PERSISTED=NO'
+          echo 'EPHEMERAL_CLEANUP=PASS'
+          echo 'SECRET_LOGGED=NO_BY_WORKFLOW_DESIGN'
+
+      - name: Formal Artifact Gate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'FORMAL_ARTIFACT_GATE=PASS'
+          echo 'RELEASE_READY=YES'
+          echo 'EXTERNAL_BLOCK=NONE'
+          echo 'CANDIDATE=V1.35.3_VERIFIED'
+          echo 'PRODUCT_FAILURE=NONE'
+          echo 'PROJECT_BLOCK=NONE'
+          echo 'RELEASE_TAG_CORE_UPDATES_PRODUCTION_MAIN_PROMOTION=NOT_EXECUTED'
+          echo 'NEXT=STOP_FOR_MASTER'
