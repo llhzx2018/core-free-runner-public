@@ -1,0 +1,201 @@
+name: P04 V2.5.3 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE: 4037ef8533747b774716eae96a529f752c4dca16
+      TAG: v2.5.3
+      VERSION: 2.5.3
+      ASSET: VF_Infra_V2.5.3_UPDATE.zip
+      EXPECTED_BYTES: '198577'
+      EXPECTED_SHA256: e98c122e9e2e75c6c2668039488c3e656f1569dfaa46aa4b5bdbcc4f701112ec
+      EXPECTED_SOURCE_MANIFEST: d7d05a3d255eade6a31a1983c5cdf4455ae1dea5a448ec29c029e69158eb3618
+    steps:
+      - name: Require unified credentials
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN"; test -n "$READ_TOKEN"
+          echo 'UNIFIED_CREDENTIALS=PASS'
+
+      - name: Prepare runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","openssl","json","sodium"] as $x)if(!extension_loaded($x))exit(2);if(!class_exists("ZipArchive"))exit(3);echo "FORMAL_RUNTIME=PASS\n";'
+
+      - name: Checkout exact immutable Candidate and rebuild formal artifacts
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-infra.git" repo
+          cd repo
+          git checkout -q "$CANDIDATE"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(cat VERSION)" = "$VERSION"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v253-runtime" >/dev/null
+          python3 scripts/build-v253-update-release.py --target-runtime "$RUNNER_TEMP/v253-runtime" --output "$RUNNER_TEMP/v253-release" >"$RUNNER_TEMP/v253-build.jsonl"
+          php "$RUNNER_TEMP/v253-release/repair-v2.5.3.php" --self-test
+          echo 'FORMAL_BUILD=PASS'
+
+      - name: Formal artifact identity and privacy gate
+        run: |
+          set -Eeuo pipefail
+          R="$RUNNER_TEMP/v253-release"
+          test -f "$R/$ASSET"; test -f "$R/VF_Infra_V2.5.3_ATOMIC.zip"
+          BYTES=$(stat -c%s "$R/$ASSET")
+          SHA=$(sha256sum "$R/$ASSET" | awk '{print $1}')
+          test "$BYTES" = "$EXPECTED_BYTES"
+          test "$SHA" = "$EXPECTED_SHA256"
+          cmp -s "$R/$ASSET" "$R/VF_Infra_V2.5.3_ATOMIC.zip"
+          python3 - "$R/PACKAGE_MANIFEST.json" <<'PY'
+          import json,os,sys
+          p=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert p['version']=='2.5.3' and p['schema']==14
+          assert p['allowed_source_versions']==['2.5.2']
+          assert p['payload_file_count']==7
+          assert p['production_source_file_count']==148
+          assert p['production_source_manifest_sha256']==os.environ['EXPECTED_SOURCE_MANIFEST']
+          assert p['schema_change'] is False and p['business_model_change'] is False and p['provider_write_authority_change'] is False
+          assert p['update_and_atomic_bytes_identical'] is True
+          PY
+          unzip -t "$R/$ASSET" >/dev/null
+          test "$(unzip -Z1 "$R/$ASSET" | wc -l)" = 1
+          test "$(unzip -Z1 "$R/$ASSET")" = repair-v2.5.3.php
+          ! unzip -p "$R/$ASSET" | grep -Eiq 'BEGIN [A-Z0-9 ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}'
+          echo "FORMAL_UPDATE_BYTES=$BYTES"
+          echo "FORMAL_UPDATE_SHA256=$SHA"
+          echo 'FORMAL_ARTIFACT_IDENTITY_PRIVACY=PASS'
+
+      - name: Create or exact-read formal Tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd repo
+          remote_tag=$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')
+          if [[ -z "$remote_tag" ]]; then
+            git tag "$TAG" "$CANDIDATE"
+            git push -q origin "refs/tags/$TAG"
+          else
+            test "$remote_tag" = "$CANDIDATE"
+          fi
+          release_id=$(gh api "/repos/llhzx2018/vf-infra/releases/tags/$TAG" --jq .id 2>/dev/null || true)
+          if [[ -z "$release_id" ]]; then
+            gh release create "$TAG" \
+              "$RUNNER_TEMP/v253-release/VF_Infra_V2.5.3_ATOMIC.zip" \
+              "$RUNNER_TEMP/v253-release/VF_Infra_V2.5.3_UPDATE.zip" \
+              "$RUNNER_TEMP/v253-release/PACKAGE_MANIFEST.json" \
+              "$RUNNER_TEMP/v253-release/SHA256SUMS.txt" \
+              --repo llhzx2018/vf-infra --verify-tag \
+              --title 'VF Infra V2.5.3' \
+              --notes 'P04 V2.5.3 Hotfix：修复 V2.5.2 Production Settings 500、统一更新信任语义、Maintenance/Atomic CSP UI、OPcache invalidation 与成功清理。Schema 14 不变；不增加 Provider 写权限。'
+          fi
+          test "$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')" = "$CANDIDATE"
+          echo 'FORMAL_TAG_RELEASE=PASS'
+
+      - name: Remote Release exact readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          release=$(gh api "/repos/llhzx2018/vf-infra/releases/tags/$TAG")
+          published=$(printf '%s' "$release" | jq -r .published_at)
+          draft=$(printf '%s' "$release" | jq -r .draft)
+          prerelease=$(printf '%s' "$release" | jq -r .prerelease)
+          test "$draft" = false; test "$prerelease" = false; test -n "$published"; test "$published" != null
+          asset_id=$(printf '%s' "$release" | jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' | head -1)
+          asset_size=$(printf '%s' "$release" | jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' | head -1)
+          test -n "$asset_id"; test "$asset_size" = "$EXPECTED_BYTES"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-infra/releases/assets/$asset_id" > "$RUNNER_TEMP/remote-update.zip"
+          test "$(stat -c%s "$RUNNER_TEMP/remote-update.zip")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/remote-update.zip"|awk '{print $1}')" = "$EXPECTED_SHA256"
+          cmp -s "$RUNNER_TEMP/remote-update.zip" "$RUNNER_TEMP/v253-release/$ASSET"
+          printf '%s' "$published" > "$RUNNER_TEMP/released-at.txt"
+          echo "FORMAL_RELEASED_AT=$published"
+          echo 'REMOTE_RELEASE_ASSET_EXACT=PASS'
+
+      - name: Publish exact core-updates P04 manifest
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/core-updates.git" core-updates
+          cd core-updates
+          git checkout -q main
+          RELEASED_AT=$(cat "$RUNNER_TEMP/released-at.txt")
+          mkdir -p projects
+          python3 - "$RELEASED_AT" > projects/P04.json <<'PY'
+          import json,os,sys
+          d={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.5.3','update_type':'ATOMIC','from_versions':['2.5.2'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra','release_tag':'v2.5.3',
+            'asset_name':'VF_Infra_V2.5.3_UPDATE.zip','asset_bytes':int(os.environ['EXPECTED_BYTES']),
+            'asset_sha256':os.environ['EXPECTED_SHA256'],'backup_required':True,'rollback_supported':True,
+            'released_at':sys.argv[1],'minimum_php':'8.0.0',
+            'notes':'P04 V2.5.3 hotfix: Settings unified update trust, Maintenance/Atomic CSP UI, runtime cache invalidation and release cleanup.'
+          }
+          print(json.dumps(d,ensure_ascii=False,indent=2)+"\n",end='')
+          PY
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          if [[ -n "$(git status --porcelain -- projects/P04.json)" ]]; then
+            git add projects/P04.json
+            git commit -m 'release(P04): publish V2.5.3 hotfix manifest'
+            git push -q origin main
+          fi
+          echo 'CORE_UPDATES_P04_PUBLISH=PASS'
+
+      - name: Unified read-token live discovery
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          auth=(-H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          curl -fsS "${auth[@]}" 'https://api.github.com/repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' > "$RUNNER_TEMP/p04-content.json"
+          jq -r .content "$RUNNER_TEMP/p04-content.json" | tr -d '\n' | base64 -d > "$RUNNER_TEMP/p04.json"
+          python3 - "$RUNNER_TEMP/p04.json" <<'PY'
+          import json,os,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['target_version']=='2.5.3' and d['from_versions']==['2.5.2']
+          assert d['release_tag']=='v2.5.3' and d['asset_name']=='VF_Infra_V2.5.3_UPDATE.zip'
+          assert d['asset_bytes']==int(os.environ['EXPECTED_BYTES']) and d['asset_sha256']==os.environ['EXPECTED_SHA256']
+          assert d['schema_from']=='14' and d['schema_to']=='14' and d['backup_required'] is True and d['rollback_supported'] is True
+          PY
+          release=$(curl -fsS "${auth[@]}" 'https://api.github.com/repos/llhzx2018/vf-infra/releases/tags/v2.5.3')
+          aid=$(printf '%s' "$release" | jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' | head -1)
+          test -n "$aid"
+          curl -fsSL "${auth[@]}" -H 'Accept: application/octet-stream' "https://api.github.com/repos/llhzx2018/vf-infra/releases/assets/$aid" > "$RUNNER_TEMP/read-token-update.zip"
+          test "$(stat -c%s "$RUNNER_TEMP/read-token-update.zip")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/read-token-update.zip"|awk '{print $1}')" = "$EXPECTED_SHA256"
+          echo 'UNIFIED_READ_TOKEN_ONLINE_DISCOVERY=PASS'
+
+      - name: Confirm Production main not advanced
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          main=$(gh api /repos/llhzx2018/vf-infra/branches/main --jq .commit.sha)
+          test "$main" = bc23fcaca79f20f91f058b5de164a4a42c73bae6
+          echo "PRODUCTION_MAIN=$main"
+          echo 'PRODUCTION_MAIN_NON_ADVANCEMENT=PASS'
+
+      - name: Cleanup private material
+        if: always()
+        run: rm -rf repo core-updates "$RUNNER_TEMP/v253-runtime" "$RUNNER_TEMP/v253-release" "$RUNNER_TEMP/v253-build.jsonl" "$RUNNER_TEMP/remote-update.zip" "$RUNNER_TEMP/read-token-update.zip" "$RUNNER_TEMP/p04-content.json" "$RUNNER_TEMP/p04.json" "$RUNNER_TEMP/released-at.txt"
