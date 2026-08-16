@@ -12,20 +12,21 @@ permissions:
 env:
   EXPECTED_P05_SHA: 9711bcde2ea3c58fb0aa9228bfd317242a245dd7
   NODE_IMAGE: node:24-bookworm
-  VF_DATABASE_PROVIDER: sqlite
-  VF_SQLITE_PATH: /tmp/vf-seo-rebaseline/vf-seo.sqlite3
-  VF_BACKUP_DIR: /tmp/vf-seo-rebaseline/backups
-  VF_ADMIN_USERNAME: rebaseline-admin
-  VF_ADMIN_PASSWORD: fixture-rebaseline-password-20260816
-  VF_SECURE_COOKIES: 'false'
-  VF_REQUIRE_HTTPS: 'false'
-  VF_TRUST_PROXY: 'false'
   VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
 
 jobs:
-  sqlite-foundation:
+  sqlite-pressure:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
+    env:
+      VF_DATABASE_PROVIDER: sqlite
+      VF_SQLITE_PATH: /tmp/vf-seo-pressure/vf-seo.sqlite3
+      VF_BACKUP_DIR: /tmp/vf-seo-pressure/backups
+      VF_ADMIN_USERNAME: pressure-admin
+      VF_ADMIN_PASSWORD: fixture-pressure-password-20260816
+      VF_SECURE_COOKIES: 'false'
+      VF_REQUIRE_HTTPS: 'false'
+      VF_TRUST_PROXY: 'false'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -39,28 +40,98 @@ jobs:
           path: p05
           fetch-depth: 1
           persist-credentials: false
-      - name: Prepare SQLite foundation
+      - name: SQLite pressure and failure regression
         run: |
           set -Eeuo pipefail
-          sudo rm -rf /tmp/vf-seo-rebaseline
-          mkdir -p /tmp/vf-seo-rebaseline
+          sudo rm -rf /tmp/vf-seo-pressure
+          mkdir -p /tmp/vf-seo-pressure
           docker pull "$NODE_IMAGE" >/dev/null
           docker run --rm --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
-            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
-            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-rebaseline:/tmp/vf-seo-rebaseline -w /work "$NODE_IMAGE" \
-            bash -lc 'node -v; npm ci; npm run lint; npm run typecheck; npm run build; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready'
-      - name: SQLite core regression
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-pressure:/tmp/vf-seo-pressure -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci; npm run build; npm run migrate; npm run verify:schema; timeout 240s node --import tsx --test --test-concurrency=1 tests/integration/database-pressure.test.ts; npm run verify:schema'
+      - name: Migration repeat and checksum drift fail-closed
         run: |
           set -Eeuo pipefail
           docker run --rm --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
-            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
-            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-rebaseline:/tmp/vf-seo-rebaseline -w /work "$NODE_IMAGE" \
-            bash -lc 'timeout 180s node --import tsx --test --test-concurrency=1 tests/integration/database-rebaseline.test.ts'
-      - name: Database provider boundary
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-pressure:/tmp/vf-seo-pressure -w /work "$NODE_IMAGE" \
+            bash -lc '
+              npm run migrate
+              cp database/migrations/sqlite/0001_phase2_security.sql /tmp/original.sql
+              printf "\n-- deliberate checksum drift\n" >> database/migrations/sqlite/0001_phase2_security.sql
+              if npm run migrate > /tmp/drift.log 2>&1; then echo "CHECKSUM_DRIFT_NOT_BLOCKED"; exit 1; fi
+              grep -q "Migration checksum drift" /tmp/drift.log
+              mv /tmp/original.sql database/migrations/sqlite/0001_phase2_security.sql
+              npm run migrate
+              echo MIGRATION_CHECKSUM_DRIFT=PASS
+            '
+      - name: Migration interruption rollback
         run: |
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" bash -lc 'npm run database:boundary'
+          set -Eeuo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-pressure:/tmp/vf-seo-pressure -w /work "$NODE_IMAGE" \
+            bash -lc '
+              printf "%s\n" "CREATE TABLE migration_should_rollback(id INTEGER PRIMARY KEY);" "THIS IS INVALID SQL;" > database/migrations/sqlite/9999_interrupted.sql
+              if npm run migrate > /tmp/interrupted.log 2>&1; then echo "INTERRUPTED_MIGRATION_NOT_BLOCKED"; exit 1; fi
+              rm database/migrations/sqlite/9999_interrupted.sql
+              node --input-type=module -e "import {DatabaseSync} from '\''node:sqlite'\''; const d=new DatabaseSync(process.env.VF_SQLITE_PATH); const r=d.prepare(\"SELECT count(*) c FROM sqlite_master WHERE type='\''table'\'' AND name='\''migration_should_rollback'\''\").get(); if(Number(r.c)!==0) process.exit(1); d.close();"
+              npm run verify:schema
+              echo MIGRATION_INTERRUPTION_ROLLBACK=PASS
+            '
       - name: Cleanup
         if: always()
-        run: sudo rm -rf p05 /tmp/vf-seo-rebaseline
+        run: sudo rm -rf p05 /tmp/vf-seo-pressure
+
+  postgresql-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vfseo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vfseo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      VF_DATABASE_PROVIDER: postgresql
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vfseo
+      VF_BACKUP_DIR: /tmp/vf-seo-pg-backups
+      VF_ADMIN_USERNAME: pg-admin
+      VF_ADMIN_PASSWORD: fixture-postgresql-password-20260816
+      VF_SECURE_COOKIES: 'false'
+      VF_REQUIRE_HTTPS: 'false'
+      VF_TRUST_PROXY: 'false'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Checkout exact P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+      - name: PostgreSQL 18 compatibility regression
+        run: |
+          set -Eeuo pipefail
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --network host --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e DATABASE_URL -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci; npm run build; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready; timeout 180s node --import tsx --test --test-concurrency=1 tests/integration/postgresql-compatibility.test.ts; npm run verify:schema'
+      - name: Cleanup private source
+        if: always()
+        run: sudo rm -rf p05
