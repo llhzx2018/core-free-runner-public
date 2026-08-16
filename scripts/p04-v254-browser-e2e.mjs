@@ -12,12 +12,13 @@ if (!base || !dbPath) throw new Error('BASE_URL / DB_PATH required');
 fs.mkdirSync(shots, { recursive: true });
 
 const errors = [];
+let expectedFailureInjection = false;
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' });
 const page = await context.newPage();
-page.on('pageerror', (e) => errors.push(`PAGEERROR ${e.message}`));
-page.on('console', (msg) => { if (msg.type() === 'error') errors.push(`CONSOLE ${msg.text()}`); });
-page.on('response', (res) => { if (res.status() >= 500) errors.push(`HTTP${res.status()} ${res.url()}`); });
+page.on('pageerror', (e) => { if (!expectedFailureInjection) errors.push(`PAGEERROR ${e.message}`); });
+page.on('console', (msg) => { if (msg.type() === 'error' && !expectedFailureInjection) errors.push(`CONSOLE ${msg.text()}`); });
+page.on('response', (res) => { if (res.status() >= 500 && !expectedFailureInjection) errors.push(`HTTP${res.status()} ${res.url()}`); });
 
 function assert(condition, message) { if (!condition) throw new Error(message); }
 async function shot(name, pg = page) { await pg.screenshot({ path: path.join(shots, `${name}.png`), fullPage: true }); }
@@ -190,6 +191,7 @@ await shot('state-partial-error');
 await page.unroute('**/api.php?action=settings*');
 
 // Synthetic full error and real retry recovery.
+expectedFailureInjection = true;
 await page.route('**/api.php?action=dashboard*', async (route) => {
   await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ ok:false, message:'工作台数据暂时无法读取。错误编号：E2E123' }) });
 });
@@ -198,6 +200,7 @@ await page.locator('.nav-item[data-nav="dashboard"]').click(); await settle(350)
 assert(await page.locator('#view-dashboard .v254-error-card').count() === 1, 'full error normalization missing');
 await shot('state-full-error');
 await page.unroute('**/api.php?action=dashboard*');
+expectedFailureInjection = false;
 await page.locator('#view-dashboard [data-action="reload-view"]').click();
 await settle(450);
 assert(await page.locator('#view-dashboard .v254-error-card').count() === 0, 'retry did not recover dashboard');
