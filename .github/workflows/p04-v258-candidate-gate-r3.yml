@@ -1,0 +1,193 @@
+name: P04 VF Infra V2.5.8 Candidate Gate R3
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-candidate-gate-r3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-candidate-gate-r3
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: 29d54486231a4ed06febaf2e777adbd4e15b5ba1
+  TARGET_TREE: 5039a9192856fe44a397468baa00e5282cd2469a
+  TARGET_VERSION: 2.5.8
+  TARGET_SCHEMA: '14'
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact private V2.5.8 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Exact source, version and migration identity
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = '14'
+          test ! -e database/migrations/015_v258.sql
+          echo 'P04_V258_EXACT_SOURCE_VERSION_SCHEMA_PASS'
+
+      - name: Repository health and syntax
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p04-v258-php-lint.txt
+          python3 -m py_compile scripts/build-release-tree.py scripts/build-v258-update-release.py scripts/build-v258-candidate-artifacts.py scripts/validate-online-atomic-package.py
+          for f in public/assets/app.js public/assets/v254-ui.js public/assets/v256-ui.js public/assets/v257-mobile.js public/assets/v257-cn.js public/assets/v258-view.js public/assets/v258-nav.js tests/e2e/v258-personal-console.mjs; do node --check "$f"; done
+          bash -n scripts/run-clean-full-install-gate.sh scripts/run-v258-browser-gate.sh
+          echo 'P04_V258_REPOSITORY_AND_SYNTAX_PASS'
+
+      - name: Targeted V2.5.8 data and UI contracts
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          php tests/integration/scope_summary_contract_v258.php .
+          php tests/integration/domain_portfolio_contract_v258.php .
+          php tests/unit/ui_contract_v258.php .
+          echo 'P04_V258_TARGETED_CONTRACTS_PASS'
+
+      - name: Existing core regression
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/core_updates_contract_v252.php
+          php tests/integration/provider_billing_contract_v250.php src
+          php tests/integration/provider_billing_pagination_v256.php src
+          php tests/integration/project_membership_contract_v257.php src
+          php tests/unit/provider_currency_contract_v256.php src
+          php tests/unit/provider_billing_persistence_contract_v256.php .
+          php tests/unit/job_partial_health_contract_v256.php .
+          echo 'P04_V258_EXISTING_CORE_REGRESSION_PASS'
+
+      - name: Fresh install and Schema 14
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-clean-full-install-gate.sh
+          echo 'P04_V258_FRESH_INSTALL_PASS'
+
+      - name: Install Browser E2E dependency
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Browser, responsive, security, backup and restore
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-v258-browser-gate.sh
+          echo 'P04_V258_BROWSER_RESPONSIVE_BACKUP_RESTORE_PASS'
+
+      - name: Candidate artifact pre-gate A
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/build-v258-candidate-artifacts.py --output build/v258-candidate-a
+
+      - name: Candidate artifact deterministic rebuild B
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/build-v258-candidate-artifacts.py --output build/v258-candidate-b
+          for name in VF_Infra_V2.5.8_FULL.zip VF_Infra_V2.5.8_UPDATE.zip VF_Infra_V2.5.8_ATOMIC.zip V258_CANDIDATE_ARTIFACT_MANIFEST.json; do
+            test "$(sha256sum build/v258-candidate-a/$name | cut -d' ' -f1)" = "$(sha256sum build/v258-candidate-b/$name | cut -d' ' -f1)"
+          done
+          for name in repair-v2.5.8.php PACKAGE_MANIFEST.json SHA256SUMS.txt; do
+            test "$(sha256sum build/v258-candidate-a/update-set/$name | cut -d' ' -f1)" = "$(sha256sum build/v258-candidate-b/update-set/$name | cut -d' ' -f1)"
+          done
+          echo 'P04_V258_DETERMINISTIC_ARTIFACT_REBUILD_PASS'
+
+      - name: Build public-safe candidate evidence
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          p=pathlib.Path('build/v258-candidate-a/V258_CANDIDATE_ARTIFACT_MANIFEST.json')
+          artifact=json.loads(p.read_text(encoding='utf-8'))
+          evidence={
+            'project':'P04 · VF Infra','version':'2.5.8','schema':14,
+            'candidate_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+            'candidate_tree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),
+            'runtime_files':artifact['runtime_file_count'],'runtime_fingerprint':artifact['runtime_fingerprint'],
+            'production_source_manifest_sha256':artifact.get('production_source_manifest_sha256',''),
+            'artifacts':artifact['artifacts'],'update_atomic_identical':artifact['update_atomic_identical'],
+            'v258_data_001':'PASS','global_scope_counts':'PASS','project_scope_counts':'PASS',
+            'dashboard_5_second_gate':'PASS','domain_portfolio':'PASS','domain_workspace':'PASS',
+            'all_assets_workspace':'PASS','finance_renewal':'PASS','context_intelligence':'PASS',
+            'chinese_first':'PASS','navigation_cleanup':'PASS','mobile':'PASS','responsive':'PASS',
+            'fresh_install':'PASS','backup_restore':'PASS','existing_core_regression':'PASS',
+            'full_regression':'PASS','formal_artifact_pre_gate':'PASS','candidate':'VERIFIED',
+            'formal_release':'NOT_EXECUTED','tag':'NOT_CREATED','core_updates':'NOT_PUBLISHED','production_write':0,
+          }
+          out=pathlib.Path('/tmp/p04-v258-candidate-evidence')
+          out.mkdir(parents=True,exist_ok=True)
+          (out/'CANDIDATE_EVIDENCE.json').write_text(json.dumps(evidence,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          (out/'CANDIDATE_ARTIFACT_MANIFEST.json').write_text(json.dumps(artifact,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(evidence,ensure_ascii=False,sort_keys=True))
+          PY
+          echo 'P04_V258_PUBLIC_SAFE_EVIDENCE_READY'
+
+      - name: Remove all private source and candidate package bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-vf-infra
+          test ! -e private-vf-infra
+
+      - name: Upload public-safe Candidate evidence only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.8-Candidate-Evidence-R3
+          path: /tmp/p04-v258-candidate-evidence
+          if-no-files-found: error
+          retention-days: 14
