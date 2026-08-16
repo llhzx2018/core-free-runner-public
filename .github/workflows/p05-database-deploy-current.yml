@@ -1,0 +1,159 @@
+name: P05 Database Deploy Current
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p05-database-deploy-current.yml'
+      - 'requests/p05-database-deploy-current-*'
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_P05_SHA: 7a9bafc2bfa02fd6db82c6764624ddb79d9db2d5
+  NODE_IMAGE: node:24-bookworm
+  VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+jobs:
+  sqlite-browser-critical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VF_DATABASE_PROVIDER: sqlite
+      VF_SQLITE_PATH: /tmp/vf-seo-browser/vf-seo.sqlite3
+      VF_BACKUP_DIR: /tmp/vf-seo-browser/backups
+      VF_ADMIN_USERNAME: browser-admin
+      VF_ADMIN_PASSWORD: fixture-browser-password-20260816
+      VF_SECURE_COOKIES: 'false'
+      VF_REQUIRE_HTTPS: 'false'
+      VF_TRUST_PROXY: 'false'
+      PORT: 3105
+      PHASE4_BASE_URL: http://127.0.0.1:3105
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Checkout exact P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Build and initialize SQLite
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /tmp/vf-seo-browser
+          mkdir -p /tmp/vf-seo-browser
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --network host \
+            -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-browser:/tmp/vf-seo-browser -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci; npm run build; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready'
+      - name: Start SQLite web runtime
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-sqlite-browser-web >/dev/null 2>&1 || true
+          docker run -d --name p05-sqlite-browser-web --network host \
+            -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 -e PORT \
+            -v "$GITHUB_WORKSPACE/p05:/work" -v /tmp/vf-seo-browser:/tmp/vf-seo-browser -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 60); do curl -fsS "$PHASE4_BASE_URL/api/health" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS "$PHASE4_BASE_URL/api/health" | grep -q '"databaseProvider":"sqlite"'
+      - name: SQLite browser critical flow desktop and mobile
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$CHROME"
+          mkdir -p "$RUNNER_TEMP/p05-db-browser"
+          cd "$RUNNER_TEMP/p05-db-browser"
+          npm init -y >/dev/null 2>&1
+          npm install --silent --no-audit --no-fund playwright-core@1.55.0
+          cp "$GITHUB_WORKSPACE/scripts/p05-phase4-browser.mjs" ./browser.mjs
+          PHASE4_BASE_URL="$PHASE4_BASE_URL" VF_ADMIN_USERNAME="$VF_ADMIN_USERNAME" VF_ADMIN_PASSWORD="$VF_ADMIN_PASSWORD" CHROME_EXECUTABLE="$CHROME" node browser.mjs
+          echo SQLITE_BROWSER_CRITICAL_FLOW=PASS
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          docker rm -f p05-sqlite-browser-web >/dev/null 2>&1
+          sudo rm -rf p05 /tmp/vf-seo-browser "$RUNNER_TEMP/p05-db-browser"
+
+  cloudpanel-pm2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Checkout exact P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Provision CloudPanel-like Node 24 site user
+        run: |
+          set -Eeuo pipefail
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker rm -f p05-cloudpanel-sim >/dev/null 2>&1 || true
+          docker run -d --name p05-cloudpanel-sim -v "$GITHUB_WORKSPACE/p05:/source:ro" "$NODE_IMAGE" sleep infinity >/dev/null
+          docker exec -u root p05-cloudpanel-sim bash -lc 'apt-get update -qq && apt-get install -y -qq cron procps >/dev/null; useradd -m -s /bin/bash site; mkdir -p /home/site/htdocs/seo.kewaro.com; cp -a /source/. /home/site/htdocs/seo.kewaro.com/; chown -R site:site /home/site/htdocs/seo.kewaro.com'
+      - name: Run CloudPanel installer with SQLite default
+        run: |
+          set -Eeuo pipefail
+          docker exec -u site -e HOME=/home/site -e NPM_CONFIG_PREFIX=/home/site/.npm-global -e PATH=/home/site/.npm-global/bin:/usr/local/bin:/usr/bin:/bin p05-cloudpanel-sim bash -c '
+            cd /home/site/htdocs/seo.kewaro.com
+            chmod +x install-cloudpanel.sh
+            printf "\n3210\nhttps://seo.kewaro.test\ncp-admin\nfixture-cloudpanel-password-20260816\nfixture-cloudpanel-password-20260816\n" | ./install-cloudpanel.sh
+          '
+      - name: Verify private paths runtime and PM2
+        run: |
+          set -Eeuo pipefail
+          docker exec -u site -e HOME=/home/site -e PATH=/home/site/.npm-global/bin:/usr/local/bin:/usr/bin:/bin p05-cloudpanel-sim bash -c '
+            set -Eeuo pipefail
+            test -f /home/site/.local/share/vf-seo/vf-seo.sqlite3
+            test ! -e /home/site/htdocs/seo.kewaro.com/vf-seo.sqlite3
+            test "$(stat -c %a /home/site/.config/vf-seo/runtime.env)" = 600
+            PM2=/home/site/.npm-global/bin/pm2
+            $PM2 jlist | grep -q "\"name\":\"vf-seo\""
+            $PM2 jlist | grep -q "\"name\":\"vf-seo-worker\""
+            node -e "fetch('\''http://127.0.0.1:3210/api/health'\'', {headers:{'\''x-forwarded-proto'\'':'\''https'\'','\''host'\'':'\''seo.kewaro.test'\''}}).then(async r=>{const j=await r.json();if(!r.ok||!j.ok||j.databaseProvider!=='\''sqlite'\'')process.exit(1)})"
+            grep -Fq "# VF SEO PM2 RESURRECT" <(crontab -l)
+            KEY=$(grep "^VF_MASTER_KEY_BASE64=" /home/site/.config/vf-seo/runtime.env | cut -d= -f2-)
+            ! grep -R -F "fixture-cloudpanel-password-20260816" /home/site/htdocs/seo.kewaro.com/ecosystem.config.cjs /home/site/.local/state/vf-seo/logs
+            ! grep -R -F "$KEY" /home/site/htdocs/seo.kewaro.com/ecosystem.config.cjs /home/site/.local/state/vf-seo/logs
+            echo CLOUDPANEL_PRIVATE_PATH=PASS
+            echo PM2_INITIAL_RUNTIME=PASS
+            echo SECRET_LOG_BOUNDARY=PASS
+          '
+      - name: PM2 crash restart and reboot recovery simulation
+        run: |
+          set -Eeuo pipefail
+          docker exec -u site -e HOME=/home/site -e PATH=/home/site/.npm-global/bin:/usr/local/bin:/usr/bin:/bin p05-cloudpanel-sim bash -c '
+            set -Eeuo pipefail
+            PM2=/home/site/.npm-global/bin/pm2
+            BEFORE=$($PM2 pid vf-seo-worker)
+            test -n "$BEFORE" && test "$BEFORE" != 0
+            kill -9 "$BEFORE"
+            for i in $(seq 1 30); do AFTER=$($PM2 pid vf-seo-worker); if test -n "$AFTER" && test "$AFTER" != 0 && test "$AFTER" != "$BEFORE"; then break; fi; sleep 1; done
+            test -n "$AFTER" && test "$AFTER" != 0 && test "$AFTER" != "$BEFORE"
+            echo PM2_WORKER_CRASH_RECOVERY=PASS
+            $PM2 save >/dev/null
+            $PM2 kill >/dev/null
+            $PM2 resurrect >/dev/null
+            for i in $(seq 1 30); do node -e "fetch('\''http://127.0.0.1:3210/api/health'\'',{headers:{'\''x-forwarded-proto'\'':'\''https'\'','\''host'\'':'\''seo.kewaro.test'\''}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))" && break; sleep 1; done
+            node -e "fetch('\''http://127.0.0.1:3210/api/health'\'',{headers:{'\''x-forwarded-proto'\'':'\''https'\'','\''host'\'':'\''seo.kewaro.test'\''}}).then(r=>{if(!r.ok)process.exit(1)})"
+            echo PM2_REBOOT_RECOVERY=PASS
+          '
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f p05-cloudpanel-sim >/dev/null 2>&1 || true
+          sudo rm -rf p05
