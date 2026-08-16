@@ -1,0 +1,97 @@
+name: S01-C01 Formal Release Bridge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c01-formal-release-bridge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact private release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 20c935524702d26ce9389f0406052c79d52d77aa
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Verify product source identity and build exact asset
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '20c935524702d26ce9389f0406052c79d52d77aa'
+          test "$(tr -d '\r\n' < VERSION)" = '1.35.8'
+          git diff --exit-code 1ddeed816aa2eddf2849b0e987e87671a090a0d6 HEAD -- src
+          TMPDIR="${RUNNER_TEMP}/vf-theme-release"
+          ROOT="${TMPDIR}/vf-tools-theme"
+          ZIP="${TMPDIR}/vf-tools-theme_V1.35.8.zip"
+          rm -rf "$TMPDIR"
+          mkdir -p "$ROOT"
+          cp -a src/. "$ROOT/"
+          python3 - "$ROOT" "$ZIP" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=pathlib.PurePosixPath('vf-tools-theme')/p.relative_to(root)
+                  info=zipfile.ZipInfo(str(rel),date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.create_system=3
+                  info.external_attr=(p.stat().st_mode & 0xFFFF) << 16
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          PY
+          BYTES="$(stat -c '%s' "$ZIP")"
+          SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
+          FILES="$(find "$ROOT" -type f | wc -l | tr -d ' ')"
+          test "$BYTES" = '1766099'
+          test "$SHA" = '82cfd4fd7bc78fdcafbe5ce0bf1255545311d89786c2f81a29200bb19bda9a59'
+          test "$FILES" = '441'
+          echo "RELEASE_ASSET=$ZIP" >> "$GITHUB_ENV"
+          echo "EXACT_ARTIFACT_IDENTITY=PASS $SHA"
+
+      - name: Create exact private release with existing installation credential
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-tools-theme >/dev/null
+          if gh release view v1.35.8 --repo llhzx2018/vf-tools-theme >/dev/null 2>&1; then
+            echo 'Release already exists; refusing overwrite.' >&2
+            exit 31
+          fi
+          gh release create v1.35.8 "$RELEASE_ASSET#vf-tools-theme_V1.35.8.zip" \
+            --repo llhzx2018/vf-tools-theme \
+            --target 20c935524702d26ce9389f0406052c79d52d77aa \
+            --title 'VF Tools Theme V1.35.8' \
+            --notes 'S01-C01 formal private release. Exact locked candidate: 1,766,099 bytes; SHA-256 82cfd4fd7bc78fdcafbe5ce0bf1255545311d89786c2f81a29200bb19bda9a59. Production bootstrap not executed.'
+
+      - name: Remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api repos/llhzx2018/vf-tools-theme/releases/tags/v1.35.8)"
+          python3 - "$JSON" <<'PY'
+          import json,sys
+          x=json.loads(sys.argv[1])
+          assert x['tag_name']=='v1.35.8'
+          assets=x.get('assets',[])
+          assert len(assets)==1, assets
+          a=assets[0]
+          assert a['name']=='vf-tools-theme_V1.35.8.zip'
+          assert a['size']==1766099
+          print('FORMAL_RELEASE_REMOTE_READBACK=PASS')
+          print('ASSET_ID='+str(a['id']))
+          PY
