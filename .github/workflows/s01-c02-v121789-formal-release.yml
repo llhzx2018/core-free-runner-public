@@ -1,0 +1,176 @@
+name: S01-C02 V1.21.789 Formal Release
+
+on:
+  push:
+    branches:
+      - task/s01-c02-v121789-formal-release
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_COMMIT: 9183c05b058e0b80411e3f329b6d34636dcd9a72
+  TARGET_TREE: 1f330ab25e69fdb390f0255b155f5b2d0bb284eb
+  TAG: v1.21.789
+  RELEASE_NAME: VF Tools Ops V1.21.789
+  ASSET_NAME: vf-tools-ops_V1.21.789.zip
+  TESTED_ARTIFACT_ID: '9259105696'
+  EXPECTED_BYTES: '3175301'
+  EXPECTED_SHA256: 63d3c7238137888a624ccd3cd7ab600a30f9fcc19a37acafb2d8554151c7a836
+  EXPECTED_RUNTIME_FILES: '888'
+  EXPECTED_RUNTIME_FP: 94bcd42be53941a35e7b88f561e7afdf89370e771cf9960dfbe33ecd2caf5a29
+
+jobs:
+  release:
+    name: Exact Tested Artifact Release + Remote Readback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Credential presence gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'READ_TOKEN_PRESENT=PASS'
+          echo 'WRITE_TOKEN_PRESENT=PASS'
+
+      - name: Fetch exact tested artifact from prior verified run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/tested
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/core-free-runner-public/actions/artifacts/${TESTED_ARTIFACT_ID}/zip" -o /tmp/tested-artifact.zip
+          unzip -q /tmp/tested-artifact.zip -d /tmp/tested
+          ZIP="$(find /tmp/tested -type f -name "$ASSET_NAME" -print -quit)"
+          test -n "$ZIP"
+          cp "$ZIP" "/tmp/$ASSET_NAME"
+          test "$(stat -c %s "/tmp/$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "/tmp/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          python3 - <<'PY'
+          import hashlib, os, zipfile
+          p='/tmp/'+os.environ['ASSET_NAME']; files={}
+          with zipfile.ZipFile(p) as z:
+              for n in z.namelist():
+                  if n.endswith('/'): continue
+                  if not n.startswith('vf-ops/'): raise SystemExit('unexpected root: '+n)
+                  rel=n[len('vf-ops/'):]
+                  if rel: files[rel]=z.read(n)
+          if len(files)!=int(os.environ['EXPECTED_RUNTIME_FILES']): raise SystemExit('runtime count mismatch')
+          if 'vf-ops.php' not in files: raise SystemExit('plugin main missing')
+          h=hashlib.sha256()
+          for rel,b in sorted(files.items()):
+              h.update(rel.encode()); h.update(b'\0'); h.update(hashlib.sha256(b).hexdigest().encode()); h.update(b'\n')
+          if h.hexdigest()!=os.environ['EXPECTED_RUNTIME_FP']: raise SystemExit('runtime fingerprint mismatch')
+          print('TESTED_ARTIFACT_EXACT=PASS')
+          PY
+
+      - name: Verify exact product target and release absence
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          COMMIT_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/commits/${TARGET_COMMIT}")"
+          test "$(jq -r '.sha' <<<"$COMMIT_JSON")" = "$TARGET_COMMIT"
+          test "$(jq -r '.tree.sha' <<<"$COMMIT_JSON")" = "$TARGET_TREE"
+          test "$(curl -sS -o /tmp/tag-check.json -w '%{http_code}' -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/ref/tags/${TAG}")" = '404'
+          test "$(curl -sS -o /tmp/release-check.json -w '%{http_code}' -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases/tags/${TAG}")" = '404'
+          echo 'EXACT_PRODUCT_TARGET=PASS'
+
+      - name: Create exact tag and formal release
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg ref "refs/tags/${TAG}" --arg sha "$TARGET_COMMIT" '{ref:$ref,sha:$sha}' >/tmp/tag-create.json
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/refs" --data-binary @/tmp/tag-create.json >/tmp/tag-created.json
+          test "$(jq -r '.object.sha' /tmp/tag-created.json)" = "$TARGET_COMMIT"
+          cat >/tmp/release-body.md <<'EOF'
+          V1.21.789 = ONLINE UPDATE BOOTSTRAP BASELINE.
+
+          - TESTED PRODUCT = RELEASED PRODUCT.
+          - TESTED ARTIFACT = DELIVERED ARTIFACT.
+          - Package Slug: vf-ops.
+          - Physical Locator: vf-ops/vf-ops.php.
+          - Locator Cutover: NO.
+          - 1.21.788 -> 1.21.789 Native Online Update: NOT SUPPORTED / NOT CLAIMED.
+          - P3-004: DEFERRED / UNVERIFIED.
+          - Production Bootstrap: NOT EXECUTED.
+          - Production Upgrade: NOT EXECUTED.
+          EOF
+          jq -n --arg tag "$TAG" --arg name "$RELEASE_NAME" --rawfile body /tmp/release-body.md '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}' >/tmp/release-create.json
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases" --data-binary @/tmp/release-create.json >/tmp/release-created.json
+          RID="$(jq -r '.id' /tmp/release-created.json)"; test -n "$RID"; test "$RID" != null
+          test "$(jq -r '.draft' /tmp/release-created.json)" = false
+          test "$(jq -r '.prerelease' /tmp/release-created.json)" = false
+          echo "RELEASE_ID=$RID" >> "$GITHUB_ENV"
+          echo "RELEASE_ID=$RID"
+
+      - name: Upload exact tested asset
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Content-Type: application/zip' "https://uploads.github.com/repos/${TARGET_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${ASSET_NAME}" --data-binary "@/tmp/$ASSET_NAME" >/tmp/asset-created.json
+          AID="$(jq -r '.id' /tmp/asset-created.json)"; test -n "$AID"; test "$AID" != null
+          test "$(jq -r '.name' /tmp/asset-created.json)" = "$ASSET_NAME"
+          test "$(jq -r '.size' /tmp/asset-created.json)" = "$EXPECTED_BYTES"
+          echo "ASSET_ID=$AID" >> "$GITHUB_ENV"
+          echo "ASSET_ID=$AID"
+
+      - name: Remote release exact readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/ref/tags/${TAG}")"
+          test "$(jq -r '.object.sha' <<<"$TAG_JSON")" = "$TARGET_COMMIT"
+          curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases/tags/${TAG}" -o /tmp/release-readback.json
+          test "$(jq -r '.id' /tmp/release-readback.json)" = "$RELEASE_ID"
+          test "$(jq -r '.draft' /tmp/release-readback.json)" = false
+          test "$(jq -r '.prerelease' /tmp/release-readback.json)" = false
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' /tmp/release-readback.json)"
+          test "$AID" = "$ASSET_ID"
+          test "$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' /tmp/release-readback.json)" = "$EXPECTED_BYTES"
+          curl -fsSL -L -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/octet-stream' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases/assets/${ASSET_ID}" -o "/tmp/remote-$ASSET_NAME"
+          test "$(stat -c %s "/tmp/remote-$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "/tmp/remote-$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "/tmp/remote-$ASSET_NAME" >/dev/null
+          python3 - <<'PY'
+          import hashlib, os, zipfile
+          p='/tmp/remote-'+os.environ['ASSET_NAME']; files={}
+          with zipfile.ZipFile(p) as z:
+              for n in z.namelist():
+                  if n.endswith('/'): continue
+                  if not n.startswith('vf-ops/'): raise SystemExit('bad root')
+                  rel=n[len('vf-ops/'):]
+                  if rel: files[rel]=z.read(n)
+          if len(files)!=int(os.environ['EXPECTED_RUNTIME_FILES']): raise SystemExit('count mismatch')
+          h=hashlib.sha256()
+          for rel,b in sorted(files.items()):
+              h.update(rel.encode()); h.update(b'\0'); h.update(hashlib.sha256(b).hexdigest().encode()); h.update(b'\n')
+          if h.hexdigest()!=os.environ['EXPECTED_RUNTIME_FP']: raise SystemExit('fingerprint mismatch')
+          print('REMOTE_RUNTIME_READBACK=PASS')
+          PY
+          jq -n --arg run "$GITHUB_RUN_ID" --arg tag "$TAG" --arg target "$TARGET_COMMIT" --argjson release_id "$RELEASE_ID" --argjson asset_id "$ASSET_ID" --arg asset "$ASSET_NAME" --argjson bytes "$EXPECTED_BYTES" --arg sha "$EXPECTED_SHA256" --argjson runtime_files "$EXPECTED_RUNTIME_FILES" --arg runtime_fp "$EXPECTED_RUNTIME_FP" '{formal_release_run:$run,tag:$tag,tag_target:$target,release_id:$release_id,asset_id:$asset_id,asset_name:$asset,remote_asset_bytes:$bytes,remote_asset_sha256:$sha,remote_zip_integrity:"PASS",remote_runtime_files:$runtime_files,remote_runtime_fingerprint:$runtime_fp,tested_artifact_equals_delivered_artifact:"PASS"}' >/tmp/formal-release-readback.json
+          cat /tmp/formal-release-readback.json
+
+      - name: Upload release readback evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.789-formal-release-readback
+          path: /tmp/formal-release-readback.json
+          retention-days: 30
