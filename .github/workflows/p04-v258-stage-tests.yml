@@ -1,0 +1,136 @@
+name: P04 VF Infra V2.5.8 Stage Regression Harness
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-stage-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-stage-tests
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_BRANCH: feature/v2.5.8-personal-console-precision
+  INPUT_COMMIT: a5bf323eb85851888513494e5a8d679373c3dd52
+  PAYLOAD_SHA256: 70c38aa517da338cf5df2ef1eb03cd832c84a1d11a6eb8447cfa8933f5479fbc
+
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact private V2.5.8 worktree
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.INPUT_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Decode exact regression payload
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+          base64 -d scripts/.v258-test-payload.tgz.b64 > "$RUNNER_TEMP/v258-test-payload.tgz"
+          test "$(sha256sum "$RUNNER_TEMP/v258-test-payload.tgz" | cut -d' ' -f1)" = "$PAYLOAD_SHA256"
+          tar -xzf "$RUNNER_TEMP/v258-test-payload.tgz" -C .
+          mv docs-package-release-notes.md docs/operations/package/RELEASE_NOTES.md
+          chmod +x scripts/run-v258-browser-gate.sh scripts/build-v258-update-release.py scripts/build-v258-candidate-artifacts.py
+          rm -f scripts/.v258-test-payload.tgz.b64
+          echo 'P04_V258_REGRESSION_PAYLOAD_EXACT_DECODE_PASS'
+
+      - name: Extend release-tree V2.5.8 maintenance identity
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/build-release-tree.py')
+          s=p.read_text(encoding='utf-8')
+          old="maintenance_versions={'2.5.1','2.5.2','2.5.3','2.5.4','2.5.5','2.5.6','2.5.7'}\nif version=='2.5.7':"
+          new="maintenance_versions={'2.5.1','2.5.2','2.5.3','2.5.4','2.5.5','2.5.6','2.5.7','2.5.8'}\nif version=='2.5.8':\n    version_note='V2.5.8 completes Personal Console Precision: one scope-aware summary contract removes false-zero dashboard counts; action/root-cause compression, decision-first Domain Portfolio, type-aware Assets Workspace, risk-first Finance, intelligent Context, Chinese-first navigation and responsive Portfolio-first mobile are refined while Schema stays 14 and Provider authority remains read-only first.'\nelif version=='2.5.7':"
+          if old not in s: raise SystemExit('V258_RELEASE_TREE_PATCH_ANCHOR_MISSING')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          grep -q "'2.5.8'" scripts/build-release-tree.py
+          echo 'P04_V258_RELEASE_TREE_IDENTITY_PATCH_PASS'
+
+      - name: Static syntax before private commit
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          for f in tests/integration/scope_summary_contract_v258.php tests/integration/domain_portfolio_contract_v258.php tests/integration/backup_restore_smoke_v258.php tests/unit/ui_contract_v258.php; do php -l "$f"; done
+          node --check tests/e2e/v258-personal-console.mjs
+          bash -n scripts/run-v258-browser-gate.sh
+          python3 -m py_compile scripts/build-v258-update-release.py scripts/build-v258-candidate-artifacts.py scripts/build-release-tree.py
+          php tests/integration/scope_summary_contract_v258.php .
+          php tests/integration/domain_portfolio_contract_v258.php .
+          php tests/unit/ui_contract_v258.php .
+          echo 'P04_V258_STAGED_HARNESS_STATIC_AND_TARGETED_PASS'
+
+      - name: Commit harness and push feature branch non-force
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Candidate Harness'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git diff --cached --name-status
+          git commit -m 'test(P04): add V2.5.8 precision candidate regression harness'
+          OUTPUT_COMMIT="$(git rev-parse HEAD)"
+          git push origin "HEAD:$TARGET_BRANCH"
+          printf '%s\n' "$OUTPUT_COMMIT" > "$RUNNER_TEMP/p04-v258-stage-output.txt"
+          echo 'P04_V258_HARNESS_NON_FORCE_PUSH_PASS'
+
+      - name: Remote readback
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          OUTPUT_COMMIT="$(cat "$RUNNER_TEMP/p04-v258-stage-output.txt")"
+          REMOTE_COMMIT="$(git ls-remote origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
+          test "$REMOTE_COMMIT" = "$OUTPUT_COMMIT"
+          test ! -e scripts/.v258-test-payload.tgz.b64
+          cat > "$RUNNER_TEMP/p04-v258-stage-evidence.txt" <<EOF
+          P04 · VF Infra V2.5.8 Regression Harness Stage
+          Result: PASS
+          Input Commit: $INPUT_COMMIT
+          Output Commit: $OUTPUT_COMMIT
+          Payload SHA-256: $PAYLOAD_SHA256
+          Targeted Static Contracts: PASS
+          Temporary Payload: CLEANED
+          Push: NON-FORCE
+          EOF
+          echo 'P04_V258_HARNESS_REMOTE_READBACK_PASS'
+
+      - name: Remove private worktree
+        if: always()
+        shell: bash
+        run: rm -rf private-vf-infra "$RUNNER_TEMP/v258-test-payload.tgz"
+
+      - name: Upload public-safe stage evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.8-Harness-Stage-Evidence
+          path: ${{ runner.temp }}/p04-v258-stage-evidence.txt
+          if-no-files-found: error
+          retention-days: 14
