@@ -1,0 +1,215 @@
+name: P02 Post-Seal System Health Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-post-seal-health-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-post-seal-health-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      SOURCE_COMMIT: f69346f00719a253a0f7c94121b7af2a975b74ee
+      CURRENT_DEVELOP: 7188e658d529e24982e41314f737beeba1798cd9
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read-only credential
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_TOKEN"
+
+      - name: Checkout exact sealed runtime source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: f69346f00719a253a0f7c94121b7af2a975b74ee
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install audit runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+          cd p02
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Baseline full regression
+        shell: bash
+        working-directory: p02
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-post-seal-regression
+          TEST_PASSWORD: P02-Audit-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          python3 - "$EVIDENCE_DIR/summary.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x['result']=='PASS' and x['version']=='2.4.24' and int(x['schema'])==2401
+          print('BASELINE_FULL_REGRESSION=PASS')
+          PY
+
+      - name: Static source health inventory
+        shell: bash
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, hashlib, collections
+          roots=[Path('src'),Path('public')]
+          files=[p for root in roots for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.php','.js','.css'}]
+          sizes=[]; todos=[]; domains=[]; long_php=[]; direct_writes=[]; dynamic_html=[]
+          blocks=collections.defaultdict(list)
+          for p in files:
+            s=p.read_text(encoding='utf-8',errors='replace'); lines=s.splitlines(); sizes.append((len(lines),len(s.encode()),p.as_posix()))
+            for i,line in enumerate(lines,1):
+              if re.search(r'\b(TODO|FIXME|HACK|XXX)\b',line,re.I): todos.append((p.as_posix(),i))
+              if re.search(r'https?://[^\s\'\"<>]*kewaro\.com',line,re.I): domains.append((p.as_posix(),i))
+              if 'file_put_contents' in line: direct_writes.append((p.as_posix(),i))
+              if p.suffix=='.js' and re.search(r'\.innerHTML\s*=|insertAdjacentHTML\s*\(',line): dynamic_html.append((p.as_posix(),i))
+            if p.suffix=='.php':
+              # Conservative brace-based function length approximation.
+              for m in re.finditer(r'(?m)^\s*(?:public|protected|private|static|final|abstract|\s)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(',s):
+                start=s.count('\n',0,m.start())+1; pos=s.find('{',m.end())
+                if pos<0: continue
+                depth=0; end=None
+                for j in range(pos,len(s)):
+                  if s[j]=='{': depth+=1
+                  elif s[j]=='}':
+                    depth-=1
+                    if depth==0: end=s.count('\n',0,j)+1; break
+                if end and end-start+1>=180: long_php.append((p.as_posix(),m.group(1),start,end,end-start+1))
+            # repeated exact 12-line normalized windows; diagnostics only
+            norm=[re.sub(r'\s+',' ',x.strip()) for x in lines]
+            for i in range(max(0,len(norm)-11)):
+              chunk='\n'.join(norm[i:i+12])
+              if len(chunk)<220 or not chunk.strip(): continue
+              h=hashlib.sha1(chunk.encode()).hexdigest(); blocks[h].append((p.as_posix(),i+1))
+          dups=[v for v in blocks.values() if len(v)>=2 and len({x[0] for x in v})>=1]
+          dups=sorted(dups,key=len,reverse=True)[:20]
+          css=Path('public/assets/app.css').read_text(encoding='utf-8',errors='replace')
+          out={
+            'runtime_text_files':len(files),
+            'largest_files':sorted(sizes,reverse=True)[:12],
+            'todo_fixme_markers':todos,
+            'hardcoded_kewaro_runtime_urls':domains,
+            'php_functions_180_lines_plus':long_php,
+            'direct_file_put_contents_sites':direct_writes,
+            'js_dynamic_html_sites_count':len(dynamic_html),
+            'js_dynamic_html_sites_sample':dynamic_html[:30],
+            'css_important_count':css.count('!important'),
+            'css_media_query_count':len(re.findall(r'@media\b',css)),
+            'duplicate_12line_window_groups_top':dups,
+          }
+          print('STATIC_AUDIT_JSON='+json.dumps(out,ensure_ascii=False,separators=(',',':')))
+          PY
+
+      - name: Build isolated UI audit site
+        shell: bash
+        working-directory: p02
+        env:
+          AUDIT_SITE: ${{ runner.temp }}/p02-ui-audit/site
+          AUDIT_ROOT: ${{ runner.temp }}/p02-ui-audit
+          AUDIT_PASSWORD: P02-UI-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$AUDIT_ROOT"; mkdir -p "$AUDIT_SITE"
+          bash scripts/build-deploy-tree.sh "$AUDIT_SITE" >/dev/null
+          php -d display_errors=0 -S 127.0.0.1:18144 -t "$AUDIT_SITE" >"$AUDIT_ROOT/server.log" 2>&1 & echo $! > "$AUDIT_ROOT/server.pid"
+          for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:18144/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          COOKIE="$AUDIT_ROOT/cookie.txt"
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18144/setup.php > "$AUDIT_ROOT/setup.html"
+          TOKEN=$(python3 - "$AUDIT_ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf" value="([^"]+)"',s); assert m
+          print(html.unescape(m.group(1)))
+          PY
+          )
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18144' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18144/setup.php)
+          test "$code" = 303
+          echo 'UI_AUDIT_SITE_READY=PASS'
+
+      - name: Exploratory DOM and responsive state audit
+        shell: bash
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: P02-UI-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p02-ui-audit.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18144'; const password=process.env.AUDIT_PASSWORD;
+          const browser=await chromium.launch({headless:true}); const context=await browser.newContext({viewport:{width:1440,height:1000}}); const page=await context.newPage();
+          const errors=[]; page.on('pageerror',e=>errors.push('pageerror:'+e)); page.on('console',m=>{if(m.type()==='error'&&!/409 \(Conflict\)/.test(m.text())) errors.push('console:'+m.text())});
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          let s=await page.evaluate(async()=>await (await fetch('/api.php?action=session')).json());
+          if(!s?.site?.auth){ await page.locator('[data-open-login]').first().click(); await page.locator('#loginForm input[name="password"]').fill(password); await page.locator('#loginSubmit').click(); await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth)); s=await page.evaluate(async()=>await (await fetch('/api.php?action=session')).json()); }
+          const csrf=s.csrf;
+          const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)}); return {status:r.status,j:await r.json()}},{a,b,csrf});
+          const cat=await post('category_save',{name:'Health Audit',description:'isolated',icon:'folder'}); if(!cat.j?.ok) throw new Error('category create failed'); const cid=cat.j.id;
+          const item=await post('content_save',{category_id:cid,title:'Health Audit Long Article',content:'# Health Audit\n\n'+('长文本段落 English UTF-8 ✓\n'.repeat(2500)),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'}); if(!item.j?.ok) throw new Error('item create failed'); const iid=item.j.id;
+          await page.reload({waitUntil:'networkidle'});
+          // Load audit item in UI by direct app function when available, otherwise click matching list text.
+          await page.evaluate(async({cid,iid})=>{ if(typeof loadBootstrap==='function') await loadBootstrap({view:typeof viewSnapshot==='function'?viewSnapshot():undefined}); if(typeof selectCategory==='function') await selectCategory(cid); if(typeof openViewer==='function') await openViewer(iid); },{cid,iid}).catch(()=>{});
+          const viewports=[[1920,1080],[1600,1000],[1440,1000],[1318,900],[1024,900],[768,900],[390,844]]; const reports=[];
+          for(const [w,h] of viewports){
+            await page.setViewportSize({width:w,height:h}); await page.waitForTimeout(220);
+            const r=await page.evaluate(()=>{
+              const de=document.documentElement,b=document.body;
+              const vis=e=>{const q=e.getBoundingClientRect(),cs=getComputedStyle(e);return q.width>0&&q.height>0&&cs.display!=='none'&&cs.visibility!=='hidden'};
+              const scrollables=[...document.querySelectorAll('*')].filter(e=>{if(!vis(e))return false;const cs=getComputedStyle(e);return /(auto|scroll)/.test(cs.overflowY)&&e.scrollHeight>e.clientHeight+5}).map(e=>({tag:e.tagName,id:e.id||'',cls:(e.className||'').toString().slice(0,100),ch:e.clientHeight,sh:e.scrollHeight})).slice(0,20);
+              const fixed=[...document.querySelectorAll('*')].filter(e=>vis(e)&&['fixed','sticky'].includes(getComputedStyle(e).position)).map(e=>{const q=e.getBoundingClientRect();return {tag:e.tagName,id:e.id||'',cls:(e.className||'').toString().slice(0,80),x:Math.round(q.x),y:Math.round(q.y),w:Math.round(q.width),h:Math.round(q.height)}}).slice(0,30);
+              const offscreenButtons=[...document.querySelectorAll('button,[role="button"],a')].filter(vis).filter(e=>{const q=e.getBoundingClientRect();return q.right<0||q.left>innerWidth||q.bottom<0||q.top>innerHeight}).length;
+              return {htmlClientWidth:de.clientWidth,htmlScrollWidth:de.scrollWidth,bodyClientWidth:b.clientWidth,bodyScrollWidth:b.scrollWidth,bodyClientHeight:b.clientHeight,bodyScrollHeight:b.scrollHeight,bodyOverflowY:getComputedStyle(b).overflowY,scrollables,fixed,offscreenButtons};
+            });
+            if(r.htmlScrollWidth>r.htmlClientWidth+3) throw new Error(`horizontal overflow ${w}: ${r.htmlScrollWidth}/${r.htmlClientWidth}`);
+            reports.push({w,h,...r});
+          }
+          // Core view-mode persistence probe: category selection must not silently rewrite current view preference.
+          const modeProbe=await page.evaluate(async(cid)=>{
+            const before={};
+            for(const k of ['listMode','viewMode','mode','layoutMode']) if(globalThis.state&&k in state) before[k]=state[k];
+            if(typeof selectCategory==='function') await selectCategory(cid);
+            const after={}; for(const k of Object.keys(before)) after[k]=state[k];
+            return {before,after};
+          },cid).catch(e=>({error:String(e)}));
+          // Editor save/readback state-sync probe.
+          const sync=await page.evaluate(async({iid,cid,csrf})=>{
+            const title='Health Audit Renamed '+Date.now();
+            const r=await fetch('/api.php?action=content_save',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({id:iid,category_id:cid,title,content:'state sync body',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'})});
+            const j=await r.json(); if(!j.ok) return {ok:false,stage:'save'};
+            if(typeof loadBootstrap==='function') await loadBootstrap({view:typeof viewSnapshot==='function'?viewSnapshot():undefined});
+            const bodyText=document.body.innerText||''; return {ok:true,title,visible:bodyText.includes(title)};
+          },{iid,cid,csrf});
+          console.log('UI_AUDIT_JSON='+JSON.stringify({reports,modeProbe,sync,errors,stateKeys:await page.evaluate(()=>globalThis.state?Object.keys(state).sort():[])}));
+          if(errors.length) throw new Error(errors.join(' | ')); if(!sync.ok||!sync.visible) throw new Error('save/readback visible state sync failed');
+          await browser.close();
+          JS
+          node "$RUNNER_TEMP/p02-ui-audit.mjs"
+
+      - name: Cleanup isolated audit state
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/p02-ui-audit/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-ui-audit/server.pid")" 2>/dev/null || true; fi
+          rm -rf p02 "$RUNNER_TEMP/p02-post-seal-regression" "$RUNNER_TEMP/p02-ui-audit" "$RUNNER_TEMP/p02-ui-audit.mjs" || true
+          echo 'AUDIT_PRIVATE_STATE_CLEANUP=PASS'
