@@ -204,7 +204,7 @@ assert(await page.locator('#view-dashboard .v254-error-card').count() === 0, 're
 
 // Empty state is a real isolated-runtime state for connected accounts.
 await page.locator('.nav-item[data-nav="providers"]').click(); await settle();
-assert(await page.locator('#view-providers .empty-state, #view-providers .compact-empty, #view-providers .notice').count() >= 1, 'provider empty-state not present');
+assert(await page.locator('#view-providers .empty-state, #view-providers .infra-empty.compact, #view-providers .notice').count() >= 1, 'provider empty-state not present');
 await shot('state-empty-providers');
 
 // Responsive evidence: representative dense pages at formal widths.
