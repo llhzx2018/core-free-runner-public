@@ -1,0 +1,114 @@
+name: S01-C02 V1.21.789 WordPress Native Update Candidate
+
+on:
+  push:
+    branches:
+      - task/s01-c02-wp-native-1.21.789
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPS_REPOSITORY: llhzx2018/vf-tools-ops
+  OPS_BRANCH: task/wp-native-update-1.21.789
+  EXPECTED_PRODUCT_COMMIT: 3250a990627c7eb38240abb7120e3e8391164b05
+  EXPECTED_PRODUCT_TREE: f8da785da3493596f760ef219c4e34c98a4f6609
+
+jobs:
+  candidate:
+    name: Plugin_Upgrader / State / Recovery / Browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_ops_update
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - name: Require existing unified read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'EXISTING_VF_PRIVATE_READ_TOKEN=PASS'
+
+      - name: Checkout public runner baseline
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 pinned
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact Ops candidate branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 pinned
+        with:
+          repository: ${{ env.OPS_REPOSITORY }}
+          ref: ${{ env.OPS_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Verify product source boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate show ${EXPECTED_PRODUCT_COMMIT}:VERSION | tr -d '\r\n')" = '1.21.789'
+          test "$(git -C candidate rev-parse ${EXPECTED_PRODUCT_COMMIT}^{tree})" = "$EXPECTED_PRODUCT_TREE"
+          git -C candidate diff --name-only "$EXPECTED_PRODUCT_COMMIT" HEAD -- ':!/.github' > /tmp/post-product-diff.txt
+          test ! -s /tmp/post-product-diff.txt
+          echo "TEST_HARNESS_HEAD=$(git -C candidate rev-parse HEAD)"
+          echo 'PRODUCT_SOURCE_MODIFIED_AFTER_TEST_BOUNDARY=NO'
+
+      - name: Provision PHP and tools
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2 pinned
+        with:
+          php-version: '8.3'
+          extensions: mysqli, curl, zip, sodium, mbstring, xml, gd
+          coverage: none
+
+      - name: Install runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mariadb-client jq unzip curl >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp
+          sudo mv /tmp/wp /usr/local/bin/wp
+          for i in $(seq 1 30); do mariadb -h127.0.0.1 -uvf -pvf -e 'SELECT 1' vf_ops_update >/dev/null 2>&1 && break; sleep 1; done
+          mariadb -h127.0.0.1 -uvf -pvf -e 'SELECT VERSION()' vf_ops_update
+          php -v
+          wp --info
+
+      - name: Execute S01-C02 native update candidate suite
+        shell: bash
+        run: bash candidate/.github/wp-update/run.sh candidate evidence/s01-c02-wp-update
+
+      - name: Publish evidence summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo '## S01-C02 V1.21.789 WordPress Native Update Candidate' >> "$GITHUB_STEP_SUMMARY"
+          test -f evidence/s01-c02-wp-update/FINAL_EVIDENCE.json && cat evidence/s01-c02-wp-update/FINAL_EVIDENCE.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload tested candidate and evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 pinned
+        with:
+          name: s01-c02-v1.21.789-native-candidate-${{ github.run_attempt }}
+          path: evidence/s01-c02-wp-update/
+          if-no-files-found: warn
+          retention-days: 30
