@@ -1,0 +1,231 @@
+name: P05 V1.0.0 Database Rebaseline Candidate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p05-v100-db-rebaseline-candidate.yml'
+      - 'requests/p05-v100-db-rebaseline-candidate-*'
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_P05_SHA: a3a87efe0086db70f66b728f826d6ca35ea31b5f
+  EXPECTED_P05_TREE: babdd96a256909ccb8d34e6729741ad0ec7ecb75
+  NODE_IMAGE: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+  VF_DATABASE_PROVIDER: sqlite
+  VF_SQLITE_PATH: /tmp/vf-seo-candidate/vf-seo.sqlite3
+  VF_BACKUP_DIR: /tmp/vf-seo-candidate/backups
+  VF_ADMIN_USERNAME: candidate-admin
+  VF_ADMIN_PASSWORD: fixture-candidate-password-20260816
+  VF_SECURE_COOKIES: 'false'
+  VF_REQUIRE_HTTPS: 'false'
+  VF_TRUST_PROXY: 'false'
+  VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  PORT: 3105
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public control repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXPECTED_P05_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p05
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$EXPECTED_P05_SHA"
+          test "$(git -C p05 rev-parse HEAD^{tree})" = "$EXPECTED_P05_TREE"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.0'
+          grep -q '"schema_identity": "VF-SEO-SCHEMA@1"' p05/VF_PROJECT.json
+          grep -q '"schema_version": 1' p05/VF_PROJECT.json
+          grep -q '"default_database": "SQLITE"' p05/VF_PROJECT.json
+          echo "CANDIDATE_SOURCE=$EXPECTED_P05_SHA"
+          echo "CANDIDATE_TREE=$EXPECTED_P05_TREE"
+          echo "VERSION=1.0.0"
+          echo "SCHEMA=VF-SEO-SCHEMA@1/1"
+          echo "DEFAULT_DATABASE=SQLITE"
+
+      - name: Build and provider boundary checks
+        run: |
+          set -Eeuo pipefail
+          docker pull "$NODE_IMAGE" >/dev/null
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -v "$GITHUB_WORKSPACE/p05:/work" -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci; npm run lint; npm run typecheck; npm run build; npm run database:boundary'
+
+      - name: Assemble deterministic V1.0.0 FULL package
+        run: |
+          set -Eeuo pipefail
+          rm -rf release-stage install-smoke cloudpanel-package VF_SEO_V1.0.0_FULL.zip VF_SEO_V1.0.0_FULL.zip.sha256
+          mkdir -p release-stage
+          cd p05
+          cp .env.example VERSION VF_PROJECT.json README.md CHANGELOG.md package.json package-lock.json tsconfig.json tsconfig.server.json vite.config.ts index.html ../release-stage/
+          cp install-cloudpanel.sh ecosystem.config.cjs ../release-stage/
+          cp -a bin config database scripts src public dist ../release-stage/
+          mkdir -p ../release-stage/docs/authority
+          cp docs/authority/DATABASE_ARCHITECTURE.md ../release-stage/docs/authority/
+          cd ../release-stage
+          chmod +x install-cloudpanel.sh bin/*.sh
+          find . -type f ! -name RELEASE_MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > RELEASE_MANIFEST.sha256
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root=Path('.')
+          out=Path('../VF_SEO_V1.0.0_FULL.zip')
+          epoch=(2026,8,16,0,0,0)
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix()
+                  zi=zipfile.ZipInfo(rel,epoch)
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  mode=0o755 if rel=='install-cloudpanel.sh' or rel.startswith('bin/') and rel.endswith('.sh') else 0o644
+                  zi.external_attr=(mode & 0xFFFF)<<16
+                  z.writestr(zi,p.read_bytes())
+          PY
+          cd ..
+          sha256sum VF_SEO_V1.0.0_FULL.zip | tee VF_SEO_V1.0.0_FULL.zip.sha256
+          stat -c 'ARTIFACT_BYTES=%s' VF_SEO_V1.0.0_FULL.zip
+          echo "ARTIFACT_SHA256=$(cut -d' ' -f1 VF_SEO_V1.0.0_FULL.zip.sha256)"
+
+      - name: Archive privacy and release content gate
+        run: |
+          set -Eeuo pipefail
+          unzip -t VF_SEO_V1.0.0_FULL.zip >/dev/null
+          unzip -Z1 VF_SEO_V1.0.0_FULL.zip > release-files.txt
+          grep -qx 'install-cloudpanel.sh' release-files.txt
+          grep -qx 'ecosystem.config.cjs' release-files.txt
+          grep -qx 'database/migrations/sqlite/0001_initial.sql' release-files.txt
+          grep -qx 'database/migrations/0001_initial.sql' release-files.txt
+          ! grep -E '(^|/)(\.git|\.github|tests|node_modules|docs/evidence|private|PRIVATE_DATA)(/|$)' release-files.txt
+          ! grep -E '(^|/)\.env$|\.(sqlite|sqlite3|db|db-wal|db-shm|pem|key|p12|pfx)$' release-files.txt
+          ! grep -aERn --exclude='*.map' '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----)' release-stage
+          ! grep -aERn 'fixture-(candidate|browser|postgresql|cloudpanel)-password' release-stage
+          echo ARCHIVE_INTEGRITY=PASS
+          echo SECRET_GATE=PASS
+          echo PRIVATE_DATA_GATE=PASS
+
+      - name: Fresh SQLite install from final ZIP
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /tmp/vf-seo-candidate install-smoke
+          mkdir -p /tmp/vf-seo-candidate install-smoke
+          unzip -q VF_SEO_V1.0.0_FULL.zip -d install-smoke
+          test -x install-smoke/install-cloudpanel.sh
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_ADMIN_USERNAME -e VF_ADMIN_PASSWORD \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            bash -lc 'npm ci --omit=dev; npm run migrate; npm run verify:schema; npm run bootstrap:admin; npm run verify:admin-ready; node dist/src/server/database/maintenance.js verify-live'
+          echo SQLITE_FRESH_INSTALL=PASS
+          echo SQLITE_MIGRATION=PASS
+          echo SQLITE_INTEGRITY=PASS
+
+      - name: Backup restore and worker from final ZIP
+        run: |
+          set -Eeuo pipefail
+          BACKUP_JSON=$(docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js backup)
+          echo "$BACKUP_JSON" | grep -q '"ok":true'
+          BACKUP_ID=$(printf '%s' "$BACKUP_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).manifest.id))')
+          test -n "$BACKUP_ID"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js verify "$BACKUP_ID" | grep -q '"ok":true'
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const d=new DatabaseSync(process.env.VF_SQLITE_PATH); d.prepare(\"INSERT INTO notes(object_type,object_id,body) VALUES('CANDIDATE','00000000-0000-4000-8000-000000000000','after-backup')\").run(); d.close();"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e VF_MAINTENANCE_MODE=1 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            node dist/src/server/database/maintenance.js restore "$BACKUP_ID" | grep -q '"ok":true'
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            node --input-type=module -e "import {DatabaseSync} from 'node:sqlite'; const d=new DatabaseSync(process.env.VF_SQLITE_PATH); const c=d.prepare(\"SELECT count(*) c FROM notes WHERE body='after-backup'\").get(); if(Number(c.c)!==0) process.exit(1); d.prepare(\"INSERT INTO jobs(job_type,state,idempotency_key) VALUES('SYSTEM_SMOKE','PENDING','candidate-worker')\").run(); d.close();"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_WORKER_ONESHOT=1 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" \
+            npm run start:worker | grep -q 'worker_job_complete'
+          echo SQLITE_BACKUP=PASS
+          echo SQLITE_RESTORE=PASS
+          echo SQLITE_WORKER=PASS
+
+      - name: Runtime boot from final ZIP
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-candidate-web >/dev/null 2>&1 || true
+          docker run -d --name p05-candidate-web --network host \
+            -e HOME=/tmp -e VF_DATABASE_PROVIDER -e VF_SQLITE_PATH -e VF_BACKUP_DIR -e PORT \
+            -e VF_SECURE_COOKIES -e VF_REQUIRE_HTTPS -e VF_TRUST_PROXY -e VF_MASTER_KEY_BASE64 \
+            -v "$GITHUB_WORKSPACE/install-smoke:/work" -v /tmp/vf-seo-candidate:/tmp/vf-seo-candidate -w /work "$NODE_IMAGE" npm start >/dev/null
+          for i in $(seq 1 45); do curl -fsS "http://127.0.0.1:$PORT/api/health" >/tmp/health.json 2>/dev/null && break; sleep 1; done
+          grep -q '"ok":true' /tmp/health.json
+          grep -q '"databaseProvider":"sqlite"' /tmp/health.json
+          echo SQLITE_RUNTIME=PASS
+
+      - name: CloudPanel installer smoke from final ZIP
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p05-candidate-cloudpanel >/dev/null 2>&1 || true
+          docker run -d --name p05-candidate-cloudpanel -v "$GITHUB_WORKSPACE/install-smoke:/package:ro" "$NODE_IMAGE" sleep infinity >/dev/null
+          docker exec -u root p05-candidate-cloudpanel bash -lc 'apt-get update -qq && apt-get install -y -qq cron procps >/dev/null; useradd -m -s /bin/bash site; mkdir -p /home/site/htdocs/seo.kewaro.com; cp -a /package/. /home/site/htdocs/seo.kewaro.com/; chown -R site:site /home/site/htdocs/seo.kewaro.com'
+          docker exec -u site -e HOME=/home/site -e NPM_CONFIG_PREFIX=/home/site/.npm-global -e PATH=/home/site/.npm-global/bin:/usr/local/bin:/usr/bin:/bin p05-candidate-cloudpanel bash -c '
+            cd /home/site/htdocs/seo.kewaro.com
+            printf "\n3211\nhttps://seo.kewaro.test\nrelease-admin\nfixture-release-installer-password-20260816\nfixture-release-installer-password-20260816\n" | ./install-cloudpanel.sh
+            test -f /home/site/.local/share/vf-seo/vf-seo.sqlite3
+            test "$(stat -c %a /home/site/.config/vf-seo/runtime.env)" = 600
+            /home/site/.npm-global/bin/pm2 jlist | grep -q "\"name\":\"vf-seo\""
+            /home/site/.npm-global/bin/pm2 jlist | grep -q "\"name\":\"vf-seo-worker\""
+            node -e "fetch('\''http://127.0.0.1:3211/api/health'\'',{headers:{'\''x-forwarded-proto'\'':'\''https'\'','\''host'\'':'\''seo.kewaro.test'\''}}).then(async r=>{const j=await r.json();if(!r.ok||!j.ok||j.databaseProvider!=='\''sqlite'\'')process.exit(1)})"
+          '
+          echo CLOUDPANEL_INSTALL_FROM_FINAL_ZIP=PASS
+          echo PM2_RUNTIME_FROM_FINAL_ZIP=PASS
+
+      - name: Upload verified V1.0.0 FULL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_SEO_V1.0.0_DATABASE_REBASELINE_CANDIDATE
+          path: |
+            VF_SEO_V1.0.0_FULL.zip
+            VF_SEO_V1.0.0_FULL.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Final result
+        run: |
+          set -Eeuo pipefail
+          echo CANDIDATE_1.0.0=RE_VERIFIED
+          echo DEFAULT_DATABASE=SQLITE
+          echo SQLITE_DRIVER=node:sqlite/DatabaseSync
+          echo POSTGRESQL_COMPATIBILITY_RUN=31923841999
+          echo CLOUDPANEL_BROWSER_RUN=31923900956
+          echo FORMAL_PUBLICATION=NOT_EXECUTED
+          echo PRODUCTION=NOT_DEPLOYED
+          echo CRITICAL_FAILURE=0
+
+      - name: Cleanup private source and runtime
+        if: always()
+        run: |
+          set +e
+          docker rm -f p05-candidate-web p05-candidate-cloudpanel >/dev/null 2>&1
+          sudo rm -rf p05 install-smoke release-stage /tmp/vf-seo-candidate
+          if [ -e p05 ]; then echo PRIVATE_SOURCE_CLEANUP=FAIL; exit 1; fi
+          echo PRIVATE_SOURCE_CLEANUP=PASS
