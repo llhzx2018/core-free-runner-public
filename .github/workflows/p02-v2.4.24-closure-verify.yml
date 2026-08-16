@@ -1,0 +1,201 @@
+name: P02 V2.4.24 Closure Verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2.4.24-closure-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-24-closure-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CANDIDATE_COMMIT: f69346f00719a253a0f7c94121b7af2a975b74ee
+      PRODUCTION_COMMIT: 333d4fd52150f1c15e9911bce312bb2b6775f856
+      RELEASE_TAG: v2.4.24
+      PUBLIC_EVIDENCE: ${{ github.workspace }}/evidence/p02-v2.4.24-closure
+
+    steps:
+      - name: Checkout public execution shell
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Require private read-only credential
+        shell: bash
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN is not configured.' >&2; exit 78; }
+          echo 'PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact VF Library candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: f69346f00719a253a0f7c94121b7af2a975b74ee
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Guard exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p02 rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(tr -d '\r\n' < p02/VERSION)" = '2.4.24'
+          git -C p02 cat-file -e "$PRODUCTION_COMMIT^{commit}"
+          test "$(git -C p02 rev-parse "$CANDIDATE_COMMIT^")" = "$PRODUCTION_COMMIT"
+          echo 'CANDIDATE_IDENTITY=PASS'
+
+      - name: Install PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+          php -v | head -1
+          sqlite3 --version | head -1
+
+      - name: Install pinned browser harness
+        shell: bash
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Full V2.4.24 maintenance regression
+        shell: bash
+        working-directory: p02
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-maint-244
+          TEST_PASSWORD: P02-244-${{ github.run_id }}-${{ github.run_attempt }}!
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          test -f "$EVIDENCE_DIR/summary.json"
+          python3 - "$EVIDENCE_DIR/summary.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x.get('result')=='PASS'
+          assert x.get('version')=='2.4.24'
+          assert int(x.get('schema',0))==2401
+          print('MAINTENANCE_REGRESSION=PASS')
+          PY
+
+      - name: Rebuild and reverse verify formal artifacts
+        shell: bash
+        working-directory: p02
+        env:
+          VF_RELEASE_SOURCE_SHA: f69346f00719a253a0f7c94121b7af2a975b74ee
+          VF_RELEASE_SOURCE_REF: develop
+          VF_RELEASE_OLD_COMMIT: 333d4fd52150f1c15e9911bce312bb2b6775f856
+        run: |
+          set -Eeuo pipefail
+          bash scripts/verify-release-artifacts.sh
+          test -f build/release/VF_Library_V2.4.24_RELEASE_MANIFEST.json
+          test -f build/release/VF_Library_V2.4.24_UPDATE.zip
+          test -f build/release/SHA256SUMS.txt
+          echo 'FORMAL_ARTIFACT_REVERSE_VERIFY=PASS'
+
+      - name: Compare rebuilt artifacts with published GitHub Release
+        shell: bash
+        working-directory: p02
+        env:
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,hashlib,os,urllib.request,pathlib
+          token=os.environ['PRIVATE_TOKEN']
+          req=urllib.request.Request('https://api.github.com/repos/llhzx2018/vf-library/releases/tags/v2.4.24',headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','User-Agent':'p02-closure-verify'})
+          with urllib.request.urlopen(req,timeout=30) as r: rel=json.load(r)
+          assert rel['tag_name']=='v2.4.24' and rel['target_commitish']=='f69346f00719a253a0f7c94121b7af2a975b74ee'
+          assets={a['name']:a for a in rel.get('assets',[])}
+          expected=['VF_Library_V2.4.24_SOURCE.zip','VF_Library_V2.4.24_FULL.zip','VF_Library_V2.4.24_UPDATE.zip','VF_Library_V2.4.24_ATOMIC.zip','repair-v2.4.24.php','VF_Library_V2.4.24_RELEASE_MANIFEST.json','VF_Library_V2.4.24_RELEASE_NOTES.md','SHA256SUMS.txt']
+          for name in expected:
+              assert name in assets, f'missing release asset: {name}'
+              p=pathlib.Path('build/release')/name
+              assert p.is_file(), f'missing rebuilt artifact: {name}'
+              sha=hashlib.sha256(p.read_bytes()).hexdigest()
+              digest=assets[name].get('digest','')
+              assert digest==f'sha256:{sha}', f'release digest mismatch {name}: {digest} != sha256:{sha}'
+              assert int(assets[name]['size'])==p.stat().st_size, f'release size mismatch {name}'
+              print(name, sha, p.stat().st_size)
+          print('PUBLISHED_RELEASE_EXACT_MATCH=PASS')
+          PY
+
+      - name: Build redacted public evidence
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          cp p02/build/release/SHA256SUMS.txt "$PUBLIC_EVIDENCE/formal-artifact-sha256s.txt"
+          python3 - "$PUBLIC_EVIDENCE/summary.json" "${{ github.run_id }}" <<'PY'
+          import json,sys,datetime
+          out={
+            'result':'PASS',
+            'project_id':'P02',
+            'project':'VF Library',
+            'version':'2.4.24',
+            'schema':2401,
+            'candidate_commit':'f69346f00719a253a0f7c94121b7af2a975b74ee',
+            'production_source_commit':'333d4fd52150f1c15e9911bce312bb2b6775f856',
+            'release_tag':'v2.4.24',
+            'run_id':sys.argv[2],
+            'runner':'GitHub Hosted Runner / ubuntu-24.04',
+            'checks':{
+              'repository_gates':'PASS','source_manifest':'PASS','php_syntax':'PASS','fresh_install':'PASS',
+              'privacy_headers':'PASS','csrf_origin':'PASS','crud_long_text_search':'PASS','attachment':'PASS',
+              'backup_restore':'PASS','transaction_regression':'PASS','sqlite_integrity_fk':'PASS','browser_e2e':'PASS',
+              'responsive':'PASS','live_category_create_plus_1':'PASS','live_category_trash_minus_1':'PASS',
+              'live_category_restore_plus_1':'PASS','formal_artifact_reverse_verify':'PASS','published_release_exact_match':'PASS'
+            },
+            'evidence_privacy':'REDACTED_SUMMARY_ONLY_NO_SOURCE_NO_DB_NO_SESSION_NO_SECRET',
+            'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+          json.dump(out,open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+
+      - name: Public evidence privacy gate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$PUBLIC_EVIDENCE"
+          if find "$PUBLIC_EVIDENCE" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' -o -name '*.sql' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .; then
+            echo 'Forbidden public evidence payload detected.' >&2; exit 91
+          fi
+          if grep -RIlE 'VF_PRIVATE_READ_TOKEN[[:space:]]*[:=]|VF_UPDATE_READ_TOKEN[[:space:]]*[:=]|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"csrf"[[:space:]]*:|"session"[[:space:]]*:|BEGIN [A-Z ]*PRIVATE KEY' "$PUBLIC_EVIDENCE" 2>/dev/null | grep -q .; then
+            echo 'Potential credential/session payload detected.' >&2; exit 92
+          fi
+          echo 'PUBLIC_EVIDENCE_PRIVACY=PASS'
+
+      - name: Cleanup private source and raw evidence
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p02 "$RUNNER_TEMP"/p02-maint-244 "$RUNNER_TEMP"/vf-library-release-* || true
+          echo 'PRIVATE_SOURCE_AND_RAW_EVIDENCE_CLEANUP=PASS'
+
+      - name: Upload redacted closure evidence
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.24-closure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/p02-v2.4.24-closure/
+          if-no-files-found: error
+          retention-days: 14
