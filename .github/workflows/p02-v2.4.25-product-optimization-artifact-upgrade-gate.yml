@@ -1,0 +1,183 @@
+name: P02 V2.4.25 Product Optimization Artifact Upgrade Gate
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-product-optimization-artifact-upgrade-gate.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-product-optimization-artifact-upgrade-gate
+  cancel-in-progress: false
+
+jobs:
+  artifact-upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE_SHA: 11019841b837038092b153930ab8e185bf2a2676
+      PRODUCTION_BASE_SHA: b8f26afd81e0c736923579eb6fe5b298dd9fc8e3
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - name: Require private source token
+        env: {PRIVATE_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'}
+        run: test -n "$PRIVATE_TOKEN"
+      - name: Checkout exact Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 11019841b837038092b153930ab8e185bf2a2676
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact Production base
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: b8f26afd81e0c736923579eb6fe5b298dd9fc8e3
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02-old
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install PHP / SQLite / ZIP runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl unzip
+      - name: Build exact formal-ready Candidate artifacts
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = 2.4.25
+          TREE=$(git show -s --format=%T "$CANDIDATE_SHA")
+          python3 scripts/build-release.py --out build/candidate-release --source-commit "$CANDIDATE_SHA" --source-tree "$TREE" --source-ref task/v2.4.25-product-optimization | tee "$RUNNER_TEMP/build.json"
+          git diff --exit-code
+          (cd build/candidate-release && sha256sum -c SHA256SUMS.txt)
+          sha256sum build/candidate-release/* > "$RUNNER_TEMP/artifact-sha256.txt"
+      - name: Formal Artifact identity / integrity / cleanliness
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/candidate-release"
+          for z in "$OUT"/*.zip;do unzip -t "$z" >/dev/null;done
+          python3 - "$OUT" "$CANDIDATE_SHA" <<'PY'
+          import json,sys,zipfile,re,hashlib
+          from pathlib import Path
+          out=Path(sys.argv[1]);commit=sys.argv[2];ver='2.4.25';src='2.4.24'
+          req=[f'VF_Library_V{ver}_SOURCE.zip',f'VF_Library_V{ver}_FULL.zip',f'VF_Library_V{ver}_UPDATE.zip',f'VF_Library_V{ver}_ATOMIC.zip',f'repair-v{ver}.php',f'VF_Library_V{ver}_RELEASE_MANIFEST.json',f'VF_Library_V{ver}_RELEASE_NOTES.md','SHA256SUMS.txt']
+          for n in req:assert (out/n).is_file(),n
+          with zipfile.ZipFile(out/f'VF_Library_V{ver}_FULL.zip') as z:
+              names=z.namelist();assert z.read('VERSION.txt').decode().strip()==ver;assert 'assets/navigation-refresh-policy.js' in names
+              m=json.loads(z.read('release-manifest.json'));assert m['version']==ver and m['schema_version']==2401 and m['source_commit']==commit
+              bad=[n for n in names if re.search(r'(^|/)(_import_chunks|private_data|node_modules|\.git)(/|$)',n,re.I) or n.lower().endswith(('.sqlite','.sqlite3','.db','.log','.env')) or n.startswith('tests/') or n.startswith('.github/')]
+              assert not bad,bad
+          with zipfile.ZipFile(out/f'VF_Library_V{ver}_UPDATE.zip') as z:
+              m=json.loads(z.read('atomic-manifest.json'));assert m['source_version']==src and m['target_version']==ver and m['source_schema']==m['target_schema']==2401
+              paths=[]
+              for e in m['files']:
+                  p='payload/'+e['path'];b=z.read(p);assert len(b)==e['bytes'] and hashlib.sha256(b).hexdigest()==e['sha256'];paths.append(p)
+              assert 'payload/assets/navigation-refresh-policy.js' in paths
+          with zipfile.ZipFile(out/f'VF_Library_V{ver}_SOURCE.zip') as z:
+              assert z.read('VERSION').decode().strip()==ver and 'public/assets/navigation-refresh-policy.js' in z.namelist()
+          repair=out/f'repair-v{ver}.php'
+          with zipfile.ZipFile(out/f'VF_Library_V{ver}_ATOMIC.zip') as z:assert z.namelist()==[repair.name] and z.read(repair.name)==repair.read_bytes()
+          r=json.load(open(out/f'VF_Library_V{ver}_RELEASE_MANIFEST.json',encoding='utf-8'));assert r['version']==ver and r['source']['candidate_commit']==commit and r['build']['runtime_source_files']==53 and r['compatibility']['supported_from']==[src]
+          print('FORMAL_ARTIFACT_GATE=PASS')
+          PY
+      - name: Formal FULL fresh setup
+        working-directory: p02
+        env: {TEST_PASSWORD: 'P02-FULL-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/formal-full";SITE="$ROOT/site";PORT=18240;BASE="http://127.0.0.1:$PORT";mkdir -p "$SITE"
+          unzip -q build/candidate-release/VF_Library_V2.4.25_FULL.zip -d "$SITE"
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!;trap 'kill "$PID" 2>/dev/null||true' EXIT
+          for _ in $(seq 1 60);do curl -fsS "$BASE/setup.php" >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/session.json"
+          python3 - "$ROOT/session.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['site']['auth'] and x['version']=='2.4.25'
+          PY
+          (cd "$SITE"&&php cli/verify.php)>"$ROOT/verify.json"
+          python3 - "$ROOT/verify.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['schema_version']==2401
+          PY
+          test -f "$SITE/assets/navigation-refresh-policy.js"
+          echo 'FORMAL_FULL_FRESH_SETUP=PASS'
+          kill "$PID" 2>/dev/null||true;trap - EXIT
+      - name: V2.4.24 -> V2.4.25 UPDATE existing-data regression
+        working-directory: p02
+        env: {TEST_PASSWORD: 'P02-UPGRADE-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/update-reg";SITE="$ROOT/site";PKG="$ROOT/pkg";PORT=18241;BASE="http://127.0.0.1:$PORT";mkdir -p "$ROOT" "$PKG"
+          bash ../p02-old/scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = 2.4.24
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!;trap 'kill "$PID" 2>/dev/null||true' EXIT
+          for _ in $(seq 1 60);do curl -fsS "$BASE/setup.php" >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/session.json";CSRF=$(python3 -c 'import json;print(json.load(open("'$ROOT'/session.json"))["csrf"])')
+          printf '%s' '{"name":"Existing Data","description":"upgrade fixture","icon":"folder"}' > "$ROOT/cat.json"
+          curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/cat.json" "$BASE/api.php?action=category_save" > "$ROOT/cat.out";CID=$(python3 -c 'import json;print(json.load(open("'$ROOT'/cat.out"))["id"])')
+          python3 - "$ROOT/item.json" "$CID" <<'PY'
+          import json,sys
+          json.dump({'category_id':int(sys.argv[2]),'title':'升级保持 UTF-8 ✓','content':'before upgrade durable body 中文','content_mode':'article','content_format':'markdown','primary_action':'read','status':'active'},open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False)
+          PY
+          curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/item.json" "$BASE/api.php?action=content_save" > "$ROOT/item.out";IID=$(python3 -c 'import json;print(json.load(open("'$ROOT'/item.out"))["id"])')
+          printf '%s' '{"note":"pre candidate upgrade"}' > "$ROOT/backup.json";curl -fsS -b "$ROOT/cookie" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"$ROOT/backup.json" "$BASE/api.php?action=backup" > "$ROOT/backup.out"
+          python3 - "$ROOT/backup.out" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok']
+          PY
+          unzip -q build/candidate-release/VF_Library_V2.4.25_UPDATE.zip -d "$PKG"
+          php -r 'require $argv[1]."/app/bootstrap.php";$m=json_decode(file_get_contents($argv[2]."/atomic-manifest.json"),true);$files=[];foreach($m["files"] as $e)$files[$e["path"]]=["bytes"=>(int)$e["bytes"],"sha256"=>(string)$e["sha256"]];$r=VfLibraryAtomicUpgradeService::fromCurrentRuntime()->upgrade("2.4.24","2.4.25",$argv[2]."/payload",$files,["source_schema"=>2401,"target_schema"=>2401]);if(($r["target"]??"")!=="2.4.25"||empty($r["self_check"]["ok"]))exit(22);echo "UPDATE_EXECUTION=PASS\n";' "$SITE" "$PKG"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = 2.4.25;test -f "$SITE/assets/navigation-refresh-policy.js"
+          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(31);$q=$d->prepare("SELECT title,content FROM text_items WHERE id=?");$q->execute([(int)$argv[2]]);$x=$q->fetch(PDO::FETCH_ASSOC);if(!$x||$x["title"]!=="升级保持 UTF-8 ✓"||$x["content"]!=="before upgrade durable body 中文")exit(32);if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(33);if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(34);echo "EXISTING_DATA_SQLITE=PASS\n";' "$SITE" "$IID"
+          curl -fsS -b "$ROOT/cookie" "$BASE/api.php?action=session" > "$ROOT/post.json"
+          python3 - "$ROOT/post.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]));assert x['ok'] and x['site']['auth'] and x['version']=='2.4.25'
+          PY
+          echo 'UPDATE_UPGRADE_REGRESSION=PASS'
+          kill "$PID" 2>/dev/null||true;trap - EXIT
+      - name: Public artifact evidence
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/public-evidence";cp "$RUNNER_TEMP/artifact-sha256.txt" "$RUNNER_TEMP/public-evidence/artifact-sha256.txt"
+          python3 - "$RUNNER_TEMP/public-evidence/artifact-upgrade-summary.json" <<'PY'
+          import json,os,sys,datetime
+          x={'project':'P02 · VF Library','candidate_version':'2.4.25','candidate_commit':os.environ['CANDIDATE_SHA'],'production_base':'2.4.24','production_base_commit':os.environ['PRODUCTION_BASE_SHA'],'schema':2401,'runner':'llhzx2018/core-free-runner-public','run_id':os.environ['GITHUB_RUN_ID'],'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'gates':{'formal_artifact':'PASS','full_fresh_setup':'PASS','update_upgrade_regression':'PASS','existing_data_utf8':'PASS','sqlite_integrity':'PASS','foreign_key':'PASS','backup_pre_upgrade':'PASS'},'release':'NOT_EXECUTED','production_write':0,'main_promotion':'NOT_EXECUTED','privacy':'NO_PRIVATE_SOURCE_DB_SESSION_SECRET_OR_ARTIFACT_ZIP_IN_PUBLIC_EVIDENCE'}
+          json.dump(x,open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          PY
+          if find "$RUNNER_TEMP/public-evidence" -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.db' -o -name '*.zip' \) -print -quit|grep -q .;then exit 91;fi
+          echo 'PUBLIC_ARTIFACT_EVIDENCE_PRIVACY=PASS'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2.4.25-artifact-upgrade-gate-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-evidence/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Cleanup
+        if: always()
+        run: rm -rf p02 p02-old "$RUNNER_TEMP/formal-full" "$RUNNER_TEMP/update-reg" "$RUNNER_TEMP/public-evidence" || true
