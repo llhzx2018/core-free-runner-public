@@ -28,32 +28,37 @@ jobs:
       EXPECTED_SHA: 61c09336d6fece2807f223b40a4eae59db06b4edae0f4524a916a072af03f220
       EXPECTED_RUNTIME_FILES: '546'
       EXPECTED_RUNTIME_FP: bf2098f54359915e165c877a18131e88f584982f4cc1eff6fe01a51f72206e3c
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
       - name: Checkout public release shell
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
 
-      - name: Require existing shared private credential
-        env:
-          RELEASE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Credential authority gate
+        shell: bash
         run: |
           set -Eeuo pipefail
-          test -n "$RELEASE_TOKEN"
-          echo 'SHARED_PRIVATE_CREDENTIAL_PRESENT=YES'
+          if [ -n "$READ_TOKEN" ]; then echo 'READ_TOKEN=PRESENT'; else echo 'READ_TOKEN=MISSING'; exit 61; fi
+          if [ -n "$WRITE_TOKEN" ]; then echo 'WRITE_TOKEN=PRESENT'; else echo 'WRITE_TOKEN=MISSING'; exit 62; fi
+          echo 'PRIVATE_READ_CREDENTIAL=VF_PRIVATE_READ_TOKEN'
+          echo 'RELEASE_WRITE_CREDENTIAL=VF_RELEASE_WRITE_TOKEN'
+          echo 'CREDENTIAL_MODEL=READ_WRITE_SEPARATED'
 
-      - name: Checkout exact verified candidate source
+      - name: Checkout exact verified candidate source with READ credential
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-tools-m3u8
           ref: ${{ env.PRODUCT_COMMIT }}
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          token: ${{ env.READ_TOKEN }}
           path: m3u8
           fetch-depth: 0
           persist-credentials: false
 
       - name: Reproduce and lock byte-identical tested artifact
         working-directory: m3u8
+        shell: bash
         run: |
           set -Eeuo pipefail
           test "$(git rev-parse HEAD)" = "$PRODUCT_COMMIT"
@@ -69,39 +74,47 @@ jobs:
           import json,sys
           m=json.load(open(sys.argv[1]))['candidate']
           assert m['files']==548
+          assert m['bytes']==3520019
+          assert m['sha256']=='61c09336d6fece2807f223b40a4eae59db06b4edae0f4524a916a072af03f220'
           assert m['runtime']['file_count']==546
           assert m['runtime']['fingerprint_sha256']=='bf2098f54359915e165c877a18131e88f584982f4cc1eff6fe01a51f72206e3c'
           PY
+          echo 'CANDIDATE_IDENTITY=PASS'
           echo 'TESTED_ARTIFACT_BYTE_IDENTITY=PASS'
 
-      - name: Create tag, draft release, upload exact bytes, remote verify, publish
-        env:
-          RELEASE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Create Tag, Draft Release and upload exact tested bytes with WRITE credential
+        shell: bash
         run: |
           set -Eeuo pipefail
           API="https://api.github.com/repos/$REPO"
-          AUTH=(-H "Authorization: Bearer $RELEASE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          AUTH_READ=(-H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          AUTH_WRITE=(-H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
           ASSET="$RUNNER_TEMP/m3u8-release/$ASSET_NAME"
           TAG_CREATED=0
           RELEASE_ID=''
           cleanup_failure(){
             rc=$?
             if [ "$rc" -ne 0 ]; then
-              if [ -n "$RELEASE_ID" ]; then curl -sS -X DELETE "${AUTH[@]}" "$API/releases/$RELEASE_ID" >/dev/null || true; fi
-              if [ "$TAG_CREATED" = 1 ]; then curl -sS -X DELETE "${AUTH[@]}" "$API/git/refs/tags/$TAG" >/dev/null || true; fi
+              if [ -n "$RELEASE_ID" ]; then curl -sS -X DELETE "${AUTH_WRITE[@]}" "$API/releases/$RELEASE_ID" >/dev/null || true; fi
+              if [ "$TAG_CREATED" = 1 ]; then curl -sS -X DELETE "${AUTH_WRITE[@]}" "$API/git/refs/tags/$TAG" >/dev/null || true; fi
             fi
             exit "$rc"
           }
           trap cleanup_failure EXIT
-          test "$(curl -sS -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$API/git/ref/tags/$TAG")" = 404
-          test "$(curl -sS -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$API/releases/tags/$TAG")" = 404
+
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "${AUTH_READ[@]}" "$API/git/ref/tags/$TAG")" = 404
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "${AUTH_READ[@]}" "$API/releases/tags/$TAG")" = 404
+          echo 'REMOTE_RELEASE_PREFLIGHT=PASS'
+
           python3 - "$PRODUCT_COMMIT" > "$RUNNER_TEMP/tag.json" <<'PY'
           import json,sys
           print(json.dumps({'ref':'refs/tags/v1.25.1','sha':sys.argv[1]}))
           PY
-          curl --fail-with-body -sS -X POST "${AUTH[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/tag.json" "$API/git/refs" > "$RUNNER_TEMP/tag-response.json"
+          curl --fail-with-body -sS -X POST "${AUTH_WRITE[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/tag.json" "$API/git/refs" > "$RUNNER_TEMP/tag-response.json"
           TAG_CREATED=1
           test "$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/tag-response.json'"))["object"]["sha"])')" = "$PRODUCT_COMMIT"
+          echo 'TAG_CREATE=PASS'
+
           cat > "$RUNNER_TEMP/release.json" <<'JSON'
           {
             "tag_name":"v1.25.1",
@@ -112,14 +125,22 @@ jobs:
             "prerelease":false
           }
           JSON
-          curl --fail-with-body -sS -X POST "${AUTH[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/release.json" "$API/releases" > "$RUNNER_TEMP/release-response.json"
+          curl --fail-with-body -sS -X POST "${AUTH_WRITE[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/release.json" "$API/releases" > "$RUNNER_TEMP/release-response.json"
           RELEASE_ID="$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/release-response.json'"))["id"])')"
+          test -n "$RELEASE_ID"
+          echo "FORMAL_RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          echo 'DRAFT_RELEASE_CREATE=PASS'
+
           UPLOAD_URL="https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$ASSET_NAME"
-          curl --fail-with-body -sS -X POST "${AUTH[@]}" -H 'Content-Type: application/zip' --data-binary @"$ASSET" "$UPLOAD_URL" > "$RUNNER_TEMP/asset-response.json"
+          curl --fail-with-body -sS -X POST "${AUTH_WRITE[@]}" -H 'Content-Type: application/zip' --data-binary @"$ASSET" "$UPLOAD_URL" > "$RUNNER_TEMP/asset-response.json"
           ASSET_ID="$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/asset-response.json'"))["id"])')"
+          test -n "$ASSET_ID"
           test "$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/asset-response.json'"))["name"])')" = "$ASSET_NAME"
           test "$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/asset-response.json'"))["size"])')" = "$EXPECTED_BYTES"
-          curl --fail-with-body -sS -L "${AUTH[@]}" -H 'Accept: application/octet-stream' "$API/releases/assets/$ASSET_ID" -o "$RUNNER_TEMP/remote-$ASSET_NAME"
+          echo "FORMAL_ASSET_ID=$ASSET_ID" >> "$GITHUB_ENV"
+          echo 'RELEASE_ASSET_UPLOAD=PASS'
+
+          curl --fail-with-body -sS -L "${AUTH_READ[@]}" -H 'Accept: application/octet-stream' "$API/releases/assets/$ASSET_ID" -o "$RUNNER_TEMP/remote-$ASSET_NAME"
           test "$(stat -c %s "$RUNNER_TEMP/remote-$ASSET_NAME")" = "$EXPECTED_BYTES"
           test "$(sha256sum "$RUNNER_TEMP/remote-$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA"
           python3 - "$RUNNER_TEMP/remote-$ASSET_NAME" <<'PY'
@@ -130,29 +151,68 @@ jobs:
             files=[i for i in z.infolist() if not i.is_dir()]
             assert len(files)==548
             assert sorted({i.filename.split('/')[0] for i in z.infolist() if i.filename})==['vf-tool-m3u8']
-            main='vf-tool-m3u8/vf-tool-m3u8.php'; txt=z.read(main).decode('utf-8'); assert re.search(r'^\s*\*?\s*Version:\s*1\.25\.1\s*$',txt,re.M)
-            allow={'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}; exd=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',re.I); exe=re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I); inc=re.compile(r'^(?:admin|config|includes|public|templates|tools)/'); exb={'readme.md','changelog.md','license','license.txt','package_profile.json'}; r={}
+            main='vf-tool-m3u8/vf-tool-m3u8.php'
+            txt=z.read(main).decode('utf-8')
+            assert re.search(r'^\s*\*?\s*Version:\s*1\.25\.1\s*$',txt,re.M)
+            allow={'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+            exd=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',re.I)
+            exe=re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+            inc=re.compile(r'^(?:admin|config|includes|public|templates|tools)/')
+            exb={'readme.md','changelog.md','license','license.txt','package_profile.json'}
+            r={}
             for i in files:
               rel=i.filename[len('vf-tool-m3u8/'):] if i.filename.startswith('vf-tool-m3u8/') else ''
               if not rel or exd.search(rel) or os.path.basename(rel).lower() in exb or exe.search(rel): continue
               if (rel in allow if '/' not in rel else bool(inc.match(rel))): r[rel]=hashlib.sha256(z.read(i)).hexdigest()
-            canon=''.join(f'{k}\0{r[k]}\n' for k in sorted(r)); assert len(r)==546; assert hashlib.sha256(canon.encode()).hexdigest()=='bf2098f54359915e165c877a18131e88f584982f4cc1eff6fe01a51f72206e3c'
+            canon=''.join(f'{k}\0{r[k]}\n' for k in sorted(r))
+            assert len(r)==546
+            assert hashlib.sha256(canon.encode()).hexdigest()=='bf2098f54359915e165c877a18131e88f584982f4cc1eff6fe01a51f72206e3c'
           PY
+          echo 'REMOTE_ASSET_EXACT_READBACK_BEFORE_PUBLISH=PASS'
+
           echo '{"draft":false,"prerelease":false}' > "$RUNNER_TEMP/publish.json"
-          curl --fail-with-body -sS -X PATCH "${AUTH[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/publish.json" "$API/releases/$RELEASE_ID" > "$RUNNER_TEMP/published.json"
+          curl --fail-with-body -sS -X PATCH "${AUTH_WRITE[@]}" -H 'Content-Type: application/json' --data-binary @"$RUNNER_TEMP/publish.json" "$API/releases/$RELEASE_ID" > "$RUNNER_TEMP/published.json"
           python3 - "$RUNNER_TEMP/published.json" <<'PY'
           import json,sys
-          x=json.load(open(sys.argv[1])); assert x['tag_name']=='v1.25.1'; assert x['name']=='VF Tools M3U8 V1.25.1'; assert x['draft'] is False; assert x['prerelease'] is False
+          x=json.load(open(sys.argv[1]))
+          assert x['tag_name']=='v1.25.1'
+          assert x['name']=='VF Tools M3U8 V1.25.1'
+          assert x['draft'] is False
+          assert x['prerelease'] is False
           PY
+          echo 'FORMAL_RELEASE_PUBLISH=PASS'
+
+          curl --fail-with-body -sS "${AUTH_READ[@]}" "$API/git/ref/tags/$TAG" > "$RUNNER_TEMP/final-tag.json"
+          test "$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP/final-tag.json'"))["object"]["sha"])')" = "$PRODUCT_COMMIT"
+          curl --fail-with-body -sS "${AUTH_READ[@]}" "$API/releases/tags/$TAG" > "$RUNNER_TEMP/final-release.json"
+          python3 - "$RUNNER_TEMP/final-release.json" "$RELEASE_ID" "$ASSET_ID" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); rid=int(sys.argv[2]); aid=int(sys.argv[3])
+          assert x['id']==rid
+          assert x['tag_name']=='v1.25.1'
+          assert x['name']=='VF Tools M3U8 V1.25.1'
+          assert x['draft'] is False
+          assert x['prerelease'] is False
+          a=[a for a in x['assets'] if a['name']=='vf-tools-m3u8_V1.25.1.zip']
+          assert len(a)==1 and a[0]['id']==aid and a[0]['size']==3520019
+          PY
+          FINAL_ASSET_ID="$(python3 -c 'import json; x=json.load(open("'$RUNNER_TEMP/final-release.json'")); print([a["id"] for a in x["assets"] if a["name"]=="vf-tools-m3u8_V1.25.1.zip"][0])')"
+          curl --fail-with-body -sS -L "${AUTH_READ[@]}" -H 'Accept: application/octet-stream' "$API/releases/assets/$FINAL_ASSET_ID" -o "$RUNNER_TEMP/final-$ASSET_NAME"
+          test "$(stat -c %s "$RUNNER_TEMP/final-$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/final-$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA"
           trap - EXIT
+          echo "FORMAL_RELEASE_ID=$RELEASE_ID"
+          echo "FORMAL_ASSET_ID=$ASSET_ID"
           echo 'FORMAL_RELEASE=PASS'
           echo 'REMOTE_ASSET_EXACT_READBACK=PASS'
+          echo 'TESTED_ARTIFACT_EQUALS_DELIVERED_ARTIFACT=PASS'
 
-      - name: Confirm main remained unchanged
-        env:
-          RELEASE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Confirm main remained unchanged with READ credential
+        shell: bash
         run: |
           set -Eeuo pipefail
-          MAIN_SHA="$(curl --fail -sS -H "Authorization: Bearer $RELEASE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/$REPO/branches/main" | python3 -c 'import json,sys;print(json.load(sys.stdin)["commit"]["sha"])')"
+          MAIN_SHA="$(curl --fail -sS -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/$REPO/branches/main" | python3 -c 'import json,sys;print(json.load(sys.stdin)["commit"]["sha"])')"
           test "$MAIN_SHA" = 'a78bb60695f3cd3f8131413b4f0bbc3c9e6a023f'
           echo 'MAIN_MODIFIED=NO'
+          echo 'PRODUCTION_BOOTSTRAP=NOT_EXECUTED'
+          echo 'CORE_UPDATES_1250_TO_1251=NOT_PUBLISHED'
