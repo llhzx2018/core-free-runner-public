@@ -102,18 +102,36 @@ await domainSearch.fill('');
 await domainSearch.press('Enter');
 await settle(300);
 
-const newDomain = page.getByRole('button', { name: '新增域名' });
-assert(await newDomain.count() >= 1, 'new-domain primary action missing');
-await newDomain.click();
+// Lightweight create action uses Modal.
+await page.locator('.nav-item[data-nav="projects"]').click();
+await settle(180);
+const newProject = page.getByRole('button', { name: '新增项目' });
+assert(await newProject.count() >= 1, 'new-project primary action missing');
+await newProject.click();
 await page.waitForFunction(() => document.querySelector('#modal')?.getAttribute('aria-hidden') === 'false');
 assert(await page.locator('#modal[role="dialog"][aria-modal="true"]').count() === 1, 'modal semantics missing');
-assert(await page.locator('#modal').evaluate((m) => m.contains(document.activeElement)), 'modal initial focus not trapped');
-await shot('modal-new-domain');
+assert(await page.locator('#modal').evaluate((m) => m.contains(document.activeElement)), 'modal initial focus not contained');
+await shot('modal-new-project');
 await page.keyboard.press('Tab');
 assert(await page.locator('#modal').evaluate((m) => m.contains(document.activeElement)), 'modal tab focus escaped');
 await page.keyboard.press('Escape');
 await page.waitForFunction(() => document.querySelector('#modal')?.getAttribute('aria-hidden') === 'true');
-assert(await newDomain.evaluate((b) => b === document.activeElement), 'modal did not return focus to opener');
+assert(await newProject.evaluate((b) => b === document.activeElement), 'modal did not return focus to opener');
+
+// Complex domain editor uses Drawer by design.
+await page.locator('.nav-item[data-nav="domains"]').click();
+await settle(180);
+const newDomain = page.getByRole('button', { name: '新增域名' });
+assert(await newDomain.count() >= 1, 'new-domain primary action missing');
+await newDomain.click();
+await page.waitForFunction(() => document.querySelector('#drawer')?.getAttribute('aria-hidden') === 'false');
+assert(await page.locator('#drawer').evaluate((d) => d.contains(document.activeElement)), 'drawer initial focus not contained');
+await shot('drawer-new-domain');
+await page.keyboard.press('Tab');
+assert(await page.locator('#drawer').evaluate((d) => d.contains(document.activeElement)), 'drawer tab focus escaped');
+await page.keyboard.press('Escape');
+await page.waitForFunction(() => document.querySelector('#drawer')?.getAttribute('aria-hidden') === 'true');
+assert(await newDomain.evaluate((b) => b === document.activeElement), 'drawer did not return focus to opener');
 
 // Settings subpages and save-state success.
 await page.locator('.nav-item[data-nav="settings"]').click();
