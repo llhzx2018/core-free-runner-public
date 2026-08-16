@@ -1,0 +1,74 @@
+name: P05 First Boot HTTP Diagnosis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-first-boot-http-diagnosis.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read-only production HTTP diagnosis
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://seo.kewaro.com'
+          rm -rf /tmp/p05diag && mkdir -p /tmp/p05diag
+
+          curl -fsS -D /tmp/p05diag/root.headers -o /tmp/p05diag/root.html "$BASE/"
+          ROOT_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/")"
+          ROOT_BYTES="$(stat -c '%s' /tmp/p05diag/root.html)"
+          echo "ROOT_HTTP=$ROOT_CODE"
+          echo "ROOT_BYTES=$ROOT_BYTES"
+          grep -Fq '<title>VF SEO</title>' /tmp/p05diag/root.html && echo 'TITLE_VF_SEO=PASS' || echo 'TITLE_VF_SEO=FAIL'
+          if grep -Fq '/src/client/main.tsx' /tmp/p05diag/root.html; then echo 'ROOT_HTML_KIND=SOURCE_VITE_INDEX'; fi
+          if grep -Eq '/assets/index-[^" ]+\.js' /tmp/p05diag/root.html; then echo 'ROOT_HTML_KIND=BUILT_DIST_INDEX'; fi
+
+          JS_SRC="$(grep -oE 'src="[^"]+\.js"' /tmp/p05diag/root.html | head -1 | cut -d'"' -f2 || true)"
+          CSS_SRC="$(grep -oE 'href="[^"]+\.css"' /tmp/p05diag/root.html | head -1 | cut -d'"' -f2 || true)"
+          TSX_SRC="$(grep -oE 'src="[^"]+\.tsx"' /tmp/p05diag/root.html | head -1 | cut -d'"' -f2 || true)"
+          echo "JS_SRC=${JS_SRC:-NONE}"
+          echo "CSS_SRC=${CSS_SRC:-NONE}"
+          echo "TSX_SRC=${TSX_SRC:-NONE}"
+
+          if [ -n "$JS_SRC" ]; then
+            curl -sS -D /tmp/p05diag/js.headers -o /tmp/p05diag/js.body "$BASE$JS_SRC" || true
+            echo "JS_HTTP=$(awk 'toupper($1) ~ /^HTTP\// {code=$2} END{print code}' /tmp/p05diag/js.headers)"
+            echo "JS_CONTENT_TYPE=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/\r$/,"",$0); print substr($0,index($0,$2))}' /tmp/p05diag/js.headers | tail -1)"
+          fi
+          if [ -n "$CSS_SRC" ]; then
+            curl -sS -D /tmp/p05diag/css.headers -o /tmp/p05diag/css.body "$BASE$CSS_SRC" || true
+            echo "CSS_HTTP=$(awk 'toupper($1) ~ /^HTTP\// {code=$2} END{print code}' /tmp/p05diag/css.headers)"
+            echo "CSS_CONTENT_TYPE=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/\r$/,"",$0); print substr($0,index($0,$2))}' /tmp/p05diag/css.headers | tail -1)"
+          fi
+          if [ -n "$TSX_SRC" ]; then
+            curl -sS -D /tmp/p05diag/tsx.headers -o /tmp/p05diag/tsx.body "$BASE$TSX_SRC" || true
+            echo "TSX_HTTP=$(awk 'toupper($1) ~ /^HTTP\// {code=$2} END{print code}' /tmp/p05diag/tsx.headers)"
+            echo "TSX_CONTENT_TYPE=$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/\r$/,"",$0); print substr($0,index($0,$2))}' /tmp/p05diag/tsx.headers | tail -1)"
+            echo "TSX_BYTES=$(stat -c '%s' /tmp/p05diag/tsx.body 2>/dev/null || echo 0)"
+            grep -Fq "createRoot(document.getElementById('root')!)" /tmp/p05diag/tsx.body && echo 'TSX_RAW_SOURCE=YES' || true
+          fi
+
+          for P in /api/health /api/auth/me; do
+            N="$(echo "$P" | tr '/?' '__')"
+            curl -sS -D "/tmp/p05diag/${N}.headers" -o "/tmp/p05diag/${N}.body" "$BASE$P" || true
+            CODE="$(awk 'toupper($1) ~ /^HTTP\// {code=$2} END{print code}' "/tmp/p05diag/${N}.headers")"
+            CT="$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {sub(/\r$/,"",$0); print substr($0,index($0,$2))}' "/tmp/p05diag/${N}.headers" | tail -1)"
+            echo "API ${P} HTTP=${CODE} CONTENT_TYPE=${CT}"
+            printf 'API %s BODY_PREFIX=' "$P"
+            head -c 180 "/tmp/p05diag/${N}.body" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g'
+            echo
+          done
+
+          echo '--- ROOT_HEADERS ---'
+          sed -n '1,80p' /tmp/p05diag/root.headers
+          echo '--- ROOT_HTML ---'
+          sed -n '1,80p' /tmp/p05diag/root.html
+          echo 'PRODUCTION_WRITE=0'
+          echo 'PRODUCTION_NETWORK_WRITE_EXECUTED=NO'
