@@ -1,0 +1,125 @@
+name: S01-C03 M3U8 Discovery Final Diagnosis
+
+on:
+  push:
+    branches: [task/s01-c03-discovery-diagnosis]
+    paths:
+      - '.github/workflows/s01-c03-discovery-final-diagnosis.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OUT: ${{ github.workspace }}/evidence/s01-c03-discovery-final
+    steps:
+      - name: Require private read credential
+        env:
+          TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$TOKEN"
+
+      - name: Fetch and verify exact released 1.25.1 plus current contract
+        env:
+          TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$OUT" "$RUNNER_TEMP/m3u8"
+          H=(-H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          curl --fail-with-body -sS "${H[@]}" 'https://api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/tags/v1.25.1' > "$OUT/release-1251.json"
+          curl --fail-with-body -sS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github.raw+json' -H 'X-GitHub-Api-Version: 2022-11-28' 'https://api.github.com/repos/llhzx2018/core-updates/contents/projects/S01-C03.json?ref=main' > "$OUT/manifest.json"
+          AID=$(python3 - "$OUT/release-1251.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1])); a=[x for x in r['assets'] if x['name']=='vf-tools-m3u8_V1.25.1.zip']; assert len(a)==1; print(a[0]['id'])
+          PY
+          )
+          curl --fail-with-body -sS -L -H "Authorization: Bearer $TOKEN" -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/$AID" -o "$RUNNER_TEMP/m3u8/vf-tools-m3u8_V1.25.1.zip"
+          test "$(stat -c %s "$RUNNER_TEMP/m3u8/vf-tools-m3u8_V1.25.1.zip")" = 3520019
+          test "$(sha256sum "$RUNNER_TEMP/m3u8/vf-tools-m3u8_V1.25.1.zip" | awk '{print $1}')" = 61c09336d6fece2807f223b40a4eae59db06b4edae0f4524a916a072af03f220
+          python3 - "$OUT/manifest.json" > "$OUT/contract-safe.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1])); assert m['target_version']=='1.25.2'; assert m['from_versions']==['1.25.1']; assert m['package_slug']=='vf-tool-m3u8'; assert m['plugin_file']=='vf-tool-m3u8/vf-tool-m3u8.php'
+          print(json.dumps({k:m[k] for k in ('target_version','from_versions','package_slug','plugin_file','release_tag','asset_name','asset_bytes','asset_sha256')},indent=2))
+          PY
+          echo 'RELEASE_1251_AND_CURRENT_CONTRACT=PASS'
+
+      - name: Provision WordPress with exact released 1.25.1
+        env:
+          TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          NET="m3u8-disc-final-${GITHUB_RUN_ID}"; DB="m3u8-disc-final-db-${GITHUB_RUN_ID}"; WP="m3u8-disc-final-wp-${GITHUB_RUN_ID}"; VOL="m3u8-disc-final-vol-${GITHUB_RUN_ID}"
+          echo "NET=$NET" >> "$GITHUB_ENV"; echo "DB=$DB" >> "$GITHUB_ENV"; echo "WP=$WP" >> "$GITHUB_ENV"; echo "VOL=$VOL" >> "$GITHUB_ENV"
+          docker network create "$NET" >/dev/null; docker volume create "$VOL" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_pass -e MARIADB_ROOT_PASSWORD=vf_root_pass mariadb:11.8.8 >/dev/null
+          for _ in $(seq 1 120); do docker exec "$DB" mariadb -h127.0.0.1 -P3306 -N -uvf_runner -pvf_runner_pass vf_test -e 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
+          docker run -d --name "$WP" --network "$NET" -v "$VOL:/var/www/html" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:7.0.2-php8.4-apache >/dev/null
+          for _ in $(seq 1 100); do docker exec "$WP" test -f /var/www/html/wp-config.php && break; sleep 1; done
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli core install --url=http://m3u8.invalid --title='M3U8 Discovery Final' --admin_user=admin --admin_password='fixture-pass-12345' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker cp "$RUNNER_TEMP/m3u8/vf-tools-m3u8_V1.25.1.zip" "$WP:/var/www/html/wp-content/vf-tools-m3u8_V1.25.1.zip"
+          wpcli plugin install /var/www/html/wp-content/vf-tools-m3u8_V1.25.1.zip --activate >/dev/null
+          wpcli plugin is-active vf-tool-m3u8
+          test "$(wpcli plugin get vf-tool-m3u8 --field=version | tr -d '\r')" = 1.25.1
+          wpcli option update vf_private_update_credential_v1 "$TOKEN" >/dev/null
+
+      - name: Verify updater client and hooks
+        run: |
+          set -Eeuo pipefail
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli eval '$c=$GLOBALS["vf_m3u8_update_client_v1"]??null; echo wp_json_encode(["client_loaded"=>$c instanceof VF_M3U8_Update_Client_V1,"pre_set_hook"=>$c&&has_filter("pre_set_site_transient_update_plugins",[$c,"inject_plugin_update"])!==false,"read_hook"=>$c&&has_filter("site_transient_update_plugins",[$c,"inject_plugin_update"])!==false,"credential"=>VF_M3U8_Update_Credential_V1::redacted_status()]);' > "$OUT/hooks.json"
+          cat "$OUT/hooks.json"
+          python3 - "$OUT/hooks.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['client_loaded']; assert x['pre_set_hook']; assert not x['read_hook']; assert x['credential']['configured']
+          PY
+
+      - name: Prove fresh complete transient suppresses remote recheck
+        run: |
+          set -Eeuo pipefail
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli eval 'if(!function_exists("get_plugins")){require_once ABSPATH."wp-admin/includes/plugin.php";} $checked=[]; foreach(get_plugins() as $file=>$data){$checked[$file]=(string)$data["Version"];} $t=(object)["last_checked"=>time(),"checked"=>$checked,"response"=>[],"no_update"=>[]]; set_site_transient("update_plugins",$t,12*HOUR_IN_SECONDS); echo wp_json_encode(["checked_count"=>count($checked),"m3u8"=>$checked["vf-tool-m3u8/vf-tool-m3u8.php"]??null]);' > "$OUT/stale-seed.json"
+          wpcli eval 'wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; echo wp_json_encode(["offer"=>is_object($t)&&isset($t->response[$p]),"checked_count"=>is_object($t)&&is_array($t->checked??null)?count($t->checked):null,"m3u8_checked"=>is_object($t)?($t->checked[$p]??null):null]);' > "$OUT/stale-result.json"
+          cat "$OUT/stale-seed.json"; cat "$OUT/stale-result.json"
+          python3 - "$OUT/stale-result.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['offer'] is False, x; assert x['m3u8_checked']=='1.25.1', x
+          print('FRESH_COMPLETE_TRANSIENT_SUPPRESSES_DISCOVERY=PASS')
+          PY
+
+      - name: Prove standard forced update check discovers real 1.25.2
+        run: |
+          set -Eeuo pipefail
+          wpcli(){ docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_pass -e WORDPRESS_DB_NAME=vf_test wordpress:cli-2.12.0-php8.4 wp "$@" --path=/var/www/html; }
+          wpcli eval 'delete_site_transient("update_plugins"); VF_M3U8_Update_Source_V1::clear_cache(); wp_update_plugins(); $t=get_site_transient("update_plugins"); $p="vf-tool-m3u8/vf-tool-m3u8.php"; $r=is_object($t)&&isset($t->response[$p])?$t->response[$p]:null; echo wp_json_encode(["offer"=>is_object($r),"new_version"=>is_object($r)?($r->new_version??null):null,"plugin"=>is_object($r)?($r->plugin??null):null,"slug"=>is_object($r)?($r->slug??null):null,"package_present"=>is_object($r)&&!empty($r->package)]);' > "$OUT/forced-result.json"
+          cat "$OUT/forced-result.json"
+          python3 - "$OUT/forced-result.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['offer'] is True,x; assert x['new_version']=='1.25.2',x; assert x['plugin']=='vf-tool-m3u8/vf-tool-m3u8.php',x; assert x['slug']=='vf-tool-m3u8',x; assert x['package_present'] is True,x
+          print('FORCED_STANDARD_UPDATE_CHECK_DISCOVERY=PASS')
+          PY
+          python3 - "$OUT/hooks.json" "$OUT/stale-result.json" "$OUT/forced-result.json" > "$OUT/diagnosis.json" <<'PY'
+          import json,sys,datetime
+          h,s,f=[json.load(open(p)) for p in sys.argv[1:]]
+          print(json.dumps({'result':'PASS','root_cause':'WORDPRESS_UPDATE_TRANSIENT_WAS_NOT_REFRESHED_AFTER_CORE_UPDATES_PUBLICATION','client_loaded':h['client_loaded'],'update_hook_registered':h['pre_set_hook'],'credential_configured':h['credential']['configured'],'stale_complete_transient_offer':s['offer'],'forced_refresh_offer':f['offer'],'forced_refresh_target':f['new_version'],'product_code_changed':False,'core_updates_changed':False,'release_changed':False,'production_write':0,'observed_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()},indent=2))
+          PY
+          cat "$OUT/diagnosis.json"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-discovery-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/s01-c03-discovery-final/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f "${WP:-}" "${DB:-}" >/dev/null 2>&1 || true
+          docker volume rm "${VOL:-}" >/dev/null 2>&1 || true
+          docker network rm "${NET:-}" >/dev/null 2>&1 || true
