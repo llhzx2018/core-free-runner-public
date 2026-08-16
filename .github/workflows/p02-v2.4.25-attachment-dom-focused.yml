@@ -1,0 +1,86 @@
+name: P02 V2.4.25 Attachment DOM Focused
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-attachment-dom-focused.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CANDIDATE_COMMIT: 0a2941dc6425859467bd3c3a83b2d1119113c04a
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 0a2941dc6425859467bd3c3a83b2d1119113c04a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p02
+          persist-credentials: false
+      - name: Install harness
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Native DOM attachment verification
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/site"; COOKIE="$RUNNER_TEMP/cookie"; PORT=18130; BASE="http://127.0.0.1:$PORT"; PASS="P02-AttDOM-${GITHUB_RUN_ID}!"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUNNER_TEMP/server.log" 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import html,re,sys;s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")" = 303
+          cat > .focused.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1440,height:900}});
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD,errors=[];
+          page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            let s=await page.evaluate(async()=>await (await fetch('/api.php?action=session')).json());
+            if(!s?.site?.auth){await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));}
+            s=await page.evaluate(async()=>await (await fetch('/api.php?action=session')).json());if(s?.version!=='2.4.25')throw new Error('version mismatch');
+            await page.evaluate(()=>openEditor(null,{forceContentMode:'quick',forceContentFormat:'plain'}));await page.locator('#contentForm').waitFor({state:'visible'});
+            const openerState=await page.evaluate(()=>{const el=document.querySelector('#contentForm [data-attachment-library]');if(!el)return {exists:false};const r=el.getBoundingClientRect();el.focus({preventScroll:true});const focused=document.activeElement===el;const wired=typeof el.onclick==='function';const disabled=el.disabled;el.click();return {exists:true,connected:el.isConnected,wired,disabled,focused,rect:{x:r.x,y:r.y,w:r.width,h:r.height}}});
+            console.log('OPENER_STATE='+JSON.stringify(openerState));
+            if(!openerState.exists||!openerState.connected||!openerState.wired||openerState.disabled||!openerState.focused)throw new Error('native opener state invalid '+JSON.stringify(openerState));
+            const search=page.locator('[data-library-query]');await search.waitFor({state:'visible'});await page.waitForFunction(()=>document.activeElement===document.querySelector('[data-library-query]'));
+            const labelled=await page.locator('.attachment-modal').evaluate(el=>{const id=el.getAttribute('aria-labelledby');return Boolean(id&&document.getElementById(id))});if(!labelled)throw new Error('aria label missing');
+            await page.keyboard.press('Escape');await page.locator('.attachment-modal-overlay').waitFor({state:'detached'});
+            const restored=await page.evaluate(()=>document.activeElement===document.querySelector('#contentForm [data-attachment-library]'));if(!restored)throw new Error('focus restore failed');
+            await page.evaluate(()=>document.querySelector('#contentForm [data-attachment-library]').click());await page.locator('[data-library-cleanup]').waitFor({state:'visible'});
+            await page.evaluate(()=>document.querySelector('[data-library-cleanup]').click());await page.locator('[data-dialog-confirm]').waitFor({state:'visible'});
+            const responsePromise=page.waitForResponse(r=>r.url().includes('action=attachment_cleanup')&&r.request().method()==='POST');await page.evaluate(()=>document.querySelector('[data-dialog-confirm]').click());const response=await responsePromise;if(!response.ok())throw new Error('cleanup HTTP '+response.status());
+            await page.waitForFunction(()=>{const b=document.querySelector('[data-library-cleanup]');return b&&!b.disabled&&(b.textContent||'').trim()==='清理孤儿文件'});
+            await page.setViewportSize({width:390,height:844});await page.waitForTimeout(120);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>3)throw new Error('mobile overflow '+overflow);
+            if(errors.length)throw new Error(errors.join(' | '));
+            console.log('ATTACHMENT_NATIVE_OPENER=PASS');console.log('ATTACHMENT_INITIAL_FOCUS=PASS');console.log('ATTACHMENT_ESCAPE_CLOSE=PASS');console.log('ATTACHMENT_FOCUS_RESTORE=PASS');console.log('ATTACHMENT_CLEANUP_BUSY_RECOVERY=PASS');console.log('ATTACHMENT_MOBILE_390=PASS');
+          }finally{await browser.close()}
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$PASS" node .focused.mjs
+          rm -f .focused.mjs
+          kill "$PID" 2>/dev/null || true; trap - EXIT
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: rm -rf p02 "$RUNNER_TEMP/site" "$RUNNER_TEMP/cookie" || true
