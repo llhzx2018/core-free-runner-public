@@ -1,0 +1,253 @@
+name: P04 VF Infra V2.5.7 Formal Release Final
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v257-formal-release-final.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v257-formal-release-final
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: 1390b84a69798eee05b9eabd9a8ec02308f80f62
+  TARGET_TREE: 1d5578b930af910ce167c65eb2ca8723dcf4e45c
+  SOURCE_COMMIT: 45f960715a2b53b4cf09524862e76b19c58f0c68
+  TARGET_TAG: v2.5.7
+  EXPECTED_RUNTIME_FILES: '158'
+  EXPECTED_RUNTIME_FINGERPRINT: 99b13b023e366f81612bb53f0e10c1e445d82a55cf901ebdd7cdb526c4350938
+  EXPECTED_SOURCE_MANIFEST: 7578885d4607e637e56f170a001be80a77407689b15a09954df7962b39cd1385
+  EXPECTED_FULL_BYTES: '419275'
+  EXPECTED_FULL_SHA: d3303c7ea09aeb45dde4d371cc43833026d7449afd313e26b5a027b767565b7b
+  EXPECTED_UPDATE_BYTES: '85945'
+  EXPECTED_UPDATE_SHA: 9d8ed43579361ca459b9377e3f5f7526a17f1b8a8d82df634cfe519b58c3503f
+  EXPECTED_REPAIR_BYTES: '232272'
+  EXPECTED_REPAIR_SHA: 52540c78deebd720e02372811b2e6d9097b668a234b8227c75023a900f20b45f
+  EXPECTED_PACKAGE_MANIFEST_BYTES: '1636'
+  EXPECTED_PACKAGE_MANIFEST_SHA: bf84f0a6b742310437d3c28d0e2f74ad28b96d65804ccf86f88d317c372194e6
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact V2.5.6 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: v256-source
+
+      - name: Verify exact identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.7'
+          test "$(git -C v256-source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < v256-source/VERSION)" = '2.5.6'
+          echo P04_V257_EXACT_SOURCE_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v sqlite3 >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y sqlite3; }
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Generate V2.5.7 builder adapter
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('scripts/build-v256-update-release.py').read_text(encoding='utf-8')
+          s=s.replace("TARGET='2.5.6'","TARGET='2.5.7'",1).replace("SOURCE='2.5.5'","SOURCE='2.5.6'",1)
+          start=s.index('PAYLOAD_PATHS=['); end=s.index(']\n\np=argparse.ArgumentParser()',start)+1
+          payload="""PAYLOAD_PATHS=[
+              'VERSION.txt','index.php','assets/v257-cn.js','assets/v257-mobile.js','assets/v257-nav.css',
+              'assets/v257-nav.js','assets/v257-ui.css','assets/v257-view.js','app/Core/ProjectService.php','release-manifest.json',
+          ]"""
+          s=s[:start]+payload+s[end:]
+          s=s.replace("source.replace('vfi251','vfi256').replace('atomic_251','atomic_256')","source.replace('vfi251','vfi257').replace('atomic_251','atomic_257')",1)
+          Path('scripts/build-v257-release-final.py').write_text(s,encoding='utf-8')
+          PY
+          python3 -m py_compile scripts/build-v257-release-final.py
+
+      - name: Rebuild and match frozen deterministic Artifact Identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v257-final"; RUNTIME="$OUT/runtime"; UPDATE="$OUT/update-set"; mkdir -p "$OUT"
+          python3 scripts/build-release-tree.py "$RUNTIME"
+          python3 scripts/build-v257-release-final.py --target-runtime "$RUNTIME" --output "$UPDATE"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,zipfile
+          out=Path(os.environ['RUNNER_TEMP'])/'p04-v257-final'; runtime=out/'runtime'; update=out/'update-set'
+          full=out/'VF_Infra_V2.5.7_FULL.zip'
+          with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                  rel=f.relative_to(runtime).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=((0o100755 if os.access(f,os.X_OK) else 0o100644)<<16); z.writestr(info,f.read_bytes())
+          def ident(p):
+              p=Path(p); return p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()
+          rm=json.loads((runtime/'release-manifest.json').read_text(encoding='utf-8')); pm=json.loads((update/'PACKAGE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert int(rm['file_count'])+1==int(os.environ['EXPECTED_RUNTIME_FILES'])
+          assert rm['source_fingerprint']==os.environ['EXPECTED_RUNTIME_FINGERPRINT']
+          assert pm['production_source_manifest_sha256']==os.environ['EXPECTED_SOURCE_MANIFEST']
+          assert pm['allowed_source_versions']==['2.5.6'] and pm['payload_file_count']==10
+          checks=[(full,'EXPECTED_FULL_BYTES','EXPECTED_FULL_SHA'),(update/'VF_Infra_V2.5.7_UPDATE.zip','EXPECTED_UPDATE_BYTES','EXPECTED_UPDATE_SHA'),(update/'VF_Infra_V2.5.7_ATOMIC.zip','EXPECTED_UPDATE_BYTES','EXPECTED_UPDATE_SHA'),(update/'repair-v2.5.7.php','EXPECTED_REPAIR_BYTES','EXPECTED_REPAIR_SHA'),(update/'PACKAGE_MANIFEST.json','EXPECTED_PACKAGE_MANIFEST_BYTES','EXPECTED_PACKAGE_MANIFEST_SHA')]
+          arts={}
+          for p,bkey,skey in checks:
+              size,sha=ident(p); assert size==int(os.environ[bkey]),(p,size); assert sha==os.environ[skey],(p,sha); arts[p.name]={'bytes':size,'sha256':sha}
+          formal={'project':'P04 · VF Infra','version':'2.5.7','schema':14,'product_commit':os.environ['TARGET_COMMIT'],'product_tree':os.environ['TARGET_TREE'],'runtime_file_count':int(os.environ['EXPECTED_RUNTIME_FILES']),'runtime_fingerprint':os.environ['EXPECTED_RUNTIME_FINGERPRINT'],'production_source_manifest_sha256':os.environ['EXPECTED_SOURCE_MANIFEST'],'payload_file_count':10,'allowed_source_versions':['2.5.6'],'artifacts':arts,'deterministic_build_gate':'PASS_EXACT_MATCH_TO_DOUBLE_BUILD'}
+          (out/'FORMAL_ARTIFACT_MANIFEST.json').write_text(json.dumps(formal,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          e=Path('p04-v257-release-evidence'); e.mkdir(exist_ok=True); (e/'formal-artifact-identity.json').write_text(json.dumps(formal,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(formal,ensure_ascii=False)); print('P04_V257_RELEASE_BUILD_EXACT_MATCH_PASS')
+          PY
+
+      - name: Real V2.5.6 to V2.5.7 Atomic artifact gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v257-final"; TMP="$RUNNER_TEMP/p04-v257-atomic-final"; SITE="$TMP/site"; DATA="$TMP/.vfinfra-data"; LOG="$TMP/php.log"; EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence/atomic-upgrade"; PORT=18993; FIXTURE='upgrade-preservation-v257.example.com'
+          rm -rf "$TMP" "$EVIDENCE"; mkdir -p "$TMP" "$EVIDENCE"
+          python3 v256-source/scripts/build-release-tree.py "$SITE"
+          cp "$OUT/update-set/repair-v2.5.7.php" "$SITE/repair-v2.5.7.php"
+          php "$SITE/repair-v2.5.7.php" --self-test | tee "$EVIDENCE/repair-self-test.txt"
+          php -S "127.0.0.1:$PORT" -t "$SITE" >"$LOG" 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true' EXIT
+          READY=0; for _ in $(seq 1 80); do if ! kill -0 "$PID" 2>/dev/null; then cat "$LOG" >&2; exit 66; fi; if curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1; then READY=1; break; fi; sleep 0.1; done
+          test "$READY" = 1 || { cat "$LOG" >&2; exit 66; }
+          node --input-type=module <<'NODE'
+          import { chromium } from 'playwright';
+          import crypto from 'node:crypto';
+          const base='http://127.0.0.1:18993', domain='upgrade-preservation-v257.example.com';
+          const credential='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1440,height:900}}); const errors=[];
+          page.on('pageerror',e=>errors.push(String(e))); page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          const ok=(v,m)=>{if(!v)throw new Error(m)};
+          try {
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'}); await page.locator('#site_name').fill('VF Infra V257 Atomic Gate'); await page.locator('#password').fill(credential); await page.locator('#password_confirm').fill(credential);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]); await page.locator('#admin-password').fill(credential); await Promise.all([page.waitForURL(/index\.php/),page.getByRole('button',{name:'登录'}).click()]);
+            ok(await page.locator('meta[name="app-version"]').getAttribute('content')==='2.5.6','source version mismatch');
+            const csrf=await page.locator('meta[name="csrf-token"]').getAttribute('content'); const saved=await page.evaluate(async ({domain,csrf})=>{const r=await fetch('api.php?action=domain_save',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({domain,manual_expiry_date:'2026-12-31',renewal_price:'12.34',currency:'USD',renewal_policy:'auto',registrar:'Dynadot',notes:'formal release preservation fixture'})}); return await r.json();},{domain,csrf}); ok(saved?.ok!==false,'fixture save failed');
+            await page.goto(base+'/repair-v2.5.7.php',{waitUntil:'domcontentloaded'}); await page.getByRole('button',{name:'执行原子升级'}).click(); await page.getByRole('heading',{name:'升级完成'}).waitFor({timeout:30000});
+            await page.goto(base+'/index.php',{waitUntil:'domcontentloaded'}); await page.waitForSelector('#view-dashboard .v257-root',{timeout:15000}); ok(await page.locator('meta[name="app-version"]').getAttribute('content')==='2.5.7','target version mismatch');
+            await page.locator('[data-nav="domains"]').first().click(); await page.waitForSelector('#view-domains .v257-root',{timeout:15000}); await page.locator('.v257-resource-item',{hasText:domain}).waitFor({state:'visible',timeout:15000});
+            ok(errors.length===0,'browser errors: '+errors.join(' | ')); console.log('P04_V256_TO_V257_BROWSER_PRESERVATION_PASS');
+          } finally { await browser.close(); }
+          NODE
+          DB="$DATA/database/vf-domain.sqlite"; test -f "$DB"
+          test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM domains WHERE domain='$FIXTURE';")" = '1'
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = 'ok'; test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          test "$(sqlite3 "$DB" 'SELECT COALESCE(MAX(version),0) FROM schema_migrations;')" = '14'
+          test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM backups WHERE backup_type='pre_update' AND protected=1;")" -ge 1
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = '2.5.7'; test ! -e "$SITE/repair-v2.5.7.php"; test -z "$(find "$DATA/temp" -maxdepth 1 -type d -name 'atomic-payload-*' -print -quit 2>/dev/null || true)"; test ! -e "$DATA/state/release-journal-v1.json"
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$LOG"; then cat "$LOG" >&2; exit 67; fi
+          cp "$LOG" "$EVIDENCE/php-server.log"; printf '%s\n' 'source=2.5.6' 'target=2.5.7' 'schema=14' 'domain_preserved=PASS' 'integrity=PASS' 'foreign_keys=PASS' 'pre_update_backup=PASS' 'cleanup=PASS' > "$EVIDENCE/result.txt"
+          kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; trap - EXIT
+          echo P04_V256_TO_V257_ATOMIC_ARTIFACT_GATE_PASS
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v257-final"; ASSETS="$RUNNER_TEMP/p04-v257-assets"; EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence"; rm -rf "$ASSETS"; mkdir -p "$ASSETS"
+          cp "$OUT/VF_Infra_V2.5.7_FULL.zip" "$ASSETS/"; cp "$OUT/update-set/VF_Infra_V2.5.7_UPDATE.zip" "$ASSETS/"; cp "$OUT/update-set/VF_Infra_V2.5.7_ATOMIC.zip" "$ASSETS/"; cp "$OUT/update-set/repair-v2.5.7.php" "$ASSETS/"; cp "$OUT/update-set/PACKAGE_MANIFEST.json" "$ASSETS/"; cp "$OUT/FORMAL_ARTIFACT_MANIFEST.json" "$ASSETS/"
+          cat > "$ASSETS/RELEASE_NOTES.md" <<'EOF'
+          # VF Infra V2.5.7
+          V2.5.7 正式将 VF Infra 重构为 Personal-first Infrastructure Console：Project 为 Global Scope；首页优先到期、续费、费用与健康风险；Domain/DNS/VPS/Provider 使用资源 Workspace；Finance 风险浅层暴露、流水次级；Mobile 为 Portfolio-first → Resource Workspace。
+
+          Final Gate Run 31949339948：PASS。Responsive 390/768/1024/1440/1920：PASS。Schema 14，无 Migration，未新增危险 Provider Remote Write。在线升级仅允许 V2.5.6 → V2.5.7。
+
+          Product Candidate Commit: 1390b84a69798eee05b9eabd9a8ec02308f80f62
+          Product Candidate Tree: 1d5578b930af910ce167c65eb2ca8723dcf4e45c
+          EOF
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ['RUNNER_TEMP'])/'p04-v257-assets'; formal=json.loads((root/'FORMAL_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          def ident(n): p=root/n; b=p.read_bytes(); return {'name':n,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+          names=['VF_Infra_V2.5.7_FULL.zip','VF_Infra_V2.5.7_UPDATE.zip','VF_Infra_V2.5.7_ATOMIC.zip','repair-v2.5.7.php','PACKAGE_MANIFEST.json','FORMAL_ARTIFACT_MANIFEST.json','RELEASE_NOTES.md']
+          m={'project':'P04 · VF Infra','version':'2.5.7','schema':14,'tag':'v2.5.7','product_commit':os.environ['TARGET_COMMIT'],'product_tree':os.environ['TARGET_TREE'],'runtime_fingerprint':formal['runtime_fingerprint'],'runtime_file_count':formal['runtime_file_count'],'production_source_manifest_sha256':formal['production_source_manifest_sha256'],'allowed_source_versions':['2.5.6'],'payload_file_count':10,'final_gate_run':31949339948,'atomic_artifact_gate':'PASS','assets':[ident(n) for n in names],'production_upgrade':'NOT_EXECUTED_AT_RELEASE_TIME'}
+          (root/'RELEASE_MANIFEST.json').write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); names.append('RELEASE_MANIFEST.json'); (root/'SHA256SUMS.txt').write_text('\n'.join(f"{hashlib.sha256((root/n).read_bytes()).hexdigest()}  {n}" for n in sorted(names))+'\n',encoding='utf-8')
+          PY
+          cp "$ASSETS/RELEASE_MANIFEST.json" "$EVIDENCE/"; cp "$ASSETS/SHA256SUMS.txt" "$EVIDENCE/"
+
+      - name: Create immutable Tag and GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v257-assets"
+          if gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" >/dev/null 2>&1; then echo V257_TAG_ALREADY_EXISTS_FAIL_CLOSED >&2; exit 70; fi
+          if gh release view "$TARGET_TAG" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then echo V257_RELEASE_ALREADY_EXISTS_FAIL_CLOSED >&2; exit 71; fi
+          gh api --method POST "repos/$TARGET_REPOSITORY/git/refs" -f ref="refs/tags/$TARGET_TAG" -f sha="$TARGET_COMMIT" >/dev/null
+          gh release create "$TARGET_TAG" --repo "$TARGET_REPOSITORY" --verify-tag --title 'VF Infra V2.5.7' --notes-file "$ASSETS/RELEASE_NOTES.md" "$ASSETS"/*
+          echo P04_V257_FORMAL_RELEASE_CREATED_PASS
+
+      - name: Remote exact Release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v257-assets"; EVIDENCE="$GITHUB_WORKSPACE/p04-v257-release-evidence"
+          gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" > "$EVIDENCE/tag.json"; gh api "repos/$TARGET_REPOSITORY/releases/tags/$TARGET_TAG" > "$EVIDENCE/release.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os
+          root=Path(os.environ['RUNNER_TEMP'])/'p04-v257-assets'; evidence=Path('p04-v257-release-evidence'); tag=json.loads((evidence/'tag.json').read_text()); rel=json.loads((evidence/'release.json').read_text()); assert tag['object']['sha']==os.environ['TARGET_COMMIT']; assert rel['tag_name']=='v2.5.7' and rel['name']=='VF Infra V2.5.7'
+          remote={a['name']:a for a in rel['assets']}; local={p.name:(p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()) for p in root.iterdir() if p.is_file()}; assert set(remote)==set(local),(sorted(remote),sorted(local)); checked={}
+          for n,(size,sha) in local.items():
+              a=remote[n]; assert a['size']==size; digest=a.get('digest') or ''; assert not digest or digest=='sha256:'+sha; checked[n]={'id':a['id'],'bytes':size,'sha256':sha,'remote_digest':digest}
+          result={'tag':'v2.5.7','tag_target':tag['object']['sha'],'release_id':rel['id'],'released_at':rel['published_at'],'assets':checked,'remote_readback':'PASS','immutable_policy':'DO_NOT_OVERWRITE'}; (evidence/'remote-release-verification.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); print(json.dumps(result,ensure_ascii=False)); print('P04_V257_REMOTE_RELEASE_READBACK_PASS')
+          PY
+
+      - name: Cleanup private/formal bytes
+        if: always()
+        shell: bash
+        run: rm -rf v256-source scripts/build-v257-release-final.py "$RUNNER_TEMP/p04-v257-final" "$RUNNER_TEMP/p04-v257-assets" "$RUNNER_TEMP/p04-v257-atomic-final"
+
+      - name: Upload public-safe release evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.7-Formal-Release-Evidence
+          path: p04-v257-release-evidence
+          if-no-files-found: error
+          retention-days: 14
