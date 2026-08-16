@@ -1,0 +1,228 @@
+name: P03 V1.35.3 Exact Candidate Reverification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1353-exact-candidate.yml'
+      - 'requests/p03-v1353-exact-candidate-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1353-exact-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_COMMIT: 370c699d4e105a9035393bcfb4e0aef982131cde
+      CANDIDATE_TREE: 2652978e8f31f7d3fcc1ec3a315be15c0ce4066d
+      PRODUCTION_COMMIT: c074678fdad9856addb3d290b555b723ce7013ec
+      FIXTURE_PASS: VfP03-PostSeal-2026!
+      PHP_TEST_IMAGE: vf-forge-v1353-php84
+      BASE_URL: http://127.0.0.1:18080
+    steps:
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: 370c699d4e105a9035393bcfb4e0aef982131cde
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Exact candidate identity and scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p03 rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C p03 rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < p03/VERSION)" = '1.35.3'
+          grep -Fq "define('VFAB_VERSION', '1.35.3');" p03/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 29);" p03/src/app/bootstrap.php
+          test "$(tr -d '\r\n' < p03/database/schema/SCHEMA_VERSION)" = '29'
+          grep -Fq "TARGET_VERSION='1.35.3'" p03/scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.35.2']" p03/scripts/build_atomic.py
+          test -z "$(git -C p03 diff "$PRODUCTION_COMMIT"..HEAD -- database/schema database/migrations)"
+          test -f p03/public/assets/forge-ui.css
+          test -f p03/public/assets/forge-ui.js
+          test -f p03/scripts/semantic_consistency_audit.py
+          test -f p03/tests/e2e/postseal_ui.spec.js
+          test -z "$(git -C p03 config --get remote.origin.url | grep -E 'x-access-token|github_pat_|ghp_' || true)"
+          if git -C p03 ls-files | grep -Ei '(^|/)(PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'; then
+            echo 'Tracked private/runtime data found.' >&2; exit 81
+          fi
+          if grep -RIlE 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+' p03 --exclude-dir=.git | head -n1 | grep -q .; then
+            echo 'Credential-shaped token found.' >&2; exit 82
+          fi
+          echo 'EXACT_CANDIDATE_IDENTITY=PASS'
+          echo 'SCHEMA_MIGRATION=NONE_29_TO_29'
+          echo 'PRIVATE_SOURCE_BOUNDARY=PASS'
+
+      - name: Prepare PHP 8.4 SQLite Zip runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl unzip
+          cat >"$RUNNER_TEMP/Dockerfile.p03" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," RUNTIME_PASS\n";'
+
+      - name: Static code schema and source integrity regression
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/repo_health.py .
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          python3 tests/integration/source_integrity_test.py
+          python3 -m py_compile scripts/semantic_consistency_audit.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/php-lint.txt"
+          node --check public/assets/app.js
+          node --check public/assets/forge-ui.js
+          node --check tests/e2e/postseal_ui.spec.js
+          python3 - <<'PY'
+          from pathlib import Path
+          css=Path('public/assets/forge-ui.css').read_text(encoding='utf-8')
+          assert css.count('{')==css.count('}')
+          for token in ['@media (max-width:479px)','@media (max-width:639px)','@media (max-width:767px)','@media (max-width:1023px)','@media (min-width:1600px)']:
+              assert token in css, token
+          print('UA_UI_STATIC_CONTRACT=PASS')
+          PY
+          test "$(wc -l < docs/decisions/SOURCE_MANIFEST.txt | tr -d ' ')" = '37'
+          echo "PHP_LINT_COUNT=$(wc -l < "$RUNNER_TEMP/php-lint.txt")"
+          echo 'STATIC_REGRESSION=PASS'
+
+      - name: Fresh install existing data CRUD upload download snapshot backup restore and failure gates
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          cp tests/maintenance/current_reverify.sh "$RUNNER_TEMP/p03-v1353-current.sh"
+          sed -i "s/d\['version'\]=='1\.35\.0'/d['version']=='1.35.3'/" "$RUNNER_TEMP/p03-v1353-current.sh"
+          grep -Fq "d['version']=='1.35.3'" "$RUNNER_TEMP/p03-v1353-current.sh"
+          bash "$RUNNER_TEMP/p03-v1353-current.sh"
+          DB=$(find "$RUNNER_TEMP/vf-forge-private/database" -maxdepth 1 -type f -name '*.sqlite' | head -n1)
+          test -n "$DB" -a -f "$DB"
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          python3 scripts/semantic_consistency_audit.py "$DB" | tee "$RUNNER_TEMP/semantic-consistency.json"
+          python3 - "$RUNNER_TEMP/semantic-consistency.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['ok'] is True, d
+          assert d['finding_count']==0, d
+          assert d['check_count']>=10, d
+          print('CROSS_OBJECT_SEMANTIC_CONSISTENCY=PASS')
+          PY
+          echo 'FRESH_INSTALL=PASS'
+          echo 'EXISTING_DATA_STARTUP=PASS'
+          echo 'CRUD=PASS'
+          echo 'UPLOAD_DOWNLOAD=PASS'
+          echo 'VERSION_HISTORY_SNAPSHOT=PASS'
+          echo 'BACKUP_RESTORE=PASS'
+          echo 'FAILURE_INJECTION_ORIGIN_CSRF_REFERENCE_PROTECTION_RESTORE=PASS'
+
+      - name: Search Browser E2E and eight-width responsive gate
+        shell: bash
+        working-directory: p03
+        env:
+          DATA_ROOT: ${{ runner.temp }}/vf-forge-private
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/vf-forge-runtime"
+          DATA_ROOT="$RUNNER_TEMP/vf-forge-private"
+          CONTAINER='vf-forge-v1353-browser'
+          COOKIE="$RUNNER_TEMP/search-cookie"
+          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+          docker run -d --rm --name "$CONTAINER" -p 18080:18080 \
+            -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" \
+            php -S 0.0.0.0:18080 -t /app >/dev/null
+          trap 'docker logs "$CONTAINER" 2>/dev/null || true; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do curl -fsS "$BASE_URL/" >/dev/null && break; sleep 0.25; done
+          LOGIN_JSON=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
+          curl -fsS -c "$COOKIE" "$BASE_URL/" >/dev/null
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" -H 'Content-Type: application/json' --data "$LOGIN_JSON" "$BASE_URL/api.php?action=login" -o "$RUNNER_TEMP/search-login.json"
+          curl -fsS -b "$COOKIE" "$BASE_URL/api.php?action=global_search&q=Maintenance%20Fixture&limit=20" -o "$RUNNER_TEMP/global-search.json"
+          python3 - "$RUNNER_TEMP/global-search.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['ok'] is True, d
+          groups=d.get('search',{}).get('groups',{})
+          titles=[str(x.get('title','')) for rows in groups.values() for x in (rows or [])]
+          assert any('Maintenance Fixture Project' in x for x in titles), titles
+          print('GLOBAL_SEARCH=PASS')
+          PY
+          PW="$RUNNER_TEMP/pw"
+          mkdir -p "$PW"
+          cp tests/e2e/postseal_ui.spec.js "$PW/postseal_ui.spec.js"
+          cd "$PW"
+          npm init -y >/dev/null
+          npm install --no-save @playwright/test@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          BASE_URL="$BASE_URL" DATA_ROOT="$DATA_ROOT" FIXTURE_PASS="$FIXTURE_PASS" npx playwright test postseal_ui.spec.js --reporter=line
+          test "$(find test-results -type f -name 'forge-*.png' | wc -l | tr -d ' ')" = '8'
+          for w in 390 480 640 768 1024 1280 1440 1920; do test -f "test-results/forge-$w.png"; done
+          docker rm -f "$CONTAINER" >/dev/null
+          trap - EXIT
+          echo 'SEARCH=PASS'
+          echo 'BROWSER_E2E=PASS'
+          echo 'RESPONSIVE_390_480_640_768_1024_1280_1440_1920=PASS'
+          echo 'UA_UI_GATE=PASS'
+
+      - name: Deterministic runtime shape and privacy gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          A="$RUNNER_TEMP/runtime-a"; B="$RUNNER_TEMP/runtime-b"
+          python3 scripts/build_runtime.py "$A" >/dev/null
+          python3 scripts/build_runtime.py "$B" >/dev/null
+          MAN_A=$(find "$A" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s#$A/##" | sha256sum | awk '{print $1}')
+          MAN_B=$(find "$B" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s#$B/##" | sha256sum | awk '{print $1}')
+          test "$MAN_A" = "$MAN_B"
+          test "$(find "$A" -type f | wc -l | tr -d ' ')" = '37'
+          test -f "$A/assets/forge-ui.css" -a -f "$A/assets/forge-ui.js"
+          if find "$A" -type f | grep -Ei '\.sqlite3?$|\.db$|(^|/)\.env$|PRIVATE_DATA|/backups?/|/logs?/|/sessions?/'; then
+            echo 'Runtime contains forbidden private/runtime data.' >&2; exit 83
+          fi
+          echo "RUNTIME_MANIFEST_FINGERPRINT=$MAN_A"
+          echo 'DETERMINISTIC_RUNTIME_BUILD=PASS'
+          echo 'PRIVACY_GATE=PASS'
+
+      - name: Exact candidate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "CANDIDATE_PRODUCT_COMMIT=$CANDIDATE_COMMIT"
+          echo "CANDIDATE_PRODUCT_TREE=$CANDIDATE_TREE"
+          echo 'PHP_JAVASCRIPT_SQLITE_SECURITY=PASS'
+          echo 'FRESH_EXISTING_CRUD_SEARCH_UPLOAD_DOWNLOAD_HISTORY=PASS'
+          echo 'FILE_DB_SEMANTIC_CONSISTENCY_BACKUP_RESTORE_FAILURE=PASS'
+          echo 'BROWSER_E2E_RESPONSIVE_UA_UI=PASS'
+          echo 'PRODUCT_FAILURE=NONE'
+          echo 'PROJECT_BLOCK=NONE'
+          echo 'EXACT_CANDIDATE_REVERIFICATION=PASS'
