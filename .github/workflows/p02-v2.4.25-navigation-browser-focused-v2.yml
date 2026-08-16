@@ -1,0 +1,75 @@
+name: P02 V2.4.25 Navigation Browser Focused V2
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-navigation-browser-focused-v2.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 16e91f12f9701d87a6da27751eb6fc43af794076
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          persist-credentials: false
+      - name: Install runtime
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 16e91f12f9701d87a6da27751eb6fc43af794076
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Browser behavior gate
+        working-directory: p02
+        env: {TEST_PASSWORD: 'P02-NAV2-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-nav2"; SITE="$ROOT/site"; PORT=18156; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          cat > .nav2.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD;
+          const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];
+          page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'});await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            const sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());if(sess.version!=='2.4.25')throw new Error('version '+sess.version);const csrf=sess.csrf;
+            const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+            const get=async(a,q={})=>page.evaluate(async({a,q})=>{const u=new URL('/api.php',location.origin);u.searchParams.set('action',a);for(const[k,v]of Object.entries(q))u.searchParams.set(k,String(v));return await(await fetch(u,{cache:'no-store'})).json()},{a,q});
+            const c=await post('category_save',{name:'Optimization Gate',description:'',icon:'folder'});if(!c.ok)throw new Error('category');const cid=Number(c.id);
+            const i=await post('content_save',{category_id:cid,title:'Optimization Seed',content:'before',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!i.ok)throw new Error('seed');const iid=Number(i.id);
+            await page.reload({waitUntil:'networkidle'});await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});await page.waitForTimeout(250);
+            let n=0;const h=r=>{if(r.url().includes('action=app_bootstrap'))n++};page.on('request',h);await page.locator('#articleTitleInput').fill('Optimization Saved');await page.locator('#articleSource').fill('after ordinary content edit ✓');await page.locator('[data-workspace-command="save"]').last().click();await page.waitForFunction(()=>state.readerItem?.title==='Optimization Saved'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(250);page.off('request',h);if(n!==0)throw new Error('redundant app_bootstrap '+n);
+            const persisted=await get('content_get',{id:iid});if(!persisted.ok||persisted.item?.content!=='after ordinary content edit ✓')throw new Error('persist mismatch '+JSON.stringify(persisted));
+            const before=Number(await page.locator('#allCount').textContent());n=0;page.on('request',h);await page.evaluate(()=>openEditor(null,{forceContentMode:'article',forceContentFormat:'markdown'}));await page.locator('#articleTitleInput').fill('New Count Item');await page.locator('#articleSource').fill('new item');await page.locator('[data-workspace-command="save"]').last().click();await page.waitForFunction(()=>state.readerItem?.title==='New Count Item'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(350);page.off('request',h);const after=Number(await page.locator('#allCount').textContent());if(n<1||after!==before+1)throw new Error(`new item refresh/count ${n} ${before}->${after}`);
+            for(const [w,hv] of [[1440,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:hv});await page.waitForTimeout(80);const d=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(d>3)throw new Error('overflow '+w+' '+d)}
+            if(errors.length)throw new Error(errors.join(' | '));console.log('ORDINARY_SAVE_EXTRA_BOOTSTRAP=0');console.log('PERSISTED_CONTENT_READBACK=PASS');console.log('NEW_ITEM_REFRESH_AND_COUNT=PASS');console.log('RESPONSIVE=PASS');console.log('P02_NAVIGATION_OPTIMIZATION_BROWSER=PASS');
+          }finally{await browser.close()}
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$TEST_PASSWORD" node .nav2.mjs
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: rm -rf node_modules package.json package-lock.json .nav2.mjs "$RUNNER_TEMP/p02-nav2" || true
