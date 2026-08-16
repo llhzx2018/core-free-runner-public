@@ -1,0 +1,131 @@
+name: P02 V2.4.25 Navigation Optimization Focused
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2.4.25-navigation-optimization-focused.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p02-v2-4-25-navigation-optimization-focused
+  cancel-in-progress: false
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE_COMMIT: 16e91f12f9701d87a6da27751eb6fc43af794076
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - name: Require private read-only source credential
+        env: {PRIVATE_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'}
+        run: test -n "$PRIVATE_TOKEN"
+      - name: Checkout exact candidate source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 16e91f12f9701d87a6da27751eb6fc43af794076
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Candidate identity and JS policy unit gate
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(tr -d '\r\n' < VERSION)" = 2.4.25
+          node --check public/assets/navigation-refresh-policy.js
+          grep -Fq '/assets/navigation-refresh-policy.js' public/index.php
+          cat > "$RUNNER_TEMP/policy-unit.cjs" <<'JS'
+          const fs=require('fs'),vm=require('vm');
+          const code=fs.readFileSync('public/assets/navigation-refresh-policy.js','utf8');
+          async function scenario({before,after,action='content_save',fail=false}){
+            let apiCalls=0,refreshCalls=0;
+            const ctx={console,state:{editorItem:before,readerItem:null,items:[],notebookItems:[]}};
+            ctx.api=async()=>{apiCalls++;if(fail)throw new Error('injected save failure');return {ok:true,item:after};};
+            ctx.refreshNavigationMetadata=async()=>{refreshCalls++;return true;};
+            vm.createContext(ctx);vm.runInContext(code,ctx);
+            let failed=false;try{await ctx.api(action,{body:{id:before?.id||0}});}catch(e){failed=true;}
+            await ctx.refreshNavigationMetadata();return {apiCalls,refreshCalls,failed};
+          }
+          (async()=>{
+            const base={id:7,category_id:2,status:'active',content_mode:'article',is_favorite:0,title:'A',content:'old'};
+            let x=await scenario({before:base,after:{...base,title:'B',content:'new'}});
+            if(x.refreshCalls!==0)throw new Error('pure content edit must skip full navigation bootstrap '+JSON.stringify(x));
+            x=await scenario({before:base,after:{...base,category_id:3}});
+            if(x.refreshCalls!==1)throw new Error('category move must refresh navigation '+JSON.stringify(x));
+            x=await scenario({before:null,after:{...base,id:8}});
+            if(x.refreshCalls!==1)throw new Error('new item must refresh navigation '+JSON.stringify(x));
+            x=await scenario({before:base,after:base,fail:true});
+            if(!x.failed||x.refreshCalls!==1)throw new Error('failed save must fail-safe to original refresh '+JSON.stringify(x));
+            console.log('NAVIGATION_REFRESH_POLICY_UNIT=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          node "$RUNNER_TEMP/policy-unit.cjs"
+      - name: Install PHP SQLite and pinned browser runtime
+        working-directory: p02
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Fresh site focused browser gate
+        working-directory: p02
+        env: {TEST_PASSWORD: 'P02-NAV-${{ github.run_id }}-${{ github.run_attempt }}!'}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-nav-focused"; SITE="$ROOT/site"; PORT=18155; BASE="http://127.0.0.1:$PORT"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          trap 'kill "$(cat "$ROOT/server.pid")" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" "$BASE/setup.php" > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")" = 303
+          cat > "$RUNNER_TEMP/nav-focused.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD;
+          const browser=await chromium.launch({headless:true});const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];
+          page.on('pageerror',e=>errors.push(String(e)));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
+          try{
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.locator('[data-open-login]').first().click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            const sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());if(sess.version!=='2.4.25')throw new Error('version mismatch '+sess.version);const csrf=sess.csrf;
+            const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+            const c=await post('category_save',{name:'Optimization Gate',description:'',icon:'folder'});if(!c.ok)throw new Error('category seed');const cid=Number(c.id);
+            const i=await post('content_save',{category_id:cid,title:'Optimization Seed',content:'before',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!i.ok)throw new Error('item seed');const iid=Number(i.id);
+            await page.reload({waitUntil:'networkidle'});await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});await page.waitForTimeout(250);
+            let bootstraps=0;const requestHandler=r=>{if(r.url().includes('action=app_bootstrap'))bootstraps++};page.on('request',requestHandler);
+            await page.locator('#articleTitleInput').fill('Optimization Saved');await page.locator('#articleSource').fill('after ordinary content edit ✓');await page.locator('[data-workspace-command="save"]').last().click();
+            await page.waitForFunction(()=>state.readerItem?.title==='Optimization Saved'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(250);page.off('request',requestHandler);
+            if(bootstraps!==0)throw new Error('ordinary edit emitted redundant app_bootstrap count='+bootstraps);
+            const persisted=await post('content_get',{id:iid});if(!persisted.ok||persisted.item?.content!=='after ordinary content edit ✓')throw new Error('ordinary edit persistence mismatch');
+            const beforeCount=await page.locator('#allCount').textContent();
+            bootstraps=0;page.on('request',requestHandler);await page.evaluate(()=>openEditor(null,{forceContentMode:'article',forceContentFormat:'markdown'}));await page.locator('#articleTitleInput').fill('New Count Item');await page.locator('#articleSource').fill('new item');await page.locator('[data-workspace-command="save"]').last().click();await page.waitForFunction(()=>state.readerItem?.title==='New Count Item'&&!state.editorDirty,{timeout:10000});await page.waitForTimeout(350);page.off('request',requestHandler);
+            if(bootstraps<1)throw new Error('new item did not refresh navigation');const afterCount=await page.locator('#allCount').textContent();if(Number(afterCount)!==Number(beforeCount)+1)throw new Error('live count did not increment '+beforeCount+' -> '+afterCount);
+            for(const [w,h] of [[1440,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:h});await page.waitForTimeout(100);const x=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(x>3)throw new Error('horizontal overflow '+w+' delta='+x);}
+            if(errors.length)throw new Error('console/page errors: '+errors.join(' | '));
+            console.log('ORDINARY_SAVE_EXTRA_BOOTSTRAP=0');console.log('NEW_ITEM_NAVIGATION_REFRESH=PASS');console.log('LIVE_COUNT_INCREMENT=PASS');console.log('RESPONSIVE_FOCUSED=PASS');console.log('P02_V2_4_25_NAVIGATION_OPTIMIZATION_FOCUSED=PASS');
+          } finally {await browser.close();}
+          JS
+          BASE_URL="$BASE" TEST_PASSWORD="$TEST_PASSWORD" node "$RUNNER_TEMP/nav-focused.mjs"
+          kill "$(cat "$ROOT/server.pid")" 2>/dev/null || true; trap - EXIT
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: rm -rf node_modules package.json package-lock.json "$RUNNER_TEMP/p02-nav-focused" "$RUNNER_TEMP/policy-unit.cjs" "$RUNNER_TEMP/nav-focused.mjs" || true
