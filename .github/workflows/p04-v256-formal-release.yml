@@ -1,0 +1,270 @@
+name: P04 VF Infra V2.5.6 Formal Release
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v256-formal-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: 45f960715a2b53b4cf09524862e76b19c58f0c68
+  TARGET_TREE: 95205f07c7a9b85c653553913facb9790c2819cc
+  TARGET_VERSION: 2.5.6
+  TARGET_TAG: v2.5.6
+  GATE_RUNTIME_FINGERPRINT: 11a74e3f9e83ff31ac129c984e809592f8b128e0c162124835a25017d668c444
+  GATE_FULL_BYTES: '398147'
+  GATE_FULL_SHA256: c3bac5a36648e74ba7b5f4059c54686a6a44be4b6feaf0212925140e0efb97cb
+  GATE_UPDATE_BYTES: '96851'
+  GATE_UPDATE_SHA256: 5d43c2056d38a4150ead30f7af84fee65c76f7d56523e3f3a8738c263c0a7c9c
+  GATE_ATOMIC_BYTES: '96851'
+  GATE_ATOMIC_SHA256: 5d43c2056d38a4150ead30f7af84fee65c76f7d56523e3f3a8738c263c0a7c9c
+  GATE_REPAIR_BYTES: '276568'
+  GATE_REPAIR_SHA256: 914de7c83e98aa4a4940241bc1899c266acc61f6f003d6e8082ec46cf58be2ba
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact VF Infra V2.5.6 Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact Product Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          echo 'P04_V256_RELEASE_EXACT_PRODUCT_IDENTITY_PASS'
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl
+          coverage: none
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rebuild and validate deterministic formal artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-release-formal"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v256-release-evidence"
+          mkdir -p "$EVIDENCE"
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          python scripts/build-v256-formal-artifacts.py --output "$FORMAL" | tee "$EVIDENCE/formal-build.txt"
+          python scripts/validate-v256-formal-artifacts.py \
+            --runtime "$FORMAL/runtime" \
+            --full "$FORMAL/VF_Infra_V2.5.6_FULL.zip" \
+            --update "$FORMAL/update-set/VF_Infra_V2.5.6_UPDATE.zip" \
+            --atomic "$FORMAL/update-set/VF_Infra_V2.5.6_ATOMIC.zip" \
+            --package-manifest "$FORMAL/update-set/PACKAGE_MANIFEST.json" \
+            --sha256sums "$FORMAL/update-set/SHA256SUMS.txt" | tee "$EVIDENCE/formal-validation.txt"
+
+      - name: Gate Build equals Release Build exact match
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-release-formal"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v256-release-evidence"
+          python - "$FORMAL" "$EVIDENCE/release-build-identity.json" <<'PY'
+          import hashlib,json,os,pathlib,sys
+          root=pathlib.Path(sys.argv[1])
+          out=pathlib.Path(sys.argv[2])
+          items={
+            'FULL': root/'VF_Infra_V2.5.6_FULL.zip',
+            'UPDATE': root/'update-set/VF_Infra_V2.5.6_UPDATE.zip',
+            'ATOMIC': root/'update-set/VF_Infra_V2.5.6_ATOMIC.zip',
+            'REPAIR': root/'update-set/repair-v2.5.6.php',
+          }
+          expected={
+            'FULL': (int(os.environ['GATE_FULL_BYTES']), os.environ['GATE_FULL_SHA256']),
+            'UPDATE': (int(os.environ['GATE_UPDATE_BYTES']), os.environ['GATE_UPDATE_SHA256']),
+            'ATOMIC': (int(os.environ['GATE_ATOMIC_BYTES']), os.environ['GATE_ATOMIC_SHA256']),
+            'REPAIR': (int(os.environ['GATE_REPAIR_BYTES']), os.environ['GATE_REPAIR_SHA256']),
+          }
+          result={}
+          for name,p in items.items():
+              b=p.read_bytes(); actual=(len(b),hashlib.sha256(b).hexdigest())
+              result[name]={'bytes':actual[0],'sha256':actual[1],'gate_bytes':expected[name][0],'gate_sha256':expected[name][1],'match':actual==expected[name]}
+              if actual != expected[name]:
+                  raise SystemExit(f'RELEASE_BUILD_GATE_BUILD_MISMATCH:{name}:{actual}:{expected[name]}')
+          manifest=json.loads((root/'FORMAL_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          if manifest.get('runtime_fingerprint') != os.environ['GATE_RUNTIME_FINGERPRINT']:
+              raise SystemExit('RELEASE_RUNTIME_FINGERPRINT_MISMATCH')
+          if manifest.get('source_commit') != os.environ['TARGET_COMMIT'] or manifest.get('source_tree') != os.environ['TARGET_TREE']:
+              raise SystemExit('RELEASE_FORMAL_MANIFEST_SOURCE_IDENTITY_MISMATCH')
+          result['runtime_fingerprint']=manifest['runtime_fingerprint']
+          result['gate_build_equals_release_build']='EXACT_MATCH_PASS'
+          out.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print('P04_V256_GATE_BUILD_EQUALS_RELEASE_BUILD_EXACT_MATCH_PASS')
+          PY
+
+      - name: Stage governed release assets and manifests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FORMAL="$RUNNER_TEMP/p04-v256-release-formal"
+          ASSETS="$RUNNER_TEMP/p04-v256-release-assets"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v256-release-evidence"
+          rm -rf "$ASSETS" && mkdir -p "$ASSETS"
+          cp "$FORMAL/VF_Infra_V2.5.6_FULL.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/VF_Infra_V2.5.6_UPDATE.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/VF_Infra_V2.5.6_ATOMIC.zip" "$ASSETS/"
+          cp "$FORMAL/update-set/repair-v2.5.6.php" "$ASSETS/"
+          cp "$FORMAL/update-set/PACKAGE_MANIFEST.json" "$ASSETS/"
+          cp "$FORMAL/FORMAL_ARTIFACT_MANIFEST.json" "$ASSETS/"
+          cp "$FORMAL/FORMAL_SHA256SUMS.txt" "$ASSETS/FORMAL_SHA256SUMS.txt"
+          cat > "$ASSETS/RELEASE_NOTES.md" <<'EOF'
+          # VF Infra V2.5.6
+
+          P04 · VF Infra V2.5.6 是基于 Production V2.5.5 的 Maintenance Engineering 正式候选发布。
+
+          本版本保持 Schema 14，不引入破坏性 Provider 远程写能力。主要完成：Linode / Vultr / DigitalOcean 计费分页完整性修复、Provider 币种异常 fail-closed、Job partial 健康语义修复、Billing 持久化静默截断修复，以及全站 UA/UI 信息架构与响应式重构。
+
+          正式 Product Identity：
+          - Commit: 45f960715a2b53b4cf09524862e76b19c58f0c68
+          - Tree: 95205f07c7a9b85c653553913facb9790c2819cc
+          - Version: 2.5.6
+          - Schema: 14
+          - Allowed Online Update Source: 2.5.5 only
+
+          Formal Gate 已验证：Deterministic Build、Secret / Privacy / Path Safety、FULL、2.5.5 → 2.5.6 Atomic、Illegal Source fail-closed、Corrupt Package fail-closed、Cleanup。
+
+          本 Release 的发布不代表 Production 已升级。Production Upgrade 必须等待独立授权。
+          EOF
+          python - "$ASSETS" <<'PY'
+          import hashlib,json,pathlib,os,sys
+          root=pathlib.Path(sys.argv[1])
+          def ident(name):
+              p=root/name; b=p.read_bytes(); return {'name':name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}
+          manifest={
+            'project':'P04 · VF Infra',
+            'version':'2.5.6',
+            'schema':14,
+            'tag':'v2.5.6',
+            'product_commit':os.environ['TARGET_COMMIT'],
+            'product_tree':os.environ['TARGET_TREE'],
+            'runtime_fingerprint':os.environ['GATE_RUNTIME_FINGERPRINT'],
+            'allowed_source_versions':['2.5.5'],
+            'gate_build_equals_release_build':'EXACT_MATCH_PASS',
+            'assets':[ident(n) for n in [
+              'VF_Infra_V2.5.6_FULL.zip','VF_Infra_V2.5.6_UPDATE.zip','VF_Infra_V2.5.6_ATOMIC.zip',
+              'repair-v2.5.6.php','PACKAGE_MANIFEST.json','FORMAL_ARTIFACT_MANIFEST.json','FORMAL_SHA256SUMS.txt','RELEASE_NOTES.md'
+            ]],
+            'production_upgrade':'NOT_EXECUTED',
+            'main_promotion':'NOT_EXECUTED'
+          }
+          (root/'RELEASE_MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          names=sorted([p.name for p in root.iterdir() if p.is_file() and p.name!='SHA256SUMS.txt'])
+          lines=[]
+          for name in names:
+              b=(root/name).read_bytes(); lines.append(f"{hashlib.sha256(b).hexdigest()}  {name}")
+          (root/'SHA256SUMS.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
+          cp "$ASSETS/RELEASE_MANIFEST.json" "$EVIDENCE/"
+          cp "$ASSETS/SHA256SUMS.txt" "$EVIDENCE/"
+          find "$ASSETS" -maxdepth 1 -type f -printf '%f\n' | sort > "$EVIDENCE/release-asset-inventory.txt"
+
+      - name: Create exact tag and GitHub Release and upload immutable-by-policy assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v256-release-assets"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v256-release-evidence"
+          if gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" >/dev/null 2>&1; then
+            EXISTING="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" --jq '.object.sha')"
+            test "$EXISTING" = "$TARGET_COMMIT" || { echo "TAG_TARGET_CONFLICT:$EXISTING" >&2; exit 70; }
+          else
+            gh api --method POST "repos/$TARGET_REPOSITORY/git/refs" -f ref="refs/tags/$TARGET_TAG" -f sha="$TARGET_COMMIT" >/dev/null
+          fi
+          if gh release view "$TARGET_TAG" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then
+            echo 'RELEASE_ALREADY_EXISTS_FAIL_CLOSED' >&2
+            exit 71
+          fi
+          gh release create "$TARGET_TAG" \
+            --repo "$TARGET_REPOSITORY" \
+            --verify-tag \
+            --title 'VF Infra V2.5.6' \
+            --notes-file "$ASSETS/RELEASE_NOTES.md" \
+            "$ASSETS/VF_Infra_V2.5.6_FULL.zip" \
+            "$ASSETS/VF_Infra_V2.5.6_UPDATE.zip" \
+            "$ASSETS/VF_Infra_V2.5.6_ATOMIC.zip" \
+            "$ASSETS/repair-v2.5.6.php" \
+            "$ASSETS/PACKAGE_MANIFEST.json" \
+            "$ASSETS/FORMAL_ARTIFACT_MANIFEST.json" \
+            "$ASSETS/FORMAL_SHA256SUMS.txt" \
+            "$ASSETS/RELEASE_MANIFEST.json" \
+            "$ASSETS/SHA256SUMS.txt" \
+            "$ASSETS/RELEASE_NOTES.md"
+          echo 'P04_V256_FORMAL_RELEASE_CREATED_PASS' > "$EVIDENCE/release-create.txt"
+
+      - name: Remote exact release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ASSETS="$RUNNER_TEMP/p04-v256-release-assets"
+          EVIDENCE="$GITHUB_WORKSPACE/p04-v256-release-evidence"
+          gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TARGET_TAG" > "$EVIDENCE/tag-readback.json"
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$TARGET_TAG" > "$EVIDENCE/release-readback.json"
+          python - "$ASSETS" "$EVIDENCE/tag-readback.json" "$EVIDENCE/release-readback.json" "$EVIDENCE/remote-release-verification.json" <<'PY'
+          import hashlib,json,pathlib,sys,os
+          assets_dir=pathlib.Path(sys.argv[1])
+          tag=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          rel=json.loads(pathlib.Path(sys.argv[3]).read_text())
+          out=pathlib.Path(sys.argv[4])
+          if tag['object']['sha'] != os.environ['TARGET_COMMIT']: raise SystemExit('REMOTE_TAG_TARGET_MISMATCH')
+          if rel['tag_name'] != os.environ['TARGET_TAG'] or rel['name'] != 'VF Infra V2.5.6': raise SystemExit('REMOTE_RELEASE_IDENTITY_MISMATCH')
+          remote={a['name']:a for a in rel.get('assets',[])}
+          local={p.name:(p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest()) for p in assets_dir.iterdir() if p.is_file()}
+          if set(remote)!=set(local): raise SystemExit(f'REMOTE_RELEASE_ASSET_SET_MISMATCH remote={sorted(remote)} local={sorted(local)}')
+          checked={}
+          for name,(size,sha) in local.items():
+              a=remote[name]
+              digest=a.get('digest') or ''
+              if a['size']!=size: raise SystemExit(f'REMOTE_ASSET_SIZE_MISMATCH:{name}')
+              if digest and digest != 'sha256:'+sha: raise SystemExit(f'REMOTE_ASSET_SHA_MISMATCH:{name}:{digest}:sha256:{sha}')
+              checked[name]={'id':a['id'],'bytes':a['size'],'sha256':sha,'remote_digest':digest}
+          result={'tag':rel['tag_name'],'tag_target':tag['object']['sha'],'release_id':rel['id'],'release_name':rel['name'],'assets':checked,'remote_readback':'PASS','immutable_policy':'DO_NOT_OVERWRITE'}
+          out.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False))
+          print('P04_V256_REMOTE_RELEASE_READBACK_PASS')
+          PY
+
+      - name: Cleanup private source and formal release bytes before public evidence upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/p04-v256-release-formal" "$RUNNER_TEMP/p04-v256-release-assets"
+          test ! -e "$RUNNER_TEMP/p04-v256-release-formal"
+          test ! -e "$RUNNER_TEMP/p04-v256-release-assets"
+
+      - name: Upload public-safe release evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.6-Formal-Release-Evidence
+          path: p04-v256-release-evidence
+          if-no-files-found: error
+          retention-days: 14
