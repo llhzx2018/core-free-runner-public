@@ -1,0 +1,66 @@
+name: P04 V2.5.3 Release Asset Diagnose
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v253-release-asset-diagnose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: v2.5.3
+      ASSET: VF_Infra_V2.5.3_UPDATE.zip
+      EXPECTED_BYTES: '198577'
+      EXPECTED_SHA256: e98c122e9e2e75c6c2668039488c3e656f1569dfaa46aa4b5bdbcc4f701112ec
+    steps:
+      - name: Probe REST metadata and private download methods
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          auth=(-H "Authorization: Bearer $TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          code=$(curl -sS -o "$RUNNER_TEMP/release.json" -w '%{http_code}' "${auth[@]}" "https://api.github.com/repos/llhzx2018/vf-infra/releases/tags/$TAG")
+          echo "REST_RELEASE_HTTP=$code"
+          test "$code" = 200
+          jq -r '.tag_name,.draft,.prerelease,.published_at' "$RUNNER_TEMP/release.json" | sed -n '1,4p'
+          aid=$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' "$RUNNER_TEMP/release.json" | head -1)
+          size=$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' "$RUNNER_TEMP/release.json" | head -1)
+          api_url=$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.url' "$RUNNER_TEMP/release.json" | head -1)
+          browser_url=$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.browser_download_url' "$RUNNER_TEMP/release.json" | head -1)
+          test -n "$aid"; test "$size" = "$EXPECTED_BYTES"
+          echo "ASSET_ID_PRESENT=YES SIZE=$size"
+
+          set +e
+          api_code=$(curl -sS -L -o "$RUNNER_TEMP/api.bin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' "$api_url")
+          api_rc=$?
+          browser_code=$(curl -sS -L -o "$RUNNER_TEMP/browser.bin" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$browser_url")
+          browser_rc=$?
+          public_code=$(curl -sS -L -o "$RUNNER_TEMP/public.bin" -w '%{http_code}' "$browser_url")
+          public_rc=$?
+          set -e
+
+          echo "API_DOWNLOAD_RC=$api_rc HTTP=$api_code BYTES=$(stat -c%s "$RUNNER_TEMP/api.bin" 2>/dev/null || echo 0)"
+          echo "BROWSER_TOKEN_RC=$browser_rc HTTP=$browser_code BYTES=$(stat -c%s "$RUNNER_TEMP/browser.bin" 2>/dev/null || echo 0)"
+          echo "BROWSER_PUBLIC_RC=$public_rc HTTP=$public_code BYTES=$(stat -c%s "$RUNNER_TEMP/public.bin" 2>/dev/null || echo 0)"
+
+          pass=0
+          for p in "$RUNNER_TEMP/api.bin" "$RUNNER_TEMP/browser.bin" "$RUNNER_TEMP/public.bin"; do
+            if [[ -f "$p" ]] && [[ "$(stat -c%s "$p")" = "$EXPECTED_BYTES" ]] && [[ "$(sha256sum "$p"|awk '{print $1}')" = "$EXPECTED_SHA256" ]]; then
+              echo "EXACT_ASSET_METHOD=$(basename "$p")"
+              pass=1
+              break
+            fi
+          done
+          test "$pass" = 1
+          echo 'PRIVATE_RELEASE_ASSET_READBACK_METHOD=PASS'
+
+      - name: Cleanup
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/api.bin" "$RUNNER_TEMP/browser.bin" "$RUNNER_TEMP/public.bin"
