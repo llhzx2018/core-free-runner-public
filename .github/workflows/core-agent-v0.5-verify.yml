@@ -14,7 +14,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      CORE_AGENT_SOURCE_SHA: 96e6ec4a555cab086f35b528b5113e3074cd9681
+      CORE_AGENT_SOURCE_SHA: e32f6411ee0ee7ca9a85340503b96fdd06ff9a26
       PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
     steps:
       - name: Verify private read credential is available
@@ -45,7 +45,13 @@ jobs:
           VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
         run: python scripts/verify.py
 
-      - name: Build public-safe evidence summary
+      - name: Run real P02 autonomous read-only pilot
+        working-directory: source
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ env.PRIVATE_READ_TOKEN }}
+        run: python scripts/pilot_v05_p02.py
+
+      - name: Build combined public-safe evidence summary
         if: always()
         working-directory: source
         env:
@@ -56,25 +62,49 @@ jobs:
           import hashlib, json, os
           from pathlib import Path
 
-          source = Path('.evidence/verification.json')
+          machine = Path('.evidence/verification.json')
+          pilot = Path('.evidence/p02-v05-pilot.json')
           out = Path('.evidence/public-evidence.json')
           payload = {
-              'schema': 'core-agent-public-evidence/v1',
+              'schema': 'core-agent-public-evidence/v2',
               'version': '0.5.0',
               'source_sha': os.environ['VF_SOURCE_SHA'],
               'private_source_persisted': False,
           }
-          if source.exists():
-              raw = source.read_bytes()
+
+          machine_status = 'MISSING'
+          if machine.exists():
+              raw = machine.read_bytes()
               detail = json.loads(raw.decode('utf-8'))
+              machine_status = detail.get('status')
               payload.update({
-                  'status': detail.get('status'),
-                  'private_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'machine_status': machine_status,
+                  'private_machine_evidence_sha256': hashlib.sha256(raw).hexdigest(),
                   'check_exit_codes': [item.get('exit_code') for item in detail.get('checks', [])],
                   'runner': detail.get('runner'),
               })
           else:
-              payload.update({'status': 'BLOCKED_BEFORE_VERIFICATION'})
+              payload['machine_status'] = machine_status
+
+          pilot_status = 'MISSING'
+          if pilot.exists():
+              raw = pilot.read_bytes()
+              detail = json.loads(raw.decode('utf-8'))
+              pilot_status = detail.get('status')
+              payload.update({
+                  'pilot_status': pilot_status,
+                  'pilot_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'pilot_version': detail.get('version'),
+                  'pilot_main_equals_develop': detail.get('main_equals_develop'),
+                  'pilot_compare_status': detail.get('compare_status'),
+                  'pilot_steps': detail.get('steps'),
+                  'pilot_write_actions': detail.get('write_actions'),
+                  'pilot_token_exposed': detail.get('token_exposed'),
+              })
+          else:
+              payload['pilot_status'] = pilot_status
+
+          payload['status'] = 'PASS' if machine_status == 'PASS' and pilot_status == 'PASS' else 'FAIL'
           canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
           payload['sha256'] = hashlib.sha256(canonical).hexdigest()
           out.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +118,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: core-agent-v0.5-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
-          path: source/.evidence/public-evidence.json
+          path: |
+            source/.evidence/public-evidence.json
+            source/.evidence/p02-v05-pilot.json
           if-no-files-found: error
           retention-days: 14
