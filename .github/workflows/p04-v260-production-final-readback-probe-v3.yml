@@ -1,0 +1,153 @@
+name: P04 V2.6.0 Production Final Readback Probe V3 Preflight
+
+on:
+  push:
+    branches: [p04-v260-production-final-readback-probe]
+    paths: ['.github/workflows/p04-v260-production-final-readback-probe-v3.yml']
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_COMMIT: b8d080e432ba811f6689372636022774e558ffc1
+  PRIVATE_INPUT_COMMIT: d79e9367a6d4471f1b3d6d19ed44af7607a69a97
+  PROBE_NAME: vf-infra-v260-production-final-readback-8d85a46c2149.php
+  PROBE_BYTES: '70533'
+  PROBE_SHA256: 62bdc3475f5d5ab751941b36479a2ec5e8a5600012a8c65f3be075c8b33c6f88
+  RUNTIME_FP: 0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b
+  SOURCE_SHA: fe2e51f2332909041f44ec34dc2b2f79075bae336b6767e7401498f1ce73de01
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: vf-infra
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-private
+          ref: ${{ env.PRIVATE_INPUT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-input
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Reconstruct proven probe object and apply exact fingerprint fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          P='private-input/p04/v260-production-final-readback/chunks'
+          cat "$P/probe.part00" "$P/probe.part01" "$P/probe.part02" "$P/probe.part03" "$P/probe.part04" "$P/probe.part05" | base64 -d | gzip -dc > /tmp/probe-old.php
+          echo '9e0bc95b0c52c2ad57e79b81137ed3d569af86e041f27e13c2cc024124a04297  /tmp/probe-old.php' | sha256sum -c -
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/probe-old.php'); s=p.read_text()
+          old='    sort($rows, SORT_STRING);\n'
+          assert s.count(old)==1
+          s=s.replace(old,'',1)
+          Path('/tmp/' + __import__('os').environ['PROBE_NAME']).write_text(s)
+          PY
+          test "$(wc -c < /tmp/$PROBE_NAME)" = "$PROBE_BYTES"
+          echo "$PROBE_SHA256  /tmp/$PROBE_NAME" | sha256sum -c -
+          php -l "/tmp/$PROBE_NAME"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          s=(Path('/tmp')/os.environ['PROBE_NAME']).read_text()
+          req=["REQUEST_METHOD'] ?? '') !== 'GET'","ADMIN_SESSION_REQUIRED","session_start(['read_and_close' => true])","?mode=ro&cache=private","PRAGMA query_only = ON","SQLITE3_OPEN_READONLY","production_runtime_write' => 0","production_db_write' => 0","provider_write' => 0","backup_create' => 0","restore' => 0","self_cleanup' => 'NO'"]
+          for x in req: assert x in s,x
+          for x in ['$_POST','file_put_contents(','fwrite(','unlink(','rename(','mkdir(','rmdir(','copy(','chmod(','touch(','shell_exec(','passthru(','exec(','system(']: assert x not in s,x
+          assert 'sort($rows, SORT_STRING)' not in s
+          print('STATIC_GET_ONLY_TRUE_READONLY=PASS')
+          PY
+
+      - name: Build exact frozen V2.6.0 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-infra
+          test "$(git rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          python3 scripts/build-v260-candidate-artifacts.py --output build/v260-probe-v3 >/tmp/builder.txt
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('build/v260-probe-v3/V260_CANDIDATE_ARTIFACT_MANIFEST.json'))
+          assert m['runtime_file_count']==168 and m['runtime_fingerprint']==os.environ['RUNTIME_FP']
+          assert m['source_manifest_count']==166 and m['source_manifest_sha256']==os.environ['SOURCE_SHA']
+          print('FROZEN_RUNTIME_IDENTITY=PASS')
+          PY
+
+      - name: Full minimal authenticated read-only fixture gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d -t p04-v260-v3-XXXXXX)"; SITE="$TMP/site"; PRIVATE="$TMP/private"; PORT=18999; LOG="$TMP/php.log"; PID=''
+          cleanup(){ if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          mkdir -p "$SITE"; cp -a vf-infra/build/v260-probe-v3/runtime/. "$SITE/"; cp "/tmp/$PROBE_NAME" "$SITE/$PROBE_NAME"
+          python3 scripts/p04_v260_probe_fixture.py --private-root "$PRIVATE" >/tmp/fixture.json
+          cat > "$SITE/config.php" <<PHP
+          <?php return ['app_key'=>'P04_V260_PROBE_FIXTURE_APP_KEY','data_path'=>'$PRIVATE','session_name'=>'vfi_probe_test_session','session_idle_timeout'=>1209600,'session_max_lifetime'=>2592000];
+          PHP
+          SID='p04v260probe1234567890abcdef'; UA='P04-V260-Probe-Fixture/1.0'
+          SID="$SID" UA="$UA" php -d "session.save_path=$PRIVATE/sessions" -r 'session_name("vfi_probe_test_session");session_id(getenv("SID"));session_start();$_SESSION["vf_domain_authenticated"]=true;$_SESSION["vf_domain_last_activity"]=time();$_SESSION["vf_domain_created_at"]=time();$_SESSION["vf_domain_auth_generation"]=1;$_SESSION["vf_domain_ua"]=hash("sha256",getenv("UA")."|P04_V260_PROBE_FIXTURE_APP_KEY");session_write_close();'
+          DB="$PRIVATE/database/vf-domain.sqlite"; BEFORE="$(sha256sum "$DB"|awk '{print $1}')"; for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+          php -d "session.save_path=$PRIVATE/sessions" -S "127.0.0.1:$PORT" -t "$SITE" >"$LOG" 2>&1 & PID=$!
+          for _ in $(seq 1 80); do curl -sS "http://127.0.0.1:$PORT/$PROBE_NAME" >/dev/null 2>&1 && break; sleep .1; done
+          test "$(curl -sS -o "$TMP/u.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:$PORT/$PROBE_NAME")" = 401
+          test "$(curl -sS -X POST -o "$TMP/p.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:$PORT/$PROBE_NAME")" = 405
+          test "$(curl -sS -o "$TMP/r.json" -w '%{http_code}' -A "$UA" -H "Cookie: vfi_probe_test_session=$SID" "http://127.0.0.1:$PORT/$PROBE_NAME")" = 200
+          python3 - "$TMP/r.json" "$GITHUB_WORKSPACE" <<'PY'
+          import json,sys,os
+          from pathlib import Path
+          j=json.load(open(sys.argv[1]))
+          assert j['ok'] is True and j['final_machine_gate']=='PASS'
+          assert j['production_version']==j['installed_version']=='2.6.0' and j['schema']==14 and j['migration']=='NONE'
+          assert j['runtime_files']==168 and j['runtime_fingerprint']==os.environ['RUNTIME_FP']
+          assert j['source_manifest_count']==166 and j['source_manifest_sha']==os.environ['SOURCE_SHA'] and j['source_exact']=='PASS'
+          assert j['missing']==[] and j['unexpected']==[] and j['hash_mismatch']==[]
+          assert j['sqlite_integrity']=='PASS' and j['foreign_key_violations']==0
+          assert j['db_primary_changed']=='NO' and j['wal_created']==j['journal_created']==j['shm_created']=='NO'
+          assert j['business_counts']=={'domains':37,'dns':13,'vps':2,'assets':86,'provider_accounts':7,'billing_accounts':7}
+          assert j['business_semantic_preservation']=='PASS' and all(v>0 for v in j['relationship_counts'].values())
+          b=j['backup']; assert b['status']=='PASS' and b['source_version']=='2.5.8' and b['schema']==14 and b['integrity']=='PASS' and b['foreign_key_violations']==0 and b['file_sha256_match'] and b['created_before_atomic_handoff']
+          h=j['update_history']; assert h['status']=='PASS' and h['from']=='2.5.8' and h['to']=='2.6.0' and h['result']=='SUCCESS' and h['schema_from']==h['schema_to']==14 and h['migration']=='NONE' and h['journal_state']==h['recovery_state']=='ABSENT_CLEAN'
+          assert j['temporary_artifacts']==[] and j['temporary_unknown_artifact_count']==0
+          assert j['production_runtime_write']==j['production_db_write']==j['provider_write']==j['migration_write']==j['backup_create']==j['restore']==0 and j['self_cleanup']=='NO'
+          ev={'preflight':'PASS','probe_name':os.environ['PROBE_NAME'],'probe_bytes':int(os.environ['PROBE_BYTES']),'probe_sha256':os.environ['PROBE_SHA256'],'runtime_files':168,'runtime_fingerprint':j['runtime_fingerprint'],'source_manifest_count':166,'source_manifest_sha':j['source_manifest_sha'],'sqlite_integrity':'PASS','foreign_key_violations':0,'db_primary_changed':'NO','wal_created':'NO','shm_created':'NO','journal_created':'NO','business_semantic_preservation':'PASS','backup_fixture':'PASS','update_history_fixture':'PASS','temporary_artifact_inventory_fixture':'PASS','writes':0}
+          out=Path(sys.argv[2])/'public-evidence-v3'; out.mkdir(exist_ok=True); (out/'P04_V260_PROBE_V3_PREFLIGHT_RESULT.json').write_text(json.dumps(ev,indent=2,sort_keys=True)+'\n')
+          print('AUTHENTICATED_SYNTHETIC_MACHINE_GATE=PASS')
+          PY
+          test "$(sha256sum "$DB"|awk '{print $1}')" = "$BEFORE"; for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+          echo TRUE_SQLITE_READONLY_NO_PRIMARY_OR_SIDECAR_WRITE=PASS
+          : > "$SITE/repair-v2.6.0.php"
+          test "$(curl -sS -o "$TMP/t.json" -w '%{http_code}' -A "$UA" -H "Cookie: vfi_probe_test_session=$SID" "http://127.0.0.1:$PORT/$PROBE_NAME")" = 409
+          python3 - "$TMP/t.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j['final_machine_gate']=='FAIL'; assert len(j['temporary_artifacts'])==1 and j['temporary_artifacts'][0]['classification']=='UPGRADE_REPAIR_REMAINING'; assert j['production_runtime_write']==j['production_db_write']==0; print('TEMP_ARTIFACT_FAIL_CLOSED=PASS')
+          PY
+          rm -f "$SITE/repair-v2.6.0.php"; test "$(sha256sum "$DB"|awk '{print $1}')" = "$BEFORE"; for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+
+      - name: Remove private source
+        if: always()
+        run: rm -rf vf-infra private-input /tmp/probe-old.php "/tmp/$PROBE_NAME"
+      - name: Upload public-safe evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.6.0-Production-Final-Readback-Probe-V3-Preflight
+          path: public-evidence-v3/P04_V260_PROBE_V3_PREFLIGHT_RESULT.json
+          if-no-files-found: error
+          retention-days: 14
