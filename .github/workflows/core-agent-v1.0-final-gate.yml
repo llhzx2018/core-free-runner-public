@@ -1,0 +1,122 @@
+name: core-agent V1.0 Final Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/core-agent-v1.0-final-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CORE_AGENT_SOURCE_SHA: f67eaa742d73e8d77581f023098e406fc5077efe
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered VF capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 78; }
+          echo 'REGISTERED_VF_CAPABILITIES=PASS'
+
+      - name: Checkout exact core-agent V1.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run full machine verification
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Run integrated V1 supervisor pilot
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          VF_PRIVATE_READ_TOKEN: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          VF_RELEASE_WRITE_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        run: python scripts/pilot_v1_supervisor.py
+
+      - name: Build public-safe V1 evidence
+        if: always()
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          machine_path=Path('.evidence/verification.json')
+          pilot_path=Path('.evidence/v1-supervisor.json')
+          out=Path('.evidence/v1-public-evidence.json')
+          payload={'schema':'core-agent-public-evidence/v1','version':'1.0.0','source_sha':os.environ['VF_SOURCE_SHA'],'private_source_persisted':False,'raw_product_authority_persisted':False,'raw_skill_instructions_persisted':False,'product_source_write_actions':0,'main_write_actions':0,'production_actions':0,'release_actions':0,'token_exposed':False}
+          if machine_path.exists():
+              raw=machine_path.read_bytes(); machine=json.loads(raw.decode('utf-8')); payload.update({'machine_status':machine.get('status'),'machine_evidence_sha256':hashlib.sha256(raw).hexdigest(),'check_exit_codes':[i.get('exit_code') for i in machine.get('checks',[])]})
+          else: payload['machine_status']='MISSING'
+          if pilot_path.exists():
+              raw=pilot_path.read_bytes(); pilot=json.loads(raw.decode('utf-8'))
+              for key in ('status','repository_count','planned_count','failure_count','queue_sha256','safe_queue_count','approval_queue_count','blocked_queue_count','no_work_queue_count','selected_repository','selected_mode','selected_phase','selected_plan_sha256','selected_authority_proof_count','skill_identities','checkpoint_created','new_window_resume','same_run_id','same_context','same_skill_authority','sandbox_runtime_state','sandbox_write_actions','sandbox_verification_sequence','product_source_write_actions','main_write_actions','production_actions','release_actions','raw_product_authority_persisted','raw_skill_instructions_persisted','user_manual_test_required','new_runner_required','new_credential_required','token_exposed'):
+                  payload['pilot_'+key if key=='status' else key]=pilot.get(key)
+              payload['pilot_evidence_sha256']=hashlib.sha256(raw).hexdigest()
+          else: payload['pilot_status']='MISSING'
+          payload['status']='PASS' if (
+              payload.get('machine_status')=='PASS'
+              and payload.get('pilot_status')=='PASS'
+              and payload.get('repository_count')==8
+              and payload.get('planned_count')==8
+              and payload.get('failure_count')==0
+              and payload.get('checkpoint_created') is True
+              and payload.get('new_window_resume') is True
+              and payload.get('same_run_id') is True
+              and payload.get('same_context') is True
+              and payload.get('same_skill_authority') is True
+              and payload.get('sandbox_runtime_state')=='DONE'
+              and payload.get('sandbox_write_actions')==2
+              and payload.get('sandbox_verification_sequence')==['FAIL','PASS']
+              and payload.get('product_source_write_actions')==0
+              and payload.get('main_write_actions')==0
+              and payload.get('production_actions')==0
+              and payload.get('release_actions')==0
+              and payload.get('raw_product_authority_persisted') is False
+              and payload.get('raw_skill_instructions_persisted') is False
+              and payload.get('user_manual_test_required') is False
+              and payload.get('new_runner_required') is False
+              and payload.get('new_credential_required') is False
+              and payload.get('token_exposed') is False
+          ) else 'FAIL'
+          canonical=json.dumps(payload,ensure_ascii=False,sort_keys=True).encode('utf-8'); payload['sha256']=hashlib.sha256(canonical).hexdigest(); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding='utf-8')
+          print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"PORTFOLIO={payload.get('planned_count')}/8")
+          print(f"SELECTED_REPOSITORY={payload.get('selected_repository') or 'NONE'}")
+          print(f"SANDBOX_VERIFY={'->'.join(payload.get('sandbox_verification_sequence') or [])}")
+          print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          if payload['status']!='PASS': raise SystemExit(1)
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-v1.0-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
+          path: source/.evidence/v1-public-evidence.json
+          if-no-files-found: error
+          retention-days: 30
