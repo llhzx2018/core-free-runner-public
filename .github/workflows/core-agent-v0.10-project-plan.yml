@@ -1,0 +1,94 @@
+name: core-agent V0.10 Project Plan Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/core-agent-v0.10-project-plan.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CORE_AGENT_SOURCE_SHA: 02d574c1c783167306c877d6cb42acbcf4385af1
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Require registered VF read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          echo 'REGISTERED_VF_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact core-agent V0.10 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run full machine verification
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Run real portfolio-to-project-plan pilot
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          VF_PRIVATE_READ_TOKEN: ${{ env.VF_PRIVATE_READ_TOKEN }}
+        run: python scripts/pilot_v10_project_plan.py
+
+      - name: Build public-safe V0.10 evidence
+        if: always()
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          machine_path=Path('.evidence/verification.json')
+          pilot_path=Path('.evidence/v10-project-plan.json')
+          out=Path('.evidence/v10-public-evidence.json')
+          payload={'schema':'core-agent-public-evidence/v10','version':'0.10.0','source_sha':os.environ['VF_SOURCE_SHA'],'private_source_persisted':False,'raw_authority_persisted':False,'write_actions_executed':0,'main_write_actions':0,'production_actions':0,'release_actions':0,'token_exposed':False}
+          if machine_path.exists():
+              raw=machine_path.read_bytes(); machine=json.loads(raw.decode('utf-8')); payload.update({'machine_status':machine.get('status'),'machine_evidence_sha256':hashlib.sha256(raw).hexdigest(),'check_exit_codes':[i.get('exit_code') for i in machine.get('checks',[])]})
+          else: payload['machine_status']='MISSING'
+          if pilot_path.exists():
+              raw=pilot_path.read_bytes(); pilot=json.loads(raw.decode('utf-8'))
+              for key in ('status','selected_repository','selected_mode','selected_action','discovery_phase','execution_phase','authority_path_count','authority_proof_count','authority_satisfied','skill_routes','future_approval_boundaries','proposed_next_actions','protected_proposals','plan_sha256','deterministic_replay','user_manual_test_required','new_runner_required','new_credential_required'):
+                  payload['pilot_'+key if key=='status' else key]=pilot.get(key)
+              payload['pilot_evidence_sha256']=hashlib.sha256(raw).hexdigest()
+          else: payload['pilot_status']='MISSING'
+          payload['status']='PASS' if (payload.get('machine_status')=='PASS' and payload.get('pilot_status')=='PASS' and payload.get('authority_satisfied') is True and payload.get('deterministic_replay') is True and not payload.get('protected_proposals') and payload.get('user_manual_test_required') is False and payload.get('new_runner_required') is False and payload.get('new_credential_required') is False) else 'FAIL'
+          canonical=json.dumps(payload,ensure_ascii=False,sort_keys=True).encode('utf-8'); payload['sha256']=hashlib.sha256(canonical).hexdigest(); out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding='utf-8')
+          print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"SELECTED_REPOSITORY={payload.get('selected_repository') or 'NONE'}")
+          print(f"EXECUTION_PHASE={payload.get('execution_phase') or 'NONE'}")
+          print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          if payload['status']!='PASS': raise SystemExit(1)
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-v0.10-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
+          path: source/.evidence/v10-public-evidence.json
+          if-no-files-found: error
+          retention-days: 14
