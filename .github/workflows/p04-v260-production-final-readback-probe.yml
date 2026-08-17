@@ -1,0 +1,226 @@
+name: P04 V2.6.0 Production Final Readback Probe Preflight
+
+on:
+  push:
+    branches:
+      - p04-v260-production-final-readback-probe
+    paths:
+      - '.github/workflows/p04-v260-production-final-readback-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_REPOSITORY: llhzx2018/vf-infra
+  PRODUCT_COMMIT: b8d080e432ba811f6689372636022774e558ffc1
+  PRIVATE_INPUT_REPOSITORY: llhzx2018/core-free-runner-private
+  PRIVATE_INPUT_COMMIT: e75cb8e754d3cfb824f7bf18fd6aefeb59e4d1f8
+  PRIVATE_PROBE_B64: p04/v260-production-final-readback/vf-infra-v260-production-final-readback-ad3983ff1900.php.gz.b64
+  PROBE_NAME: vf-infra-v260-production-final-readback-ad3983ff1900.php
+  PROBE_BYTES: '70563'
+  PROBE_SHA256: 9e0bc95b0c52c2ad57e79b81137ed3d569af86e041f27e13c2cc024124a04297
+  EXPECTED_RUNTIME_FINGERPRINT: 0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b
+  EXPECTED_SOURCE_SHA: fe2e51f2332909041f44ec34dc2b2f79075bae336b6767e7401498f1ce73de01
+
+jobs:
+  readonly-probe-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout public synthetic harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact private V2.6.0 Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRODUCT_REPOSITORY }}
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-infra
+
+      - name: Checkout private probe input
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_INPUT_REPOSITORY }}
+          ref: ${{ env.PRIVATE_INPUT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-input
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Decode and verify exact probe identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base64 -d "private-input/$PRIVATE_PROBE_B64" | gzip -dc > /tmp/$PROBE_NAME
+          test "$(wc -c < /tmp/$PROBE_NAME)" = "$PROBE_BYTES"
+          echo "$PROBE_SHA256  /tmp/$PROBE_NAME" | sha256sum -c -
+          php -l /tmp/$PROBE_NAME
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp')/Path(__import__('os').environ['PROBE_NAME'])
+          s=p.read_text(encoding='utf-8')
+          required=[
+            "REQUEST_METHOD'] ?? '') !== 'GET'",
+            "ADMIN_SESSION_REQUIRED",
+            "session_start(['read_and_close' => true])",
+            "?mode=ro&cache=private",
+            "PRAGMA query_only = ON",
+            "SQLITE3_OPEN_READONLY",
+            "production_runtime_write' => 0",
+            "production_db_write' => 0",
+            "provider_write' => 0",
+            "backup_create' => 0",
+            "restore' => 0",
+            "self_cleanup' => 'NO'",
+          ]
+          for x in required:
+            assert x in s, x
+          forbidden=['$_POST','file_put_contents(','fwrite(','unlink(','rename(','mkdir(','rmdir(','copy(','chmod(','touch(','shell_exec(','passthru(','exec(','system(']
+          for x in forbidden:
+            assert x not in s, x
+          print('PROBE_STATIC_GET_ONLY_NO_WRITE_TRUE_SQLITE_RO=PASS')
+          PY
+
+      - name: Build exact frozen V2.6.0 runtime only
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          rm -rf build/v260-probe-preflight
+          python3 scripts/build-v260-candidate-artifacts.py --output build/v260-probe-preflight >/tmp/p04-v260-builder.txt
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('build/v260-probe-preflight/V260_CANDIDATE_ARTIFACT_MANIFEST.json').read_text())
+          assert m['runtime_file_count']==168
+          assert m['runtime_fingerprint']==os.environ['EXPECTED_RUNTIME_FINGERPRINT']
+          assert m['source_manifest_count']==166
+          assert m['source_manifest_sha256']==os.environ['EXPECTED_SOURCE_SHA']
+          print('FROZEN_RUNTIME_IDENTITY=PASS')
+          PY
+
+      - name: Canonical read-only fixture and fail-closed gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d -t p04-v260-probe-XXXXXX)"
+          SITE="$TMP/site"; PRIVATE="$TMP/private"; PORT=18996; LOG="$TMP/php.log"; PID=''
+          cleanup(){ if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          mkdir -p "$SITE"
+          cp -a vf-infra/build/v260-probe-preflight/runtime/. "$SITE/"
+          cp /tmp/$PROBE_NAME "$SITE/$PROBE_NAME"
+          python3 scripts/p04_v260_probe_fixture.py --private-root "$PRIVATE" > "$TMP/fixture.json"
+          cat > "$SITE/config.php" <<PHP
+          <?php
+          return [
+            'app_key' => 'P04_V260_PROBE_FIXTURE_APP_KEY',
+            'data_path' => '$PRIVATE',
+            'session_name' => 'vfi_probe_test_session',
+            'session_idle_timeout' => 1209600,
+            'session_max_lifetime' => 2592000,
+          ];
+          PHP
+
+          SESSION_ID='p04v260probe1234567890abcdef'
+          UA='P04-V260-Probe-Fixture/1.0'
+          PRIVATE_ROOT="$PRIVATE" SESSION_ID="$SESSION_ID" UA="$UA" php -d "session.save_path=$PRIVATE/sessions" -r '
+            $name="vfi_probe_test_session"; session_name($name); session_id(getenv("SESSION_ID")); session_start();
+            $_SESSION["vf_domain_authenticated"]=true;
+            $_SESSION["vf_domain_last_activity"]=time();
+            $_SESSION["vf_domain_created_at"]=time();
+            $_SESSION["vf_domain_auth_generation"]=1;
+            $_SESSION["vf_domain_ua"]=hash("sha256",getenv("UA")."|P04_V260_PROBE_FIXTURE_APP_KEY");
+            session_write_close();'
+
+          DB="$PRIVATE/database/vf-domain.sqlite"
+          DB_SHA_BEFORE="$(sha256sum "$DB" | awk '{print $1}')"
+          for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+          php -d "session.save_path=$PRIVATE/sessions" -S "127.0.0.1:$PORT" -t "$SITE" >"$LOG" 2>&1 & PID=$!
+          READY=0; for _ in $(seq 1 80); do if ! kill -0 "$PID" 2>/dev/null; then cat "$LOG" >&2; exit 31; fi; if curl -sS "http://127.0.0.1:$PORT/$PROBE_NAME" >/dev/null 2>&1; then READY=1; break; fi; sleep .1; done; test "$READY" = 1
+
+          HTTP="$(curl -sS -o "$TMP/unauth.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:$PORT/$PROBE_NAME")"; test "$HTTP" = 401
+          python3 - "$TMP/unauth.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j['ok'] is False and j['code']=='ADMIN_SESSION_REQUIRED'
+          print('ADMIN_AUTH_FAIL_CLOSED=PASS')
+          PY
+
+          HTTP="$(curl -sS -X POST -o "$TMP/post.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:$PORT/$PROBE_NAME")"; test "$HTTP" = 405
+          python3 - "$TMP/post.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j['ok'] is False and j['code']=='GET_ONLY'
+          print('POST_REJECTED_GET_ONLY=PASS')
+          PY
+
+          HTTP="$(curl -sS -o "$TMP/pass.json" -w '%{http_code}' -A "$UA" -H "Cookie: vfi_probe_test_session=$SESSION_ID" "http://127.0.0.1:$PORT/$PROBE_NAME")"; test "$HTTP" = 200
+          python3 - "$TMP/pass.json" "$GITHUB_WORKSPACE" <<'PY'
+          import json,sys
+          from pathlib import Path
+          j=json.load(open(sys.argv[1]))
+          assert j['ok'] is True and j['final_machine_gate']=='PASS'
+          assert j['production_version']=='2.6.0' and j['installed_version']=='2.6.0' and j['schema']==14 and j['migration']=='NONE'
+          assert j['runtime_files']==168 and j['runtime_fingerprint']=='0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b'
+          assert j['source_manifest_count']==166 and j['source_manifest_sha']=='fe2e51f2332909041f44ec34dc2b2f79075bae336b6767e7401498f1ce73de01'
+          assert j['missing']==[] and j['unexpected']==[] and j['hash_mismatch']==[] and j['source_exact']=='PASS'
+          assert j['sqlite_integrity']=='PASS' and j['foreign_key_violations']==0
+          assert j['db_primary_changed']=='NO' and j['wal_created']=='NO' and j['journal_created']=='NO' and j['shm_created']=='NO'
+          assert j['business_counts']=={'domains':37,'dns':13,'vps':2,'assets':86,'provider_accounts':7,'billing_accounts':7}
+          assert j['business_semantic_preservation']=='PASS' and all(v>0 for v in j['relationship_counts'].values())
+          assert j['backup']['status']=='PASS' and j['backup']['source_version']=='2.5.8' and j['backup']['schema']==14 and j['backup']['foreign_key_violations']==0
+          assert j['backup']['created_before_atomic_handoff'] is True and j['backup']['file_sha256_match'] is True
+          h=j['update_history']; assert h['status']=='PASS' and h['from']=='2.5.8' and h['to']=='2.6.0' and h['result']=='SUCCESS' and h['migration']=='NONE'
+          assert h['backup_reference']==260 and h['journal_state']=='ABSENT_CLEAN' and h['recovery_state']=='ABSENT_CLEAN'
+          assert j['temporary_artifacts']==[] and j['temporary_unknown_artifact_count']==0
+          assert j['production_runtime_write']==j['production_db_write']==j['provider_write']==j['migration_write']==j['backup_create']==j['restore']==0 and j['self_cleanup']=='NO'
+          evidence={'probe_preflight':'PASS','final_machine_gate_fixture':'PASS','sqlite_true_readonly':'PASS','sidecar_creation':0,'db_primary_changed':False,'backup_fixture':'PASS','update_history_fixture':'PASS','temporary_inventory_empty_fixture':'PASS','runtime_files':j['runtime_files'],'runtime_fingerprint':j['runtime_fingerprint'],'source_manifest_count':j['source_manifest_count'],'source_manifest_sha':j['source_manifest_sha']}
+          out=Path(sys.argv[2])/'public-evidence'; out.mkdir(exist_ok=True); (out/'P04_V260_PROBE_PREFLIGHT_RESULT.json').write_text(json.dumps(evidence,indent=2,sort_keys=True)+'\n')
+          print('CANONICAL_V260_READONLY_PROBE_FIXTURE=PASS')
+          PY
+
+          test "$(sha256sum "$DB" | awk '{print $1}')" = "$DB_SHA_BEFORE"
+          for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+          echo 'TRUE_SQLITE_READONLY_NO_PRIMARY_OR_SIDECAR_WRITE=PASS'
+
+          : > "$SITE/repair-v2.6.0.php"
+          HTTP="$(curl -sS -o "$TMP/tempfail.json" -w '%{http_code}' -A "$UA" -H "Cookie: vfi_probe_test_session=$SESSION_ID" "http://127.0.0.1:$PORT/$PROBE_NAME")"; test "$HTTP" = 409
+          python3 - "$TMP/tempfail.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j['ok'] is True and j['final_machine_gate']=='FAIL'
+          assert len(j['temporary_artifacts'])==1 and j['temporary_artifacts'][0]['classification']=='UPGRADE_REPAIR_REMAINING'
+          assert j['production_runtime_write']==0 and j['production_db_write']==0
+          print('TEMPORARY_ARTIFACT_FAIL_CLOSED=PASS')
+          PY
+          rm -f "$SITE/repair-v2.6.0.php"
+          test "$(sha256sum "$DB" | awk '{print $1}')" = "$DB_SHA_BEFORE"
+          for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+
+      - name: Remove private source before public evidence upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf vf-infra private-input /tmp/$PROBE_NAME
+
+      - name: Upload public-safe preflight evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.6.0-Production-Final-Readback-Probe-Preflight
+          path: public-evidence/P04_V260_PROBE_PREFLIGHT_RESULT.json
+          if-no-files-found: error
+          retention-days: 14
