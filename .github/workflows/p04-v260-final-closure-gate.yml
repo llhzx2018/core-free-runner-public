@@ -1,0 +1,136 @@
+name: P04 V2.6.0 Final Closure Runtime Exact Gate
+
+on:
+  push:
+    branches:
+      - p04-v260-final-closure-gate
+    paths:
+      - '.github/workflows/p04-v260-final-closure-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REPOSITORY: llhzx2018/vf-infra
+  CLOSURE_COMMIT: 248035651a359142e576f24ef3479d7af82964db
+  CANDIDATE_COMMIT: b8d080e432ba811f6689372636022774e558ffc1
+  EXPECTED_RUNTIME_FILES: '168'
+  EXPECTED_RUNTIME_FP: 0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b
+  EXPECTED_SOURCE_COUNT: '166'
+  EXPECTED_SOURCE_SHA: fe2e51f2332909041f44ec34dc2b2f79075bae336b6767e7401498f1ce73de01
+  EXPECTED_AGENTS_BLOB: b9448b6098a2f1240172d851a86c027bc280cc17
+
+jobs:
+  exact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@v4
+
+      - name: Checkout exact closure
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.CLOSURE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: closure
+
+      - name: Checkout frozen release candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prove Authority and Agent-native governance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C closure rev-parse HEAD)" = "$CLOSURE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(tr -d '\r\n' < closure/VERSION)" = '2.6.0'
+          test "$(git -C closure hash-object AGENTS.md)" = "$EXPECTED_AGENTS_BLOB"
+          python3 - <<'PY'
+          import json
+          p=json.load(open('closure/VF_PROJECT.json',encoding='utf-8'))
+          assert p['status']=='STABLE_OPERATIONS'
+          assert p['lifecycle']=='STABLE_OPERATIONS'
+          assert p['production']['runtime_version']=='2.6.0'
+          assert p['production']['schema']==14
+          assert p['production']['migration']=='NONE'
+          assert p['production']['final_online_pass']=='YES'
+          assert p['production']['source_exact']=='PASS'
+          assert p['production']['business_semantic_preservation']=='PASS'
+          assert p['product_failure']=='NONE'
+          assert p['project_block']=='NONE'
+          assert p['observability_debt']['status']=='RECORDED_NON_BLOCKING'
+          assert p['native_existing_evidence_closure']['production_probe']=='NOT_USED'
+          print('AUTHORITY_CLOSURE=PASS')
+          PY
+
+      - name: Build closure and frozen candidate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd closure
+          python3 scripts/build-v260-candidate-artifacts.py --output build/final-closure >/tmp/closure-builder.txt
+          cd ../candidate
+          python3 scripts/build-v260-candidate-artifacts.py --output build/frozen-candidate >/tmp/candidate-builder.txt
+
+      - name: Runtime Exact Gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          diff -qr closure/build/final-closure/runtime candidate/build/frozen-candidate/runtime
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('closure/build/final-closure/V260_CANDIDATE_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          assert m['runtime_file_count']==int(os.environ['EXPECTED_RUNTIME_FILES'])
+          assert m['runtime_fingerprint']==os.environ['EXPECTED_RUNTIME_FP']
+          assert m['source_manifest_count']==int(os.environ['EXPECTED_SOURCE_COUNT'])
+          assert m['source_manifest_sha256']==os.environ['EXPECTED_SOURCE_SHA']
+          result={
+            'gate':'P04_V260_FINAL_CLOSURE_RUNTIME_EXACT',
+            'status':'PASS',
+            'version':'2.6.0',
+            'schema':14,
+            'runtime_files':m['runtime_file_count'],
+            'runtime_fingerprint':m['runtime_fingerprint'],
+            'source_manifest_count':m['source_manifest_count'],
+            'source_manifest_sha256':m['source_manifest_sha256'],
+            'candidate_runtime_byte_exact':True,
+            'agents_md_preserved':True,
+            'force_push':'NO',
+            'history_rewrite':'NO',
+            'production_probe':'NOT_USED'
+          }
+          Path('public-evidence').mkdir(exist_ok=True)
+          Path('public-evidence/P04_V260_FINAL_CLOSURE_RUNTIME_EXACT.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print('RUNTIME_168_EXACT=PASS')
+          PY
+
+      - name: Remove private source before evidence upload
+        if: always()
+        shell: bash
+        run: rm -rf closure candidate
+
+      - name: Upload public-safe closure evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.6.0-Final-Closure-Runtime-Exact
+          path: public-evidence/P04_V260_FINAL_CLOSURE_RUNTIME_EXACT.json
+          if-no-files-found: error
+          retention-days: 14
