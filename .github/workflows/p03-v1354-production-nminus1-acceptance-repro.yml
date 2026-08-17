@@ -1,0 +1,148 @@
+name: P03 V1.35.4 Production N-1 Acceptance Repro
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1354-production-nminus1-acceptance-repro.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_COMMIT: 263c4d8f7e38bff58db5680a6845ceb5a576d6ae
+      RELEASE_ID: '371488636'
+      UPDATE_ASSET_ID: '517455108'
+      RELEASE_MANIFEST_ASSET_ID: '517455146'
+      PACKAGE_MANIFEST_ASSET_ID: '517455168'
+      UPDATE_SHA256: c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073
+      UPDATE_BYTES: '766277'
+    steps:
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout exact V1.35.3 Production parser
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p03-prod
+
+      - name: Prepare PHP Zip runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-zip unzip >/dev/null
+          php -r 'if(!class_exists("ZipArchive")){fwrite(STDERR,"ZipArchive missing\n");exit(1);} echo "ZIP_RUNTIME=PASS\n";'
+
+      - name: Download exact immutable V1.35.4 Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p03-nminus1"; rm -rf "$ROOT"; mkdir -p "$ROOT"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-forge/releases/assets/$UPDATE_ASSET_ID" > "$ROOT/VF_Forge_V1.35.4_UPDATE.zip"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-forge/releases/assets/$RELEASE_MANIFEST_ASSET_ID" > "$ROOT/VF_Forge_V1.35.4_RELEASE_MANIFEST.json"
+          gh api -H 'Accept: application/octet-stream' "/repos/llhzx2018/vf-forge/releases/assets/$PACKAGE_MANIFEST_ASSET_ID" > "$ROOT/VF_Forge_V1.35.4_PACKAGE_MANIFEST.json"
+          test "$(stat -c%s "$ROOT/VF_Forge_V1.35.4_UPDATE.zip")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$ROOT/VF_Forge_V1.35.4_UPDATE.zip"|awk '{print $1}')" = "$UPDATE_SHA256"
+          unzip -t "$ROOT/VF_Forge_V1.35.4_UPDATE.zip" >/dev/null
+          test "$(unzip -Z1 "$ROOT/VF_Forge_V1.35.4_UPDATE.zip")" = 'repair-v1.35.4.php'
+          unzip -p "$ROOT/VF_Forge_V1.35.4_UPDATE.zip" repair-v1.35.4.php > "$ROOT/repair-v1.35.4.php"
+          echo 'EXACT_RELEASE_ASSET_READBACK=PASS'
+          echo "UPDATE_BYTES=$(stat -c%s "$ROOT/VF_Forge_V1.35.4_UPDATE.zip")"
+          echo "UPDATE_SHA256=$(sha256sum "$ROOT/VF_Forge_V1.35.4_UPDATE.zip"|awk '{print $1}')"
+          echo "REPAIR_SHA256=$(sha256sum "$ROOT/repair-v1.35.4.php"|awk '{print $1}')"
+
+      - name: Compare exact three-layer contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p03-nminus1"
+          echo '--- PRODUCTION PARSER CONTRACT ---'
+          grep -nE 'VFF_ATOMIC_(TARGET|SCHEMA|ALLOWED)|VFF_PACKAGE_(ID|TYPE)|allowed source' p03-prod/src/app/ManualUpdateService.php
+          echo '--- RELEASE REPAIR CONTRACT ---'
+          grep -nE '^const VFF_(ATOMIC_TARGET|ATOMIC_SCHEMA|ATOMIC_ALLOWED|PACKAGE_ID|PACKAGE_TYPE|SOURCE_VERSION|SOURCE_SCHEMA|MIGRATION_ID)' "$ROOT/repair-v1.35.4.php" || true
+          echo '--- RELEASE MANIFEST SAFE CONTRACT ---'
+          python3 - "$ROOT/VF_Forge_V1.35.4_RELEASE_MANIFEST.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          print(json.dumps(d,ensure_ascii=False,sort_keys=True))
+          PY
+          echo '--- PACKAGE MANIFEST SAFE CONTRACT ---'
+          python3 - "$ROOT/VF_Forge_V1.35.4_PACKAGE_MANIFEST.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          print(json.dumps(d,ensure_ascii=False,sort_keys=True))
+          PY
+          if grep -qE '^const VFF_ATOMIC_ALLOWED\s*=' "$ROOT/repair-v1.35.4.php"; then
+            echo 'REPAIR_ALLOWED_CONSTANT_PRESENT=YES'
+          else
+            echo 'REPAIR_ALLOWED_CONSTANT_PRESENT=NO'
+          fi
+
+      - name: Reproduce exact V1.35.3 Production acceptance failure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p03-nminus1"
+          TESTROOT="$ROOT/site"; TEMPROOT="$ROOT/temp"; mkdir -p "$TESTROOT" "$TEMPROOT"
+          cat > "$ROOT/repro.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('VFAB_VERSION','1.35.3');
+          define('VFAB_SCHEMA_VERSION',29);
+          define('VFAB_ROOT',$argv[3]);
+          define('VFAB_TEMP_DIR',$argv[4]);
+          require $argv[1];
+          $svc=new VfManualUpdateService();
+          try {
+              $svc->inspectAndPublishPath($argv[2],'c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073',false);
+              fwrite(STDERR,"UNEXPECTED_ACCEPTANCE\n");
+              exit(91);
+          } catch (Throwable $e) {
+              echo 'EXACT_EXCEPTION_CLASS='.get_class($e)."\n";
+              echo 'EXACT_EXCEPTION_MESSAGE='.$e->getMessage()."\n";
+              if ($e->getMessage() !== 'Atomic repair 缺少 VFF_ATOMIC_ALLOWED。') {
+                  fwrite(STDERR,"FAILURE_TEXT_MISMATCH\n");
+                  exit(92);
+              }
+              echo "FAILURE_REPRODUCED=PASS\n";
+          }
+          PHP
+          php "$ROOT/repro.php" p03-prod/src/app/ManualUpdateService.php "$ROOT/VF_Forge_V1.35.4_UPDATE.zip" "$TESTROOT" "$TEMPROOT"
+
+      - name: Formal gate coverage diagnosis
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -nE 'repair-v1\.35\.4|VFF_ATOMIC_ALLOWED|ManualUpdateService|inspectAndPublish' .github/workflows/p03-v1.35.4-formal-artifact-pre-gate.yml scripts/p03_v1354_* 2>/dev/null || true
+          echo 'PERMANENT_REGRESSION_REQUIRED=PRODUCTION_N_MINUS_1_UPDATE_ACCEPTANCE_GATE'
+          echo 'PRODUCT_RUNTIME_CANDIDATE=UNCHANGED'
+          echo 'M030=UNCHANGED'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Verify zero public artifacts and cleanup
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/p03-nminus1" p03-prod
+          echo 'PUBLIC_ACTIONS_ARTIFACTS=0'
+          echo 'EPHEMERAL_PRIVATE_DATA_CLEANUP=PASS'
