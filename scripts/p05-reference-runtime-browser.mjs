@@ -46,7 +46,8 @@ async function assertNoOverflow(label){
 
 await page.setViewport({width:1440,height:1000,deviceScaleFactor:1});
 await page.goto(base,{waitUntil:'networkidle2'});
-await page.type('input[autocomplete="username"]','admin');
+const usernameValue=await page.$eval('input[autocomplete="username"]',el=>el.value);
+assert.equal(usernameValue,'admin','default admin username changed unexpectedly');
 await page.type('input[autocomplete="current-password"]',password);
 await page.click('button.primary');
 await page.waitForSelector('.workspace-shell',{timeout:10000});
