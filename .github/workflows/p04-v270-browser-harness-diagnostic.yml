@@ -1,0 +1,73 @@
+name: P04 V2.7 Browser Harness Diagnostic
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-browser-harness-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: integration/v2.7.0-personal-infra
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reproduce old harness prerequisite order
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p diagnostic
+          cd private
+          python3 - <<'PY'
+          import json, subprocess
+          out={}
+          exts=['pdo_sqlite','sqlite3','curl','sodium']
+          out['php_extensions']={}
+          for ext in exts:
+              r=subprocess.run(['php','-r',f"exit(extension_loaded('{ext}')?0:1);"],capture_output=True)
+              out['php_extensions'][ext]=(r.returncode==0)
+          r=subprocess.run(['php','-r','exit(class_exists("ZipArchive")?0:1);'],capture_output=True)
+          out['ziparchive']=(r.returncode==0)
+          r=subprocess.run(['node','-e',"import('playwright').then(()=>process.exit(0)).catch(()=>process.exit(1))"],capture_output=True,text=True)
+          out['playwright_import_before_install']=(r.returncode==0)
+          out['version']=open('VERSION',encoding='utf-8').read().strip()
+          if not all(out['php_extensions'].values()): out['old_harness_first_failure']='PHP_EXTENSION_EXIT_10'
+          elif not out['ziparchive']: out['old_harness_first_failure']='ZIPARCHIVE_EXIT_10'
+          elif not out['playwright_import_before_install']: out['old_harness_first_failure']='PLAYWRIGHT_IMPORT_EXIT_10'
+          elif out['version']!='2.5.8': out['old_harness_first_failure']='V258_VERSION_ASSERT_EXIT_11'
+          else: out['old_harness_first_failure']='NONE'
+          open('../diagnostic/prerequisites.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(out,ensure_ascii=False))
+          PY
+      - name: Lint restored V2.7 PHP runtime
+        shell: bash
+        run: |
+          set +e
+          cd private
+          fail=0
+          : > ../diagnostic/php-lint.txt
+          for f in public/index.php public/advanced.php public/experience.php src/app/Core/GlobalSearchService.php src/app/Core/PersonalInfraExperienceService.php src/app/Core/PersonalInfraTodayTrait.php src/app/Core/PersonalInfraMoneyTrait.php src/app/Core/PersonalInfraPortfolioTrait.php src/app/Core/PersonalInfraDomainTrait.php src/app/Core/PersonalInfraInfraTrait.php src/app/Core/PersonalInfraSupportTrait.php; do
+            php -l "$f" >> ../diagnostic/php-lint.txt 2>&1 || fail=1
+          done
+          printf 'lint_failed=%s\n' "$fail" >> ../diagnostic/php-lint.txt
+          cat ../diagnostic/php-lint.txt
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p04-v270-browser-harness-diagnostic
+          path: diagnostic
+          if-no-files-found: error
+          retention-days: 14
