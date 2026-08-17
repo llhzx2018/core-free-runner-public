@@ -65,7 +65,7 @@ PY
 
   python3 - "$runtime/$CLEANUP" <<'PY'
 from pathlib import Path
-import re,sys
+import base64,json,re,sys
 text=Path(sys.argv[1]).read_text()
 for token in [
     'file_put_contents','fopen(','rename(','copy(','mkdir(','chmod(','touch(',
@@ -83,9 +83,15 @@ assert "TARGET_PATH_INVALID" in text
 assert "is_link($path)" in text
 assert 'FROZEN_RUNTIME_SOURCE_NOT_EXACT' in text
 assert 'MEMORY_API_NOT_CANONICAL_EXACT' in text
-assert '1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7' in text
-assert 'b9a41499d33d1b5dddc0b9fd2ddc43a324aa9378da8336ef34cab183fa0dc18d' in text
-assert 'b0024ea1d8b12f0d89a4bc9163c82139f46d5b7bd3c9ad57e978d910f73b928f' in text
+payload_match=re.search(r"const VFTC_PAYLOAD='([^']+)';",text); assert payload_match
+payload=json.loads(base64.b64decode(payload_match.group(1),validate=True))
+assert payload['memory_api_bytes']==4497
+assert payload['memory_api_sha256']=='1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7'
+assert payload['targets']['vf-forge-v1354-source-reconcile-1ec8566c6838.php']=='b9a41499d33d1b5dddc0b9fd2ddc43a324aa9378da8336ef34cab183fa0dc18d'
+assert payload['targets']['vf-forge-v1354-source-forensic-3dc194b1768a.php']=='b0024ea1d8b12f0d89a4bc9163c82139f46d5b7bd3c9ad57e978d910f73b928f'
+assert payload['runtime_files']==42
+assert payload['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+assert payload['source_manifest_sha256']=='07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'
 print('FAIL_CLOSED_STATIC=PASS')
 print('NO_SQLITE_OPEN=PASS')
 print('ONLY_ALLOWED_UNLINK_WRITES=PASS')
