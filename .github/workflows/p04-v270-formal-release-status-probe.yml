@@ -1,0 +1,77 @@
+name: P04 V2.7 Formal Release Status Probe
+
+on:
+  push:
+    branches:
+      - p04-v270-formal-release-tmp
+    paths:
+      - '.github/workflows/p04-v270-formal-release-status-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for formal release run and publish safe status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo='llhzx2018/core-free-runner-public'
+          product='llhzx2018/vf-infra'
+          branch='p04-v270-formal-release-tmp'
+          workflow='p04-v270-formal-release.yml'
+          run_json="$RUNNER_TEMP/run.json"
+          for i in $(seq 1 120); do
+            gh api "repos/$repo/actions/workflows/$workflow/runs?branch=$branch&event=push&per_page=5" > "$run_json"
+            count=$(jq '.workflow_runs|length' "$run_json")
+            if [ "$count" -gt 0 ]; then
+              status=$(jq -r '.workflow_runs[0].status' "$run_json")
+              if [ "$status" = 'completed' ]; then break; fi
+            fi
+            sleep 10
+          done
+          run_id=$(jq -r '.workflow_runs[0].id // 0' "$run_json")
+          status=$(jq -r '.workflow_runs[0].status // "missing"' "$run_json")
+          conclusion=$(jq -r '.workflow_runs[0].conclusion // "null"' "$run_json")
+          if [ "$run_id" = 0 ] || [ "$status" != 'completed' ]; then conclusion='TIMEOUT_OR_MISSING'; fi
+
+          tag='ABSENT'; release='ABSENT'; release_id=0; assets='[]'
+          if [ -n "$RELEASE_TOKEN" ]; then
+            export GH_TOKEN="$RELEASE_TOKEN"
+            if gh api "repos/$product/git/ref/tags/v2.7.0" > "$RUNNER_TEMP/tag.json" 2>/dev/null; then
+              tag=$(jq -r '.object.sha' "$RUNNER_TEMP/tag.json")
+            fi
+            if gh api "repos/$product/releases/tags/v2.7.0" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+              release=$(jq -r '.name' "$RUNNER_TEMP/release.json")
+              release_id=$(jq -r '.id' "$RUNNER_TEMP/release.json")
+              assets=$(jq -c '[.assets[]|{id,name,size,digest}]|sort_by(.name)' "$RUNNER_TEMP/release.json")
+            fi
+          fi
+          jq -n \
+            --argjson run_id "$run_id" \
+            --arg status "$status" \
+            --arg conclusion "$conclusion" \
+            --arg tag_target "$tag" \
+            --arg release_name "$release" \
+            --argjson release_id "$release_id" \
+            --argjson assets "$assets" \
+            '{formal_release_run_id:$run_id,status:$status,conclusion:$conclusion,tag_target:$tag_target,release_name:$release_name,release_id:$release_id,assets:$assets}' \
+            > p04-v270-formal-release-status.json
+          git config user.name 'VF Release Status Probe'
+          git config user.email 'actions@users.noreply.github.com'
+          git add p04-v270-formal-release-status.json
+          git commit -m 'chore(P04): record V2.7.0 formal release status [skip ci]' || true
+          git push origin HEAD:"$branch"
+          cat p04-v270-formal-release-status.json
