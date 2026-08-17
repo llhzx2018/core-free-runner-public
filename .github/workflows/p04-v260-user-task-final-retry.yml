@@ -1,0 +1,210 @@
+name: P04 VF Infra V2.6.0 User Task Final Retry
+
+on:
+  push:
+    branches:
+      - p04-v260-formal-candidate
+    paths:
+      - '.github/workflows/p04-v260-user-task-final-retry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v260-user-task-final-retry
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_COMMIT: b8d080e432ba811f6689372636022774e558ffc1
+  PRIOR_BROWSER_SOURCE: 13e1da3c7dd5ec7cf4abbdba7c041b94329f20a5
+  EXPECTED_RUNTIME_FINGERPRINT: 0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b
+  EXPECTED_FULL_SHA: 9eb272cae0ff36bfc2c738033d310646545fcf2808c67665f0c13b3c7ab33696
+  EXPECTED_UPDATE_SHA: f5b2d7e44cbc5ce1b7d7c7c13dbdc27fa4eaef1b117c54f67c2ac1f752deab75
+  EXPECTED_PACKAGE_SHA: d4884cf8d8f0064ab49b952b9430f7f0c4e4cee5e7293ab1f34275cbb43dd71b
+  EXPECTED_SOURCE_MANIFEST_SHA: fe2e51f2332909041f44ec34dc2b2f79075bae336b6767e7401498f1ce73de01
+
+jobs:
+  user-task-final:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact private Candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-infra
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Prove only User Task test changed since compatibility PASS
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          git diff --name-only "$PRIOR_BROWSER_SOURCE"...HEAD | tee /tmp/v260-final-retry-diff.txt
+          test "$(wc -l </tmp/v260-final-retry-diff.txt | tr -d ' ')" = '1'
+          grep -qx 'tests/e2e/v260-formal-candidate.mjs' /tmp/v260-final-retry-diff.txt
+          git diff --exit-code "$PRIOR_BROWSER_SOURCE" HEAD -- VERSION public src database config scripts docs/operations/package/RELEASE_NOTES.md
+          node --check tests/e2e/v260-formal-candidate.mjs
+          echo 'P04_V260_RUNTIME_AND_ARTIFACT_IDENTITY_UNCHANGED_AFTER_USER_TASK_TEST_FIX'
+
+      - name: Rebuild locked Candidate artifacts for final evidence
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf build/v260-candidate
+          python3 scripts/build-v260-candidate-artifacts.py --output build/v260-candidate | tee /tmp/v260-artifact-build-final.txt
+          echo "$EXPECTED_FULL_SHA  build/v260-candidate/VF_Infra_V2.6.0_FULL.zip" | sha256sum -c -
+          echo "$EXPECTED_UPDATE_SHA  build/v260-candidate/update-set/VF_Infra_V2.6.0_UPDATE.zip" | sha256sum -c -
+          echo "$EXPECTED_UPDATE_SHA  build/v260-candidate/update-set/VF_Infra_V2.6.0_ATOMIC.zip" | sha256sum -c -
+          echo "$EXPECTED_PACKAGE_SHA  build/v260-candidate/update-set/PACKAGE_MANIFEST.json" | sha256sum -c -
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          m=json.loads(Path('build/v260-candidate/V260_CANDIDATE_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          assert m['runtime_file_count']==168
+          assert m['runtime_fingerprint']==os.environ['EXPECTED_RUNTIME_FINGERPRINT']
+          assert m['source_manifest_count']==166
+          assert m['source_manifest_sha256']==os.environ['EXPECTED_SOURCE_MANIFEST_SHA']
+          assert m['package_identity']['maintenance_only'] is False
+          assert m['package_identity']['release_kind']=='product_experience_generation'
+          print('P04_V260_FINAL_ARTIFACT_IDENTITY_EXACT_CARRY_FORWARD_PASS')
+          PY
+
+      - name: Install Playwright Chromium
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Run V2.6.0 User Task Responsive Visual Gate
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d -t vf-infra-v260-user-task-final-XXXXXX)"; WEB="$TMP/site"; LOG="$TMP/php-server.log"; PORT=18997; PID=''
+          cleanup(){ if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          cp -a build/v260-candidate/runtime "$WEB"
+          php -S "127.0.0.1:$PORT" -t "$WEB" >"$LOG" 2>&1 & PID=$!
+          READY=0; for _ in $(seq 1 80); do if ! kill -0 "$PID" 2>/dev/null; then cat "$LOG" >&2; exit 11; fi; if curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1; then READY=1; break; fi; sleep .1; done
+          test "$READY" = 1
+          ADMIN_CREDENTIAL="$(php -r 'echo "Vf" . bin2hex(random_bytes(18)) . "Aa1";')"
+          rm -rf build/v260-candidate-evidence
+          VF_INFRA_E2E_BASE_URL="http://127.0.0.1:$PORT" VF_INFRA_E2E_ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL" VF_INFRA_E2E_WEB_ROOT="$WEB" VF_INFRA_V260_FIXTURE="$PWD/tests/fixtures/v260-user-task-fixture.php" VF_INFRA_UI_EVIDENCE_DIR="build/v260-candidate-evidence" node tests/e2e/v260-formal-candidate.mjs | tee /tmp/v260-user-task-final.txt
+          grep -q '"user_task":"PASS"' /tmp/v260-user-task-final.txt
+          grep -q '"responsive":"PASS"' /tmp/v260-user-task-final.txt
+          for f in candidate-1440-dashboard.png candidate-1440-domains.png candidate-1440-system-update.png candidate-390-dashboard.png candidate-390-domains.png USER_TASK_GATE.json visual-metrics.json; do test -f "build/v260-candidate-evidence/$f"; done
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$LOG"; then cat "$LOG" >&2; exit 75; fi
+          echo 'P04_V260_USER_TASK_RESPONSIVE_VISUAL_CAPTURE_PASS'
+
+      - name: Build final public-safe evidence and encrypt private Candidate artifacts
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/p04-v260-formal-candidate-evidence; ENC=/tmp/p04-v260-encrypted-artifacts
+          rm -rf "$OUT" "$ENC"; mkdir -p "$OUT" "$ENC"
+          COMMIT="$(git rev-parse HEAD)"; TREE="$(git rev-parse HEAD^{tree})"
+          python3 - "$COMMIT" "$TREE" <<'PY'
+          from pathlib import Path
+          import json,sys
+          commit,tree=sys.argv[1:]
+          m=json.loads(Path('build/v260-candidate/V260_CANDIDATE_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          result={
+            'project':'P04 · VF Infra','version':'2.6.0','schema':14,'migration':'NONE',
+            'candidate_branch':'candidate/v2.6.0-mature-personal-console','candidate_commit':commit,'candidate_tree':tree,
+            'runtime_files':m['runtime_file_count'],'runtime_fingerprint':m['runtime_fingerprint'],
+            'source_manifest_count':m['source_manifest_count'],'source_manifest_sha256':m['source_manifest_sha256'],
+            'function':'PASS','security':'PASS','data':'PASS','backup_restore':'PASS','existing_v2_5_8_compatibility':'PASS',
+            'user_task':'PASS','browser':'PASS','responsive':'PASS','visual_regression':'PENDING_MASTER_PIXEL_STRUCTURE_REVIEW',
+            'full_runtime_vs_update_result_source_exact':'PASS','formal_artifact':'PASS',
+            'product_failure':'NONE','project_block':'NONE','ready_for_release':'PENDING_VISUAL_REVIEW',
+            'production_write':0,'main_write':0,'tag_write':0,'release_write':0,'core_updates_write':0,
+            'evidence_lineage':{
+              'function_data_fresh_install':{'run':32000287243,'source':'a9878e9b09ffacc2afdc7b96c36e1912db1d32b5'},
+              'artifact_source_exact':{'run':32000542680,'source':'13e1da3c7dd5ec7cf4abbdba7c041b94329f20a5'},
+              'v258_browser_backup_restore':{'run':32000681583,'source':'13e1da3c7dd5ec7cf4abbdba7c041b94329f20a5'},
+              'runtime_unchanged_after_test_only_fix':True
+            },
+            'artifacts':m['artifacts'],'package_identity':m['package_identity']
+          }
+          Path('/tmp/p04-v260-formal-candidate-evidence/CANDIDATE_GATE_RESULT.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          Path('/tmp/p04-v260-formal-candidate-evidence/FULL_RUNTIME_VS_UPDATE_RESULT_SOURCE_EXACT.json').write_text(json.dumps({'gate':'FULL_RUNTIME_VS_UPDATE_RESULT_SOURCE_EXACT','run':32000542680,'result':'PASS','runtime_files':168,'missing':0,'unexpected':0,'hash_mismatch':0,'fingerprint':'0c5d14bd437ece1c826e76fee186d0a785838aae329e7406133e4d7f14a6212b'},indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False,sort_keys=True))
+          PY
+          cp /tmp/v260-final-retry-diff.txt "$OUT/FINAL_TEST_ONLY_DIFF.txt"
+          cp /tmp/v260-artifact-build-final.txt "$OUT/ARTIFACT_REBUILD.txt"
+          cp /tmp/v260-user-task-final.txt "$OUT/V260_USER_TASK_BROWSER.txt"
+          cp build/v260-candidate/V260_CANDIDATE_ARTIFACT_MANIFEST.json "$OUT/"
+          cp build/v260-candidate-evidence/* "$OUT/"
+          printf '%s\n' 'FUNCTION=PASS' 'SECURITY=PASS' 'DATA=PASS' 'BACKUP_RESTORE=PASS' 'V258_COMPATIBILITY=PASS' 'USER_TASK=PASS' 'BROWSER=PASS' 'RESPONSIVE=PASS' 'VISUAL_REGRESSION=PENDING_MASTER_PIXEL_STRUCTURE_REVIEW' 'FULL_RUNTIME_VS_UPDATE_RESULT_SOURCE_EXACT=PASS' 'FORMAL_ARTIFACT=PASS' 'PRODUCTION_WRITE=0' 'MAIN_WRITE=0' 'TAG_WRITE=0' 'RELEASE_WRITE=0' 'CORE_UPDATES_WRITE=0' > "$OUT/GATE_SUMMARY.txt"
+          tar -C build/v260-candidate -czf /tmp/V260_FORMAL_CANDIDATE_ARTIFACTS.tar.gz VF_Infra_V2.6.0_FULL.zip update-set/VF_Infra_V2.6.0_UPDATE.zip update-set/VF_Infra_V2.6.0_ATOMIC.zip update-set/repair-v2.6.0.php update-set/PACKAGE_MANIFEST.json update-set/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt update-set/SHA256SUMS.txt V260_CANDIDATE_ARTIFACT_MANIFEST.json
+          cat >/tmp/v260-artifact-public.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAsiqkyIEOi191EYo4pJno
+          S5FFRHgjKuDH3WiPXdTQDvTzZrrux+jJWaxeZYQFFHo9bsEUlfLZDUZmp4N35WnQ
+          o867LLe/KvD2NafTS1O+Kxxyq25jjRexMo+Syj6dE3mYM6nOTYR4kj9PIVAll9P5
+          HAXjiRGQ5eukpBwRQ/6GyNfBw3brRpItuRdsyOXS+WJeW5qtEbJ+4OnwBBTIl4wQ
+          KbdgY8ksySzaK35K6955UN+T9LmWd5MSzIivz2aWO1IAXwaEXJ2wDzVTxQ7JOVB7
+          ipgQRy/Ox5JEuZovycizA2RxpHu8lS+1KPyTsVneQSIMx++NPl4joU63PQzPZ8oc
+          A+ifazgmV3bIorT5JwXXsdTmwozk6ue2yf1B/SKwvRzqblMQNMWIgFVyllKl9y3P
+          pJYMZxpDNEgPWL3nvcBvq9hXLl/wiRyENCeh/nM558zgQbxI4fEx/LuGGYes/mCg
+          vTI324Z9UekX1V7b/N8nTJTgqJd7Qw9dHkfuLviA5eQNAgMBAAE=
+          -----END PUBLIC KEY-----
+          PEM
+          openssl rand -base64 48 > /tmp/v260-artifact-passphrase.txt
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -pass file:/tmp/v260-artifact-passphrase.txt -in /tmp/V260_FORMAL_CANDIDATE_ARTIFACTS.tar.gz -out "$ENC/V260_FORMAL_CANDIDATE_ARTIFACTS.enc"
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/v260-artifact-public.pem -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in /tmp/v260-artifact-passphrase.txt -out "$ENC/V260_FORMAL_CANDIDATE_KEY.enc"
+          sha256sum "$ENC"/* > "$ENC/ENCRYPTED_SHA256SUMS.txt"
+          printf '%s\n' 'Encryption: AES-256-CBC + PBKDF2(200000)' 'Key wrapping: RSA-3072 OAEP SHA-256' 'Plaintext Candidate release artifacts are not uploaded to the public Runner.' > "$ENC/ENCRYPTION_README.txt"
+          rm -f /tmp/v260-artifact-passphrase.txt /tmp/V260_FORMAL_CANDIDATE_ARTIFACTS.tar.gz /tmp/v260-artifact-public.pem
+          echo 'P04_V260_FORMAL_CANDIDATE_AUTOMATED_GATE_PASS'
+
+      - name: Remove private source before artifact upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf vf-infra
+          test ! -e vf-infra
+
+      - name: Upload public-safe V2.6.0 Candidate evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.6.0-Formal-Candidate-Evidence
+          path: /tmp/p04-v260-formal-candidate-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload encrypted V2.6.0 Candidate release artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.6.0-Encrypted-Candidate-Artifacts
+          path: /tmp/p04-v260-encrypted-artifacts
+          if-no-files-found: error
+          retention-days: 14
