@@ -1,0 +1,90 @@
+name: P04 VF Infra V2.5.8 Test Fix 04
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-test-fix-04.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_BRANCH: feature/v2.5.8-personal-console-precision
+  INPUT_COMMIT: 08424721273818f5e05a8a208cd679f2f994d48e
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.INPUT_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - name: Correct expected security console accounting
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tests/e2e/v258-personal-console.mjs')
+          s=p.read_text(encoding='utf-8')
+          old="const pageErrors=[]; const consoleErrors=[];"
+          new="const pageErrors=[]; const consoleErrors=[]; let expectedSecurityStatus=null;"
+          if s.count(old)!=1: raise SystemExit('V258_CONSOLE_STATE_ANCHOR_INVALID')
+          s=s.replace(old,new,1)
+          old="assert(result.status>=400 && result.ok!==true,'CSRF fail-closed regression');"
+          new="assert(result.status===422 && result.ok!==true,'CSRF fail-closed regression'); expectedSecurityStatus=result.status;"
+          if s.count(old)!=1: raise SystemExit('V258_CSRF_ASSERT_ANCHOR_INVALID')
+          s=s.replace(old,new,1)
+          old="assert(pageErrors.length===0,`page errors: ${pageErrors.join(' | ')}`); assert(consoleErrors.length===0,`console errors: ${consoleErrors.join(' | ')}`);"
+          new="assert(pageErrors.length===0,`page errors: ${pageErrors.join(' | ')}`); const unexpectedConsoleErrors=consoleErrors.filter(m=>!(expectedSecurityStatus===422&&m.includes('Failed to load resource')&&m.includes('422'))); assert(unexpectedConsoleErrors.length===0,`console errors: ${unexpectedConsoleErrors.join(' | ')}`);"
+          if s.count(old)!=1: raise SystemExit('V258_FINAL_CONSOLE_ASSERT_ANCHOR_INVALID')
+          s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          node --check tests/e2e/v258-personal-console.mjs
+          grep -q 'expectedSecurityStatus=result.status' tests/e2e/v258-personal-console.mjs
+          grep -q 'unexpectedConsoleErrors' tests/e2e/v258-personal-console.mjs
+          echo 'P04_V258_EXPECTED_CSRF_422_CONSOLE_ACCOUNTING_PASS'
+
+      - name: Commit test correction and push non-force
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Candidate Test Fix'
+          git config user.email 'actions@users.noreply.github.com'
+          git add tests/e2e/v258-personal-console.mjs
+          git diff --cached --check
+          git commit -m 'test(P04): account for expected CSRF 422 console signal'
+          OUTPUT_COMMIT="$(git rev-parse HEAD)"
+          OUTPUT_TREE="$(git rev-parse HEAD^{tree})"
+          git push origin "HEAD:$TARGET_BRANCH"
+          printf '%s\n%s\n' "$OUTPUT_COMMIT" "$OUTPUT_TREE" > "$RUNNER_TEMP/p04-v258-test-fix-04.txt"
+
+      - name: Remote readback
+        shell: bash
+        working-directory: private-vf-infra
+        run: |
+          set -Eeuo pipefail
+          OUTPUT_COMMIT="$(sed -n '1p' "$RUNNER_TEMP/p04-v258-test-fix-04.txt")"
+          OUTPUT_TREE="$(sed -n '2p' "$RUNNER_TEMP/p04-v258-test-fix-04.txt")"
+          test "$(git ls-remote origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')" = "$OUTPUT_COMMIT"
+          echo "Output Commit: $OUTPUT_COMMIT"
+          echo "Output Tree: $OUTPUT_TREE"
+          echo 'P04_V258_TEST_FIX_04_REMOTE_READBACK_PASS'
+
+      - name: Remove private worktree
+        if: always()
+        shell: bash
+        run: rm -rf private-vf-infra
