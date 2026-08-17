@@ -111,7 +111,6 @@ PY
     --data-urlencode "password_confirm=$FIXTURE_PASS" \
     "$base/setup.php" > "$GATE_ROOT/setup-post-$port.txt"
   grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$GATE_ROOT/setup-post-$port.txt"
-  # setup.php intentionally removes bootstrap index.html; restore exact frozen runtime fixture.
   if [[ ! -e "$runtime/index.html" ]]; then cp "$GATE_ROOT/frozen/index.html" "$runtime/index.html"; fi
   curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H 'Content-Type: application/json' \
     --data "{\"password\":\"$FIXTURE_PASS\"}" "$base/api.php?action=login" > "$GATE_ROOT/login-$port.json"
@@ -121,8 +120,11 @@ j=json.load(open(sys.argv[1])); assert j.get('ok') and j.get('csrf')
 PY
 }
 
-db_path(){ find "$1/database" -maxdepth 1 -type f -name '*.sqlite' | head -n1; }
-assert_db_unchanged(){ local db="$1" before="$2"; test -n "$db"; test "$before" = "$(sha256sum "$db"|awk '{print $1}')"; }
+db_sha(){
+  local port="$1" name="p03-v1354-forensic-$1"
+  docker exec "$name" php -r '$r=include "/app/app/.runtime.php"; $p=(string)($r["db_file"]??""); if($p===""||!is_file($p)){exit(2);} echo hash_file("sha256",$p);'
+}
+assert_db_unchanged(){ local port="$1" before="$2"; test "$before" = "$(db_sha "$port")"; }
 
 run_case(){
   local label="$1" port="$2" suffix="$3"
@@ -138,10 +140,9 @@ run_case(){
   start_fixture "$runtime" "$data" "$port"
   trap "stop_fixture $port" RETURN
   setup_login "$port" "$data" "$cookie" "$runtime"
-  local base="http://127.0.0.1:$port" db db0
-  db=$(db_path "$data"); test -n "$db"; db0=$(sha256sum "$db"|awk '{print $1}')
+  local base="http://127.0.0.1:$port" db0
+  db0=$(db_sha "$port"); test -n "$db0"
 
-  # Authentication required: no cookie must be denied and remain read-only.
   local code
   code=$(curl -sS -o "$GATE_ROOT/$label-unauth.json" -w '%{http_code}' "$base/$tool")
   test "$code" = 401
@@ -149,21 +150,20 @@ run_case(){
 import json,sys
 j=json.load(open(sys.argv[1])); assert j['ok'] is False; assert j['code']=='AUTH_REQUIRED'; assert j['production_write']==0
 PY
-  assert_db_unchanged "$db" "$db0"
+  assert_db_unchanged "$port" "$db0"
   echo "$label:UNAUTHENTICATED=DENY"
 
-  # POST is categorically rejected; no CSRF path exists.
   code=$(curl -sS -b "$cookie" -o "$GATE_ROOT/$label-post.json" -w '%{http_code}' -X POST "$base/$tool")
   test "$code" = 405
   python3 - "$GATE_ROOT/$label-post.json" <<'PY'
 import json,sys
 j=json.load(open(sys.argv[1])); assert j['ok'] is False; assert j['code']=='METHOD_NOT_ALLOWED'; assert j['get_only'] is True; assert j['production_write']==0
 PY
-  assert_db_unchanged "$db" "$db0"
+  assert_db_unchanged "$port" "$db0"
   echo "$label:POST=DENY"
 
   curl -fsS -b "$cookie" "$base/$tool" -o "$GATE_ROOT/$label.json"
-  assert_db_unchanged "$db" "$db0"
+  assert_db_unchanged "$port" "$db0"
 
   python3 - "$label" "$GATE_ROOT/$label.json" <<'PY'
 import json,sys
@@ -200,8 +200,8 @@ elif label=='case-d':
     assert any(x['path']=='robots.txt' for x in j['hash_mismatch']) and j['source_exact']=='FAIL'
 print(label.upper()+'=PASS')
 PY
-  test -f "$runtime/$tool" # no self cleanup
-  assert_db_unchanged "$db" "$db0"
+  test -f "$runtime/$tool"
+  assert_db_unchanged "$port" "$db0"
   stop_fixture "$port"
   trap - RETURN
 }
