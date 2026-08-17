@@ -1,0 +1,118 @@
+name: P04 V2.7 Engineering Regression Repair V3
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-regression-repair-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPOSITORY: llhzx2018/vf-infra
+  INTEGRATION_BRANCH: integration/v2.7.0-personal-infra
+  TESTED_PRODUCT_RUNTIME_COMMIT: f8e94f9e27780b725fa0ac5592b19f42a75ff00f
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: tested-product
+      - name: Install PHP dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-curl php-zip php-mbstring >/dev/null
+      - name: Runtime exact and preserved contracts
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < private/VERSION)" = 2.7.0
+          python3 private/scripts/build-release-tree.py /tmp/current >/dev/null
+          python3 tested-product/scripts/build-release-tree.py /tmp/tested >/dev/null
+          diff -qr /tmp/current /tmp/tested
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find private/src private/public -type f -name '*.php' -print0)
+          php private/tests/unit/core_updates_contract_v252.php
+          php private/tests/unit/job_partial_health_contract_v256.php
+          php private/tests/unit/provider_billing_persistence_contract_v256.php
+          php private/tests/unit/provider_currency_contract_v256.php
+          php private/tests/integration/domain_portfolio_contract_v258.php
+          php private/tests/integration/project_membership_contract_v257.php
+          php private/tests/integration/provider_billing_pagination_v256.php
+          php private/tests/integration/scope_summary_contract_v258.php
+          echo "REGRESSION_HEAD=$(git -C private rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "REGRESSION_TREE=$(git -C private rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo 'PRESERVED_BACKEND_CONTRACTS=8/8 PASS'
+      - name: Clean install setup login Session CSRF
+        run: |
+          set -Eeuo pipefail
+          WEB=/tmp/v270-reg-site; PORT=18999
+          rm -rf "$WEB" /tmp/.vfinfra-data /tmp/.vfinfra-install.lock /tmp/v270-reg.cookies
+          python3 private/scripts/build-release-tree.py "$WEB" >/dev/null
+          php -S "127.0.0.1:$PORT" -t "$WEB" >/tmp/v270-reg-server.log 2>&1 & echo $! >/tmp/v270-reg-server.pid
+          READY=0; for _ in $(seq 1 100); do if curl -fsS -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies "http://127.0.0.1:$PORT/setup.php" >/tmp/setup.html 2>/dev/null; then READY=1; break; fi; sleep .1; done; test "$READY" = 1
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          CRED="VfRegression$(openssl rand -hex 12)Aa1"
+          code=$(curl -sS -o /tmp/setup-post -w '%{http_code}' -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies --data-urlencode "csrf=$csrf" --data-urlencode 'site_name=VF Infra V2.7 Regression' --data-urlencode "password=$CRED" --data-urlencode "password_confirm=$CRED" "http://127.0.0.1:$PORT/setup.php"); test "$code" = 302
+          curl -fsS -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies "http://127.0.0.1:$PORT/login.php" >/tmp/login.html
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          code=$(curl -sS -o /tmp/login-post -w '%{http_code}' -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies --data-urlencode "csrf=$csrf" --data-urlencode "password=$CRED" "http://127.0.0.1:$PORT/login.php"); test "$code" = 302
+          curl -fsS -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies "http://127.0.0.1:$PORT/api.php?action=settings" >/tmp/settings.json; jq -e '.ok==true' /tmp/settings.json >/dev/null
+          csrf_code=$(curl -sS -o /tmp/csrf.json -w '%{http_code}' -c /tmp/v270-reg.cookies -b /tmp/v270-reg.cookies -H 'Content-Type: application/json' -X POST --data '{"name":"csrf-must-not-write"}' "http://127.0.0.1:$PORT/api.php?action=project_save"); test "$csrf_code" = 422; jq -e '.ok!=true' /tmp/csrf.json >/dev/null
+          echo "REG_WEB=$WEB" >> "$GITHUB_ENV"; echo "REG_CRED=$CRED" >> "$GITHUB_ENV"
+          echo 'CLEAN_INSTALL_AUTH_SESSION_CSRF=PASS'
+      - name: Runtime Backup Restore Update Search Relations Gate
+        run: |
+          set -Eeuo pipefail
+          php harness/p04-v270-runtime-regression.php "$REG_WEB" "$REG_CRED" /tmp/p04-v270-regression-v3.json
+          jq -e '.status=="PASS" and .version=="2.7.0" and .schema==14 and .gate_count>=35' /tmp/p04-v270-regression-v3.json >/dev/null
+      - name: Validate disposable server log
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          if test -f /tmp/v270-reg-server.pid; then kill "$(cat /tmp/v270-reg-server.pid)" 2>/dev/null || true; fi
+          if test -f /tmp/v270-reg-server.log && grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' /tmp/v270-reg-server.log; then cat /tmp/v270-reg-server.log >&2; exit 75; fi
+      - name: Publish regression evidence
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json,os,pathlib
+          d=json.loads(pathlib.Path('/tmp/p04-v270-regression-v3.json').read_text(encoding='utf-8'))
+          d.update({'workflow':'P04 V2.7 Engineering Regression Repair V3','integration_head':os.environ['REGRESSION_HEAD'],'integration_tree':os.environ['REGRESSION_TREE'],'tested_product_runtime_commit':os.environ['TESTED_PRODUCT_RUNTIME_COMMIT'],'runtime_exact':'PASS','preserved_backend_contracts':'8/8 PASS','clean_install':'PASS','auth_session':'PASS','csrf_fail_closed':'PASS'})
+          pathlib.Path('evidence/p04-v270-regression-repair-v3.json').write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          pathlib.Path('evidence/p04-v270-regression-repair-v3.PASS').write_text('P04_V270_ENGINEERING_REGRESSION_REPAIR_V3_PASS\n',encoding='utf-8')
+          PY
+          rm -rf private tested-product /tmp/current /tmp/tested /tmp/v270-reg-site /tmp/.vfinfra-data
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-regression-repair-v3.json evidence/p04-v270-regression-repair-v3.PASS
+          git commit -m 'evidence(P04): seal V2.7 engineering regression repair V3'
+          git push origin HEAD:p04-v270-integration-gate
