@@ -1,0 +1,178 @@
+name: P04 VF Infra V2.5.8 Final One-File Source Reconciliation Gate R2
+
+on:
+  push:
+    branches: [p04-v258-final-one-file-source-reconciliation-gate]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-final-one-file-source-reconciliation-gate-r2
+  cancel-in-progress: false
+
+env:
+  TARGET_COMMIT: 4a18a61c21455184c67aa4a3e0957283674ae2d7
+  TARGET_TREE: 89f322a309f8c51c9869864800a6980cb9bfbb94
+  TOOL_NAME: vf-v258-final-source-reconcile-b4e7cacc3117.php
+  TOOL_BYTES: '25406'
+  TOOL_SHA256: a10f694e91410ea9de630e70cb33559c2950ab9ca1c1aef49abbd8418af23dc5
+  TARGET_NOTES_BYTES: '1770'
+  TARGET_NOTES_SHA256: c402daaeb27130dda0354024a3725295270e78e16bcc6952f6d3b23269dd74d7
+  TARGET_RUNTIME_FINGERPRINT: 13e8eeaddf89837f2d370a2e15899e354402042d8bc0c27eccd130ec6ff2855a
+  TARGET_SOURCE_COUNT: '163'
+  TARGET_SOURCE_SHA256: 4b4b52a5b0651aeca41433730fa53bbd96392524b6face44940f2405cf864203
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout gate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: gate
+      - name: Checkout frozen Product
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sqlite3, mbstring
+          coverage: none
+
+      - name: Reconstruct exact original tool from four ASCII chunks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          D=gate/tools/p04/v258-final-reconcile
+          test "$(wc -c < "$D/finalrec.part01.b64")" = 4000
+          test "$(wc -c < "$D/finalrec.part02.b64")" = 4000
+          test "$(wc -c < "$D/finalrec.part03.b64")" = 4000
+          test "$(wc -c < "$D/finalrec.part04.b64")" = 720
+          test "$(sha256sum "$D/finalrec.part01.b64" | awk '{print $1}')" = ebc0fd79ebab24444d562e1d31289c8183d6240833f133dea574dafba4fc6e3c
+          test "$(sha256sum "$D/finalrec.part02.b64" | awk '{print $1}')" = 03d829037ea8ea4f61c2aa91a3d4f83556534e0667a7ae4cc2c97bd263305520
+          test "$(sha256sum "$D/finalrec.part03.b64" | awk '{print $1}')" = 7bb4b2632688bbde68b348f7f32e338be6cf943333977c765c1428f5b67c8b99
+          test "$(sha256sum "$D/finalrec.part04.b64" | awk '{print $1}')" = 6a2ba04552236170049cabc29a85072013f5bfc6f39f8d35f963848a186af8ce
+          mkdir -p "$RUNNER_TEMP/original"
+          cat "$D"/finalrec.part*.b64 | base64 -d | gzip -d > "$RUNNER_TEMP/original/$TOOL_NAME"
+          test "$(stat -c %s "$RUNNER_TEMP/original/$TOOL_NAME")" = "$TOOL_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/original/$TOOL_NAME" | awk '{print $1}')" = "$TOOL_SHA256"
+          php -l "$RUNNER_TEMP/original/$TOOL_NAME" >/dev/null
+          echo EXACT_ORIGINAL_TOOL=PASS
+
+      - name: Frozen target Runtime contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/base-runtime" > "$RUNNER_TEMP/build.json"
+          test "$(stat -c %s "$RUNNER_TEMP/base-runtime/RELEASE_NOTES.md")" = "$TARGET_NOTES_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/base-runtime/RELEASE_NOTES.md" | awk '{print $1}')" = "$TARGET_NOTES_SHA256"
+          python3 - "$RUNNER_TEMP/base-runtime/release-manifest.json" <<'PY'
+          import json,os,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['version']=='2.5.8' and m['target_schema']==14
+          assert m['file_count']==164
+          assert m['source_fingerprint']==os.environ['TARGET_RUNTIME_FINGERPRINT']
+          print('FROZEN_TARGET_RUNTIME=PASS')
+          PY
+
+      - name: Static authorization boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/original/$TOOL_NAME" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+          assert 'SQLITE3_OPEN_READONLY' in s and 'SQLITE3_OPEN_READWRITE' not in s and 'SQLITE3_OPEN_CREATE' not in s
+          assert "PRAGMA query_only=ON" in s
+          assert not re.search(r'\b(curl_[a-z_]+|fsockopen|pfsockopen|stream_socket_client|socket_connect)\s*\(',s,re.I)
+          assert 'rename($tmp,$target)' in s
+          assert "VFC_NOTES_BEFORE_BYTES=1146" in s
+          assert "77f6c3d1cd4e214aaa5ee0a001e2e4e37daeb0f27d689e89dd0f10f4ebbec9f8" in s
+          assert "c402daaeb27130dda0354024a3725295270e78e16bcc6952f6d3b23269dd74d7" in s
+          assert 'vf-v258-production-reconcile-b1e7564c23ba.php' in s
+          assert 'vf-v258-asset-relation-forensic-bd2eadc2c6aa.php' in s
+          print('STATIC_BOUNDARY=PASS')
+          PY
+
+      - name: Build isolated fixtures
+        shell: bash
+        env:
+          ORIGINAL_TOOL: ${{ runner.temp }}/original/${{ env.TOOL_NAME }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import hashlib,hmac,os,pathlib,shutil,sqlite3,sys
+          root=pathlib.Path(sys.argv[1]); base=root/'base-runtime'; original=pathlib.Path(os.environ['ORIGINAL_TOOL']).read_text(encoding='utf-8')
+          appkey='a'*64; ua='P04-V258-Final-R2/1.0'; sid='p04v258finalr2session1234567890'
+          old=(b'OLD-V258-NOTES\n'*100)[:1146]; old+=b'X'*(1146-len(old)); oldsha=hashlib.sha256(old).hexdigest()
+          pre=root/'pre.sqlite'; c=sqlite3.connect(pre); c.executescript("CREATE TABLE schema_migrations(version INTEGER,status TEXT);INSERT INTO schema_migrations VALUES(14,'success');");c.commit();c.close()
+          bsha=hashlib.sha256(pre.read_bytes()).hexdigest(); bbytes=pre.stat().st_size
+          def build(name,drift):
+              case=root/name; rt=case/'runtime'; data=case/'data'; sess=case/'sessions'; shutil.copytree(base,rt);(data/'database').mkdir(parents=True);(data/'backups').mkdir(parents=True);sess.mkdir(parents=True);shutil.copy2(pre,data/'backups/pre.sqlite')
+              c=sqlite3.connect(data/'database/vf-domain.sqlite');c.executescript("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT);INSERT INTO settings VALUES('auth_generation','1','x');CREATE TABLE schema_migrations(version INTEGER,status TEXT);INSERT INTO schema_migrations VALUES(14,'success');CREATE TABLE backups(id INTEGER PRIMARY KEY,filename TEXT,backup_type TEXT,size_bytes INTEGER,sha256 TEXT,created_at TEXT,source_version TEXT,schema_version INTEGER,integrity_status TEXT,foreign_key_status TEXT,protected INTEGER);")
+              c.execute("INSERT INTO backups VALUES(61,?,?,?,?,?,?,?,?,?,?)",('pre.sqlite','pre_update',bbytes,bsha,'x','2.5.7',14,'ok','ok',1));c.commit();c.close()
+              cur=old+(b'!' if drift else b'');(rt/'RELEASE_NOTES.md').write_bytes(cur)
+              t=original.replace("const VFC_NOTES_BEFORE_SHA='77f6c3d1cd4e214aaa5ee0a001e2e4e37daeb0f27d689e89dd0f10f4ebbec9f8';",f"const VFC_NOTES_BEFORE_SHA='{oldsha}';").replace("const VFC_BACKUP_SHA='367619835c340614522c29a1f316bffe44167c2c6bd07ac8beccbee5287e3531';",f"const VFC_BACKUP_SHA='{bsha}';")
+              (rt/os.environ['TOOL_NAME']).write_text(t,encoding='utf-8');(rt/'vf-v258-production-reconcile-b1e7564c23ba.php').write_text('<?php',encoding='utf-8');(rt/'vf-v258-asset-relation-forensic-bd2eadc2c6aa.php').write_text('<?php',encoding='utf-8')
+              port=18151 if name=='positive' else 18152
+              (rt/'config.php').write_text("<?php return ['base_url'=>'http://127.0.0.1:%d','data_path'=>%r,'timezone'=>'Asia/Shanghai','app_key'=>'%s','session_name'=>'vf_domain_session','session_idle_timeout'=>1209600,'session_max_lifetime'=>2592000,'allowed_hosts'=>['127.0.0.1']];\n"%(port,str(data),appkey),encoding='utf-8')
+              return hmac.new(appkey.encode(),f"P04_V258_FINAL_SINGLE_FILE|{os.environ['TOOL_NAME']}".encode(),hashlib.sha256).hexdigest()
+          pos=build('positive',False); neg=build('negative',True)
+          (root/'fixture.env').write_text(f"APPKEY={appkey}\nUA={ua}\nSID={sid}\nPOS={pos}\nNEG={neg}\n",encoding='utf-8')
+          print('FIXTURES=PASS')
+          PY
+          source "$RUNNER_TEMP/fixture.env"
+          for C in positive negative; do
+            SID="$SID" UA="$UA" APPKEY="$APPKEY" php -d session.save_path="$RUNNER_TEMP/$C/sessions" -d session.use_strict_mode=0 -r 'session_name("vf_domain_session");session_id(getenv("SID"));session_start();$n=time();$_SESSION=["vf_domain_authenticated"=>true,"vf_domain_last_activity"=>$n,"vf_domain_created_at"=>$n,"vf_domain_auth_generation"=>1,"vf_domain_ua"=>hash("sha256",getenv("UA")."|".getenv("APPKEY"))];session_write_close();'
+          done
+
+      - name: Positive atomic replace and Final Exact
+        shell: bash
+        run: |
+          set -Eeuo pipefail; source "$RUNNER_TEMP/fixture.env"; RT="$RUNNER_TEMP/positive/runtime"; DB="$RUNNER_TEMP/positive/data/database/vf-domain.sqlite"; S="$RUNNER_TEMP/positive/sessions"; B=$(sha256sum "$DB"|awk '{print $1}')
+          php -d session.save_path="$S" -S 127.0.0.1:18151 -t "$RT" >"$RUNNER_TEMP/p.log" 2>&1 & P=$!; trap 'kill $P 2>/dev/null||true' EXIT
+          for i in $(seq 1 50); do C=$(curl -sS --max-time 1 -o "$RUNNER_TEMP/get.html" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:18151/$TOOL_NAME"||true); [ "$C" = 200 ]&&break;sleep .1;done; test "$C" = 200; grep -q 'Pre-write Fail-closed Gate：PASS' "$RUNNER_TEMP/get.html"
+          N=$(python3 -c 'import re;print(re.search(r"name=\"nonce\" value=\"([a-f0-9]{64})\"",open("'$RUNNER_TEMP'/get.html").read()).group(1))'); test "$N" = "$POS"
+          C=$(curl -sS -o "$RUNNER_TEMP/positive.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" -d "nonce=$N" "http://127.0.0.1:18151/$TOOL_NAME"); test "$C" = 200; kill $P;wait $P 2>/dev/null||true;trap - EXIT
+          test "$B" = "$(sha256sum "$DB"|awk '{print $1}')"; test ! -e "$RT/$TOOL_NAME"; test ! -e "$RT/vf-v258-production-reconcile-b1e7564c23ba.php"; test ! -e "$RT/vf-v258-asset-relation-forensic-bd2eadc2c6aa.php"
+          python3 - "$RUNNER_TEMP/positive.json" <<'PY'
+          import json,os,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); assert d['ok'] and d['closure']=='PASS_READY_FOR_AUTHORITY_CLOSURE'; assert d['release_notes']['before']['bytes']==1146 and d['release_notes']['after']['bytes']==1770 and d['release_notes']['after']['sha256']==os.environ['TARGET_NOTES_SHA256']; assert d['production_version']=='2.5.8' and d['schema']==14 and d['sqlite_integrity']=='PASS' and d['foreign_keys']=='PASS'; assert d['runtime_files']==165 and d['runtime_fingerprint']==os.environ['TARGET_RUNTIME_FINGERPRINT']; assert d['source_manifest_count']==163 and d['source_manifest_sha']==os.environ['TARGET_SOURCE_SHA256'] and d['missing']==d['unexpected']==d['hash_mismatch']==0 and d['source_exact']=='PASS'; assert d['business_semantic_preservation']=='PASS' and d['backup']['status']=='PASS' and d['temporary_probe_remaining']==0; assert d['production_db_write']==0 and d['provider_write']==0 and d['physical_db_repair']==0; print('POSITIVE_FINAL_EXACT=PASS')
+          PY
+
+      - name: Negative second drift is fail-closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail; source "$RUNNER_TEMP/fixture.env"; RT="$RUNNER_TEMP/negative/runtime"; DB="$RUNNER_TEMP/negative/data/database/vf-domain.sqlite"; S="$RUNNER_TEMP/negative/sessions"; F="$RT/RELEASE_NOTES.md"; B=$(sha256sum "$F"|awk '{print $1}'); D=$(sha256sum "$DB"|awk '{print $1}')
+          php -d session.save_path="$S" -S 127.0.0.1:18152 -t "$RT" >"$RUNNER_TEMP/n.log" 2>&1 & P=$!; trap 'kill $P 2>/dev/null||true' EXIT
+          for i in $(seq 1 50); do C=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:18152/$TOOL_NAME"||true); [ "$C" = 409 ]&&break;sleep .1;done; test "$C" = 409
+          C=$(curl -sS -o "$RUNNER_TEMP/negative.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" -d "nonce=$NEG" "http://127.0.0.1:18152/$TOOL_NAME"); test "$C" = 409; kill $P;wait $P 2>/dev/null||true;trap - EXIT
+          test "$B" = "$(sha256sum "$F"|awk '{print $1}')"; test "$D" = "$(sha256sum "$DB"|awk '{print $1}')"; test ! -e "$RT/$TOOL_NAME"
+          python3 - "$RUNNER_TEMP/negative.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); assert not d['ok'] and d['closure']=='STOP_FOR_MASTER'; assert d['release_notes']['status']=='FAIL_CLOSED' and d['release_notes']['reason']=='CURRENT_RELEASE_NOTES_SECOND_DRIFT' and d['release_notes']['production_file_change']==0; assert d['production_db_write']==0 and d['provider_write']==0 and d['physical_db_repair']==0; print('NEGATIVE_FAIL_CLOSED=PASS')
+          PY
+
+      - name: Seal and upload exact original tool
+        shell: bash
+        run: |
+          set -Eeuo pipefail; mkdir -p "$RUNNER_TEMP/handoff"; cp "$RUNNER_TEMP/original/$TOOL_NAME" "$RUNNER_TEMP/handoff/$TOOL_NAME"; test "$(stat -c %s "$RUNNER_TEMP/handoff/$TOOL_NAME")" = "$TOOL_BYTES"; test "$(sha256sum "$RUNNER_TEMP/handoff/$TOOL_NAME"|awk '{print $1}')" = "$TOOL_SHA256"; echo FINAL_RECONCILIATION_TOOL_GATE=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P04-V258-Final-One-File-Source-Reconciliation-R2
+          path: ${{ runner.temp }}/handoff/${{ env.TOOL_NAME }}
+          if-no-files-found: error
+          retention-days: 7
