@@ -52,6 +52,13 @@ await page.type('input[autocomplete="current-password"]',password);
 await page.click('button.primary');
 await page.waitForSelector('.workspace-shell',{timeout:10000});
 await sleep(800);
+
+// The unauthenticated App boot intentionally probes /api/auth/me and receives 401.
+// Start the strict browser error gate only after authenticated workspace entry.
+consoleErrors.length=0;
+pageErrors.length=0;
+apiFailures.length=0;
+
 assert.ok(await textIncludes('Kewaro Owner Review'));
 for(const label of ['概览','网站检查','关键词','页面','AI / AEO','变更记录','设置','全局搜索','备份与恢复','系统状态']){
   assert.ok(await textIncludes(label),`missing ${label}`);
