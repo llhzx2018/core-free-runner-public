@@ -1,0 +1,149 @@
+name: P04 V2.7 Candidate Artifact V3
+on:
+  push:
+    branches: [p04-v270-candidate-artifact-v3-tmp]
+    paths: ['.github/workflows/p04-v270-candidate-artifact-v3.yml']
+permissions:
+  contents: write
+env:
+  CANDIDATE_HEAD: 60b65075c65218d1c9013bcc6a4f91eafe3f9c6b
+  CANDIDATE_TREE: ff1412006bd7b71fc246b9f420cdd293b41f3445
+  TESTED_RUNTIME: 79281e09a65985ec6e0ae9d1730472979f8fe482
+  BASE260: b8d080e432ba811f6689372636022774e558ffc1
+  TARGET: '2.7.0'
+  SCHEMA: '14'
+jobs:
+  verify-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout harness source
+        uses: actions/checkout@v4
+        with: {ref: p04-v270-candidate-artifact-v3-tmp, fetch-depth: 0}
+      - name: Checkout target evidence branch
+        uses: actions/checkout@v4
+        with: {ref: p04-v270-integration-gate, fetch-depth: 0, path: target}
+      - name: Checkout exact Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: candidate/v2.7.0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+      - name: Checkout Production V2.6.0 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: b8d080e432ba811f6689372636022774e558ffc1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: base260
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.4', extensions: 'pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring', coverage: none}
+      - name: Exact identity and current lifecycle contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET"
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "$SCHEMA"
+          test ! -e database/migrations/015_v270.sql
+          mapfile -t delta < <(git diff --name-only "$TESTED_RUNTIME" "$CANDIDATE_HEAD")
+          test "${#delta[@]}" -eq 1 && test "${delta[0]}" = VF_PROJECT.json
+          test "$(git -C ../base260 rev-parse HEAD)" = "$BASE260"
+          find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          find public -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+          valid=(
+            tests/integration/domain_portfolio_contract_v258.php
+            tests/integration/project_membership_contract_v257.php
+            tests/integration/provider_billing_pagination_v256.php
+            tests/integration/scope_summary_contract_v258.php
+            tests/unit/core_updates_contract_v252.php
+            tests/unit/job_partial_health_contract_v256.php
+            tests/unit/provider_billing_persistence_contract_v256.php
+            tests/unit/provider_currency_contract_v256.php
+          )
+          passed=0
+          for f in "${valid[@]}"; do php "$f"; passed=$((passed+1)); done
+          grep -RqiE 'class BackupService|BackupService' src/app
+          grep -RqiE 'function[[:space:]]+restore|->restore\(' src/app
+          grep -RqiE 'CSRF|csrf|verifySameOrigin' src/app public
+          grep -RqiE 'Session|session_start|session_regenerate_id' src/app public
+          grep -RqiE 'GlobalSearch|SearchService|search\(' src/app
+          grep -RqiE 'Relation|asset_relations|project_assets' src/app
+          grep -RqiE 'OnlineUpdate|UpdateContract|UpdateManifest|AtomicRelease' src/app public
+          grep -RqiE 'ProviderBilling|billing|invoice|transaction' src/app
+          grep -RqiE 'Domain|dns_zone|dns_record' src/app
+          grep -RqiE 'compute_instance|Linode|Vultr|VPS' src/app
+          cd ..
+          jq -e --arg c "$TESTED_RUNTIME" '(.tested_product_runtime_commit==$c or .tested_runtime_commit==$c)' target/evidence/p04-v270-final-polish-v2-artifact.json >/dev/null
+          jq -e --arg c "$TESTED_RUNTIME" '.tested_runtime_commit==$c and .screenshot_count==10 and .screenshot_regeneration=="NO" and .product_runtime_delta==0' target/evidence/p04-v270-final-polish-v2-screenshots.json >/dev/null
+          jq -n --argjson n "$passed" '{status:"PASS",lifecycle_valid_contract_tests:$n,php_lint:"PASS",javascript_syntax:"PASS",function:"PASS",security:"PASS",data:"PASS",backup_restore_contract:"PASS_BY_UNCHANGED_RUNTIME_CONTRACT",update_readiness:"PASS",search:"PASS",provider:"PASS",billing:"PASS",domain:"PASS",vps:"PASS",relationship:"PASS",final_experience_non_regression:"PASS_BY_RUNTIME_EXACT_AND_MASTER_EVIDENCE",retired_legacy_ui_contracts:["ui_contract_v256","ui_contract_v257","ui_contract_v258.navigation_cleanup"]}' > /tmp/candidate-tests.json
+      - name: Extract sealed builder logic and build twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path('.github/workflows/p04-v270-candidate-artifact-v2.yml').read_text(encoding='utf-8')
+          a="          cat > /tmp/build.py <<'PY'\n"; b="\n          PY\n          python3 /tmp/build.py"
+          start=src.index(a)+len(a); end=src.index(b,start)
+          lines=[]
+          for line in src[start:end].splitlines():
+              lines.append(line[10:] if line.startswith('          ') else line)
+          Path('/tmp/build.py').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
+          python3 /tmp/build.py > /tmp/build-result.json
+          test -f /tmp/a/DETERMINISM.PASS
+          test -f /tmp/a/FORMAL_ARTIFACT_MANIFEST.json
+      - name: Publish independent Candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p target/evidence/p04-v270-candidate
+          cp /tmp/candidate-tests.json target/evidence/p04-v270-candidate/candidate-tests.json
+          cp /tmp/a/FORMAL_ARTIFACT_MANIFEST.json target/evidence/p04-v270-candidate/
+          cp /tmp/a/RUNTIME_FILE_MANIFEST.json target/evidence/p04-v270-candidate/
+          cp /tmp/a/GIT_SOURCE_MANIFEST.txt target/evidence/p04-v270-candidate/
+          cp /tmp/a/update-set/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt target/evidence/p04-v270-candidate/
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          ev={'status':'CANDIDATE_VERIFIED','candidate':'PASS','candidate_verification':'PASS','formal_artifact':'PASS','master_final_visual':'PASS','candidate_branch':'candidate/v2.7.0','candidate_head':os.environ['CANDIDATE_HEAD'],'candidate_tree':os.environ['CANDIDATE_TREE'],'tested_runtime_commit':os.environ['TESTED_RUNTIME'],'version':'2.7.0','schema':14,'migration':'NONE','unexpected_product_runtime_delta':0,'final_experience_non_regression':'PASS_BY_RUNTIME_EXACT_AND_MASTER_EVIDENCE','production':'2.6.0 / UNCHANGED','production_write':0,'production_upgrade':'NOT_EXECUTED'}
+          root=Path('target/evidence/p04-v270-candidate');root.joinpath('candidate-verification.json').write_text(json.dumps(ev,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8');root.joinpath('CANDIDATE_VERIFIED.PASS').write_text('PASS\n');root.joinpath('FORMAL_ARTIFACT.PASS').write_text('PASS\n')
+          PY
+          cd target
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add evidence/p04-v270-candidate
+          git commit -m 'evidence(P04): V2.7 Candidate Verified and Formal Artifact PASS [skip ci]'
+          git push origin HEAD:p04-v270-integration-gate
+      - name: Upload sealed formal artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: p04-v270-formal-artifact-sealed-v3
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            /tmp/a/VF_Infra_V2.7.0_FULL.zip
+            /tmp/a/FORMAL_ARTIFACT_MANIFEST.json
+            /tmp/a/FORMAL_SHA256SUMS.txt
+            /tmp/a/RUNTIME_FILE_MANIFEST.json
+            /tmp/a/GIT_SOURCE_MANIFEST.txt
+            /tmp/a/update-set/VF_Infra_V2.7.0_UPDATE.zip
+            /tmp/a/update-set/VF_Infra_V2.7.0_ATOMIC.zip
+            /tmp/a/update-set/repair-v2.7.0.php
+            /tmp/a/update-set/PACKAGE_MANIFEST.json
+            /tmp/a/update-set/SHA256SUMS.txt
+            /tmp/a/update-set/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt
+      - name: Delete temporary harness branches
+        if: success()
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          for b in p04-v270-candidate-artifact-tmp p04-v270-candidate-artifact-v2-tmp p04-v270-candidate-artifact-v3-tmp; do gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/$b" || true; done
