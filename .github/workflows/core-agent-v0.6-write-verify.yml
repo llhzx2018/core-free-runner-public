@@ -1,0 +1,129 @@
+name: core-agent V0.6 Conditional Write Machine Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/core-agent-v0.6-write-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      CORE_AGENT_SOURCE_SHA: b3c0d9f381ce7ba241f6429b82650b7bf205a091
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
+    steps:
+      - name: Verify private source read credential
+        shell: bash
+        run: |
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            echo "RUNNER_INFRASTRUCTURE_BLOCK=PRIVATE_READ_TOKEN_MISSING"
+            exit 78
+          fi
+
+      - name: Checkout exact core-agent V0.6 develop source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run core-agent machine verification
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Run real autonomous conditional develop write pilot
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          V06_WRITE_TOKEN: ${{ github.token }}
+        run: python scripts/pilot_v06_remote_write.py
+
+      - name: Build public-safe combined evidence
+        if: always()
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          machine = Path('.evidence/verification.json')
+          pilot = Path('.evidence/v06-write-pilot.json')
+          out = Path('.evidence/v06-public-evidence.json')
+          payload = {
+              'schema': 'core-agent-public-evidence/v3',
+              'version': '0.6.0',
+              'source_sha': os.environ['VF_SOURCE_SHA'],
+              'private_source_persisted': False,
+              'main_write_actions': 0,
+              'production_actions': 0,
+          }
+
+          machine_status = 'MISSING'
+          if machine.exists():
+              raw = machine.read_bytes()
+              detail = json.loads(raw.decode('utf-8'))
+              machine_status = detail.get('status')
+              payload.update({
+                  'machine_status': machine_status,
+                  'private_machine_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'check_exit_codes': [item.get('exit_code') for item in detail.get('checks', [])],
+                  'runner': detail.get('runner'),
+              })
+          else:
+              payload['machine_status'] = machine_status
+
+          pilot_status = 'MISSING'
+          if pilot.exists():
+              raw = pilot.read_bytes()
+              detail = json.loads(raw.decode('utf-8'))
+              pilot_status = detail.get('status')
+              payload.update({
+                  'write_pilot_status': pilot_status,
+                  'write_pilot_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'target_repository': detail.get('repository'),
+                  'target_branch': detail.get('branch'),
+                  'target_path': detail.get('path'),
+                  'write_actions': detail.get('write_actions'),
+                  'write_commit_sha': detail.get('commit_sha'),
+                  'already_converged': detail.get('already_converged'),
+                  'token_exposed': detail.get('token_exposed'),
+              })
+          else:
+              payload['write_pilot_status'] = pilot_status
+
+          payload['status'] = 'PASS' if machine_status == 'PASS' and pilot_status == 'PASS' else 'FAIL'
+          canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['sha256'] = hashlib.sha256(canonical).hexdigest()
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+          print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-v0.6-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
+          path: |
+            source/.evidence/v06-public-evidence.json
+            source/.evidence/v06-write-pilot.json
+          if-no-files-found: error
+          retention-days: 14
