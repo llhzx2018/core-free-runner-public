@@ -1,0 +1,57 @@
+g_replace('/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]/u','',$value)??'';
+    return function_exists('mb_substr')?mb_substr($value,0,$max,'UTF-8'):substr($value,0,$max);
+}
+function vfp_ident(string $name): string {
+    if(!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/',$name)) throw new RuntimeException('SQL identifier contract failed.');
+    return '"'.$name.'"';
+}
+function vfp_scalar(SQLite3 $db,string $sql) {
+    $r=$db->querySingle($sql,false); return $r;
+}
+function vfp_rows(SQLite3 $db,string $sql): array {
+    $res=$db->query($sql); $rows=[];
+    while($row=$res->fetchArray(SQLITE3_ASSOC)) $rows[]=$row;
+    $res->finalize(); return $rows;
+}
+function vfp_table_columns(SQLite3 $db,string $table): array {
+    $out=[]; foreach(vfp_rows($db,'PRAGMA table_info('.vfp_ident($table).')') as $r) $out[]=(string)$r['name']; return $out;
+}
+function vfp_open_ro(string $path): SQLite3 {
+    if(!is_file($path)||is_link($path)||!is_readable($path)) throw new RuntimeException('SQLite read-only source unavailable.');
+    $db=new SQLite3($path,SQLITE3_OPEN_READONLY); $db->enableExceptions(true); $db->busyTimeout(5000); $db->exec('PRAGMA query_only=ON'); return $db;
+}
+function vfp_schema(SQLite3 $db): int {
+    $cols=vfp_table_columns($db,'schema_migrations');
+    if(in_array('status',$cols,true)) return (int)vfp_scalar($db,"SELECT COALESCE(MAX(version),0) FROM schema_migrations WHERE status='success'");
+    return (int)vfp_scalar($db,'SELECT COALESCE(MAX(version),0) FROM schema_migrations');
+}
+function vfp_db_health(SQLite3 $db): array {
+    $integrity=(string)vfp_scalar($db,'PRAGMA integrity_check');
+    $fk=count(vfp_rows($db,'PRAGMA foreign_key_check'));
+    return ['integrity'=>$integrity,'foreign_key_violations'=>$fk];
+}
+function vfp_source_scan(string $root,array $expected): array {
+    $real=realpath($root); if($real===false||is_link($root)) throw new RuntimeException('Application Root 无法安全读取。');
+    $rootFiles=['.htaccess','FULL_INSTALL_ONLY.txt','README.md','RECOVERED_BUILD_NOTICE.txt','RELEASE_NOTES.md','VERSION.txt','api.php','backup-download.php','backup-upload.php','bootstrap.php','config.example.php','cron-domain-check.php','cron.php','export.php','index.php','login.php','logout.php','maintenance.php','nginx-vf-infra.conf.example','release-manifest.json','robots.txt','setup.php'];
+    $paths=[];
+    foreach($rootFiles as $name){$p=$real.DIRECTORY_SEPARATOR.$name;if(is_file($p)){if(is_link($p))throw new RuntimeException('Runtime source symlink detected: '.$name);$paths[$name]=$p;}}
+    foreach(['app','assets','cli','migrations'] as $dn){
+        $dir=$real.DIRECTORY_SEPARATOR.$dn; if(!is_dir($dir))continue; if(is_link($dir))throw new RuntimeException('Runtime source directory symlink detected: '.$dn);
+        $it=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir,FilesystemIterator::SKIP_DOTS));
+        foreach($it as $info){if(!$info->isFile()||$info->isLink())continue;$p=$info->getRealPath();if($p===false||!str_starts_with($p,$real.DIRECTORY_SEPARATOR))throw new RuntimeException('Runtime path boundary failure.');$rel=str_replace('\\','/',substr($p,strlen($real)+1));if($rel==='app/.runtime.php'||preg_match('#(^|/)repair-v[^/]+\\.php$#',$rel))continue;$paths[$rel]=$p;}
+    }
+    ksort($paths,SORT_STRING);$actual=[];$rows=[];$fpRows=[];
+    foreach($paths as $rel=>$p){$z=filesize($p);$h=hash_file('sha256',$p);if(!is_int($z)||!is_string($h))throw new RuntimeException('Runtime source read failure: '.$rel);$actual[$rel]=['size'=>$z,'sha256'=>$h];$rows[]=$rel."\t".$z."\t".$h;if($rel!=='release-manifest.json')$fpRows[]=$h.'  '.$rel;}
+    $body=implode("\n",$rows)."\n";$sourceSha=hash('sha256',$body);$runtimeFp=hash('sha256',implode("\n",$fpRows)."\n");
+    $missing=[];$unexpected=[];$mismatch=[];$drift=[];
+    foreach($expected as $rel=>$m){if(!isset($actual[$rel])){$missing[]=$rel;$drift[]=['path'=>$rel,'type'=>'missing','expected_sha'=>(string)$m['sha256'],'actual_sha'=>''];continue;}if(!hash_equals((string)$m['sha256'],(string)$actual[$rel]['sha256'])||(int)$m['size']!==(int)$actual[$rel]['size']){$mismatch[]=$rel;$drift[]=['path'=>$rel,'type'=>'hash_mismatch','expected_sha'=>(string)$m['sha256'],'actual_sha'=>(string)$actual[$rel]['sha256']];}}
+    foreach($actual as $rel=>$m){if(!isset($expected[$rel])){$unexpected[]=$rel;$drift[]=['path'=>$rel,'type'=>'unexpected','expected_sha'=>'','actual_sha'=>(string)$m['sha256']];}}
+    $exact=count($actual)===VFP_EXPECTED_SOURCE_FILE_COUNT&&$sourceSha===VFP_EXPECTED_SOURCE_MANIFEST_SHA256&&!$missing&&!$unexpected&&!$mismatch;
+    return ['source_manifest_file_count'=>count($actual),'production_source_manifest_sha256'=>$sourceSha,'missing'=>$missing,'unexpected'=>$unexpected,'mismatch'=>$mismatch,'drift'=>$drift,'source_manifest_exact'=>$exact?'PASS':'FAIL'];
+}
+function vfp_runtime_scan(string $root): array {
+    $real=realpath($root);if($real===false)throw new RuntimeException('Runtime root unavailable.');
+    $manifestPath=$real.DIRECTORY_SEPARATOR.'release-manifest.json';if(!is_file($manifestPath)||is_link($manifestPath))throw new RuntimeException('Runtime release manifest unavailable.');
+    $m=json_decode((string)file_get_contents($manifestPath),true,512,JSON_THROW_ON_ERROR);
+    if(!is_array($m)||(string)($m['version']??'')!==VFP_EXPECTED_VERSION||(int)($m['target_schema']??0)!==VFP_EXPECTED_SCHEMA)throw new RuntimeException('Runtime release manifest identity mismatch.');
+    $files=(array)($m['files']??[]);if((int)($m['file_count']??-
