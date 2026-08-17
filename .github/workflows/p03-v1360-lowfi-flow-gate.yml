@@ -1,0 +1,91 @@
+name: P03 V1.36.0 Low-Fi UA Flow Gate
+on:
+  push:
+    branches: [p03-v1360-flow-gate]
+    paths:
+      - '.github/workflows/p03-v1360-lowfi-flow-gate.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      P03_SOURCE_SHA: c73425b499c3bea2bd572aac553e0479b6dc5cf5
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
+    steps:
+      - name: Verify private read channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then echo 'RUNNER_INFRASTRUCTURE_BLOCK=PRIVATE_READ_TOKEN_MISSING'; exit 78; fi
+      - name: Checkout exact private P03 UA source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.P03_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - name: Static low-fi contract
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = '1.36.0'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          test -f prototype/p03-v1360-ua-flow/index.html
+          test -f prototype/p03-v1360-ua-flow/lowfi.js
+          test -f prototype/p03-v1360-ua-flow/lowfi.css
+          grep -q 'Primary Next Action' prototype/p03-v1360-ua-flow/lowfi.js
+          grep -q 'projectSwitcher' prototype/p03-v1360-ua-flow/lowfi.js
+          grep -q 'data-related="decisions"' prototype/p03-v1360-ua-flow/lowfi.js
+          ! grep -Eq '>最近变化<|>文件<' prototype/p03-v1360-ua-flow/index.html
+          node --check prototype/p03-v1360-ua-flow/lowfi.js
+          node --check tests/e2e/v1360_lowfi_flow.spec.js
+          echo 'LOW_FI_STATIC_CONTRACT=PASS'
+      - name: Install browser harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/browser";cd "$RUNNER_TEMP/browser"
+          npm init -y >/dev/null
+          npm install playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Run 12-task low-fi flow gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/source/v1360-flow-evidence"
+          cd prototype/p03-v1360-ua-flow
+          python3 -m http.server 18136 --bind 127.0.0.1 >"$RUNNER_TEMP/p03-flow-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60);do curl -fsS http://127.0.0.1:18136/ >/dev/null 2>&1 && break;sleep .2;done
+          cd "$GITHUB_WORKSPACE/source"
+          NODE_PATH="$RUNNER_TEMP/browser/node_modules" VF_FLOW_BASE='http://127.0.0.1:18136' VF_FLOW_OUT="$OUT" node tests/e2e/v1360_lowfi_flow.spec.js | tee "$RUNNER_TEMP/p03-v1360-flow.log"
+          grep -q 'P03_V1360_LOW_FI_FLOW_GATE=12/12 PASS' "$RUNNER_TEMP/p03-v1360-flow.log"
+          python3 - <<'PY'
+          import json
+          d=json.load(open('v1360-flow-evidence/flow-gate.json',encoding='utf-8'))
+          assert d['status']=='PASS'
+          assert d['summary']['tasks_pass']=='12/12'
+          assert d['summary']['max_clicks']<=3
+          assert d['summary']['max_context_switches']<=1
+          assert d['summary']['dead_ends']==0
+          assert d['summary']['backtracking']==0
+          assert d['summary']['internal_model_required']==0
+          assert d['summary']['unknown_next_action']==0
+          assert d['summary']['need_to_remember_menu_location'] is False
+          print('FLOW_JSON_CONTRACT=PASS')
+          PY
+      - name: Upload public-safe flow evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03_V1.36.0_LOW_FI_FLOW_GATE
+          path: source/v1360-flow-evidence
+          if-no-files-found: warn
+          retention-days: 2
