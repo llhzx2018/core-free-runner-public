@@ -1,4 +1,4 @@
-name: core-agent V0.7 Private VF Write Machine Gate
+name: core-agent V0.7 Registered Private Sandbox Gate
 
 on:
   push:
@@ -14,24 +14,24 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      CORE_AGENT_SOURCE_SHA: 20dbd1587568bd563c4dde1d30986a51603dad76
-      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
-      PRIVATE_WRITE_TOKEN: ${{ secrets.VF_PRIVATE_WRITE_TOKEN || secrets.CORE_AGENT_WRITE_TOKEN || secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
+      CORE_AGENT_SOURCE_SHA: 040ef6b93fa62b572e1a65a43ca317cb9abed494
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Verify private source read credential
+      - name: Require registered VF capabilities
         shell: bash
         run: |
-          if [ -z "$PRIVATE_READ_TOKEN" ]; then
-            echo "RUNNER_INFRASTRUCTURE_BLOCK=PRIVATE_READ_TOKEN_MISSING"
-            exit 78
-          fi
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 79; }
+          echo 'REGISTERED_VF_CAPABILITIES=PASS'
 
-      - name: Checkout exact core-agent V0.7 develop source
+      - name: Checkout exact core-agent V0.7 source
         uses: actions/checkout@v4
         with:
           repository: llhzx2018/core-agent
           ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
-          token: ${{ env.PRIVATE_READ_TOKEN }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: source
 
@@ -46,84 +46,91 @@ jobs:
           VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
         run: python scripts/verify.py
 
-      - name: Run real private P02 develop write pilot
-        id: private_pilot
-        continue-on-error: true
+      - name: Run registered private sandbox write pilot first pass
+        id: private_pilot_first
         working-directory: source
         env:
           VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
-          V07_PRIVATE_WRITE_TOKEN: ${{ env.PRIVATE_WRITE_TOKEN }}
-        run: python scripts/pilot_v07_private_repository_write.py
+        run: |
+          set -Eeuo pipefail
+          python scripts/pilot_v07_private_repository_write.py
+          cp .evidence/v07-private-write-pilot.json .evidence/v07-private-write-pilot-first.json
+
+      - name: Run registered private sandbox write pilot idempotency pass
+        id: private_pilot_second
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: |
+          set -Eeuo pipefail
+          python scripts/pilot_v07_private_repository_write.py
+          cp .evidence/v07-private-write-pilot.json .evidence/v07-private-write-pilot-second.json
 
       - name: Build public-safe V0.7 evidence
-        if: always()
         working-directory: source
         env:
           VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
-          PILOT_OUTCOME: ${{ steps.private_pilot.outcome }}
         shell: bash
         run: |
+          set -Eeuo pipefail
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
 
-          machine = Path('.evidence/verification.json')
-          pilot = Path('.evidence/v07-private-write-pilot.json')
+          machine_path = Path('.evidence/verification.json')
+          first_path = Path('.evidence/v07-private-write-pilot-first.json')
+          second_path = Path('.evidence/v07-private-write-pilot-second.json')
           out = Path('.evidence/v07-public-evidence.json')
+
+          machine_raw = machine_path.read_bytes()
+          first_raw = first_path.read_bytes()
+          second_raw = second_path.read_bytes()
+          machine = json.loads(machine_raw.decode('utf-8'))
+          first = json.loads(first_raw.decode('utf-8'))
+          second = json.loads(second_raw.decode('utf-8'))
+
           payload = {
-              'schema': 'core-agent-public-evidence/v4',
+              'schema': 'core-agent-public-evidence/v5',
               'version': '0.7.0',
               'source_sha': os.environ['VF_SOURCE_SHA'],
-              'pilot_step_outcome': os.environ.get('PILOT_OUTCOME'),
+              'machine_status': machine.get('status'),
+              'machine_evidence_sha256': hashlib.sha256(machine_raw).hexdigest(),
+              'check_exit_codes': [item.get('exit_code') for item in machine.get('checks', [])],
+              'runner': machine.get('runner'),
+              'target_repository': first.get('target_repository'),
+              'target_branch': first.get('target_branch'),
+              'target_path': first.get('target_path'),
+              'registered_write_capability': first.get('registered_write_capability'),
+              'first_status': first.get('status'),
+              'first_write_actions': first.get('write_actions'),
+              'first_commit_sha': first.get('commit_sha'),
+              'first_already_converged': first.get('already_converged'),
+              'first_evidence_sha256': hashlib.sha256(first_raw).hexdigest(),
+              'second_status': second.get('status'),
+              'second_write_actions': second.get('write_actions'),
+              'second_already_converged': second.get('already_converged'),
+              'second_evidence_sha256': hashlib.sha256(second_raw).hexdigest(),
               'private_source_persisted': False,
               'product_source_write_actions': 0,
               'main_write_actions': 0,
               'production_actions': 0,
               'release_actions': 0,
+              'token_exposed': bool(first.get('token_exposed')) or bool(second.get('token_exposed')),
           }
-
-          machine_status = 'MISSING'
-          if machine.exists():
-              raw = machine.read_bytes()
-              detail = json.loads(raw.decode('utf-8'))
-              machine_status = detail.get('status')
-              payload.update({
-                  'machine_status': machine_status,
-                  'private_machine_evidence_sha256': hashlib.sha256(raw).hexdigest(),
-                  'check_exit_codes': [item.get('exit_code') for item in detail.get('checks', [])],
-                  'runner': detail.get('runner'),
-              })
-          else:
-              payload['machine_status'] = machine_status
-
-          pilot_status = 'MISSING'
-          if pilot.exists():
-              raw = pilot.read_bytes()
-              detail = json.loads(raw.decode('utf-8'))
-              pilot_status = detail.get('status')
-              payload.update({
-                  'private_pilot_status': pilot_status,
-                  'private_pilot_evidence_sha256': hashlib.sha256(raw).hexdigest(),
-                  'target_repository': detail.get('target_repository'),
-                  'target_branch': detail.get('target_branch'),
-                  'target_path': detail.get('target_path'),
-                  'write_actions': detail.get('write_actions'),
-                  'write_commit_sha': detail.get('commit_sha'),
-                  'already_converged': detail.get('already_converged'),
-                  'failure_class': detail.get('failure_class'),
-                  'safe_error': detail.get('safe_error'),
-                  'token_exposed': detail.get('token_exposed'),
-              })
-          else:
-              payload['private_pilot_status'] = pilot_status
-
-          payload['status'] = 'PASS' if machine_status == 'PASS' and pilot_status == 'PASS' else 'BLOCKED_OR_FAIL'
+          first_ok = payload['first_status'] == 'PASS'
+          second_ok = payload['second_status'] == 'PASS' and payload['second_write_actions'] == 0 and payload['second_already_converged'] is True
+          safety_ok = payload['machine_status'] == 'PASS' and not payload['token_exposed']
+          payload['status'] = 'PASS' if first_ok and second_ok and safety_ok else 'FAIL'
           canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
           payload['sha256'] = hashlib.sha256(canonical).hexdigest()
-          out.parent.mkdir(parents=True, exist_ok=True)
           out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
           print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"FIRST_WRITE_ACTIONS={payload['first_write_actions']}")
+          print(f"SECOND_WRITE_ACTIONS={payload['second_write_actions']}")
+          print(f"SECOND_ALREADY_CONVERGED={payload['second_already_converged']}")
           print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          if payload['status'] != 'PASS':
+              raise SystemExit(1)
           PY
 
       - name: Upload public-safe evidence only
@@ -131,18 +138,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: core-agent-v0.7-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
-          path: |
-            source/.evidence/v07-public-evidence.json
-            source/.evidence/v07-private-write-pilot.json
-          if-no-files-found: warn
+          path: source/.evidence/v07-public-evidence.json
+          if-no-files-found: error
           retention-days: 14
-
-      - name: Enforce private pilot gate
-        if: always()
-        shell: bash
-        run: |
-          if [ "${{ steps.private_pilot.outcome }}" != "success" ]; then
-            echo "V0.7_PRIVATE_PILOT_GATE=BLOCKED_OR_FAIL"
-            exit 1
-          fi
-          echo "V0.7_PRIVATE_PILOT_GATE=PASS"
