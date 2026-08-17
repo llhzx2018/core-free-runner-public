@@ -1,0 +1,128 @@
+name: P03 V1.35.4 Distribution Repair R1 Local Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1354-dist-r1-local-gate.yml'
+      - 'scripts/p03_v1354_dist_r1_local_gate.sh'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1354-dist-r1-local-gate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DIST_BUILD_COMMIT: a3f1d4579c25020ca53b47700e0b8d03e1507ab5
+      DIST_BUILD_TREE: b50e1aafb06dcd69a6fc742230e99c8885b7bcb0
+      FROZEN_PRODUCT_COMMIT: af34b84a3135333cf05077b3eb64e22ef6b3afef
+      FROZEN_PRODUCT_TREE: 08eee7e8c891a57c357553dd5de20c1a7bd79849
+      PRODUCTION_COMMIT: 263c4d8f7e38bff58db5680a6845ceb5a576d6ae
+      ORIGINAL_UPDATE_ASSET_ID: '517455108'
+      ORIGINAL_UPDATE_SHA256: c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073
+      FIXTURE_PASS: VfP03-Dist-R1-2026!
+      PHP_TEST_IMAGE: vf-forge-v1354-dist-r1-php84
+      GATE_ROOT: /tmp/p03-v1354-dist-r1
+
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: harness
+
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout exact Distribution Build Commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.DIST_BUILD_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: distribution
+
+      - name: Checkout exact Frozen Product
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.FROZEN_PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: product
+
+      - name: Checkout exact Production V1.35.3
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.PRODUCTION_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: production
+
+      - name: Prepare PHP 8.4 SQLite Zip cURL runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 curl unzip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-dist-r1" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev libcurl4-openssl-dev sqlite3 && docker-php-ext-install zip pdo_sqlite curl && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-dist-r1" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","curl"] as $x){if(!extension_loaded($x)){exit(1);}} echo PHP_VERSION," DIST_R1_RUNTIME_PASS\n";'
+
+      - name: Execute Distribution R1 local gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          chmod +x harness/scripts/p03_v1354_dist_r1_local_gate.sh
+          bash -n harness/scripts/p03_v1354_dist_r1_local_gate.sh
+          bash harness/scripts/p03_v1354_dist_r1_local_gate.sh
+
+      - name: Verify zero public artifacts and cleanup
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p03-dist-r1-upgrade p03-dist-r1-recovery >/dev/null 2>&1 || true
+          rm -rf distribution product production /tmp/p03-v1354-dist-r1 "$RUNNER_TEMP/Dockerfile.p03-dist-r1"
+          RESP=$(curl -fsS -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts")
+          test "$(python3 -c 'import json,sys;print(json.load(sys.stdin)["total_count"])' <<<"$RESP")" = 0
+          echo 'PUBLIC_ACTIONS_ARTIFACTS=0'
+          echo 'EPHEMERAL_CLEANUP=PASS'
+
+      - name: Local gate verdict
+        shell: bash
+        run: |
+          echo 'P03_V1354_DISTRIBUTION_R1_LOCAL_GATE=PASS'
+          echo 'CORE_UPDATES_REENABLE=NOT_AUTHORIZED'
+          echo 'PRODUCTION_WRITE=0'
