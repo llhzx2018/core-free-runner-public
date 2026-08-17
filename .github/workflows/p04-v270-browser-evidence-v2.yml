@@ -1,0 +1,69 @@
+name: P04 V2.7 Integrated Browser Evidence V2
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths: [.github/workflows/p04-v270-browser-evidence-v2.yml]
+permissions:
+  contents: write
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: p04-v270-integration-gate}
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: integration/v2.7.0-personal-infra
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Capture
+        shell: bash
+        run: |
+          set +e
+          evidence=/tmp/p04-v270-browser-evidence; mkdir -p "$evidence"; cd private
+          src=$(grep -rl --include='*.sh' 'v260-user-task-fixture.php' scripts tests 2>/dev/null | head -n1)
+          if [ -z "$src" ] && [ -f scripts/run-v258-browser-gate.sh ]; then src=scripts/run-v258-browser-gate.sh; fi
+          if [ -z "$src" ]; then printf '{"status":"FAIL","error":"NO_PROJECT_NATIVE_BROWSER_HARNESS"}\n' > "$evidence/browser-report.json"; exit 0; fi
+          tmp="$(dirname "$src")/.v270-browser-v2.sh"; cp "$src" "$tmp"; chmod +x "$tmp"
+          python3 - "$tmp" <<'PY'
+          import re,sys
+          p=sys.argv[1];s=open(p,encoding='utf-8').read();s=re.sub(r'tests/e2e/[A-Za-z0-9._/-]+\.mjs','tests/e2e/v270-browser-evidence.mjs',s);open(p,'w',encoding='utf-8').write(s)
+          PY
+          VF_V270_EVIDENCE_DIR="$evidence" bash "$tmp" >/tmp/v270-browser-v2.log 2>&1
+          rc=$?; rm -f "$tmp"
+          if [ ! -s "$evidence/browser-report.json" ]; then printf '{"status":"FAIL","error":"PROJECT_NATIVE_BROWSER_HARNESS","exit":%s}\n' "$rc" > "$evidence/browser-report.json"; fi
+          exit 0
+      - name: Remove private source
+        if: always()
+        shell: bash
+        run: rm -rf private /tmp/v270-browser-v2.log
+      - name: Upload evidence
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p04-v270-integrated-browser-evidence-v2
+          path: /tmp/p04-v270-browser-evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Seal public-safe metadata
+        if: always()
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cp /tmp/p04-v270-browser-evidence/browser-report.json evidence/p04-v270-browser-report-v2.json || printf '{"status":"FAIL"}\n' > evidence/p04-v270-browser-report-v2.json
+          printf 'artifact_id=%s\nartifact_url=%s\nartifact_digest=%s\n' "$ARTIFACT_ID" "$ARTIFACT_URL" "$ARTIFACT_DIGEST" > evidence/p04-v270-browser-artifact-v2.txt
+          rm -f evidence/p04-v270-browser-evidence-v2.PASS
+          if jq -e '.status=="PASS" and (.screenshots|length)==13 and .mobile_safe_area.pass==true' evidence/p04-v270-browser-report-v2.json >/dev/null && ! jq -e '[.viewports|to_entries[]|.value|to_entries[]|select(.value.sw > .value.iw + 1)]|length>0' evidence/p04-v270-browser-report-v2.json >/dev/null; then printf 'P04_V270_BROWSER_RESPONSIVE_EVIDENCE_PASS\n' > evidence/p04-v270-browser-evidence-v2.PASS; fi
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A evidence/p04-v270-browser-report-v2.json evidence/p04-v270-browser-artifact-v2.txt evidence/p04-v270-browser-evidence-v2.PASS
+          git commit -m 'evidence(P04): seal V2.7 browser artifact identity' || exit 0
+          git push origin HEAD:p04-v270-integration-gate
