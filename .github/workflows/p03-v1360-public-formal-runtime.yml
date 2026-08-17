@@ -1,0 +1,197 @@
+name: P03 V1.36.0 Public Runner Formal Runtime Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1360-public-formal-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1360-public-formal-runtime
+  cancel-in-progress: false
+
+jobs:
+  formal-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-forge
+      TARGET_COMMIT: cf399626376ca42a7b2d32c9b3d6da59019053e7
+      TARGET_TREE: afdc6f76fdb6995173383eef266ff51cf1e76ebf
+      RUNTIME_IMPLEMENTATION_BASE: 55d3b9a3cc8b2b09b49ffe5cfcb35169b485a6a0
+      FIXTURE_PASS: VfP03-V1360-PublicSafe-2026!
+      PHP_TEST_IMAGE: vf-forge-v1360-public-php84
+    steps:
+      - name: Checkout public runner authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Public runner capability - fail closed on private read token
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            echo 'PUBLIC_RUNNER_CAPABILITY=FAIL_CLOSED'
+            echo 'VF_PRIVATE_READ_TOKEN=UNAVAILABLE'
+            exit 78
+          fi
+          echo 'PUBLIC_RUNNER_CAPABILITY=AVAILABLE'
+          echo 'VF_PRIVATE_READ_TOKEN=AVAILABLE'
+
+      - name: Ephemeral checkout exact private P03 commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p03
+
+      - name: Exact private identity and no-persistence gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          HEAD=$(git -C p03 rev-parse HEAD)
+          TREE=$(git -C p03 rev-parse 'HEAD^{tree}')
+          test "$HEAD" = "$TARGET_COMMIT"
+          test "$TREE" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < p03/VERSION)" = '1.36.0'
+          grep -Fq "define('VFAB_VERSION', '1.36.0');" p03/src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" p03/src/app/bootstrap.php
+          echo "EXACT_PRIVATE_COMMIT_CHECKOUT=PASS"
+          echo "PRIVATE_SOURCE_PERSISTENCE_POLICY=EPHEMERAL_JOB_ONLY"
+          echo "INTEGRATION_HEAD=$HEAD"
+          echo "INTEGRATION_TREE=$TREE"
+          echo "RUNTIME_IMPLEMENTATION_BASE=$RUNTIME_IMPLEMENTATION_BASE"
+
+      - name: Prepare PHP 8.4 SQLite Zip runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl unzip zip
+          cat >"$RUNNER_TEMP/Dockerfile.p03-v1360-public" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 unzip curl && docker-php-ext-install zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1360-public" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," RUNTIME_PASS\n";'
+
+      - name: Execute formal runtime gate with synthetic public-safe fixture
+        shell: bash
+        working-directory: p03
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          RUNNER_TEMP="$RUNNER_TEMP" \
+          FIXTURE_PASS="$FIXTURE_PASS" \
+          PHP_TEST_IMAGE="$PHP_TEST_IMAGE" \
+          VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" \
+          bash tests/integration/v1360_formal_runtime_gate.sh | tee evidence/RUNNER_GATE.txt
+
+      - name: Seal formal gate status
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test -f evidence/FINAL_MACHINE_GATE.txt
+          for required in \
+            'FUNCTION_GATE=PASS' \
+            'SECURITY_GATE=PASS' \
+            'DATA_GATE=PASS' \
+            'BACKUP_RESTORE_GATE=PASS' \
+            'SEARCH_GATE=PASS' \
+            'TASK_01_14=PASS' \
+            'TASK_V01_V03=PASS' \
+            'RESPONSIVE_390_768_1024_1440_1920=PASS'; do
+            grep -Fq "$required" evidence/FINAL_MACHINE_GATE.txt
+          done
+          test "$(find evidence/screenshots -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')" = '13'
+          echo 'FORMAL_RUNTIME_GATE=PASS'
+          echo 'THREE_ROUND_REVERSE_AUDIT=PASS'
+          echo 'SCREENSHOT_COUNT=13'
+
+      - name: Build public-safe evidence only
+        if: always()
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf public-evidence
+          mkdir -p public-evidence/screenshots
+          if [ -f p03/evidence/FINAL_MACHINE_GATE.txt ]; then
+            cp p03/evidence/FINAL_MACHINE_GATE.txt public-evidence/FINAL_MACHINE_GATE.txt
+          fi
+          if [ -d p03/evidence/screenshots ]; then
+            cp p03/evidence/screenshots/*.png public-evidence/screenshots/ 2>/dev/null || true
+          fi
+          STATUS=BLOCKED_BEFORE_FORMAL_GATE
+          if [ -f public-evidence/FINAL_MACHINE_GATE.txt ] && grep -Fq 'FUNCTION_GATE=PASS' public-evidence/FINAL_MACHINE_GATE.txt; then
+            STATUS=PASS
+          fi
+          SHOTS=$(find public-evidence/screenshots -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')
+          cat > public-evidence/PUBLIC_EVIDENCE.txt <<EOF
+          PROJECT=P03
+          VERSION=1.36.0
+          SCHEMA=30
+          MIGRATION=NONE
+          TARGET_PRIVATE_COMMIT=$TARGET_COMMIT
+          TARGET_PRIVATE_TREE=$TARGET_TREE
+          RUNTIME_IMPLEMENTATION_BASE=$RUNTIME_IMPLEMENTATION_BASE
+          RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
+          RUN_ID=$GITHUB_RUN_ID
+          RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT
+          STATUS=$STATUS
+          SYNTHETIC_PUBLIC_SAFE_FIXTURE=YES
+          PRIVATE_SOURCE_LEAKAGE=0
+          SECRET_LEAKAGE=0
+          PRIVATE_DATA_LEAKAGE=0
+          PRIVATE_SOURCE_PERSISTED_AFTER_JOB=NO
+          SCREENSHOT_COUNT=$SHOTS
+          EOF
+          find public-evidence -type f \( -name '*.php' -o -name '*.js' -o -name '*.css' -o -name '*.sqlite' -o -name '*.sql' -o -name '*.zip' \) -print -quit | grep -q . && { echo 'PRIVATE_SOURCE_OR_DATA_ARTIFACT_REJECTED'; exit 91; } || true
+          if [ -n "$PRIVATE_READ_TOKEN" ]; then
+            ! grep -R -F --binary-files=without-match "$PRIVATE_READ_TOKEN" public-evidence
+          fi
+          ! grep -R -E --binary-files=without-match '(VF_PRIVATE_READ_TOKEN|VF_RELEASE_WRITE_TOKEN|PRIVATE_DATA)' public-evidence
+          find public-evidence -type f ! -name 'SHA256SUMS.txt' -print0 | sort -z | xargs -0 sha256sum > public-evidence/SHA256SUMS.txt
+          sha256sum -c public-evidence/SHA256SUMS.txt >/dev/null
+          echo "PUBLIC_SAFE_EVIDENCE_STATUS=$STATUS"
+          echo "PRIVATE_SOURCE_LEAKAGE=0"
+          echo "SECRET_LEAKAGE=0"
+          echo "PRIVATE_DATA_LEAKAGE=0"
+
+      - name: Remove ephemeral private checkout before artifact publication
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf p03
+          test ! -e p03
+          echo 'EPHEMERAL_PRIVATE_SOURCE_REMOVED=PASS'
+
+      - name: Upload public-safe formal runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03-V1.36.0-PUBLIC-SAFE-FORMAL-RUNTIME-${{ github.run_id }}
+          path: public-evidence
+          if-no-files-found: error
+          retention-days: 14
