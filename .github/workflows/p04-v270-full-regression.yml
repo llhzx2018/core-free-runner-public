@@ -1,0 +1,73 @@
+name: P04 V2.7 Full Regression
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths: [.github/workflows/p04-v270-full-regression.yml]
+permissions:
+  contents: write
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: p04-v270-integration-gate}
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: integration/v2.7.0-personal-infra
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private
+          persist-credentials: false
+      - name: Execute PHP regression corpus
+        shell: bash
+        run: |
+          set +e
+          cd private
+          result=/tmp/p04-v270-regression.json
+          mapfile -t tests < <(find tests -type f -name '*.php' \( -path '*/unit/*' -o -path '*/integration/*' -o -path '*/security/*' -o -path '*/regression/*' \) | sort)
+          total=${#tests[@]}; passed=0; failed=0; failed_names='[]'
+          for f in "${tests[@]}"; do
+            php "$f" >/tmp/one-test.log 2>&1
+            if [ $? -eq 0 ]; then passed=$((passed+1)); else failed=$((failed+1)); failed_names=$(jq -c --arg n "$(basename "$f")" '. + [$n]' <<<"$failed_names"); fi
+          done
+          coverage='{}'
+          corpus=/tmp/p04-v270-test-corpus.txt
+          cat "${tests[@]}" > "$corpus" 2>/dev/null
+          check(){ key="$1"; pattern="$2"; if grep -Eiq "$pattern" "$corpus"; then coverage=$(jq -c --arg k "$key" '. + {($k):"PRESENT"}' <<<"$coverage"); else coverage=$(jq -c --arg k "$key" '. + {($k):"MISSING"}' <<<"$coverage"); fi; }
+          check AUTH 'Auth|authentication|login'
+          check SESSION 'Session|session'
+          check CSRF 'CSRF|csrf'
+          check SCHEMA 'schema|migration|Migrator'
+          check PROVIDER 'Provider|provider'
+          check BILLING 'Billing|billing|invoice|transaction'
+          check DOMAIN 'Domain|domain'
+          check DNS 'DNS|dns_zone|dns_record'
+          check VPS 'VPS|compute_instance|compute'
+          check ASSETS 'Asset|asset_relations|assets'
+          check ALERTS 'Alert|alerts'
+          check JOBS 'Job|jobs|cron'
+          check BACKUP_RESTORE 'Backup|Restore|backup|restore'
+          check ONLINE_UPDATE 'OnlineUpdate|online_update|UpdateManifest'
+          check UPDATE_HISTORY 'UpdateHistory|update_history'
+          check ATOMIC 'Atomic|atomic|repair'
+          check SEARCH 'Search|search'
+          check RELATIONS 'Relation|relation|project_assets'
+          missing=$(jq '[to_entries[]|select(.value=="MISSING")]|length' <<<"$coverage")
+          status=FAIL; if [ "$total" -gt 0 ] && [ "$failed" -eq 0 ] && [ "$missing" -eq 0 ]; then status=PASS; fi
+          jq -n --arg status "$status" --argjson total "$total" --argjson passed "$passed" --argjson failed "$failed" --argjson failed_names "$failed_names" --argjson coverage "$coverage" '{status:$status,php_tests_total:$total,php_tests_passed:$passed,php_tests_failed:$failed,failed_tests:$failed_names,coverage:$coverage}' > "$result"
+          rm -f /tmp/one-test.log "$corpus"
+          exit 0
+      - name: Publish safe regression evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cp /tmp/p04-v270-regression.json evidence/p04-v270-full-regression.json || printf '{"status":"FAIL","failed_gate":"RUNNER_SETUP"}\n' > evidence/p04-v270-full-regression.json
+          rm -f evidence/p04-v270-full-regression.PASS
+          if jq -e '.status=="PASS" and .php_tests_failed==0 and .php_tests_total>0' evidence/p04-v270-full-regression.json >/dev/null; then printf 'P04_V270_FULL_REGRESSION_PASS\n' > evidence/p04-v270-full-regression.PASS; fi
+          rm -rf private /tmp/p04-v270-regression.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A evidence/p04-v270-full-regression.*
+          git commit -m 'evidence(P04): V2.7 full regression result' || exit 0
+          git push origin HEAD:p04-v270-integration-gate
