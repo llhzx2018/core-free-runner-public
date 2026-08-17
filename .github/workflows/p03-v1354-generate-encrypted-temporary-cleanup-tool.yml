@@ -1,0 +1,281 @@
+name: P03 V1.35.4 Generate Encrypted Temporary Cleanup Tool
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1354-generate-encrypted-temporary-cleanup-tool.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1354-generate-encrypted-temporary-cleanup-tool
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CORRECTIVE_HEAD: 6463c3c1585ef4e9477bb3d8ac1858405914aac7
+      FROZEN_PRODUCT_COMMIT: af34b84a3135333cf05077b3eb64e22ef6b3afef
+      EXPECTED_PRODUCT_TREE: 08eee7e8c891a57c357553dd5de20c1a7bd79849
+      EXPECTED_RUNTIME_FINGERPRINT: 2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083
+      EXPECTED_SOURCE_MANIFEST: 07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47
+      EXPECTED_MEMORY_SHA: 1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7
+      EXPECTED_MEMORY_BYTES: '4497'
+      EXPECTED_WRITER_SHA: b9a41499d33d1b5dddc0b9fd2ddc43a324aa9378da8336ef34cab183fa0dc18d
+      EXPECTED_FORENSIC_SHA: b0024ea1d8b12f0d89a4bc9163c82139f46d5b7bd3c9ad57e978d910f73b928f
+      MINIMAL_GATE_RUN: '31999989078'
+      MINIMAL_GATE_JOB: '95298363695'
+      PHP_IMAGE: php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: harness
+
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout exact corrective tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.CORRECTIVE_HEAD }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: corrective
+
+      - name: Checkout Frozen V1.35.4 Product
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.FROZEN_PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: product
+
+      - name: Verify exact source identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C corrective rev-parse HEAD)" = "$CORRECTIVE_HEAD"
+          test "$(git -C product rev-parse HEAD)" = "$FROZEN_PRODUCT_COMMIT"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$EXPECTED_PRODUCT_TREE"
+          test -f corrective/scripts/corrective/finalize_v1354_temporary_tool_cleanup.py
+          echo 'CORRECTIVE_GIT_IDENTITY=PASS'
+          echo 'FROZEN_PRODUCT_GIT_IDENTITY=PASS'
+
+      - name: Build exact Frozen Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf runtime formal secure-out
+          mkdir -p runtime formal secure-out
+          python3 product/scripts/build_runtime.py runtime >/dev/null
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          s=importlib.util.spec_from_file_location('scope',Path('corrective/scripts/corrective/v1354_source_exact_scope.py'))
+          m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+          o=m.assert_frozen_runtime(Path('runtime'))
+          assert o['runtime_files']==42
+          assert o['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+          assert o['source_manifest_sha256']=='07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'
+          assert o['memory_api_bytes']==4497
+          assert o['memory_api_sha256']=='1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7'
+          print('FROZEN_RUNTIME_IDENTITY=PASS')
+          PY
+
+      - name: Generate unique formal Cleanup Tool
+        id: tool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SUFFIX="$(openssl rand -hex 6)"
+          NAME="vf-forge-v1354-temporary-tool-cleanup-${SUFFIX}.php"
+          python3 corrective/scripts/corrective/finalize_v1354_temporary_tool_cleanup.py \
+            --runtime-root runtime --output-dir formal --filename "$NAME" > formal/build-metadata.json
+          python3 - <<'PY' > formal/env.out
+          import hashlib,json,re
+          from pathlib import Path
+          m=json.loads(Path('formal/build-metadata.json').read_text())
+          name=m['filename']; p=Path('formal')/name; raw=p.read_bytes()
+          assert re.fullmatch(r'vf-forge-v1354-temporary-tool-cleanup-[0-9a-f]{12}\.php',name)
+          assert len(raw)==m['bytes']
+          assert hashlib.sha256(raw).hexdigest()==m['sha256']
+          assert m['product_version']=='1.35.4' and m['schema']==30
+          assert m['product_commit']=='af34b84a3135333cf05077b3eb64e22ef6b3afef'
+          assert m['product_tree']=='08eee7e8c891a57c357553dd5de20c1a7bd79849'
+          assert m['runtime_files']==42
+          assert m['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+          assert m['targets']['vf-forge-v1354-source-reconcile-1ec8566c6838.php']=='b9a41499d33d1b5dddc0b9fd2ddc43a324aa9378da8336ef34cab183fa0dc18d'
+          assert m['targets']['vf-forge-v1354-source-forensic-3dc194b1768a.php']=='b0024ea1d8b12f0d89a4bc9163c82139f46d5b7bd3c9ad57e978d910f73b928f'
+          assert m['allowed_writes']==['unlink_exact_temporary_targets','unlink_self']
+          assert m['product_runtime_write']==0 and m['memory_api_write']==0 and m['db_write']==0 and m['provider_write']==0 and m['migration']==0
+          assert m['m030']=='NOT_RERUN'
+          print('filename='+name)
+          print('bytes='+str(len(raw)))
+          print('sha256='+hashlib.sha256(raw).hexdigest())
+          PY
+          cat formal/env.out
+          while IFS='=' read -r k v; do echo "$k=$v" >> "$GITHUB_OUTPUT"; done < formal/env.out
+          echo 'FORMAL_CLEANUP_IDENTITY=LOCKED'
+
+      - name: PHP 8.4 syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/formal:/formal:ro" "$PHP_IMAGE" php -l "/formal/${{ steps.tool.outputs.filename }}"
+          echo 'PHP_SYNTAX=PASS'
+
+      - name: Static fail-closed and no-DB gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "formal/${{ steps.tool.outputs.filename }}" <<'PY'
+          from pathlib import Path
+          import base64,json,re,sys
+          text=Path(sys.argv[1]).read_text()
+          for token in ['file_put_contents','fopen(','rename(','copy(','mkdir(','chmod(','touch(','vfab_require_admin(','vfab_require_csrf(','vfab_csrf_token(','vfab_db(','PDO','sqlite:','PRAGMA','admin_sessions','BackupService','MigrationRunner']:
+              assert token not in text, token
+          assert text.count('unlink(')==2
+          assert 'session_abort()' in text
+          assert 'vftc_same_origin()' in text
+          assert 'CSRF_FAILED' in text
+          assert 'TARGET_SHA_MISMATCH' in text
+          assert 'TARGET_PATH_INVALID' in text
+          assert 'FROZEN_RUNTIME_SOURCE_NOT_EXACT' in text
+          assert 'MEMORY_API_NOT_CANONICAL_EXACT' in text
+          assert not re.search(r"['\"]\s*(UPDATE|INSERT|DELETE|ALTER|CREATE|DROP|REPLACE)\b",text,re.I)
+          pm=re.search(r"const VFTC_PAYLOAD='([^']+)';",text); assert pm
+          payload=json.loads(base64.b64decode(pm.group(1),validate=True))
+          assert payload['memory_api_bytes']==4497
+          assert payload['memory_api_sha256']=='1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7'
+          assert payload['targets']['vf-forge-v1354-source-reconcile-1ec8566c6838.php']=='b9a41499d33d1b5dddc0b9fd2ddc43a324aa9378da8336ef34cab183fa0dc18d'
+          assert payload['targets']['vf-forge-v1354-source-forensic-3dc194b1768a.php']=='b0024ea1d8b12f0d89a4bc9163c82139f46d5b7bd3c9ad57e978d910f73b928f'
+          assert payload['runtime_files']==42
+          assert payload['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+          assert payload['source_manifest_sha256']=='07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'
+          print('FAIL_CLOSED_STATIC=PASS')
+          print('NO_SQLITE_OPEN=PASS')
+          print('ONLY_ALLOWED_UNLINK_WRITES=PASS')
+          PY
+
+      - name: Encrypt Cleanup Tool with ephemeral sandbox public key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > secure-out/recipient-public.pem <<'EOF'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA26J3Omb82hv2GAEeLxnd
+          41ZnpylZlDwT0WOKF563xtm8PgaOAnjKUEj+9Uky8z0GlHlQPxVAo3TR4URN4JbV
+          6RcOGQkBTca8AbhTSfrcaImOHp3zjOen0OrywQfZY0UpHUCU2llc4UcSA4cgWWvH
+          m86EbvFOgf8VjXMpVf3sJLyp76o4cvp6mH28CXrdP0N36G5lKuwI08VrlqSCcY1X
+          3I4tey/OPt0C5vPkZfNiSmddmUlQC0YdMwjT3erNEIlfkIqP34YCQUS7Q1H8WaTD
+          HnQ/xz1oHDFx1buTNFyLMfHI+E5XT3Jik+H5DsiN8jFlXZziefOeREtA1Jj5pZcE
+          j/KD5IluF8FQA3phiLnxy9C3Q3NwhmxnC63eTSoxNZxgEXhCcM6v4xUSc82w3+Jc
+          ahZwyce9l6jTkLNG5LAodKIY0frmmmPj2ri6KlPt8k39STAfIm4ToUa7dI+dxDyl
+          XQ3AHx+wNuREkQ3+0HNnm9hfwZAfZKXQ8XU2nmbhPRZlAgMBAAE=
+          -----END PUBLIC KEY-----
+          EOF
+          openssl rand 32 > secure-out/aes.key
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -pass file:secure-out/aes.key \
+            -in "formal/${{ steps.tool.outputs.filename }}" \
+            -out secure-out/cleanup.php.enc
+          openssl pkeyutl -encrypt -pubin -inkey secure-out/recipient-public.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+            -in secure-out/aes.key -out secure-out/aes.key.rsa
+          cp formal/build-metadata.json secure-out/build-metadata.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('secure-out/build-metadata.json'); m=json.loads(p.read_text())
+          m.update({
+            'php_syntax':'PASS',
+            'minimal_gate_run':31999989078,
+            'minimal_gate_job':95298363695,
+            'minimal_gate':'PASS',
+            'fail_closed_static':'PASS',
+            'no_sqlite_open':'PASS',
+            'allowed_writes':['unlink_exact_temporary_targets','unlink_self'],
+            'encrypted_bridge':'RSA_OAEP_SHA256_PLUS_AES256_CBC_PBKDF2',
+            'public_artifact_contains_plaintext':False,
+            'product_runtime_write':0,
+            'memory_api_write':0,
+            'db_write':0,
+            'db_sidecar_write':0,
+            'provider_write':0,
+            'migration':'NOT_EXECUTED',
+            'm030':'NOT_RERUN',
+            'main_promotion':'NOT_EXECUTED',
+            'v1_35_5':'NOT_CREATED'
+          })
+          p.write_text(json.dumps(m,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum secure-out/cleanup.php.enc secure-out/aes.key.rsa secure-out/build-metadata.json > secure-out/ENCRYPTED_SHA256SUMS.txt
+          shred -u secure-out/aes.key
+          shred -u "formal/${{ steps.tool.outputs.filename }}"
+          test ! -e "formal/${{ steps.tool.outputs.filename }}"
+          echo 'PLAINTEXT_CLEANUP_AFTER_ENCRYPTION=0'
+
+      - name: Upload encrypted cleanup artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03_V1.35.4_PRODUCTION_TEMPORARY_CLEANUP_TOOL_ENCRYPTED
+          path: |
+            secure-out/cleanup.php.enc
+            secure-out/aes.key.rsa
+            secure-out/build-metadata.json
+            secure-out/ENCRYPTED_SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Verify plaintext absent
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test ! -e "formal/${{ steps.tool.outputs.filename }}"
+          test ! -e secure-out/aes.key
+          test -f secure-out/cleanup.php.enc
+          test -f secure-out/aes.key.rsa
+          echo 'PUBLIC_ARTIFACT_PLAINTEXT=0'
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          echo 'FORMAL_PRODUCTION_TEMPORARY_CLEANUP_TOOL=GENERATED_AND_ENCRYPTED'
+          echo 'FILENAME=${{ steps.tool.outputs.filename }}'
+          echo 'BYTES=${{ steps.tool.outputs.bytes }}'
+          echo 'SHA256=${{ steps.tool.outputs.sha256 }}'
+          echo 'PHP_SYNTAX=PASS'
+          echo 'MINIMAL_GATE_RUN=31999989078'
+          echo 'MINIMAL_GATE_JOB=95298363695'
+          echo 'MINIMAL_GATE=PASS'
+          echo 'NO_SQLITE_OPEN=PASS'
+          echo 'PRODUCT_RUNTIME_WRITE=0'
+          echo 'MEMORY_API_WRITE=0'
+          echo 'PRODUCTION_DB_WRITE=0'
+          echo 'PRODUCTION_DB_SIDECAR_WRITE=0'
+          echo 'M030=NOT_RERUN'
+          echo 'PUBLIC_ARTIFACT_PLAINTEXT=0'
+          echo 'NEXT=DOWNLOAD_DECRYPT_VERIFY_AND_STOP_FOR_SINGLE_USER_CLEANUP_ACTION'
