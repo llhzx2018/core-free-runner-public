@@ -1,0 +1,95 @@
+name: P04 VF Infra V2.5.8 Reconciliation Probe Fixture Diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-reconciliation-probe-fixture-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_COMMIT: 4a18a61c21455184c67aa4a3e0957283674ae2d7
+  PROBE_NAME: vf-v258-production-reconcile-b1e7564c23ba.php
+  VF_RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: runner-tools
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-vf-infra
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sqlite3, pdo_sqlite, mbstring, zip, fileinfo, sodium
+          coverage: none
+      - name: Build exact formal runtime, Probe and fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat runner-tools/tools/p04/v258-probe-builder.part0{0,1,2,3,4} > "$RUNNER_TEMP/build_probe.py"
+          M="$RUNNER_TEMP/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt"
+          curl -fsSL -H "Authorization: Bearer $VF_RELEASE_TOKEN" -H 'Accept: application/octet-stream' https://api.github.com/repos/llhzx2018/vf-infra/releases/assets/517422532 -o "$M"
+          python3 private-vf-infra/scripts/build-v258-candidate-artifacts.py --output "$RUNNER_TEMP/formal" >/dev/null
+          mv "$RUNNER_TEMP/formal/runtime" "$RUNNER_TEMP/runtime"
+          python3 "$RUNNER_TEMP/build_probe.py" --sealed-manifest "$M" --output "$RUNNER_TEMP/probe" --filename "$PROBE_NAME" >/dev/null
+          cp "$RUNNER_TEMP/probe/$PROBE_NAME" "$RUNNER_TEMP/runtime/$PROBE_NAME"
+          mkdir -p "$RUNNER_TEMP/data/database" "$RUNNER_TEMP/data/backups" "$RUNNER_TEMP/sessions" "$RUNNER_TEMP/diagnostic"
+          python3 - <<'PY'
+          import hashlib,os,pathlib,shutil,sqlite3
+          rt=pathlib.Path(os.environ['RUNNER_TEMP']); db=rt/'data/database/vf-domain.sqlite'; con=sqlite3.connect(db)
+          con.executescript(pathlib.Path('private-vf-infra/database/schema/current.sql').read_text(encoding='utf-8'))
+          con.execute("INSERT INTO schema_migrations(version,name,applied_at,status,source_version,target_version,migration_name) VALUES(14,'fixture','2026-08-17 00:00:00','success','2.5.7','2.5.8','fixture')")
+          con.execute("INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES('auth_generation','1','2026-08-17 00:00:00')")
+          con.execute("INSERT INTO projects(name,status,description,notes,created_at,updated_at) VALUES('Fixture Project','active','fixture description','fixture note','2026-08-17 00:00:00','2026-08-17 00:00:00')")
+          con.commit();con.close();b=rt/'data/backups/pre-update-v257-to-v258-fixture.sqlite3';shutil.copy2(db,b);raw=b.read_bytes()
+          con=sqlite3.connect(db);con.execute("INSERT INTO backups(filename,backup_type,size_bytes,sha256,created_at,note,source_version,schema_version,integrity_status,foreign_key_status,protected) VALUES(?,?,?,?,?,?,?,?,?,?,1)",(b.name,'pre_update',len(raw),hashlib.sha256(raw).hexdigest(),'2026-08-17 00:00:01','在线更新到 V2.5.8 前自动恢复点','2.5.7',14,'ok','ok'));con.commit();con.close()
+          PY
+          cat > "$RUNNER_TEMP/runtime/config.php" <<PHP
+          <?php return ['app_name'=>'VF Infra Fixture','base_url'=>'http://127.0.0.1:18088','data_path'=>'$RUNNER_TEMP/data','timezone'=>'Asia/Shanghai','app_key'=>'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','session_name'=>'vf_domain_session','session_idle_timeout'=>1209600,'session_max_lifetime'=>2592000,'allowed_hosts'=>['127.0.0.1']];
+          PHP
+          export SID='p04probefixture1234567890abcdef' UA='P04-Probe-Fixture/1.0' APPKEY='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          php -d session.save_path="$RUNNER_TEMP/sessions" -d session.use_strict_mode=0 -r 'session_name("vf_domain_session");session_id(getenv("SID"));session_start();$n=time();$_SESSION=["vf_domain_authenticated"=>true,"vf_domain_last_activity"=>$n,"vf_domain_created_at"=>$n,"vf_domain_auth_generation"=>1,"vf_domain_csrf"=>str_repeat("b",64),"vf_domain_ua"=>hash("sha256",getenv("UA")."|".getenv("APPKEY")),"vf_domain_rotated_at"=>$n];session_write_close();'
+      - name: Capture isolated fixture response without failing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RT="$RUNNER_TEMP/runtime"; SESS="$RUNNER_TEMP/sessions"; SID='p04probefixture1234567890abcdef'; UA='P04-Probe-Fixture/1.0'; D="$RUNNER_TEMP/diagnostic"
+          php -d display_errors=0 -d log_errors=1 -d error_log="$D/php-errors.log" -d session.save_path="$SESS" -S 127.0.0.1:18088 -t "$RT" >"$D/server.log" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null||true' EXIT
+          for i in $(seq 1 50); do curl -sS --max-time 1 http://127.0.0.1:18088/ >/dev/null 2>&1&&break||sleep .1; done
+          set +e
+          curl -sS -o "$D/unauth.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:18088/$PROBE_NAME" > "$D/unauth-code.txt"
+          curl -sS -o "$D/auth.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:18088/$PROBE_NAME" > "$D/auth-code.txt"
+          set -e
+          kill $PID; wait $PID 2>/dev/null||true; trap - EXIT
+          python3 - "$D" <<'PY'
+          import pathlib,re,sys
+          d=pathlib.Path(sys.argv[1])
+          for p in d.glob('*'):
+              if p.is_file():
+                  s=p.read_text(errors='replace')
+                  s=s.replace('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','[FAKE_APP_KEY]')
+                  s=s.replace('p04probefixture1234567890abcdef','[FAKE_SESSION_ID]')
+                  s=re.sub(r'/home/runner/[^\s"\']+','[RUNNER_PATH]',s)
+                  p.write_text(s)
+          PY
+          echo 'FIXTURE_DIAGNOSTIC_CAPTURED=PASS'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P04-V258-Probe-Fixture-Diagnostic
+          path: ${{ runner.temp }}/diagnostic
+          if-no-files-found: error
+          retention-days: 1
