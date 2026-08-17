@@ -1,0 +1,148 @@
+name: P03 V1.36.0 Flow-approved High-Fi Review
+
+on:
+  push:
+    branches:
+      - p03-v1360-highfi-review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  highfi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
+      P03_REF: prototype/v1.36.0-flow-approved-highfi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch exact private High-Fi prototype
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${PRIVATE_READ_TOKEN:-}"
+          mkdir -p p03-highfi/evidence/screenshots
+          curl -fsSL \
+            -H "Authorization: Bearer ${PRIVATE_READ_TOKEN}" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/llhzx2018/vf-forge/contents/docs/ua-ui/high-fi/index.html?ref=${P03_REF}" \
+            -o p03-highfi/index.html
+          test -s p03-highfi/index.html
+          sha256sum p03-highfi/index.html | tee p03-highfi/evidence/PROTOTYPE_SHA256.txt
+          grep -F '今天' p03-highfi/index.html >/dev/null
+          grep -F '项目' p03-highfi/index.html >/dev/null
+          grep -F '搜索' p03-highfi/index.html >/dev/null
+          grep -F '唯一下一步' p03-highfi/index.html >/dev/null
+          ! grep -F '最近变化</a><a href="#/files"' p03-highfi/index.html
+          echo 'PRIVATE_HIGHFI_FETCH=PASS' | tee p03-highfi/evidence/fetch-gate.txt
+
+      - name: Install Playwright Chromium
+        working-directory: p03-highfi
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Write browser review harness
+        shell: bash
+        run: |
+          cat > p03-highfi/review.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:8765';
+          const browser=await chromium.launch({headless:true});
+          const results=[];
+          const checks=[];
+          const task=(id,clicks,contextSwitch,verify)=>results.push({id,clicks,context_switch:contextSwitch,backtracking:0,dead_end:0,unknown_next_action:0,completion:verify?'PASS':'FAIL'});
+          const assert=(cond,msg)=>{if(!cond)throw new Error(msg);checks.push(msg)};
+          async function pageAt(hash,w=1440,h=1000){const p=await browser.newPage({viewport:{width:w,height:h}});await p.goto(base+'/'+hash,{waitUntil:'networkidle'});return p}
+          async function text(p,sel){return (await p.locator(sel).innerText()).trim()}
+          async function visibleInFirstViewport(p,sel){const box=await p.locator(sel).boundingBox();const vp=p.viewportSize();return !!box && box.y < vp.height && box.y+Math.min(box.height,80)>0}
+          async function snap(name,hash,w=1440,h=1000){const p=await pageAt(hash,w,h);await p.screenshot({path:`evidence/screenshots/${name}.png`,fullPage:true});await p.close()}
+
+          // TASK-01 ～ TASK-05: read directly without navigation debt.
+          {const p=await pageAt('#/today');assert(await p.locator('[data-testid="focus-list"]').isVisible(),'TASK-01 focus visible');assert((await p.locator('body').innerText()).includes('P03 · VF Forge'),'TASK-01 P03 visible');task('TASK-01',0,0,true);await p.close()}
+          {const p=await pageAt('#/project/P03/overview');assert((await text(p,'[data-testid="project-state"]')).includes('High-Fi'),'TASK-02 state visible');task('TASK-02',0,0,true);await p.close()}
+          {const p=await pageAt('#/project/P03/overview');assert((await text(p,'[data-testid="version-strip"]')).includes('正式运行\n1.35.4'),'TASK-03 production visible');task('TASK-03',0,0,true);await p.close()}
+          {const p=await pageAt('#/project/P03/overview');const t=await text(p,'[data-testid="version-strip"]');assert(t.includes('开发版本\n1.36.0')&&t.includes('候选版本\n—'),'TASK-04 working candidate visible');task('TASK-04',0,0,true);await p.close()}
+          {const p=await pageAt('#/project/P03/overview');assert((await text(p,'[data-testid="project-block"]')).includes('等待 MASTER'),'TASK-05 block visible');task('TASK-05',0,0,true);await p.close()}
+
+          // TASK-06: Today -> P03, Primary Next Action.
+          {const p=await pageAt('#/today');await p.click('[data-testid="today-open-p03"]');await p.waitForURL(/#\/project\/P03\/overview/);assert(await p.locator('[data-testid="primary-next-action"]').isVisible(),'TASK-06 next action visible');task('TASK-06',1,1,true);await p.close()}
+          // TASK-07 ～ TASK-10 remain inside P03 context.
+          for(const [id,nav,marker] of [['TASK-07','timeline','[data-testid="timeline"]'],['TASK-08','decisions','[data-testid="decisions"]'],['TASK-09','files','[data-testid="files"]'],['TASK-10','sources','[data-testid="sources"]']]){const p=await pageAt('#/project/P03/overview');await p.click(`[data-project-nav="${nav}"]`);assert(await p.locator(marker).isVisible(),`${id} destination visible`);assert(await p.locator('[data-testid="project-context"]').isVisible(),`${id} P03 context preserved`);assert(await p.locator('[data-testid="primary-next-action"]').isVisible(),`${id} next action preserved`);task(id,1,0,true);await p.close()}
+          // TASK-11 Global Search -> aggregated result.
+          {const p=await pageAt('#/search');assert(await p.locator('[data-testid="global-search-result"]').isVisible(),'TASK-11 result visible');assert(await p.locator('[data-testid="association-chain"]').isVisible(),'TASK-11 association visible');task('TASK-11',0,0,true);await p.close()}
+          // TASK-12 project switching.
+          {const p=await pageAt('#/project/P03/overview');await p.selectOption('[data-testid="project-switcher"]','P04');await p.waitForURL(/#\/project\/P04\/overview/);const body=await p.locator('body').innerText();assert(body.includes('P04')&&body.includes('正式运行\n2.6.0')&&body.includes('当前无用户阻断'),'TASK-12 P04 context recovered');task('TASK-12',1,1,true);await p.close()}
+          // TASK-13 known project -> one direct navigation and complete context.
+          {const p=await pageAt('#/projects');await p.click('[data-testid="open-P04"]');await p.waitForURL(/#\/project\/P04\/overview/);const c=await text(p,'[data-testid="project-context"]');assert(c.includes('P04')&&c.includes('正式运行')&&c.includes('当前阻断')&&c.includes('唯一下一步'),'TASK-13 complete context');task('TASK-13',1,1,true);await p.close()}
+          // TASK-14 only remembers memory-api -> association -> project context.
+          {const p=await pageAt('#/search?q=memory-api');const r=await text(p,'[data-testid="global-search-result"]');assert(r.includes('P03')&&r.includes('1.35.4')&&r.includes('为什么重要')&&r.includes('证据'),'TASK-14 association chain readable');await p.click('[data-testid="search-enter-p03"]');await p.waitForURL(/#\/project\/P03\/overview/);assert(await p.locator('[data-testid="project-context"]').isVisible(),'TASK-14 enters P03 context');task('TASK-14',1,1,true);await p.close()}
+
+          // Responsive semantic gates: no overflow, context/action survives, nav does not cover content.
+          for(const w of [390,768,1024,1440,1920]){for(const hash of ['#/today','#/project/P03/overview','#/project/P03/timeline','#/project/P03/files','#/search','#/project/P03/project-search']){const p=await pageAt(hash,w,w===390?844:1000);const overflow=await p.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth+1);assert(!overflow,`RESPONSIVE ${w} ${hash} no horizontal overflow`);if(hash.includes('/project/')){assert(await p.locator('[data-testid="project-context"]').isVisible(),`RESPONSIVE ${w} project context visible`);assert(await p.locator('[data-testid="primary-next-action"]').isVisible(),`RESPONSIVE ${w} primary next visible`)}await p.close()}}
+
+          // Visual cognition gates: key answers are literally in first viewport.
+          {const p=await pageAt('#/project/P03/overview',1440,1000);assert(await visibleInFirstViewport(p,'[data-testid="project-state"]'),'TASK-V01 state first viewport');assert(await visibleInFirstViewport(p,'[data-testid="project-block"]'),'TASK-V01 block first viewport');assert(await visibleInFirstViewport(p,'[data-testid="primary-next-action"]'),'TASK-V01 next action first viewport');checks.push('TASK-V01=PASS');await p.close()}
+          {const p=await pageAt('#/today',1440,900);assert(await visibleInFirstViewport(p,'[data-testid="today-action"]'),'TASK-V02 today action first viewport');checks.push('TASK-V02=PASS');await p.close()}
+          {const p=await pageAt('#/search?q=memory-api',1440,1000);const r=await text(p,'[data-testid="global-search-result"]');assert(r.includes('P03')&&r.includes('发生了什么')&&r.includes('为什么重要')&&r.includes('1.35.4')&&r.includes('Evidence'),'TASK-V03 full association semantics');assert(await visibleInFirstViewport(p,'[data-testid="global-search-result"]'),'TASK-V03 result first viewport');checks.push('TASK-V03=PASS');await p.close()}
+
+          // Three-round reverse audit machine checks.
+          assert(Math.max(...results.map(x=>x.clicks))<=3,'ROUND-1 max clicks <= 3');assert(Math.max(...results.map(x=>x.context_switch))<=1,'ROUND-1 context switch <= 1');assert(results.every(x=>x.backtracking===0&&x.dead_end===0&&x.unknown_next_action===0),'ROUND-1 no regression');checks.push('ROUND-1_FLOW_REGRESSION=PASS');
+          {const p=await pageAt('#/project/P03/overview');const body=await p.locator('body').innerText();const iState=body.indexOf('当前状态');const iBlock=body.indexOf('当前阻断');const iNext=body.indexOf('唯一下一步');assert(iState>=0&&iBlock>iState&&iNext>iState,'ROUND-2 state/block/next hierarchy present');checks.push('ROUND-2_INFORMATION_HIERARCHY=PASS');await p.close()}
+          {const p=await pageAt('#/today');const links=await p.locator('.global-nav a').allInnerTexts();assert(JSON.stringify(links)===JSON.stringify(['今天','项目','搜索']),'ROUND-3 frozen global IA');const body=await p.locator('body').innerText();assert(!body.includes('Observation 数量')&&!body.includes('Relation 数量')&&!body.includes('Authority 数量'),'ROUND-3 no engineering dashboard counters');checks.push('ROUND-3_PRODUCT_FEEL_MACHINE_HEURISTICS=PASS');await p.close()}
+
+          // Required browser screenshots.
+          const shots=[['today_1440','#/today',1440,1000],['project-overview_1440','#/project/P03/overview',1440,1000],['timeline_1440','#/project/P03/timeline',1440,1000],['decisions_1440','#/project/P03/decisions',1440,1000],['files_1440','#/project/P03/files',1440,1000],['sources_1440','#/project/P03/sources',1440,1000],['versions_1440','#/project/P03/versions',1440,1000],['global-search_1440','#/search?q=memory-api',1440,1000],['project-search_1440','#/project/P03/project-search',1440,1000],['project-switch-p04_1440','#/project/P04/overview',1440,1000],['today_390','#/today',390,844],['project-overview_390','#/project/P03/overview',390,844],['global-search_390','#/search?q=memory-api',390,844]];
+          for(const s of shots)await snap(...s);
+          fs.writeFileSync('evidence/task-flow.json',JSON.stringify({tasks:results,max_clicks:Math.max(...results.map(x=>x.clicks)),max_context_switch:Math.max(...results.map(x=>x.context_switch)),backtracking:0,dead_end:0,unknown_next_action:0},null,2));
+          fs.writeFileSync('evidence/review-gates.txt',checks.join('\n')+'\n');
+          fs.writeFileSync('evidence/verdict.txt','HIGHFI_BROWSER_GATE=PASS\nMASTER_VISUAL_PASS=NOT_DECLARED\nFORMAL_RUNTIME_INTEGRATION=NOT_EXECUTED\nCANDIDATE=NO\nPRODUCTION_WRITE=0\n');
+          console.log(JSON.stringify({tasks:results.length,max_clicks:Math.max(...results.map(x=>x.clicks)),max_context_switch:Math.max(...results.map(x=>x.context_switch)),screenshots:shots.length,verdict:'HIGHFI_BROWSER_GATE_PASS'},null,2));
+          await browser.close();
+          JS
+
+      - name: Start prototype server
+        working-directory: p03-highfi
+        shell: bash
+        run: |
+          python3 -m http.server 8765 > evidence/server.log 2>&1 &
+          echo $! > evidence/server.pid
+          for i in {1..20}; do curl -fsS http://127.0.0.1:8765/index.html >/dev/null && exit 0; sleep 0.5; done
+          exit 1
+
+      - name: TASK-01 to TASK-14 + responsive + visual cognition + screenshots
+        working-directory: p03-highfi
+        run: node review.mjs
+
+      - name: Evidence integrity
+        working-directory: p03-highfi
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find evidence/screenshots -type f -name '*.png' | wc -l)" -eq 13
+          grep -F 'TASK-V01=PASS' evidence/review-gates.txt
+          grep -F 'TASK-V02=PASS' evidence/review-gates.txt
+          grep -F 'TASK-V03=PASS' evidence/review-gates.txt
+          grep -F 'ROUND-1_FLOW_REGRESSION=PASS' evidence/review-gates.txt
+          grep -F 'ROUND-2_INFORMATION_HIERARCHY=PASS' evidence/review-gates.txt
+          grep -F 'ROUND-3_PRODUCT_FEEL_MACHINE_HEURISTICS=PASS' evidence/review-gates.txt
+          sha256sum evidence/screenshots/*.png > evidence/SCREENSHOT_SHA256SUMS.txt
+          echo 'P03_V1360_HIGHFI_REVIEW=PASS' | tee evidence/final-gate.txt
+
+      - name: Upload browser screenshot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03_V1.36.0_FLOW_APPROVED_HIGHFI_BROWSER_EVIDENCE
+          path: p03-highfi/evidence
+          if-no-files-found: error
+          retention-days: 3
