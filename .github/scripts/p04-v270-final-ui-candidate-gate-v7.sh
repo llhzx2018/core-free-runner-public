@@ -11,15 +11,14 @@ test "$(tr -d '\r\n' < VERSION)" = "$PRODUCT_VERSION"
 test "$(jq -r '.schema_version_contract' VF_PROJECT.json)" = "$PRODUCT_SCHEMA"
 test "$(jq -r '.integration.migration' VF_PROJECT.json)" = NONE
 mapfile -t changed < <(git diff --name-only "$AUTHORITY_HEAD" "$PRODUCT_HEAD")
-printf '%s\n' "${changed[@]}"; test "${#changed[@]}" -eq 3
-for p in public/index.php public/assets/v270-final-polish.css tests/e2e/v270-reference-locked-candidate.mjs; do printf '%s\n' "${changed[@]}" | grep -Fx "$p" >/dev/null; done
+printf '%s\n' "${changed[@]}"; test "${#changed[@]}" -eq 4
+for p in public/index.php public/assets/v270-final-polish.css public/assets/v270-final-polish.js tests/e2e/v270-reference-locked-candidate.mjs; do printf '%s\n' "${changed[@]}" | grep -Fx "$p" >/dev/null; done
 mapfile -t runtime_changed < <(git diff --name-only "$AUTHORITY_HEAD" "$PRODUCT_HEAD" -- public src config database)
-printf 'RUNTIME_DELTA %s\n' "${runtime_changed[@]}"; test "${#runtime_changed[@]}" -eq 2
-printf '%s\n' "${runtime_changed[@]}" | grep -Fx public/index.php >/dev/null
-printf '%s\n' "${runtime_changed[@]}" | grep -Fx public/assets/v270-final-polish.css >/dev/null
+printf 'RUNTIME_DELTA %s\n' "${runtime_changed[@]}"; test "${#runtime_changed[@]}" -eq 3
+for p in public/index.php public/assets/v270-final-polish.css public/assets/v270-final-polish.js; do printf '%s\n' "${runtime_changed[@]}" | grep -Fx "$p" >/dev/null; done
 test -z "$(git diff --name-only "$AUTHORITY_HEAD" "$PRODUCT_HEAD" -- VERSION VF_PROJECT.json migrations database src config public/bootstrap.php public/api.php public/experience.php public/assets/v270-reference-lock.js public/assets/v270-personal-infra.css)"
-test "$(git diff --numstat "$AUTHORITY_HEAD" "$PRODUCT_HEAD" -- public/index.php | awk '{print $1":"$2}')" = 1:0
-! grep -Eqi 'VF_PRIVATE_READ_TOKEN|VF_RELEASE_WRITE_TOKEN|github_pat_|ghp_' public/assets/v270-final-polish.css tests/e2e/v270-reference-locked-candidate.mjs
+test "$(git diff --numstat "$AUTHORITY_HEAD" "$PRODUCT_HEAD" -- public/index.php | awk '{print $1":"$2}')" = 2:0
+! grep -Eqi 'VF_PRIVATE_READ_TOKEN|VF_RELEASE_WRITE_TOKEN|github_pat_|ghp_' public/assets/v270-final-polish.css public/assets/v270-final-polish.js tests/e2e/v270-reference-locked-candidate.mjs
 echo P04_V270_SCOPED_DELTA=PASS
 
 echo '=== PHP / CURRENT NON-LEGACY CONTRACTS ==='
@@ -35,11 +34,11 @@ echo '=== FORMAL RELEASE-TREE ==='
 rm -rf "$SITE" evidence-final-ui; mkdir -p evidence-final-ui
 python3 scripts/build-release-tree.py "$SITE" --source-root "$ROOT" | tee evidence-final-ui/release-tree-build.json
 test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = "$PRODUCT_VERSION"
-for p in assets/v270-final-polish.css assets/v270-reference-lock.js assets/v270-reference-lock.css index.php; do test -s "$SITE/$p"; done
+for p in assets/v270-final-polish.css assets/v270-final-polish.js assets/v270-reference-lock.js assets/v270-reference-lock.css index.php; do test -s "$SITE/$p"; done
 python3 - "$SITE/release-manifest.json" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8')); assert p['version']=='2.7.0'; assert int(p['target_schema'])==14
-paths={x['path'] for x in p['files']}; assert 'assets/v270-final-polish.css' in paths and 'index.php' in paths
+paths={x['path'] for x in p['files']}; assert 'assets/v270-final-polish.css' in paths and 'assets/v270-final-polish.js' in paths and 'index.php' in paths
 PY
 echo P04_V270_RELEASE_TREE=PASS
 
@@ -65,7 +64,7 @@ pngs="$(find evidence-final-ui -maxdepth 1 -type f -name '*.png' | wc -l | tr -d
 sha256sum evidence-final-ui/*.png > evidence-final-ui/SHA256SUMS
 fingerprint="$(jq -r '.source_fingerprint' evidence-final-ui/release-tree-build.json)"; files="$(jq -r '.file_count' evidence-final-ui/release-tree-build.json)"
 cat > evidence-final-ui/CANDIDATE_GATE_MANIFEST.json <<JSON
-{"project":"P04 · VF Infra","status":"READY_FOR_ACTUAL_PIXEL_REVIEW","source_head":"$PRODUCT_HEAD","authority_commit":"$AUTHORITY_HEAD","version":"$PRODUCT_VERSION","schema":14,"migration":"NONE","owner_real_use":"PASS","final_ui_polish":"TESTED","functional_regression":"PASS","security_regression":"PASS","desktop_browser":"PASS","mobile_browser":"PASS","actual_pixel_review":"PENDING_MASTER_AGENT_INSPECTION","screenshot_count":$pngs,"release_tree_file_count":$files,"release_tree_fingerprint":"$fingerprint","runtime_delta_files":2,"test_only_delta_files":1,"production_write":0,"candidate_created":false}
+{"project":"P04 · VF Infra","status":"READY_FOR_ACTUAL_PIXEL_REVIEW","source_head":"$PRODUCT_HEAD","authority_commit":"$AUTHORITY_HEAD","version":"$PRODUCT_VERSION","schema":14,"migration":"NONE","owner_real_use":"PASS","final_ui_polish":"TESTED","functional_regression":"PASS","security_regression":"PASS","desktop_browser":"PASS","mobile_browser":"PASS","actual_pixel_review":"PENDING_MASTER_AGENT_INSPECTION","screenshot_count":$pngs,"release_tree_file_count":$files,"release_tree_fingerprint":"$fingerprint","runtime_delta_files":3,"test_only_delta_files":1,"production_write":0,"candidate_created":false}
 JSON
 cat evidence-final-ui/CANDIDATE_GATE_MANIFEST.json
 echo P04_V270_FINAL_UI_CANDIDATE_GATE=PASS
