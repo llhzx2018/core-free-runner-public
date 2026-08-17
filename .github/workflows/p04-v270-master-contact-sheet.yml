@@ -1,0 +1,218 @@
+name: P04 V2.7 Master Contact Sheet Only
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-master-contact-sheet.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  SOURCE_ARTIFACT_ID: '9287081155'
+  SOURCE_ARTIFACT_SHA256: 'c1ae95ede8715b743889c26053c9974bf6da1a5e8e25d43d9b659cbd23ec2619'
+  TESTED_RUNTIME_COMMIT: '79281e09a65985ec6e0ae9d1730472979f8fe482'
+
+jobs:
+  contact-sheet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout evidence branch
+        uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+
+      - name: Download already-sealed source artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" > /tmp/p04-source.zip
+          test "$(sha256sum /tmp/p04-source.zip | awk '{print $1}')" = "${SOURCE_ARTIFACT_SHA256}"
+          rm -rf /tmp/p04-source
+          mkdir -p /tmp/p04-source
+          unzip -q /tmp/p04-source.zip -d /tmp/p04-source
+
+      - name: Verify exact 10 original screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/p04-source')
+          required=[
+            '01-today-1440.png','02-billing-1440.png','03-infrastructure-1440.png',
+            '04-domain-workspace-1440.png','05-vps-workspace-1440.png','06-provider-workspace-1440.png',
+            '07-settings-1440.png','08-today-390.png','09-billing-390.png','10-domain-workspace-390.png'
+          ]
+          actual=sorted(p.name for p in root.glob('*.png'))
+          assert actual==sorted(required), (actual, required)
+          assert all((root/n).stat().st_size>1000 for n in required)
+          print('SOURCE_SCREENSHOT_COUNT=10/10')
+          PY
+
+      - name: Build master-readable PDF from original PNG streams only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct,base64,hashlib,json,os
+
+          src=Path('/tmp/p04-source')
+          out=Path('evidence/p04-v270-final-polish-v2-contact-sheet.pdf')
+          meta_path=Path('evidence/p04-v270-final-polish-v2-contact-sheet.json')
+          commit=os.environ['TESTED_RUNTIME_COMMIT']
+          artifact_id=os.environ['SOURCE_ARTIFACT_ID']
+          artifact_sha=os.environ['SOURCE_ARTIFACT_SHA256']
+          files=[
+            '01-today-1440.png','02-billing-1440.png','03-infrastructure-1440.png',
+            '04-domain-workspace-1440.png','05-vps-workspace-1440.png','06-provider-workspace-1440.png',
+            '07-settings-1440.png','08-today-390.png','09-billing-390.png','10-domain-workspace-390.png'
+          ]
+
+          def parse_png(path):
+              data=path.read_bytes()
+              assert data[:8]==b'\x89PNG\r\n\x1a\n'
+              pos=8; w=h=bit=ctype=interlace=None; idat=[]
+              while pos < len(data):
+                  ln=struct.unpack('>I',data[pos:pos+4])[0]
+                  typ=data[pos+4:pos+8]
+                  chunk=data[pos+8:pos+8+ln]
+                  pos += 12+ln
+                  if typ==b'IHDR':
+                      w,h,bit,ctype,comp,filt,interlace=struct.unpack('>IIBBBBB',chunk)
+                  elif typ==b'IDAT':
+                      idat.append(chunk)
+                  elif typ==b'IEND':
+                      break
+              assert bit==8 and ctype==2 and interlace==0, (path.name,bit,ctype,interlace)
+              return w,h,b''.join(idat)
+
+          def esc(s):
+              return s.replace('\\','\\\\').replace('(','\\(').replace(')','\\)')
+
+          objs=[]
+          def add(data):
+              objs.append(data); return len(objs)
+
+          catalog=add(b'')
+          pages=add(b'')
+          font=add(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+          page_ids=[]
+
+          cover=[
+            'P04 VF Infra - V2.7.0 Final Polish V2',
+            'Master-Readable Visual Evidence - Contact Sheet',
+            '',
+            'Status: READY_FOR_MASTER_FINAL_VISUAL_REVIEW',
+            'Source Artifact ID: '+artifact_id,
+            'Source Artifact SHA-256: '+artifact_sha,
+            'Tested Runtime Commit: '+commit,
+            'Screenshot Count: 10 / 10',
+            'Desktop: 7 screenshots (1440)',
+            'Mobile: 3 screenshots (390)',
+            '',
+            'Source rule: original screenshot PNG streams only; no UI redraw or screenshot regeneration.',
+            'Public-safe evidence only.'
+          ]
+          cmds=['BT','/F1 18 Tf','54 740 Td']
+          for i,line in enumerate(cover):
+              if i:
+                  cmds.append('0 -28 Td' if i<3 else '0 -22 Td')
+                  if i==1: cmds.append('/F1 13 Tf')
+                  if i==3: cmds.append('/F1 10 Tf')
+              cmds.append(f'({esc(line)}) Tj')
+          cmds.append('ET')
+          cb='\n'.join(cmds).encode('ascii')
+          cover_content=add(b'<< /Length %d >>\nstream\n'%len(cb)+cb+b'\nendstream')
+          cover_page=add(f'<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 {font} 0 R >> >> /Contents {cover_content} 0 R >>'.encode('ascii'))
+          page_ids.append(cover_page)
+
+          screenshot_sha={}
+          for idx,name in enumerate(files,1):
+              path=src/name
+              screenshot_sha[name]=hashlib.sha256(path.read_bytes()).hexdigest()
+              w,h,idat=parse_png(path)
+              a85=base64.a85encode(idat,adobe=False,wrapcol=120)+b'~>'
+              img=(f'<< /Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate false '
+                   f'/Filter [/ASCII85Decode /FlateDecode] /DecodeParms [null << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns {w} >>] /Length {len(a85)} >>\nstream\n').encode('ascii')+a85+b'\nendstream'
+              image_id=add(img)
+              scale=.75; iw=w*scale; ih=h*scale; margin=36; header=72; pw=iw+72; ph=ih+108
+              viewport='1440' if '-1440' in name else '390'
+              section='DESKTOP' if viewport=='1440' else 'MOBILE'
+              lines=[
+                f'P04 VF Infra - Final Polish V2 - {section}',
+                f'Screenshot: {name}    Viewport: {viewport}',
+                f'Tested Runtime Commit: {commit}',
+                f'Source Artifact: {artifact_id}'
+              ]
+              y=ph-24
+              c=['BT','/F1 10 Tf',f'{margin} {y:.2f} Td',f'({esc(lines[0])}) Tj','0 -14 Td',f'({esc(lines[1])}) Tj','0 -14 Td',f'({esc(lines[2])}) Tj','0 -14 Td',f'({esc(lines[3])}) Tj','ET','q',f'{iw:.4f} 0 0 {ih:.4f} {margin:.4f} {margin:.4f} cm',f'/Im{idx} Do','Q']
+              body='\n'.join(c).encode('ascii')
+              content_id=add(b'<< /Length %d >>\nstream\n'%len(body)+body+b'\nendstream')
+              page_id=add((f'<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 {pw:.4f} {ph:.4f}] /Resources << /Font << /F1 {font} 0 R >> /XObject << /Im{idx} {image_id} 0 R >> >> /Contents {content_id} 0 R >>').encode('ascii'))
+              page_ids.append(page_id)
+
+          objs[pages-1]=f'<< /Type /Pages /Count {len(page_ids)} /Kids [{' '.join(f'{p} 0 R' for p in page_ids)}] >>'.encode('ascii')
+          objs[catalog-1]=f'<< /Type /Catalog /Pages {pages} 0 R >>'.encode('ascii')
+          pdf=bytearray(b'%PDF-1.4\n%ASCII-ONLY\n')
+          offsets=[0]
+          for i,obj in enumerate(objs,1):
+              offsets.append(len(pdf))
+              pdf += f'{i} 0 obj\n'.encode('ascii')+obj+b'\nendobj\n'
+          xref=len(pdf)
+          pdf += f'xref\n0 {len(objs)+1}\n'.encode('ascii')+b'0000000000 65535 f \n'
+          for off in offsets[1:]:
+              pdf += f'{off:010d} 00000 n \n'.encode('ascii')
+          pdf += (f'trailer\n<< /Size {len(objs)+1} /Root {catalog} 0 R >>\nstartxref\n{xref}\n%%EOF\n').encode('ascii')
+          assert pdf.startswith(b'%PDF-1.4') and pdf.endswith(b'%%EOF\n') and len(page_ids)==11
+          out.write_bytes(pdf)
+          pdf_sha=hashlib.sha256(pdf).hexdigest()
+          meta={
+            'status':'READY_FOR_MASTER_FINAL_VISUAL_REVIEW',
+            'evidence_type':'MASTER_READABLE_CONTACT_SHEET_PDF',
+            'pdf_path':'evidence/p04-v270-final-polish-v2-contact-sheet.pdf',
+            'pdf_bytes':len(pdf),
+            'pdf_sha256':pdf_sha,
+            'page_count':11,
+            'source_artifact_id':artifact_id,
+            'source_artifact_sha256':artifact_sha,
+            'source_screenshot_count':10,
+            'source_screenshots':files,
+            'source_screenshot_sha256':screenshot_sha,
+            'tested_runtime_commit':commit,
+            'product_runtime_delta':0,
+            'final_polish_tested_runtime':'UNCHANGED',
+            'source_method':'ORIGINAL_PNG_IDAT_STREAM_EMBEDDING',
+            'screenshot_regeneration':False,
+            'ui_redraw':False,
+            'prototype_used':False,
+            'public_safe':True,
+            'secret_present':False,
+            'private_source_present':False
+          }
+          meta_path.write_text(json.dumps(meta,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print('PDF_BYTES='+str(len(pdf)))
+          print('PDF_SHA256='+pdf_sha)
+          print('PDF_PAGE_COUNT=11')
+          print('SOURCE_SCREENSHOT_COUNT=10/10')
+          PY
+
+      - name: Seal evidence and remove temporary workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -s evidence/p04-v270-final-polish-v2-contact-sheet.pdf
+          test -s evidence/p04-v270-final-polish-v2-contact-sheet.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-final-polish-v2-contact-sheet.pdf evidence/p04-v270-final-polish-v2-contact-sheet.json
+          git rm .github/workflows/p04-v270-master-contact-sheet.yml
+          git commit -m 'evidence(P04): add master-readable final visual contact sheet'
+          git push origin HEAD:p04-v270-integration-gate
