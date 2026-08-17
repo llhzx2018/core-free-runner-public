@@ -1,0 +1,48 @@
+name: P03 V1.36.0 Backup Restore Harness Patch
+on:
+  push:
+    branches: [p03-v1360-runtime-integration]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    env:
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      EXPECTED_HEAD: 6549d73a3580ba19988dfee952f9d5dbb5f71105
+    steps:
+      - name: Patch only disposable Backup Restore test readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${WRITE_TOKEN:-}"
+          git clone --quiet --branch integration/v1.36.0-product-experience --single-branch "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-forge.git" p03
+          cd p03
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tests/maintenance/v1354_backup_restore.sh')
+          s=p.read_text(encoding='utf-8')
+          old="DB=$(find \"$DATA_ROOT/database\" -maxdepth 1 -type f -name '*.sqlite'|head -n1);test \"$(sqlite3 \"$DB\" 'pragma integrity_check;')\" = ok;test -z \"$(sqlite3 \"$DB\" 'pragma foreign_key_check;')\";test \"$(sqlite3 \"$DB\" 'select count(*) from asset_files;')\" = 0"
+          new="""sudo chown -R \"$(id -u):$(id -g)\" \"$DATA_ROOT\"
+          DB=''
+          while IFS= read -r CANDIDATE_DB; do
+            HAS_SCHEMA=$(sqlite3 \"$CANDIDATE_DB\" \"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations';\" 2>/dev/null || true)
+            if [ \"$HAS_SCHEMA\" = '1' ]; then
+              CANDIDATE_SCHEMA=$(sqlite3 \"$CANDIDATE_DB\" 'select max(version) from schema_migrations;' 2>/dev/null || true)
+              if [ \"$CANDIDATE_SCHEMA\" = '30' ]; then DB=\"$CANDIDATE_DB\"; break; fi
+            fi
+          done < <(find \"$DATA_ROOT\" -type f -name '*.sqlite' -print)
+          test -n \"$DB\";test \"$(sqlite3 \"$DB\" 'pragma integrity_check;')\" = ok;test -z \"$(sqlite3 \"$DB\" 'pragma foreign_key_check;')\";test \"$(sqlite3 \"$DB\" 'select count(*) from asset_files;')\" = 0"""
+          assert s.count(old)==1, 'BACKUP_DB_READBACK_ANCHOR_MISMATCH'
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          bash -n tests/maintenance/v1354_backup_restore.sh
+          test "$(git status --short | wc -l)" -eq 1
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add tests/maintenance/v1354_backup_restore.sh
+          git commit -m 'test(v1.36.0): harden backup restore fixture readback'
+          git push origin HEAD:integration/v1.36.0-product-experience
+          echo "PATCHED_HEAD=$(git rev-parse HEAD)"
