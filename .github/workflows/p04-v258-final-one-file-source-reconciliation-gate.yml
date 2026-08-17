@@ -1,0 +1,328 @@
+name: P04 VF Infra V2.5.8 Final One-File Source Reconciliation Gate
+
+on:
+  push:
+    branches:
+      - p04-v258-final-one-file-source-reconciliation-gate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-final-one-file-source-reconciliation-gate
+  cancel-in-progress: false
+
+env:
+  TARGET_COMMIT: 4a18a61c21455184c67aa4a3e0957283674ae2d7
+  TARGET_TREE: 89f322a309f8c51c9869864800a6980cb9bfbb94
+  TOOL_NAME: vf-v258-final-source-reconcile-b4e7cacc3117.php
+  TOOL_BYTES: '25406'
+  TOOL_SHA256: a10f694e91410ea9de630e70cb33559c2950ab9ca1c1aef49abbd8418af23dc5
+  TARGET_NOTES_BYTES: '1770'
+  TARGET_NOTES_SHA256: c402daaeb27130dda0354024a3725295270e78e16bcc6952f6d3b23269dd74d7
+  TARGET_MANIFEST_BYTES: '27978'
+  TARGET_MANIFEST_SHA256: a2690de61bdb73d995465d75f87f5b9b0f94867db9cc333ce1eaef9609417408
+  TARGET_RUNTIME_FINGERPRINT: 13e8eeaddf89837f2d370a2e15899e354402042d8bc0c27eccd130ec6ff2855a
+  TARGET_SOURCE_COUNT: '163'
+  TARGET_SOURCE_SHA256: 4b4b52a5b0651aeca41433730fa53bbd96392524b6face44940f2405cf864203
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout gate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: gate
+
+      - name: Checkout exact frozen VF Infra V2.5.8 Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sqlite3, mbstring
+          coverage: none
+
+      - name: Reconstruct exact original reconciliation tool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/original"
+          base64 -d gate/tools/p04/v258-final-reconcile/final-source-reconcile.php.gz.b64 | gzip -d > "$RUNNER_TEMP/original/$TOOL_NAME"
+          test "$(stat -c %s "$RUNNER_TEMP/original/$TOOL_NAME")" = "$TOOL_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/original/$TOOL_NAME" | awk '{print $1}')" = "$TOOL_SHA256"
+          php -l "$RUNNER_TEMP/original/$TOOL_NAME" >/dev/null
+          echo "EXACT_ORIGINAL_TOOL=PASS"
+
+      - name: Verify frozen Product and build exact target Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/base-runtime" > "$RUNNER_TEMP/build.json"
+          test "$(stat -c %s "$RUNNER_TEMP/base-runtime/RELEASE_NOTES.md")" = "$TARGET_NOTES_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/base-runtime/RELEASE_NOTES.md" | awk '{print $1}')" = "$TARGET_NOTES_SHA256"
+          test "$(stat -c %s "$RUNNER_TEMP/base-runtime/release-manifest.json")" = "$TARGET_MANIFEST_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/base-runtime/release-manifest.json" | awk '{print $1}')" = "$TARGET_MANIFEST_SHA256"
+          python3 - "$RUNNER_TEMP/base-runtime/release-manifest.json" <<'PY'
+          import json,os,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['version']=='2.5.8'
+          assert m['target_schema']==14
+          assert m['file_count']+1==165
+          assert m['source_fingerprint']==os.environ['TARGET_RUNTIME_FINGERPRINT']
+          print('TARGET_RUNTIME_BUILD=PASS')
+          PY
+
+      - name: Static write-boundary review
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/original/$TOOL_NAME" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+          assert "SQLITE3_OPEN_READONLY" in s
+          assert "SQLITE3_OPEN_READWRITE" not in s and "SQLITE3_OPEN_CREATE" not in s
+          assert "PRAGMA query_only=ON" in s
+          assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[A-Za-z_\"]|DELETE\s+FROM|REPLACE\s+INTO)\b",s,re.I)
+          assert not re.search(r"\b(curl_[a-z_]+|fsockopen|pfsockopen|stream_socket_client|socket_connect)\s*\(",s,re.I)
+          assert "RELEASE_NOTES.md" in s
+          assert "vf-v258-production-reconcile-b1e7564c23ba.php" in s
+          assert "vf-v258-asset-relation-forensic-bd2eadc2c6aa.php" in s
+          assert "rename($tmp,$target)" in s
+          print('STATIC_DB_WRITE=0')
+          print('STATIC_PROVIDER_NETWORK_WRITE=0')
+          print('STATIC_PRODUCT_WRITE_SCOPE=RELEASE_NOTES_ONLY')
+          PY
+
+      - name: Build isolated positive and negative fixtures
+        shell: bash
+        env:
+          ORIGINAL_TOOL: ${{ runner.temp }}/original/${{ env.TOOL_NAME }}
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import hashlib,hmac,os,pathlib,shutil,sqlite3,sys
+          root=pathlib.Path(sys.argv[1])
+          base=root/'base-runtime'
+          original=pathlib.Path(os.environ['ORIGINAL_TOOL']).read_text(encoding='utf-8')
+          appkey='a'*64
+          ua='P04-V258-Final-Reconcile-Gate/1.0'
+          sid='p04v258finalreconcilefixture123456'
+          old=(b'P04-V258-OLD-NOTES-FIXTURE\n'*100)[:1146]
+          if len(old)<1146: old += b'X'*(1146-len(old))
+          oldsha=hashlib.sha256(old).hexdigest()
+
+          pre=root/'pre.sqlite'
+          c=sqlite3.connect(pre)
+          c.executescript("""
+          CREATE TABLE schema_migrations(version INTEGER NOT NULL,status TEXT NOT NULL);
+          INSERT INTO schema_migrations VALUES(14,'success');
+          """)
+          c.commit();c.close()
+          backupsha=hashlib.sha256(pre.read_bytes()).hexdigest()
+          backupbytes=pre.stat().st_size
+
+          def build(name,second_drift=False):
+              case=root/name
+              runtime=case/'runtime';data=case/'data';sessions=case/'sessions'
+              shutil.copytree(base,runtime)
+              (data/'database').mkdir(parents=True);(data/'backups').mkdir(parents=True);sessions.mkdir(parents=True)
+              shutil.copy2(pre,data/'backups/pre-v258-fixture.sqlite')
+              db=data/'database/vf-domain.sqlite'
+              c=sqlite3.connect(db)
+              c.executescript("""
+              CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
+              INSERT INTO settings VALUES('auth_generation','1','2026-08-17 03:00:00');
+              CREATE TABLE schema_migrations(version INTEGER NOT NULL,status TEXT NOT NULL);
+              INSERT INTO schema_migrations VALUES(14,'success');
+              CREATE TABLE backups(
+                id INTEGER PRIMARY KEY,filename TEXT NOT NULL,backup_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,source_version TEXT NOT NULL,schema_version INTEGER NOT NULL,integrity_status TEXT NOT NULL,
+                foreign_key_status TEXT NOT NULL,protected INTEGER NOT NULL DEFAULT 0
+              );
+              """)
+              c.execute("INSERT INTO backups VALUES(61,?,?,?,?,?,?,?,?,?,?)",(
+                'pre-v258-fixture.sqlite','pre_update',backupbytes,backupsha,'2026-08-17 03:00:00','2.5.7',14,'ok','ok',1
+              ))
+              c.commit();c.close()
+              current=(old+b'!') if second_drift else old
+              (runtime/'RELEASE_NOTES.md').write_bytes(current)
+              tool=original.replace(
+                "const VFC_NOTES_BEFORE_SHA='77f6c3d1cd4e214aaa5ee0a001e2e4e37daeb0f27d689e89dd0f10f4ebbec9f8';",
+                f"const VFC_NOTES_BEFORE_SHA='{oldsha}';"
+              ).replace(
+                "const VFC_BACKUP_SHA='367619835c340614522c29a1f316bffe44167c2c6bd07ac8beccbee5287e3531';",
+                f"const VFC_BACKUP_SHA='{backupsha}';"
+              )
+              (runtime/os.environ['TOOL_NAME']).write_text(tool,encoding='utf-8')
+              (runtime/'vf-v258-production-reconcile-b1e7564c23ba.php').write_text('<?php // old probe',encoding='utf-8')
+              (runtime/'vf-v258-asset-relation-forensic-bd2eadc2c6aa.php').write_text('<?php // old probe',encoding='utf-8')
+              port=18141 if name=='positive' else 18142
+              (runtime/'config.php').write_text("<?php\nreturn [\n"
+                f"'base_url'=>'http://127.0.0.1:{port}',\n"
+                f"'data_path'=>{str(data)!r},\n"
+                "'timezone'=>'Asia/Shanghai',\n"
+                f"'app_key'=>'{appkey}',\n"
+                "'session_name'=>'vf_domain_session',\n"
+                "'session_idle_timeout'=>1209600,\n"
+                "'session_max_lifetime'=>2592000,\n"
+                "'allowed_hosts'=>['127.0.0.1'],\n];\n",encoding='utf-8')
+              nonce=hmac.new(appkey.encode(),f"P04_V258_FINAL_SINGLE_FILE|{os.environ['TOOL_NAME']}".encode(),hashlib.sha256).hexdigest()
+              return str(case),nonce
+
+          pos,posnonce=build('positive',False)
+          neg,negnonce=build('negative',True)
+          (root/'fixture.env').write_text(
+              f"APPKEY={appkey}\nUA={ua}\nSID={sid}\nOLDSHA={oldsha}\nBACKUPSHA={backupsha}\nPOSNONCE={posnonce}\nNEGNONCE={negnonce}\n",
+              encoding='utf-8'
+          )
+          print('POSITIVE='+pos)
+          print('NEGATIVE='+neg)
+          print('FIXTURE_BUILD=PASS')
+          PY
+
+          source "$RUNNER_TEMP/fixture.env"
+          for CASE in positive negative; do
+            SESS="$RUNNER_TEMP/$CASE/sessions"
+            SID="$SID" UA="$UA" APPKEY="$APPKEY" php -d session.save_path="$SESS" -d session.use_strict_mode=0 -r '
+              session_name("vf_domain_session");session_id(getenv("SID"));session_start();$n=time();
+              $_SESSION=["vf_domain_authenticated"=>true,"vf_domain_last_activity"=>$n,"vf_domain_created_at"=>$n,"vf_domain_auth_generation"=>1,
+              "vf_domain_ua"=>hash("sha256",getenv("UA")."|".getenv("APPKEY"))];session_write_close();'
+          done
+          echo 'SESSION_FIXTURE=PASS'
+
+      - name: Positive exact atomic replace and Final Exact Gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$RUNNER_TEMP/fixture.env"
+          RT="$RUNNER_TEMP/positive/runtime"; DATA="$RUNNER_TEMP/positive/data"; SESS="$RUNNER_TEMP/positive/sessions"; PORT=18141
+          DB="$DATA/database/vf-domain.sqlite"
+          DB_BEFORE="$(sha256sum "$DB" | awk '{print $1}')"
+          php -d session.save_path="$SESS" -S 127.0.0.1:$PORT -t "$RT" >"$RUNNER_TEMP/positive-server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 50); do
+            code=$(curl -sS --max-time 1 -o "$RUNNER_TEMP/ready.html" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:$PORT/$TOOL_NAME" || true)
+            if [ "$code" = 200 ]; then ready=1; break; fi
+            sleep .1
+          done
+          test "$ready" = 1
+          grep -q 'Pre-write Fail-closed Gate：PASS' "$RUNNER_TEMP/ready.html"
+          NONCE=$(python3 - "$RUNNER_TEMP/ready.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="nonce" value="([a-f0-9]{64})"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          test "$NONCE" = "$POSNONCE"
+          code=$(curl -sS -o "$RUNNER_TEMP/positive.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" -d "nonce=$NONCE" "http://127.0.0.1:$PORT/$TOOL_NAME")
+          test "$code" = 200
+          kill $PID;wait $PID 2>/dev/null || true;trap - EXIT
+          DB_AFTER="$(sha256sum "$DB" | awk '{print $1}')"
+          test "$DB_BEFORE" = "$DB_AFTER"
+          test "$(stat -c %s "$RT/RELEASE_NOTES.md")" = "$TARGET_NOTES_BYTES"
+          test "$(sha256sum "$RT/RELEASE_NOTES.md" | awk '{print $1}')" = "$TARGET_NOTES_SHA256"
+          test ! -e "$RT/$TOOL_NAME"
+          test ! -e "$RT/vf-v258-production-reconcile-b1e7564c23ba.php"
+          test ! -e "$RT/vf-v258-asset-relation-forensic-bd2eadc2c6aa.php"
+          python3 - "$RUNNER_TEMP/positive.json" <<'PY'
+          import json,os,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['ok'] is True and d['closure']=='PASS_READY_FOR_AUTHORITY_CLOSURE'
+          assert d['release_notes']['before']['bytes']==1146
+          assert d['release_notes']['after']['bytes']==1770
+          assert d['release_notes']['after']['sha256']==os.environ['TARGET_NOTES_SHA256']
+          assert d['production_version']=='2.5.8' and d['schema']==14
+          assert d['sqlite_integrity']=='PASS' and d['foreign_keys']=='PASS'
+          assert d['runtime_files']==165 and d['runtime_fingerprint']==os.environ['TARGET_RUNTIME_FINGERPRINT']
+          assert d['source_manifest_count']==int(os.environ['TARGET_SOURCE_COUNT'])
+          assert d['source_manifest_sha']==os.environ['TARGET_SOURCE_SHA256']
+          assert d['missing']==0 and d['unexpected']==0 and d['hash_mismatch']==0 and d['source_exact']=='PASS'
+          assert d['business_semantic_preservation']=='PASS'
+          assert d['asset_relations_classification']['classification']=='POST_UPGRADE_PROVIDER_SYNC'
+          assert d['asset_relations_classification']['old_ids']==[1695,1696,1697,1698]
+          assert d['asset_relations_classification']['new_ids']==[1699,1700,1701,1702]
+          assert d['asset_relations_classification']['job_run_id']==2728
+          assert d['backup']['status']=='PASS'
+          assert d['temporary_probe_remaining']==0
+          assert d['production_file_change']==1 and d['production_db_write']==0 and d['provider_write']==0 and d['physical_db_repair']==0
+          assert d['final_online_pass']=='YES' and d['product_failure']=='NONE' and d['project_block']=='NONE'
+          assert d['v2_5_9']=='NOT_CREATED'
+          print('POSITIVE_FINAL_EXACT_GATE=PASS')
+          PY
+
+      - name: Negative second-drift must fail closed with zero Product write
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "$RUNNER_TEMP/fixture.env"
+          RT="$RUNNER_TEMP/negative/runtime"; DATA="$RUNNER_TEMP/negative/data"; SESS="$RUNNER_TEMP/negative/sessions"; PORT=18142
+          BEFORE="$(sha256sum "$RT/RELEASE_NOTES.md" | awk '{print $1}')"
+          DB="$DATA/database/vf-domain.sqlite"; DB_BEFORE="$(sha256sum "$DB" | awk '{print $1}')"
+          php -d session.save_path="$SESS" -S 127.0.0.1:$PORT -t "$RT" >"$RUNNER_TEMP/negative-server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            code=$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:$PORT/$TOOL_NAME" || true)
+            if [ "$code" = 409 ]; then break; fi
+            sleep .1
+          done
+          test "$code" = 409
+          code=$(curl -sS -o "$RUNNER_TEMP/negative.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" -d "nonce=$NEGNONCE" "http://127.0.0.1:$PORT/$TOOL_NAME")
+          test "$code" = 409
+          kill $PID;wait $PID 2>/dev/null || true;trap - EXIT
+          AFTER="$(sha256sum "$RT/RELEASE_NOTES.md" | awk '{print $1}')"
+          DB_AFTER="$(sha256sum "$DB" | awk '{print $1}')"
+          test "$BEFORE" = "$AFTER"
+          test "$DB_BEFORE" = "$DB_AFTER"
+          test ! -e "$RT/$TOOL_NAME"
+          python3 - "$RUNNER_TEMP/negative.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['ok'] is False and d['closure']=='STOP_FOR_MASTER'
+          assert d['release_notes']['status']=='FAIL_CLOSED'
+          assert d['release_notes']['reason']=='CURRENT_RELEASE_NOTES_SECOND_DRIFT'
+          assert d['release_notes']['production_file_change']==0
+          assert d['production_db_write']==0 and d['provider_write']==0 and d['physical_db_repair']==0
+          assert d['v2_5_9']=='NOT_CREATED'
+          print('NEGATIVE_SECOND_DRIFT_FAIL_CLOSED=PASS')
+          PY
+
+      - name: Seal exact original handoff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/handoff"
+          cp "$RUNNER_TEMP/original/$TOOL_NAME" "$RUNNER_TEMP/handoff/$TOOL_NAME"
+          test "$(stat -c %s "$RUNNER_TEMP/handoff/$TOOL_NAME")" = "$TOOL_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/handoff/$TOOL_NAME" | awk '{print $1}')" = "$TOOL_SHA256"
+          echo "TOOL_NAME=$TOOL_NAME"
+          echo "TOOL_BYTES=$TOOL_BYTES"
+          echo "TOOL_SHA256=$TOOL_SHA256"
+          echo "FORMAL_RELEASE_REWRITE=0"
+          echo "CORE_UPDATES_REWRITE=0"
+          echo "PRODUCTION_EXECUTION=NOT_EXECUTED_BY_RUNNER"
+
+      - name: Upload exact one-time final reconciliation tool
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V258-Final-One-File-Source-Reconciliation
+          path: ${{ runner.temp }}/handoff/${{ env.TOOL_NAME }}
+          if-no-files-found: error
+          retention-days: 7
