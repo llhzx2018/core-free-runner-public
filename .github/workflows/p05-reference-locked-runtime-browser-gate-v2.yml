@@ -1,0 +1,166 @@
+name: P05 Reference-Locked Runtime Browser Gate V2
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'evidence/triggers/p05-reference-runtime-browser-v2.txt'
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_REPOSITORY: llhzx2018/vf-seo
+  EXPECTED_COMMIT: f1d74810582668c71d23dbd9a97ddc497813babe
+  EXPECTED_TREE: 56f52f938b62215f24af6f1a56dc5d294b2e2b6c
+  EXPECTED_VERSION: 1.0.0
+  PORT: '3105'
+  VF_DATABASE_PROVIDER: sqlite
+  VF_SQLITE_BUSY_TIMEOUT_MS: '5000'
+  VF_ADMIN_USERNAME: admin
+  VF_ADMIN_PASSWORD: P05-Browser-Gate-2026!
+  NODE_ENV: test
+  VF_SECURE_COOKIES: 'false'
+  VF_REQUIRE_HTTPS: 'false'
+  VF_TRUST_PROXY: 'false'
+  P05_BASE_URL: http://127.0.0.1:3105
+  P05_TEST_ADMIN_PASSWORD: P05-Browser-Gate-2026!
+
+jobs:
+  browser-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout public runner harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Existing private read credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -f scripts/p05-reference-runtime-seed.mjs
+          test -f scripts/p05-reference-runtime-browser.mjs
+          echo 'PRIVATE_READ_CREDENTIAL=VF_PRIVATE_READ_TOKEN'
+          echo 'BROWSER_HARNESS_SOURCE=PUBLIC_RUNNER'
+          echo 'NEW_CREDENTIAL=NO'
+          echo 'NEW_RUNNER=NO'
+
+      - name: Checkout exact P05 runtime recovery source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRODUCT_REPOSITORY }}
+          ref: ${{ env.EXPECTED_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - name: Exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test "$(tr -d '\r\n' < product/VERSION)" = "$EXPECTED_VERSION"
+          echo 'SOURCE_IDENTITY=PASS'
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: product/package-lock.json
+
+      - name: Install and build exact source
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run build
+
+      - name: Prepare test-only SQLite runtime environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "VF_SQLITE_PATH=${RUNNER_TEMP}/vf-seo-browser.sqlite3" >> "$GITHUB_ENV"
+          echo "VF_BACKUP_DIR=${RUNNER_TEMP}/vf-seo-backups" >> "$GITHUB_ENV"
+          echo 'VF_MASTER_KEY_BASE64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' >> "$GITHUB_ENV"
+          echo 'TEST_RUNTIME_ENV=PASS'
+
+      - name: Fresh SQLite migration schema and admin
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm run migrate
+          npm run verify:schema
+          npm run bootstrap:admin
+          npm run verify:admin-ready
+          echo 'SQLITE_FRESH_RUNTIME=PASS'
+
+      - name: Start real Node runtime
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          nohup npm start > "${RUNNER_TEMP}/p05-server.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/p05-server.pid"
+          for i in $(seq 1 60); do
+            if curl -fsS "${P05_BASE_URL}/api/health" >/tmp/p05-health.json; then break; fi
+            sleep 1
+          done
+          cat /tmp/p05-health.json
+          grep -q '"ok":true' /tmp/p05-health.json
+          echo 'NODE_RUNTIME_BOOT=PASS'
+
+      - name: Seed owner-review fixture through existing APIs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node scripts/p05-reference-runtime-seed.mjs
+
+      - name: Install isolated Chrome harness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          HARNESS="${RUNNER_TEMP}/p05-browser-harness"
+          mkdir -p "$HARNESS"
+          cp scripts/p05-reference-runtime-browser.mjs "$HARNESS/gate.mjs"
+          cd "$HARNESS"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund puppeteer-core@24.16.0 >/dev/null
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
+          test -n "$CHROME"
+          echo "CHROME_BIN=$CHROME" >> "$GITHUB_ENV"
+          echo "BROWSER_HARNESS=$HARNESS" >> "$GITHUB_ENV"
+          "$CHROME" --version
+
+      - name: Desktop 1440 and Mobile 390 owner workflow gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$BROWSER_HARNESS"
+          node gate.mjs
+
+      - name: Final runtime boundary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -f "${RUNNER_TEMP}/p05-server.pid" ]; then kill "$(cat "${RUNNER_TEMP}/p05-server.pid")" 2>/dev/null || true; fi
+          echo 'RUNTIME_CHANGE=UI_ONLY'
+          echo 'VERSION_CHANGE=NO'
+          echo 'DATABASE_SCHEMA_PROVIDER_CHANGE=NO'
+          echo 'PRODUCTION_WRITE=NO'
+          echo 'CANDIDATE=NOT_AUTHORIZED'
+          echo 'RELEASE=NOT_AUTHORIZED'
+          echo 'PRODUCTION_DEPLOYMENT=NOT_AUTHORIZED'
