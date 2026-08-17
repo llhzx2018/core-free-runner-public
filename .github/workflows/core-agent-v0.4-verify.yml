@@ -1,0 +1,92 @@
+name: core-agent V0.4 Independent Machine Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/core-agent-v0.4-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      CORE_AGENT_SOURCE_SHA: 76f7b315760bdeff69f6321586ebfcf7b0457f91
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN || secrets.CORE_AGENT_RUNNER_TOKEN || secrets.VF_START_RUNNER_TOKEN }}
+    steps:
+      - name: Verify private read credential is available
+        shell: bash
+        run: |
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            echo "RUNNER_INFRASTRUCTURE_BLOCK=PRIVATE_READ_TOKEN_MISSING"
+            exit 78
+          fi
+
+      - name: Checkout exact core-agent develop source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run core-agent machine verification
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Build public-safe evidence summary
+        if: always()
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          source = Path('.evidence/verification.json')
+          out = Path('.evidence/public-evidence.json')
+          payload = {
+              'schema': 'core-agent-public-evidence/v1',
+              'source_sha': os.environ['VF_SOURCE_SHA'],
+              'private_source_persisted': False,
+          }
+          if source.exists():
+              raw = source.read_bytes()
+              detail = json.loads(raw.decode('utf-8'))
+              payload.update({
+                  'status': detail.get('status'),
+                  'private_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'check_exit_codes': [item.get('exit_code') for item in detail.get('checks', [])],
+                  'runner': detail.get('runner'),
+              })
+          else:
+              payload.update({'status': 'BLOCKED_BEFORE_VERIFICATION'})
+          canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['sha256'] = hashlib.sha256(canonical).hexdigest()
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+          print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-v0.4-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
+          path: source/.evidence/public-evidence.json
+          if-no-files-found: error
+          retention-days: 14
