@@ -29,7 +29,6 @@ http_replacement=r"""replacement=r'''echo 'MANUAL_HTTP_BRIDGE_BEGIN'
 # The login immediately above this insertion is the exact V1.35.3 HTTP admin login.
 echo 'HTTP_ADMIN_AUTH=PASS'
 
-# Unauthenticated multipart upload must be denied before business processing.
 curl -sS -i -H "Origin: $UP_BASE" \
   -F "_csrf=anonymous" -F "expected_sha256=$CORRECTIVE_SHA" \
   -F "atomic_zip=@$CORRECTIVE_UPDATE;filename=VF_Forge_V1.35.4_UPDATE_DIST_R1.zip;type=application/zip" \
@@ -39,19 +38,13 @@ grep -q 'AUTH_REQUIRED' "$GATE_ROOT/http-neg-unauth.txt"
 test ! -e "$UP_RT/repair-v1.35.4.php"
 echo 'HTTP_NEG_UNAUTHENTICATED_UPLOAD=DENY_PASS'
 
-# Authenticated GET proves the real maintenance UI and supplies its real form CSRF.
 curl -fsS -b "$UP_COOKIE" -c "$UP_COOKIE" "$UP_BASE/maintenance.php" -o "$GATE_ROOT/http-maintenance-get.html"
 grep -q '系统维护' "$GATE_ROOT/http-maintenance-get.html"
 grep -q 'VF Forge V1.35.3 · Schema 29' "$GATE_ROOT/http-maintenance-get.html"
-MCSRF=$(python3 - "$GATE_ROOT/http-maintenance-get.html" <<'PY'
-import re,sys
-s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
-PY
-)
+MCSRF=$(python3 -c "import re,sys;s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name=\\\"_csrf\\\" value=\\\"([^\\\"]+)\\\"',s);assert m;print(m.group(1))" "$GATE_ROOT/http-maintenance-get.html")
 test -n "$MCSRF"
 echo 'HTTP_CSRF_FORM=PASS'
 
-# Missing CSRF must be rejected with 419.
 curl -sS -i -b "$UP_COOKIE" -c "$UP_COOKIE" -H "Origin: $UP_BASE" \
   -F "expected_sha256=$CORRECTIVE_SHA" \
   -F "atomic_zip=@$CORRECTIVE_UPDATE;filename=VF_Forge_V1.35.4_UPDATE_DIST_R1.zip;type=application/zip" \
@@ -61,7 +54,6 @@ grep -q 'CSRF_FAILED' "$GATE_ROOT/http-neg-csrf.txt"
 test ! -e "$UP_RT/repair-v1.35.4.php"
 echo 'HTTP_NEG_MISSING_CSRF=DENY_PASS'
 
-# Wrong expected SHA must fail closed.
 BADSHA=$(printf '0%.0s' $(seq 1 64))
 curl -sS -i -b "$UP_COOKIE" -c "$UP_COOKIE" -H "Origin: $UP_BASE" \
   -F "_csrf=$MCSRF" -F "expected_sha256=$BADSHA" \
@@ -71,7 +63,6 @@ grep -q 'Atomic ZIP SHA-256 与输入值不一致，已拒绝执行。' "$GATE_R
 test ! -e "$UP_RT/repair-v1.35.4.php"
 echo 'HTTP_NEG_WRONG_SHA=DENY_PASS'
 
-# The immutable original broken V1.35.4 UPDATE must be rejected for its exact compatibility defect.
 ORIGINAL_SHA=$(sha256sum "$ORIGINAL_UPDATE"|awk '{print $1}')
 curl -sS -i -b "$UP_COOKIE" -c "$UP_COOKIE" -H "Origin: $UP_BASE" \
   -F "_csrf=$MCSRF" -F "expected_sha256=$ORIGINAL_SHA" \
@@ -81,18 +72,8 @@ grep -q 'Atomic repair 缺少 VFF_ATOMIC_ALLOWED。' "$GATE_ROOT/http-neg-origin
 test ! -e "$UP_RT/repair-v1.35.4.php"
 echo 'HTTP_NEG_ORIGINAL_BROKEN_UPDATE=DENY_PASS exact=VFF_ATOMIC_ALLOWED_MISSING'
 
-# Build test-only negative derivatives from the downloaded R1 repair.
 unzip -p "$CORRECTIVE_UPDATE" repair-v1.35.4.php >"$GATE_ROOT/r1-repair.php"
-python3 - "$GATE_ROOT/r1-repair.php" "$GATE_ROOT/wrong-source.zip" "$GATE_ROOT/unsafe.zip" <<'PY'
-from pathlib import Path
-import sys,zipfile
-src=Path(sys.argv[1]).read_text(encoding='utf-8')
-old='const VFF_ATOMIC_ALLOWED=["1.35.3"];'
-assert src.count(old)==1
-wrong=src.replace(old,'const VFF_ATOMIC_ALLOWED=["1.35.2"];',1).encode()
-with zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED) as z:z.writestr('repair-v1.35.4.php',wrong)
-with zipfile.ZipFile(sys.argv[3],'w',zipfile.ZIP_DEFLATED) as z:z.writestr('../repair-v1.35.4.php',src.encode())
-PY
+python3 -c "from pathlib import Path;import sys,zipfile;src=Path(sys.argv[1]).read_text(encoding='utf-8');old='const VFF_ATOMIC_ALLOWED=[\\\"1.35.3\\\"];';assert src.count(old)==1;wrong=src.replace(old,'const VFF_ATOMIC_ALLOWED=[\\\"1.35.2\\\"];',1).encode();z=zipfile.ZipFile(sys.argv[2],'w',zipfile.ZIP_DEFLATED);z.writestr('repair-v1.35.4.php',wrong);z.close();z=zipfile.ZipFile(sys.argv[3],'w',zipfile.ZIP_DEFLATED);z.writestr('../repair-v1.35.4.php',src.encode());z.close()" "$GATE_ROOT/r1-repair.php" "$GATE_ROOT/wrong-source.zip" "$GATE_ROOT/unsafe.zip"
 WRONG_SOURCE_SHA=$(sha256sum "$GATE_ROOT/wrong-source.zip"|awk '{print $1}')
 curl -sS -i -b "$UP_COOKIE" -c "$UP_COOKIE" -H "Origin: $UP_BASE" \
   -F "_csrf=$MCSRF" -F "expected_sha256=$WRONG_SOURCE_SHA" \
@@ -122,7 +103,6 @@ test ! -e "$UP_RT/repair-v1.35.4.php"
 echo 'HTTP_NEG_UNSAFE_ZIP=DENY_PASS'
 echo 'NEGATIVE_HTTP_MATRIX=PASS'
 
-# Correct bridge: exact multipart/form-data through public/maintenance.php -> inspectAndPublishUpload().
 curl -sS -i -b "$UP_COOKIE" -c "$UP_COOKIE" -H "Origin: $UP_BASE" \
   -F "_csrf=$MCSRF" -F "expected_sha256=$CORRECTIVE_SHA" \
   -F "atomic_zip=@$CORRECTIVE_UPDATE;filename=VF_Forge_V1.35.4_UPDATE_DIST_R1.zip;type=application/zip" \
