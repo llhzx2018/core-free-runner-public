@@ -1,0 +1,82 @@
+name: P04 V2.6.0 Probe Synthetic Diagnostic
+
+on:
+  push:
+    branches: [p04-v260-production-final-readback-probe]
+    paths: ['.github/workflows/p04-v260-production-final-readback-probe-diagnostic.yml']
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_COMMIT: b8d080e432ba811f6689372636022774e558ffc1
+  PRIVATE_INPUT_COMMIT: d79e9367a6d4471f1b3d6d19ed44af7607a69a97
+  PROBE_NAME: vf-infra-v260-production-final-readback-ad3983ff1900.php
+  PROBE_SHA256: 9e0bc95b0c52c2ad57e79b81137ed3d569af86e041f27e13c2cc024124a04297
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: vf-infra
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-private
+          ref: ${{ env.PRIVATE_INPUT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-input
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3
+          coverage: none
+      - name: Run authenticated synthetic diagnostic without writes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          P='private-input/p04/v260-production-final-readback/chunks'
+          cat "$P/probe.part00" "$P/probe.part01" "$P/probe.part02" "$P/probe.part03" "$P/probe.part04" "$P/probe.part05" | base64 -d | gzip -dc > "/tmp/$PROBE_NAME"
+          echo "$PROBE_SHA256  /tmp/$PROBE_NAME" | sha256sum -c -
+          cd vf-infra
+          python3 scripts/build-v260-candidate-artifacts.py --output build/v260-probe-diagnostic >/tmp/builder.txt
+          cd ..
+          TMP="$(mktemp -d -t p04-v260-diag-XXXXXX)"; SITE="$TMP/site"; PRIVATE="$TMP/private"; PORT=18997; LOG="$TMP/php.log"; PID=''
+          cleanup(){ if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          mkdir -p "$SITE"
+          cp -a vf-infra/build/v260-probe-diagnostic/runtime/. "$SITE/"
+          cp "/tmp/$PROBE_NAME" "$SITE/$PROBE_NAME"
+          python3 scripts/p04_v260_probe_fixture.py --private-root "$PRIVATE"
+          cat > "$SITE/config.php" <<PHP
+          <?php return ['app_key'=>'P04_V260_PROBE_FIXTURE_APP_KEY','data_path'=>'$PRIVATE','session_name'=>'vfi_probe_test_session','session_idle_timeout'=>1209600,'session_max_lifetime'=>2592000];
+          PHP
+          SESSION_ID='p04v260probe1234567890abcdef'; UA='P04-V260-Probe-Fixture/1.0'
+          SESSION_ID="$SESSION_ID" UA="$UA" php -d "session.save_path=$PRIVATE/sessions" -r 'session_name("vfi_probe_test_session"); session_id(getenv("SESSION_ID")); session_start(); $_SESSION["vf_domain_authenticated"]=true; $_SESSION["vf_domain_last_activity"]=time(); $_SESSION["vf_domain_created_at"]=time(); $_SESSION["vf_domain_auth_generation"]=1; $_SESSION["vf_domain_ua"]=hash("sha256",getenv("UA")."|P04_V260_PROBE_FIXTURE_APP_KEY"); session_write_close();'
+          DB="$PRIVATE/database/vf-domain.sqlite"; BEFORE="$(sha256sum "$DB" | awk '{print $1}')"
+          php -d "session.save_path=$PRIVATE/sessions" -S "127.0.0.1:$PORT" -t "$SITE" >"$LOG" 2>&1 & PID=$!
+          for _ in $(seq 1 60); do curl -sS "http://127.0.0.1:$PORT/$PROBE_NAME" >/dev/null 2>&1 && break; sleep .1; done
+          HTTP="$(curl -sS -o "$TMP/result.json" -w '%{http_code}' -A "$UA" -H "Cookie: vfi_probe_test_session=$SESSION_ID" "http://127.0.0.1:$PORT/$PROBE_NAME")"
+          echo "SYNTHETIC_AUTH_HTTP=$HTTP"
+          python3 - "$TMP/result.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1]))
+          safe={k:j.get(k) for k in ['ok','code','error','final_machine_gate','production_version','installed_version','schema','runtime_files','runtime_fingerprint','source_manifest_count','source_manifest_sha','missing','unexpected','hash_mismatch','source_exact','sqlite_integrity','foreign_key_violations','business_counts','relationship_counts','business_semantic_preservation','backup','update_history','temporary_artifacts','temporary_unknown_artifact_count','db_primary_changed','wal_created','journal_created','shm_created','production_runtime_write','production_db_write','provider_write','migration_write','backup_create','restore']}
+          print(json.dumps(safe,indent=2,sort_keys=True,ensure_ascii=False))
+          PY
+          test "$(sha256sum "$DB" | awk '{print $1}')" = "$BEFORE"
+          for s in "$DB-wal" "$DB-shm" "$DB-journal"; do test ! -e "$s"; done
+          echo 'DIAGNOSTIC_DB_UNCHANGED_NO_SIDECAR=PASS'
+      - name: Remove private source
+        if: always()
+        run: rm -rf vf-infra private-input "/tmp/$PROBE_NAME"
