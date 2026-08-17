@@ -1,0 +1,84 @@
+name: P03 V1.36.0 Integrated Auth Debug
+on:
+  push:
+    branches: [p03-v1360-runtime-integration]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      EXPECTED_HEAD: c7d803a8200718e2106394b7fb2281f7fd668dfe
+      FIXTURE_PASS: Vf1360-Integrated-Test!
+      IMG: p03-v1360-auth-debug
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}"
+          git clone --quiet --branch integration/v1.36.0-product-experience --single-branch "https://x-access-token:${VF_PRIVATE_READ_TOKEN}@github.com/llhzx2018/vf-forge.git" p03
+          test "$(git -C p03 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          mkdir -p evidence
+          cat > "$RUNNER_TEMP/Dockerfile" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev libcurl4-openssl-dev sqlite3 curl && docker-php-ext-install zip pdo_sqlite curl && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -q -t "$IMG" -f "$RUNNER_TEMP/Dockerfile" "$RUNNER_TEMP" >/dev/null
+      - name: Install seed and probe auth
+        working-directory: p03
+        shell: bash
+        run: |
+          set -u
+          E="$GITHUB_WORKSPACE/evidence/AUTH_DEBUG.txt"; : > "$E"; log(){ echo "$*" | tee -a "$E"; }
+          R="$RUNNER_TEMP/runtime"; D="$RUNNER_TEMP/private"; C="$RUNNER_TEMP/cookie"; B='http://127.0.0.1:18082'; N='p03-v1360-auth-debug'
+          rm -rf "$R" "$D" "$C"; mkdir -p "$D"; python3 scripts/build_runtime.py "$R" >/dev/null || { log BUILD_FAIL; exit 1; }; log BUILD=PASS
+          docker rm -f "$N" >/dev/null 2>&1 || true
+          docker run -d --rm --name "$N" -p 18082:18082 -e VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" -v "$R:/app" -v "$D:$D" -w /app "$IMG" php -S 0.0.0.0:18082 -t /app >/dev/null || exit 1
+          for i in $(seq 1 60); do code=$(curl -sS -o /dev/null -w '%{http_code}' "$B/setup.php"||true); [ "$code" = 200 ] && break; sleep .25; done; log SETUP_GET=$code
+          curl -fsS -c "$C" "$B/setup.php" -o "$RUNNER_TEMP/setup.html" || exit 1
+          X=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          ) || exit 1
+          pc=$(curl -sS -o "$RUNNER_TEMP/setup-post" -w '%{http_code}' -b "$C" -c "$C" -H "Origin: $B" --data-urlencode "setup_csrf=$X" --data-urlencode 'site_title=VF Forge Fixture' --data-urlencode "data_root=$D" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$B/setup.php"||true); log SETUP_POST=$pc; [ "$pc" = 302 ] || [ "$pc" = 303 ] || exit 1
+          sudo chown -R "$(id -u):$(id -g)" "$D"
+          DB=''; while IFS= read -r f; do s=$(sqlite3 "$f" "select count(*) from sqlite_master where type='table' and name='schema_migrations';" 2>/dev/null||true); [ "$s" = 1 ] || continue; v=$(sqlite3 "$f" 'select max(version) from schema_migrations;' 2>/dev/null||true); if [ "$v" = 30 ]; then DB="$f"; break; fi; done < <(find "$D" -name '*.sqlite' -type f -print); [ -n "$DB" ] || { log DB_AUTHORITY=FAIL; exit 1; }; log DB_AUTHORITY=PASS
+          python3 tests/integration/v1360_experience_fixture.py seed "$DB" > "$RUNNER_TEMP/seed.out" 2> "$RUNNER_TEMP/seed.err" || { log SEED=FAIL; sed -E 's/[A-Za-z0-9+\/_=-]{24,}/[REDACTED]/g' "$RUNNER_TEMP/seed.err" >> "$E"; exit 1; }; log SEED=PASS
+          rm -f "$C"
+          uc=$(curl -sS -o "$RUNNER_TEMP/unauth" -w '%{http_code}' "$B/memory-api.php?action=experience_today"||true); log UNAUTH_CODE=$uc
+          lc=$(curl -sS -o "$RUNNER_TEMP/login" -w '%{http_code}' -c "$C" -b "$C" -H "Origin: $B" -H 'Content-Type: application/json' --data "{\"password\":\"$FIXTURE_PASS\"}" "$B/api.php?action=login"||true); log LOGIN_CODE=$lc
+          python3 - "$RUNNER_TEMP/login" >> "$E" 2>&1 <<'PY'
+          import json,sys
+          try:
+           d=json.load(open(sys.argv[1]));print('LOGIN_OK='+str(d.get('ok')));print('LOGIN_CODE_FIELD='+str(d.get('code','')));print('LOGIN_HAS_CSRF='+str(bool(d.get('csrf'))));print('LOGIN_ERROR='+str(d.get('error','')))
+          except Exception as e: print('LOGIN_JSON_PARSE_FAIL='+repr(e))
+          PY
+          sc=$(curl -sS -o "$RUNNER_TEMP/session" -w '%{http_code}' -b "$C" "$B/api.php?action=session"||true); log SESSION_CODE=$sc; cat "$RUNNER_TEMP/session" | sed -E 's/"csrf":"[^"]+"/"csrf":"[REDACTED]"/' >> "$E"; echo >> "$E"
+          T=$(python3 - "$RUNNER_TEMP/login" <<'PY'
+          import json,sys
+          try: print(json.load(open(sys.argv[1])).get('csrf',''))
+          except: print('')
+          PY
+          )
+          ep=$(curl -sS -o "$RUNNER_TEMP/ep" -w '%{http_code}' -b "$C" -H "Origin: $B" -H "X-CSRF-Token: $T" -H 'Content-Type: application/json' --data '{}' "$B/memory-api.php?action=experience_today"||true); log EXPERIENCE_POST_CODE=$ep; cat "$RUNNER_TEMP/ep" >> "$E"; echo >> "$E"
+          nc=$(curl -sS -o "$RUNNER_TEMP/nc" -w '%{http_code}' -b "$C" -H "Origin: $B" -H 'Content-Type: application/json' --data '{"name":"x"}' "$B/memory-api.php?action=register_project"||true); log NO_CSRF_CODE=$nc
+          P03=$(sqlite3 "$DB" "select id from projects where project_code='P03'")
+          src=$(curl -sS -o "$RUNNER_TEMP/src" -w '%{http_code}' -b "$C" "$B/memory-api.php?action=experience_sources&project_id=$P03"||true); log SOURCES_CODE=$src; grep -q credential_ref "$RUNNER_TEMP/src" && log SOURCE_LEAK=YES || log SOURCE_LEAK=NO
+          cc=$(curl -sS -o "$RUNNER_TEMP/contract" -w '%{http_code}' -b "$C" "$B/memory-api.php?action=experience_contract"||true); log CONTRACT_CODE=$cc; cat "$RUNNER_TEMP/contract" >> "$E"; echo >> "$E"
+          docker logs "$N" 2>&1 | tail -20 | sed -E 's/[A-Za-z0-9+\/_=-]{24,}/[REDACTED]/g' >> "$E"
+          docker rm -f "$N" >/dev/null 2>&1 || true
+          [ "$uc" = 401 ] || [ "$uc" = 403 ]; [ "$lc" = 200 ]; [ "$sc" = 200 ]; [ "$ep" = 405 ]; [ "$nc" = 403 ]; [ "$src" = 200 ]; [ "$cc" = 200 ]
+          log AUTH_DEBUG=PASS
+      - name: Upload auth debug
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03_V1360_AUTH_DEBUG
+          path: evidence
+          retention-days: 1
