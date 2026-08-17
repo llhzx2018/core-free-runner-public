@@ -1,0 +1,217 @@
+name: P03 VF Forge V1.35.4 Unified Candidate Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1.35.4-candidate.yml'
+      - 'requests/p03-v1354-candidate-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1.35.4-candidate
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-forge
+  SOURCE_BRANCH: feature/v1.35.4-git-native-memory-index
+  PRODUCTION_COMMIT: 263c4d8f7e38bff58db5680a6845ceb5a576d6ae
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1354-php84
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Require unified credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'P03_UNIFIED_CREDENTIAL_GATE=PASS'
+
+      - name: Checkout exact current P03 runtime branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: feature/v1.35.4-git-native-memory-index
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Checkout exact Production Schema 29 baseline
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: 263c4d8f7e38bff58db5680a6845ceb5a576d6ae
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Install real runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 curl >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.v1354" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev libcurl4-openssl-dev sqlite3 \
+            && docker-php-ext-install zip pdo_sqlite curl \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.v1354" "$RUNNER_TEMP"
+          docker run --rm "$PHP_TEST_IMAGE" php -m | grep -Ei 'PDO|pdo_sqlite|sqlite3|zip|curl|fileinfo|sodium'
+
+      - name: Materialize authorized Runtime Rebuild and push feature branch only
+        shell: bash
+        working-directory: candidate
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git branch --show-current)" = "$SOURCE_BRANCH"
+          python3 scripts/v1354_prepare_runtime.py
+          test "$(cat VERSION)" = '1.35.4'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(v1.35.4): rebuild Forge as Git-native project memory index'
+            git remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/${SOURCE_REPOSITORY}.git"
+            git push origin "HEAD:${SOURCE_BRANCH}"
+            git remote set-url origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          fi
+          echo "PRODUCT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "PRODUCT_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo "V1354_MATERIALIZED commit=$(git rev-parse HEAD) tree=$(git rev-parse HEAD^{tree})"
+
+      - name: L0 identity and zero-storage contract
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          test "$(cat VERSION)" = '1.35.4'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert p['production_version']=='1.35.3'
+          assert p['working_version']=='1.35.4'
+          assert p['candidate_version']=='1.35.4'
+          assert p['schema_version']==30
+          r=p['v1_35_4_runtime_rebuild']
+          assert r['project_asset_storage']=='NONE'
+          assert r['user_upload']=='RETIRED'
+          assert r['physical_delete']==0 and r['production_write']==0
+          assert p['working_branch']=='feature/v1.35.4-git-native-memory-index'
+          print('V1354_L0_IDENTITY_PASS')
+          PY
+          ! grep -q 'CREATE TABLE.*storage_exceptions' database/migrations/030_external_authority_memory_index.sql
+          grep -q 'PROJECT-ASSET STORAGE = NONE' docs/architecture/V1354_ZERO_PROJECT_ASSET_STORAGE_CONTRACT.md
+          grep -q '^# SUPERSEDED' docs/architecture/V1354_STORAGE_EXCEPTION_CONTRACT.md
+          grep -q 'PROJECT_ASSET_STORAGE_RETIRED' public/api.php
+
+      - name: Source schema syntax and static gates
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          python3 tests/integration/source_integrity_test.py
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/php-lint.log"
+          echo "PHP_LINT_PASS $(wc -l <"$RUNNER_TEMP/php-lint.log") files"
+          node --check public/assets/memory-index.js
+          node --check public/assets/app.js
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/runtime-requirements" >/dev/null
+          docker run --rm -v "$RUNNER_TEMP/runtime-requirements:/app" -w /app "$PHP_TEST_IMAGE" php cli/check-requirements.php
+
+      - name: Schema 30 migration and core runtime matrix
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_SCHEMA29_SQL: ${{ github.workspace }}/production/database/schema/current.sql
+        run: |
+          set -Eeuo pipefail
+          php tests/maintenance/v1354_schema30_runtime.php
+
+      - name: Real GitHub read-only adapter gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          php tests/maintenance/v1354_github_readonly.php
+
+      - name: Full security data backup restore and update regression
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          bash tests/maintenance/v1354_full_regression.sh
+          bash tests/maintenance/v1354_backup_restore.sh
+          python3 tests/maintenance/v1351_contract_test.py
+
+      - name: Browser E2E and responsive audit
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          BROWSER_NODE="$RUNNER_TEMP/v1354-browser-node";mkdir -p "$BROWSER_NODE";cd "$BROWSER_NODE"
+          npm init -y >/dev/null 2>&1;npm install --no-save playwright@1.55.0 >/dev/null;npx playwright install --with-deps chromium >/dev/null
+          cd "$GITHUB_WORKSPACE/candidate"
+          RUNTIME="$RUNNER_TEMP/v1354-browser-runtime";DATA_ROOT="$RUNNER_TEMP/v1354-browser-private";COOKIE="$RUNNER_TEMP/v1354-browser-cookie";BASE='http://127.0.0.1:18081'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE";mkdir -p "$DATA_ROOT";python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          docker rm -f vf-forge-v1354-browser >/dev/null 2>&1||true
+          docker run -d --rm --name vf-forge-v1354-browser -p 18081:18081 -e VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18081 -t /app >/dev/null
+          trap 'docker logs vf-forge-v1354-browser 2>/dev/null||true;docker rm -f vf-forge-v1354-browser >/dev/null 2>&1||true' EXIT
+          ready=0;for i in $(seq 1 100);do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1;then ready=1;break;fi;sleep .25;done;test "$ready" = 1
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/v1354-browser-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/v1354-browser-setup.html" <<'PY'
+          import re,sys
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',open(sys.argv[1],encoding='utf-8').read());assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Browser V1.35.4' --data-urlencode "data_root=$DATA_ROOT" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$BASE/setup.php" >"$RUNNER_TEMP/v1354-browser-setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/v1354-browser-setup-post.txt"
+          NODE_PATH="$BROWSER_NODE/node_modules" VF_BROWSER_BASE="$BASE" FIXTURE_PASS="$FIXTURE_PASS" node tests/e2e/v1354_memory_index.spec.js
+          DB=$(find "$DATA_ROOT/database" -maxdepth 1 -type f -name '*.sqlite'|head -n1);test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok;test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')";test "$(sqlite3 "$DB" 'select count(*) from asset_files;')" = 0
+          docker rm -f vf-forge-v1354-browser >/dev/null;trap - EXIT
+
+      - name: Candidate exact identity and runtime fingerprint
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          git diff --quiet;git diff --cached --quiet
+          RUNTIME="$RUNNER_TEMP/v1354-candidate-runtime";python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          python3 - "$RUNTIME" "$PRODUCT_COMMIT" "$PRODUCT_TREE" <<'PY'
+          from pathlib import Path
+          import hashlib,sys,json
+          root=Path(sys.argv[1]);files=sorted(p for p in root.rglob('*') if p.is_file());h=hashlib.sha256()
+          for p in files:
+              rel=p.relative_to(root).as_posix().encode();data=p.read_bytes();h.update(rel+b'\0'+hashlib.sha256(data).hexdigest().encode()+b'\0'+str(len(data)).encode()+b'\n')
+          print(json.dumps({'candidate':'VERIFIED','product_commit':sys.argv[2],'product_tree':sys.argv[3],'runtime_files':len(files),'runtime_fingerprint':h.hexdigest(),'version':'1.35.4','schema':30,'project_asset_storage':'NONE','physical_delete':0},ensure_ascii=False,sort_keys=True))
+          PY
+          echo "P03_V1354_CANDIDATE_VERIFIED commit=$PRODUCT_COMMIT tree=$PRODUCT_TREE version=1.35.4 schema=30 physical_delete=0"
