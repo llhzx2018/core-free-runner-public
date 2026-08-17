@@ -1,0 +1,211 @@
+name: P04 V2.7 Integration Final Seal Repair V2
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-final-seal-repair-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPOSITORY: llhzx2018/vf-infra
+  CLOSURE_COMMIT: 248035651a359142e576f24ef3479d7af82964db
+  TESTED_PRODUCT_RUNTIME_COMMIT: f8e94f9e27780b725fa0ac5592b19f42a75ff00f
+  INTEGRATION_BRANCH: integration/v2.7.0-personal-infra
+
+jobs:
+  seal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public evidence branch
+        uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+
+      - name: Validate Browser and Regression evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f evidence/p04-v270-browser-repair-v2.PASS
+          test -f evidence/p04-v270-regression-repair-v3.PASS
+          jq -e '.status=="PASS" and .version=="2.7.0" and .schema==14 and (.screenshots|length)==13 and .flow.task_count==15 and .flow.pass_count==15 and .flow.max_clicks<=3 and .flow.max_context_switch<=1 and .flow.backtracking==0 and .flow.dead_end==0 and .flow.unknown_next_action==0 and .mobile_safe_area.pass==true' evidence/p04-v270-browser-repair-v2-report.json >/dev/null
+          jq -e '.status=="PASS" and .version=="2.7.0" and .schema==14 and .gate_count>=35 and .runtime_exact=="PASS" and .preserved_backend_contracts=="8/8 PASS" and .auth_session=="PASS" and .csrf_fail_closed=="PASS"' evidence/p04-v270-regression-repair-v3.json >/dev/null
+          jq -e '.status=="PASS" and .screenshot_count==13 and .artifact_id!="" and .artifact_digest!=""' evidence/p04-v270-browser-repair-v2-artifact.json >/dev/null
+          echo 'BROWSER_REGRESSION_EVIDENCE=PASS'
+
+      - name: Checkout V2.6 closure baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.CLOSURE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: closure
+
+      - name: Checkout live main start
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: main-start
+
+      - name: Checkout live develop start
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: develop
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: develop-start
+
+      - name: Checkout live integration start
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: integration-start
+
+      - name: Checkout tested product runtime
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: tested-product
+
+      - name: Classify concurrent main develop truth by runtime and repository diff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 closure/scripts/build-release-tree.py /tmp/closure-runtime >/dev/null
+          python3 main-start/scripts/build-release-tree.py /tmp/main-runtime >/dev/null
+          python3 develop-start/scripts/build-release-tree.py /tmp/develop-runtime >/dev/null
+          diff -qr /tmp/closure-runtime /tmp/main-runtime
+          diff -qr /tmp/closure-runtime /tmp/develop-runtime
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          def snap(root):
+              root=Path(root);out={}
+              for p in root.rglob('*'):
+                  if not p.is_file() or '.git' in p.parts: continue
+                  rel=p.relative_to(root).as_posix();out[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+              return out
+          base=snap('closure');result={}
+          for name in ('main-start','develop-start'):
+              cur=snap(name);changed=sorted(k for k in set(base)|set(cur) if base.get(k)!=cur.get(k))
+              allowed=all(k in {'AGENTS.md','README.md','VF_PROJECT.json'} or k.startswith('docs/') or k.startswith('.github/') for k in changed)
+              if not allowed: raise SystemExit(f'NON_GOVERNANCE_CONCURRENT_CHANGE {name} {changed}')
+              result[name]={'changed_paths':changed,'classification':'CONCURRENT_GOVERNANCE_CHANGE' if changed else 'NO_CONCURRENT_CHANGE'}
+          Path('/tmp/governance-classification.json').write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result))
+          PY
+          echo 'MAIN_DEVELOP_PRODUCT_RUNTIME_CHANGE=NO'
+
+      - name: Lock Integration runtime identity and contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < integration-start/VERSION)" = '2.7.0'
+          test "$(tr -d '\r\n' < tested-product/VERSION)" = '2.7.0'
+          python3 integration-start/scripts/build-release-tree.py /tmp/integration-runtime >/tmp/integration-build.json
+          python3 tested-product/scripts/build-release-tree.py /tmp/tested-runtime >/tmp/tested-build.json
+          diff -qr /tmp/integration-runtime /tmp/tested-runtime
+          diff -qr closure/database/migrations integration-start/database/migrations
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          nums=[]
+          for p in Path('integration-start/database/migrations').iterdir():
+              m=re.match(r'^(\d+)',p.name)
+              if m: nums.append(int(m.group(1)))
+          assert nums and max(nums)==14, nums
+          s=Path('integration-start/public/experience.php').read_text(encoding='utf-8')
+          assert 'Auth::requireAuth();' in s
+          assert "if ($method !== 'GET')" in s
+          for p in Path('integration-start/src/app/Core').glob('PersonalInfra*.php'):
+              t=p.read_text(encoding='utf-8').upper()
+              for bad in ('INSERT INTO','UPDATE ','DELETE FROM','VACUUM '): assert bad not in t,(p,bad)
+          print('SCHEMA=14');print('MIGRATION=NONE');print('RUNTIME_CONTRACT=PASS')
+          PY
+          echo "START_INTEGRATION_HEAD=$(git -C integration-start rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "START_INTEGRATION_TREE=$(git -C integration-start rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo "START_MAIN_HEAD=$(git -C main-start rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "START_DEVELOP_HEAD=$(git -C develop-start rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo 'RUNTIME_EXACT_TO_TESTED=PASS'
+
+      - name: Checkout integration again for authenticated end-of-run remote readback
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 1
+          path: integration-end
+
+      - name: End-of-run live Remote Truth and candidate absence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          end_integration="$(git -C integration-end rev-parse HEAD)"
+          test "$end_integration" = "$START_INTEGRATION_HEAD"
+          refs="$(git -C integration-end ls-remote origin refs/heads/main refs/heads/develop refs/heads/integration/v2.7.0-personal-infra 'refs/heads/candidate/v2.7.0*')"
+          main_remote="$(printf '%s\n' "$refs" | awk '$2=="refs/heads/main"{print $1}')"
+          develop_remote="$(printf '%s\n' "$refs" | awk '$2=="refs/heads/develop"{print $1}')"
+          integration_remote="$(printf '%s\n' "$refs" | awk '$2=="refs/heads/integration/v2.7.0-personal-infra"{print $1}')"
+          candidate_remote="$(printf '%s\n' "$refs" | awk '$2 ~ /^refs\/heads\/candidate\/v2\.7\.0/{print $0}')"
+          test -n "$main_remote" && test -n "$develop_remote" && test -n "$integration_remote"
+          test "$main_remote" = "$START_MAIN_HEAD"
+          test "$develop_remote" = "$START_DEVELOP_HEAD"
+          test "$integration_remote" = "$START_INTEGRATION_HEAD"
+          test -z "$candidate_remote"
+          echo "LIVE_MAIN=$main_remote" >> "$GITHUB_ENV"
+          echo "LIVE_DEVELOP=$develop_remote" >> "$GITHUB_ENV"
+          echo "LIVE_INTEGRATION=$integration_remote" >> "$GITHUB_ENV"
+          echo 'LIVE_REMOTE_TRUTH=PASS'
+          echo 'CANDIDATE_V270=NOT_CREATED'
+
+      - name: Publish Final Seal Repair V2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json,os,pathlib
+          browser=json.loads(pathlib.Path('evidence/p04-v270-browser-repair-v2-report.json').read_text(encoding='utf-8'))
+          artifact=json.loads(pathlib.Path('evidence/p04-v270-browser-repair-v2-artifact.json').read_text(encoding='utf-8'))
+          regression=json.loads(pathlib.Path('evidence/p04-v270-regression-repair-v3.json').read_text(encoding='utf-8'))
+          classification=json.loads(pathlib.Path('/tmp/governance-classification.json').read_text(encoding='utf-8'))
+          state={
+            'status':'READY_FOR_MASTER_INTEGRATED_UA_UI_REVIEW','version':'2.7.0','schema':14,'migration':'NONE',
+            'integration_branch':'integration/v2.7.0-personal-infra','integration_head':os.environ['LIVE_INTEGRATION'],'integration_tree':os.environ['START_INTEGRATION_TREE'],
+            'tested_product_runtime_commit':os.environ['TESTED_PRODUCT_RUNTIME_COMMIT'],'runtime_exact_to_tested':'PASS','runtime_changed_since_browser_test':'NO',
+            'current_main':os.environ['LIVE_MAIN'],'current_develop':os.environ['LIVE_DEVELOP'],'concurrent_governance_classification':classification,
+            'main_develop_contains_v270_runtime':'NO','candidate_v2_7_0':'NOT_CREATED',
+            'browser':{'status':'PASS','workflow':'P04 V2.7 Integrated Browser Evidence Repair V2','run':32018026615,'artifact_id':artifact['artifact_id'],'artifact_digest':artifact['artifact_digest'],'artifact_bytes':1222608,'screenshot_count':13,'screenshot_bytes':artifact['screenshot_bytes'],'flow':browser['flow'],'responsive':'PASS','mobile_safe_area':'PASS'},
+            'regression':{'status':'PASS','workflow':'P04 V2.7 Engineering Regression Repair V3','run':32018838786,'gate_count':regression['gate_count'],'preserved_backend_contracts':regression['preserved_backend_contracts'],'auth_session':'PASS','csrf_fail_closed':'PASS','backup_restore':'PASS','online_update_contract':'PASS','update_history':'PASS','search_relations':'PASS'},
+            'production_write':0,'user_engineering_action':0,'force_push':'NO','history_rewrite':'NO','formal_candidate':'NOT_AUTHORIZED','production_ready':'NOT_DECLARED','master_visual_pass':'NOT_DECLARED','product_complete':'NO'
+          }
+          pathlib.Path('evidence/p04-v270-final-seal-repair-v2.json').write_text(json.dumps(state,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          pathlib.Path('evidence/p04-v270-final-seal-repair-v2.PASS').write_text('P04_V270_FINAL_SEAL_REPAIR_V2_PASS\n',encoding='utf-8')
+          PY
+          rm -rf closure main-start develop-start integration-start integration-end tested-product /tmp/closure-runtime /tmp/main-runtime /tmp/develop-runtime /tmp/integration-runtime /tmp/tested-runtime
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-final-seal-repair-v2.json evidence/p04-v270-final-seal-repair-v2.PASS
+          git commit -m 'evidence(P04): seal corrected V2.7 integrated UA review state V2'
+          git push origin HEAD:p04-v270-integration-gate
