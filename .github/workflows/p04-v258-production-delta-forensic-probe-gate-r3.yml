@@ -1,0 +1,147 @@
+name: P04 VF Infra V2.5.8 Production Delta Forensic Probe Gate R3
+
+on:
+  push:
+    branches:
+      - p04-v258-delta-forensic-gate-bd2eadc2c6aa
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-delta-forensic-gate-r3-bd2eadc2c6aa
+  cancel-in-progress: false
+
+env:
+  TARGET_COMMIT: 4a18a61c21455184c67aa4a3e0957283674ae2d7
+  TARGET_TREE: 89f322a309f8c51c9869864800a6980cb9bfbb94
+  PROBE_NAME: vf-v258-asset-relation-forensic-bd2eadc2c6aa.php
+  PROBE_SHA256: 3d223577a2915752cec2ef941b748ff330057fbbb94352c6b6dc45b6edeb382c
+  EXPECTED_NOTES_BYTES: '1770'
+  EXPECTED_NOTES_SHA256: c402daaeb27130dda0354024a3725295270e78e16bcc6952f6d3b23269dd74d7
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout forensic gate authority
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: gate
+
+      - name: Checkout exact frozen Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sqlite3, mbstring
+          coverage: none
+
+      - name: Exact original Probe and frozen Product contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/original"
+          cat gate/tools/p04/v258-delta-forensic/probe.part*.b64 | tr -d '\r\n' | base64 -d > "$RUNNER_TEMP/original/$PROBE_NAME"
+          test "$(stat -c %s "$RUNNER_TEMP/original/$PROBE_NAME")" = '23156'
+          test "$(sha256sum "$RUNNER_TEMP/original/$PROBE_NAME" | awk '{print $1}')" = "$PROBE_SHA256"
+          php -l "$RUNNER_TEMP/original/$PROBE_NAME" >/dev/null
+          cd private-vf-infra
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(stat -c %s docs/operations/package/RELEASE_NOTES.md)" = "$EXPECTED_NOTES_BYTES"
+          test "$(sha256sum docs/operations/package/RELEASE_NOTES.md | awk '{print $1}')" = "$EXPECTED_NOTES_SHA256"
+          python3 - <<'PY'
+          import ast,re,pathlib
+          s=pathlib.Path('scripts/build-v258-update-release.py').read_text(encoding='utf-8')
+          m=re.search(r"payload=(\[.*?\])\nreplacement=",s,re.S); assert m
+          payload=ast.literal_eval(m.group(1))
+          assert 'RELEASE_NOTES.md' not in payload
+          assert payload==['VERSION.txt','index.php','scope-summary.php','domain-portfolio.php','assets/v258-ui.css','assets/v258-view.js','assets/v258-nav.js','app/Core/ScopeSummaryService.php','app/Core/DomainPortfolioQueryService.php','release-manifest.json']
+          PY
+          echo 'EXACT_PROBE_FROZEN_PRODUCT_RELEASE_NOTES_CONTRACT=PASS'
+
+      - name: Corrected static read-only security review
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/original/$PROBE_NAME" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+          forbidden_fs=r'\b(file_put_contents|fwrite|fputs|unlink|rename|copy|mkdir|rmdir|chmod|chown|touch|tempnam|move_uploaded_file)\s*\('
+          forbidden_net=r'\b(curl_[a-z_]+|fsockopen|pfsockopen|stream_socket_client|socket_connect|file_get_contents\s*\(\s*[\"\']https?://)'
+          forbidden_shell=r'\b(system|shell_exec|passthru|proc_open|popen)\s*\('
+          assert not re.search(forbidden_fs,s,re.I), 'FILESYSTEM_WRITE_PRIMITIVE_FOUND'
+          assert not re.search(forbidden_net,s,re.I), 'NETWORK_PRIMITIVE_FOUND'
+          assert not re.search(forbidden_shell,s,re.I), 'SHELL_PRIMITIVE_FOUND'
+          assert not re.search(r'(?<!->)\bexec\s*\(',s,re.I), 'SHELL_EXEC_FUNCTION_FOUND'
+          assert 'SQLITE3_OPEN_READONLY' in s
+          assert 'SQLITE3_OPEN_READWRITE' not in s and 'SQLITE3_OPEN_CREATE' not in s
+          execs=re.findall(r'->exec\s*\((.*?)\)\s*;',s,re.S)
+          assert len(execs)==1 and "'PRAGMA query_only=ON'" in execs[0]
+          assert "session_start(['read_and_close' => true])" in s
+          assert 'require $configFile' in s and 'bootstrap.php' not in s
+          print('STATIC_FILESYSTEM_WRITE=0')
+          print('STATIC_DATABASE_WRITE=0')
+          print('STATIC_NETWORK_CALL=0')
+          print('STATIC_PROVIDER_REMOTE_WRITE=0')
+          PY
+          echo 'CORRECTED_STATIC_READ_ONLY_SECURITY_REVIEW=PASS'
+
+      - name: Extract unchanged fixture scripts from prior Gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path('gate/.github/workflows/p04-v258-production-delta-forensic-probe-gate.yml').read_text(encoding='utf-8').splitlines()
+          targets=[
+            'Build positive and negative isolated forensic fixtures',
+            'Positive relation-delta classification and zero-write proof',
+            'Negative missing-job provenance must remain unresolved',
+            'Seal exact original single-file handoff',
+          ]
+          out=Path('/tmp/p04-r3-steps'); out.mkdir(parents=True,exist_ok=True)
+          for n,target in enumerate(targets,1):
+              start=next(i for i,line in enumerate(src) if line=='      - name: '+target)
+              run=next(i for i in range(start+1,len(src)) if src[i]=='        run: |')
+              body=[]
+              for line in src[run+1:]:
+                  if line.startswith('      - name: '): break
+                  if line.startswith('          '): body.append(line[10:])
+                  elif line=='': body.append('')
+                  else: raise SystemExit(f'UNEXPECTED_STEP_INDENT {target}: {line!r}')
+              p=out/f'{n:02d}.sh'; p.write_text('\n'.join(body)+'\n',encoding='utf-8')
+              print(target, '->', p, len(body))
+          PY
+          echo 'UNCHANGED_FIXTURE_SCRIPTS_EXTRACTED=PASS'
+
+      - name: Execute unchanged positive and negative forensic fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export ORIGINAL_PROBE="$RUNNER_TEMP/original/$PROBE_NAME"
+          bash /tmp/p04-r3-steps/01.sh
+          bash /tmp/p04-r3-steps/02.sh
+          bash /tmp/p04-r3-steps/03.sh
+          bash /tmp/p04-r3-steps/04.sh
+          echo 'POSITIVE_NEGATIVE_FORENSIC_FIXTURES=PASS'
+
+      - name: Upload exact original Probe only
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V258-Asset-Relation-Delta-Forensic-Probe-R3
+          path: ${{ runner.temp }}/handoff/${{ env.PROBE_NAME }}
+          if-no-files-found: error
+          retention-days: 7
