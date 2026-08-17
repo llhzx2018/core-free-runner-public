@@ -1,0 +1,148 @@
+name: core-agent V0.8 P02 Autonomous Engineering Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/core-agent-v0.8-p02-autonomous-engineering.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CORE_AGENT_SOURCE_SHA: 60fa18dc57d967586d222a6d747f429db8e07960
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered VF capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 79; }
+          echo 'REGISTERED_VF_CAPABILITIES=PASS'
+
+      - name: Checkout exact core-agent V0.8 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run full core-agent machine verification
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Run real P02 autonomous engineering loop
+        id: pilot
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          VF_PRIVATE_READ_TOKEN: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          VF_RELEASE_WRITE_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        run: python scripts/pilot_v08_p02_autonomous_engineering.py
+
+      - name: Build public-safe V0.8 evidence
+        if: always()
+        working-directory: source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          machine_path = Path('.evidence/verification.json')
+          pilot_path = Path('.evidence/v08-p02-autonomous-engineering.json')
+          out = Path('.evidence/v08-public-evidence.json')
+
+          payload = {
+              'schema': 'core-agent-public-evidence/v08',
+              'version': '0.8.0',
+              'source_sha': os.environ['VF_SOURCE_SHA'],
+              'private_source_persisted': False,
+              'product_source_write_actions': 0,
+              'main_write_actions': 0,
+              'production_actions': 0,
+              'release_actions': 0,
+              'token_exposed': False,
+          }
+
+          if machine_path.exists():
+              raw = machine_path.read_bytes()
+              machine = json.loads(raw.decode('utf-8'))
+              payload.update({
+                  'machine_status': machine.get('status'),
+                  'machine_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'check_exit_codes': [item.get('exit_code') for item in machine.get('checks', [])],
+                  'runner': machine.get('runner'),
+              })
+          else:
+              payload['machine_status'] = 'MISSING'
+
+          if pilot_path.exists():
+              raw = pilot_path.read_bytes()
+              pilot = json.loads(raw.decode('utf-8'))
+              payload.update({
+                  'pilot_status': pilot.get('status'),
+                  'pilot_evidence_sha256': hashlib.sha256(raw).hexdigest(),
+                  'runtime_state': pilot.get('runtime_state'),
+                  'decision_steps': pilot.get('decision_steps'),
+                  'target_repository': pilot.get('target_repository'),
+                  'target_branch': pilot.get('target_branch'),
+                  'target_path': pilot.get('target_path'),
+                  'write_actions': pilot.get('write_actions'),
+                  'verification_calls': pilot.get('verification_calls'),
+                  'verification_statuses': pilot.get('verification_statuses'),
+                  'final_head_sha': pilot.get('final_head_sha'),
+                  'final_content_sha256': pilot.get('final_content_sha256'),
+                  'final_match': pilot.get('final_match'),
+                  'user_manual_test_required': pilot.get('user_manual_test_required'),
+              })
+          else:
+              payload['pilot_status'] = 'MISSING'
+
+          payload['status'] = 'PASS' if (
+              payload.get('machine_status') == 'PASS'
+              and payload.get('pilot_status') == 'PASS'
+              and payload.get('verification_statuses') == ['FAIL', 'PASS']
+              and payload.get('write_actions') == 2
+              and payload.get('final_match') is True
+              and payload.get('user_manual_test_required') is False
+          ) else 'FAIL'
+
+          canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['sha256'] = hashlib.sha256(canonical).hexdigest()
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+          print(f"PUBLIC_EVIDENCE_STATUS={payload['status']}")
+          print(f"VERIFICATION_SEQUENCE={payload.get('verification_statuses')}")
+          print(f"WRITE_ACTIONS={payload.get('write_actions')}")
+          print(f"PUBLIC_EVIDENCE_SHA256={payload['sha256']}")
+          if payload['status'] != 'PASS':
+              raise SystemExit(1)
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-v0.8-public-evidence-${{ env.CORE_AGENT_SOURCE_SHA }}
+          path: source/.evidence/v08-public-evidence.json
+          if-no-files-found: error
+          retention-days: 14
