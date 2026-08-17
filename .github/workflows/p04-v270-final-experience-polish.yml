@@ -1,0 +1,182 @@
+name: P04 V2.7 Final Experience Polish
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-final-experience-polish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPOSITORY: llhzx2018/vf-infra
+  INTEGRATION_BRANCH: integration/v2.7.0-personal-infra
+  TESTED_PRODUCT_RUNTIME_COMMIT: 43eee7e21c2304eed5f0413b5711b3aa53ce3510
+
+jobs:
+  final-polish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+
+      - name: Checkout current integration
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private
+
+      - name: Checkout tested product runtime commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: tested-product
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser/runtime prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-curl php-zip >/dev/null
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Affected runtime smoke and exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < private/VERSION)" = '2.7.0'
+          test "$(tr -d '\r\n' < tested-product/VERSION)" = '2.7.0'
+          python3 private/scripts/build-release-tree.py /tmp/v270-current-runtime >/tmp/v270-current-build.json
+          python3 tested-product/scripts/build-release-tree.py /tmp/v270-tested-runtime >/tmp/v270-tested-build.json
+          diff -qr /tmp/v270-current-runtime /tmp/v270-tested-runtime
+          php -l private/public/index.php >/dev/null
+          php -l private/public/experience.php >/dev/null
+          node --check private/public/assets/v270-app.js
+          node --check private/public/assets/v270-presentation.js
+          test -s private/public/assets/v270-presentation.css
+          grep -q 'v270-presentation.css' private/public/index.php
+          grep -q 'v270-presentation.js' private/public/index.php
+          echo "POLISH_INTEGRATION_HEAD=$(git -C private rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "POLISH_INTEGRATION_TREE=$(git -C private rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo 'AFFECTED_RUNTIME_SMOKE=PASS'
+          echo 'RUNTIME_EXACT_TO_TESTED_PRODUCT=PASS'
+
+      - name: Run fail-hard final polish browser gate
+        shell: bash
+        env:
+          VF_V270_EVIDENCE_DIR: /tmp/p04-v270-final-polish
+          VF_V270_TESTED_RUNTIME_COMMIT: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+        run: |
+          set -Eeuo pipefail
+          bash private/scripts/run-v270-final-polish-gate.sh
+
+      - name: Validate final artifact contract and four hard gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('/tmp/p04-v270-final-polish')
+          report=json.loads((root/'browser-report.json').read_text(encoding='utf-8'))
+          required=['01-today-1440.png','02-billing-1440.png','03-infrastructure-1440.png','04-domain-workspace-1440.png','05-vps-workspace-1440.png','06-provider-workspace-1440.png','07-settings-1440.png','08-today-390.png','09-billing-390.png','10-domain-workspace-390.png']
+          assert report['status']=='PASS'
+          assert report['screenshots']==required
+          assert report['flow']['task_count']==15 and report['flow']['pass_count']==15
+          assert report['flow']['max_clicks']<=3 and report['flow']['max_context_switch']<=1
+          assert report['flow']['backtracking']==0 and report['flow']['dead_end']==0 and report['flow']['unknown_next_action']==0
+          exp=report['experience_gates']
+          assert exp['internal_model_exposure']==0
+          assert exp['raw_status_exposure']==0
+          assert exp['engineering_meta_copy']==0
+          assert exp['fixture_identity_exposure']==0
+          assert exp['mobile_reading_obstruction']==0
+          assert report['mobile_reading_obstruction']['pass'] is True
+          assert sorted(p.name for p in root.glob('*.png'))==sorted(required)
+          for p in root.glob('*.png'): assert p.stat().st_size>1000
+          report['screenshot_bytes']=sum((root/n).stat().st_size for n in required)
+          (root/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print('INTERNAL_MODEL_EXPOSURE=0')
+          print('RAW_STATUS_EXPOSURE=0')
+          print('ENGINEERING_META_COPY=0')
+          print('MOBILE_READING_OBSTRUCTION=0')
+          print(f"SCREENSHOT_COUNT={len(required)}")
+          print(f"SCREENSHOT_BYTES={report['screenshot_bytes']}")
+          PY
+
+      - name: Remove private source before evidence upload
+        shell: bash
+        run: rm -rf private tested-product /tmp/v270-current-runtime /tmp/v270-tested-runtime
+
+      - name: Upload final browser screenshots
+        id: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.0-Final-Experience-Polish
+          path: /tmp/p04-v270-final-polish
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Publish public-safe final polish evidence
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cp /tmp/p04-v270-final-polish/browser-report.json evidence/p04-v270-final-polish-report.json
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('evidence/p04-v270-final-polish-report.json')
+          d=json.loads(p.read_text(encoding='utf-8'))
+          assert d['status']=='PASS' and len(d['screenshots'])==10
+          meta={
+            'status':'READY_FOR_MASTER_FINAL_VISUAL_REVIEW',
+            'workflow':'P04 V2.7 Final Experience Polish',
+            'integration_head':os.environ['POLISH_INTEGRATION_HEAD'],
+            'integration_tree':os.environ['POLISH_INTEGRATION_TREE'],
+            'tested_product_runtime_commit':os.environ['TESTED_PRODUCT_RUNTIME_COMMIT'],
+            'runtime_exact_to_tested':'PASS',
+            'artifact_id':os.environ['ARTIFACT_ID'],
+            'artifact_url':os.environ['ARTIFACT_URL'],
+            'artifact_digest':os.environ['ARTIFACT_DIGEST'],
+            'screenshot_count':10,
+            'screenshot_bytes':d['screenshot_bytes'],
+            'task_flow':'15/15 PASS',
+            'responsive':'390/768/1024/1440/1920 PASS',
+            'internal_model_exposure':0,
+            'raw_status_exposure':0,
+            'engineering_meta_copy':0,
+            'fixture_identity_exposure':0,
+            'mobile_reading_obstruction':0,
+            'candidate':'NOT_CREATED',
+            'production':'2.6.0 / UNCHANGED'
+          }
+          pathlib.Path('evidence/p04-v270-final-polish-artifact.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          pathlib.Path('evidence/p04-v270-final-polish.PASS').write_text('P04_V270_FINAL_EXPERIENCE_POLISH_PASS\n',encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-final-polish-report.json evidence/p04-v270-final-polish-artifact.json evidence/p04-v270-final-polish.PASS
+          git commit -m 'evidence(P04): seal V2.7 final experience polish'
+          git push origin HEAD:p04-v270-integration-gate
