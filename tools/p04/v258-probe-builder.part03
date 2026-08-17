@@ -1,0 +1,32 @@
+ccount_id','external_instance_id','label','hostname','primary_ipv4','region','plan_code','os_label','backups_enabled','archived_at']],
+      'provider_accounts'=>['table'=>'provider_accounts','keys'=>['id'],'columns'=>['id','provider_id','display_name','external_account_id','environment','archived_at']],
+      'project_relations'=>['table'=>'project_assets','keys'=>['id'],'columns'=>['id','project_id','asset_id','relation_role','source']],
+      'asset_relations'=>['table'=>'asset_relations','keys'=>['id'],'columns'=>['id','from_asset_id','to_asset_id','relation_type','source']],
+      'reminders'=>['table'=>'alerts','keys'=>['id'],'columns'=>['id','domain_id','asset_id','module','scope_type','scope_id','alert_type','reminder_days','expiry_date','fingerprint'],'where'=>'reminder_days IS NOT NULL'],
+      'billing_rules'=>['table'=>'provider_billing_alert_rules','keys'=>['provider_account_id'],'columns'=>['provider_account_id','enabled','currency','month_to_date_threshold','amount_due_threshold']],
+      'billing_invoices'=>['table'=>'provider_billing_invoices','keys'=>['id'],'columns'=>['id','provider_account_id','external_invoice_id','issued_at','period_start','period_end','currency','amount','subtotal','tax','total','status']],
+      'billing_transactions'=>['table'=>'provider_billing_transactions','keys'=>['id'],'columns'=>['id','provider_account_id','external_transaction_id','transaction_type','occurred_at','currency','amount','description']],
+    ];
+    $details=[];$ok=true;foreach($specs as $name=>$spec){$r=vfp_compare_category($pre,$cur,$spec);$details[$name]=$r;if($r['preserved']!=='YES')$ok=false;}
+    return ['status'=>$ok?'PASS':'FAIL','entities'=>$details,'operational_events_excluded'=>['job_runs','cron_runs','security_logs','events','domain_events','check_attempts','domain_checks','provider sync timestamps','billing sync state']];
+}
+function vfp_backup(SQLite3 $cur,string $dataPath): array {
+    $sql="SELECT id,filename,backup_type,size_bytes,sha256,created_at,note,source_version,schema_version,integrity_status,foreign_key_status,protected FROM backups WHERE backup_type='pre_update' AND protected=1 AND source_version='2.5.7' AND schema_version=14 AND note LIKE '%V2.5.8%' ORDER BY id DESC LIMIT 1";
+    $rows=vfp_rows($cur,$sql); if(!$rows)return ['status'=>'FAIL','exists'=>false,'reason'=>'pre_update recovery point not found'];$b=$rows[0];$name=(string)$b['filename'];if($name===''||basename($name)!==$name)return ['status'=>'FAIL','exists'=>true,'reason'=>'backup filename contract failed'];
+    $dir=rtrim($dataPath,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'backups';$path=$dir.DIRECTORY_SEPARATOR.$name;if(!is_dir($dir)||is_link($dir)||!is_file($path)||is_link($path)||!is_readable($path))return ['status'=>'FAIL','exists'=>true,'created_at'=>(string)$b['created_at'],'reason'=>'backup file unavailable'];
+    $bytes=filesize($path);$sha=hash_file('sha256',$path);if(!is_int($bytes)||!is_string($sha))return ['status'=>'FAIL','exists'=>true,'reason'=>'backup identity unreadable'];
+    $pre=vfp_open_ro($path);$health=vfp_db_health($pre);$schema=vfp_schema($pre);$target=preg_match('/V2\\.5\\.8/u',(string)$b['note'])?'2.5.8':'';
+    $ok=$bytes===(int)$b['size_bytes']&&hash_equals(strtolower((string)$b['sha256']),strtolower($sha))&&$schema===14&&(string)$b['source_version']==='2.5.7'&&$health['integrity']==='ok'&&$health['foreign_key_violations']===0&&$target==='2.5.8';
+    return ['status'=>$ok?'PASS':'FAIL','exists'=>true,'backup_id'=>(int)$b['id'],'created_at'=>(string)$b['created_at'],'bytes'=>$bytes,'sha256'=>$sha,'schema'=>$schema,'source_version'=>(string)$b['source_version'],'target_version'=>$target,'file_readable'=>'YES','metadata_readable'=>'YES','integrity'=>$health['integrity'],'foreign_key_violations'=>$health['foreign_key_violations'],'_db'=>$pre];
+}
+
+try {
+    if(($_SERVER['REQUEST_METHOD']??'GET')!=='GET') vfp_json(['ok'=>false,'error'=>'Probe 只接受 GET。'],405);
+    $root=__DIR__;$configFile=$root.DIRECTORY_SEPARATOR.'config.php';if(!is_file($configFile)||is_link($configFile))throw new RuntimeException('Production config unavailable.');
+    $cfg=require $configFile;if(!is_array($cfg))throw new RuntimeException('Production config invalid.');
+    $sessionName=trim((string)($cfg['session_name']??'vf_domain_session'));if(!preg_match('/^[A-Za-z0-9_-]{1,80}$/',$sessionName))throw new RuntimeException('Session contract invalid.');
+    $cookie=(string)($_COOKIE[$sessionName]??'');if($cookie===''||!preg_match('/^[A-Za-z0-9,-]{16,128}$/',$cookie))vfp_deny();
+    $baseHost=(string)parse_url((string)($cfg['base_url']??''),PHP_URL_HOST);$reqHost=(string)($_SERVER['HTTP_HOST']??'');$reqHost=(string)parse_url('https://'.$reqHost,PHP_URL_HOST);if($baseHost!==''&&$reqHost!==''&&!hash_equals(strtolower($baseHost),strtolower($reqHost))&&!in_array(strtolower($reqHost),array_map('strtolower',(array)($cfg['allowed_hosts']??[])),true))vfp_deny();
+    ini_set('session.gc_probability','0');ini_set('session.use_strict_mode','1');ini_set('session.use_only_cookies','1');session_name($sessionName);session_id($cookie);
+    if(!session_start(['read_and_close'=>true]))vfp_deny();$s=$_SESSION;if(!hash_equals($cookie,session_id()))vfp_deny();
+    if(empty($s['vf_domain_authenticated']))vfp_deny();$now=time();$last=(int)($s['vf_domain_last_activity']??0);$created=(int)($s['vf_domain_created_at']??0);$idle=max(3600,(int)($cfg['session_idle_timeout']??1209600));$max=max($idle,(int)($cfg['session_max_lifetime']??
