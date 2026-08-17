@@ -1,0 +1,245 @@
+name: P03 VF Forge V1.35.4 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p03-v1354-formal-release-*.txt'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1354-formal-release
+  cancel-in-progress: false
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CANDIDATE_COMMIT: af34b84a3135333cf05077b3eb64e22ef6b3afef
+      CANDIDATE_TREE: 08eee7e8c891a57c357553dd5de20c1a7bd79849
+      AUTHORITY_HEAD: 9b5bfacd052176104b44db00d1098d8021f6b7be
+      PRODUCTION_COMMIT: 263c4d8f7e38bff58db5680a6845ceb5a576d6ae
+      FIXTURE_PASS: VfP03-Formal-1354-2026!
+      PHP_TEST_IMAGE: vf-forge-v1354-formal-release-php84
+      GATE_ROOT: /tmp/p03-v1354-formal-release
+      TAG: v1.35.4
+      RELEASE_NAME: VF Forge V1.35.4
+
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: harness
+
+      - name: Require private read and release write credentials
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN missing' >&2; exit 78; }
+          test -n "$RELEASE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN missing' >&2; exit 79; }
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+          echo 'RELEASE_WRITE_CREDENTIAL=PASS'
+
+      - name: Checkout exact frozen Product Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p03
+
+      - name: Checkout exact Authority-only HEAD
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.AUTHORITY_HEAD }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: authority
+
+      - name: Checkout exact Production 1.35.3 baseline
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.PRODUCTION_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: production
+
+      - name: Prepare PHP 8.4 SQLite Zip cURL runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 curl unzip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-v1354-release" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev libcurl4-openssl-dev sqlite3 \
+            && docker-php-ext-install zip pdo_sqlite curl \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1354-release" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","curl","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," FORMAL_RELEASE_RUNTIME_PASS\n";'
+
+      - name: Rebuild and verify exact Formal Artifacts
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 harness/scripts/p03_v1354_formal_builder_normalize.py harness/scripts/p03_v1354_formal_builder.py
+          python3 harness/scripts/p03_v1354_two_phase_builder_normalize.py harness/scripts/p03_v1354_formal_builder.py
+          python3 harness/scripts/p03_v1354_two_phase_gate_normalize.py harness/scripts/p03_v1354_formal_artifact_pre_gate.sh
+          python3 harness/scripts/p03_v1354_formal_gate_diagnostics.py harness/scripts/p03_v1354_formal_artifact_pre_gate.sh
+          chmod +x harness/scripts/p03_v1354_formal_artifact_pre_gate.sh
+          bash -n harness/scripts/p03_v1354_formal_artifact_pre_gate.sh
+          python3 -m py_compile harness/scripts/p03_v1354_formal_builder.py harness/scripts/p03_v1354_two_phase_repair.py harness/scripts/p03_v1354_two_phase_builder_normalize.py harness/scripts/p03_v1354_two_phase_gate_normalize.py
+          bash harness/scripts/p03_v1354_formal_artifact_pre_gate.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('/tmp/p03-v1354-formal-release/build-a')
+          expected={
+          'VF_Forge_V1.35.4_FULL.zip':(493845,'bbc5415ea5e49b6e1a070fcae816318c6b264dc08c57e1b98540db0099cf3a80'),
+          'VF_Forge_V1.35.4_UPDATE.zip':(766277,'c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073'),
+          'VF_Forge_V1.35.4_Atomic_Upgrade.zip':(766277,'c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073'),
+          'repair-v1.35.4.php':(1024660,'36117f9b9b58e7d5e509edb19f1f6f4411cd5826e96e8602e900268bb421f832'),
+          'VF_Forge_V1.35.4_RELEASE_MANIFEST.json':(2231,'97d0f5eaaeea879afb06fea536ddef297bd62cb3d2156f7d8120aa446930eafc'),
+          'VF_Forge_V1.35.4_SOURCE_MANIFEST.txt':(3765,'07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'),
+          'VF_Forge_V1.35.4_RELEASE_NOTES.md':(936,'950371e51c29af6a70ad5ddd0f4ea595e5b96308ab8d91f0c0edfe17ff5a423f'),
+          'VF_Forge_V1.35.4_PACKAGE_MANIFEST.json':(1379,'326e22b115c36e600917e15b528b9b0858c43a0bc81e3553a17b8d32d3150ead'),
+          'SHA256SUMS.txt':(786,'24a4986e989ff3a93ce9dbe27b2003b81d424f33f70d159440db4dc6ba8c946a')}
+          assert {p.name for p in root.iterdir() if p.is_file()}==set(expected)
+          for n,(b,h) in expected.items():
+              p=root/n; data=p.read_bytes(); assert len(data)==b,(n,len(data),b); assert hashlib.sha256(data).hexdigest()==h,n
+          assert (root/'VF_Forge_V1.35.4_UPDATE.zip').read_bytes()==(root/'VF_Forge_V1.35.4_Atomic_Upgrade.zip').read_bytes()
+          print('FORMAL_RELEASE_IDENTITY_EXACT=PASS files=9 update_eq_atomic=YES')
+          PY
+
+      - name: Create exact Tag Release and upload all assets
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          API='https://api.github.com/repos/llhzx2018/vf-forge'
+          AUTH=(-H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $RELEASE_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28')
+          CODE=$(curl -sS -o /tmp/tag-before.json -w '%{http_code}' "${AUTH[@]}" "$API/git/ref/tags/$TAG")
+          test "$CODE" = 404 || { echo 'TAG_ALREADY_EXISTS_BLOCK'; cat /tmp/tag-before.json; exit 90; }
+          CODE=$(curl -sS -o /tmp/release-before.json -w '%{http_code}' "${AUTH[@]}" "$API/releases/tags/$TAG")
+          test "$CODE" = 404 || { echo 'RELEASE_ALREADY_EXISTS_BLOCK'; cat /tmp/release-before.json; exit 91; }
+          python3 - <<'PY' >/tmp/tag-create.json
+          import json,os
+          print(json.dumps({'ref':'refs/tags/'+os.environ['TAG'],'sha':os.environ['CANDIDATE_COMMIT']}))
+          PY
+          curl -fsS "${AUTH[@]}" -H 'Content-Type: application/json' -X POST --data-binary @/tmp/tag-create.json "$API/git/refs" >/tmp/tag-created.json
+          python3 - <<'PY'
+          import json,os
+          d=json.load(open('/tmp/tag-created.json')); assert d['ref']=='refs/tags/'+os.environ['TAG']; assert d['object']['sha']==os.environ['CANDIDATE_COMMIT']; print('TAG_CREATE=PASS '+d['object']['sha'])
+          PY
+          cat >/tmp/release-body.md <<'EOF'
+          # VF Forge V1.35.4
+
+          本版正式将 VF Forge 从“本地项目文件仓库”重构为“个人项目记忆与资产索引中心”。
+
+          核心能力包括：Schema 30、External Authority、GitHub Read-only Adapter、Observation Layer、Truth Relation Graph、Derived Current Truth、Project Memory、Version Truth Graph、Cross-Authority Search、Authority-aware Retrieval。
+
+          正式边界：Project Asset Storage = NONE；User Upload = RETIRED。旧历史文件本版不删除，Legacy Storage Cleanup = NOT EXECUTED。
+
+          在线升级只允许 V1.35.3 / Schema 29 → V1.35.4 / Schema 30，Migration = M030_EXTERNAL_AUTHORITY_MEMORY_INDEX，并使用已验证的 Two-request Schema 30 Executor。
+          EOF
+          python3 - <<'PY' >/tmp/release-create.json
+          import json,os
+          body=open('/tmp/release-body.md',encoding='utf-8').read()
+          print(json.dumps({'tag_name':os.environ['TAG'],'target_commitish':os.environ['CANDIDATE_COMMIT'],'name':os.environ['RELEASE_NAME'],'body':body,'draft':False,'prerelease':False},ensure_ascii=False))
+          PY
+          curl -fsS "${AUTH[@]}" -H 'Content-Type: application/json' -X POST --data-binary @/tmp/release-create.json "$API/releases" >/tmp/release-created.json
+          RID=$(python3 -c "import json;d=json.load(open('/tmp/release-created.json'));assert d['tag_name']=='v1.35.4' and d['name']=='VF Forge V1.35.4' and not d['draft'] and not d['prerelease'];print(d['id'])")
+          echo "RELEASE_ID=$RID" >> "$GITHUB_ENV"
+          ROOT="$GATE_ROOT/build-a"
+          for F in VF_Forge_V1.35.4_FULL.zip VF_Forge_V1.35.4_UPDATE.zip VF_Forge_V1.35.4_Atomic_Upgrade.zip repair-v1.35.4.php VF_Forge_V1.35.4_RELEASE_MANIFEST.json VF_Forge_V1.35.4_SOURCE_MANIFEST.txt VF_Forge_V1.35.4_RELEASE_NOTES.md VF_Forge_V1.35.4_PACKAGE_MANIFEST.json SHA256SUMS.txt; do
+            case "$F" in *.zip) CT='application/zip';; *.json) CT='application/json';; *.md) CT='text/markdown';; *.php) CT='application/x-php';; *) CT='text/plain';; esac
+            curl -fsS "${AUTH[@]}" -H "Content-Type: $CT" --data-binary "@$ROOT/$F" "https://uploads.github.com/repos/llhzx2018/vf-forge/releases/$RID/assets?name=$F" >"/tmp/asset-$F.json"
+            python3 - "$F" <<'PY'
+          import json,sys
+          f=sys.argv[1]; d=json.load(open('/tmp/asset-'+f+'.json')); assert d['name']==f and d['state']=='uploaded' and int(d['id'])>0; print('ASSET_UPLOAD',d['id'],d['name'],d['size'],d.get('digest',''))
+          PY
+          done
+          echo "RELEASE_CREATE_UPLOAD=PASS id=$RID assets=9"
+
+      - name: Remote exact release readback
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          API='https://api.github.com/repos/llhzx2018/vf-forge'
+          AUTH=(-H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $RELEASE_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28')
+          curl -fsS "${AUTH[@]}" "$API/git/ref/tags/$TAG" >/tmp/tag-readback.json
+          curl -fsS "${AUTH[@]}" "$API/releases/tags/$TAG" >/tmp/release-readback.json
+          python3 - <<'PY'
+          import json,os
+          tag=json.load(open('/tmp/tag-readback.json')); rel=json.load(open('/tmp/release-readback.json'))
+          assert tag['object']['sha']==os.environ['CANDIDATE_COMMIT']
+          assert rel['id']==int(os.environ['RELEASE_ID']) and rel['tag_name']=='v1.35.4' and rel['name']=='VF Forge V1.35.4' and not rel['draft'] and not rel['prerelease']
+          expected={
+          'VF_Forge_V1.35.4_FULL.zip':(493845,'bbc5415ea5e49b6e1a070fcae816318c6b264dc08c57e1b98540db0099cf3a80'),
+          'VF_Forge_V1.35.4_UPDATE.zip':(766277,'c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073'),
+          'VF_Forge_V1.35.4_Atomic_Upgrade.zip':(766277,'c063d99e8ab99b86da345599c8db2f27d961b3565df94daafd203e867d8c8073'),
+          'repair-v1.35.4.php':(1024660,'36117f9b9b58e7d5e509edb19f1f6f4411cd5826e96e8602e900268bb421f832'),
+          'VF_Forge_V1.35.4_RELEASE_MANIFEST.json':(2231,'97d0f5eaaeea879afb06fea536ddef297bd62cb3d2156f7d8120aa446930eafc'),
+          'VF_Forge_V1.35.4_SOURCE_MANIFEST.txt':(3765,'07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'),
+          'VF_Forge_V1.35.4_RELEASE_NOTES.md':(936,'950371e51c29af6a70ad5ddd0f4ea595e5b96308ab8d91f0c0edfe17ff5a423f'),
+          'VF_Forge_V1.35.4_PACKAGE_MANIFEST.json':(1379,'326e22b115c36e600917e15b528b9b0858c43a0bc81e3553a17b8d32d3150ead'),
+          'SHA256SUMS.txt':(786,'24a4986e989ff3a93ce9dbe27b2003b81d424f33f70d159440db4dc6ba8c946a')}
+          assets={a['name']:a for a in rel['assets']}; assert set(assets)==set(expected)
+          for n,(size,sha) in expected.items():
+              a=assets[n]; assert int(a['id'])>0 and a['size']==size and a.get('digest')=='sha256:'+sha,(n,a.get('digest')); print('REMOTE_ASSET',a['id'],n,a['size'],a['digest'])
+          print('TAG_REMOTE_EXACT=PASS commit='+tag['object']['sha'])
+          print('RELEASE_REMOTE_EXACT=PASS id='+str(rel['id'])+' published_at='+str(rel['published_at'])+' assets=9')
+          PY
+
+      - name: Verify zero public artifacts and cleanup
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p03-v1354-full-fresh p03-v1354-upgrade >/dev/null 2>&1 || true
+          rm -rf p03 authority production /tmp/p03-v1354-formal-release /tmp/tag-*.json /tmp/release-*.json /tmp/asset-*.json /tmp/release-body.md "$RUNNER_TEMP/Dockerfile.p03-v1354-release"
+          RESP=$(curl -fsS -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts")
+          COUNT=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["total_count"])' <<<"$RESP")
+          test "$COUNT" = 0
+          echo 'PUBLIC_ACTIONS_ARTIFACTS=0'
+          echo 'EPHEMERAL_PRIVATE_CHECKOUT=DELETED'
+          echo 'TEMPORARY_FORMAL_PACKAGES=DELETED'
+
+      - name: Formal Release verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_V1354_FORMAL_RELEASE=PASS'
+          echo "RELEASE_ID=$RELEASE_ID"
+          echo 'TAG=v1.35.4 PRODUCT_COMMIT=af34b84a3135333cf05077b3eb64e22ef6b3afef PRODUCT_TREE=08eee7e8c891a57c357553dd5de20c1a7bd79849'
+          echo 'MAIN_PROMOTION=NO PRODUCTION_UPGRADE=NOT_EXECUTED PRODUCTION_WRITE=0 PHYSICAL_DELETE=0'
+          echo 'NEXT=CORE_UPDATES_P03_PUBLISH'
