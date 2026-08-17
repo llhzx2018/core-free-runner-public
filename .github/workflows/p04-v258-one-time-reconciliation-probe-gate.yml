@@ -1,0 +1,288 @@
+name: P04 VF Infra V2.5.8 One-Time Reconciliation Probe Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v258-one-time-reconciliation-probe-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v258-one-time-reconciliation-probe-gate
+  cancel-in-progress: false
+
+env:
+  TARGET_COMMIT: 4a18a61c21455184c67aa4a3e0957283674ae2d7
+  TARGET_TREE: 89f322a309f8c51c9869864800a6980cb9bfbb94
+  PROBE_NAME: vf-v258-production-reconcile-b1e7564c23ba.php
+  PROBE_SHA256: abb59324bc769ec8149212c23d44c1a2aef25af3fc9f5fb9db6f75785b265c05
+  SEALED_SOURCE_SHA256: 4b4b52a5b0651aeca41433730fa53bbd96392524b6face44940f2405cf864203
+  RUNTIME_FINGERPRINT: 13e8eeaddf89837f2d370a2e15899e354402042d8bc0c27eccd130ec6ff2855a
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VF_RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout Runner test authority
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: runner-tools
+
+      - name: Checkout exact frozen VF Infra Product Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-vf-infra
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sqlite3, pdo_sqlite, mbstring
+          coverage: none
+
+      - name: Verify exact frozen source and assemble Probe builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd private-vf-infra
+          test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          cd ..
+          cat runner-tools/tools/p04/v258-probe-builder.part00 \
+              runner-tools/tools/p04/v258-probe-builder.part01 \
+              runner-tools/tools/p04/v258-probe-builder.part02 \
+              runner-tools/tools/p04/v258-probe-builder.part03 \
+              runner-tools/tools/p04/v258-probe-builder.part04 > "$RUNNER_TEMP/build_probe.py"
+          test "$(sha256sum "$RUNNER_TEMP/build_probe.py" | awk '{print $1}')" = '44a9f132ae1fd7ea25a1236a3c307e74898a05942aaddd3f8fbeef5235149144'
+          python3 -m py_compile "$RUNNER_TEMP/build_probe.py"
+          echo 'PROBE_BUILDER_IDENTITY=PASS'
+
+      - name: Download immutable Formal Release expected source manifest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_RELEASE_TOKEN"
+          OUT="$RUNNER_TEMP/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt"
+          curl -fsSL -H "Authorization: Bearer $VF_RELEASE_TOKEN" -H 'Accept: application/octet-stream' \
+            https://api.github.com/repos/llhzx2018/vf-infra/releases/assets/517422532 -o "$OUT"
+          test "$(stat -c %s "$OUT")" = '16475'
+          test "$(sha256sum "$OUT" | awk '{print $1}')" = '8d0a17c66afd142bfcde69e861d77c9e59487bdc835f4735db9224d7ae6d22b2'
+          grep -Fq $'# version\t2.5.8' "$OUT"
+          grep -Fq $'# schema\t14' "$OUT"
+          grep -Fq $'# file_count\t163' "$OUT"
+          grep -Fq "# manifest_sha256\t$SEALED_SOURCE_SHA256" "$OUT"
+          echo 'SEALED_FORMAL_SOURCE_MANIFEST=PASS'
+
+      - name: Build exact V2.5.8 runtime and single Probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 private-vf-infra/scripts/build-release-tree.py "$RUNNER_TEMP/runtime" --source-root "$GITHUB_WORKSPACE/private-vf-infra" > "$RUNNER_TEMP/runtime-build.json"
+          python3 "$RUNNER_TEMP/build_probe.py" \
+            --sealed-manifest "$RUNNER_TEMP/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt" \
+            --output "$RUNNER_TEMP/probe" \
+            --filename "$PROBE_NAME" > "$RUNNER_TEMP/probe-build.json"
+          PROBE="$RUNNER_TEMP/probe/$PROBE_NAME"
+          test -f "$PROBE"
+          test "$(sha256sum "$PROBE" | awk '{print $1}')" = "$PROBE_SHA256"
+          php -l "$PROBE" >/dev/null
+          cp "$PROBE" "$RUNNER_TEMP/runtime/$PROBE_NAME"
+          python3 - <<'PY'
+          import json,os,pathlib
+          m=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'runtime/release-manifest.json').read_text())
+          assert m['version']=='2.5.8' and int(m['target_schema'])==14
+          assert int(m['file_count'])+1==165
+          assert m['source_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+          print('RUNTIME_IDENTITY=PASS')
+          PY
+          echo 'SINGLE_PROBE_BUILD=PASS'
+
+      - name: Static security review — read-only and no network
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROBE="$RUNNER_TEMP/probe/$PROBE_NAME"
+          python3 - "$PROBE" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+          forbidden_fs=r'\b(file_put_contents|fwrite|fputs|unlink|rename|copy|mkdir|chmod|touch|tempnam|move_uploaded_file)\s*\('
+          forbidden_net=r'\b(curl_[a-z_]+|fsockopen|pfsockopen|stream_socket_client|socket_connect)\s*\('
+          forbidden_shell=r'\b(system|shell_exec|passthru|proc_open|popen)\s*\('
+          assert not re.search(forbidden_fs,s,re.I)
+          assert not re.search(forbidden_net,s,re.I)
+          assert not re.search(forbidden_shell,s,re.I)
+          assert not re.search(r'\b(INSERT|UPDATE|DELETE|REPLACE|ALTER|CREATE|DROP)\b',s)
+          assert len(re.findall(r'->exec\s*\(',s))==1 and "->exec('PRAGMA query_only=ON')" in s
+          assert not re.search(r'(require|include)[^;]*bootstrap',s,re.I)
+          assert "SQLITE3_OPEN_READONLY" in s and "PRAGMA query_only=ON" in s
+          assert "session_start(['read_and_close'=>true])" in s
+          print('STATIC_READ_ONLY_SECURITY_REVIEW=PASS')
+          PY
+
+      - name: Build isolated authenticated fixture and pre-upgrade backup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DATA="$RUNNER_TEMP/data"; mkdir -p "$DATA/database" "$DATA/backups" "$RUNNER_TEMP/sessions"
+          python3 - <<'PY'
+          import hashlib,os,pathlib,shutil,sqlite3
+          rt=pathlib.Path(os.environ['RUNNER_TEMP']); db=rt/'data/database/vf-domain.sqlite'; schema=pathlib.Path('private-vf-infra/database/schema/current.sql').read_text(encoding='utf-8')
+          con=sqlite3.connect(db); con.executescript(schema)
+          con.execute("INSERT INTO schema_migrations(version,name,applied_at,status,source_version,target_version,migration_name) VALUES(14,'fixture','2026-08-17 00:00:00','success','2.5.7','2.5.8','fixture')")
+          con.execute("INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES('auth_generation','1','2026-08-17 00:00:00')")
+          con.execute("INSERT INTO projects(name,status,description,notes,created_at,updated_at) VALUES('Fixture Project','active','fixture description','fixture note','2026-08-17 00:00:00','2026-08-17 00:00:00')")
+          con.commit(); con.close()
+          backup=rt/'data/backups/pre-update-v257-to-v258-fixture.sqlite3'; shutil.copy2(db,backup)
+          raw=backup.read_bytes(); sha=hashlib.sha256(raw).hexdigest(); size=len(raw)
+          con=sqlite3.connect(db)
+          con.execute("INSERT INTO backups(filename,backup_type,size_bytes,sha256,created_at,note,source_version,schema_version,integrity_status,foreign_key_status,protected) VALUES(?,?,?,?,?,?,?,?,?,?,1)",(backup.name,'pre_update',size,sha,'2026-08-17 00:00:01','在线更新到 V2.5.8 前自动恢复点','2.5.7',14,'ok','ok'))
+          con.commit(); con.close()
+          PY
+          cat > "$RUNNER_TEMP/runtime/config.php" <<PHP
+          <?php
+          return [
+            'app_name'=>'VF Infra Fixture',
+            'base_url'=>'http://127.0.0.1:18088',
+            'data_path'=>'$RUNNER_TEMP/data',
+            'timezone'=>'Asia/Shanghai',
+            'app_key'=>'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'session_name'=>'vf_domain_session',
+            'session_idle_timeout'=>1209600,
+            'session_max_lifetime'=>2592000,
+            'allowed_hosts'=>['127.0.0.1'],
+          ];
+          PHP
+          export SID='p04probefixture1234567890abcdef' UA='P04-Probe-Fixture/1.0' APPKEY='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+          php -d session.save_path="$RUNNER_TEMP/sessions" -d session.use_strict_mode=0 -r '
+            session_name("vf_domain_session"); session_id(getenv("SID")); session_start(); $now=time();
+            $_SESSION=["vf_domain_authenticated"=>true,"vf_domain_last_activity"=>$now,"vf_domain_created_at"=>$now,"vf_domain_auth_generation"=>1,"vf_domain_csrf"=>str_repeat("b",64),"vf_domain_ua"=>hash("sha256",getenv("UA")."|".getenv("APPKEY")),"vf_domain_rotated_at"=>$now]; session_write_close();'
+          test -f "$RUNNER_TEMP/sessions/sess_$SID"
+          echo 'AUTHENTICATED_FIXTURE=PASS'
+
+      - name: Unauthenticated deny + authenticated positive reconciliation + zero-write proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RT="$RUNNER_TEMP/runtime"; DATA="$RUNNER_TEMP/data"; SESS="$RUNNER_TEMP/sessions"; SID='p04probefixture1234567890abcdef'; UA='P04-Probe-Fixture/1.0'
+          find "$RT" -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/runtime.before"
+          sha256sum "$DATA/database/vf-domain.sqlite" "$DATA/backups/pre-update-v257-to-v258-fixture.sqlite3" "$SESS/sess_$SID" > "$RUNNER_TEMP/state.before"
+          php -d session.save_path="$SESS" -S 127.0.0.1:18088 -t "$RT" >"$RUNNER_TEMP/php-server.log" 2>&1 & SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 40); do curl -sS --max-time 1 http://127.0.0.1:18088/ >/dev/null 2>&1 && break || sleep .1; done
+          code=$(curl -sS -o "$RUNNER_TEMP/unauth.json" -w '%{http_code}' -A "$UA" "http://127.0.0.1:18088/$PROBE_NAME")
+          test "$code" = '403'
+          python3 - "$RUNNER_TEMP/unauth.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d=={'ok':False,'error':'需要现有 VF Infra 管理员会话。'}
+          PY
+          code=$(curl -sS -o "$RUNNER_TEMP/auth.json" -w '%{http_code}' -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:18088/$PROBE_NAME")
+          test "$code" = '200'
+          python3 - "$RUNNER_TEMP/auth.json" <<'PY'
+          import json,os,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['ok'] is True and d['production_version']=='2.5.8' and d['schema_version']==14
+          assert d['sqlite_integrity']=='PASS' and d['foreign_keys']=='PASS' and d['foreign_key_violations']==0
+          assert d['runtime_file_count']==165 and d['runtime_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+          assert d['production_source_manifest_sha256']==os.environ['SEALED_SOURCE_SHA256'] and d['source_manifest_file_count']==163
+          assert d['missing_count']==0 and d['unexpected_count']==0 and d['hash_mismatch_count']==0 and d['source_exact']=='PASS' and d['drift']==[]
+          assert d['business_preservation']['status']=='PASS' and d['business_preservation']['entities']['projects']['pre_count']==1
+          assert d['business_preservation']['entities']['projects']['preserved']=='YES'
+          assert d['pre_upgrade_backup']['status']=='PASS' and d['pre_upgrade_backup']['exists'] is True
+          assert d['pre_upgrade_backup']['schema']==14 and d['pre_upgrade_backup']['source_version']=='2.5.7' and d['pre_upgrade_backup']['target_version']=='2.5.8'
+          assert d['final_reconciliation']=='PASS'
+          assert d['safety']['filesystem_write']==0 and d['safety']['database_write']==0 and d['safety']['network_call']==0 and d['safety']['provider_remote_write']==0
+          raw=open(sys.argv[1],encoding='utf-8').read()
+          for secret in ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','p04probefixture1234567890abcdef',os.environ['RUNNER_TEMP'],'Fixture Project']:
+              assert secret not in raw
+          print('POSITIVE_RECONCILIATION_FIXTURE=PASS')
+          PY
+          kill $SERVER_PID; wait $SERVER_PID 2>/dev/null || true; trap - EXIT
+          find "$RT" -type f -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/runtime.after"
+          sha256sum "$DATA/database/vf-domain.sqlite" "$DATA/backups/pre-update-v257-to-v258-fixture.sqlite3" "$SESS/sess_$SID" > "$RUNNER_TEMP/state.after"
+          cmp "$RUNNER_TEMP/runtime.before" "$RUNNER_TEMP/runtime.after"
+          cmp "$RUNNER_TEMP/state.before" "$RUNNER_TEMP/state.after"
+          echo 'UNAUTHENTICATED_DENY=PASS'
+          echo 'AUTHENTICATION_REUSE=PASS'
+          echo 'DATABASE_READ_ONLY=PASS'
+          echo 'FILESYSTEM_WRITE=0'
+          echo 'DATABASE_WRITE=0'
+          echo 'NETWORK_CALL=0'
+          echo 'SENSITIVE_OUTPUT_SCAN=PASS'
+          echo 'SOURCE_MANIFEST_ALGORITHM=PASS'
+          echo 'BUSINESS_PRESERVATION_COMPARATOR=PASS'
+          echo 'BACKUP_COMPARATOR=PASS'
+
+      - name: Negative comparator verification in isolated copies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SID='p04probefixture1234567890abcdef'; UA='P04-Probe-Fixture/1.0'
+          run_case(){
+            local root="$1" data="$2" port="$3" out="$4"
+            cat > "$root/config.php" <<PHP
+          <?php return ['app_name'=>'VF Infra Fixture','base_url'=>'http://127.0.0.1:$port','data_path'=>'$data','timezone'=>'Asia/Shanghai','app_key'=>'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','session_name'=>'vf_domain_session','session_idle_timeout'=>1209600,'session_max_lifetime'=>2592000,'allowed_hosts'=>['127.0.0.1']];
+          PHP
+            php -d session.save_path="$RUNNER_TEMP/sessions" -S 127.0.0.1:$port -t "$root" >"$RUNNER_TEMP/server-$port.log" 2>&1 & local pid=$!
+            for i in $(seq 1 30); do curl -sS --max-time 1 http://127.0.0.1:$port/ >/dev/null 2>&1 && break || sleep .1; done
+            curl -fsS -A "$UA" -H "Cookie: vf_domain_session=$SID" "http://127.0.0.1:$port/$PROBE_NAME" -o "$out"
+            kill $pid; wait $pid 2>/dev/null || true
+          }
+          cp -a "$RUNNER_TEMP/runtime" "$RUNNER_TEMP/runtime-source-drift"
+          printf '\n/* isolated source drift */\n' >> "$RUNNER_TEMP/runtime-source-drift/assets/v258-view.js"
+          run_case "$RUNNER_TEMP/runtime-source-drift" "$RUNNER_TEMP/data" 18089 "$RUNNER_TEMP/source-drift.json"
+          python3 - "$RUNNER_TEMP/source-drift.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['source_exact']=='FAIL' and d['final_reconciliation']=='FAIL'; assert any(x['path']=='assets/v258-view.js' for x in d['drift'])
+          PY
+          cp -a "$RUNNER_TEMP/data" "$RUNNER_TEMP/data-business-drift"
+          python3 - <<'PY'
+          import os,sqlite3
+          p=os.path.join(os.environ['RUNNER_TEMP'],'data-business-drift/database/vf-domain.sqlite'); c=sqlite3.connect(p); c.execute("UPDATE projects SET name='Changed Fixture Project' WHERE id=1"); c.commit(); c.close()
+          PY
+          cp -a "$RUNNER_TEMP/runtime" "$RUNNER_TEMP/runtime-business-drift"
+          run_case "$RUNNER_TEMP/runtime-business-drift" "$RUNNER_TEMP/data-business-drift" 18090 "$RUNNER_TEMP/business-drift.json"
+          python3 - "$RUNNER_TEMP/business-drift.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['business_preservation']['status']=='FAIL' and d['business_preservation']['entities']['projects']['preserved']=='NO' and d['final_reconciliation']=='FAIL'
+          PY
+          cp -a "$RUNNER_TEMP/data" "$RUNNER_TEMP/data-backup-drift"
+          printf 'X' >> "$RUNNER_TEMP/data-backup-drift/backups/pre-update-v257-to-v258-fixture.sqlite3"
+          cp -a "$RUNNER_TEMP/runtime" "$RUNNER_TEMP/runtime-backup-drift"
+          run_case "$RUNNER_TEMP/runtime-backup-drift" "$RUNNER_TEMP/data-backup-drift" 18091 "$RUNNER_TEMP/backup-drift.json"
+          python3 - "$RUNNER_TEMP/backup-drift.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['pre_upgrade_backup']['status']=='FAIL' and d['final_reconciliation']=='FAIL'
+          PY
+          echo 'SOURCE_DRIFT_NEGATIVE=PASS'
+          echo 'BUSINESS_DRIFT_NEGATIVE=PASS'
+          echo 'BACKUP_DRIFT_NEGATIVE=PASS'
+
+      - name: Seal exact single-file handoff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROBE="$RUNNER_TEMP/probe/$PROBE_NAME"
+          test "$(sha256sum "$PROBE" | awk '{print $1}')" = "$PROBE_SHA256"
+          test "$(find "$RUNNER_TEMP/probe" -maxdepth 1 -type f | wc -l | tr -d ' ')" = '1'
+          echo "PROBE_NAME=$PROBE_NAME"
+          echo "PROBE_SHA256=$PROBE_SHA256"
+          echo 'PROBE_RUNTIME_INCLUSION=NO'
+          echo 'PRODUCTION_DEPLOY=NOT_EXECUTED'
+
+      - name: Upload exact single PHP Probe only
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-V2.5.8-One-Time-Reconciliation-Probe
+          path: ${{ runner.temp }}/probe/${{ env.PROBE_NAME }}
+          if-no-files-found: error
+          retention-days: 7
