@@ -39,7 +39,7 @@ s=s.replace(cmp_marker,cmp_marker+'''cmp "$REMOTE_UPDATE" "$BUILD_A/VF_Forge_V1.
 start=s.index("replacement=r'''cat >\"$GATE_ROOT/publish-corrective.php\"")
 end_marker="print('INTEGRATED_N_MINUS_1_ACCEPTANCE=PASS')\nPY'''"
 end=s.index(end_marker,start)+len(end_marker)
-http_replacement=r'''replacement=r'''echo 'MANUAL_HTTP_BRIDGE_BEGIN'
+http_replacement=r"""replacement=r'''echo 'MANUAL_HTTP_BRIDGE_BEGIN'
 # The login immediately above this insertion is the exact V1.35.3 HTTP admin login.
 echo 'HTTP_ADMIN_AUTH=PASS'
 
@@ -152,7 +152,7 @@ echo 'INSPECT_AND_PUBLISH_UPLOAD=PASS'
 echo 'REPAIR_HANDOFF=PASS repair-v1.35.4.php'
 echo 'VFF_ATOMIC_ALLOWED=["1.35.3"]'
 '''
-'''
+"""
 s=s[:start]+http_replacement+s[end:]
 
 old_export='export CORRECTIVE_UPDATE="$BUILD_A/VF_Forge_V1.35.4_UPDATE_DIST_R1.zip"\n'
