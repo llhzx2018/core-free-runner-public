@@ -1,0 +1,211 @@
+name: P04 VF Infra Mature UI Full Regression Gate
+
+on:
+  push:
+    branches:
+      - p04-mature-ui-quality-reopen
+    paths:
+      - '.github/workflows/p04-mature-ui-full-regression-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-mature-ui-full-regression-gate
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_BRANCH: prototype/mature-ui-quality-reopen
+  BASELINE_COMMIT: 16324137c8c0d3553d8fb6a367d515080d5ef0e1
+  TARGET_VERSION: 2.5.8
+  TARGET_SCHEMA: '14'
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout exact prototype branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-infra
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Version schema and UI-only scope boundary
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "$TARGET_SCHEMA"
+          test ! -e database/migrations/015_v258.sql
+          git diff --name-only "$BASELINE_COMMIT"...HEAD | tee /tmp/p04-mature-full-diff.txt
+          test -z "$(grep -E '^(VERSION|database/|src/app/|src/bootstrap\.php|src/cli/|src/cli-entry/|config/)' /tmp/p04-mature-full-diff.txt || true)"
+          grep -q '^public/assets/mature-ui-prototype.css$' /tmp/p04-mature-full-diff.txt
+          grep -q '^public/assets/mature-ui-prototype.js$' /tmp/p04-mature-full-diff.txt
+          grep -q '^public/assets/mature-ui-refinement.css$' /tmp/p04-mature-full-diff.txt
+          echo 'P04_MATURE_UI_SCOPE_BOUNDARY_PASS'
+
+      - name: Repository health migration and all syntax
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p04-mature-php-lint.txt
+          find public/assets tests/e2e -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | while IFS= read -r -d '' f; do node --check "$f"; done
+          python3 -m py_compile scripts/build-release-tree.py scripts/build-v258-update-release.py scripts/build-v258-candidate-artifacts.py scripts/validate-online-atomic-package.py
+          bash -n scripts/run-clean-full-install-gate.sh scripts/run-v258-browser-gate.sh
+          test -z "$(find . -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \))"
+          echo 'P04_MATURE_UI_REPOSITORY_SYNTAX_PASS'
+
+      - name: V2.5.8 scope domain and UI contracts
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/integration/scope_summary_contract_v258.php .
+          php tests/integration/domain_portfolio_contract_v258.php .
+          php tests/unit/ui_contract_v258.php .
+          php tests/integration/project_membership_contract_v257.php src
+          echo 'P04_MATURE_UI_SCOPE_DOMAIN_CONTRACT_PASS'
+
+      - name: Provider billing jobs and update-core regression
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/core_updates_contract_v252.php
+          php tests/integration/provider_billing_contract_v250.php src
+          php tests/integration/provider_billing_pagination_v256.php src
+          php tests/unit/provider_currency_contract_v256.php src
+          php tests/unit/provider_billing_persistence_contract_v256.php .
+          php tests/unit/job_partial_health_contract_v256.php .
+          echo 'P04_MATURE_UI_PROVIDER_BILLING_UPDATE_REGRESSION_PASS'
+
+      - name: Fresh install authentication session CSRF and Schema 14
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-clean-full-install-gate.sh
+          echo 'P04_MATURE_UI_FRESH_INSTALL_AUTH_SESSION_CSRF_PASS'
+
+      - name: Install Playwright Chromium
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Existing V2.5.8 browser responsive security backup restore gate
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-v258-browser-gate.sh
+          echo 'P04_MATURE_UI_EXISTING_BROWSER_BACKUP_RESTORE_PASS'
+
+      - name: Mature UI before-after and responsive browser gate
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d -t vf-infra-mature-full-XXXXXX)"
+          WEB="$TMP/site"; LOG="$TMP/php-server.log"; PORT=18996
+          cleanup(){ if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          python3 scripts/build-release-tree.py "$WEB" >/tmp/p04-mature-full-build.json
+          php -S "127.0.0.1:$PORT" -t "$WEB" >"$LOG" 2>&1 & PID=$!
+          READY=0
+          for _ in $(seq 1 80); do
+            if ! kill -0 "$PID" 2>/dev/null; then cat "$LOG" >&2; exit 11; fi
+            if curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1; then READY=1; break; fi
+            sleep .1
+          done
+          test "$READY" = 1
+          ADMIN_CREDENTIAL="$(php -r 'echo "Vf" . bin2hex(random_bytes(18)) . "Aa1";')"
+          rm -rf build/mature-ui-full-evidence
+          VF_INFRA_E2E_BASE_URL="http://127.0.0.1:$PORT" \
+          VF_INFRA_E2E_ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL" \
+          VF_INFRA_UI_EVIDENCE_DIR="build/mature-ui-full-evidence" \
+          node tests/e2e/mature-ui-prototype.mjs
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$LOG"; then cat "$LOG" >&2; exit 75; fi
+          test -f build/mature-ui-full-evidence/visual-metrics.json
+          echo 'P04_MATURE_UI_BROWSER_VISUAL_RESPONSIVE_PASS'
+
+      - name: Final no-product-authority-drift gate
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.8'
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = '14'
+          git diff --name-only "$BASELINE_COMMIT"...HEAD | grep -q '^public/'
+          test -z "$(git diff --name-only "$BASELINE_COMMIT"...HEAD | grep -E '^(VERSION|database/|src/app/|src/bootstrap\.php|src/cli/|src/cli-entry/|config/)' || true)"
+          echo 'PRODUCTION_WRITE=0'
+          echo 'MAIN_WRITE=0'
+          echo 'RELEASE_WRITE=0'
+          echo 'PROVIDER_DANGEROUS_WRITE=0'
+          echo 'V2_5_9=NOT_CREATED'
+          echo 'V2_6_0=NOT_CREATED'
+
+      - name: Build public-safe full regression evidence
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/p04-mature-ui-full-regression
+          mkdir -p "$OUT"
+          git rev-parse HEAD > "$OUT/PROTOTYPE_COMMIT.txt"
+          git rev-parse HEAD^{tree} > "$OUT/PROTOTYPE_TREE.txt"
+          cp /tmp/p04-mature-full-diff.txt "$OUT/PROTOTYPE_DIFF.txt"
+          cp build/mature-ui-full-evidence/visual-metrics.json "$OUT/visual-metrics.json"
+          printf '%s\n' \
+            'VERSION=2.5.8' 'SCHEMA=14' \
+            'REPOSITORY_SYNTAX=PASS' 'SCOPE_DOMAIN=PASS' \
+            'PROVIDER_BILLING_UPDATE=PASS' 'FRESH_INSTALL=PASS' \
+            'AUTH_SESSION_CSRF=PASS' 'BACKUP_RESTORE=PASS' \
+            'EXISTING_BROWSER=PASS' 'MATURE_BROWSER=PASS' \
+            'RESPONSIVE_390_768_1024_1440_1920=PASS' \
+            'FULL_REGRESSION=PASS' 'PRODUCTION_WRITE=0' 'MAIN_WRITE=0' 'RELEASE_WRITE=0' \
+            > "$OUT/FULL_REGRESSION.txt"
+
+      - name: Remove private source before evidence upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf vf-infra
+          test ! -e vf-infra
+
+      - name: Upload public-safe full regression evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-Mature-UI-Full-Regression-Evidence
+          path: /tmp/p04-mature-ui-full-regression
+          if-no-files-found: error
+          retention-days: 14
