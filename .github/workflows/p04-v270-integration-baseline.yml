@@ -1,0 +1,72 @@
+name: P04 V2.7 Integration Baseline Gate
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@v4
+      - name: Checkout private integration
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: integration/v2.7.0-personal-infra
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private
+          persist-credentials: false
+      - name: PHP and JS syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          find private -type f -name '*.php' -not -path '*/vendor/*' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          node --check private/public/assets/v270-app.js
+          echo 'SYNTAX_GATE=PASS'
+      - name: V2.7 identity and no migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r\n' < private/VERSION)" = '2.7.0'
+          test ! -e private/database/migrations/015_v270.sql
+          test "$(find private/database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l)" -eq 14
+          echo 'VERSION=2.7.0'
+          echo 'SCHEMA=14'
+          echo 'MIGRATION=NONE'
+      - name: No prototype fixture hardcoding in runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=(private/public/index.php private/public/experience.php private/public/assets/v270-app.js private/src/app/Core/PersonalInfraExperienceService.php private/src/app/Core/PersonalInfraTodayTrait.php private/src/app/Core/PersonalInfraMoneyTrait.php private/src/app/Core/PersonalInfraPortfolioTrait.php private/src/app/Core/PersonalInfraDomainTrait.php private/src/app/Core/PersonalInfraInfraTrait.php private/src/app/Core/PersonalInfraSupportTrait.php private/src/app/Core/GlobalSearchService.php)
+          for needle in '今天有 3 件事' 'USD 36.40' 'USD 46.20' 'USD 82.19' 'Tokyo-01'; do
+            if grep -Fq "$needle" "${paths[@]}"; then echo "HARDCODE_GATE=FAIL:$needle"; exit 1; fi
+          done
+          echo 'HARDCODE_GATE=PASS'
+      - name: Read-only experience boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq "if ($method !== 'GET')" private/public/experience.php
+          if grep -Eiq '\b(INSERT|UPDATE|DELETE|REPLACE|VACUUM|ATTACH|DETACH)\b' private/src/app/Core/PersonalInfra*.php private/src/app/Core/GlobalSearchService.php; then
+            echo 'READ_ONLY_GATE=FAIL'; exit 1
+          fi
+          echo 'READ_ONLY_GATE=PASS'
+      - name: Existing core contract spot regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          passed=0
+          for f in \
+            private/tests/integration/domain_portfolio_contract_v258.php \
+            private/tests/integration/provider_billing_pagination.php \
+            private/tests/integration/backup_restore.php; do
+            if [ -f "$f" ]; then php "$f" >/tmp/$(basename "$f").log 2>&1 || { echo "REGRESSION_FAIL=$(basename "$f")"; tail -n 40 /tmp/$(basename "$f").log; exit 1; }; passed=$((passed+1)); fi
+          done
+          echo "CORE_SPOT_REGRESSION_PASS=$passed"
+      - name: Remove private source
+        if: always()
+        shell: bash
+        run: rm -rf private /tmp/php-lint.log /tmp/*.php.log
