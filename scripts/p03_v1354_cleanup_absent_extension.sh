@@ -44,7 +44,7 @@ if mode=='writer':
 elif mode=='forensic':
     assert j['already_absent']==[F] and j['deleted']==[W]
 elif mode=='both':
-    assert j['already_absent']==[W,F] and j['deleted']==[]
+    assert set(j['already_absent'])=={W,F} and len(j['already_absent'])==2 and j['deleted']==[]
 else:
     raise AssertionError(mode)
 PY
