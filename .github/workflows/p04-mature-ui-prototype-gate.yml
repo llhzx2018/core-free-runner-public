@@ -1,0 +1,161 @@
+name: P04 VF Infra Mature UI Prototype Gate
+
+on:
+  push:
+    branches:
+      - p04-mature-ui-quality-reopen
+    paths:
+      - '.github/workflows/p04-mature-ui-prototype-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-mature-ui-quality-reopen
+  cancel-in-progress: false
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-infra
+  TARGET_BRANCH: prototype/mature-ui-quality-reopen
+  TARGET_VERSION: 2.5.8
+  TARGET_SCHEMA: '14'
+
+jobs:
+  prototype:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact prototype branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-infra
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Prototype source boundary and syntax
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "$TARGET_SCHEMA"
+          test -f public/assets/mature-ui-prototype.css
+          test -f public/assets/mature-ui-prototype.js
+          node --check public/assets/mature-ui-prototype.js
+          node --check public/assets/v258-nav.js
+          node --check tests/e2e/mature-ui-prototype.mjs
+          git diff --name-only 16324137c8c0d3553d8fb6a367d515080d5ef0e1...HEAD | tee /tmp/p04-ui-prototype-diff.txt
+          test -z "$(grep -E '^(VERSION|database/|src/app/|src/bootstrap|src/cli/)' /tmp/p04-ui-prototype-diff.txt || true)"
+          echo "P04_UI_PROTOTYPE_SOURCE_BOUNDARY_PASS"
+
+      - name: Install Playwright Chromium
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build exact prototype runtime and run before-after browser gate
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d -t vf-infra-mature-ui-XXXXXX)"
+          WEB="$TMP/site"
+          LOG="$TMP/php-server.log"
+          PORT=18995
+          cleanup(){ if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; rm -rf "$TMP"; }
+          trap cleanup EXIT
+          python3 scripts/build-release-tree.py "$WEB" > /tmp/p04-ui-build.json
+          test "$(tr -d '\r\n' < "$WEB/VERSION.txt")" = '2.5.8'
+          test -f "$WEB/assets/mature-ui-prototype.css"
+          test -f "$WEB/assets/mature-ui-prototype.js"
+          php -S "127.0.0.1:$PORT" -t "$WEB" >"$LOG" 2>&1 & PID=$!
+          READY=0
+          for _ in $(seq 1 80); do
+            if ! kill -0 "$PID" 2>/dev/null; then cat "$LOG" >&2; exit 11; fi
+            if curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1; then READY=1; break; fi
+            sleep .1
+          done
+          test "$READY" = 1
+          ADMIN_CREDENTIAL="$(php -r 'echo "Vf" . bin2hex(random_bytes(18)) . "Aa1";')"
+          rm -rf build/mature-ui-evidence
+          VF_INFRA_E2E_BASE_URL="http://127.0.0.1:$PORT" \
+          VF_INFRA_E2E_ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL" \
+          VF_INFRA_UI_EVIDENCE_DIR="build/mature-ui-evidence" \
+          node tests/e2e/mature-ui-prototype.mjs
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$LOG"; then cat "$LOG" >&2; exit 75; fi
+          test -f build/mature-ui-evidence/before-1440-dashboard.png
+          test -f build/mature-ui-evidence/after-1440-dashboard.png
+          test -f build/mature-ui-evidence/after-390-system-update.png
+          test -f build/mature-ui-evidence/after-1920-billing.png
+          python3 - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('build/mature-ui-evidence/visual-metrics.json')
+          d=json.loads(p.read_text())
+          assert set(d['before'])=={'dashboard','system-update','domains','assets','billing'}
+          assert set(d['after'])==set(d['before'])
+          assert set(map(int,d['responsive'].keys()))=={390,768,1024,1440,1920}
+          print('P04_MATURE_UI_BEFORE_AFTER_RESPONSIVE_EVIDENCE_PASS')
+          PY
+
+      - name: Existing V2.5.8 targeted regression after prototype layer
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/integration/scope_summary_contract_v258.php .
+          php tests/integration/domain_portfolio_contract_v258.php .
+          php tests/unit/ui_contract_v258.php .
+          php tests/unit/core_updates_contract_v252.php
+          php tests/integration/project_membership_contract_v257.php src
+          php tests/unit/provider_currency_contract_v256.php src
+          echo 'P04_MATURE_UI_TARGETED_REGRESSION_PASS'
+
+      - name: Build public-safe prototype evidence
+        working-directory: vf-infra
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p04-mature-ui-evidence
+          cp -a build/mature-ui-evidence/. /tmp/p04-mature-ui-evidence/
+          cp /tmp/p04-ui-prototype-diff.txt /tmp/p04-mature-ui-evidence/PROTOTYPE_DIFF.txt
+          git rev-parse HEAD > /tmp/p04-mature-ui-evidence/PROTOTYPE_COMMIT.txt
+          git rev-parse HEAD^{tree} > /tmp/p04-mature-ui-evidence/PROTOTYPE_TREE.txt
+          printf '%s\n' 'VERSION=2.5.8' 'SCHEMA=14' 'PRODUCTION_WRITE=0' 'MAIN_WRITE=0' 'RELEASE_WRITE=0' > /tmp/p04-mature-ui-evidence/GATE_BOUNDARY.txt
+
+      - name: Remove private source before evidence upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf vf-infra
+          test ! -e vf-infra
+
+      - name: Upload public-safe screenshots and metrics
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-VF-Infra-Mature-UI-Prototype-Evidence
+          path: /tmp/p04-mature-ui-evidence
+          if-no-files-found: error
+          retention-days: 14
