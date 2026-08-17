@@ -1,0 +1,210 @@
+name: P03 V1.35.4 Generate Encrypted Production Reconcile Tool
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1354-generate-encrypted-production-reconcile-tool.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: p03-v1354-generate-encrypted-production-reconcile-tool
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORRECTIVE_BRANCH: repair/v1.35.4-source-exact-reconcile
+      FROZEN_PRODUCT_COMMIT: af34b84a3135333cf05077b3eb64e22ef6b3afef
+      EXPECTED_PRODUCT_TREE: 08eee7e8c891a57c357553dd5de20c1a7bd79849
+      EXPECTED_RUNTIME_FINGERPRINT: 2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083
+      EXPECTED_MEMORY_SHA: 1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7
+
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+          path: harness
+
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout corrective tooling branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.CORRECTIVE_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: corrective
+
+      - name: Checkout Frozen V1.35.4 Product
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.FROZEN_PRODUCT_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: product
+
+      - name: Verify exact Frozen Git identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$FROZEN_PRODUCT_COMMIT"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$EXPECTED_PRODUCT_TREE"
+          echo 'FROZEN_PRODUCT_GIT_IDENTITY=PASS'
+
+      - name: Build exact Frozen Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf runtime secure-out formal
+          mkdir -p runtime secure-out formal
+          python3 product/scripts/build_runtime.py runtime >/dev/null
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          s=importlib.util.spec_from_file_location('scope',Path('corrective/scripts/corrective/v1354_source_exact_scope.py'))
+          m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+          o=m.assert_frozen_runtime(Path('runtime'))
+          assert o['runtime_files']==42
+          assert o['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+          assert o['source_manifest_sha256']=='07103a75ce7841cb2ede11cd30a822830cf255f991195eb05391282e6e50ec47'
+          assert o['memory_api_bytes']==4497
+          assert o['memory_api_sha256']=='1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7'
+          print('FROZEN_RUNTIME_IDENTITY=PASS')
+          PY
+
+      - name: Generate unique formal Production Tool
+        id: formal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 corrective/scripts/corrective/finalize_v1354_same_version_reconcile_production.py \
+            --runtime-root runtime \
+            --output-dir formal > formal/build-metadata.json
+          python3 - <<'PY' > formal/env.out
+          import hashlib,json,re
+          from pathlib import Path
+          m=json.loads(Path('formal/build-metadata.json').read_text())
+          name=m['filename']; p=Path('formal')/name; raw=p.read_bytes()
+          assert re.fullmatch(r'vf-forge-v1354-source-reconcile-[0-9a-f]{12}\.php',name)
+          assert len(raw)==m['bytes']
+          assert hashlib.sha256(raw).hexdigest()==m['sha256']
+          assert m['production_version']=='1.35.4' and m['schema']==30
+          assert m['product_commit']=='af34b84a3135333cf05077b3eb64e22ef6b3afef'
+          assert m['product_tree']=='08eee7e8c891a57c357553dd5de20c1a7bd79849'
+          assert m['runtime_files']==42
+          assert m['runtime_fingerprint']=='2fd3ebbbebfd7155371fe44664715cbe34f63cfb98dfeb691bba90d4864ca083'
+          assert m['memory_api_bytes']==4497
+          assert m['memory_api_sha256']=='1c9b784d0a1c8cb8f9245c4c9bc7af6511c55006de5fd3fefa796b1ec438a9b7'
+          print('filename='+name); print('bytes='+str(len(raw))); print('sha256='+hashlib.sha256(raw).hexdigest())
+          PY
+          cat formal/env.out
+          while IFS='=' read -r k v; do echo "$k=$v" >> "$GITHUB_OUTPUT"; done < formal/env.out
+          echo 'FORMAL_TOOL_SHA=LOCKED'
+
+      - name: PHP 8.4 syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/formal:/formal:ro" \
+            php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7 \
+            php -l "/formal/${{ steps.formal.outputs.filename }}"
+          echo 'PHP_SYNTAX=PASS'
+
+      - name: Encrypt formal tool with ephemeral sandbox public key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > secure-out/recipient-public.pem <<'EOF'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAoKdXe43hsfEA2Myfap7A
+          JTzHy+XXMlcEfRgNXdqvJ/JuCBOdlbmdB0bMsW36sF881EySu3exVKNCMDILJieU
+          AS+20ppOdMBw6Lgt2dj5olbF2ouJQ5gglnyBI1PS8K/YhzM+UHA8q+AbDtjUBwN5
+          F3O1uLuMTeXDPyJiSc5A5zP6F+qkb89K+iz0LDa2jkwmZPgcmv0UXb2mntOfSZQt
+          clnAtZOAUo+5ic0dW8j8hTF8IHMP5WxOz4z8GZ9g1gynX6OQH6oA5ekeVB9ylH4l
+          RK7yEIzFMjHv37Nq0mPa/2yFy9aSjRgbNyebg0ZOA2wKqvFlvED0qGtRdc8pwgff
+          xE4odyFzjFq9y9Kh7c8EJgIPZjb/IYAmb1F5ApRiHN8u+xyRIT8o+g02goPi+xN7
+          NB1Oku7UdrVLR6tvU9mqvaR82xZpm2JgPIoGBaFWM0wAmADS919OJNZ1j8voFzAf
+          fgpyq6/wiHh1ai2//nWL4gX8RhArpuk2WWkCFPSUhl93AgMBAAE=
+          -----END PUBLIC KEY-----
+          EOF
+          openssl rand 32 > secure-out/aes.key
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 \
+            -pass file:secure-out/aes.key \
+            -in "formal/${{ steps.formal.outputs.filename }}" \
+            -out secure-out/tool.php.enc
+          openssl pkeyutl -encrypt -pubin -inkey secure-out/recipient-public.pem \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+            -in secure-out/aes.key -out secure-out/aes.key.rsa
+          cp formal/build-metadata.json secure-out/build-metadata.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('secure-out/build-metadata.json'); m=json.loads(p.read_text())
+          m.update({'php_syntax':'PASS','transport_gate_run':31995624255,'transport_gate_job':95286632445,'transport_gate':'PASS','encrypted_bridge':'RSA_OAEP_SHA256_PLUS_AES256_CBC_PBKDF2','public_artifact_contains_plaintext':False,'production_write':0,'m030':'NOT_EXECUTED','main_promotion':'NOT_EXECUTED','v1_35_5':'NOT_CREATED'})
+          p.write_text(json.dumps(m,indent=2,sort_keys=True)+'\n')
+          PY
+          sha256sum secure-out/tool.php.enc secure-out/aes.key.rsa secure-out/build-metadata.json > secure-out/ENCRYPTED_SHA256SUMS.txt
+          shred -u secure-out/aes.key
+          shred -u "formal/${{ steps.formal.outputs.filename }}"
+          test ! -e "formal/${{ steps.formal.outputs.filename }}"
+          echo 'PLAINTEXT_TOOL_AFTER_ENCRYPTION=0'
+
+      - name: Upload encrypted bridge artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: P03_V1.35.4_PRODUCTION_SOURCE_RECONCILE_TOOL_ENCRYPTED
+          path: |
+            secure-out/tool.php.enc
+            secure-out/aes.key.rsa
+            secure-out/build-metadata.json
+            secure-out/ENCRYPTED_SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Verify no plaintext in artifact staging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test ! -e "formal/${{ steps.formal.outputs.filename }}"
+          test ! -e secure-out/aes.key
+          test -f secure-out/tool.php.enc
+          test -f secure-out/aes.key.rsa
+          echo 'PUBLIC_ARTIFACT_PLAINTEXT=0'
+          echo 'PRODUCTION_WRITE=0'
+          echo 'M030_PRODUCTION=NOT_RERUN'
+          echo 'MAIN_PROMOTION=NOT_EXECUTED'
+          echo 'V1.35.5=NOT_CREATED'
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          echo 'FORMAL_PRODUCTION_TOOL=GENERATED_AND_ENCRYPTED'
+          echo 'FILENAME=${{ steps.formal.outputs.filename }}'
+          echo 'BYTES=${{ steps.formal.outputs.bytes }}'
+          echo 'SHA256=${{ steps.formal.outputs.sha256 }}'
+          echo 'PHP_SYNTAX=PASS'
+          echo 'PUBLIC_ARTIFACT_PLAINTEXT=0'
+          echo 'NEXT=DOWNLOAD_DECRYPT_IN_PRIVATE_SANDBOX_AND_STOP_FOR_SINGLE_USER_ACTION'
