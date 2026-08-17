@@ -1,0 +1,159 @@
+name: P04 V2.7 Integrated Browser Evidence Repair V2
+
+on:
+  push:
+    branches: [p04-v270-integration-gate]
+    paths:
+      - '.github/workflows/p04-v270-integrated-browser-evidence-repair-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPOSITORY: llhzx2018/vf-infra
+  INTEGRATION_BRANCH: integration/v2.7.0-personal-infra
+  TESTED_PRODUCT_RUNTIME_COMMIT: f8e94f9e27780b725fa0ac5592b19f42a75ff00f
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public harness
+        uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+
+      - name: Checkout current integration
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.INTEGRATION_BRANCH }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private
+
+      - name: Checkout tested product runtime commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY }}
+          ref: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: tested-product
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install browser/runtime prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-curl php-zip >/dev/null
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Product runtime preflight and exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < private/VERSION)" = '2.7.0'
+          test "$(tr -d '\r\n' < tested-product/VERSION)" = '2.7.0'
+          python3 private/scripts/build-release-tree.py /tmp/v270-current-runtime >/tmp/v270-current-build.json
+          python3 tested-product/scripts/build-release-tree.py /tmp/v270-tested-runtime >/tmp/v270-tested-build.json
+          diff -qr /tmp/v270-current-runtime /tmp/v270-tested-runtime
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find private/src private/public -type f -name '*.php' -print0)
+          node --check private/public/assets/v270-app.js
+          python3 - <<'PY'
+          from pathlib import Path
+          targets=[Path('private/public/index.php'),Path('private/public/assets/v270-app.js'),Path('private/public/assets/v270-personal-infra.css'),*Path('private/src/app/Core').glob('PersonalInfra*.php')]
+          bad=[]; markers=['\ufffd','Ã','Â','ä¸','æœ','�']
+          for p in targets:
+            s=p.read_text(encoding='utf-8',errors='strict')
+            controls=[ord(c) for c in s if ord(c)<32 and c not in '\n\r\t']
+            if controls or any(m in s for m in markers): bad.append((str(p),controls[:8]))
+          assert not bad, f'UTF8_OR_CONTROL_CORRUPTION {bad}'
+          print('V270_RUNTIME_UTF8=PASS')
+          PY
+          echo "BROWSER_INTEGRATION_HEAD=$(git -C private rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BROWSER_INTEGRATION_TREE=$(git -C private rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          echo "INTEGRATION_HEAD=$(git -C private rev-parse HEAD)"
+          echo "INTEGRATION_TREE=$(git -C private rev-parse HEAD^{tree})"
+          echo "TESTED_PRODUCT_RUNTIME_COMMIT=$TESTED_PRODUCT_RUNTIME_COMMIT"
+          echo 'RUNTIME_EXACT_TO_TESTED_PRODUCT=PASS'
+
+      - name: Run fail-hard integrated browser harness
+        shell: bash
+        env:
+          VF_V270_EVIDENCE_DIR: /tmp/p04-v270-browser-evidence-repair-v2
+          VF_V270_TESTED_RUNTIME_COMMIT: ${{ env.TESTED_PRODUCT_RUNTIME_COMMIT }}
+        run: |
+          set -Eeuo pipefail
+          bash private/scripts/run-v270-browser-gate.sh
+
+      - name: Validate exact artifact contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('/tmp/p04-v270-browser-evidence-repair-v2')
+          report=json.loads((root/'browser-report.json').read_text(encoding='utf-8'))
+          required=['01-dashboard-1440.png','02-billing-1440.png','03-infrastructure-1440.png','04-domain-portfolio-1440.png','05-domain-workspace-1440.png','06-vps-workspace-1440.png','07-provider-workspace-1440.png','08-dns-workspace-1440.png','09-settings-1440.png','10-system-update-1440.png','11-dashboard-390.png','12-billing-390.png','13-domain-workspace-390.png']
+          assert report['status']=='PASS'
+          assert report['screenshots']==required
+          assert report['flow']['task_count']==15 and report['flow']['pass_count']==15
+          assert report['flow']['max_clicks']<=3 and report['flow']['max_context_switch']<=1
+          assert report['flow']['backtracking']==0 and report['flow']['dead_end']==0 and report['flow']['unknown_next_action']==0
+          assert report['mobile_safe_area']['pass'] is True
+          assert sorted(p.name for p in root.glob('*.png'))==sorted(required)
+          for p in root.glob('*.png'): assert p.stat().st_size>1000
+          report['screenshot_bytes']=sum((root/n).stat().st_size for n in required)
+          (root/'browser-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(f"SCREENSHOT_COUNT={len(required)}")
+          print(f"SCREENSHOT_BYTES={report['screenshot_bytes']}")
+          PY
+
+      - name: Remove private source before evidence upload
+        shell: bash
+        run: rm -rf private tested-product /tmp/v270-current-runtime /tmp/v270-tested-runtime
+
+      - name: Upload 13 real browser screenshots
+        id: artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.0-Integrated-Browser-Evidence-Repair-V2
+          path: /tmp/p04-v270-browser-evidence-repair-v2
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Publish public-safe browser gate identity
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cp /tmp/p04-v270-browser-evidence-repair-v2/browser-report.json evidence/p04-v270-browser-repair-v2-report.json
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('evidence/p04-v270-browser-repair-v2-report.json')
+          d=json.loads(p.read_text(encoding='utf-8'))
+          assert d['status']=='PASS' and len(d['screenshots'])==13
+          meta={'status':'PASS','workflow':'P04 V2.7 Integrated Browser Evidence Repair V2','integration_head':os.environ['BROWSER_INTEGRATION_HEAD'],'integration_tree':os.environ['BROWSER_INTEGRATION_TREE'],'tested_product_runtime_commit':os.environ['TESTED_PRODUCT_RUNTIME_COMMIT'],'artifact_id':os.environ['ARTIFACT_ID'],'artifact_url':os.environ['ARTIFACT_URL'],'artifact_digest':os.environ['ARTIFACT_DIGEST'],'screenshot_count':13,'screenshot_bytes':d['screenshot_bytes'],'flow':'15/15 PASS','responsive':'PASS','mobile_safe_area':'PASS'}
+          pathlib.Path('evidence/p04-v270-browser-repair-v2-artifact.json').write_text(json.dumps(meta,indent=2)+'\n',encoding='utf-8')
+          pathlib.Path('evidence/p04-v270-browser-repair-v2.PASS').write_text('P04_V270_INTEGRATED_BROWSER_REPAIR_V2_PASS\n',encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-browser-repair-v2-report.json evidence/p04-v270-browser-repair-v2-artifact.json evidence/p04-v270-browser-repair-v2.PASS
+          git commit -m 'evidence(P04): seal real V2.7 browser repair V2 evidence'
+          git push origin HEAD:p04-v270-integration-gate
