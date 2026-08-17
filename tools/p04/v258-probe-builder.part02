@@ -1,0 +1,36 @@
+1)!==count($files)||count($files)+1!==VFP_EXPECTED_FILE_COUNT)throw new RuntimeException('Runtime release manifest count mismatch.');
+    $seen=[];$fpRows=[];$missing=[];$mismatch=[];$drift=[];
+    foreach($files as $e){if(!is_array($e))throw new RuntimeException('Runtime release manifest row invalid.');$rel=(string)($e['path']??'');$sha=strtolower((string)($e['sha256']??''));$size=(int)($e['size']??-1);if($rel===''||str_contains($rel,'..')||str_starts_with($rel,'/')||isset($seen[$rel])||!preg_match('/^[a-f0-9]{64}$/',$sha)||$size<0)throw new RuntimeException('Runtime release manifest row contract failed.');$seen[$rel]=true;$p=$real.DIRECTORY_SEPARATOR.str_replace('/',DIRECTORY_SEPARATOR,$rel);if(!is_file($p)||is_link($p)){$missing[]=$rel;$drift[]=['path'=>$rel,'type'=>'missing','expected_sha'=>$sha,'actual_sha'=>''];continue;}$actualSize=filesize($p);$actualSha=hash_file('sha256',$p);if(!is_int($actualSize)||!is_string($actualSha))throw new RuntimeException('Runtime file read failed.');if($actualSize!==$size||!hash_equals($sha,$actualSha)){$mismatch[]=$rel;$drift[]=['path'=>$rel,'type'=>'hash_mismatch','expected_sha'=>$sha,'actual_sha'=>$actualSha];}$fpRows[$rel]=$actualSha.'  '.$rel;}
+    ksort($fpRows,SORT_STRING);$fp=hash('sha256',implode("\n",$fpRows).($fpRows?"\n":''));$exact=count($files)+1===VFP_EXPECTED_FILE_COUNT&&$fp===VFP_EXPECTED_RUNTIME_FINGERPRINT&&!$missing&&!$mismatch&&hash_equals((string)($m['source_fingerprint']??''),VFP_EXPECTED_RUNTIME_FINGERPRINT);
+    return ['runtime_file_count'=>count($files)+1,'runtime_fingerprint'=>$fp,'missing'=>$missing,'unexpected'=>[],'mismatch'=>$mismatch,'drift'=>$drift,'runtime_exact'=>$exact?'PASS':'FAIL'];
+}
+function vfp_merge_drift(array $source,array $runtime): array {
+    $by=[];foreach(array_merge($source['drift'],$runtime['drift']) as $d){$k=$d['path'].'|'.$d['type'];$by[$k]=$d;}ksort($by,SORT_STRING);return array_values($by);
+}
+function vfp_select_rows(SQLite3 $db,string $table,array $cols,string $where='1=1'): array {
+    $available=vfp_table_columns($db,$table); if(!$available)throw new RuntimeException('Required business table missing: '.$table);
+    $use=array_values(array_filter($cols,fn($c)=>in_array($c,$available,true))); if(!$use)throw new RuntimeException('Business identity columns missing: '.$table);
+    $sql='SELECT '.implode(',',array_map('vfp_ident',$use)).' FROM '.vfp_ident($table).' WHERE '.$where;
+    return [$use,vfp_rows($db,$sql)];
+}
+function vfp_row_key(array $row,array $keys): string { $v=[];foreach($keys as $k){if(!array_key_exists($k,$row))throw new RuntimeException('Business key missing: '.$k);$v[$k]=$row[$k];}return json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR); }
+function vfp_row_hash(array $row,array $cols): string { $v=[];foreach($cols as $c)$v[$c]=$row[$c]??null;return hash('sha256',json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)); }
+function vfp_compare_category(SQLite3 $pre,SQLite3 $cur,array $spec): array {
+    [$preCols,$preRows]=vfp_select_rows($pre,$spec['table'],$spec['columns'],$spec['where']??'1=1');
+    [$curCols,$curRows]=vfp_select_rows($cur,$spec['table'],$spec['columns'],$spec['where']??'1=1');
+    $cols=array_values(array_intersect($preCols,$curCols));$keys=$spec['keys'];foreach($keys as $k)if(!in_array($k,$cols,true))throw new RuntimeException('Business key unavailable: '.$spec['table'].'.'.$k);
+    $preMap=[];foreach($preRows as $r){$k=vfp_row_key($r,$keys);$preMap[$k]=vfp_row_hash($r,$cols);}ksort($preMap,SORT_STRING);
+    $curMap=[];foreach($curRows as $r){$k=vfp_row_key($r,$keys);$curMap[$k]=vfp_row_hash($r,$cols);}ksort($curMap,SORT_STRING);
+    $preLines=[];$curLines=[];$missing=0;$mismatch=0;
+    foreach($preMap as $k=>$h){$preLines[]=$k."\t".$h;$ch=$curMap[$k]??'';$curLines[]=$k."\t".($ch!==''?$ch:'<MISSING>');if($ch==='')$missing++;elseif(!hash_equals($h,$ch))$mismatch++;}
+    $preDigest=hash('sha256',implode("\n",$preLines).($preLines?"\n":''));$curDigest=hash('sha256',implode("\n",$curLines).($curLines?"\n":''));$ok=$missing===0&&$mismatch===0;
+    return ['pre_count'=>count($preRows),'current_count'=>count($curRows),'pre_identity_digest'=>$preDigest,'current_identity_digest'=>$curDigest,'missing_pre_identities'=>$missing,'changed_pre_identities'=>$mismatch,'preserved'=>$ok?'YES':'NO'];
+}
+function vfp_business_preservation(SQLite3 $pre,SQLite3 $cur): array {
+    $specs=[
+      'projects'=>['table'=>'projects','keys'=>['id'],'columns'=>['id','name','status','description','notes','archived_at']],
+      'assets'=>['table'=>'assets','keys'=>['id'],'columns'=>['id','asset_type','asset_key','display_name','project_name','provider_account_id','parent_asset_id','status','source_module','source_object_id','archived_at']],
+      'domains'=>['table'=>'domains','keys'=>['id'],'columns'=>['id','domain','project_name','group_id','registration_price','renewal_price','currency','auto_renew','manual_expiry_date','renewal_policy','registrar_provider_account_id','tags_json','notes','archived_at']],
+      'dns_zones'=>['table'=>'dns_zones','keys'=>['id'],'columns'=>['id','provider_account_id','external_zone_id','zone_name','archived_at']],
+      'dns_records'=>['table'=>'dns_records','keys'=>['id'],'columns'=>['id','dns_zone_id','provider_account_id','external_record_id','record_type','record_name','content','ttl','proxied','comment','archived_at']],
+      'vps'=>['table'=>'compute_instances','keys'=>['id'],'columns'=>['id','provider_a
