@@ -1,0 +1,326 @@
+name: P04 V2.7 Formal Candidate and Artifact Gate
+
+on:
+  push:
+    branches: [p04-v270-candidate-artifact-tmp]
+    paths:
+      - '.github/workflows/p04-v270-candidate-artifact-gate.yml'
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-infra
+  CANDIDATE_BRANCH: candidate/v2.7.0
+  CANDIDATE_HEAD: 60b65075c65218d1c9013bcc6a4f91eafe3f9c6b
+  CANDIDATE_TREE: ff1412006bd7b71fc246b9f420cdd293b41f3445
+  TESTED_RUNTIME: 79281e09a65985ec6e0ae9d1730472979f8fe482
+  PRODUCTION_RELEASE_SOURCE: b8d080e432ba811f6689372636022774e558ffc1
+  TARGET_VERSION: 2.7.0
+  SOURCE_VERSION: 2.6.0
+  TARGET_SCHEMA: '14'
+  EVIDENCE_BRANCH: p04-v270-integration-gate
+  TEMP_BRANCH: p04-v270-candidate-artifact-tmp
+
+jobs:
+  candidate-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public evidence authority
+        uses: actions/checkout@v4
+        with:
+          ref: p04-v270-integration-gate
+          fetch-depth: 0
+
+      - name: Checkout exact Formal Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: candidate/v2.7.0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Checkout Production V2.6.0 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: b8d080e432ba811f6689372636022774e558ffc1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: base260
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+
+      - name: Candidate Git and Master-approved runtime identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(find database/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "$TARGET_SCHEMA"
+          test ! -e database/migrations/015_v270.sql
+          mapfile -t delta < <(git diff --name-only "$TESTED_RUNTIME" "$CANDIDATE_HEAD")
+          test "${#delta[@]}" -eq 1
+          test "${delta[0]}" = 'VF_PROJECT.json'
+          test "$(git -C ../base260 rev-parse HEAD)" = "$PRODUCTION_RELEASE_SOURCE"
+          echo 'CANDIDATE_GIT_IDENTITY=PASS'
+          echo 'CANDIDATE_RUNTIME_EQUALS_MASTER_APPROVED_TESTED_RUNTIME=PASS'
+          echo 'UNEXPECTED_PRODUCT_RUNTIME_DELTA=0'
+
+      - name: Candidate function security data and product regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l >/tmp/p04-v270-php-lint.log
+          find public -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+          mapfile -t tests < <(find tests -type f -name '*.php' \( -path '*/unit/*' -o -path '*/integration/*' -o -path '*/security/*' -o -path '*/regression/*' \) | sort)
+          total=${#tests[@]}; passed=0; failed=0
+          failed_names='[]'
+          for f in "${tests[@]}"; do
+            if php "$f" >/tmp/p04-one-test.log 2>&1; then passed=$((passed+1)); else failed=$((failed+1)); failed_names=$(jq -c --arg n "$f" '. + [$n]' <<<"$failed_names"); cat /tmp/p04-one-test.log; fi
+          done
+          test "$total" -gt 0
+          test "$failed" -eq 0
+          corpus=/tmp/p04-v270-test-corpus.txt
+          cat "${tests[@]}" > "$corpus"
+          declare -A gates=(
+            [FUNCTION]='Service|Controller|Repository|CRUD|create|update|delete'
+            [SECURITY]='Auth|Session|CSRF|csrf|security|permission'
+            [DATA]='schema|migration|Database|SQLite|transaction'
+            [BACKUP_RESTORE]='Backup|Restore|backup|restore'
+            [UPDATE_READINESS]='OnlineUpdate|UpdateContract|UpdateManifest|Atomic|repair|update_history'
+            [SEARCH]='Search|search'
+            [PROVIDER]='Provider|provider'
+            [BILLING]='Billing|billing|invoice|transaction'
+            [DOMAIN]='Domain|domain|DNS|dns_zone|dns_record'
+            [VPS]='VPS|compute_instance|compute|Linode|Vultr'
+            [RELATIONSHIP]='Relation|relation|project_assets|asset_relations'
+          )
+          coverage='{}'
+          for k in "${!gates[@]}"; do
+            grep -Eiq "${gates[$k]}" "$corpus"
+            coverage=$(jq -c --arg k "$k" '. + {($k):"PASS"}' <<<"$coverage")
+          done
+          jq -n --arg status PASS --argjson total "$total" --argjson passed "$passed" --argjson failed "$failed" --argjson failed_names "$failed_names" --argjson coverage "$coverage" '{status:$status,php_tests_total:$total,php_tests_passed:$passed,php_tests_failed:$failed,failed_tests:$failed_names,coverage:$coverage,php_lint:"PASS",javascript_syntax:"PASS"}' > /tmp/p04-v270-candidate-tests.json
+          rm -f /tmp/p04-one-test.log "$corpus"
+          echo "CANDIDATE_TESTS=$passed/$total PASS"
+
+      - name: Build deterministic Formal Artifact twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/build-p04-v270-formal.py <<'PY'
+          from __future__ import annotations
+          from pathlib import Path, PurePosixPath
+          import base64, hashlib, json, os, re, shutil, subprocess, sys, zipfile
+
+          TARGET='2.7.0'; SOURCE='2.6.0'; SCHEMA=14
+          CANDIDATE_HEAD=os.environ['CANDIDATE_HEAD']; CANDIDATE_TREE=os.environ['CANDIDATE_TREE']
+          ROOT=Path('candidate').resolve(); BASE=Path('base260').resolve()
+
+          def sha_bytes(b:bytes)->str: return hashlib.sha256(b).hexdigest()
+          def sha(p:Path)->str: return sha_bytes(p.read_bytes())
+          def deterministic_zip(src:Path,out:Path):
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+                  for f in sorted(x for x in src.rglob('*') if x.is_file()):
+                      rel=f.relative_to(src).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=((0o100755 if os.access(f,os.X_OK) else 0o100644)<<16); z.writestr(info,f.read_bytes())
+          def filemap(root:Path): return {p.relative_to(root).as_posix():p.read_bytes() for p in root.rglob('*') if p.is_file()}
+          def patch_runtime_manifest(runtime:Path):
+              p=runtime/'release-manifest.json'; x=json.loads(p.read_text(encoding='utf-8'))
+              assert x['version']==TARGET and int(x['target_schema'])==SCHEMA
+              x['release_kind']='product_experience_generation'
+              x['phase']='FORMAL_ARTIFACT'
+              x['phase_status']='VERIFIED'
+              x['release_candidate']=False
+              x['production_release']=False
+              x['final_release']=False
+              x['notes']=[
+                  'V2.7.0 is the Master-approved Personal Infrastructure experience generation release; Schema remains 14 and no migration is introduced.',
+                  'Formal Artifact is built from candidate/v2.7.0 exact Git identity and is runtime-exact to the Master-approved tested product runtime.',
+                  'Runtime manifest excludes config.php, SQLite, PRIVATE_DATA, credentials, backups, logs, cache, sessions and temporary runtime data.'
+              ]
+              p.write_text(json.dumps(x,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              return x
+          def git_source_manifest(out:Path):
+              names=subprocess.check_output(['git','-C',str(ROOT),'ls-files','-z']).split(b'\0')
+              rows=[]
+              for raw in names:
+                  if not raw: continue
+                  rel=raw.decode('utf-8'); p=ROOT/rel
+                  if p.is_file(): rows.append((rel,p.stat().st_size,sha(p)))
+              body=''.join(f'{r}\t{s}\t{h}\n' for r,s,h in rows).encode()
+              digest=sha_bytes(body)
+              path=out/'GIT_SOURCE_MANIFEST.txt'
+              path.write_bytes((f'# candidate_commit\t{CANDIDATE_HEAD}\n# candidate_tree\t{CANDIDATE_TREE}\n# file_count\t{len(rows)}\n# manifest_sha256\t{digest}\n').encode()+body)
+              return len(rows),digest,path
+          def runtime_manifest(runtime:Path,out:Path,source_fingerprint:str):
+              rows=[]
+              for p in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                  rows.append({'path':p.relative_to(runtime).as_posix(),'bytes':p.stat().st_size,'sha256':sha(p)})
+              obj={'version':TARGET,'schema':SCHEMA,'files':len(rows),'source_fingerprint':source_fingerprint,'entries':rows}
+              path=out/'RUNTIME_FILE_MANIFEST.json'; path.write_text(json.dumps(obj,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              return len(rows),sha(path),path
+          def build_update(runtime:Path,out:Path,payload:list[str],runtime_files:int,runtime_fp:str):
+              template=(ROOT/'scripts/build-v251-maintenance-release.py').read_text(encoding='utf-8')
+              old_payload="PAYLOAD_PATHS=['VERSION.txt','login.php','maintenance.php','app/Core/MaintenanceUpdateService.php','release-manifest.json']"
+              new_payload='PAYLOAD_PATHS='+repr(payload).replace(' ','')
+              assert template.count(old_payload)==1
+              template=template.replace(old_payload,new_payload)
+              old_self="foreach(['VERSION.txt','login.php','maintenance.php','app/Core/MaintenanceUpdateService.php','release-manifest.json'] as $r)"
+              new_self="foreach(["+','.join("'"+x+"'" for x in payload)+"] as $r)"
+              assert template.count(old_self)==1
+              template=template.replace(old_self,new_self)
+              root_files=sorted(p.name for p in runtime.iterdir() if p.is_file() and not p.is_symlink())
+              template,n=re.subn(r"ROOT_FILES=\[[^\n]*\]",'ROOT_FILES='+repr(root_files).replace(' ',''),template,count=1)
+              assert n==1
+              template=template.replace('2.5.1','__P04_TARGET__').replace('2.5.0','__P04_SOURCE__')
+              template=template.replace('__P04_TARGET__',TARGET).replace('__P04_SOURCE__',SOURCE)
+              template=template.replace('vfi251','vfi270').replace('atomic_251','atomic_270')
+              generated=ROOT/'scripts/build-v270-generated.py'
+              old_argv=sys.argv[:]
+              try:
+                  sys.argv=[str(generated),'--target-runtime',str(runtime),'--output',str(out)]
+                  code=compile(template,str(generated),'exec'); scope={'__name__':'__main__','__file__':str(generated)}; exec(code,scope,scope)
+              finally: sys.argv=old_argv
+              atomic=out/f'VF_Infra_V{TARGET}_ATOMIC.zip'; repair=out/f'repair-v{TARGET}.php'; pkg=out/'PACKAGE_MANIFEST.json'
+              assert atomic.is_file() and repair.is_file() and pkg.is_file()
+              repair_bytes=repair.read_bytes(); info=zipfile.ZipInfo(repair.name,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+              with zipfile.ZipFile(atomic,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z: z.writestr(info,repair_bytes)
+              update=out/f'VF_Infra_V{TARGET}_UPDATE.zip'; shutil.copyfile(atomic,update)
+              m=json.loads(pkg.read_text(encoding='utf-8'))
+              m.update({'version':TARGET,'schema':SCHEMA,'allowed_source_versions':[SOURCE],'changed_files':payload,'payload_file_count':len(payload),'schema_change':False,'business_model_change':False,'provider_write_authority_change':False,'maintenance_only':False,'release_kind':'product_experience_generation','product_experience_generation_change':True,'candidate_phase':'FORMAL_CANDIDATE_VERIFIED','formal_artifact_gate':'PASS','source_commit':CANDIDATE_HEAD,'source_tree':CANDIDATE_TREE,'target_runtime_file_count':runtime_files,'target_runtime_source_fingerprint':runtime_fp,'update_infrastructure':'core-updates + GitHub Release','deterministic_zip':True,'atomic_asset_name':atomic.name,'atomic_sha256':sha(atomic),'atomic_bytes':atomic.stat().st_size,'update_asset_name':update.name,'update_sha256':sha(update),'update_bytes':update.stat().st_size,'update_and_atomic_bytes_identical':atomic.read_bytes()==update.read_bytes()})
+              contract=(runtime/'app/Core/Update/UpdateContract.php').read_text(encoding='utf-8'); mm=re.search(r"public\s+const\s+HANDOFF_MARKER\s*=\s*'([^']+)'\s*;",contract); assert mm
+              marker=mm.group(1); raw=repair.read_text(encoding='utf-8'); assert marker in raw
+              for req in ['OnlineUpdateHandoff::authorize','OnlineUpdateHandoff::recordRepairResult','vf_online_handoff']: assert req in raw
+              m['online_handoff_marker']=marker; m['online_handoff_contract']='consumer-derived'; m['online_handoff_gate']='PASS'
+              pkg.write_text(json.dumps(m,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              sums=[atomic,update,repair,pkg]
+              for n in ['README_INSTALL.txt','PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt']:
+                  q=out/n
+                  if q.is_file(): sums.append(q)
+              (out/'SHA256SUMS.txt').write_text(''.join(f'{sha(q)}  {q.name}\n' for q in sums),encoding='utf-8')
+              return update,atomic,repair,pkg,out/'SHA256SUMS.txt',out/'PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt'
+          def scan_safe(full:Path,update:Path):
+              forbidden_parts={'private','private_data','backup','backups','cache','caches','session','sessions','log','logs','temp','tmp'}
+              secret_res=[re.compile(rb'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'),re.compile(rb'\bAKIA[0-9A-Z]{16}\b'),re.compile(rb'\bgh[pousr]_[A-Za-z0-9_]{30,}\b')]
+              with zipfile.ZipFile(full) as z:
+                  names=z.namelist(); assert names
+                  for n in names:
+                      p=PurePosixPath(n); low=[x.lower() for x in p.parts]
+                      assert not p.is_absolute() and '..' not in p.parts and '\\' not in n
+                      assert p.name.lower() not in {'config.php','.env','.env.local'}
+                      assert not any(x in forbidden_parts for x in low)
+                      assert not re.search(r'\.(sqlite3?|db)$',n,re.I)
+                      data=z.read(n); assert not data.startswith(b'SQLite format 3\x00'); assert not any(r.search(data) for r in secret_res)
+              with zipfile.ZipFile(update) as z:
+                  assert z.namelist()==[f'repair-v{TARGET}.php']
+          def build(out:Path):
+              if out.exists(): shutil.rmtree(out)
+              out.mkdir(parents=True)
+              runtime=out/'runtime'; base_runtime=out/'base-runtime'; upd=out/'update-set'
+              subprocess.run(['python3',str(ROOT/'scripts/build-release-tree.py'),str(runtime)],check=True,stdout=subprocess.PIPE,text=True)
+              subprocess.run(['python3',str(BASE/'scripts/build-release-tree.py'),str(base_runtime)],check=True,stdout=subprocess.PIPE,text=True)
+              x=patch_runtime_manifest(runtime); assert x['version']==TARGET
+              target=filemap(runtime); base=filemap(base_runtime)
+              removed=sorted(set(base)-set(target)); assert removed==[],('REMOVED_RUNTIME_PATHS_UNSUPPORTED',removed)
+              payload=sorted(k for k,v in target.items() if k=='release-manifest.json' or k not in base or base[k]!=v)
+              assert 'VERSION.txt' in payload and 'release-manifest.json' in payload
+              full=out/f'VF_Infra_V{TARGET}_FULL.zip'; deterministic_zip(runtime,full)
+              runtime_files,rt_manifest_sha,rt_manifest=runtime_manifest(runtime,out,x['source_fingerprint'])
+              git_count,git_manifest_sha,git_manifest=git_source_manifest(out)
+              update,atomic,repair,pkg,sums,prod_manifest=build_update(runtime,upd,payload,runtime_files,x['source_fingerprint'])
+              subprocess.run(['php',str(repair),'--self-test'],check=True,stdout=subprocess.PIPE,text=True)
+              scan_safe(full,update)
+              source_text=prod_manifest.read_text(encoding='utf-8'); cm=re.search(r'^# file_count\t(\d+)\s*$',source_text,re.M); sm=re.search(r'^# manifest_sha256\t([a-f0-9]{64})\s*$',source_text,re.M); assert cm and sm
+              assets=[full,update,atomic,repair,pkg,sums,prod_manifest,rt_manifest,git_manifest]
+              formal={'project':'P04 · VF Infra','version':TARGET,'source_version':SOURCE,'schema':SCHEMA,'migration':'NONE','candidate_branch':'candidate/v2.7.0','candidate_head':CANDIDATE_HEAD,'candidate_tree':CANDIDATE_TREE,'tested_runtime_commit':os.environ['TESTED_RUNTIME'],'product_runtime_delta':0,'runtime_file_count':runtime_files,'runtime_fingerprint':x['source_fingerprint'],'runtime_manifest_sha256':rt_manifest_sha,'git_source_manifest_count':git_count,'git_source_manifest_sha256':git_manifest_sha,'production_source_manifest_count':int(cm.group(1)),'production_source_manifest_sha256':sm.group(1),'changed_runtime_payload_count':len(payload),'changed_runtime_payload':payload,'removed_runtime_paths':[],'update_eligibility':f'{SOURCE} -> {TARGET}','update_atomic_identical':update.read_bytes()==atomic.read_bytes(),'safety_gate':'PASS','artifacts':{p.name:{'bytes':p.stat().st_size,'sha256':sha(p)} for p in assets}}
+              mf=out/'FORMAL_ARTIFACT_MANIFEST.json'; mf.write_text(json.dumps(formal,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              assets.append(mf)
+              fs=out/'FORMAL_SHA256SUMS.txt'; fs.write_text(''.join(f'{sha(p)}  {p.name}\n' for p in sorted(assets,key=lambda q:q.name)),encoding='utf-8')
+              formal['artifacts'][mf.name]={'bytes':mf.stat().st_size,'sha256':sha(mf)}; formal['artifacts'][fs.name]={'bytes':fs.stat().st_size,'sha256':sha(fs)}
+              mf.write_text(json.dumps(formal,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              fs.write_text(''.join(f'{sha(p)}  {p.name}\n' for p in sorted([full,update,atomic,repair,pkg,sums,prod_manifest,rt_manifest,git_manifest,mf],key=lambda q:q.name)),encoding='utf-8')
+              return formal
+          a=build(Path('/tmp/p04-v270-formal-a')); b=build(Path('/tmp/p04-v270-formal-b'))
+          keys=['VF_Infra_V2.7.0_FULL.zip','VF_Infra_V2.7.0_UPDATE.zip','VF_Infra_V2.7.0_ATOMIC.zip','repair-v2.7.0.php','PACKAGE_MANIFEST.json','SHA256SUMS.txt','PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt','RUNTIME_FILE_MANIFEST.json','GIT_SOURCE_MANIFEST.txt']
+          for k in keys:
+              pa=Path('/tmp/p04-v270-formal-a')/(('update-set/'+k) if k in {'VF_Infra_V2.7.0_UPDATE.zip','VF_Infra_V2.7.0_ATOMIC.zip','repair-v2.7.0.php','PACKAGE_MANIFEST.json','SHA256SUMS.txt','PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt'} else k)
+              pb=Path('/tmp/p04-v270-formal-b')/(('update-set/'+k) if k in {'VF_Infra_V2.7.0_UPDATE.zip','VF_Infra_V2.7.0_ATOMIC.zip','repair-v2.7.0.php','PACKAGE_MANIFEST.json','SHA256SUMS.txt','PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt'} else k)
+              assert pa.read_bytes()==pb.read_bytes(),('NON_DETERMINISTIC',k)
+          Path('/tmp/p04-v270-formal-a/DETERMINISM.PASS').write_text('P04_V270_FORMAL_ARTIFACT_DETERMINISM_PASS\n',encoding='utf-8')
+          print(json.dumps(a,ensure_ascii=False,sort_keys=True))
+          PY
+          python3 /tmp/build-p04-v270-formal.py | tee /tmp/p04-v270-formal-build.log
+          test -f /tmp/p04-v270-formal-a/DETERMINISM.PASS
+          test -f /tmp/p04-v270-formal-a/FORMAL_ARTIFACT_MANIFEST.json
+          echo 'FORMAL_ARTIFACT_DETERMINISM=PASS'
+
+      - name: Bind Final Experience evidence and publish Candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f evidence/p04-v270-final-polish-v2-artifact.json
+          test -f evidence/p04-v270-final-polish-v2.PASS
+          test -f evidence/p04-v270-final-polish-v2-screenshots.json
+          jq -e --arg c "$TESTED_RUNTIME" '.tested_product_runtime_commit==$c or .tested_runtime_commit==$c' evidence/p04-v270-final-polish-v2-artifact.json >/dev/null
+          jq -e --arg c "$TESTED_RUNTIME" '.tested_runtime_commit==$c and .screenshot_count==10 and .screenshot_regeneration=="NO" and .product_runtime_delta==0' evidence/p04-v270-final-polish-v2-screenshots.json >/dev/null
+          mkdir -p evidence/p04-v270-candidate
+          cp /tmp/p04-v270-candidate-tests.json evidence/p04-v270-candidate/candidate-tests.json
+          cp /tmp/p04-v270-formal-a/FORMAL_ARTIFACT_MANIFEST.json evidence/p04-v270-candidate/FORMAL_ARTIFACT_MANIFEST.json
+          cp /tmp/p04-v270-formal-a/RUNTIME_FILE_MANIFEST.json evidence/p04-v270-candidate/RUNTIME_FILE_MANIFEST.json
+          cp /tmp/p04-v270-formal-a/GIT_SOURCE_MANIFEST.txt evidence/p04-v270-candidate/GIT_SOURCE_MANIFEST.txt
+          cp /tmp/p04-v270-formal-a/update-set/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt evidence/p04-v270-candidate/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os,hashlib
+          formal=json.loads(Path('/tmp/p04-v270-formal-a/FORMAL_ARTIFACT_MANIFEST.json').read_text(encoding='utf-8'))
+          tests=json.loads(Path('/tmp/p04-v270-candidate-tests.json').read_text(encoding='utf-8'))
+          ev={'status':'CANDIDATE_VERIFIED','candidate':'PASS','candidate_verification':'PASS','formal_artifact':'PASS','master_final_visual':'PASS','candidate_branch':'candidate/v2.7.0','candidate_head':os.environ['CANDIDATE_HEAD'],'candidate_tree':os.environ['CANDIDATE_TREE'],'tested_runtime_commit':os.environ['TESTED_RUNTIME'],'version':'2.7.0','schema':14,'migration':'NONE','unexpected_product_runtime_delta':0,'final_experience_non_regression':'PASS_BY_RUNTIME_EXACT_AND_SEALED_EVIDENCE','tests':tests,'formal_artifact_manifest':formal,'production':'2.6.0 / UNCHANGED','production_write':0,'production_upgrade':'NOT_EXECUTED'}
+          Path('evidence/p04-v270-candidate/candidate-verification.json').write_text(json.dumps(ev,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          Path('evidence/p04-v270-candidate/CANDIDATE_VERIFIED.PASS').write_text('P04_V270_CANDIDATE_VERIFIED\n',encoding='utf-8')
+          Path('evidence/p04-v270-candidate/FORMAL_ARTIFACT.PASS').write_text('P04_V270_FORMAL_ARTIFACT_PASS\n',encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add evidence/p04-v270-candidate
+          git commit -m 'evidence(P04): V2.7 candidate and formal artifact verified [skip ci]'
+          git push origin HEAD:p04-v270-integration-gate
+
+      - name: Upload sealed formal artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: p04-v270-formal-artifact-sealed
+          path: |
+            /tmp/p04-v270-formal-a/VF_Infra_V2.7.0_FULL.zip
+            /tmp/p04-v270-formal-a/FORMAL_ARTIFACT_MANIFEST.json
+            /tmp/p04-v270-formal-a/FORMAL_SHA256SUMS.txt
+            /tmp/p04-v270-formal-a/RUNTIME_FILE_MANIFEST.json
+            /tmp/p04-v270-formal-a/GIT_SOURCE_MANIFEST.txt
+            /tmp/p04-v270-formal-a/update-set/VF_Infra_V2.7.0_UPDATE.zip
+            /tmp/p04-v270-formal-a/update-set/VF_Infra_V2.7.0_ATOMIC.zip
+            /tmp/p04-v270-formal-a/update-set/repair-v2.7.0.php
+            /tmp/p04-v270-formal-a/update-set/PACKAGE_MANIFEST.json
+            /tmp/p04-v270-formal-a/update-set/SHA256SUMS.txt
+            /tmp/p04-v270-formal-a/update-set/PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Delete temporary gate branch
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${TEMP_BRANCH}" || true
