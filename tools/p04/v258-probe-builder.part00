@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import argparse, base64, hashlib, json, re, secrets
+
+EXPECTED_VERSION='2.5.8'
+EXPECTED_SCHEMA=14
+EXPECTED_RUNTIME_FILES=165
+EXPECTED_SOURCE_FILES=163
+EXPECTED_RUNTIME_FP='13e8eeaddf89837f2d370a2e15899e354402042d8bc0c27eccd130ec6ff2855a'
+EXPECTED_SOURCE_SHA='4b4b52a5b0651aeca41433730fa53bbd96392524b6face44940f2405cf864203'
+ROOT_FILES=['.htaccess','FULL_INSTALL_ONLY.txt','README.md','RECOVERED_BUILD_NOTICE.txt','RELEASE_NOTES.md','VERSION.txt','api.php','backup-download.php','backup-upload.php','bootstrap.php','config.example.php','cron-domain-check.php','cron.php','export.php','index.php','login.php','logout.php','maintenance.php','nginx-vf-infra.conf.example','release-manifest.json','robots.txt','setup.php']
+SOURCE_DIRS=['app','assets','cli','migrations']
+
+def sha_file(p:Path): return hashlib.sha256(p.read_bytes()).hexdigest()
+
+def production_map(runtime:Path):
+    paths={}
+    for rel in ROOT_FILES:
+        p=runtime/rel
+        if p.is_file() and not p.is_symlink(): paths[rel]=p
+    for d in SOURCE_DIRS:
+        root=runtime/d
+        if not root.is_dir() or root.is_symlink(): continue
+        for p in root.rglob('*'):
+            if p.is_file() and not p.is_symlink():
+                rel=p.relative_to(runtime).as_posix()
+                if rel=='app/.runtime.php' or re.search(r'(^|/)repair-v[^/]+\.php$',rel): continue
+                paths[rel]=p
+    rows=[]; expected={}
+    for rel,p in sorted(paths.items()):
+        b=p.read_bytes(); h=hashlib.sha256(b).hexdigest(); z=len(b)
+        rows.append(f'{rel}\t{z}\t{h}')
+        expected[rel]={'size':z,'sha256':h}
+    body=('\n'.join(rows)+'\n').encode()
+    return expected, hashlib.sha256(body).hexdigest()
+
+def runtime_fp(expected):
+    body=''.join(f"{m['sha256']}  {rel}\n" for rel,m in sorted(expected.items()) if rel!='release-manifest.json').encode()
+    return hashlib.sha256(body).hexdigest()
+
+def parse_sealed_manifest(path:Path):
+    raw=path.read_text(encoding='utf-8')
+    lines=raw.splitlines()
+    if len(lines)<6 or lines[0]!='# VF_INFRA_PRODUCTION_SOURCE_MANIFEST_V1': raise SystemExit('SEALED_MANIFEST_HEADER_INVALID')
+    header={}
+    i=1
+    while i<len(lines) and lines[i].startswith('# '):
+        part=lines[i][2:]
+        if '\t' in part:
+            k,v=part.split('\t',1); header[k]=v
+        i+=1
+    expected={}
+    body_lines=[]
+    for line in lines[i:]:
+        if not line: continue
+        parts=line.split('\t')
+        if len(parts)!=3: raise SystemExit('SEALED_MANIFEST_ROW_INVALID')
+        rel,size,sha=parts
+        if rel in expected or not re.fullmatch(r'[a-f0-9]{64}',sha): raise SystemExit('SEALED_MANIFEST_ROW_IDENTITY_INVALID')
+        expected[rel]={'size':int(size),'sha256':sha}; body_lines.append(line)
+    body=('\n'.join(body_lines)+'\n').encode()
+    body_sha=hashlib.sha256(body).hexdigest()
+    if header.get('version')!=EXPECTED_VERSION or int(header.get('schema','0'))!=EXPECTED_SCHEMA: raise SystemExit('SEALED_MANIFEST_VERSION_SCHEMA_INVALID')
+    if int(header.get('file_count','0'))!=EXPECTED_SOURCE_FILES or len(expected)!=EXPECTED_SOURCE_FILES: raise SystemExit(f'SEALED_MANIFEST_FILE_COUNT_DRIFT {len(expected)}')
+    if header.get('manifest_sha256')!=EXPECTED_SOURCE_SHA or body_sha!=EXPECTED_SOURCE_SHA: raise SystemExit(f'SEALED_MANIFEST_BODY_SHA_DRIFT {body_sha}')
+    return expected
+
+p=argparse.ArgumentParser(); p.add_argument('--sealed-manifest',required=True); p.add_argument('--output',required=True); p.add_argument('--filename',default='')
+a=p.parse_args(); out=Path(a.output).resolve(); sealed=Path(a.sealed_manifest).resolve()
+sealed_expected=parse_sealed_manifest(sealed)
+source_sha=EXPECTED_SOURCE_SHA
+fp=EXPECTED_RUNTIME_FP
+filename=a.filename.strip() or f"vf-v258-production-reconcile-{secrets.token_hex(6)}.php"
+if not re.fullmatch(r'vf-v258-production-reconcile-[a-f0-9]{12}\.php',filename): raise SystemExit('PROBE_FILENAME_INVALID')
+payload=base64.b64encode(json.dumps(sealed_expected,sort_keys=True,separators=(',',':')).encode()).decode()
+
+php=r'''<?php
+declare(strict_types=1);
+/*
+ * P04 · VF Infra V2.5.8 one-time Production reconciliation probe.
+ * TEMPORARY OPERATIONS EVIDENCE TOOL — NOT PRODUCT RUNTIME / NOT RELEASE ASSET.
+ * Upload to Application Root, open once while already authenticated, then delete.
+ * Read-only: no Product bootstrap, no Settings writes, no Provider/RDAP/Billing/Job/Backup/Update calls.
+ */
+const VFP_EXPECTED_VERSION = '__VERSION__';
+const VFP_EXPECTED_SCHEMA = __SCHEMA__;
+const VFP_EXPECTED_FILE_COUNT = __FILES__;
+const VFP_EXPECTED_SOURCE_FILE_COUNT = __SOURCE_FILES__;
+const VFP_EXPECTED_RUNTIME_FINGERPRINT = '__RUNTIME_FP__';
+const VFP_EXPECTED_SOURCE_MANIFEST_SHA256 = '__SOURCE_SHA__';
+const VFP_EXPECTED_MAP_B64 = '__MAP_B64__';
+
+function vfp_json(array $value, int $status = 200): never {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, max-age=0');
+    header('Pragma: no-cache');
+    header('X-Robots-Tag: noindex, nofollow, noarchive');
+    header('X-Content-Type-Options: nosniff');
+    echo json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
+    exit;
+}
+function vfp_deny(): never { vfp_json(['ok'=>false,'error'=>'需要现有 VF Infra 管理员会话。'],403); }
+function vfp_clean_string($value,int $max=1000): string {
+    $value=is_scalar($value)?trim((string)$value):'';
+    $value=pre
