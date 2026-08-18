@@ -1,0 +1,149 @@
+name: P04 V2.7.4 Segmented Owner Browser Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v274-segmented-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require private read token
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || exit 78
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: a7593cecd1e20e696db4fd38c04c7a85f578d500
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p04
+
+      - name: Prepare PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Chromium
+        working-directory: p04
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build isolated runtime
+        working-directory: p04
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/build-release-tree.py "$RUNNER_TEMP/p04-v274-site" >/dev/null
+          test "$(tr -d '\r\n' < "$RUNNER_TEMP/p04-v274-site/VERSION.txt")" = '2.7.4'
+          php -l "$RUNNER_TEMP/p04-v274-site/index.php" >/dev/null
+
+      - name: Start isolated runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -d opcache.jit=0 -S 127.0.0.1:18995 -t "$RUNNER_TEMP/p04-v274-site" >"$RUNNER_TEMP/p04-v274-site.log" 2>&1 &
+          echo "PHP_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 100); do
+            curl -fsS http://127.0.0.1:18995/setup.php >/dev/null 2>&1 && exit 0
+            sleep .1
+          done
+          cat "$RUNNER_TEMP/p04-v274-site.log" >&2
+          exit 1
+
+      - name: Segmented owner-task browser verification
+        working-directory: p04
+        shell: bash
+        env:
+          SITE: ${{ runner.temp }}/p04-v274-site
+        run: |
+          set -Eeuo pipefail
+          timeout --signal=TERM --kill-after=5s 360s node --input-type=module <<'NODE'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18995';
+          const password='Vf274SegmentedOwnerAa1-20260818';
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:1000}});
+          const page=await context.newPage();
+          page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(20000);
+          const pageErrors=[]; const consoleErrors=[];
+          page.on('pageerror',e=>pageErrors.push(String(e)));
+          page.on('console',m=>{ if(m.type()==='error') consoleErrors.push(m.text()); });
+          const assert=(v,m)=>{if(!v) throw new Error(m)};
+          try {
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#site_name').fill('VF Infra');
+            await page.locator('#password').fill(password);
+            await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php/),page.getByRole('button',{name:'登录'}).click()]);
+            await page.locator('#v270-root').waitFor();
+            assert(await page.locator('meta[name="app-version"]').getAttribute('content')==='2.7.4','version');
+            assert(await page.locator('meta[name="app-schema"]').getAttribute('content')==='14','schema');
+            const nav=await page.locator('.v270-nav nav [data-v270-nav]').allTextContents();
+            assert(JSON.stringify(nav.map(x=>x.trim()))===JSON.stringify(['概览','域名','服务器','服务商','设置']),'nav '+JSON.stringify(nav));
+            for (const [hash,needle] of [['overview','个人基础设施概览'],['domains','域名'],['servers','服务器'],['providers','服务商'],['settings/basic','基础']]) {
+              await page.goto(base+'/index.php#'+hash,{waitUntil:'domcontentloaded'});
+              await page.locator('#v270-root').waitFor();
+              await page.waitForTimeout(250);
+              const t=await page.locator('#v270-app').innerText();
+              assert(t.includes(needle),hash+' missing '+needle);
+              assert(!t.includes('正在读取真实基础设施状态'),hash+' stuck loader');
+            }
+            await page.goto(base+'/index.php#settings/backup',{waitUntil:'domcontentloaded'});
+            await page.locator('[data-v274-backup-policy]').waitFor();
+            let t=await page.locator('#v270-app').innerText();
+            for (const x of ['自动备份','立即创建备份']) assert(t.includes(x),'backup '+x);
+            await page.goto(base+'/index.php#settings/system',{waitUntil:'domcontentloaded'});
+            await page.waitForTimeout(250);
+            t=await page.locator('#v270-app').innerText();
+            assert(t.includes('V2.7.4') || t.includes('2.7.4'),'system version');
+            await page.goto(base+'/advanced.php',{waitUntil:'domcontentloaded'});
+            await page.waitForTimeout(250);
+            assert(page.url().includes('index.php#settings/advanced'),'advanced compatibility '+page.url());
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(base+'/index.php#overview',{waitUntil:'domcontentloaded'});
+            await page.locator('#v270-root').waitFor();
+            const metrics=await page.evaluate(()=>({w:innerWidth,sw:Math.max(document.body.scrollWidth,document.documentElement.scrollWidth)}));
+            assert(metrics.sw<=metrics.w+1,'mobile overflow '+JSON.stringify(metrics));
+            assert(pageErrors.length===0,'page errors '+JSON.stringify(pageErrors));
+            assert(consoleErrors.length===0,'console errors '+JSON.stringify(consoleErrors));
+            console.log(JSON.stringify({status:'PASS',version:'2.7.4',schema:14,nav,owner_routes:5,backup:'PASS',advanced_redirect:'PASS',mobile_overflow:'PASS',page_errors:0,console_errors:0}));
+            console.log('P04_V274_SEGMENTED_OWNER_BROWSER_GATE=PASS');
+          } finally { await browser.close(); }
+          NODE
+
+      - name: Cleanup and server error gate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -n "${PHP_PID:-}" ]; then kill "$PHP_PID" 2>/dev/null || true; fi
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$RUNNER_TEMP/p04-v274-site.log"; then
+            cat "$RUNNER_TEMP/p04-v274-site.log" >&2
+            exit 1
+          fi
+          echo 'P04_V274_SEGMENTED_SERVER_ERRORS=0'
