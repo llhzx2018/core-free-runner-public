@@ -1,0 +1,132 @@
+name: P06 VF Press V0.1.2 Visible Installer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v012-visible-installer.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 1877f143ca247869c5c0614a132b902ab16e50b7
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Build visible FULL contract
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.2'
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          php -l bin/build-release.php >/dev/null
+          php -l deploy/web/index.php >/dev/null
+          rm -rf storage dist storage-restore-*
+          php bin/build-release.php dist | tee /tmp/build
+          grep -Fq 'VISIBLE_FULL_ROOT=PASS' /tmp/build
+          grep -Fq 'RELEASE_BUILD=PASS' /tmp/build
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          unzip -Z1 dist/VF_Press_V0.1.2_FULL.zip | sort >/tmp/full-list
+          printf '%s\n' README_FIRST_INSTALL.txt index.php vfpress-install.php vfpress-runtime.php | sort >/tmp/expected-list
+          diff -u /tmp/expected-list /tmp/full-list
+          ! grep -Eq '^\.' /tmp/full-list
+          ! grep -Fq '.vfpress-installer.php' /tmp/full-list
+          ! grep -Fq '.vfpress-runtime.php' /tmp/full-list
+          unzip -p dist/VF_Press_V0.1.2_FULL.zip index.php | grep -Fq "vfpress-install.php"
+          unzip -p dist/VF_Press_V0.1.2_FULL.zip vfpress-install.php | grep -Fq "vfpress-runtime.php"
+          ! unzip -p dist/VF_Press_V0.1.2_FULL.zip vfpress-install.php | grep -Fq "/.vfpress-runtime.php"
+          echo VISIBLE_FULL_CONTRACT=PASS
+
+      - name: Reproduce broken V0.1.1 root then overlay V0.1.2 and install
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WEB=/tmp/vfpress-user-root
+          RUNTIME=/tmp/.vfpress-user-root-vfpress-runtime
+          DATA=/tmp/.vfpress-user-root-vfpress-data
+          rm -rf "$WEB" "$RUNTIME" "$DATA" /tmp/v012-cookies /tmp/v012-server.log
+          mkdir -p "$WEB"
+          cat >"$WEB/index.php" <<'PHP'
+          <?php echo 'VF Press 暂时无法启动';
+          PHP
+          test ! -e "$WEB/.vfpress-installer.php"
+          test ! -e "$WEB/.vfpress-runtime.php"
+          unzip -qo dist/VF_Press_V0.1.2_FULL.zip -d "$WEB"
+          test -f "$WEB/index.php"
+          test -f "$WEB/vfpress-install.php"
+          test -f "$WEB/vfpress-runtime.php"
+          test -f "$WEB/README_FIRST_INSTALL.txt"
+          test ! -e "$WEB/.vfpress-installer.php"
+          test ! -e "$WEB/.vfpress-runtime.php"
+          ! grep -Fq '暂时无法启动' "$WEB/index.php"
+          cat >/tmp/v012-router.php <<'PHP'
+          <?php
+          $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+          $file = '/tmp/vfpress-user-root' . $path;
+          if ($path !== '/' && (is_file($file) || is_link($file))) return false;
+          require '/tmp/vfpress-user-root/index.php';
+          PHP
+          php -S 127.0.0.1:18782 -t "$WEB" /tmp/v012-router.php >/tmp/v012-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-user-root-vfpress-runtime /tmp/.vfpress-user-root-vfpress-data' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/v012-cookies http://127.0.0.1:18782/ >/tmp/v012-install.html; then READY=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null; then cat /tmp/v012-server.log; exit 1; fi
+            sleep 1
+          done
+          test "$READY" = 1
+          grep -Fq '开始安装 VF Press' /tmp/v012-install.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/v012-install.html',encoding='utf-8').read(); m=re.search(r'name="_csrf" value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/v012-install.headers -o /tmp/v012-install.post -c /tmp/v012-cookies -b /tmp/v012-cookies -X POST http://127.0.0.1:18782/ \
+            --data-urlencode "_csrf=$CSRF" \
+            --data-urlencode 'site_name=科瓦罗出版' \
+            --data-urlencode 'username=owner-test' \
+            --data-urlencode 'display_name=Owner Test' \
+            --data-urlencode 'password=synthetic-visible-install-2026' \
+            --data-urlencode 'password_confirm=synthetic-visible-install-2026'
+          if ! grep -Eq '^HTTP/1.1 303' /tmp/v012-install.headers; then cat /tmp/v012-install.post; cat /tmp/v012-server.log; exit 1; fi
+          grep -Fiq 'Location: /login' /tmp/v012-install.headers
+          test -f "$WEB/.vfpress-bootstrap.php"
+          test ! -f "$WEB/vfpress-runtime.php"
+          test ! -f "$WEB/vfpress-install.php"
+          test -L "$WEB/assets"
+          test -f "$DATA/app.db"
+          test "$(cat "$RUNTIME/VERSION")" = '0.1.2'
+          test "$(sqlite3 "$DATA/app.db" 'select max(version) from schema_migrations;')" = '2'
+          test "$(sqlite3 "$DATA/app.db" 'pragma integrity_check;')" = 'ok'
+          curl -fsS http://127.0.0.1:18782/health | grep -Fq '"version":"0.1.2"'
+          echo USER_SCREENSHOT_REPRO_INSTALL=PASS
+
+      - name: Cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage dist storage-restore-*
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo P06_V012_VISIBLE_INSTALLER=PASS
