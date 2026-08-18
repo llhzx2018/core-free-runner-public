@@ -53,7 +53,7 @@ jobs:
           test "$(sha256sum "$UPDATE" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
           echo UPDATE_IDENTITY=PASS
 
-      - name: Actual 2.4.25 to 2.4.26 Update Core upgrade
+      - name: Actual 2.4.25 to 2.4.26 Update Core upgrade with detailed readback
         working-directory: product
         run: |
           set -Eeuo pipefail
@@ -76,7 +76,7 @@ jobs:
           test "$CODE" = 303
           test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = '2.4.25'
 
-          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();$n=gmdate("c");$q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");$q->execute(["Upgrade Fixture","formal gate","folder",100,$n,$n]);$c=(int)$d->lastInsertId();$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,"V2425_SENTINEL","formal gate","preserve me","quick","plain","copy","active","[]","[]",$n,$n]);' "$OLDSITE"
+          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();$n=gmdate("c");$q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");$q->execute(["Upgrade Fixture","formal gate","folder",100,$n,$n]);$c=(int)$d->lastInsertId();$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,"V2425_SENTINEL","formal gate","preserve me","quick","plain","copy","active","[]","[]",$n,$n]);echo "SEEDED_CATEGORY=$c\n";' "$OLDSITE"
 
           python3 - "$RUNNER_TEMP/update-manifest.json" <<'PY'
           import json,os,sys,datetime
@@ -90,18 +90,37 @@ jobs:
           chdir($site);require $site.'/app/bootstrap.php';
           $core=new \CoreUpdates\UpdateCore('P02','APP');$adapter=new VfLibraryCoreUpdateAdapter();
           $result=$core->upgrade(VFTB_VERSION,(string)VfLibrarySchemaMigration::currentVersion(vftb_db()),$adapter,$package,$manifest);
-          if(!in_array($result['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'], true)){fwrite(STDERR,json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));exit(2);}
-          if(empty($result['backup_locator'])){fwrite(STDERR,"backup locator missing\n");exit(3);}
           echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT),"\n";
+          if(!in_array($result['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'], true)) exit(2);
+          if(empty($result['backup_locator'])) exit(3);
           PHP
           php "$RUNNER_TEMP/run-update.php" "$OLDSITE" "$UPDATE" "$RUNNER_TEMP/update-manifest.json"
 
-          test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = '2.4.26'
-          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();if(VFTB_VERSION!=="2.4.26")exit(2);if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(3);if($d->query("SELECT content FROM text_items WHERE title=\"V2425_SENTINEL\"")->fetchColumn()!=="preserve me")exit(4);if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(5);if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(6);$n=gmdate("c");$c=(int)$d->query("SELECT id FROM text_categories WHERE name=\"Upgrade Fixture\"")->fetchColumn();$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,"POST_UPGRADE_WRITE","formal gate","write pass","quick","plain","copy","active","[]","[]",$n,$n]);' "$OLDSITE"
-          ( cd "$OLDSITE" && php cli/verify.php ) > "$RUNNER_TEMP/verify.json"
+          VERSION_FILE=$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")
+          echo "POST_VERSION_FILE=$VERSION_FILE"
+          test "$VERSION_FILE" = '2.4.26'
+
+          cat > "$RUNNER_TEMP/post-check.php" <<'PHP'
+          <?php
+          $site=$argv[1];chdir($site);require $site.'/app/bootstrap.php';$d=vftb_db();
+          $out=[];
+          $out['version']=VFTB_VERSION;
+          $out['schema']=VfLibrarySchemaMigration::currentVersion($d);
+          $out['sentinel']=$d->query("SELECT content FROM text_items WHERE title='V2425_SENTINEL'")->fetchColumn();
+          $out['integrity']=$d->query('PRAGMA integrity_check')->fetchColumn();
+          $out['fk_count']=count($d->query('PRAGMA foreign_key_check')->fetchAll());
+          $n=gmdate('c');$c=(int)$d->query("SELECT id FROM text_categories WHERE name='Upgrade Fixture'")->fetchColumn();$out['category_id']=$c;
+          try{$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,'POST_UPGRADE_WRITE','formal gate','write pass','quick','plain','copy','active','[]','[]',$n,$n]);$out['post_write']='PASS';}catch(Throwable $e){$out['post_write']='FAIL';$out['post_write_error']=$e->getMessage();}
+          echo json_encode($out,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT),"\n";
+          if($out['version']!=='2.4.26')exit(2);if($out['schema']!==2401)exit(3);if($out['sentinel']!=='preserve me')exit(4);if($out['integrity']!=='ok')exit(5);if($out['fk_count']!==0)exit(6);if($out['post_write']!=='PASS')exit(7);
+          PHP
+          php "$RUNNER_TEMP/post-check.php" "$OLDSITE"
+
+          ( cd "$OLDSITE" && php cli/verify.php ) | tee "$RUNNER_TEMP/verify.json"
           python3 - "$RUNNER_TEMP/verify.json" <<'PY'
           import json,sys
           x=json.load(open(sys.argv[1])); assert x['ok'] is True and int(x['schema_version'])==2401
+          print('CLI_VERIFY_POST_UPGRADE=PASS')
           PY
           echo EXISTING_DATA_UPDATE_CORE_2_4_25_TO_2_4_26=PASS
 
