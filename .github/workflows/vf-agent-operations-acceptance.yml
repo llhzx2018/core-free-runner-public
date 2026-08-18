@@ -19,7 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch operations source
+      - name: Fetch source and run A-O gate
+        id: gate
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -30,12 +32,6 @@ jobs:
           git rev-parse HEAD | tee ../operations-source-sha.txt
           test "$(cat VERSION)" = '1.0.0'
           python -m compileall -q operations
-
-      - name: Run A-O real integration acceptance
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd core-agent
           PYTHONPATH=src:operations python operations/acceptance/integration_gate.py
 
       - name: Seal operations identity
@@ -43,6 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -d core-agent/operations || exit 0
           python - <<'PY'
           import hashlib, json, pathlib
           root=pathlib.Path('core-agent/operations')
@@ -51,11 +48,55 @@ jobs:
               if p.is_file() and '__pycache__' not in p.parts:
                   data=p.read_bytes()
                   rows.append({'path':str(p.relative_to(root)),'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data)})
-          payload={'schema':'vf-agent-operations-source-identity/v1','source_sha':pathlib.Path('operations-source-sha.txt').read_text().strip(),'files':rows}
+          source_file=pathlib.Path('operations-source-sha.txt')
+          payload={'schema':'vf-agent-operations-source-identity/v1','source_sha':source_file.read_text().strip() if source_file.exists() else 'UNAVAILABLE','files':rows}
           raw=json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
           payload['operations_sha256']=hashlib.sha256(raw).hexdigest()
           pathlib.Path('core-agent/.evidence').mkdir(exist_ok=True)
           pathlib.Path('core-agent/.evidence/vf-agent-operations-source-identity.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+
+      - name: Publish machine-readable result marker
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, json, os, urllib.error, urllib.request
+          token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          path=f"vf-agent/acceptance-result/{os.environ['GITHUB_SHA']}.json"
+          result_path='core-agent/.evidence/vf-agent-operations-independent-machine.json'
+          result={}
+          if os.path.exists(result_path):
+              result=json.load(open(result_path,encoding='utf-8'))
+          payload={
+              'schema':'vf-agent-operations-result-marker/v1',
+              'trigger_sha':os.environ['GITHUB_SHA'],
+              'workflow_run_id':os.environ['GITHUB_RUN_ID'],
+              'outcome':os.environ.get('GATE_OUTCOME','unknown'),
+              'source_sha':open('operations-source-sha.txt').read().strip() if os.path.exists('operations-source-sha.txt') else None,
+              'machine_status':result.get('status'),
+              'pass_count':result.get('pass_count'),
+              'expected_count':result.get('expected_count'),
+              'secret_exposure':result.get('secret_exposure'),
+              'automatic_protected_actions':result.get('automatic_protected_actions'),
+          }
+          content=json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n'
+          api=f"https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/{path}"
+          headers={'Accept':'application/vnd.github+json','Authorization':f'Bearer {token}','X-GitHub-Api-Version':'2022-11-28'}
+          sha=None
+          try:
+              req=urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=headers)
+              with urllib.request.urlopen(req,timeout=20) as r:
+                  sha=json.load(r).get('sha')
+          except urllib.error.HTTPError as e:
+              if e.code != 404: raise
+          body={'message':'test(vf-agent): publish independent gate result','content':base64.b64encode(content.encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha: body['sha']=sha
+          req=urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**headers,'Content-Type':'application/json'})
+          with urllib.request.urlopen(req,timeout=20) as r: r.read()
           PY
 
       - name: Upload independent evidence
@@ -69,3 +110,7 @@ jobs:
             operations-source-sha.txt
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Enforce gate result
+        if: steps.gate.outcome != 'success'
+        run: exit 1
