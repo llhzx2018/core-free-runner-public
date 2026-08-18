@@ -16,233 +16,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
+  close-review-window:
     runs-on: ubuntu-24.04
-    timeout-minutes: 130
-    env:
-      SOURCE_SHA: be24712b3d56f2aa2d6d7dd1c118f3beed144b74
-      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    timeout-minutes: 5
     steps:
       - name: Checkout public-safe evidence repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          path: evidence-repo
           fetch-depth: 1
 
-      - name: Mark control checkout
-        shell: bash
-        run: echo 'CONTROL_CHECKOUT=PASS' > /tmp/p06-review-stage
-
-      - name: Checkout exact private VF Press source ephemerally
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          repository: llhzx2018/vf-press
-          ref: be24712b3d56f2aa2d6d7dd1c118f3beed144b74
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          fetch-depth: 1
-          persist-credentials: false
-          path: source
-
-      - name: Prepare isolated synthetic review data
-        shell: bash
-        working-directory: source
-        run: |
-          set -Eeuo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          sudo apt-get update -qq
-          sudo apt-get install -y php-cli php-sqlite3 sqlite3 composer curl openssl >/dev/null
-          composer dump-autoload --no-interaction --optimize >/dev/null
-          rm -f storage/app.db storage/app.db-shm storage/app.db-wal
-          php bin/migrate.php >/dev/null
-
-          REVIEW_PASSWORD="$(openssl rand -hex 32)"
-          VF_PRESS_OWNER_USERNAME='owner-review' \
-          VF_PRESS_OWNER_PASSWORD="$REVIEW_PASSWORD" \
-          VF_PRESS_OWNER_DISPLAY_NAME='Owner Review' \
-          php bin/create-owner.php >/dev/null
-          unset REVIEW_PASSWORD
-
-          cat >/tmp/p06-seed.php <<'PHP'
-          <?php
-          declare(strict_types=1);
-          require getcwd() . '/vendor/autoload.php';
-          $config = VF\Press\Infrastructure\Config\AppConfig::fromEnvironment(getcwd());
-          $pdo = VF\Press\Infrastructure\Database\ConnectionFactory::create($config);
-          $service = new VF\Press\Application\Research\ResearchService($pdo, new VF\Press\Infrastructure\Security\AuditLogger($pdo));
-          $id = $service->createProject(
-              'Agent 可靠性研究',
-              '为什么 Agent 已经拥有 Tool 和 Memory，仍然经常不能可靠完成复杂、长期、跨步骤任务？',
-              '从 ChatGPT、Skill、Workflow、Tool、Memory 一路进入 Agent Runtime 后，把零散实践整理成真正可解释、可验证的知识体系。'
-          );
-          foreach ([
-              'Memory 与长期任务失败之间是什么关系？',
-              'Agent Runtime 到底承担了哪些模型本身不能承担的责任？',
-              'Authority 为什么会直接影响 Agent 的可靠性？',
-              'Verification 应该放在任务生命周期的什么位置？',
-          ] as $question) {
-              $service->addQuestion($id, $question);
-          }
-          $service->addNote($id, 'FINDING', '第一条关键发现', '可靠 Agent 不是“模型更聪明”这么简单。Runtime、Authority、Verification 共同决定它能不能稳定完成长期任务。');
-          $service->addNote($id, 'NEXT_QUESTION', '下一步要验证什么', '状态机、恢复、重试和 Evidence 如何共同组成可持续运行的 Agent Runtime？');
-          $service->addSource($id, 'WEB', 'Agent Runtime Research Notes', 'VF Press Research', 'https://example.com/agent-runtime', 'Kewaro Press', null, 'Synthetic review source.', '用于验证 Tool、Memory、Runtime、Authority 与 Verification 之间的关系。');
-          $service->updateProject($id, [
-              'summary' => '已经把 Agent 可靠性拆成 Runtime、Authority、Verification 三个层面。',
-              'findings' => '模型能力只是起点。真正的可靠性来自可持续运行、明确 Authority、可恢复状态以及独立 Verification。',
-              'next_step' => '继续拆 Agent Runtime 的状态机、恢复、重试与 Evidence 机制。',
-              'status' => 'RESEARCH',
-          ]);
-          PHP
-          php /tmp/p06-seed.php
-          echo 'SYNTHETIC_DATA=PASS' > /tmp/p06-review-stage
-
-      - name: Create review-only session bootstrap router
-        shell: bash
-        working-directory: source
-        run: |
-          set -Eeuo pipefail
-          OWNER_ID="$(php -r '$pdo=new PDO("sqlite:storage/app.db"); echo $pdo->query("SELECT id FROM owner_users WHERE username=\"owner-review\" LIMIT 1")->fetchColumn();')"
-          test -n "$OWNER_ID"
-          cat >/tmp/p06-review-router.php <<PHP
-          <?php
-          declare(strict_types=1);
-          \$publicRoot = '${GITHUB_WORKSPACE}/source/public';
-          \$requestPath = parse_url(\$_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
-          \$candidate = realpath(\$publicRoot . \$requestPath);
-          \$publicReal = realpath(\$publicRoot);
-          if (\$candidate !== false && \$publicReal !== false && is_file(\$candidate) && str_starts_with(\$candidate, \$publicReal . DIRECTORY_SEPARATOR)) {
-              return false;
-          }
-          if (\$requestPath === '/review-start') {
-              ini_set('session.use_strict_mode', '1');
-              session_name('vf_press_session');
-              session_start();
-              \$_SESSION['vf_press_owner_id'] = '${OWNER_ID}';
-              \$_SESSION['vf_press_owner_username'] = 'owner-review';
-              session_write_close();
-              header('Location: /studio/research', true, 303);
-              exit;
-          }
-          require \$publicRoot . '/index.php';
-          PHP
-          echo 'SESSION_BOOTSTRAP=PASS' > /tmp/p06-review-stage
-
-      - name: Start isolated PHP runtime
+      - name: Close superseded Research owner review window
         shell: bash
         run: |
           set -Eeuo pipefail
-          nohup php -S 127.0.0.1:8098 -t "${GITHUB_WORKSPACE}/source/public" /tmp/p06-review-router.php >/tmp/p06-review-server.log 2>&1 &
-          echo $! >/tmp/p06-review-server.pid
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8098/health >/dev/null; then
-              echo 'LOCAL_RUNTIME=PASS' > /tmp/p06-review-stage
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/p06-review-server.log
-          exit 1
-
-      - name: Install Cloudflare Quick Tunnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o /tmp/cloudflared
-          chmod +x /tmp/cloudflared
-          /tmp/cloudflared --version
-          echo 'CLOUDFLARED=PASS' > /tmp/p06-review-stage
-
-      - name: Open and verify 120-minute owner review window
-        id: tunnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          nohup /tmp/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8098 >/tmp/p06-cloudflared.log 2>&1 &
-          echo $! >/tmp/p06-cloudflared.pid
-
-          REVIEW_BASE=''
-          for i in $(seq 1 90); do
-            REVIEW_BASE="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/p06-cloudflared.log | head -1 || true)"
-            if [ -n "$REVIEW_BASE" ]; then break; fi
-            sleep 1
-          done
-          if [ -z "$REVIEW_BASE" ]; then
-            echo 'TUNNEL_URL_DISCOVERY=FAIL' > /tmp/p06-review-stage
-            cat /tmp/p06-cloudflared.log
-            exit 1
-          fi
-
-          REVIEW_URL="$REVIEW_BASE/review-start"
-          echo "REVIEW_URL=$REVIEW_URL" > /tmp/p06-review-url
-          echo 'TUNNEL_URL_DISCOVERY=PASS' > /tmp/p06-review-stage
-
-          READY=0
-          for i in $(seq 1 60); do
-            CODE="$(curl -sS -o /tmp/p06-review-probe.html -w '%{http_code}' --connect-timeout 10 --max-time 20 "$REVIEW_URL" || true)"
-            if [ "$CODE" = '303' ] || [ "$CODE" = '302' ] || [ "$CODE" = '200' ]; then
-              READY=1
-              break
-            fi
-            sleep 2
-          done
-          if [ "$READY" != '1' ]; then
-            echo 'TUNNEL_READINESS=FAIL' > /tmp/p06-review-stage
-            cat /tmp/p06-cloudflared.log
-            exit 1
-          fi
-          echo 'TUNNEL_READINESS=PASS' > /tmp/p06-review-stage
-
-          mkdir -p evidence-repo/evidence/p06/review
-          cat >evidence-repo/evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_LATEST.txt <<EOF
-          STATUS=READY_FOR_OWNER_RUNTIME_REAL_USE_REVIEW
-          REVIEW_URL=$REVIEW_URL
-          REVIEW_WINDOW=120_MINUTES
-          SOURCE_REPOSITORY=llhzx2018/vf-press
-          SOURCE_SHA=$SOURCE_SHA
-          DATA_MODE=SYNTHETIC_ISOLATED
+          mkdir -p evidence/p06/review
+          cat > evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_CLOSED.txt <<'EOF'
+          STATUS=CLOSED_OWNER_CONTINUE
+          REASON=OWNER_ACCEPTED_CURRENT_DIRECTION_AND_CONTINUED_TO_PHASE_C
+          LONG_LIVED_HOSTED_RUNNER_TUNNEL=RETIRED
+          SHARED_RUNNER_BLOCKING=NOT_ALLOWED
           PRODUCTION_WRITE=0
-          PRIVATE_SOURCE_PERSISTED=NO
           PRIVATE_DATA_USED=NO
-          CREDENTIAL_EXPOSED=NO
-          AUTO_LOGIN_MODE=EPHEMERAL_SYNTHETIC_OWNER_ONLY
-          USER_ENGINEERING_ACTION=0
-          EOF
-          cd evidence-repo
-          git config user.name 'VF Public Runner'
-          git config user.email 'vf-public-runner@users.noreply.github.com'
-          git add evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_LATEST.txt
-          git commit -m "evidence(P06): owner review runtime READY $SOURCE_SHA"
-          git push origin HEAD:main
-          echo 'OWNER_REVIEW_RUNTIME_READY=YES'
-
-      - name: Persist failure diagnostic
-        if: ${{ failure() }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test -d evidence-repo/.git || exit 0
-          STAGE="$(cat /tmp/p06-review-stage 2>/dev/null || echo UNKNOWN)"
-          mkdir -p evidence-repo/evidence/p06/review
-          cat >evidence-repo/evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_DIAGNOSTIC.txt <<EOF
-          STATUS=BLOCKED
-          SOURCE_SHA=$SOURCE_SHA
-          LAST_STAGE=$STAGE
-          PRODUCT_FAILURE=NO
-          REVIEW_INFRA_FAILURE=YES
           USER_ACTION_REQUIRED=NO
-          PRIVATE_SOURCE_PERSISTED=NO
-          CREDENTIAL_EXPOSED=NO
           EOF
-          cd evidence-repo
           git config user.name 'VF Public Runner'
           git config user.email 'vf-public-runner@users.noreply.github.com'
-          git add evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_DIAGNOSTIC.txt
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "evidence(P06): owner review diagnostic $SOURCE_SHA"
-          git push origin HEAD:main
-
-      - name: Keep review runtime alive for 120 minutes
-        if: ${{ success() }}
-        shell: bash
-        run: sleep 7200
+          git add evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_CLOSED.txt
+          if git diff --cached --quiet; then
+            echo 'REVIEW_CLOSE_ALREADY_CURRENT=YES'
+          else
+            git commit -m 'evidence(P06): close Research owner review window'
+            git push origin HEAD:main
+          fi
+          echo 'P06_RESEARCH_OWNER_REVIEW=CLOSED_OWNER_CONTINUE'
