@@ -1,0 +1,128 @@
+name: P06 VF Press Reader Browser Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-reader-browser-diagnostic.yml'
+      - 'requests/p06-vfpress-reader-diag-*.txt'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-reader-browser-diagnostic
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: ddf3cc050256052ed51c11a4a39270a4734f0576
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: evidence-repo
+          fetch-depth: 1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Build minimal synthetic runtime
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring composer curl openssl >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          STORAGE="${RUNNER_TEMP}/p06-reader-diag"
+          export VF_PRESS_STORAGE_PATH="$STORAGE" VF_PRESS_DB_PATH="$STORAGE/app.db" APP_ENV=test
+          rm -rf "$STORAGE"; mkdir -p "$STORAGE"
+          php bin/migrate.php >/dev/null
+          PASS="$(openssl rand -hex 24)"; printf '%s' "$PASS" >/tmp/p06-diag-password
+          VF_PRESS_OWNER_USERNAME=visual-owner VF_PRESS_OWNER_PASSWORD="$PASS" VF_PRESS_OWNER_DISPLAY_NAME='Visual Owner' php bin/create-owner.php >/dev/null
+          unset PASS
+          php bin/reader-self-test.php >/tmp/p06-diag-fixture.log
+          php -r '$pdo=new PDO("sqlite:".getenv("VF_PRESS_DB_PATH"));$pid=$pdo->query("SELECT id FROM publications ORDER BY created_at DESC LIMIT 1")->fetchColumn();file_put_contents("/tmp/p06-diag-pid",$pid);$s=$pdo->prepare("SELECT id FROM publication_sections WHERE publication_id=:p ORDER BY position ASC LIMIT 1");$s->execute(["p"=>$pid]);file_put_contents("/tmp/p06-diag-sid",$s->fetchColumn());'
+          cat >/tmp/p06-diag-router.php <<PHP
+          <?php
+          \$root='${GITHUB_WORKSPACE}/source/public'; \$p=parse_url(\$_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/'; \$f=realpath(\$root.\$p); \$r=realpath(\$root);
+          if(\$f!==false&&\$r!==false&&is_file(\$f)&&str_starts_with(\$f,\$r.DIRECTORY_SEPARATOR)) return false;
+          require \$root.'/index.php';
+          PHP
+          nohup env VF_PRESS_STORAGE_PATH="$STORAGE" VF_PRESS_DB_PATH="$STORAGE/app.db" APP_ENV=test php -S 127.0.0.1:8103 -t public /tmp/p06-diag-router.php >/tmp/p06-diag-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8103/health >/dev/null && exit 0; sleep 1; done
+          exit 1
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-diag-browser; cd /tmp/p06-diag-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 >/dev/null 2>&1; npx playwright install --with-deps chromium >/dev/null
+
+      - name: Run staged Reader diagnostic
+        id: browser
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence-repo/evidence/p06/reader-browser-diagnostic
+          cat >/tmp/p06-diag-browser/diag.js <<'JS'
+          const { chromium }=require('/tmp/p06-diag-browser/node_modules/playwright'); const fs=require('fs');
+          const out='evidence-repo/evidence/p06/reader-browser-diagnostic';
+          const write=(stage,extra='')=>{fs.writeFileSync(`${out}/STAGE.txt`,`STAGE=${stage}\n${extra}`);console.log(`STAGE=${stage}`)};
+          (async()=>{
+            let stage='START';
+            try {
+              const password=fs.readFileSync('/tmp/p06-diag-password','utf8'); const pid=fs.readFileSync('/tmp/p06-diag-pid','utf8').trim(); const sid=fs.readFileSync('/tmp/p06-diag-sid','utf8').trim(); const base='http://127.0.0.1:8103';
+              const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1440,height:1050}});
+              const consoleErrors=[]; const pageErrors=[]; page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text())}); page.on('pageerror',e=>pageErrors.push(String(e)));
+              stage='LOGIN'; write(stage); await page.goto(`${base}/preview/publisher`); await page.getByLabel('用户名').fill('visual-owner'); await page.getByLabel('密码').fill(password); await Promise.all([page.waitForURL('**/studio'),page.getByRole('button',{name:'登录'}).click()]);
+              stage='READER_LOAD'; write(stage); const url=`${base}/preview/read/${pid}/${sid}`; await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor();
+              stage='OPEN_SETTINGS'; write(stage); await page.getByRole('button',{name:'阅读设置'}).click(); await page.locator('[data-reader-settings-panel]').waitFor({state:'visible'});
+              stage='FONT_INPUT'; write(stage); await page.locator('[data-reader-font]').evaluate(el=>{el.value='23';el.dispatchEvent(new Event('input',{bubbles:true}))});
+              stage='LINE_INPUT'; write(stage); await page.locator('[data-reader-line]').evaluate(el=>{el.value='1.95';el.dispatchEvent(new Event('input',{bubbles:true}))});
+              stage='WIDTH_INPUT'; write(stage); await page.locator('[data-reader-width]').evaluate(el=>{el.value='800';el.dispatchEvent(new Event('input',{bubbles:true}))});
+              stage='WARM_THEME'; write(stage); await page.getByRole('button',{name:'暖色'}).click();
+              const state=await page.locator('html').evaluate(el=>({theme:el.dataset.readerTheme,classes:[...el.classList]})); fs.writeFileSync(`${out}/STATE_DESKTOP.json`,JSON.stringify(state,null,2));
+              stage='DESKTOP_ASSERT'; write(stage,`STATE=${JSON.stringify(state)}\n`); if(state.theme!=='warm'||!state.classes.includes('reader-font-23')||!state.classes.includes('reader-line-195')||!state.classes.includes('reader-width-800')) throw new Error('desktop preference state mismatch');
+              const font=await page.locator('.reader-content').evaluate(el=>getComputedStyle(el).fontSize); if(font!=='23px') throw new Error(`font computed ${font}`);
+              stage='CLOSE_SETTINGS'; write(stage); await page.keyboard.press('Escape'); await page.locator('[data-reader-settings-panel]').waitFor({state:'hidden'});
+              stage='MOBILE_NAVIGATE'; write(stage); await page.setViewportSize({width:390,height:844}); await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor();
+              const mobileState=await page.locator('html').evaluate(el=>({theme:el.dataset.readerTheme,classes:[...el.classList]})); fs.writeFileSync(`${out}/STATE_MOBILE.json`,JSON.stringify(mobileState,null,2));
+              stage='MOBILE_ASSERT'; write(stage,`STATE=${JSON.stringify(mobileState)}\n`); if(mobileState.theme!=='warm'||!mobileState.classes.includes('reader-font-23')) throw new Error('mobile preference persistence mismatch');
+              stage='OPEN_TOC'; write(stage); await page.getByRole('button',{name:'打开目录'}).click(); await page.locator('[data-reader-toc-panel]').waitFor({state:'visible'});
+              stage='TOC_SECOND_CHAPTER'; write(stage); await page.getByText('Tool：让 AI 接触外部世界').waitFor();
+              stage='MOBILE_SCREENSHOT'; write(stage); await page.keyboard.press('Escape'); await page.screenshot({path:`${out}/04_reader_mobile_diag.png`,fullPage:true});
+              stage='DONE'; write(stage,`CONSOLE_ERRORS=${JSON.stringify(consoleErrors)}\nPAGE_ERRORS=${JSON.stringify(pageErrors)}\n`); await browser.close();
+            } catch(e) {
+              fs.writeFileSync(`${out}/ERROR.txt`,`STAGE=${stage}\nERROR=${e.stack||e}\n`);
+              write(`FAIL_${stage}`);
+              throw e;
+            }
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          node /tmp/p06-diag-browser/diag.js
+
+      - name: Persist diagnostic evidence
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-diag-password
+          DIR=evidence-repo/evidence/p06/reader-browser-diagnostic
+          mkdir -p "$DIR"
+          if [ ! -f "$DIR/STAGE.txt" ]; then echo 'STAGE=BLOCKED_BEFORE_BROWSER' >"$DIR/STAGE.txt"; fi
+          cd evidence-repo
+          git config user.name 'VF Public Runner'; git config user.email 'vf-public-runner@users.noreply.github.com'; git pull --rebase origin main; git add evidence/p06/reader-browser-diagnostic
+          if ! git diff --cached --quiet; then git commit -m 'evidence(P06): Reader browser diagnostic'; git push origin HEAD:main; fi
