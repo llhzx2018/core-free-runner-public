@@ -1,0 +1,135 @@
+name: P02 V2.5.2 Formal Verify
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v252-formal-verify.yml']
+permissions: {contents: read}
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REF: caf332732485d4f0afd4d4ddf349851778ca9e6c
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Repository and exact-source gates
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test -n '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(cat VERSION)" = 2.5.2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl jq unzip
+          python3 scripts/repository-gates.py
+          python3 -m py_compile scripts/build-release-v2.5.2.py
+          php -l public/index.php >/dev/null
+          node --check public/assets/app.js
+          node --check public/assets/editor-enhancements.js
+          node --check public/assets/v251-preboot.js
+          test -s public/assets/v252-hotfix.css
+      - name: Deterministic formal build x2
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git show -s --format=%T "$PRODUCT_REF")
+          python3 scripts/build-release-v2.5.2.py --out build/formal-a --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.2 > "$RUNNER_TEMP/build-a.json"
+          python3 scripts/build-release-v2.5.2.py --out build/formal-b --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.2 > "$RUNNER_TEMP/build-b.json"
+          (cd build/formal-a && sha256sum * | sort) > "$RUNNER_TEMP/sums-a.txt"
+          (cd build/formal-b && sha256sum * | sort) > "$RUNNER_TEMP/sums-b.txt"
+          diff -u "$RUNNER_TEMP/sums-a.txt" "$RUNNER_TEMP/sums-b.txt"
+          diff -u build/formal-a/SHA256SUMS.txt build/formal-b/SHA256SUMS.txt
+          for f in VF_Library_V2.5.2_UPDATE.zip VF_Library_V2.5.2_FULL.zip VF_Library_V2.5.2_ATOMIC.zip VF_Library_V2.5.2_SOURCE.zip repair-v2.5.2.php; do test -s "build/formal-a/$f"; done
+          for z in build/formal-a/*.zip; do unzip -t "$z" >/dev/null; done
+      - name: FULL actual ZIP fresh install
+        working-directory: p02
+        env: {PW: 'P02-V252-Fresh-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/full-test"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          unzip -q build/formal-a/VF_Library_V2.5.2_FULL.zip -d "$SITE"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.2
+          test -s "$SITE/assets/v251-hotfix.css"; test -s "$SITE/assets/v252-hotfix.css"; test -s "$SITE/assets/v251-preboot.js"
+          php -S 127.0.0.1:18184 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18184/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" http://127.0.0.1:18184/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H 'Origin: http://127.0.0.1:18184' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18184/setup.php)" = 303
+          curl -fsS -b "$ROOT/cookie" http://127.0.0.1:18184/api.php?action=session | jq -e '.site.auth==true' >/dev/null
+          DB=$(find "$(dirname "$SITE")" -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) | head -n1); test -n "$DB"; test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok; test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          kill "$(cat "$ROOT/pid")"
+          echo P02_V252_FULL_FRESH_INSTALL=PASS
+      - name: Existing-data UpdateCore 2.5.0 to 2.5.2
+        working-directory: p02
+        env: {PW: 'P02-V252-Upgrade-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/upgrade-test"; SRC="$ROOT/source-250"; SITE="$ROOT/site"; mkdir -p "$ROOT"
+          git clone -q --no-checkout https://x-access-token:${{ secrets.VF_PRIVATE_READ_TOKEN }}@github.com/llhzx2018/vf-library.git "$SRC"
+          git -C "$SRC" checkout -q v2.5.0
+          mkdir -p "$SITE"; bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.0
+          php -S 127.0.0.1:18185 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18185/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" http://127.0.0.1:18185/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H 'Origin: http://127.0.0.1:18185' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18185/setup.php)" = 303
+          SESSION=$(curl -fsS -b "$ROOT/cookie" http://127.0.0.1:18185/api.php?action=session); CSRF=$(jq -r '.csrf' <<<"$SESSION")
+          CAT=$(curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"V252 Upgrade Sentinel","description":"formal existing-data sentinel","icon":"folder"}' 'http://127.0.0.1:18185/api.php?action=category_save'); CID=$(jq -r '.id' <<<"$CAT"); test "$CID" != null
+          ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V252 Existing Data Sentinel",description:"must survive",content:"# Existing Data Sentinel\n\nBusiness content must survive.",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')
+          SAVED=$(curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" 'http://127.0.0.1:18185/api.php?action=content_save'); IID=$(jq -r '.id' <<<"$SAVED"); test "$IID" != null
+          curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" 'http://127.0.0.1:18185/api.php?action=content_favorite' | jq -e '.ok==true' >/dev/null
+          cp build/formal-a/VF_Library_V2.5.2_UPDATE.zip "$ROOT/update.zip"; BYTES=$(stat -c%s "$ROOT/update.zip"); SHA=$(sha256sum "$ROOT/update.zip"|awk '{print $1}')
+          cat > "$ROOT/upgrade.php" <<'PHP'
+          <?php
+          $site=$argv[1];$package=$argv[2];$bytes=(int)$argv[3];$sha=$argv[4];
+          require $site.'/app/bootstrap.php';require_once $site.'/app/CoreUpdates/UpdateAdapter.php';require_once $site.'/app/CoreUpdates/UpdateCore.php';require_once $site.'/app/VfLibraryCoreUpdateAdapter.php';
+          $manifest=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'target_version'=>'2.5.2','update_type'=>'ATOMIC','from_versions'=>['2.5.0'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.2','asset_name'=>'VF_Library_V2.5.2_UPDATE.zip','asset_bytes'=>$bytes,'asset_sha256'=>$sha,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-18T00:00:00Z','minimum_php'=>'8.1'];
+          $core=new CoreUpdates\UpdateCore('P02','APP');$check=$core->check('2.5.0','2401',$manifest);if(($check['status']??'')!=='AVAILABLE')exit(2);$verify=$core->verifyPackage($package,$manifest);if(($verify['status']??'')!=='VERIFIED')exit(3);$adapter=new VfLibraryCoreUpdateAdapter();$result=$core->upgrade('2.5.0','2401',$adapter,$package,$manifest);echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT),"\n";if(!in_array($result['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true))exit(4);if(empty($result['backup_locator']))exit(5);
+          PHP
+          php "$ROOT/upgrade.php" "$SITE" "$ROOT/update.zip" "$BYTES" "$SHA" | tee "$ROOT/result.json"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.2
+          jq -e '.status=="COMMITTED" or .status=="COMMITTED_WITH_CLEANUP_WARNING"' "$ROOT/result.json" >/dev/null
+          jq -e '.backup_locator|length>0' "$ROOT/result.json" >/dev/null
+          SESSION2=$(curl -fsS -b "$ROOT/cookie" http://127.0.0.1:18185/api.php?action=session); CSRF2=$(jq -r '.csrf' <<<"$SESSION2"); jq -e '.site.auth==true' <<<"$SESSION2" >/dev/null
+          curl -fsS -b "$ROOT/cookie" "http://127.0.0.1:18185/api.php?action=content_get&id=$IID" | jq -e '.item.title=="V252 Existing Data Sentinel" and (.item.is_favorite|tonumber)==1' >/dev/null
+          POST=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V252 Post Upgrade Write",description:"after update",content:"write works",content_mode:"quick",content_format:"plain",primary_action:"copy",status:"active"}')
+          curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d "$POST" 'http://127.0.0.1:18185/api.php?action=content_save' | jq -e '.ok==true' >/dev/null
+          php "$SITE/cli/verify.php" > "$ROOT/verify.json"; cat "$ROOT/verify.json"
+          DB=$(find "$(dirname "$SITE")" -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) | head -n1); test -n "$DB"; test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok; test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          test -s "$SITE/assets/v251-hotfix.css"; test -s "$SITE/assets/v252-hotfix.css"; test -s "$SITE/assets/v251-preboot.js"
+          kill "$(cat "$ROOT/pid")"
+          echo P02_V252_EXISTING_DATA_UPDATECORE=PASS
+      - name: Artifact identities
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          cd build/formal-a
+          for f in *; do printf '%s  %s  ' "$f" "$(stat -c%s "$f")"; sha256sum "$f"|awk '{print $1}'; done | sort
+          echo P02_V252_FORMAL_SOURCE=$PRODUCT_REF
+          echo P02_V252_DETERMINISTIC_BUILD=PASS
+          echo P02_V252_FULL_FRESH_INSTALL=PASS
+          echo P02_V252_EXISTING_DATA_UPDATECORE=PASS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p02-v252-formal-assets
+          path: p02/build/formal-a/*
+          if-no-files-found: error
+          retention-days: 1
