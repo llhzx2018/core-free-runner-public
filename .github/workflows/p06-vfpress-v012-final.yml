@@ -1,0 +1,103 @@
+name: P06 VF Press V0.1.2 Final Release Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v012-final.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 7a6b6d0d9a67013cdbf03a4445db12fcd0907473
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact final source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Exact final package and install
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.2'
+          grep -Fq '"lifecycle": "RELEASE_READY"' VF_PROJECT.json
+          grep -Fq '"visible_full_root_contract": "PASS"' VF_PROJECT.json
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          php -l bin/build-release.php >/dev/null
+          rm -rf storage dist storage-restore-*
+          php bin/build-release.php dist | tee /tmp/final-build
+          grep -Fq 'VISIBLE_FULL_ROOT=PASS' /tmp/final-build
+          grep -Fq 'RELEASE_BUILD=PASS' /tmp/final-build
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          unzip -Z1 dist/VF_Press_V0.1.2_FULL.zip | sort >/tmp/final-list
+          printf '%s\n' README_FIRST_INSTALL.txt index.php vfpress-install.php vfpress-runtime.php | sort >/tmp/final-expected
+          diff -u /tmp/final-expected /tmp/final-list
+          ! grep -Eq '^\.' /tmp/final-list
+
+          WEB=/tmp/vfpress-v012-final-root
+          RUNTIME=/tmp/.vfpress-v012-final-root-vfpress-runtime
+          DATA=/tmp/.vfpress-v012-final-root-vfpress-data
+          rm -rf "$WEB" "$RUNTIME" "$DATA" /tmp/v012-final-cookies
+          mkdir -p "$WEB"
+          echo "<?php echo 'old broken root';" > "$WEB/index.php"
+          unzip -qo dist/VF_Press_V0.1.2_FULL.zip -d "$WEB"
+          test -f "$WEB/vfpress-install.php"
+          test -f "$WEB/vfpress-runtime.php"
+          ! grep -Fq 'old broken root' "$WEB/index.php"
+          cat >/tmp/v012-final-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          $file='/tmp/vfpress-v012-final-root'.$path;
+          if($path!=='/'&&(is_file($file)||is_link($file))) return false;
+          require '/tmp/vfpress-v012-final-root/index.php';
+          PHP
+          php -S 127.0.0.1:18783 -t "$WEB" /tmp/v012-final-router.php >/tmp/v012-final-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-v012-final-root-vfpress-runtime /tmp/.vfpress-v012-final-root-vfpress-data' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/v012-final-cookies http://127.0.0.1:18783/ >/tmp/v012-final-install.html; then READY=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null; then cat /tmp/v012-final-server.log; exit 1; fi
+            sleep 1
+          done
+          test "$READY" = 1
+          grep -Fq '开始安装 VF Press' /tmp/v012-final-install.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/v012-final-install.html',encoding='utf-8').read(); m=re.search(r'name="_csrf" value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/v012-final.headers -o /tmp/v012-final.post -c /tmp/v012-final-cookies -b /tmp/v012-final-cookies -X POST http://127.0.0.1:18783/ \
+            --data-urlencode "_csrf=$CSRF" \
+            --data-urlencode 'site_name=科瓦罗出版' \
+            --data-urlencode 'username=release-owner' \
+            --data-urlencode 'display_name=Release Owner' \
+            --data-urlencode 'password=synthetic-v012-final-2026' \
+            --data-urlencode 'password_confirm=synthetic-v012-final-2026'
+          grep -Eq '^HTTP/1.1 303' /tmp/v012-final.headers
+          test ! -f "$WEB/vfpress-install.php"
+          test ! -f "$WEB/vfpress-runtime.php"
+          test -f "$WEB/.vfpress-bootstrap.php"
+          test "$(cat "$RUNTIME/VERSION")" = '0.1.2'
+          test "$(sqlite3 "$DATA/app.db" 'pragma integrity_check;')" = ok
+          curl -fsS http://127.0.0.1:18783/health | grep -Fq '"version":"0.1.2"'
+          rm -rf storage dist storage-restore-*
+          test -z "$(git status --porcelain --untracked-files=all)"
+          echo P06_V012_FINAL_RELEASE_GATE=PASS
