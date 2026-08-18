@@ -1,0 +1,225 @@
+name: P02 V2.4.26 Formal Artifact Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2.4.26-formal-artifact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPOSITORY: llhzx2018/vf-library
+      PRODUCT_REF: 9c62b0f348958777fdaba251316cd76a867358af
+      TARGET_VERSION: 2.4.26
+      SOURCE_VERSION: 2.4.25
+      TARGET_SCHEMA: '2401'
+      TEST_PASSWORD: VF-Formal-${{ github.run_id }}!
+    steps:
+      - name: Require registered private read capability
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          echo 'REGISTERED_PRIVATE_READ=PASS'
+
+      - name: Checkout exact P02 release source transiently
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRODUCT_REPOSITORY }}
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+
+      - name: Install release runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl >/dev/null
+          php -v
+          sqlite3 --version
+
+      - name: Exact source and repository gates
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          python3 - <<'PY'
+          import json
+          m=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert m['version']=='2.4.26'
+          assert int(m['schema'])==2401
+          assert int(m['runtime_source_file_count'])==55
+          PY
+          bash scripts/verify-repository.sh
+          python3 -m py_compile scripts/build-release.py
+          php -l scripts/repair-template.php >/dev/null
+          echo 'P02_FORMAL_SOURCE_GATE=PASS'
+
+      - name: Deterministic formal build x2
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git show -s --format=%T "$PRODUCT_REF")
+          python3 scripts/build-release.py --out build/release-a --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.4.26 > "$RUNNER_TEMP/build-a.json"
+          python3 scripts/build-release.py --out build/release-b --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.4.26 > "$RUNNER_TEMP/build-b.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          a=Path('build/release-a'); b=Path('build/release-b')
+          af={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in a.iterdir() if p.is_file()}
+          bf={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in b.iterdir() if p.is_file()}
+          assert af==bf,(af,bf)
+          print('DETERMINISTIC_BUILD=PASS')
+          for name in sorted(af): print(f'ARTIFACT_SHA256 {name} {af[name]}')
+          PY
+
+      - name: Archive privacy identity and package gates
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          OUT=build/release-a
+          for z in "$OUT"/*.zip; do unzip -t "$z" >/dev/null; done
+          php -l "$OUT/repair-v2.4.26.php" >/dev/null
+          python3 - "$OUT" <<'PY'
+          import hashlib,json,re,sys,zipfile
+          from pathlib import Path
+          out=Path(sys.argv[1]); ver='2.4.26'; src='2.4.25'; schema=2401
+          expected={
+            f'VF_Library_V{ver}_SOURCE.zip',f'VF_Library_V{ver}_FULL.zip',f'VF_Library_V{ver}_UPDATE.zip',
+            f'VF_Library_V{ver}_ATOMIC.zip',f'repair-v{ver}.php',f'VF_Library_V{ver}_RELEASE_NOTES.md',
+            f'VF_Library_V{ver}_RELEASE_MANIFEST.json','SHA256SUMS.txt'
+          }
+          actual={p.name for p in out.iterdir() if p.is_file()}; assert actual==expected,(actual,expected)
+          full=out/f'VF_Library_V{ver}_FULL.zip'; update=out/f'VF_Library_V{ver}_UPDATE.zip'; atomic=out/f'VF_Library_V{ver}_ATOMIC.zip'; source=out/f'VF_Library_V{ver}_SOURCE.zip'; repair=out/f'repair-v{ver}.php'
+          forbidden_re=re.compile(r'(^|/)(_import_chunks|chunk-|relay-|private_data|node_modules|\.git)(/|$)',re.I)
+          with zipfile.ZipFile(full) as z:
+            names=z.namelist(); low=[n.lower() for n in names]
+            assert 'version.txt' in low and 'release-manifest.json' in low
+            bad=[n for n in names if forbidden_re.search(n) or n.lower().endswith(('.sqlite','.sqlite3','.db','.log','.env')) or n.startswith('tests/') or n.startswith('.github/')]
+            assert not bad,bad
+            m=json.loads(z.read('release-manifest.json')); assert m['version']==ver and int(m['schema_version'])==schema and m['build_flavor']=='FORMAL_CLEAN_FULL'
+          with zipfile.ZipFile(source) as z:
+            names=z.namelist(); bad=[n for n in names if forbidden_re.search(n) or n.lower().endswith(('.sqlite','.sqlite3','.db','.log','.env'))]
+            assert not bad,bad
+          with zipfile.ZipFile(update) as z:
+            names=z.namelist(); assert 'atomic-manifest.json' in names
+            m=json.loads(z.read('atomic-manifest.json')); assert m['format']=='vf.library.atomic-package' and m['source_version']==src and m['target_version']==ver and int(m['source_schema'])==int(m['target_schema'])==schema
+            assert len(m['files'])==55,len(m['files']); seen=set()
+            for e in m['files']:
+              p='payload/'+e['path']; assert p in names and p not in seen; seen.add(p); data=z.read(p); assert len(data)==int(e['bytes']) and hashlib.sha256(data).hexdigest()==e['sha256']
+            assert set(names)=={'atomic-manifest.json'}|seen
+          with zipfile.ZipFile(atomic) as z:
+            assert z.namelist()==[repair.name]; assert z.read(repair.name)==repair.read_bytes()
+          rel=json.load(open(out/f'VF_Library_V{ver}_RELEASE_MANIFEST.json',encoding='utf-8'))
+          assert rel['schema']=='vf-release-manifest/2.1' and rel['version']==ver and int(rel['build']['schema'])==schema
+          assert rel['compatibility']['supported_from']==[src] and rel['compatibility']['schema_migration'] is False
+          for p in sorted(out.iterdir()):
+            if p.is_file(): print(f'FORMAL_ARTIFACT {p.name} {p.stat().st_size} {hashlib.sha256(p.read_bytes()).hexdigest()}')
+          print('ARCHIVE_PRIVACY_IDENTITY=PASS')
+          PY
+
+      - name: Actual FULL ZIP fresh install
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          OUT=build/release-a
+          SITE="$RUNNER_TEMP/p02-full-site"; COOKIE="$RUNNER_TEMP/p02-full-cookie"
+          mkdir -p "$SITE"; unzip -q "$OUT/VF_Library_V2.4.26_FULL.zip" -d "$SITE"
+          php -d display_errors=0 -S 127.0.0.1:18142 -t "$SITE" >"$RUNNER_TEMP/full-server.log" 2>&1 & FULL_PID=$!
+          trap 'kill "$FULL_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18142/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18142/setup.php > "$RUNNER_TEMP/full-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/full-setup.html" <<'PY'
+          import html,re,sys
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',open(sys.argv[1],encoding='utf-8').read()); assert m
+          print(html.unescape(m.group(1)))
+          PY
+          )
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18142' --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" http://127.0.0.1:18142/setup.php)
+          test "$CODE" = 303
+          curl -fsS -b "$COOKIE" http://127.0.0.1:18142/api.php?action=session > "$RUNNER_TEMP/full-session.json"
+          python3 - "$RUNNER_TEMP/full-session.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['ok'] and x['site']['auth'] and x['version']=='2.4.26'
+          PY
+          ( cd "$SITE" && php cli/verify.php ) > "$RUNNER_TEMP/full-verify.json"
+          python3 - "$RUNNER_TEMP/full-verify.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['ok'] is True and int(x['schema_version'])==2401
+          PY
+          kill "$FULL_PID" 2>/dev/null || true
+          trap - EXIT
+          echo 'FULL_ACTUAL_ZIP_FRESH_INSTALL=PASS'
+
+      - name: Actual 2.4.25 to 2.4.26 Update Core existing-data upgrade
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          OUT="$PWD/build/release-a"; UPDATE="$OUT/VF_Library_V2.4.26_UPDATE.zip"
+          git worktree add --detach "$RUNNER_TEMP/p02-old-src" v2.4.25 >/dev/null
+          OLDSITE="$RUNNER_TEMP/p02-old-site"; bash "$RUNNER_TEMP/p02-old-src/scripts/build-deploy-tree.sh" "$OLDSITE" >/dev/null
+          COOKIE="$RUNNER_TEMP/p02-old-cookie"
+          php -d display_errors=0 -S 127.0.0.1:18143 -t "$OLDSITE" >"$RUNNER_TEMP/old-server.log" 2>&1 & OLD_PID=$!
+          trap 'kill "$OLD_PID" 2>/dev/null || true; git worktree remove --force "$RUNNER_TEMP/p02-old-src" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18143/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18143/setup.php > "$RUNNER_TEMP/old-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/old-setup.html" <<'PY'
+          import html,re,sys
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',open(sys.argv[1],encoding='utf-8').read()); assert m
+          print(html.unescape(m.group(1)))
+          PY
+          )
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18143' --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" http://127.0.0.1:18143/setup.php)
+          test "$CODE" = 303
+          test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = '2.4.25'
+          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();$n=gmdate("c");$q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");$q->execute(["Upgrade Fixture","formal gate","folder",100,$n,$n]);$c=(int)$d->lastInsertId();$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,"V2425_SENTINEL","formal gate","preserve me","quick","plain","copy","active","[]","[]",$n,$n]);echo $c;' "$OLDSITE" > "$RUNNER_TEMP/category-id"
+          BYTES=$(stat -c %s "$UPDATE"); SHA=$(sha256sum "$UPDATE" | awk '{print $1}')
+          python3 - "$RUNNER_TEMP/update-manifest.json" "$BYTES" "$SHA" <<'PY'
+          import json,sys,datetime
+          m={'schema_version':'1.0','project_id':'P02','component_id':'APP','enabled':True,'current_version':'2.4.25','target_version':'2.4.26','update_type':'ATOMIC','from_versions':['2.4.25'],'schema_from':'2401','schema_to':'2401','repository':'llhzx2018/vf-library','release_tag':'v2.4.26','asset_name':'VF_Library_V2.4.26_UPDATE.zip','asset_bytes':int(sys.argv[2]),'asset_sha256':sys.argv[3],'backup_required':True,'rollback_supported':True,'released_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+          json.dump(m,open(sys.argv[1],'w'),indent=2)
+          PY
+          php - "$OLDSITE" "$UPDATE" "$RUNNER_TEMP/update-manifest.json" <<'PHP'
+          <?php
+          $site=$argv[1];$package=$argv[2];$manifest=json_decode(file_get_contents($argv[3]),true);chdir($site);require $site.'/app/bootstrap.php';
+          $core=new \CoreUpdates\UpdateCore('P02','APP');$adapter=new VfLibraryCoreUpdateAdapter();
+          $result=$core->upgrade(VFTB_VERSION,(string)VfLibrarySchemaMigration::currentVersion(vftb_db()),$adapter,$package,$manifest);
+          if(!in_array($result['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'], true)){fwrite(STDERR,json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));exit(2);}
+          if(empty($result['backup_locator'])){fwrite(STDERR,"backup locator missing\n");exit(3);}echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT),"\n";
+          PHP
+          test "$(tr -d '\r\n' < "$OLDSITE/VERSION.txt")" = '2.4.26'
+          php -r 'require $argv[1]."/app/bootstrap.php";$d=vftb_db();if(VFTB_VERSION!=="2.4.26")exit(2);if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(3);if($d->query("SELECT content FROM text_items WHERE title=\"V2425_SENTINEL\"")->fetchColumn()!=="preserve me")exit(4);if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(5);if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(6);$n=gmdate("c");$c=(int)$d->query("SELECT id FROM text_categories WHERE name=\"Upgrade Fixture\"")->fetchColumn();$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");$q->execute([$c,"POST_UPGRADE_WRITE","formal gate","write pass","quick","plain","copy","active","[]","[]",$n,$n]);' "$OLDSITE"
+          ( cd "$OLDSITE" && php cli/verify.php ) > "$RUNNER_TEMP/old-verify.json"
+          python3 - "$RUNNER_TEMP/old-verify.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1])); assert x['ok'] is True and int(x['schema_version'])==2401
+          PY
+          kill "$OLD_PID" 2>/dev/null || true
+          git worktree remove --force "$RUNNER_TEMP/p02-old-src" >/dev/null
+          trap - EXIT
+          echo 'EXISTING_DATA_UPDATE_CORE_2.4.25_TO_2.4.26=PASS'
+
+      - name: Public-safe formal evidence summary
+        if: always()
+        working-directory: product
+        run: |
+          echo 'P02=VF Library'
+          echo 'FORMAL_TARGET=2.4.26 / Schema 2401'
+          echo 'SOURCE_VERSION=2.4.25'
+          echo 'SOURCE_COMMIT=9c62b0f348958777fdaba251316cd76a867358af'
+          echo 'CANDIDATE_RUN=32107447358 / PASS'
+          echo 'PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'PRIVATE_DATA_USED=NO'
+          echo 'PRODUCTION_WRITE=NO'
+          echo 'MAIN_WRITE=NO'
+          echo 'RELEASE_PUBLICATION=NO'
