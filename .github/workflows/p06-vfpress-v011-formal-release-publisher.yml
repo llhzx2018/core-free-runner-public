@@ -1,0 +1,180 @@
+name: P06 VF Press V0.1.1 Formal Private Release Publisher
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v011-formal-release-publisher.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 1c4db4bfd77daa69f9a9d626264ae5ad3a482b40
+  TAG: v0.1.1
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Require registered capabilities
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+          echo REGISTERED_RELEASE_CAPABILITIES=PASS
+
+      - name: Checkout exact private formal source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Build and verify formal browser-first assets
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.1'
+          grep -Fq '"lifecycle": "RELEASE_READY"' VF_PROJECT.json
+          grep -Fq '"browser_first_full_install": "PASS"' VF_PROJECT.json
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          rm -rf dist storage storage-restore-*
+          php bin/build-release.php dist | tee /tmp/build
+          grep -Fq 'RELEASE_BUILD=PASS' /tmp/build
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          FULL=dist/VF_Press_V0.1.1_FULL.zip
+          UPDATE=dist/VF_Press_V0.1.1_UPDATE.zip
+          test -s "$FULL" && test -s "$UPDATE"
+          unzip -l "$FULL" >/tmp/full-list
+          grep -Fq 'index.php' /tmp/full-list
+          grep -Fq '.vfpress-installer.php' /tmp/full-list
+          grep -Fq '.vfpress-runtime.php' /tmp/full-list
+          grep -Fq 'README_FIRST_INSTALL.txt' /tmp/full-list
+          ! grep -Eq '(^|[[:space:]])(src|bin|database|vendor|public|storage)/' /tmp/full-list
+          unzip -p "$UPDATE" VF_UPDATE.json | grep -Fq '"target_version": "0.1.1"'
+          FULL_SHA="$(sha256sum "$FULL" | awk '{print $1}')"
+          UPDATE_SHA="$(sha256sum "$UPDATE" | awk '{print $1}')"
+          FULL_BYTES="$(stat -c%s "$FULL")"
+          UPDATE_BYTES="$(stat -c%s "$UPDATE")"
+          echo "FORMAL_FULL_SHA=$FULL_SHA" >> "$GITHUB_ENV"
+          echo "FORMAL_UPDATE_SHA=$UPDATE_SHA" >> "$GITHUB_ENV"
+          echo "FORMAL_FULL_BYTES=$FULL_BYTES" >> "$GITHUB_ENV"
+          echo "FORMAL_UPDATE_BYTES=$UPDATE_BYTES" >> "$GITHUB_ENV"
+          echo FORMAL_ASSET_BUILD=PASS
+
+      - name: Install the exact FULL artifact before publication
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WEB=/tmp/vfpress-release-webroot
+          RUNTIME=/tmp/.vfpress-release-webroot-vfpress-runtime
+          DATA=/tmp/.vfpress-release-webroot-vfpress-data
+          rm -rf "$WEB" "$RUNTIME" "$DATA" /tmp/release-cookies
+          mkdir -p "$WEB"
+          unzip -q dist/VF_Press_V0.1.1_FULL.zip -d "$WEB"
+          cat >/tmp/vfpress-release-router.php <<'PHP'
+          <?php
+          $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+          $file = '/tmp/vfpress-release-webroot' . $path;
+          if ($path !== '/' && (is_file($file) || is_link($file))) return false;
+          require '/tmp/vfpress-release-webroot/index.php';
+          PHP
+          php -S 127.0.0.1:18780 -t "$WEB" /tmp/vfpress-release-router.php >/tmp/vfpress-release-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-release-webroot-vfpress-runtime /tmp/.vfpress-release-webroot-vfpress-data' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/release-cookies http://127.0.0.1:18780/ >/tmp/release-install.html; then READY=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null; then cat /tmp/vfpress-release-server.log; exit 1; fi
+            sleep 1
+          done
+          test "$READY" = 1
+          grep -Fq '开始安装 VF Press' /tmp/release-install.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/release-install.html',encoding='utf-8').read(); m=re.search(r'name="_csrf" value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/release-install.headers -o /tmp/release-install.post -c /tmp/release-cookies -b /tmp/release-cookies -X POST http://127.0.0.1:18780/ \
+            --data-urlencode "_csrf=$CSRF" \
+            --data-urlencode 'site_name=科瓦罗出版正式包验证' \
+            --data-urlencode 'username=release-owner' \
+            --data-urlencode 'display_name=Release Owner' \
+            --data-urlencode 'password=synthetic-formal-release-2026' \
+            --data-urlencode 'password_confirm=synthetic-formal-release-2026'
+          grep -Eq '^HTTP/1.1 303' /tmp/release-install.headers
+          test -f "$WEB/.vfpress-bootstrap.php"
+          test ! -f "$WEB/.vfpress-runtime.php"
+          test -L "$WEB/assets"
+          test "$(sqlite3 "$DATA/app.db" 'pragma integrity_check;')" = ok
+          test "$(sqlite3 "$DATA/app.db" 'select max(version) from schema_migrations;')" = 2
+          curl -fsS http://127.0.0.1:18780/health | grep -Fq '"version":"0.1.1"'
+          echo FORMAL_FULL_BROWSER_INSTALL=PASS
+
+      - name: Publish exact private GitHub Release
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/release-notes.md <<'EOF'
+          VF Press V0.1.1 · Browser-First 首次安装修正版。
+
+          - FULL ZIP 根目录直接提供 index.php
+          - 上传 / 解压 / 打开域名即可进入浏览器安装器
+          - 自动环境预检、Migration、Owner 初始化
+          - Runtime / SQLite / 书稿 / Brand / Recovery 自动置于 Web Root 外
+          - 兼容旧 V0.1.0 已解压目录并保留旧 storage
+          - 后台 core-updates 在线升级、升级前 Recovery、校验与失败回滚保持有效
+          EOF
+          if gh release view "$TAG" --repo llhzx2018/vf-press --json targetCommitish >/tmp/existing.json 2>/dev/null; then
+            test "$(jq -r '.targetCommitish' /tmp/existing.json)" = "$SOURCE_SHA"
+            gh release upload "$TAG" --repo llhzx2018/vf-press dist/VF_Press_V0.1.1_FULL.zip dist/VF_Press_V0.1.1_UPDATE.zip dist/SHA256SUMS.txt dist/RELEASE_INFO.json --clobber
+          else
+            gh release create "$TAG" --repo llhzx2018/vf-press dist/VF_Press_V0.1.1_FULL.zip dist/VF_Press_V0.1.1_UPDATE.zip dist/SHA256SUMS.txt dist/RELEASE_INFO.json --target "$SOURCE_SHA" --title 'VF Press V0.1.1' --notes-file /tmp/release-notes.md
+          fi
+          gh release view "$TAG" --repo llhzx2018/vf-press --json tagName,targetCommitish,isDraft,isPrerelease >/tmp/release.json
+          test "$(jq -r '.tagName' /tmp/release.json)" = "$TAG"
+          test "$(jq -r '.targetCommitish' /tmp/release.json)" = "$SOURCE_SHA"
+          test "$(jq -r '.isDraft' /tmp/release.json)" = false
+          test "$(jq -r '.isPrerelease' /tmp/release.json)" = false
+          echo FORMAL_PRIVATE_RELEASE=PASS
+
+      - name: Remote asset readback establishes authority
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/release-readback && mkdir /tmp/release-readback
+          gh release download "$TAG" --repo llhzx2018/vf-press --dir /tmp/release-readback -p 'VF_Press_V0.1.1_FULL.zip' -p 'VF_Press_V0.1.1_UPDATE.zip' -p 'SHA256SUMS.txt' -p 'RELEASE_INFO.json'
+          (cd /tmp/release-readback && sha256sum -c SHA256SUMS.txt)
+          RF="$(sha256sum /tmp/release-readback/VF_Press_V0.1.1_FULL.zip | awk '{print $1}')"
+          RU="$(sha256sum /tmp/release-readback/VF_Press_V0.1.1_UPDATE.zip | awk '{print $1}')"
+          RFB="$(stat -c%s /tmp/release-readback/VF_Press_V0.1.1_FULL.zip)"
+          RUB="$(stat -c%s /tmp/release-readback/VF_Press_V0.1.1_UPDATE.zip)"
+          test "$RF" = "$FORMAL_FULL_SHA" && test "$RU" = "$FORMAL_UPDATE_SHA"
+          test "$RFB" = "$FORMAL_FULL_BYTES" && test "$RUB" = "$FORMAL_UPDATE_BYTES"
+          echo FORMAL_REMOTE_READBACK=PASS
+          echo "OFFICIAL_FULL_BYTES=$RFB"
+          echo "OFFICIAL_FULL_SHA256=$RF"
+          echo "OFFICIAL_UPDATE_BYTES=$RUB"
+          echo "OFFICIAL_UPDATE_SHA256=$RU"
+          rm -rf /tmp/release-readback source
