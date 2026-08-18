@@ -1,0 +1,71 @@
+name: VF Agent Operations Independent Gate
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - 'vf-agent/acceptance-kick/**'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch operations source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}"
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          git clone --quiet --branch operations/v1-daily-use --single-branch "https://x-access-token:${VF_PRIVATE_READ_TOKEN}@github.com/llhzx2018/core-agent.git" core-agent
+          cd core-agent
+          git rev-parse HEAD | tee ../operations-source-sha.txt
+          test "$(cat VERSION)" = '1.0.0'
+          python -m compileall -q operations
+
+      - name: Run A-O real integration acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-agent
+          PYTHONPATH=src:operations python operations/acceptance/integration_gate.py
+
+      - name: Seal operations identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, pathlib
+          root=pathlib.Path('core-agent/operations')
+          rows=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and '__pycache__' not in p.parts:
+                  data=p.read_bytes()
+                  rows.append({'path':str(p.relative_to(root)),'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data)})
+          payload={'schema':'vf-agent-operations-source-identity/v1','source_sha':pathlib.Path('operations-source-sha.txt').read_text().strip(),'files':rows}
+          raw=json.dumps(payload,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+          payload['operations_sha256']=hashlib.sha256(raw).hexdigest()
+          pathlib.Path('core-agent/.evidence').mkdir(exist_ok=True)
+          pathlib.Path('core-agent/.evidence/vf-agent-operations-source-identity.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+
+      - name: Upload independent evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_AGENT_OPERATIONS_INDEPENDENT_EVIDENCE
+          path: |
+            core-agent/.evidence/vf-agent-operations-independent-machine.json
+            core-agent/.evidence/vf-agent-operations-source-identity.json
+            operations-source-sha.txt
+          if-no-files-found: warn
+          retention-days: 7
