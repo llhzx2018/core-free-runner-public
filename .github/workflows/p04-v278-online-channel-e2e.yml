@@ -1,0 +1,83 @@
+name: P04 V2.7.8 Online Channel E2E
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p04-v278-online-channel-e2e.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  MANIFEST_REPOSITORY: llhzx2018/core-updates
+  MANIFEST_PATH: projects/P04.json
+  PRODUCT_REPOSITORY: llhzx2018/vf-infra
+  TARGET_VERSION: 2.7.8
+  SOURCE_VERSION: 2.7.7
+  TARGET_TAG: v2.7.8
+  UPDATE_ASSET: VF_Infra_V2.7.8_UPDATE.zip
+  EXPECTED_ASSET_ID: '519541583'
+  EXPECTED_BYTES: '33975'
+  EXPECTED_SHA256: 5d27db8f8d80661bd5682f1d848a53b3f0fd9af8ac55535f3e318929b377d77b
+  SOURCE_COMMIT: ec133d34c1f27098a01aa7b5e9f8e77ba8e847a2
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout public evidence repository
+        uses: actions/checkout@v4
+      - name: Prepare PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: zip,curl,fileinfo,sodium
+          coverage: none
+      - name: Verify manifest release and Atomic payload contract
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo VF_PRIVATE_READ_TOKEN_MISSING; exit 78; }
+          TMP="$RUNNER_TEMP/p04-v278-channel"; mkdir -p "$TMP"
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/$MANIFEST_REPOSITORY/contents/$MANIFEST_PATH" > "$TMP/manifest.json"
+          jq -e --arg v "$TARGET_VERSION" --arg f "$SOURCE_VERSION" --arg t "$TARGET_TAG" --arg a "$UPDATE_ASSET" --arg s "$EXPECTED_SHA256" --argjson b "$EXPECTED_BYTES" --argjson aid "$EXPECTED_ASSET_ID" '.schema_version=="1.0" and .project_id=="P04" and .component_id=="APP" and .enabled==true and .target_version==$v and .update_type=="ATOMIC" and .from_versions==[$f] and .schema_from=="14" and .schema_to=="14" and .repository=="llhzx2018/vf-infra" and .release_tag==$t and .asset_name==$a and .asset_id==$aid and .asset_bytes==$b and .asset_sha256==$s and .backup_required==true and .rollback_supported==true' "$TMP/manifest.json" >/dev/null
+          gh api "repos/$PRODUCT_REPOSITORY/releases/tags/$TARGET_TAG" > "$TMP/release.json"
+          jq -e --arg t "$TARGET_TAG" --arg c "$SOURCE_COMMIT" '.tag_name==$t and .target_commitish==$c and .draft==false and .prerelease==false' "$TMP/release.json" >/dev/null
+          COUNT=$(jq --arg n "$UPDATE_ASSET" '[.assets[]|select(.name==$n)]|length' "$TMP/release.json"); test "$COUNT" = 1
+          ASSET_ID=$(jq -r --arg n "$UPDATE_ASSET" '.assets[]|select(.name==$n)|.id' "$TMP/release.json"); test "$ASSET_ID" = "$EXPECTED_ASSET_ID"
+          RELEASE_BYTES=$(jq -r --arg n "$UPDATE_ASSET" '.assets[]|select(.name==$n)|.size' "$TMP/release.json"); test "$RELEASE_BYTES" = "$EXPECTED_BYTES"
+          gh api -H 'Accept: application/octet-stream' "repos/$PRODUCT_REPOSITORY/releases/assets/$ASSET_ID" > "$TMP/$UPDATE_ASSET"
+          ACTUAL_BYTES=$(wc -c < "$TMP/$UPDATE_ASSET" | tr -d ' '); test "$ACTUAL_BYTES" = "$EXPECTED_BYTES"
+          ACTUAL_SHA=$(sha256sum "$TMP/$UPDATE_ASSET" | awk '{print $1}'); test "$ACTUAL_SHA" = "$EXPECTED_SHA256"
+          unzip -t "$TMP/$UPDATE_ASSET" >/dev/null
+          test "$(unzip -Z1 "$TMP/$UPDATE_ASSET" | wc -l | tr -d ' ')" = 1
+          test "$(unzip -Z1 "$TMP/$UPDATE_ASSET")" = 'repair-v2.7.8.php'
+          unzip -p "$TMP/$UPDATE_ASSET" repair-v2.7.8.php > "$TMP/repair-v2.7.8.php"
+          php -l "$TMP/repair-v2.7.8.php" >/dev/null
+          php "$TMP/repair-v2.7.8.php" --self-test
+          grep -Fq 'VF_INFRA_ONLINE_HANDOFF_V1' "$TMP/repair-v2.7.8.php"
+          mkdir -p evidence/p04
+          python3 - evidence/p04/P04_V278_ONLINE_CHANNEL_LATEST.json <<'PY'
+          import json,sys,datetime
+          out={
+            'status':'PASS','project':'P04','source_version':'2.7.7','target_version':'2.7.8','schema':14,
+            'manifest_readback':'PASS','release_readback':'PASS','asset_unique':'PASS','asset_bytes':'PASS',
+            'asset_sha256':'PASS','zip_integrity':'PASS','repair_self_test':'PASS','online_handoff_marker':'PASS',
+            'can_update_contract':True,'page_progress_reintroduced':False,'ui_redesign':False,
+            'release_id':372400774,'asset_id':519541583,'asset_bytes_value':33975,
+            'asset_sha256_value':'5d27db8f8d80661bd5682f1d848a53b3f0fd9af8ac55535f3e318929b377d77b',
+            'verified_at':datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+          }
+          open(sys.argv[1],'w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          print('P04_V278_ONLINE_CHANNEL_E2E=PASS')
+          PY
+      - name: Commit public-safe channel evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name vf-runner
+          git config user.email vf-runner@users.noreply.github.com
+          git add evidence/p04/P04_V278_ONLINE_CHANNEL_LATEST.json
+          git diff --cached --quiet && exit 0
+          git commit -m 'evidence(P04): V2.7.8 online update channel PASS'
+          git push origin HEAD:main
