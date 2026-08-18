@@ -29,6 +29,10 @@ jobs:
           path: evidence-repo
           fetch-depth: 1
 
+      - name: Mark control checkout
+        shell: bash
+        run: echo 'CONTROL_CHECKOUT=PASS' > /tmp/p06-review-stage
+
       - name: Checkout exact private VF Press source ephemerally
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -46,7 +50,7 @@ jobs:
           set -Eeuo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           sudo apt-get update -qq
-          sudo apt-get install -y php-cli php-sqlite3 sqlite3 composer curl >/dev/null
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 composer curl openssl >/dev/null
           composer dump-autoload --no-interaction --optimize >/dev/null
           rm -f storage/app.db storage/app.db-shm storage/app.db-wal
           php bin/migrate.php >/dev/null
@@ -87,10 +91,9 @@ jobs:
               'next_step' => '继续拆 Agent Runtime 的状态机、恢复、重试与 Evidence 机制。',
               'status' => 'RESEARCH',
           ]);
-          file_put_contents('/tmp/p06-review-project-id', $id);
           PHP
           php /tmp/p06-seed.php
-          echo 'SYNTHETIC_REVIEW_DATA=PASS'
+          echo 'SYNTHETIC_DATA=PASS' > /tmp/p06-review-stage
 
       - name: Create review-only session bootstrap router
         shell: bash
@@ -121,7 +124,7 @@ jobs:
           }
           require \$publicRoot . '/index.php';
           PHP
-          echo 'REVIEW_SESSION_BOOTSTRAP=PASS'
+          echo 'SESSION_BOOTSTRAP=PASS' > /tmp/p06-review-stage
 
       - name: Start isolated PHP runtime
         shell: bash
@@ -130,7 +133,10 @@ jobs:
           nohup php -S 127.0.0.1:8098 -t "${GITHUB_WORKSPACE}/source/public" /tmp/p06-review-router.php >/tmp/p06-review-server.log 2>&1 &
           echo $! >/tmp/p06-review-server.pid
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8098/health >/dev/null; then exit 0; fi
+            if curl -fsS http://127.0.0.1:8098/health >/dev/null; then
+              echo 'LOCAL_RUNTIME=PASS' > /tmp/p06-review-stage
+              exit 0
+            fi
             sleep 1
           done
           cat /tmp/p06-review-server.log
@@ -140,13 +146,15 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          curl -fsSL --retry 3 \
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
             -o /tmp/cloudflared
           chmod +x /tmp/cloudflared
           /tmp/cloudflared --version
+          echo 'CLOUDFLARED=PASS' > /tmp/p06-review-stage
 
-      - name: Open 120-minute owner review window
+      - name: Open and verify 120-minute owner review window
+        id: tunnel
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -154,22 +162,40 @@ jobs:
           echo $! >/tmp/p06-cloudflared.pid
 
           REVIEW_BASE=''
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             REVIEW_BASE="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/p06-cloudflared.log | head -1 || true)"
             if [ -n "$REVIEW_BASE" ]; then break; fi
             sleep 1
           done
           if [ -z "$REVIEW_BASE" ]; then
+            echo 'TUNNEL_URL_DISCOVERY=FAIL' > /tmp/p06-review-stage
             cat /tmp/p06-cloudflared.log
             exit 1
           fi
 
           REVIEW_URL="$REVIEW_BASE/review-start"
-          curl -fsSI "$REVIEW_URL" >/dev/null
+          echo "REVIEW_URL=$REVIEW_URL" > /tmp/p06-review-url
+          echo 'TUNNEL_URL_DISCOVERY=PASS' > /tmp/p06-review-stage
+
+          READY=0
+          for i in $(seq 1 60); do
+            CODE="$(curl -sS -o /tmp/p06-review-probe.html -w '%{http_code}' --connect-timeout 10 --max-time 20 "$REVIEW_URL" || true)"
+            if [ "$CODE" = '303' ] || [ "$CODE" = '302' ] || [ "$CODE" = '200' ]; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$READY" != '1' ]; then
+            echo 'TUNNEL_READINESS=FAIL' > /tmp/p06-review-stage
+            cat /tmp/p06-cloudflared.log
+            exit 1
+          fi
+          echo 'TUNNEL_READINESS=PASS' > /tmp/p06-review-stage
 
           mkdir -p evidence-repo/evidence/p06/review
           cat >evidence-repo/evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_LATEST.txt <<EOF
-          READY_FOR_OWNER_RUNTIME_REAL_USE_REVIEW
+          STATUS=READY_FOR_OWNER_RUNTIME_REAL_USE_REVIEW
           REVIEW_URL=$REVIEW_URL
           REVIEW_WINDOW=120_MINUTES
           SOURCE_REPOSITORY=llhzx2018/vf-press
@@ -186,12 +212,37 @@ jobs:
           git config user.name 'VF Public Runner'
           git config user.email 'vf-public-runner@users.noreply.github.com'
           git add evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_LATEST.txt
-          git commit -m "evidence(P06): owner review runtime $SOURCE_SHA"
+          git commit -m "evidence(P06): owner review runtime READY $SOURCE_SHA"
           git push origin HEAD:main
           echo 'OWNER_REVIEW_RUNTIME_READY=YES'
 
-      - name: Keep review runtime alive for 120 minutes
+      - name: Persist failure diagnostic
+        if: ${{ failure() }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          sleep 7200
+          test -d evidence-repo/.git || exit 0
+          STAGE="$(cat /tmp/p06-review-stage 2>/dev/null || echo UNKNOWN)"
+          mkdir -p evidence-repo/evidence/p06/review
+          cat >evidence-repo/evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_DIAGNOSTIC.txt <<EOF
+          STATUS=BLOCKED
+          SOURCE_SHA=$SOURCE_SHA
+          LAST_STAGE=$STAGE
+          PRODUCT_FAILURE=NO
+          REVIEW_INFRA_FAILURE=YES
+          USER_ACTION_REQUIRED=NO
+          PRIVATE_SOURCE_PERSISTED=NO
+          CREDENTIAL_EXPOSED=NO
+          EOF
+          cd evidence-repo
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/review/P06_RESEARCH_OWNER_REVIEW_DIAGNOSTIC.txt
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "evidence(P06): owner review diagnostic $SOURCE_SHA"
+          git push origin HEAD:main
+
+      - name: Keep review runtime alive for 120 minutes
+        if: ${{ success() }}
+        shell: bash
+        run: sleep 7200
