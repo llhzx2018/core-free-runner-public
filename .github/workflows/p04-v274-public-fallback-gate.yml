@@ -1,0 +1,161 @@
+name: P04 VF Infra V2.7.4 Public Fallback Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v274-public-fallback-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      P04_REPOSITORY: llhzx2018/vf-infra
+      P04_SOURCE_SHA: 3e6a18b893e42467e18913facf286ca2bc420f16
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact P04 V2.7.4 candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P04_REPOSITORY }}
+          ref: ${{ env.P04_SOURCE_SHA }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p04
+
+      - name: Verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p04 rev-parse HEAD)" = "$P04_SOURCE_SHA"
+          test "$(tr -d '\r\n' < p04/VERSION)" = '2.7.4'
+          grep -Fq '"project_id": "P04"' p04/VF_PROJECT.json
+          echo 'P04_SOURCE_IDENTITY=PASS'
+
+      - name: Prepare PHP and Node runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Chromium runtime
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+          echo 'PLAYWRIGHT_RUNTIME=PASS'
+
+      - name: Repository and migration health
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          test ! -e database/migrations/015_ || exit 1
+          echo 'REPOSITORY_HEALTH=PASS'
+          echo 'MIGRATION_IMMUTABILITY=PASS'
+
+      - name: Syntax and current contract checks
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          for f in \
+            public/assets/v270-final-polish.js \
+            public/assets/v271-unified-shell.js \
+            public/assets/v272-backend-detail-ux.js \
+            public/assets/v272-copy-polish.js \
+            public/assets/v274-performance-bridge.js \
+            tests/e2e/v274-runtime-consolidation-v2.mjs; do
+            node --check "$f"
+          done
+          bash -n scripts/run-v274-runtime-consolidation-gate.sh
+          echo 'SYNTAX_AND_CURRENT_CONTRACTS=PASS'
+
+      - name: Run V2.7.4 runtime consolidation gate
+        shell: bash
+        working-directory: p04
+        env:
+          VF_V274_TESTED_RUNTIME_COMMIT: ${{ env.P04_SOURCE_SHA }}
+          VF_V274_EVIDENCE_DIR: ${{ github.workspace }}/p04-evidence-private
+        run: bash scripts/run-v274-runtime-consolidation-gate.sh
+
+      - name: Build public-safe evidence summary
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p public-evidence
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          source = os.environ['P04_SOURCE_SHA']
+          report_path = Path('p04-evidence-private/V274_RUNTIME_CONSOLIDATION_REPORT.json')
+          payload = {
+              'schema': 'vf-public-runner-evidence/v1',
+              'project': 'P04',
+              'version': '2.7.4',
+              'schema_version': 14,
+              'source_sha': source,
+              'production_version': '2.7.3',
+              'production_write_actions': 0,
+              'main_write_actions': 0,
+              'release_actions': 0,
+              'private_source_persisted': False,
+              'private_evidence_published': False,
+              'token_exposed': False,
+              'job_status': os.environ.get('JOB_STATUS', 'unknown'),
+          }
+          if report_path.is_file():
+              raw = report_path.read_bytes()
+              report = json.loads(raw.decode('utf-8'))
+              payload.update({
+                  'runtime_report_present': True,
+                  'runtime_status': report.get('status'),
+                  'runtime_report_sha256': hashlib.sha256(raw).hexdigest(),
+                  'tested_runtime_commit': report.get('tested_runtime_commit'),
+                  'page_error_count': len(report.get('page_errors') or []),
+                  'console_error_count': len(report.get('console_errors') or []),
+                  'screenshot_count_private_ephemeral': len(report.get('screenshots') or []),
+              })
+          else:
+              payload.update({'runtime_report_present': False, 'runtime_status': 'UNAVAILABLE'})
+          payload['status'] = 'PASS' if payload['job_status'] == 'success' and payload.get('runtime_status') == 'PASS' else 'FAIL'
+          canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['evidence_sha256'] = hashlib.sha256(canonical).hexdigest()
+          Path('public-evidence/P04_V274_PUBLIC_SAFE_EVIDENCE.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          print('PUBLIC_SAFE_EVIDENCE_STATUS=' + payload['status'])
+          print('PUBLIC_SAFE_EVIDENCE_SHA256=' + payload['evidence_sha256'])
+          PY
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.4-PUBLIC-SAFE-EVIDENCE
+          path: public-evidence/P04_V274_PUBLIC_SAFE_EVIDENCE.json
+          if-no-files-found: error
+          retention-days: 14
