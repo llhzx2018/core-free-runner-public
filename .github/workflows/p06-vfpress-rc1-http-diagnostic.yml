@@ -1,0 +1,113 @@
+name: P06 VF Press RC1 HTTP Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-rc1-http-diagnostic.yml'
+      - 'requests/p06-vfpress-rc1-http-diagnostic-*.txt'
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+  VF_PRESS_OWNER_USERNAME: http-owner
+  VF_PRESS_OWNER_PASSWORD: synthetic-http-password-2026
+  VF_PRESS_OWNER_DISPLAY_NAME: HTTP Owner
+
+jobs:
+  http:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - name: Prepare
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl composer >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          rm -rf storage
+          mkdir -p storage
+          php bin/migrate.php >/dev/null
+          php bin/living-publishing-self-test.php >/dev/null
+          php bin/create-owner.php >/dev/null
+      - name: Start and diagnose HTTP runtime
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/vf-press-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          if($path!=='/' && is_file(getcwd().'/public'.$path)){return false;}
+          require getcwd().'/public/index.php';
+          PHP
+          php -S 127.0.0.1:8099 -t public /tmp/vf-press-router.php >/tmp/vf-press-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo 'SERVER_PROCESS_EXITED_EARLY'
+              cat /tmp/vf-press-server.log || true
+              exit 1
+            fi
+            if curl -fsS --max-time 2 http://127.0.0.1:8099/health >/tmp/health.json 2>/tmp/curl.err; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$READY" != 1 ]; then
+            echo 'HTTP_READINESS_TIMEOUT'
+            cat /tmp/curl.err || true
+            cat /tmp/vf-press-server.log || true
+            exit 1
+          fi
+          cat /tmp/health.json
+          grep -Fq '"status":"ok"' /tmp/health.json
+          SLUG="$(php -r '$p=new PDO("sqlite:storage/app.db");echo $p->query("SELECT slug FROM publications WHERE current_edition_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1")->fetchColumn();')"
+          curl -fsS http://127.0.0.1:8099/ -o /tmp/home
+          curl -fsS "http://127.0.0.1:8099/books/$SLUG" -o /tmp/book
+          curl -fsS "http://127.0.0.1:8099/read/$SLUG" -o /tmp/read
+          grep -Fq '从 ChatGPT 到个人 Agent' /tmp/home
+          grep -Fq 'Edition 0.1.0' /tmp/book
+          grep -Fq 'Published Snapshot' /tmp/read
+          echo 'P06_RC1_HTTP_DIAGNOSTIC=PASS'
+      - name: Persist diagnostic receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          [ "$STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_RC1_HTTP_DIAGNOSTIC.txt <<EOF
+          P06_RC1_HTTP_DIAGNOSTIC=$RESULT
+          SOURCE_SHA=$SOURCE_SHA
+          RUN_ID=$GITHUB_RUN_ID
+          PRODUCTION_WRITE=NO
+          PRIVATE_SOURCE_PERSISTED=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_RC1_HTTP_DIAGNOSTIC.txt
+          git commit -m "evidence(P06): RC1 HTTP diagnostic $RESULT $SOURCE_SHA run $GITHUB_RUN_ID"
+          git push origin HEAD:main
+          test "$RESULT" = PASS
