@@ -1,0 +1,97 @@
+name: P06 VF Press V0.1.0 Official Encrypted Download
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v010-official-encrypted-download.txt
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify official private release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          mkdir -p /tmp/p06-official
+          gh release view v0.1.0 --repo llhzx2018/vf-press --json tagName,targetCommitish,isDraft,isPrerelease >/tmp/release.json
+          test "$(jq -r '.tagName' /tmp/release.json)" = 'v0.1.0'
+          test "$(jq -r '.targetCommitish' /tmp/release.json)" = 'cea083cf04c74ae5bff2c6f2c92299b01fc3ad30'
+          test "$(jq -r '.isDraft' /tmp/release.json)" = 'false'
+          test "$(jq -r '.isPrerelease' /tmp/release.json)" = 'false'
+          gh release download v0.1.0 --repo llhzx2018/vf-press --dir /tmp/p06-official \
+            -p 'VF_Press_V0.1.0_FULL.zip' \
+            -p 'VF_Press_V0.1.0_UPDATE.zip' \
+            -p 'SHA256SUMS.txt' \
+            -p 'RELEASE_INFO.json'
+          (cd /tmp/p06-official && sha256sum -c SHA256SUMS.txt)
+          test "$(stat -c%s /tmp/p06-official/VF_Press_V0.1.0_FULL.zip)" = '179672'
+          test "$(sha256sum /tmp/p06-official/VF_Press_V0.1.0_FULL.zip | awk '{print $1}')" = '59cabc44409e199336bf09383f8b8429993063b66c535f5242155e12217ec252'
+          test "$(stat -c%s /tmp/p06-official/VF_Press_V0.1.0_UPDATE.zip)" = '144068'
+          test "$(sha256sum /tmp/p06-official/VF_Press_V0.1.0_UPDATE.zip | awk '{print $1}')" = 'c2a88f2cc89ca3bf9237e33d138955686108b0c5f135388c6cafa3054fffe7fc'
+          (cd /tmp/p06-official && zip -q /tmp/VF_Press_V0.1.0_Official_Deployment.zip VF_Press_V0.1.0_FULL.zip VF_Press_V0.1.0_UPDATE.zip SHA256SUMS.txt RELEASE_INFO.json)
+
+      - name: Encrypt official deployment bundle with one-time key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --quiet cryptography
+          mkdir -p encrypted-bridge
+          cat >/tmp/p06-public.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAw8B3wYkewJVQjezixPpv
+          m0l5ZOlwYTZ4yaIF0jaadQekns+Frfz6SPZgnqTF6p17MNM57DVB9bycu36Gyb+0
+          tfSjHhYsEqS90nzDeRLlNeagVfTsg4EvxiKLzNrTKThQycNnwEEyMsoI/hL9u2dO
+          ss96/utfIqIFnFl0Hx/OI3/TfGgtsrJcfUrxZw2EqKRxhUXgQi0DQMLdKwP94otx
+          x2e0cQXWGDu8GLQWEZDY945MtzYo2B8dxqgd+GvKjre1K1BwEQmAj0M7k2EK0cM9
+          J0Et3N6u10L0LC9EIEcuGyMYJFIDdYnaWD/c4igv7ZzVIDJWoiLXRKCxduxvQtba
+          2Mf4jhw+9twCSytN8BQE9EM/I3BXzvFSCz5wZKjSk53J9cEHbojmHKrEy7/sRSX5
+          d5WEA69n93CC2BVmJL6lqbyk5RvdOGUa0fSG03cErop89xVidIagzN83nuyB/T/7
+          8+GYeMd0DjuIF9MdeJiUqZv5gM6TjkG6ZUGyrhuVLpNFAgMBAAE=
+          -----END PUBLIC KEY-----
+          PEM
+          python3 - <<'PY'
+          import os, json, base64, hashlib
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization, hashes
+          from cryptography.hazmat.primitives.asymmetric import padding
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          bundle=Path('/tmp/VF_Press_V0.1.0_Official_Deployment.zip').read_bytes()
+          pub=serialization.load_pem_public_key(Path('/tmp/p06-public.pem').read_bytes())
+          key=AESGCM.generate_key(bit_length=256)
+          nonce=os.urandom(12)
+          aad=b'P06-VF-PRESS-V0.1.0-OFFICIAL-RELEASE'
+          ct=AESGCM(key).encrypt(nonce,bundle,aad)
+          wrapped=pub.encrypt(key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+          out=Path('encrypted-bridge'); out.mkdir(exist_ok=True)
+          (out/'payload.enc').write_bytes(ct)
+          (out/'key.enc').write_bytes(wrapped)
+          (out/'meta.json').write_text(json.dumps({
+            'schema':'p06-official-encrypted-bridge/v1',
+            'release_tag':'v0.1.0',
+            'source_sha':'cea083cf04c74ae5bff2c6f2c92299b01fc3ad30',
+            'nonce_b64':base64.b64encode(nonce).decode(),
+            'aad':aad.decode(),
+            'bundle_sha256':hashlib.sha256(bundle).hexdigest(),
+            'bundle_bytes':len(bundle),
+            'official_full_sha256':'59cabc44409e199336bf09383f8b8429993063b66c535f5242155e12217ec252',
+            'official_update_sha256':'c2a88f2cc89ca3bf9237e33d138955686108b0c5f135388c6cafa3054fffe7fc'
+          },indent=2)+'\n',encoding='utf-8')
+          PY
+          rm -rf /tmp/p06-official /tmp/VF_Press_V0.1.0_Official_Deployment.zip /tmp/p06-public.pem
+
+      - name: Upload ciphertext only
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_Press_V0.1.0_Official_Encrypted_Bridge
+          path: encrypted-bridge/
+          if-no-files-found: error
+          retention-days: 1
