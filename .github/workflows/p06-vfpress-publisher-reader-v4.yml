@@ -1,0 +1,287 @@
+name: P06 VF Press Publisher Reader Gate V4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-publisher-reader-v4.yml'
+      - 'requests/p06-vfpress-reader-v4-*.txt'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-publisher-reader-v4
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: ddf3cc050256052ed51c11a4a39270a4734f0576
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout evidence repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: evidence-repo
+          fetch-depth: 1
+
+      - name: Require private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact private source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Validate source and strict CSP boundary
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          grep -Fq '"current_phase": "PHASE_D_PUBLISHER_READER"' VF_PROJECT.json
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring sqlite3 composer curl openssl >/dev/null
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src bin public -type f -name '*.php' -print0)
+          grep -Fq "script-src 'self'; style-src 'self'" public/index.php
+          ! grep -Fq 'style="' src/Http/Preview/PublisherReaderPreviewController.php
+          ! grep -Fq '.style.' public/assets/reader.js
+          ! grep -Fq 'style.setProperty' public/assets/reader.js
+          ! grep -Fq 'setAttribute("style"' public/assets/reader.js
+          grep -Fq '<progress class="reader-progress"' src/Http/Preview/PublisherReaderPreviewController.php
+          grep -Fq 'reader-font-23' public/assets/reader.css
+          grep -Fq 'reader-line-195' public/assets/reader.css
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'PHP_SYNTAX=PASS'
+          echo 'CSP_STATIC_BOUNDARY=PASS'
+
+      - name: Run isolated full regression chain
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          run_gate() {
+            local script="$1"
+            local name="$2"
+            export VF_PRESS_STORAGE_PATH="${RUNNER_TEMP}/p06-v4-${name}"
+            export VF_PRESS_DB_PATH="${VF_PRESS_STORAGE_PATH}/app.db"
+            export APP_ENV=test
+            rm -rf "$VF_PRESS_STORAGE_PATH"
+            mkdir -p "$VF_PRESS_STORAGE_PATH"
+            php bin/migrate.php >/dev/null
+            php "$script" | tee "/tmp/p06-v4-${name}.log"
+            php -r '$pdo=new PDO("sqlite:".getenv("VF_PRESS_DB_PATH"));if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(1);'
+          }
+          run_gate bin/self-test.php foundation
+          run_gate bin/security-self-test.php security
+          run_gate bin/research-self-test.php research
+          run_gate bin/publication-self-test.php manuscript
+          run_gate bin/reader-self-test.php reader
+          grep -Fq 'REVISION_IMMUTABLE=PASS' /tmp/p06-v4-manuscript.log
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/p06-v4-reader.log
+          grep -Fq 'SAFE_MARKDOWN=PASS' /tmp/p06-v4-reader.log
+          grep -Fq 'READER_NAVIGATION=PASS' /tmp/p06-v4-reader.log
+          echo 'FULL_REGRESSION=PASS'
+
+      - name: Build synthetic Owner Preview fixture
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          STORAGE="${RUNNER_TEMP}/p06-reader-v4"
+          export VF_PRESS_STORAGE_PATH="$STORAGE"
+          export VF_PRESS_DB_PATH="$STORAGE/app.db"
+          export APP_ENV=test
+          rm -rf "$STORAGE"
+          mkdir -p "$STORAGE"
+          php bin/migrate.php >/dev/null
+          PREVIEW_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$PREVIEW_PASSWORD" >/tmp/p06-v4-password
+          VF_PRESS_OWNER_USERNAME='visual-owner' VF_PRESS_OWNER_PASSWORD="$PREVIEW_PASSWORD" VF_PRESS_OWNER_DISPLAY_NAME='Visual Owner' php bin/create-owner.php >/dev/null
+          unset PREVIEW_PASSWORD
+          php bin/reader-self-test.php >/tmp/p06-v4-fixture.log
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/p06-v4-fixture.log
+          php -r '$pdo=new PDO("sqlite:".getenv("VF_PRESS_DB_PATH"));$pid=$pdo->query("SELECT id FROM publications ORDER BY created_at DESC LIMIT 1")->fetchColumn();if(!$pid)exit(1);file_put_contents("/tmp/p06-v4-pid",$pid);$s=$pdo->prepare("SELECT id FROM publication_sections WHERE publication_id=:p ORDER BY position ASC LIMIT 1");$s->execute(["p"=>$pid]);$sid=$s->fetchColumn();if(!$sid)exit(1);file_put_contents("/tmp/p06-v4-sid",$sid);'
+          echo 'SYNTHETIC_OWNER_PREVIEW_FIXTURE=PASS'
+
+      - name: Start routed PHP runtime
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          STORAGE="${RUNNER_TEMP}/p06-reader-v4"
+          cat >/tmp/p06-v4-router.php <<PHP
+          <?php
+          declare(strict_types=1);
+          \$root='${GITHUB_WORKSPACE}/source/public';
+          \$path=parse_url(\$_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          \$file=realpath(\$root.\$path);
+          \$real=realpath(\$root);
+          if(\$file!==false&&\$real!==false&&is_file(\$file)&&str_starts_with(\$file,\$real.DIRECTORY_SEPARATOR)) return false;
+          require \$root.'/index.php';
+          PHP
+          nohup env VF_PRESS_STORAGE_PATH="$STORAGE" VF_PRESS_DB_PATH="$STORAGE/app.db" APP_ENV=test php -S 127.0.0.1:8102 -t public /tmp/p06-v4-router.php >/tmp/p06-v4-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8102/health >/dev/null; then echo 'LOCAL_RUNTIME=PASS'; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/p06-v4-server.log
+          exit 1
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-v4-browser
+          cd /tmp/p06-v4-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Browser E2E and four visual captures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence-repo/evidence/p06/publisher-reader-v4
+          cat >/tmp/p06-v4-browser/capture.js <<'JS'
+          const { chromium } = require('/tmp/p06-v4-browser/node_modules/playwright');
+          const fs = require('fs');
+          (async()=>{
+            const password=fs.readFileSync('/tmp/p06-v4-password','utf8');
+            const pid=fs.readFileSync('/tmp/p06-v4-pid','utf8').trim();
+            const sid=fs.readFileSync('/tmp/p06-v4-sid','utf8').trim();
+            const base='http://127.0.0.1:8102';
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1050},deviceScaleFactor:1});
+            const csp=[];
+            const errors=[];
+            page.on('console',m=>{const t=m.text();if(/Content Security Policy|Refused to apply inline style|Refused to execute inline/i.test(t))csp.push(t);});
+            page.on('pageerror',e=>errors.push(String(e)));
+
+            await page.goto(`${base}/preview/publisher`);
+            if(!page.url().includes('/login')) throw new Error('Owner Preview auth gate missing');
+            await page.getByLabel('用户名').fill('visual-owner');
+            await page.getByLabel('密码').fill(password);
+            await Promise.all([page.waitForURL('**/studio'),page.getByRole('button',{name:'登录'}).click()]);
+
+            await page.goto(`${base}/preview/publisher`);
+            await page.getByText('OWNER PREVIEW · WORKING PUBLICATION').waitFor();
+            await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-v4/01_publisher_desktop.png',fullPage:true});
+
+            await page.goto(`${base}/preview/publications/${pid}`);
+            await page.getByText('这还不是正式 Edition。').waitFor();
+            await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-v4/02_book_detail_desktop.png',fullPage:true});
+
+            const url=`${base}/preview/read/${pid}/${sid}`;
+            await page.goto(url);
+            await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor();
+            if(await page.locator('[style]').count()!==0) throw new Error('Runtime inline style attribute detected');
+            await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-v4/03_reader_desktop.png',fullPage:true});
+
+            await page.getByRole('button',{name:'阅读设置'}).click();
+            await page.locator('[data-reader-font]').evaluate(el=>{el.value='23';el.dispatchEvent(new Event('input',{bubbles:true}));});
+            await page.locator('[data-reader-line]').evaluate(el=>{el.value='1.95';el.dispatchEvent(new Event('input',{bubbles:true}));});
+            await page.locator('[data-reader-width]').evaluate(el=>{el.value='800';el.dispatchEvent(new Event('input',{bubbles:true}));});
+            await page.getByRole('button',{name:'暖色'}).click();
+            const html=page.locator('html');
+            if(await html.getAttribute('data-reader-theme')!=='warm') throw new Error('Theme apply failed');
+            for(const klass of ['reader-font-23','reader-line-195','reader-width-800']) {
+              if(!(await html.evaluate((el,k)=>el.classList.contains(k),klass))) throw new Error(`Missing ${klass}`);
+            }
+            const font=await page.locator('.reader-content').evaluate(el=>getComputedStyle(el).fontSize);
+            if(font!=='23px') throw new Error(`Font class not applied: ${font}`);
+            await page.keyboard.press('Escape');
+
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(url);
+            await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor();
+            if(await html.getAttribute('data-reader-theme')!=='warm') throw new Error('Theme persistence failed');
+            if(!(await html.evaluate(el=>el.classList.contains('reader-font-23')))) throw new Error('Font persistence failed');
+            await page.getByRole('button',{name:'打开目录'}).click();
+            await page.locator('[data-reader-toc-panel]').waitFor({state:'visible'});
+            await page.getByText('Tool：让 AI 接触外部世界').waitFor();
+            await page.keyboard.press('Escape');
+            await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-v4/04_reader_mobile.png',fullPage:true});
+
+            if(csp.length) throw new Error(`CSP violations: ${csp.join(' | ')}`);
+            if(errors.length) throw new Error(`Page errors: ${errors.join(' | ')}`);
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          node /tmp/p06-v4-browser/capture.js
+          echo 'PUBLISHER_READER_BROWSER_E2E=PASS'
+          echo 'CSP_RUNTIME=PASS'
+          echo 'READER_SETTINGS_CLASS_STATE=PASS'
+          echo 'READER_SETTINGS_PERSISTENCE=PASS'
+          echo 'DESKTOP_MOBILE_VISUAL_CAPTURE=PASS'
+
+      - name: Verify source cleanliness and privacy
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-v4-password
+          test -z "$(git status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_REPOSITORY_CLEAN=PASS'
+          echo 'PRIVATE_SOURCE_PERSISTED_TO_PUBLIC_REPOSITORY=NO'
+          echo 'PRIVATE_SOURCE_UPLOADED_AS_ARTIFACT=NO'
+          echo 'PRIVATE_DATA_USED=NO'
+          echo 'TOKEN_EXPOSED=NO'
+
+      - name: Persist public-safe V4 evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-v4-password
+          RESULT=FAIL
+          VISUAL=INCOMPLETE
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT=PASS; VISUAL=READY_FOR_OWNER_REVIEW; fi
+          DIR=evidence-repo/evidence/p06/publisher-reader-v4
+          mkdir -p "$DIR"
+          COUNT="$(find "$DIR" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l)"
+          cat >"$DIR/RECEIPT.txt" <<EOF
+          P06_PUBLISHER_READER_MACHINE=$RESULT
+          P06_PUBLISHER_READER_VISUAL=$VISUAL
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          DATA_MODE=SYNTHETIC_PUBLIC_SAFE
+          PREVIEW_AUTH_REQUIRED=YES
+          FORMAL_EDITION_EXPOSED=NO
+          STRICT_CSP=YES
+          INLINE_STYLE_RUNTIME=NO
+          SCREENSHOTS=$COUNT
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=SOURCE_IDENTITY,PHP_SYNTAX,CSP_STATIC_BOUNDARY,FULL_REGRESSION,SAFE_MARKDOWN,READER_NAVIGATION,PREVIEW_AUTH,PUBLISHER_DESKTOP,BOOK_DETAIL_DESKTOP,READER_DESKTOP,READER_MOBILE,CSP_RUNTIME,READER_SETTINGS_CLASS_STATE,READER_SETTINGS_PERSISTENCE,REPOSITORY_CLEANLINESS
+          EOF
+          cd evidence-repo
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git pull --rebase origin main
+          git add evidence/p06/publisher-reader-v4
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence(P06): Publisher Reader V4 $RESULT $SOURCE_SHA"
+            git push origin HEAD:main
+          fi
+          echo "P06_PUBLISHER_READER_MACHINE=$RESULT"
