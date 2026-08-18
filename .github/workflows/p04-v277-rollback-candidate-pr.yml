@@ -1,0 +1,177 @@
+name: P04 VF Infra V2.7.7 Rollback Candidate PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v277-rollback-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v277-rollback-candidate-pr
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: 'a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8'
+  SOURCE_TREE: '57109ca42abb71e9d4943761690d53e66d0240ff'
+  TARGET_VERSION: '2.7.7'
+  SOURCE_VERSION: '2.7.6'
+  SCHEMA: '14'
+
+jobs:
+  recovery-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout exact V2.7.7 Recovery Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact rollback identity and V2.7.5 UI authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test ! -e candidate/database/migrations/015_\*
+          ! grep -Fq 'v276-responsive-loading.css' candidate/public/index.php
+          ! grep -Fq 'v276-responsive-loading.js' candidate/public/index.php
+          ! grep -Fq 'MutationObserver' candidate/public/assets/v276-responsive-loading.js
+          ! grep -Fq 'v276-progress-track' candidate/public/assets/v276-responsive-loading.js
+          ! grep -Fq '@media(max-width' candidate/public/assets/v276-responsive-loading.css
+          git -C candidate diff --exit-code v2.7.5 -- \
+            public/index.php \
+            public/assets/v270-personal-infra.css public/assets/v270-reference-lock.css public/assets/v270-reference-lock.js \
+            public/assets/v270-final-polish.css public/assets/v270-final-polish.js \
+            public/assets/v271-unified-shell.css public/assets/v271-unified-shell.js \
+            public/assets/v272-backend-detail-ux.css public/assets/v272-backend-detail-ux.js public/assets/v272-copy-polish.js \
+            public/assets/v273-typography-rhythm.css public/assets/v273-readable-floor.css \
+            public/assets/v274-ui-stability.css public/assets/v274-performance-bridge.js public/assets/v274-owned-route-primer.js \
+            public/assets/v275-ua-workflow.css public/assets/v275-ua-workflow.js
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          echo 'V277_V275_UI_SOURCE_EXACT=PASS'
+          echo 'V277_WITHDRAWN_OVERLAY_INACTIVE=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Re-run V2.7.5 owner workflow on V2.7.7 runtime
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V275_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V275_EVIDENCE_DIR: ${{ runner.temp }}/p04-v277-ui
+        run: |
+          set -Eeuo pipefail
+          sed -i "s/'2.7.5'/'2.7.7'/g; s/=='2.7.5'/=='2.7.7'/g; s/\['version'\]=='2.7.5'/['version']=='2.7.7'/g; s/\['release_kind'\]=='maintenance_release'/['release_kind']=='runtime_source'/g" scripts/run-v275-ua-workflow-gate.sh
+          sed -i "s/2\.7\.5/2.7.7/g" tests/e2e/v275-ua-workflow-v2.mjs
+          bash scripts/run-v275-ua-workflow-gate.sh | tee "$RUNNER_TEMP/p04-v277-ui.log"
+          grep -Fxq 'P04_V275_UA_WORKFLOW_GATE_PASS' "$RUNNER_TEMP/p04-v277-ui.log"
+          echo 'V277_V275_OWNER_WORKFLOW_BROWSER=PASS'
+
+      - name: Build V2.7.7 recovery artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v277-artifacts"
+          python scripts/build-v277-candidate-artifacts.py --output "$OUT" | tee "$RUNNER_TEMP/p04-v277-build.log"
+          grep -Fxq 'P04_V277_RECOVERY_ARTIFACT_PRE_GATE_PASS' "$RUNNER_TEMP/p04-v277-build.log"
+          php "$OUT/update-set/repair-v2.7.7.php" --self-test | tee "$RUNNER_TEMP/p04-v277-atomic.log"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS' "$RUNNER_TEMP/p04-v277-atomic.log"
+          echo "ARTIFACT_DIR=$OUT" >> "$GITHUB_ENV"
+
+      - name: Download immutable V2.7.6 FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v276"
+          gh release download v2.7.6 -R llhzx2018/vf-infra --pattern 'VF_Infra_V2.7.6_FULL.zip' --dir "$RUNNER_TEMP/v276"
+          test -s "$RUNNER_TEMP/v276/VF_Infra_V2.7.6_FULL.zip"
+
+      - name: V2.7.6 to V2.7.7 Source-Exact recovery gate
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          python scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/v276/VF_Infra_V2.7.6_FULL.zip" \
+            --candidate-full "$ARTIFACT_DIR/VF_Infra_V2.7.7_FULL.zip" \
+            --candidate-update "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_UPDATE.zip" \
+            --expected-source-version 2.7.6 \
+            --expected-target-version 2.7.7
+          echo 'V277_FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS'
+
+      - name: Emit recovery Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['ARTIFACT_DIR'])
+          full=root/'VF_Infra_V2.7.7_FULL.zip'; update=root/'update-set/VF_Infra_V2.7.7_UPDATE.zip'; atomic=root/'update-set/VF_Infra_V2.7.7_ATOMIC.zip'; repair=root/'update-set/repair-v2.7.7.php'
+          sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          runtime=json.loads((root/'runtime/release-manifest.json').read_text(encoding='utf-8'))
+          assert update.read_bytes()==atomic.read_bytes()
+          print('P04_V277_RECOVERY_CANDIDATE_GATE=PASS')
+          print('SOURCE_SHA='+os.environ['SOURCE_COMMIT'])
+          print('SOURCE_TREE='+os.environ['SOURCE_TREE'])
+          print('FULL_BYTES='+str(full.stat().st_size)); print('FULL_SHA256='+sha(full))
+          print('UPDATE_BYTES='+str(update.stat().st_size)); print('UPDATE_SHA256='+sha(update))
+          print('ATOMIC_SHA256='+sha(atomic)); print('REPAIR_SHA256='+sha(repair))
+          print('RUNTIME_FINGERPRINT='+runtime['source_fingerprint'])
+          print('RECOVERY_BASELINE=2.7.5-UA-UI')
+          print('SCHEMA=14'); print('MIGRATION=NONE'); print('PRODUCTION_WRITE=0'); print('RELEASE_WRITE=0')
+          PY
+
+      - name: Upload ephemeral recovery artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.7-ROLLBACK-CANDIDATE
+          path: |
+            ${{ runner.temp }}/p04-v277-ui/*.png
+            ${{ runner.temp }}/p04-v277-ui/V275_UA_WORKFLOW_REPORT.json
+            ${{ runner.temp }}/p04-v277-artifacts/VF_Infra_V2.7.7_FULL.zip
+            ${{ runner.temp }}/p04-v277-artifacts/update-set/VF_Infra_V2.7.7_UPDATE.zip
+            ${{ runner.temp }}/p04-v277-artifacts/update-set/VF_Infra_V2.7.7_ATOMIC.zip
+            ${{ runner.temp }}/p04-v277-artifacts/update-set/repair-v2.7.7.php
+            ${{ runner.temp }}/p04-v277-artifacts/V277_PACKAGE_MANIFEST.json
+            ${{ runner.temp }}/p04-v277-artifacts/V277_SHA256SUMS.txt
+          retention-days: 7
