@@ -1,0 +1,163 @@
+name: P02 V2.5.3 Notebook Resizer Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v253-notebook-resizer-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.3-notebook-resizer-hotfix
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare exact V2.5.3 runtime
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test -n '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.3'
+          test -s public/assets/v253-hotfix.css
+          grep -Fq 'assets/v253-hotfix.css' public/index.php
+          php -l public/index.php >/dev/null
+          node --check public/assets/app.js
+          node --check public/assets/editor-enhancements.js
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl >/dev/null
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Real edit and split resizer regression
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: 'P02-V253-${{ github.run_id }}-${{ github.run_attempt }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-v253"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = '2.5.3'
+          test -s "$SITE/assets/v253-hotfix.css"
+          php -d display_errors=0 -S 127.0.0.1:18193 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18193/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie.txt" http://127.0.0.1:18193/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie.txt" -c "$ROOT/cookie.txt" -H 'Origin: http://127.0.0.1:18193' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18193/setup.php)" = 303
+
+          cat > .v253-resizer.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          let page=await context.newPage();
+          const errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+          const url='http://127.0.0.1:18193/';
+          await page.goto(url,{waitUntil:'networkidle'});
+          let sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          if(!sess?.site?.auth){
+            await page.locator('[data-open-login]').click();
+            await page.locator('#loginForm input[name="password"]').fill(process.env.AUDIT_PASSWORD);
+            await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          }
+          const csrf=sess.csrf;
+          const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+          const c=await post('category_save',{name:'V253 Resizer Audit',description:'',icon:'folder'}); const cid=Number(c.id); if(!cid)throw new Error('category create failed');
+          const i=await post('content_save',{category_id:cid,title:'V2.5.3 编辑列表拖动验证',description:'resizer regression',content:'# V2.5.3\n\n编辑状态下标题列表边界必须可拖动，并且宽度需要记忆。\n\n## 第二节\n\nSplit 模式也必须保持同样行为。',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'}); const iid=Number(i.id); if(!iid)throw new Error('item create failed');
+
+          async function openMode(mode){
+            await page.evaluate(async({cid,iid,mode})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode(mode,true)},{cid,iid,mode});
+            await page.waitForFunction(({iid,mode})=>Number(state.readerItem?.id)===iid&&state.articleMode===mode,{iid,mode},{timeout:10000});
+            await page.locator('#articleSource').waitFor({state:'visible'});
+          }
+          const snap=async label=>await page.evaluate(label=>{
+            const q=s=>document.querySelector(s), r=e=>e?.getBoundingClientRect(), cs=e=>e?getComputedStyle(e):null;
+            const l=q('#notebookLayout'), n=q('#notebookListPane'), z=q('#notebookResizer'), d=q('#notebookDetailScroll'), ta=q('#articleSource');
+            return {label,viewport:innerWidth,mode:state.articleMode,collapsed:state.notebookListCollapsed,grid:cs(l)?.gridTemplateColumns,list:r(n)?.width||0,resizer:r(z)?.width||0,detail:r(d)?.width||0,textarea:r(ta)?.width||0,custom:l?.style.getPropertyValue('--notebook-list-width')||'',stored:localStorage.getItem('vftb-notebook-pane-width'),scrollW:document.documentElement.scrollWidth,clientW:document.documentElement.clientWidth};
+          },label);
+          async function dragBy(delta){
+            const box=await page.locator('#notebookResizer').boundingBox(); if(!box)throw new Error('resizer missing');
+            const x=box.x+Math.max(1,box.width/2), y=box.y+Math.min(110,Math.max(28,box.height*.18));
+            await page.mouse.move(x,y); await page.mouse.down(); await page.mouse.move(x+delta,y,{steps:10}); await page.mouse.up(); await page.waitForTimeout(100);
+          }
+          function assertThreeTrack(s){if(s.list<200||s.resizer<5||!s.grid||s.grid.split(' ').length<3)throw new Error('three-track notebook grid missing '+JSON.stringify(s));}
+          function assertNoOverflow(s){if(s.scrollW>s.clientW+1)throw new Error('horizontal overflow '+JSON.stringify(s));}
+
+          await openMode('edit');
+          let before=await snap('edit-before'); assertThreeTrack(before); assertNoOverflow(before);
+          await dragBy(80); let after=await snap('edit-after');
+          if(after.list<before.list+55)throw new Error('edit list width did not follow drag '+JSON.stringify({before,after}));
+          if(after.detail>before.detail-40)throw new Error('edit detail did not yield width '+JSON.stringify({before,after}));
+          if(!after.custom||!after.stored)throw new Error('width was not persisted '+JSON.stringify(after));
+          assertNoOverflow(after);
+          const remembered=Math.round(after.list);
+
+          await page.evaluate(()=>state.workspaceController.setMode('split',true));
+          await page.waitForFunction(()=>state.articleMode==='split');
+          let splitBefore=await snap('split-before'); assertThreeTrack(splitBefore);
+          await dragBy(-55); let splitAfter=await snap('split-after');
+          if(splitAfter.list>splitBefore.list-35)throw new Error('split list width did not follow drag '+JSON.stringify({splitBefore,splitAfter}));
+          assertNoOverflow(splitAfter);
+          const splitRemembered=Math.round(splitAfter.list);
+
+          await page.evaluate(()=>toggleNotebookListCollapsed(true)); await page.waitForFunction(()=>state.notebookListCollapsed===true); await page.waitForTimeout(80);
+          const collapsed=await snap('collapsed'); if(collapsed.list>2||collapsed.resizer>2)throw new Error('collapsed list did not reclaim space '+JSON.stringify(collapsed));
+          await page.evaluate(()=>toggleNotebookListCollapsed(false)); await page.waitForFunction(()=>state.notebookListCollapsed===false); await page.waitForTimeout(100);
+          const restored=await snap('restored'); if(Math.abs(restored.list-splitRemembered)>3)throw new Error('restored list lost chosen width '+JSON.stringify({splitRemembered,restored}));
+
+          const ta=page.locator('#articleSource'); const fontBefore=await ta.evaluate(el=>parseFloat(getComputedStyle(el).fontSize)); await page.locator('[data-vf-editor-action="font-larger"]').first().click(); const fontAfter=await ta.evaluate(el=>parseFloat(getComputedStyle(el).fontSize)); if(!(fontAfter>fontBefore))throw new Error('prior font-size hotfix regressed');
+
+          for(const vp of [{w:1920,h:1080},{w:1440,h:900},{w:1024,h:768}]){
+            await page.setViewportSize({width:vp.w,height:vp.h}); await page.waitForTimeout(80); await openMode('edit'); const s=await snap('desktop-'+vp.w); assertThreeTrack(s); assertNoOverflow(s);
+          }
+          for(const vp of [{w:900,h:900},{w:768,h:1024},{w:430,h:932},{w:390,h:844}]){
+            await page.setViewportSize({width:vp.w,height:vp.h}); await page.waitForTimeout(100); await openMode('edit'); const s=await snap('responsive-'+vp.w); assertNoOverflow(s); if(s.textarea<Math.min(280,vp.w*.65))throw new Error('responsive editor too narrow '+JSON.stringify(s));
+          }
+
+          await page.setViewportSize({width:1440,height:900}); await page.close(); page=await context.newPage(); page.on('pageerror',e=>errors.push(String(e))); await page.goto(url,{waitUntil:'networkidle'}); await page.waitForFunction(()=>typeof state!=='undefined'&&state.site?.auth===true);
+          await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid}); await page.waitForFunction(()=>state.articleMode==='edit');
+          const sessionRestored=await snap('new-page-restored'); if(Math.abs(sessionRestored.list-splitRemembered)>3)throw new Error('new page did not restore list width '+JSON.stringify({splitRemembered,sessionRestored}));
+          if(errors.length)throw new Error(errors.join(' | '));
+          console.log('P02_V253_NOTEBOOK_RESIZER=PASS '+JSON.stringify({before,after,remembered,splitBefore,splitAfter,restored,fontBefore,fontAfter,sessionRestored}));
+          await browser.close();
+          JS
+          node .v253-resizer.mjs
+
+      - name: Repository privacy and source sanity
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/repository-gates.py
+          php -l public/index.php >/dev/null
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.3'
+          echo P02_V253_NOTEBOOK_RESIZER_VERIFY=PASS
+          echo SCHEMA=2401
+          echo MIGRATION=NONE
+          echo PRODUCTION_WRITE=NO
+          echo PRIVATE_SOURCE_PERSISTED=NO
+
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: |
+          if test -f "$RUNNER_TEMP/p02-v253/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-v253/server.pid")" 2>/dev/null || true; fi
+          rm -rf "$RUNNER_TEMP/p02-v253" .v253-resizer.mjs node_modules package.json package-lock.json || true
