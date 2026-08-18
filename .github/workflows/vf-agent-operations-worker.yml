@@ -1,0 +1,65 @@
+name: VF Agent Operations Worker
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - 'vf-agent/triggers/**'
+
+permissions:
+  contents: read
+
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve sanitized trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          trigger="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | grep '^vf-agent/triggers/.*\.json$' | head -n1)"
+          test -n "$trigger"
+          python - "$trigger" <<'PY' >> "$GITHUB_ENV"
+          import json, sys
+          data=json.load(open(sys.argv[1], encoding='utf-8'))
+          print('VF_AGENT_REQUEST_ID='+str(data['request_id']))
+          print('VF_AGENT_REQUEST_HASH='+str(data['request_hash']))
+          PY
+
+      - name: Fetch exact operations source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}"
+          git clone --quiet --branch operations/v1-daily-use --single-branch "https://x-access-token:${VF_PRIVATE_READ_TOKEN}@github.com/llhzx2018/core-agent.git" core-agent
+          cd core-agent
+          git status --porcelain | grep -q '^' && exit 1 || true
+          git rev-parse HEAD | tee ../operations-source-sha.txt
+          test "$(cat VERSION)" = '1.0.0'
+
+      - name: Activate durable VF Agent request
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-agent
+          PYTHONPATH=src:operations python -m vf_agent.worker \
+            --request-id "$VF_AGENT_REQUEST_ID" \
+            --request-hash "$VF_AGENT_REQUEST_HASH" \
+            --result .evidence/vf-agent-worker-result.json
+
+      - name: Upload sanitized worker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VF_AGENT_OPERATIONS_WORKER_EVIDENCE
+          path: |
+            core-agent/.evidence/vf-agent-worker-result.json
+            operations-source-sha.txt
+          if-no-files-found: warn
+          retention-days: 3
