@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - triggers/p06-v011-browser-install-candidate.txt
+      - triggers/p06-v011-browser-install-candidate-v2.txt
 
 permissions:
   contents: read
@@ -69,6 +69,8 @@ jobs:
           grep -Fq 'README_FIRST_INSTALL.txt' /tmp/full-list
           ! grep -Eq '(^|[[:space:]])(src|bin|database|vendor|public|storage)/' /tmp/full-list
           unzip -p dist/VF_Press_V0.1.1_UPDATE.zip VF_UPDATE.json | grep -Fq '"target_version": "0.1.1"'
+          echo FULL_ROOT_INDEX=PASS
+          echo FULL_ROOT_PRIVATE_SOURCE_ABSENT=PASS
 
       - name: Real browser-first install HTTP E2E
         working-directory: source
@@ -76,7 +78,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           WEB=/tmp/vfpress-webroot
-          rm -rf "$WEB" /tmp/.vfpress-webroot-vfpress-runtime /tmp/.vfpress-webroot-vfpress-data
+          RUNTIME=/tmp/.vfpress-webroot-vfpress-runtime
+          DATA=/tmp/.vfpress-webroot-vfpress-data
+          rm -rf "$WEB" "$RUNTIME" "$DATA" /tmp/vfpress-server.log /tmp/cookies
           mkdir -p "$WEB"
           unzip -q dist/VF_Press_V0.1.1_FULL.zip -d "$WEB"
           test -f "$WEB/index.php"
@@ -84,16 +88,26 @@ jobs:
           test ! -d "$WEB/vendor"
           cat >/tmp/vfpress-router.php <<'PHP'
           <?php
-          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
-          $file='/tmp/vfpress-webroot'.$path;
-          if ($path!=='/' && (is_file($file)||is_link($file))) return false;
+          $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+          $file = '/tmp/vfpress-webroot' . $path;
+          if ($path !== '/' && (is_file($file) || is_link($file))) {
+              return false;
+          }
           require '/tmp/vfpress-webroot/index.php';
           PHP
+          php -l /tmp/vfpress-router.php
           php -S 127.0.0.1:18777 -t "$WEB" /tmp/vfpress-router.php >/tmp/vfpress-server.log 2>&1 &
           PID=$!
           trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-webroot-vfpress-runtime /tmp/.vfpress-webroot-vfpress-data' EXIT
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18777/ >/tmp/install.html && break; sleep 1; done
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18777/ >/tmp/install.html; then READY=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null; then echo 'PHP_SERVER_DIED'; cat /tmp/vfpress-server.log; exit 1; fi
+            sleep 1
+          done
+          if [ "$READY" != 1 ]; then echo 'PHP_SERVER_NOT_READY'; cat /tmp/vfpress-server.log; exit 1; fi
           grep -Fq '开始安装 VF Press' /tmp/install.html
+          curl -fsS -c /tmp/cookies http://127.0.0.1:18777/ >/tmp/install.html
           CSRF=$(python3 - <<'PY'
           import re
           s=open('/tmp/install.html',encoding='utf-8').read()
@@ -110,17 +124,17 @@ jobs:
             --data-urlencode 'display_name=Owner Test' \
             --data-urlencode 'password=synthetic-browser-install-2026' \
             --data-urlencode 'password_confirm=synthetic-browser-install-2026'
-          grep -Eq '^HTTP/1.1 303' /tmp/install.headers
+          if ! grep -Eq '^HTTP/1.1 303' /tmp/install.headers; then cat /tmp/install.headers; cat /tmp/install.post; cat /tmp/vfpress-server.log; exit 1; fi
           grep -Fiq 'Location: /login' /tmp/install.headers
           test -f "$WEB/.vfpress-bootstrap.php"
           test ! -f "$WEB/.vfpress-runtime.php"
           test -L "$WEB/assets"
-          test -d /tmp/.vfpress-webroot-vfpress-runtime
-          test -d /tmp/.vfpress-webroot-vfpress-data
-          test -f /tmp/.vfpress-webroot-vfpress-data/app.db
-          test "$(cat /tmp/.vfpress-webroot-vfpress-runtime/VERSION)" = '0.1.1'
-          test "$(sqlite3 /tmp/.vfpress-webroot-vfpress-data/app.db 'select max(version) from schema_migrations;')" = '2'
-          test "$(sqlite3 /tmp/.vfpress-webroot-vfpress-data/app.db 'pragma integrity_check;')" = 'ok'
+          test -d "$RUNTIME"
+          test -d "$DATA"
+          test -f "$DATA/app.db"
+          test "$(cat "$RUNTIME/VERSION")" = '0.1.1'
+          test "$(sqlite3 "$DATA/app.db" 'select max(version) from schema_migrations;')" = '2'
+          test "$(sqlite3 "$DATA/app.db" 'pragma integrity_check;')" = 'ok'
           curl -fsS -c /tmp/cookies -b /tmp/cookies http://127.0.0.1:18777/login >/tmp/login.html
           grep -Fq '私人出版工作台' /tmp/login.html
           LOGIN_CSRF=$(python3 - <<'PY'
@@ -147,19 +161,71 @@ jobs:
           grep -Fq '"schema":2' /tmp/health.json
           echo BROWSER_FIRST_INSTALL_E2E=PASS
 
-      - name: Legacy unpack compatibility E2E
+      - name: Legacy V0.1.0 unpack compatibility E2E
         working-directory: source
         shell: bash
         run: |
           set -Eeuo pipefail
           WEB=/tmp/vfpress-legacy-webroot
-          rm -rf "$WEB" /tmp/.vfpress-legacy-webroot-vfpress-runtime /tmp/.vfpress-legacy-webroot-vfpress-data
-          mkdir -p "$WEB"
-          mkdir -p "$WEB/src" "$WEB/public" "$WEB/bin" "$WEB/vendor" "$WEB/storage"
-          echo legacy > "$WEB/storage/keep-me.txt"
+          RUNTIME=/tmp/.vfpress-legacy-webroot-vfpress-runtime
+          DATA=/tmp/.vfpress-legacy-webroot-vfpress-data
+          rm -rf "$WEB" "$RUNTIME" "$DATA" /tmp/vfpress-legacy-server.log /tmp/legacy-cookies
+          mkdir -p "$WEB/src" "$WEB/public" "$WEB/bin" "$WEB/vendor" "$WEB/database" "$WEB/docs" "$WEB/storage"
+          echo legacy-preserve-me > "$WEB/storage/keep-me.txt"
           unzip -q dist/VF_Press_V0.1.1_FULL.zip -d "$WEB"
-          grep -Fq 'index.php' <(unzip -l dist/VF_Press_V0.1.1_FULL.zip)
-          echo LEGACY_LAYOUT_DETECTION_FIXTURE=PASS
+          cat >/tmp/vfpress-legacy-router.php <<'PHP'
+          <?php
+          $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+          $file = '/tmp/vfpress-legacy-webroot' . $path;
+          if ($path !== '/' && (is_file($file) || is_link($file))) {
+              return false;
+          }
+          require '/tmp/vfpress-legacy-webroot/index.php';
+          PHP
+          php -l /tmp/vfpress-legacy-router.php
+          php -S 127.0.0.1:18778 -t "$WEB" /tmp/vfpress-legacy-router.php >/tmp/vfpress-legacy-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-legacy-webroot-vfpress-runtime /tmp/.vfpress-legacy-webroot-vfpress-data' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/legacy-cookies http://127.0.0.1:18778/ >/tmp/legacy-install.html; then READY=1; break; fi
+            if ! kill -0 "$PID" 2>/dev/null; then cat /tmp/vfpress-legacy-server.log; exit 1; fi
+            sleep 1
+          done
+          if [ "$READY" != 1 ]; then cat /tmp/vfpress-legacy-server.log; exit 1; fi
+          grep -Fq '检测到旧式 FULL 解压结构' /tmp/legacy-install.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/legacy-install.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/legacy-install.headers -o /tmp/legacy-install.post -c /tmp/legacy-cookies -b /tmp/legacy-cookies \
+            -X POST http://127.0.0.1:18778/ \
+            --data-urlencode "_csrf=$CSRF" \
+            --data-urlencode 'site_name=科瓦罗出版兼容测试' \
+            --data-urlencode 'username=legacy-owner' \
+            --data-urlencode 'display_name=Legacy Owner' \
+            --data-urlencode 'password=synthetic-legacy-install-2026' \
+            --data-urlencode 'password_confirm=synthetic-legacy-install-2026'
+          if ! grep -Eq '^HTTP/1.1 303' /tmp/legacy-install.headers; then cat /tmp/legacy-install.post; cat /tmp/vfpress-legacy-server.log; exit 1; fi
+          test -f "$DATA/keep-me.txt"
+          grep -Fq 'legacy-preserve-me' "$DATA/keep-me.txt"
+          test ! -d "$WEB/src"
+          test ! -d "$WEB/public"
+          test ! -d "$WEB/bin"
+          test ! -d "$WEB/vendor"
+          test ! -d "$WEB/database"
+          test ! -d "$WEB/docs"
+          test ! -d "$WEB/storage"
+          test -f "$WEB/index.php"
+          test -f "$WEB/.vfpress-bootstrap.php"
+          test ! -f "$WEB/.vfpress-runtime.php"
+          test "$(sqlite3 "$DATA/app.db" 'pragma integrity_check;')" = 'ok'
+          curl -fsS http://127.0.0.1:18778/health | grep -Fq '"version":"0.1.1"'
+          echo LEGACY_V010_UNPACK_COMPATIBILITY=PASS
 
       - name: Cleanliness
         working-directory: source
