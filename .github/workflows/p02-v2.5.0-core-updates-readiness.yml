@@ -1,0 +1,124 @@
+name: P02 V2.5.0 Core Updates Readiness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2.5.0-core-updates-readiness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CORE_UPDATES_REF: 47fda163ad37bb2881f8aeb4a7c3090204736630
+      PRODUCT_REF: 1dd46dd7ca944a73e31b937b1f7290327cfb8328
+      RELEASE_ID: '372288362'
+      UPDATE_NAME: VF_Library_V2.5.0_UPDATE.zip
+      UPDATE_BYTES: '305939'
+      UPDATE_SHA256: a59a87cc4de35e96a3896c58d57c3c6ad549c78ca97631ffd158d6bbd3c564fb
+    steps:
+      - name: Require registered private read capability
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo VF_PRIVATE_READ_TOKEN_MISSING; exit 78; }
+          echo REGISTERED_PRIVATE_READ=PASS
+
+      - name: Checkout exact core-updates authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_UPDATES_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: updates
+
+      - name: Checkout exact V2.5.0 product tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: v2.5.0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: product
+
+      - name: Validate update authority identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C updates rev-parse HEAD)" = "$CORE_UPDATES_REF"
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.5.0'
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('updates/projects/P02.json',encoding='utf-8'))
+          expected={
+            'schema_version':'1.0','project_id':'P02','component_id':'APP','enabled':True,
+            'current_version':'2.4.26','target_version':'2.5.0','update_type':'ATOMIC',
+            'from_versions':['2.4.26'],'schema_from':'2401','schema_to':'2401',
+            'repository':'llhzx2018/vf-library','release_tag':'v2.5.0','release_id':int(os.environ['RELEASE_ID']),
+            'product_identity':os.environ['PRODUCT_REF'],'asset_name':os.environ['UPDATE_NAME'],
+            'asset_bytes':int(os.environ['UPDATE_BYTES']),'asset_sha256':os.environ['UPDATE_SHA256'],
+            'backup_required':True,'rollback_supported':True,'released_at':'2026-08-18T11:17:01Z'
+          }
+          for k,v in expected.items(): assert m.get(k)==v,(k,m.get(k),v)
+          print('CORE_UPDATES_AUTHORITY=PASS')
+          PY
+
+      - name: Remote GitHub Release and update asset readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release view v2.5.0 --repo llhzx2018/vf-library --json databaseId,tagName,isDraft,isPrerelease,assets > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json,os,sys
+          x=json.load(open(sys.argv[1])); assert int(x['databaseId'])==int(os.environ['RELEASE_ID']); assert x['tagName']=='v2.5.0' and not x['isDraft'] and not x['isPrerelease']
+          assets={a['name']:a for a in x['assets']}; a=assets[os.environ['UPDATE_NAME']]; assert int(a['size'])==int(os.environ['UPDATE_BYTES'])
+          print('REMOTE_RELEASE_METADATA=PASS')
+          PY
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download v2.5.0 --repo llhzx2018/vf-library --pattern "$UPDATE_NAME" --dir "$RUNNER_TEMP/readback"
+          test "$(stat -c %s "$RUNNER_TEMP/readback/$UPDATE_NAME")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/readback/$UPDATE_NAME" | awk '{print $1}')" = "$UPDATE_SHA256"
+          echo REMOTE_UPDATE_BYTES_SHA256=PASS
+
+      - name: UpdateCore availability and package verification
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/check.php" <<'PHP'
+          <?php
+          require getcwd().'/product/src/app/CoreUpdates/UpdateCore.php';
+          $manifest=json_decode(file_get_contents(getcwd().'/updates/projects/P02.json'),true);
+          $core=new \CoreUpdates\UpdateCore('P02','APP');
+          $available=$core->check('2.4.26','2401',$manifest);
+          $verified=$core->verifyPackage(getenv('RUNNER_TEMP').'/readback/'.getenv('UPDATE_NAME'),$manifest);
+          $latest=$core->check('2.5.0','2401',$manifest);
+          $wrongSchema=$core->check('2.4.26','9999',$manifest);
+          echo json_encode(['available'=>$available,'verified'=>$verified,'latest'=>$latest,'wrong_schema'=>$wrongSchema],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE),"\n";
+          if(($available['status']??'')!=='AVAILABLE')exit(2);
+          if(($verified['status']??'')!=='VERIFIED')exit(3);
+          if(($latest['status']??'')!=='UP_TO_DATE')exit(4);
+          if(($wrongSchema['status']??'')!=='BLOCKED_SCHEMA')exit(5);
+          PHP
+          RUNNER_TEMP="$RUNNER_TEMP" UPDATE_NAME="$UPDATE_NAME" php "$RUNNER_TEMP/check.php"
+          echo CORE_UPDATES_RUNTIME_READINESS=PASS
+
+      - name: Public-safe readiness summary
+        if: always()
+        run: |
+          echo P02=VF_LIBRARY
+          echo CURRENT=2.4.26
+          echo TARGET=2.5.0
+          echo CORE_UPDATES_REF=$CORE_UPDATES_REF
+          echo RELEASE_ID=$RELEASE_ID
+          echo UPDATE_BYTES=$UPDATE_BYTES
+          echo UPDATE_SHA256=$UPDATE_SHA256
+          echo PRODUCTION_WRITE=NO
+          echo PRIVATE_SOURCE_PERSISTED=NO
