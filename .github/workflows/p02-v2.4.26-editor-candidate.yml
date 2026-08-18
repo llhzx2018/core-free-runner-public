@@ -89,7 +89,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           SITE="$RUNNER_TEMP/p02-editor-site"
-          COOKIE="$RUNNER_TEMP/p02-editor-cookie"
           bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
           test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = '2.4.26'
           php -d display_errors=0 -S 127.0.0.1:18132 -t "$SITE" >"$RUNNER_TEMP/p02-editor-php.log" 2>&1 &
@@ -98,21 +97,6 @@ jobs:
           for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18132/setup.php >/dev/null 2>&1 && break; sleep .25; done
           kill -0 "$SERVER_PID"
 
-          curl -fsS -c "$COOKIE" http://127.0.0.1:18132/setup.php > "$RUNNER_TEMP/setup.html"
-          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
-          import html,re,sys
-          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
-          assert m; print(html.unescape(m.group(1)))
-          PY
-          )
-          code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18132' --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" http://127.0.0.1:18132/setup.php)
-          test "$code" = 303
-          curl -fsS -b "$COOKIE" http://127.0.0.1:18132/api.php?action=session > "$RUNNER_TEMP/session.json"
-          python3 - "$RUNNER_TEMP/session.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok'] and x['site']['auth'] and x['version']=='2.4.26'
-          PY
-
           VF_EDITOR_BASE_URL=http://127.0.0.1:18132 node <<'NODE'
           const { chromium } = require('playwright');
           const assert = require('assert');
@@ -120,8 +104,17 @@ jobs:
             const browser = await chromium.launch({headless:true});
             const page = await browser.newPage({viewport:{width:1365,height:768}});
             const base = process.env.VF_EDITOR_BASE_URL;
-            await page.goto(base + '/', {waitUntil:'domcontentloaded'});
+            const password = process.env.TEST_PASSWORD;
+
+            await page.goto(base + '/setup.php', {waitUntil:'domcontentloaded'});
+            await page.locator('input[name="password"]').fill(password);
+            await page.locator('input[name="password_confirm"]').fill(password);
+            await Promise.all([
+              page.waitForURL(base + '/', {timeout:15000}),
+              page.locator('button[type="submit"]').click()
+            ]);
             await page.waitForSelector('#addContentBtn:not(.hidden)', {timeout:15000});
+
             await page.locator('#addContentBtn').click();
             const editor = page.locator('.content-editor').first();
             await editor.waitFor({state:'visible'});
@@ -160,6 +153,21 @@ jobs:
             assert.strictEqual(await page.locator('#vf-align-fixture').textContent(), '预览居中');
             assert.strictEqual(await page.locator('#vf-align-fixture').evaluate(el => getComputedStyle(el).textAlign), 'center');
 
+            await page.evaluate(() => {
+              const form=document.createElement('form');
+              form.id='vf-article-editor-fixture';
+              form.innerHTML='<select name="content_format"><option value="markdown" selected>Markdown</option><option value="code">Code</option></select><div class="article-source-pane"><textarea id="articleSource">文章工作台正文</textarea></div>';
+              document.body.appendChild(form);
+            });
+            const articleEditor = page.locator('#vf-article-editor-fixture #articleSource');
+            await page.waitForFunction(() => document.querySelector('#vf-article-editor-fixture #articleSource')?.dataset.vfEditorEnhanced === '1');
+            const articleToolbar = page.locator('#vf-article-editor-fixture .vf-editor-toolbar');
+            await articleToolbar.waitFor({state:'visible'});
+            assert.strictEqual(await articleEditor.evaluate(el => getComputedStyle(el).fontSize), '14px');
+            await articleEditor.evaluate(el => el.setSelectionRange(0, el.value.length));
+            await articleToolbar.locator('[data-vf-editor-action="h2"]').click();
+            assert.strictEqual(await articleEditor.inputValue(), '## 文章工作台正文');
+
             const format = page.locator('[name="content_format"]').first();
             if (await format.count()) {
               await format.selectOption('code');
@@ -172,7 +180,7 @@ jobs:
             assert.ok(overflow <= 1, 'mobile horizontal page overflow=' + overflow);
             assert.strictEqual(await toolbar.evaluate(el => getComputedStyle(el).overflowX), 'auto');
 
-            await page.locator('[data-vf-editor-action="font-larger"]').click();
+            await toolbar.locator('[data-vf-editor-action="font-larger"]').click();
             await page.reload({waitUntil:'domcontentloaded'});
             await page.locator('#addContentBtn').click();
             const persisted = page.locator('.content-editor').first();
