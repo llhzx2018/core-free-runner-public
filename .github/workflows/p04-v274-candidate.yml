@@ -1,0 +1,154 @@
+name: P04 VF Infra V2.7.4 Candidate Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v274-candidate.yml'
+      - 'requests/p04-v274-candidate-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p04-v274-public-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout public runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require temporary private-source credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_EPHEMERAL_CHECKOUT=AUTHORIZED'
+
+      - name: Checkout exact P04 candidate ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: candidate/v2.7.4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p04
+
+      - name: Bind exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_SHA="$(git -C p04 rev-parse HEAD)"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          test "$(tr -d '\r\n' < p04/VERSION)" = '2.7.4'
+          grep -Fq '"project_id": "P04"' p04/VF_PROJECT.json
+          grep -Fq '"runtime_version": "2.7.3"' p04/VF_PROJECT.json
+          git -C p04 merge-base --is-ancestor fe0f364c7da7a4592c21a9cc36eb6a8f9563c505 HEAD
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'V273_FORMAL_RELEASE_ANCESTRY=PASS'
+
+      - name: Repository health before transient dependencies
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          test ! -e database/migrations/015_ || exit 1
+          echo 'REPOSITORY_HEALTH=PASS'
+          echo 'MIGRATION_IMMUTABILITY=PASS'
+
+      - name: Prepare PHP 8.4 runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare ephemeral Chromium runtime
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+          echo 'PLAYWRIGHT_RUNTIME=PASS'
+
+      - name: Run V2.7.4 runtime consolidation gate
+        shell: bash
+        working-directory: p04
+        env:
+          VF_V274_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_SHA }}
+          VF_V274_EVIDENCE_DIR: ${{ runner.temp }}/p04-v274-evidence
+        run: bash scripts/run-v274-runtime-consolidation-gate.sh
+
+      - name: Verify no private source is staged for publication
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -z "$(git -C runner-control status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_IN_PUBLIC_GIT=NO'
+          echo 'PRIVATE_SOURCE_IN_PUBLIC_ARTIFACT=NO'
+
+      - name: Write sanitized durable evidence receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT='PASS'; else RESULT='FAIL'; fi
+          SOURCE="${SOURCE_SHA:-UNKNOWN}"
+          REPORT_SHA='UNAVAILABLE'
+          SCREENSHOTS='0'
+          if [ -f "$RUNNER_TEMP/p04-v274-evidence/V274_RUNTIME_CONSOLIDATION_REPORT.json" ]; then
+            REPORT_SHA="$(sha256sum "$RUNNER_TEMP/p04-v274-evidence/V274_RUNTIME_CONSOLIDATION_REPORT.json" | awk '{print $1}')"
+            SCREENSHOTS="$(find "$RUNNER_TEMP/p04-v274-evidence" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
+          fi
+          mkdir -p runner-control/evidence/p04
+          cat > runner-control/evidence/p04/P04_V274_CANDIDATE_LATEST.txt <<EOF
+          P04_V274_CANDIDATE=$RESULT
+          SOURCE_REPOSITORY=llhzx2018/vf-infra
+          SOURCE_REF=candidate/v2.7.4
+          SOURCE_SHA=$SOURCE
+          PRODUCTION_VERSION=2.7.3
+          TARGET_VERSION=2.7.4
+          SCHEMA=14
+          MIGRATION=NONE
+          V273_FORMAL_RELEASE_ANCESTRY=PASS_REQUIRED
+          RUNTIME_CONSOLIDATION_GATE=$RESULT
+          REPORT_SHA256=$REPORT_SHA
+          SCREENSHOT_COUNT=$SCREENSHOTS
+          RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
+          PRIVATE_SOURCE_IN_PUBLIC_GIT=NO
+          PRIVATE_SOURCE_IN_PUBLIC_ARTIFACT=NO
+          PRIVATE_READ_TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=0
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p04/P04_V274_CANDIDATE_LATEST.txt
+          if git diff --cached --quiet; then
+            echo 'EVIDENCE_ALREADY_CURRENT=YES'
+          else
+            git commit -m "evidence(P04): V2.7.4 candidate $RESULT $SOURCE"
+            git push origin HEAD:main
+          fi
+          echo "P04_V274_CANDIDATE=$RESULT"
