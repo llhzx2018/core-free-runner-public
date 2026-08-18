@@ -1,0 +1,89 @@
+name: P02 V2.5.0 UAUI Final 3
+on:
+  pull_request:
+    branches: [main]
+    paths: ['p02-v250-final3-trigger.txt']
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: task/v2.5.0-runtime-uaui
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify runtime and browser behavior
+        working-directory: p02
+        env: {AUDIT_PASSWORD: 'P02-V250F3-${{ github.run_id }}-${{ github.run_attempt }}!'}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl
+          php -l public/index.php
+          find public src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          node --check public/assets/app.js
+          node --check public/assets/editor-enhancements.js
+          node --check public/assets/v250-uaui.js
+          python3 scripts/repository-gates.py
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          ROOT="$RUNNER_TEMP/p02-final3"; SITE="$ROOT/site"; mkdir -p "$SITE"; bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test -s "$SITE/assets/v250-uaui.css"; test -s "$SITE/assets/v250-uaui.js"; test -s "$SITE/assets/v250-reader-scale.css"
+          php -d display_errors=0 -S 127.0.0.1:18158 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18158/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie.txt" http://127.0.0.1:18158/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie.txt" -c "$ROOT/cookie.txt" -H 'Origin: http://127.0.0.1:18158' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18158/setup.php)" = 303
+          cat > .final3.mjs <<'JS'
+          import {chromium} from 'playwright';
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1440,height:900}});
+          const errors=[];page.on('pageerror',e=>errors.push('pageerror:'+String(e)));page.on('console',m=>{if(m.type()==='error'&&!/409 \(Conflict\)/.test(m.text()))errors.push('console:'+m.text())});
+          const box=async s=>{const l=page.locator(s).first();return await l.isVisible()?await l.boundingBox():null};
+          const overlap=(a,b)=>!!(a&&b&&Math.max(0,Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y))>0);
+          await page.goto('http://127.0.0.1:18158/',{waitUntil:'networkidle'});
+          let sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          if(!sess.site.auth){await page.locator('[data-open-login]').click();await page.locator('#loginForm input[name="password"]').fill(process.env.AUDIT_PASSWORD);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json()).site.auth);sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json())}
+          if(await page.evaluate(()=>state.contentView)!=='notebook')throw new Error('fresh default workspace is not notebook');
+          const csrf=sess.csrf;const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+          const c=await post('category_save',{name:'V250 Final3',description:'',icon:'folder'});if(!c.ok)throw new Error('category seed');const cid=Number(c.id);
+          const i=await post('content_save',{category_id:cid,title:'V2.5.0 Final3',description:'摘要只在用户主动选择摘要模式时显示。',content:'# V2.5.0 Final3\n\n正文阅读验证。\n\n## 第二节\n\n'+('舒适阅读需要合适字号、行距、字重和内容宽度。 '.repeat(120)),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});if(!i.ok)throw new Error('item seed');const iid=Number(i.id);
+          if(!(await post('content_favorite',{id:iid,favorite:true})).ok)throw new Error('favorite action');
+          await page.reload({waitUntil:'networkidle'});
+          await page.evaluate(async cid=>{await setContentView('list');await selectCategory(cid)},cid);await page.waitForFunction(iid=>state.items.some(x=>Number(x.id)===iid),iid,{timeout:10000});await page.locator('[data-item-row="'+iid+'"]').waitFor({state:'visible'});
+          await page.waitForFunction(()=>document.body.dataset.v250ListMode==='minimal');const sel=page.locator('select[data-v250-list-mode]').first();await sel.waitFor({state:'visible'});if(await page.locator('[data-item-row="'+iid+'"] .content-meta').isVisible())throw new Error('minimal mode meta visible');
+          await sel.selectOption('standard');await page.waitForFunction(()=>document.body.dataset.v250ListMode==='standard');
+          await sel.selectOption('summary');await page.waitForFunction(()=>document.body.dataset.v250ListMode==='summary');await page.locator('[data-item-row="'+iid+'"] .v250-item-summary:not([hidden])').waitFor({state:'visible'});
+          await sel.selectOption('minimal');await page.waitForFunction(()=>document.body.dataset.v250ListMode==='minimal');
+          await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true)},{cid,iid});await page.waitForFunction(iid=>Number(state.readerItem?.id)===iid,iid,{timeout:10000});await page.locator('.markdown-body').first().waitFor({state:'visible'});
+          const typo=await page.evaluate(()=>{const r=document.querySelector('.markdown-body');return{body:parseFloat(getComputedStyle(document.body).fontSize),reader:parseFloat(getComputedStyle(r).fontSize),line:parseFloat(getComputedStyle(r).lineHeight),mode:document.body.dataset.v250ListMode}});if(typo.body<14.5||typo.reader<16.8||typo.line<29||typo.mode!=='minimal')throw new Error('typography '+JSON.stringify(typo));
+          const h=page.locator('#notebookResizer'),hb=await h.boundingBox();if(!hb)throw new Error('resizer missing');const w0=await page.evaluate(()=>state.notebookPaneWidth);await page.mouse.move(hb.x+3,hb.y+100);await page.mouse.down();await page.mouse.move(hb.x+73,hb.y+100,{steps:4});await page.mouse.up();const resize=await page.evaluate(()=>({w:state.notebookPaneWidth,s:Number(localStorage.getItem('vftb-notebook-pane-width'))}));if(resize.w<w0+40||Math.abs(resize.w-resize.s)>2)throw new Error('resize '+JSON.stringify({w0,resize}));
+          const visible=()=>page.locator('#sidebarRailToggle:visible,#notebookPaneCollapse:visible,#notebookPaneRestore:visible').count();if(await visible()!==2||await page.locator('#menuBtn:visible').count())throw new Error('duplicate pane controls');const before=await box('#notebookDetailScroll');
+          await page.locator('#notebookPaneCollapse').click();await page.waitForFunction(()=>state.notebookListCollapsed);await page.waitForTimeout(80);const afterList=await box('#notebookDetailScroll');if(!afterList||afterList.width<=before.width+150||await visible()!==2||overlap(await box('#sidebarRailToggle'),await box('#notebookPaneRestore')))throw new Error('list collapse');
+          await page.locator('#sidebarRailToggle').click();await page.waitForFunction(()=>state.sidebarCollapsed);await page.waitForTimeout(80);const afterBoth=await box('#notebookDetailScroll');if(!afterBoth||afterBoth.width<=afterList.width+100||await visible()!==2||overlap(await box('#sidebarRailToggle'),await box('#notebookPaneRestore')))throw new Error('both collapse');
+          await page.locator('#notebookPaneRestore').click();await page.locator('#sidebarRailToggle').click();await page.waitForFunction(()=>!state.notebookListCollapsed&&!state.sidebarCollapsed);
+          const fav=await page.evaluate(async iid=>Number((await(await fetch('/api.php?action=content_get&id='+iid,{cache:'no-store'})).json()).item?.is_favorite||0),iid);if(fav!==1)throw new Error('favorite parity '+fav);
+          await page.evaluate(async()=>await state.workspaceController.setMode('edit',true));await page.locator('#articleSource').waitFor({state:'visible'});await page.locator('.vf-editor-toolbar').first().waitFor({state:'visible'});if(await page.locator('#articleSource').evaluate(el=>parseFloat(getComputedStyle(el).fontSize))<15.5)throw new Error('editor font');await page.evaluate(async()=>await state.workspaceController.setMode('read',true));
+          await page.locator('#themeBtn').click();await page.waitForFunction(()=>document.documentElement.getAttribute('data-theme')==='dark');const dark=await page.evaluate(()=>getComputedStyle(document.body).backgroundColor);if(dark==='rgb(247, 247, 247)'||dark==='rgb(255, 255, 255)')throw new Error('dark theme');await page.locator('#themeBtn').click();
+          for(const [w,h2] of [[1920,1080],[1440,900],[1024,820],[768,900],[390,844]]){await page.setViewportSize({width:w,height:h2});await page.waitForTimeout(80);const m=await page.evaluate(()=>[document.documentElement.clientWidth,document.documentElement.scrollWidth]);if(m[1]>m[0]+3)throw new Error('horizontal overflow '+w+' '+m)}
+          await page.setViewportSize({width:1440,height:900});await page.locator('#accountBtn').click();const d=page.locator('[data-dialog-confirm]');if(await d.count())await d.click();await page.waitForFunction(async()=>!(await(await fetch('/api.php?action=session',{cache:'no-store'})).json()).site.auth);await page.locator('[data-open-login]').waitFor({state:'visible'});await page.locator('[data-open-login]').click();await page.locator('#loginForm input[name="password"]').fill(process.env.AUDIT_PASSWORD);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json()).site.auth);
+          if(errors.length)throw new Error(errors.join(' | '));console.log('P02_V250_FINAL3_PASS='+JSON.stringify({typo,resize,before,afterList,afterBoth,dark}));await browser.close();
+          JS
+          node .final3.mjs
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: |
+          if test -f "$RUNNER_TEMP/p02-final3/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-final3/server.pid")" 2>/dev/null || true; fi
+          rm -rf "$RUNNER_TEMP/p02-final3" .final3.mjs node_modules package.json package-lock.json || true
