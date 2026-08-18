@@ -1,0 +1,155 @@
+name: P04 VF Infra V2.7.5 Candidate Gate PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v275-candidate-pr-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v275-candidate-gate-pr
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '35cf27b310a84e621c37429538034f9734c76f49'
+  PRODUCTION_COMMIT: '3e6a18b893e42467e18913facf286ca2bc420f16'
+  PRODUCTION_VERSION: '2.7.4'
+  TARGET_VERSION: '2.7.5'
+  SCHEMA: '14'
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact V2.7.5 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_COMMIT" "$SOURCE_COMMIT"
+          test ! -e candidate/database/migrations/015_
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          echo 'CANDIDATE_IDENTITY=PASS'
+          echo 'V274_PRODUCTION_ANCESTRY=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Exact final Candidate UA runtime gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V275_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V275_EVIDENCE_DIR: ${{ runner.temp }}/p04-v275-ui
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-v275-ua-workflow-gate.sh | tee "$RUNNER_TEMP/p04-v275-ui.log"
+          grep -Fxq 'P04_V275_UA_WORKFLOW_GATE_PASS' "$RUNNER_TEMP/p04-v275-ui.log"
+          grep -Fxq 'V275_VF_CYAN_VISUAL_CONTRACT=PASS' "$RUNNER_TEMP/p04-v275-ui.log"
+          grep -Fxq 'V275_BLACK_BRAND_PRIMARY=0' "$RUNNER_TEMP/p04-v275-ui.log"
+
+      - name: Build and validate exact V2.7.5 artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v275-artifacts"
+          python scripts/build-v275-candidate-artifacts.py --output "$OUT" | tee "$RUNNER_TEMP/p04-v275-build.log"
+          python scripts/validate-v275-candidate-artifacts.py --artifacts "$OUT" | tee "$RUNNER_TEMP/p04-v275-validate.log"
+          grep -Fxq 'P04_V275_CANDIDATE_ARTIFACT_PRE_GATE_PASS' "$RUNNER_TEMP/p04-v275-build.log"
+          grep -Fxq 'P04_V275_FORMAL_ARTIFACT_VALIDATION_PASS' "$RUNNER_TEMP/p04-v275-validate.log"
+          echo "ARTIFACT_DIR=$OUT" >> "$GITHUB_ENV"
+
+      - name: Download immutable V2.7.4 FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v274"
+          gh release download v2.7.4 -R llhzx2018/vf-infra --pattern 'VF_Infra_V2.7.4_FULL.zip' --dir "$RUNNER_TEMP/v274"
+          test -s "$RUNNER_TEMP/v274/VF_Infra_V2.7.4_FULL.zip"
+          echo 'V274_FULL_DOWNLOAD=PASS'
+
+      - name: FULL Runtime vs UPDATE result Source-Exact gate
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          python scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/v274/VF_Infra_V2.7.4_FULL.zip" \
+            --candidate-full "$ARTIFACT_DIR/VF_Infra_V2.7.5_FULL.zip" \
+            --candidate-update "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.5_UPDATE.zip" \
+            --expected-source-version 2.7.4 \
+            --expected-target-version 2.7.5
+          echo 'V275_FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS'
+
+      - name: Emit public-safe Candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['ARTIFACT_DIR'])
+          full=root/'VF_Infra_V2.7.5_FULL.zip'
+          update=root/'update-set/VF_Infra_V2.7.5_UPDATE.zip'
+          atomic=root/'update-set/VF_Infra_V2.7.5_ATOMIC.zip'
+          repair=root/'update-set/repair-v2.7.5.php'
+          runtime=json.loads((root/'runtime/release-manifest.json').read_text(encoding='utf-8'))
+          sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          assert update.read_bytes()==atomic.read_bytes()
+          print('P04_V275_CANDIDATE_GATE=PASS')
+          print('SOURCE_SHA='+os.environ['SOURCE_COMMIT'])
+          print('FULL_BYTES='+str(full.stat().st_size))
+          print('FULL_SHA256='+sha(full))
+          print('UPDATE_BYTES='+str(update.stat().st_size))
+          print('UPDATE_SHA256='+sha(update))
+          print('ATOMIC_SHA256='+sha(atomic))
+          print('REPAIR_SHA256='+sha(repair))
+          print('RUNTIME_FINGERPRINT='+runtime['source_fingerprint'])
+          print('SCHEMA=14')
+          print('MIGRATION=NONE')
+          print('PRODUCTION_WRITE=0')
+          print('RELEASE_WRITE=0')
+          PY
