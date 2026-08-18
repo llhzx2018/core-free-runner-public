@@ -1,0 +1,134 @@
+name: P06 VF Press V0.1.2 to V0.1.4 Real Online Update
+
+on:
+  pull_request:
+    branches: [gate/p06-v012-to-v014-real-update]
+    paths:
+      - triggers/p06-v012-to-v014-real-update.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 7a6b6d0d9a67013cdbf03a4445db12fcd0907473
+  TARGET_VERSION: 0.1.4
+  TARGET_SCHEMA: '3'
+
+jobs:
+  update_e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact installed V0.1.2 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: installed
+
+      - name: Prepare installed V0.1.2 runtime
+        working-directory: installed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.2'
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          rm -rf storage storage-restore-* dist
+          php bin/migrate.php | grep -Fq MIGRATION_PASS
+          test "$(sqlite3 storage/app.db 'select max(version) from schema_migrations;')" = 2
+          test "$(sqlite3 storage/app.db 'pragma integrity_check;')" = ok
+
+      - name: Verify current public manifest points to formal V0.1.4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json, urllib.request
+          url='https://raw.githubusercontent.com/llhzx2018/core-updates/main/projects/P06.json'
+          with urllib.request.urlopen(url, timeout=30) as r:
+              m=json.load(r)
+          c=m['current']
+          assert c['version']=='0.1.4', c
+          assert c['release_tag']=='v0.1.4', c
+          assert c['asset_name']=='VF_PRESS_V0.1.4_FULL.zip', c
+          assert c['asset_sha256']=='bd5990e31ca07879d67cdfbbd73bfd2d043b79442ff843e803ae88c440ad9370', c
+          assert int(c['package_schema_version'])==3, c
+          assert c['min_supported_from']=='0.1.2', c
+          print('P06_V014_MANIFEST=PASS')
+          PY
+
+      - name: Use real V0.1.2 service, current manifest and formal V0.1.4 asset
+        working-directory: installed
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p06-v014-real-update.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd() . '/vendor/autoload.php';
+          use VF\Press\Application\Operations\OnlineUpdateService;
+          use VF\Press\Infrastructure\Config\AppConfig;
+          use VF\Press\Infrastructure\Database\ConnectionFactory;
+          use VF\Press\Infrastructure\Recovery\RecoveryService;
+          use VF\Press\Infrastructure\Security\AuditLogger;
+          use VF\Press\Infrastructure\Update\VFPressUpdateAdapter;
+
+          $base=getcwd();
+          $config=AppConfig::fromEnvironment($base);$config->ensureRuntimeDirectories();
+          $pdo=ConnectionFactory::create($config);$audit=new AuditLogger($pdo);
+          $recovery=new RecoveryService($pdo,$audit,$config->storagePath,$config->databasePath);
+          $adapter=new VFPressUpdateAdapter($pdo,$config,$audit,$recovery);
+          $service=new OnlineUpdateService($pdo,$config,$audit,$adapter);
+          $before=$service->check();
+          echo 'BEFORE_STATUS='.($before['status']??'UNKNOWN').PHP_EOL;
+          echo 'BEFORE_VERSION='.$service->currentVersion().PHP_EOL;
+          if(($before['status']??'')!=='AVAILABLE'||($before['target_version']??'')!=='0.1.4') exit(20);
+          $result=$service->install();
+          echo 'INSTALL_STATUS='.($result['status']??'UNKNOWN').PHP_EOL;
+          echo 'ROLLBACK_RESULT='.($result['rollback_result']??'UNKNOWN').PHP_EOL;
+          if(!in_array(($result['status']??''),['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)) exit(21);
+          if(!is_array($result['backup_locator']??null)) exit(22);
+          clearstatcache(true,$base.'/VERSION');
+          $version=trim((string)file_get_contents($base.'/VERSION'));
+          echo 'AFTER_VERSION='.$version.PHP_EOL;
+          if($version!=='0.1.4') exit(23);
+          $schema=(string)(int)$pdo->query('SELECT MAX(version) FROM schema_migrations')->fetchColumn();
+          $integrity=(string)$pdo->query('PRAGMA integrity_check')->fetchColumn();
+          echo 'AFTER_SCHEMA='.$schema.PHP_EOL;
+          echo 'AFTER_INTEGRITY='.$integrity.PHP_EOL;
+          if($schema!=='3'||$integrity!=='ok') exit(24);
+          $after=$service->check();
+          echo 'AFTER_STATUS='.($after['status']??'UNKNOWN').PHP_EOL;
+          if(($after['status']??'')!=='UP_TO_DATE') exit(25);
+          $recoveries=(int)$pdo->query('SELECT COUNT(*) FROM recovery_points')->fetchColumn();
+          $runs=(int)$pdo->query("SELECT COUNT(*) FROM update_runs WHERE status IN ('COMMITTED','COMMITTED_WITH_CLEANUP_WARNING')")->fetchColumn();
+          if($recoveries<1||$runs<1) exit(26);
+          echo 'REAL_ONLINE_UPDATE_0.1.2_TO_0.1.4=PASS'.PHP_EOL;
+          PHP
+          php /tmp/p06-v014-real-update.php
+          test "$(cat VERSION)" = '0.1.4'
+          test "$(sqlite3 storage/app.db 'select max(version) from schema_migrations;')" = 3
+          test "$(sqlite3 storage/app.db 'pragma integrity_check;')" = ok
+          test -d storage/backups
+          test -d storage/update-source-backups
+          grep -Fq '出版工作台' public/index.php
+          test -f src/Support/UiText.php
+          echo P06_REAL_V014_UPDATE_CHAIN=PASS
+
+      - name: Safety cleanup
+        if: always()
+        working-directory: installed
+        shell: bash
+        run: |
+          rm -rf storage storage-restore-* dist
+          echo PRIVATE_SOURCE_PERSISTED=NO
+          echo TOKEN_EXPOSED=NO
+          echo PRODUCTION_WRITE=NO
