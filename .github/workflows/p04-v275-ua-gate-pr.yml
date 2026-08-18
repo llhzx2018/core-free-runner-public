@@ -1,0 +1,126 @@
+name: P04 VF Infra V2.7.5 UA Gate PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v275-ua-pr-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v275-ua-gate-pr
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '789fc18627ba4f48a2a0b13be825adb6ad877274'
+  PRODUCTION_COMMIT: '3e6a18b893e42467e18913facf286ca2bc420f16'
+  PRODUCTION_VERSION: '2.7.4'
+  TARGET_VERSION: '2.7.5'
+  SCHEMA: '14'
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Private source credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact P04 V2.7.5 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact source, ancestry and cyan contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_COMMIT" "$SOURCE_COMMIT"
+          test ! -e candidate/database/migrations/015_
+          grep -Fq -- '--vf-series-cyan:#0f766e' candidate/public/assets/v275-ua-workflow.css
+          grep -Fq 'body.v275-ua-workflow .v270-brand-mark' candidate/public/assets/v275-ua-workflow.css
+          grep -Fq 'body.v275-ua-workflow .v270-primary' candidate/public/assets/v275-ua-workflow.css
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'PRODUCTION_V274_ANCESTRY=PASS'
+          echo 'VF_CYAN_STATIC_CONTRACT=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Run V2.7.5 UA workflow gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V275_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V275_EVIDENCE_DIR: ${{ runner.temp }}/p04-v275-evidence
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-v275-ua-workflow-gate.sh | tee "$RUNNER_TEMP/p04-v275-gate.log"
+          grep -Fxq 'P04_V275_UA_WORKFLOW_GATE_PASS' "$RUNNER_TEMP/p04-v275-gate.log"
+
+      - name: Verify report contract
+        shell: bash
+        env:
+          EVIDENCE: ${{ runner.temp }}/p04-v275-evidence
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+          p=json.loads((pathlib.Path(os.environ['EVIDENCE'])/'V275_UA_WORKFLOW_REPORT.json').read_text(encoding='utf-8'))
+          assert p['status']=='PASS',p
+          assert p['version']=='2.7.5' and p['schema']==14 and p['migration']=='NONE',p
+          assert p['domain']=={'tld_filter':'PASS','expiry_sort':'PASS','tld_group':'PASS'},p['domain']
+          assert p['server']['filter_sort_group']=='PASS',p
+          assert p['provider']['filter_sort_group']=='PASS',p
+          assert p['navigation']['explicit_back']=='PASS',p
+          assert p['navigation']['previous_next']=='PASS',p
+          assert p['navigation']['list_state_restore']=='PASS',p
+          assert p['mobile']['no_overflow']=='PASS',p
+          assert p['page_errors']==[] and p['console_errors']==[],p
+          assert p['tested_runtime_commit']==os.environ['SOURCE_COMMIT'],p
+          print('P04_V275_UA_REPORT_CONTRACT=PASS')
+          PY
+
+      - name: Upload synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.5-UA-GATE-PR
+          path: |
+            ${{ runner.temp }}/p04-v275-evidence/*.png
+            ${{ runner.temp }}/p04-v275-evidence/V275_UA_WORKFLOW_REPORT.json
+            ${{ runner.temp }}/p04-v275-evidence/SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 7
