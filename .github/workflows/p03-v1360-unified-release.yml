@@ -1,0 +1,207 @@
+name: P03 V1.36.0 Unified Formal Release
+
+on:
+  push:
+    branches:
+      - release/p03-v1360-unified
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: llhzx2018/vf-forge
+  SOURCE_SHA: 8ee74268c9cd0196e6b2269154a257f6f0427fb9
+  VERSION_TARGET: '1.36.0'
+  VERSION_FROM: '1.35.4'
+  SCHEMA_TARGET: '30'
+  RELEASE_TAG: 'v1.36.0'
+  ASSET_NAME: 'VF_Forge_V1.36.0_Atomic_Upgrade.zip'
+  EVIDENCE_NAME: 'P03-V1.36.0-UNIFIED-RELEASE-PUBLIC-EVIDENCE'
+  FIXTURE_PASS: 'Vf1360-Runner-Fixture!'
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout public runner
+        uses: actions/checkout@v4
+
+      - name: Checkout exact private source
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q "https://x-access-token:${READ_TOKEN}@github.com/${SOURCE_REPO}.git" "$RUNNER_TEMP/source"
+          cd "$RUNNER_TEMP/source"
+          git checkout -q --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(cat VERSION)" = "$VERSION_TARGET"
+          test "$(cat database/schema/SCHEMA_VERSION)" = "$SCHEMA_TARGET"
+
+      - name: Product contract syntax and repository health
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          grep -Fq "define('VFAB_VERSION', '1.36.0');" src/app/bootstrap.php
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" src/app/bootstrap.php
+          grep -Fq 'PROJECT_ASSET_STORAGE_RETIRED' public/api.php
+          grep -Fq 'PROJECT-ASSET STORAGE = NONE' docs/authority/RPD.md
+          grep -Fq '需要关注' public/index.php
+          grep -Fq '设置' public/index.php
+          grep -Fq '版本与依据' public/assets/experience.js
+          grep -Fq '账户与安全' public/assets/experience.js
+          grep -Fq '备份与恢复' public/assets/experience.js
+          grep -Fq '更新与维护' public/assets/experience.js
+          ! grep -Fq '>今天<' public/index.php
+          python3 scripts/repo_health.py .
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 jq
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l > "$RUNNER_TEMP/php-lint.txt"
+          node --check public/assets/experience.js
+          git fetch -q origin main
+          test "$(git show origin/main:VERSION | tr -d '\r\n')" = "$VERSION_FROM"
+          test "$(git show origin/main:database/schema/SCHEMA_VERSION | tr -d '\r\n')" = "$SCHEMA_TARGET"
+          git diff --exit-code origin/main..HEAD -- database/schema database/migrations
+
+      - name: Build exact base target and Atomic
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          TARGET="$RUNNER_TEMP/target-runtime"; BASE="$RUNNER_TEMP/base-runtime"; WT="$RUNNER_TEMP/base-worktree"
+          python3 scripts/build_runtime.py "$TARGET" >/dev/null
+          git worktree add --detach "$WT" origin/main >/dev/null
+          python3 "$WT/scripts/build_runtime.py" "$BASE" >/dev/null
+          git worktree remove --force "$WT" >/dev/null
+          test -f "$TARGET/index.php" -a -f "$TARGET/memory-api.php" -a -f "$TARGET/assets/experience.js" -a -f "$TARGET/assets/experience.css"
+          BUILDER="$RUNNER_TEMP/build_atomic_v1360.py"; cp scripts/build_atomic.py "$BUILDER"
+          python3 - "$BUILDER" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text(encoding='utf-8')
+          s=s.replace('1.35.3','1.36.0').replace('1.35.2','1.35.4')
+          s=s.replace('TARGET_SCHEMA=29','TARGET_SCHEMA=30').replace('VFF_ATOMIC_SCHEMA=29','VFF_ATOMIC_SCHEMA=30')
+          s=s.replace("'maintenance.php','robots.txt'","'maintenance.php','memory-api.php','robots.txt'")
+          p.write_text(s,encoding='utf-8')
+          PY
+          grep -Fq "TARGET_VERSION='1.36.0'" "$BUILDER"
+          grep -Fq "TARGET_SCHEMA=30" "$BUILDER"
+          grep -Fq "ALLOWED_SOURCES=['1.35.4']" "$BUILDER"
+          grep -Fq "'memory-api.php'" "$BUILDER"
+          python3 "$BUILDER" --base-runtime "$BASE" --target-runtime "$TARGET" --output "$RUNNER_TEMP/release" >/dev/null
+          cd "$RUNNER_TEMP/release"
+          test -f "$ASSET_NAME"
+          sha256sum -c SHA256SUMS.txt
+          unzip -t "$ASSET_NAME"
+          test "$(unzip -Z1 "$ASSET_NAME" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "$ASSET_NAME")" = 'repair-v1.36.0.php'
+          unzip -p "$ASSET_NAME" repair-v1.36.0.php > "$RUNNER_TEMP/repair-v1.36.0.php"
+          php -l "$RUNNER_TEMP/repair-v1.36.0.php"
+          grep -Fq "const VFF_PACKAGE_ID='vf-forge';" "$RUNNER_TEMP/repair-v1.36.0.php"
+          grep -Fq "const VFF_ATOMIC_TARGET='1.36.0';" "$RUNNER_TEMP/repair-v1.36.0.php"
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=30;' "$RUNNER_TEMP/repair-v1.36.0.php"
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.35.4"];' "$RUNNER_TEMP/repair-v1.36.0.php"
+          ! unzip -Z1 "$ASSET_NAME" | grep -E '(^|/)(database|PRIVATE_DATA|uploads|backup|cache|session|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+
+      - name: Real 1.35.4 to 1.36.0 Atomic upgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          ROOT="$RUNNER_TEMP/upgrade-runtime"; DATA="$RUNNER_TEMP/upgrade-private"; COOKIE="$RUNNER_TEMP/upgrade-cookie"; URL='http://127.0.0.1:18092'
+          git worktree add --detach "$RUNNER_TEMP/upgrade-wt" origin/main >/dev/null
+          python3 "$RUNNER_TEMP/upgrade-wt/scripts/build_runtime.py" "$ROOT" >/dev/null
+          git worktree remove --force "$RUNNER_TEMP/upgrade-wt" >/dev/null
+          mkdir -p "$DATA"
+          php -S 127.0.0.1:18092 -t "$ROOT" >"$RUNNER_TEMP/upgrade-server.log" 2>&1 & echo $! > "$RUNNER_TEMP/upgrade.pid"
+          trap 'kill $(cat "$RUNNER_TEMP/upgrade.pid") 2>/dev/null || true' EXIT
+          for i in $(seq 1 80); do curl -fsS "$URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$URL/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $URL" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Upgrade Fixture' --data-urlencode "data_root=$DATA" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$URL/setup.php" > "$RUNNER_TEMP/setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"
+          LOGIN=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $URL" -H 'Content-Type: application/json' --data "$LOGIN" "$URL/api.php?action=login" -o "$RUNNER_TEMP/login.json"
+          python3 - "$RUNNER_TEMP/login.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));assert d['ok'] and d['version']=='1.35.4'
+          PY
+          unzip -p "$RUNNER_TEMP/release/$ASSET_NAME" repair-v1.36.0.php > "$ROOT/repair-v1.36.0.php"
+          curl -fsS -b "$COOKIE" "$URL/repair-v1.36.0.php" -o "$RUNNER_TEMP/repair.html"
+          RCSRF=$(python3 - "$RUNNER_TEMP/repair.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -b "$COOKIE" -H "Origin: $URL" --data-urlencode "_csrf=$RCSRF" --data-urlencode confirmation=UPGRADE "$URL/repair-v1.36.0.php" -o "$RUNNER_TEMP/result.html"
+          grep -q '升级完成' "$RUNNER_TEMP/result.html"
+          grep -Fq "define('VFAB_VERSION', '1.36.0');" "$ROOT/app/bootstrap.php"
+          grep -Fq '个人项目状态中心' "$ROOT/index.php"
+          test ! -e "$ROOT/repair-v1.36.0.php"
+          DB=$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1); test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok; test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          kill $(cat "$RUNNER_TEMP/upgrade.pid") 2>/dev/null || true; trap - EXIT
+
+      - name: Browser unified shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          ROOT="$RUNNER_TEMP/browser-runtime"; DATA="$RUNNER_TEMP/browser-private"; URL='http://127.0.0.1:18093'; mkdir -p "$DATA"; python3 scripts/build_runtime.py "$ROOT" >/dev/null
+          php -S 127.0.0.1:18093 -t "$ROOT" >"$RUNNER_TEMP/browser-server.log" 2>&1 & echo $! > "$RUNNER_TEMP/browser.pid"; trap 'kill $(cat "$RUNNER_TEMP/browser.pid") 2>/dev/null || true' EXIT
+          for i in $(seq 1 80); do curl -fsS "$URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$RUNNER_TEMP/browser-cookie" "$URL/setup.php" -o "$RUNNER_TEMP/browser-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/browser-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$RUNNER_TEMP/browser-cookie" -c "$RUNNER_TEMP/browser-cookie" -H "Origin: $URL" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Browser Fixture' --data-urlencode "data_root=$DATA" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$URL/setup.php" > "$RUNNER_TEMP/browser-post.txt"
+          npm init -y >/dev/null 2>&1; npm install --no-save playwright@1.55.0 >/dev/null; npx playwright install --with-deps chromium >/dev/null
+          cat > "$RUNNER_TEMP/gate.mjs" <<'JS'
+          import{chromium}from'playwright';const b=await chromium.launch({headless:true}),p=await b.newPage({viewport:{width:1440,height:900}}),e=[];p.on('pageerror',x=>e.push(x.message));p.on('console',m=>{if(m.type()==='error')e.push(m.text())});await p.goto('http://127.0.0.1:18093/');await p.fill('#loginPassword',process.env.FIXTURE_PASS);await p.click('#loginForm button[type=submit]');await p.waitForSelector('#app:not([hidden])');const s=await p.locator('.sidebar').innerText();for(const t of['项目','需要关注','归档','设置'])if(!s.includes(t))throw Error('missing '+t);if(s.includes('今天'))throw Error('Today returned');await p.click('[data-route="settings"]');let x=await p.locator('#view').innerText();for(const t of['基础','账户与安全','备份与恢复','更新与维护','系统信息'])if(!x.includes(t))throw Error('missing settings '+t);for(const v of[{width:1440,height:900},{width:390,height:844}]){await p.setViewportSize(v);for(const r of['projects','settings']){await p.click(`[data-route="${r}"]`);await p.waitForTimeout(80);const m=await p.evaluate(()=>[document.documentElement.scrollWidth,document.documentElement.clientWidth]);if(m[0]>m[1]+2)throw Error('overflow '+r+' '+v.width)}}if(e.length)throw Error(e.join('\n'));console.log('BROWSER_PASS errors=0 responsive=1440,390');await b.close();
+          JS
+          FIXTURE_PASS="$FIXTURE_PASS" node "$RUNNER_TEMP/gate.mjs"
+          kill $(cat "$RUNNER_TEMP/browser.pid") 2>/dev/null || true; trap - EXIT
+
+      - name: Publish private release and core-updates
+        id: pub
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$WRITE_TOKEN"; export GH_TOKEN="$WRITE_TOKEN"
+          ZIP="$RUNNER_TEMP/release/$ASSET_NAME"; SHA=$(sha256sum "$ZIP"|awk '{print $1}'); BYTES=$(stat -c '%s' "$ZIP")
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          P03 · VF Forge V1.36.0
+          Unified Project-first shell: Projects / Needs Attention / Archive; Search utility; Project Overview / Activity / Version & Authority; Settings / Security / Backup / Update / System Info in one product shell.
+          PROJECT-ASSET STORAGE = NONE. USER FILE UPLOAD = RETIRED. LOCAL ASSET REPOSITORY = RETIRED. Schema30 unchanged. Upgrade from V1.35.4.
+          EOF
+          if gh release view "$RELEASE_TAG" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+            REF=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha'); test "$REF" = "$SOURCE_SHA"; gh release upload "$RELEASE_TAG" "$ZIP" --repo "$SOURCE_REPO" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$ZIP" --repo "$SOURCE_REPO" --target "$SOURCE_SHA" --title 'VF Forge V1.36.0' --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          REL=$(gh api "repos/$SOURCE_REPO/releases/tags/$RELEASE_TAG"); RID=$(jq -r '.id'<<<"$REL"); AID=$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id'<<<"$REL"); RBYTES=$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size'<<<"$REL"); test "$RBYTES" = "$BYTES"
+          RELEASED=$(date -u +%Y-%m-%dT%H:%M:%SZ); M="$RUNNER_TEMP/P03.json"
+          jq -n --arg v "$VERSION_TARGET" --arg f "$VERSION_FROM" --arg tag "$RELEASE_TAG" --arg repo "$SOURCE_REPO" --arg id "$SOURCE_SHA" --arg asset "$ASSET_NAME" --arg sha "$SHA" --arg released "$RELEASED" --argjson rid "$RID" --argjson bytes "$BYTES" '{schema_version:"1.0",project_id:"P03",component_id:"APP",enabled:true,target_version:$v,update_type:"ATOMIC",from_versions:[$f],schema_from:"30",schema_to:"30",repository:$repo,release_tag:$tag,release_id:$rid,product_identity:$id,asset_name:$asset,asset_bytes:$bytes,asset_sha256:$sha,backup_required:true,rollback_supported:true,released_at:$released,release_notes:{summary:"V1.36.0：VF Forge 全系统统一为 Project-first 单一产品壳；项目 / 需要关注 / 归档 + 搜索工具；项目内概览 / 活动 / 版本与依据；设置、备份、更新、维护统一整合。"},notes:"REFERENCE-LOCKED UNIFIED PRODUCT SHELL. Schema30 unchanged. Upgrade from V1.35.4."}' > "$M"
+          API='https://api.github.com/repos/llhzx2018/core-updates/contents/projects/P03.json'; OLD=$(curl -fsSL -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' "$API?ref=main"); OLD_SHA=$(jq -r '.sha'<<<"$OLD"); CONTENT=$(base64 -w0 "$M"); PAY=$(jq -n --arg content "$CONTENT" --arg sha "$OLD_SHA" '{message:"release(P03): publish V1.36.0",content:$content,sha:$sha,branch:"main"}'); curl -fsSL -X PUT -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" -d "$PAY" >/dev/null
+          READ=$(curl -fsSL -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github.raw+json' "$API?ref=main"); jq -e --arg v "$VERSION_TARGET" --arg id "$SOURCE_SHA" --arg sha "$SHA" '.enabled==true and .target_version==$v and .from_versions==["1.35.4"] and .schema_from=="30" and .schema_to=="30" and .product_identity==$id and .asset_sha256==$sha'<<<"$READ" >/dev/null
+          jq -n --arg source "$SOURCE_SHA" --arg tag "$RELEASE_TAG" --arg asset "$ASSET_NAME" --arg sha "$SHA" --argjson rid "$RID" --argjson aid "$AID" --argjson bytes "$BYTES" '{status:"READY_FOR_OWNER_BACKEND_UPDATE",source_commit:$source,release_tag:$tag,release_id:$rid,asset_id:$aid,asset_name:$asset,asset_bytes:$bytes,asset_sha256:$sha,schema:30,from_version:"1.35.4",target_version:"1.36.0",browser_gate:"PASS",atomic_upgrade_gate:"PASS",project_asset_storage:"NONE",production_write:"NO"}' > "$RUNNER_TEMP/P03_PUBLIC_EVIDENCE.json"
+
+      - name: Upload public-safe evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EVIDENCE_NAME }}
+          path: ${{ runner.temp }}/P03_PUBLIC_EVIDENCE.json
+          if-no-files-found: error
+          retention-days: 90
