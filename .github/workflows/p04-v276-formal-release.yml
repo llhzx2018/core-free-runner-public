@@ -1,0 +1,305 @@
+name: P04 VF Infra V2.7.6 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p04-v276-formal-release-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p04-v276-formal-release
+  cancel-in-progress: false
+
+env:
+  VERSION: '2.7.6'
+  SOURCE_VERSION: '2.7.5'
+  SCHEMA: '14'
+  CANDIDATE_COMMIT: 'a4aca3b2836132b88097bd234232e3207fa567ed'
+  CANDIDATE_TREE: '9c3b36757d4afa9570db0643a52e78f8317cb037'
+  PRODUCTION_COMMIT: '35cf27b310a84e621c37429538034f9734c76f49'
+  EXPECTED_FULL_BYTES: '557555'
+  EXPECTED_FULL_SHA: 'b94c1c8f4df6b4c8c39d64508ca7340843126e41cb83a25acf363d004c5c8919'
+  EXPECTED_UPDATE_BYTES: '47128'
+  EXPECTED_UPDATE_SHA: '884abd3108e9f4b8c6f3d7073cae361ad5d7a97f74876f588543baf818f8cc1c'
+  EXPECTED_REPAIR_SHA: 'e65071d9bcf80f927a0c137431fd78b9759a272bbb0d5cc08884c500ecb71568'
+  EXPECTED_RUNTIME_FINGERPRINT: '98bc6fa7543891e742c4941616fdfe6b1cc506668bfa3b9381cdb4236a17a081'
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout runner evidence authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 1
+          path: runner
+
+      - name: Require sealed V2.7.6 Candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          C='runner/evidence/p04/P04_V276_CANDIDATE_LATEST.txt'
+          R='runner/evidence/p04/P04_V276_RESPONSIVE_LATEST.txt'
+          grep -Fxq 'P04_V276_CANDIDATE=PASS' "$C"
+          grep -Fxq "SOURCE_SHA=$CANDIDATE_COMMIT" "$C"
+          grep -Fxq "SOURCE_TREE=$CANDIDATE_TREE" "$C"
+          grep -Fxq "FULL_SHA256=$EXPECTED_FULL_SHA" "$C"
+          grep -Fxq "UPDATE_SHA256=$EXPECTED_UPDATE_SHA" "$C"
+          grep -Fxq 'FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS' "$C"
+          grep -Fxq 'P04_V276_RESPONSIVE_LOADING=PASS' "$R"
+          grep -Fxq "SOURCE_SHA=$CANDIDATE_COMMIT" "$R"
+          grep -Fxq 'PAGE_HORIZONTAL_OVERFLOW=0' "$R"
+          grep -Fxq 'LOADING_PROGRESS=PASS' "$R"
+          grep -Fxq 'VF_CYAN_VISUAL_CONTRACT=PASS' "$R"
+          echo 'SEALED_V276_EVIDENCE=PASS'
+
+      - name: Unified release credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 78; }
+          echo 'UNIFIED_RELEASE_CREDENTIALS=PASS'
+
+      - name: Checkout exact V2.7.6 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Verify Candidate identity and lineage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_COMMIT" "$CANDIDATE_COMMIT"
+          test ! -e candidate/database/migrations/015_
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          echo 'CANDIDATE_IDENTITY_AND_LINEAGE=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Rebuild and validate exact formal artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v276-release"
+          python scripts/build-v276-candidate-artifacts.py --output "$OUT"
+          python scripts/validate-v276-candidate-artifacts.py --artifacts "$OUT"
+          test "$(stat -c %s "$OUT/VF_Infra_V2.7.6_FULL.zip")" = "$EXPECTED_FULL_BYTES"
+          test "$(sha256sum "$OUT/VF_Infra_V2.7.6_FULL.zip" | awk '{print $1}')" = "$EXPECTED_FULL_SHA"
+          test "$(stat -c %s "$OUT/update-set/VF_Infra_V2.7.6_UPDATE.zip")" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum "$OUT/update-set/VF_Infra_V2.7.6_UPDATE.zip" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA"
+          test "$(sha256sum "$OUT/update-set/VF_Infra_V2.7.6_ATOMIC.zip" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA"
+          test "$(sha256sum "$OUT/update-set/repair-v2.7.6.php" | awk '{print $1}')" = "$EXPECTED_REPAIR_SHA"
+          fp="$(python - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'p04-v276-release/runtime/release-manifest.json'
+          print(json.loads(p.read_text(encoding='utf-8'))['source_fingerprint'])
+          PY
+          )"
+          test "$fp" = "$EXPECTED_RUNTIME_FINGERPRINT"
+          echo "PUBLISH_BUILD=$OUT" >> "$GITHUB_ENV"
+          echo 'FORMAL_REBUILD_MATCHES_VERIFIED_ARTIFACT=PASS'
+
+      - name: Re-run V2.7.5 to V2.7.6 Source-Exact gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v275"
+          gh release download v2.7.5 -R llhzx2018/vf-infra --pattern 'VF_Infra_V2.7.5_FULL.zip' --dir "$RUNNER_TEMP/v275"
+          python candidate/scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/v275/VF_Infra_V2.7.5_FULL.zip" \
+            --candidate-full "$PUBLISH_BUILD/VF_Infra_V2.7.6_FULL.zip" \
+            --candidate-update "$PUBLISH_BUILD/update-set/VF_Infra_V2.7.6_UPDATE.zip" \
+            --expected-source-version 2.7.5 \
+            --expected-target-version 2.7.6
+          echo 'FORMAL_SOURCE_EXACT=PASS'
+
+      - name: Protect current V2.7.5 online authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          old="$(gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.5)"
+          test "$(jq -r '.id' <<<"$old")" = '372238086'
+          old_update="$(jq -c '.assets[]|select(.name=="VF_Infra_V2.7.5_UPDATE.zip")' <<<"$old")"
+          test "$(jq -r '.id' <<<"$old_update")" = '519249385'
+          test "$(jq -r '.size' <<<"$old_update")" = '54882'
+          test "$(jq -r '.digest' <<<"$old_update")" = 'sha256:81c14847dec048ee867322e22ec0ad4881b8c610e3b1d2701a1abf917f9da58c'
+          echo 'V275_RELEASE_AUTHORITY=PASS'
+
+      - name: Assemble immutable V2.7.6 release asset set
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          A="$PUBLISH_BUILD"
+          D="$RUNNER_TEMP/p04-v276-publish"
+          mkdir -p "$D"
+          cp "$A/VF_Infra_V2.7.6_FULL.zip" "$D/"
+          cp "$A/update-set/VF_Infra_V2.7.6_UPDATE.zip" "$D/"
+          cp "$A/update-set/VF_Infra_V2.7.6_ATOMIC.zip" "$D/"
+          cp "$A/update-set/repair-v2.7.6.php" "$D/"
+          cp "$A/V276_PACKAGE_MANIFEST.json" "$D/"
+          cp "$A/V276_SHA256SUMS.txt" "$D/"
+          cp "$A/V276_PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt" "$D/"
+          test "$(find "$D" -maxdepth 1 -type f | wc -l | tr -d ' ')" = '7'
+          echo "PUBLISH_DIR=$D" >> "$GITHUB_ENV"
+
+      - name: Create exact V2.7.6 tag and GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.7.6 > "$RUNNER_TEMP/tag.json" 2>/dev/null; then
+            tag_sha="$(jq -r '.object.sha' "$RUNNER_TEMP/tag.json")"
+            test "$tag_sha" = "$CANDIDATE_COMMIT" || { echo "V276_TAG_IDENTITY_CONFLICT=$tag_sha" >&2; exit 1; }
+          else
+            git -C candidate remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-infra.git"
+            git -C candidate tag "v$VERSION" "$CANDIDATE_COMMIT"
+            git -C candidate push origin "refs/tags/v$VERSION"
+          fi
+          if gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.6 >/dev/null 2>&1; then
+            echo 'V276_RELEASE_ALREADY_PRESENT=YES'
+          else
+            gh release create "v$VERSION" "$PUBLISH_DIR"/* -R llhzx2018/vf-infra --target "$CANDIDATE_COMMIT" --title "VF Infra V$VERSION" --notes-file candidate/docs/operations/package/RELEASE_NOTES.md
+          fi
+          echo 'V276_RELEASE_CREATE_OR_RESUME=PASS'
+
+      - name: Remote Release exact readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.6 > "$RUNNER_TEMP/v276-release.json"
+          jq -e --arg c "$CANDIDATE_COMMIT" '.tag_name=="v2.7.6" and .target_commitish==$c and .draft==false and .prerelease==false' "$RUNNER_TEMP/v276-release.json" >/dev/null
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          r=json.load(open(os.environ['RUNNER_TEMP']+'/v276-release.json'))
+          remote={a['name']:a for a in r['assets']}
+          d=pathlib.Path(os.environ['PUBLISH_DIR'])
+          local={p.name:p for p in d.iterdir() if p.is_file()}
+          assert set(remote)==set(local),(set(remote),set(local))
+          for n,p in local.items():
+              h=hashlib.sha256(p.read_bytes()).hexdigest(); a=remote[n]
+              assert int(a['size'])==p.stat().st_size,(n,'bytes')
+              assert a.get('digest')=='sha256:'+h,(n,a.get('digest'),h)
+          print('V276_REMOTE_RELEASE_ASSET_IDENTITY=PASS')
+          PY
+          echo "RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/v276-release.json")" >> "$GITHUB_ENV"
+          echo "PUBLISHED_AT=$(jq -r '.published_at' "$RUNNER_TEMP/v276-release.json")" >> "$GITHUB_ENV"
+          echo "UPDATE_ASSET_ID=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.7.6_UPDATE.zip")|.id' "$RUNNER_TEMP/v276-release.json")" >> "$GITHUB_ENV"
+
+      - name: Checkout current core-updates authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Advance P04 online update channel to V2.7.6
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -e '.target_version=="2.7.5" and .from_versions==["2.7.4"] and .release_tag=="v2.7.5" and .release_id==372238086 and .release_product_commit=="35cf27b310a84e621c37429538034f9734c76f49" and .asset_name=="VF_Infra_V2.7.5_UPDATE.zip" and .asset_id==519249385 and .asset_sha256=="81c14847dec048ee867322e22ec0ad4881b8c610e3b1d2701a1abf917f9da58c"' updates/projects/P04.json >/dev/null
+          python - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('updates/projects/P04.json')
+          x={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.7.6','update_type':'ATOMIC','from_versions':['2.7.5'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra',
+            'release_tag':'v2.7.6','release_name':'VF Infra V2.7.6','release_id':int(os.environ['RELEASE_ID']),
+            'release_product_commit':os.environ['CANDIDATE_COMMIT'],'release_product_tree':os.environ['CANDIDATE_TREE'],
+            'asset_name':'VF_Infra_V2.7.6_UPDATE.zip','asset_id':int(os.environ['UPDATE_ASSET_ID']),
+            'asset_bytes':int(os.environ['EXPECTED_UPDATE_BYTES']),'asset_sha256':os.environ['EXPECTED_UPDATE_SHA'],
+            'backup_required':True,'rollback_supported':True,'released_at':os.environ['PUBLISHED_AT'],'minimum_php':'8.0.0',
+            'notes':'VF Infra V2.7.6 正式在线更新：仅支持 Production V2.7.5 → V2.7.6；Schema 14 → 14，无 Migration。本版不重做已认可的整体 UI，完成全站全屏与响应式收口：概览、域名、服务器、服务商及全部设置子页已覆盖 1440/1280/1024/768/390 五档 viewport；详情侧栏在中等桌面宽度提前下沉，页面级横向溢出为 0，设置导航、工具栏、操作区、统计卡与分页均可自适应重排。加载与同步统一接入 2px VF 青色线性进度反馈，详情首屏增加轻量 Skeleton，避免大面积空白。VF 系列继续锁定 Teal/Cyan，Logo 与 Primary CTA 不回退黑色。Provider 继续 READ-ONLY FIRST，不新增 DNS、VPS、付款或续费远程写权限。正式 UPDATE 已通过全站 Runtime Browser、Artifact Validation、Atomic Self-test 与 FULL_RUNTIME_VS_UPDATE_RESULT_SOURCE_EXACT Gate。'
+          }
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          git -C updates config user.name 'VF Release Automation'
+          git -C updates config user.email 'vf-release-automation@users.noreply.github.com'
+          git -C updates add projects/P04.json
+          git -C updates commit -m 'release(P04): advance unified update target to V2.7.6'
+          git -C updates push origin main
+          echo "CORE_UPDATES_COMMIT=$(git -C updates rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo 'CORE_UPDATES_ADVANCE=PASS'
+
+      - name: Remote core-updates readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C updates fetch origin main
+          test "$(git -C updates rev-parse origin/main)" = "$CORE_UPDATES_COMMIT"
+          jq -e --arg c "$CANDIDATE_COMMIT" --arg sha "$EXPECTED_UPDATE_SHA" --argjson rid "$RELEASE_ID" --argjson aid "$UPDATE_ASSET_ID" '.target_version=="2.7.6" and .from_versions==["2.7.5"] and .schema_from=="14" and .schema_to=="14" and .release_tag=="v2.7.6" and .release_id==$rid and .release_product_commit==$c and .asset_name=="VF_Infra_V2.7.6_UPDATE.zip" and .asset_id==$aid and .asset_sha256==$sha' updates/projects/P04.json >/dev/null
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+          echo 'ONLINE_UPDATE_AVAILABLE=YES'
+
+      - name: Seal public-safe release evidence
+        shell: bash
+        working-directory: runner
+        run: |
+          set -Eeuo pipefail
+          cat > evidence/p04/P04_V276_RELEASE_LATEST.txt <<EOF
+          P04_V276_FORMAL_RELEASE=PASS
+          PRODUCTION_VERSION=2.7.5
+          TARGET_VERSION=2.7.6
+          SCHEMA=14
+          MIGRATION=NONE
+          CANDIDATE_SHA=$CANDIDATE_COMMIT
+          CANDIDATE_TREE=$CANDIDATE_TREE
+          RUNTIME_FINGERPRINT=$EXPECTED_RUNTIME_FINGERPRINT
+          RESPONSIVE_RUNTIME_GATE=PASS
+          ALL_VIEWPORTS=PASS
+          PAGE_HORIZONTAL_OVERFLOW=0
+          DETAIL_COLLAPSE=PASS
+          LOADING_PROGRESS=PASS
+          DETAIL_SKELETON=PASS
+          VF_CYAN_VISUAL_CONTRACT=PASS
+          FORMAL_ARTIFACT_GATE=PASS
+          FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS
+          RELEASE_TAG=v2.7.6
+          RELEASE_ID=$RELEASE_ID
+          UPDATE_ASSET=VF_Infra_V2.7.6_UPDATE.zip
+          UPDATE_ASSET_ID=$UPDATE_ASSET_ID
+          UPDATE_BYTES=$EXPECTED_UPDATE_BYTES
+          UPDATE_SHA256=$EXPECTED_UPDATE_SHA
+          FULL_BYTES=$EXPECTED_FULL_BYTES
+          FULL_SHA256=$EXPECTED_FULL_SHA
+          REPAIR_SHA256=$EXPECTED_REPAIR_SHA
+          CORE_UPDATES_TARGET=2.7.6
+          CORE_UPDATES_FROM=2.7.5
+          CORE_UPDATES_COMMIT=$CORE_UPDATES_COMMIT
+          ONLINE_UPDATE_AVAILABLE=YES
+          PRODUCTION_UPGRADE=NOT_EXECUTED
+          PRODUCTION_WRITE=0
+          EOF
+          git config user.name 'VF Runner Evidence'
+          git config user.email 'vf-runner-evidence@users.noreply.github.com'
+          git add evidence/p04/P04_V276_RELEASE_LATEST.txt
+          git commit -m 'release(P04): seal V2.7.6 formal release evidence'
+          git push origin main
+          echo 'V276_RELEASE_EVIDENCE=PASS'
