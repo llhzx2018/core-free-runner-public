@@ -1,0 +1,287 @@
+name: P04 VF Infra V2.7.5 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p04-v275-formal-release-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v275-formal-release
+  cancel-in-progress: false
+
+env:
+  VERSION: '2.7.5'
+  SOURCE_VERSION: '2.7.4'
+  SCHEMA: '14'
+  CANDIDATE_COMMIT: '35cf27b310a84e621c37429538034f9734c76f49'
+  CANDIDATE_TREE: '43708f268fd14d234d652c8bac37c1db091bbf1b'
+  V274_RELEASE_COMMIT: '3e6a18b893e42467e18913facf286ca2bc420f16'
+  V274_RELEASE_ID: '372208635'
+  V274_UPDATE_BYTES: '58480'
+  V274_UPDATE_SHA: '1a65f4c556a954b30c11463e76028bf1ff84a6baf077715f0ea7b954a109c808'
+  EXPECTED_FULL_BYTES: '552638'
+  EXPECTED_FULL_SHA: 'ebcd1bd2e8476d5d6c7c5b7b543ec9173ee69fd0829a0ccf586ec77e426846db'
+  EXPECTED_UPDATE_BYTES: '54882'
+  EXPECTED_UPDATE_SHA: '81c14847dec048ee867322e22ec0ad4881b8c610e3b1d2701a1abf917f9da58c'
+  EXPECTED_REPAIR_SHA: '0757b75e6fd5413720cad71ab08b92bd51f6cc2bd6af708d64a9e448bb586632'
+  EXPECTED_RUNTIME_FINGERPRINT: '1cf6e34137304fb1dc549d1b349dc9211540c471fea8609ced01fcb7e039b1b1'
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout sealed runner evidence
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 1
+          path: runner
+
+      - name: Require exact V2.7.5 Candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          E='runner/evidence/p04/P04_V275_CANDIDATE_LATEST.txt'
+          grep -Fxq 'P04_V275_CANDIDATE_GATE=PASS' "$E"
+          grep -Fxq "SOURCE_SHA=$CANDIDATE_COMMIT" "$E"
+          grep -Fxq "SOURCE_TREE=$CANDIDATE_TREE" "$E"
+          grep -Fxq 'DOMAIN_TLD_FILTER=PASS' "$E"
+          grep -Fxq 'DOMAIN_EXPIRY_SORT=PASS' "$E"
+          grep -Fxq 'DOMAIN_TLD_GROUP=PASS' "$E"
+          grep -Fxq 'DETAIL_RETURN_NAVIGATION=PASS' "$E"
+          grep -Fxq 'PREVIOUS_NEXT_NAVIGATION=PASS' "$E"
+          grep -Fxq 'LIST_STATE_RESTORE=PASS' "$E"
+          grep -Fxq 'VF_CYAN_LOGO=PASS' "$E"
+          grep -Fxq 'VF_CYAN_PRIMARY_CTA=PASS' "$E"
+          grep -Fxq 'BLACK_BRAND_PRIMARY=0' "$E"
+          grep -Fxq 'PAGE_ERROR_COUNT=0' "$E"
+          grep -Fxq 'CONSOLE_ERROR_COUNT=0' "$E"
+          grep -Fxq 'FORMAL_ARTIFACT_VALIDATION=PASS' "$E"
+          grep -Fxq 'FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS' "$E"
+          grep -Fxq "FULL_SHA256=$EXPECTED_FULL_SHA" "$E"
+          grep -Fxq "UPDATE_SHA256=$EXPECTED_UPDATE_SHA" "$E"
+          grep -Fxq "REPAIR_SHA256=$EXPECTED_REPAIR_SHA" "$E"
+          grep -Fxq "RUNTIME_FINGERPRINT=$EXPECTED_RUNTIME_FINGERPRINT" "$E"
+          echo 'SEALED_V275_CANDIDATE_EVIDENCE=PASS'
+
+      - name: Unified release credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 78; }
+          echo 'UNIFIED_RELEASE_CREDENTIALS=PASS'
+
+      - name: Checkout exact verified V2.7.5 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Verify exact Candidate identity and V2.7.4 lineage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          git -C candidate merge-base --is-ancestor "$V274_RELEASE_COMMIT" "$CANDIDATE_COMMIT"
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          test ! -e candidate/database/migrations/015_
+          grep -Fq -- '--vf-series-cyan:#0f766e' candidate/public/assets/v275-ua-workflow.css
+          echo 'V275_CANDIDATE_IDENTITY_AND_LINEAGE=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Protect immutable V2.7.4 authority and inspect V2.7.5 identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          old="$(gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.4)"
+          test "$(jq -r '.id' <<<"$old")" = "$V274_RELEASE_ID"
+          old_update="$(jq -c '.assets[]|select(.name=="VF_Infra_V2.7.4_UPDATE.zip")' <<<"$old")"
+          test "$(jq -r '.size' <<<"$old_update")" = "$V274_UPDATE_BYTES"
+          test "$(jq -r '.digest' <<<"$old_update")" = "sha256:$V274_UPDATE_SHA"
+          if gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.7.5 > "$RUNNER_TEMP/v275-tag.json" 2>/dev/null; then
+            tag_sha="$(jq -r '.object.sha' "$RUNNER_TEMP/v275-tag.json")"
+            test "$tag_sha" = "$CANDIDATE_COMMIT" || { echo "V275_TAG_IDENTITY_CONFLICT=$tag_sha" >&2; exit 1; }
+            echo 'V275_TAG_ALREADY_EXACT=YES'
+          else
+            echo 'V275_TAG_ALREADY_EXACT=NO'
+          fi
+
+      - name: Rebuild and validate exact formal artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          A="$RUNNER_TEMP/p04-v275-release"
+          python scripts/build-v275-candidate-artifacts.py --output "$A"
+          python scripts/validate-v275-candidate-artifacts.py --artifacts "$A"
+          test "$(stat -c %s "$A/VF_Infra_V2.7.5_FULL.zip")" = "$EXPECTED_FULL_BYTES"
+          test "$(sha256sum "$A/VF_Infra_V2.7.5_FULL.zip" | awk '{print $1}')" = "$EXPECTED_FULL_SHA"
+          test "$(stat -c %s "$A/update-set/VF_Infra_V2.7.5_UPDATE.zip")" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum "$A/update-set/VF_Infra_V2.7.5_UPDATE.zip" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA"
+          test "$(sha256sum "$A/update-set/VF_Infra_V2.7.5_ATOMIC.zip" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA"
+          test "$(sha256sum "$A/update-set/repair-v2.7.5.php" | awk '{print $1}')" = "$EXPECTED_REPAIR_SHA"
+          fp="$(python - <<'PY'
+          import json,os
+          from pathlib import Path
+          p=Path(os.environ['RUNNER_TEMP'])/'p04-v275-release/runtime/release-manifest.json'
+          print(json.loads(p.read_text(encoding='utf-8'))['source_fingerprint'])
+          PY
+          )"
+          test "$fp" = "$EXPECTED_RUNTIME_FINGERPRINT"
+          echo 'V275_FORMAL_REBUILD_MATCHES_VERIFIED_CANDIDATE=PASS'
+
+      - name: Re-run V2.7.4 to V2.7.5 source-exact gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v274"
+          gh release download v2.7.4 -R llhzx2018/vf-infra --pattern 'VF_Infra_V2.7.4_FULL.zip' --dir "$RUNNER_TEMP/v274"
+          python candidate/scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/v274/VF_Infra_V2.7.4_FULL.zip" \
+            --candidate-full "$RUNNER_TEMP/p04-v275-release/VF_Infra_V2.7.5_FULL.zip" \
+            --candidate-update "$RUNNER_TEMP/p04-v275-release/update-set/VF_Infra_V2.7.5_UPDATE.zip" \
+            --expected-source-version 2.7.4 \
+            --expected-target-version 2.7.5
+          echo 'V275_FORMAL_SOURCE_EXACT=PASS'
+
+      - name: Assemble immutable V2.7.5 Release asset set
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          A="$RUNNER_TEMP/p04-v275-release"
+          D="$RUNNER_TEMP/p04-v275-publish"
+          mkdir -p "$D"
+          cp "$A/VF_Infra_V2.7.5_FULL.zip" "$D/"
+          cp "$A/update-set/VF_Infra_V2.7.5_UPDATE.zip" "$D/"
+          cp "$A/update-set/VF_Infra_V2.7.5_ATOMIC.zip" "$D/"
+          cp "$A/update-set/repair-v2.7.5.php" "$D/"
+          cp "$A/V275_PACKAGE_MANIFEST.json" "$D/"
+          cp "$A/V275_SHA256SUMS.txt" "$D/"
+          cp "$A/V275_PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt" "$D/"
+          test "$(find "$D" -maxdepth 1 -type f | wc -l | tr -d ' ')" = '7'
+          echo "PUBLISH_DIR=$D" >> "$GITHUB_ENV"
+
+      - name: Create or resume exact V2.7.5 GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.7.5 >/dev/null 2>&1; then
+            git -C candidate remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-infra.git"
+            git -C candidate tag "v$VERSION" "$CANDIDATE_COMMIT"
+            git -C candidate push origin "refs/tags/v$VERSION"
+          fi
+          if ! gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.5 >/dev/null 2>&1; then
+            gh release create "v$VERSION" "$PUBLISH_DIR"/* -R llhzx2018/vf-infra --target "$CANDIDATE_COMMIT" --title "VF Infra V$VERSION" --notes-file candidate/docs/operations/package/RELEASE_NOTES.md
+          fi
+          echo 'V275_RELEASE_CREATE_OR_RESUME=PASS'
+
+      - name: Remote V2.7.5 Release exact readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.5 > "$RUNNER_TEMP/v275-release.json"
+          jq -e --arg c "$CANDIDATE_COMMIT" '.tag_name=="v2.7.5" and .target_commitish==$c and .draft==false and .prerelease==false' "$RUNNER_TEMP/v275-release.json" >/dev/null
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          r=json.load(open(os.environ['RUNNER_TEMP']+'/v275-release.json'))
+          remote={a['name']:a for a in r['assets']}
+          d=pathlib.Path(os.environ['PUBLISH_DIR'])
+          local={p.name:p for p in d.iterdir() if p.is_file()}
+          assert set(remote)==set(local),(set(remote),set(local))
+          for n,p in local.items():
+              h=hashlib.sha256(p.read_bytes()).hexdigest(); a=remote[n]
+              assert int(a['size'])==p.stat().st_size,(n,'bytes',a['size'],p.stat().st_size)
+              assert a.get('digest')=='sha256:'+h,(n,a.get('digest'),h)
+          print('V275_REMOTE_RELEASE_ASSET_IDENTITY=PASS')
+          PY
+          echo "RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/v275-release.json")" >> "$GITHUB_ENV"
+          echo "PUBLISHED_AT=$(jq -r '.published_at' "$RUNNER_TEMP/v275-release.json")" >> "$GITHUB_ENV"
+          echo "UPDATE_ASSET_ID=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.7.5_UPDATE.zip")|.id' "$RUNNER_TEMP/v275-release.json")" >> "$GITHUB_ENV"
+
+      - name: Checkout current core-updates authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Advance or verify P04 online update channel to V2.7.5
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          current="$(jq -r '.target_version' updates/projects/P04.json)"
+          if [ "$current" = '2.7.4' ]; then
+            jq -e --arg sha "$V274_UPDATE_SHA" '.target_version=="2.7.4" and .from_versions==["2.7.3"] and .schema_from=="14" and .schema_to=="14" and .release_tag=="v2.7.4" and .release_id==372208635 and .release_product_commit=="3e6a18b893e42467e18913facf286ca2bc420f16" and .release_product_tree=="0be764507c0533af82418263f25700d70ed90c72" and .asset_name=="VF_Infra_V2.7.4_UPDATE.zip" and .asset_bytes==58480 and .asset_sha256==$sha' updates/projects/P04.json >/dev/null
+            python - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('updates/projects/P04.json')
+          x={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.7.5','update_type':'ATOMIC','from_versions':['2.7.4'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra',
+            'release_tag':'v2.7.5','release_name':'VF Infra V2.7.5','release_id':int(os.environ['RELEASE_ID']),
+            'release_product_commit':os.environ['CANDIDATE_COMMIT'],'release_product_tree':os.environ['CANDIDATE_TREE'],
+            'asset_name':'VF_Infra_V2.7.5_UPDATE.zip','asset_id':int(os.environ['UPDATE_ASSET_ID']),
+            'asset_bytes':int(os.environ['EXPECTED_UPDATE_BYTES']),'asset_sha256':os.environ['EXPECTED_UPDATE_SHA'],
+            'backup_required':True,'rollback_supported':True,'released_at':os.environ['PUBLISHED_AT'],'minimum_php':'8.0.0',
+            'notes':'VF Infra V2.7.5 正式在线更新：仅支持 Production V2.7.4 → V2.7.5；Schema 14 → 14，无 Migration。本版保留 V2.7.4 整体 UI，不做大改；重点优化 OWNER 日常资源工作流：域名支持列表内搜索、后缀/注册商/风险筛选、到期日/续费排序及后缀/注册商/风险分组；Domain/Server/Provider/DNS 详情增加显式站内返回与上一条/下一条，并保留列表筛选、排序、分组和上下文；Server/Provider 列表同步采用筛选、排序、分组模式。VF 系列视觉继续锁定青色/Teal/Cyan，Logo 主底与 Primary CTA 使用 VF 青色，不使用黑色。Provider 继续 READ-ONLY FIRST，不新增 DNS、VPS、付款或续费远程写权限。正式 UPDATE 已通过 Runtime Browser、VF Cyan computed-style、Artifact Validation、Repair Self-test 与 FULL_RUNTIME_VS_UPDATE_RESULT_SOURCE_EXACT Gate。Production 安装前仍由现有 Atomic 合同建立并验证受保护备份。'
+          }
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+            cd updates
+            git config user.name 'VF Release Automation'
+            git config user.email 'vf-release-automation@users.noreply.github.com'
+            git add projects/P04.json
+            git commit -m 'release(P04): advance unified update target to V2.7.5'
+            git push origin main
+            echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          elif [ "$current" = '2.7.5' ]; then
+            echo "CORE_UPDATES_COMMIT=$(git -C updates rev-parse HEAD)" >> "$GITHUB_ENV"
+          else
+            echo "CORE_UPDATES_UNEXPECTED_TARGET=$current" >&2
+            exit 1
+          fi
+
+      - name: Final V2.7.5 online channel remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main' --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/P04.json"
+          jq -e --arg c "$CANDIDATE_COMMIT" --arg t "$CANDIDATE_TREE" --arg sha "$EXPECTED_UPDATE_SHA" --argjson bytes "$EXPECTED_UPDATE_BYTES" '.target_version=="2.7.5" and .from_versions==["2.7.4"] and .schema_from=="14" and .schema_to=="14" and .release_tag=="v2.7.5" and .release_product_commit==$c and .release_product_tree==$t and .asset_name=="VF_Infra_V2.7.5_UPDATE.zip" and .asset_bytes==$bytes and .asset_sha256==$sha' "$RUNNER_TEMP/P04.json" >/dev/null
+          gh api repos/llhzx2018/vf-infra/releases/tags/v2.7.5 > "$RUNNER_TEMP/final-release.json"
+          a="$(jq -c '.assets[]|select(.name=="VF_Infra_V2.7.5_UPDATE.zip")' "$RUNNER_TEMP/final-release.json")"
+          test "$(jq -r '.size' <<<"$a")" = "$EXPECTED_UPDATE_BYTES"
+          test "$(jq -r '.digest' <<<"$a")" = "sha256:$EXPECTED_UPDATE_SHA"
+          echo 'P04_V275_FORMAL_RELEASE=PASS'
+          echo 'P04_V275_ONLINE_CHANNEL_REMOTE_READBACK=PASS'
+          echo "P04_V275_RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/final-release.json")"
+          echo "P04_V275_CORE_UPDATES_COMMIT=$CORE_UPDATES_COMMIT"
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
