@@ -1,0 +1,195 @@
+name: P06 VF Press Publisher Reader Gate V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-publisher-reader-v2.yml'
+      - 'requests/p06-vfpress-reader-v2-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-publisher-reader-v2
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: b8dbad40de5a3b7e4deb275925ec4cd896348e20
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout evidence and exact private source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: evidence-repo
+          fetch-depth: 1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Machine regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring sqlite3 composer curl openssl >/dev/null
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src bin public -type f -name '*.php' -print0)
+          run_gate(){
+            local script="$1" name="$2"
+            export VF_PRESS_STORAGE_PATH="${RUNNER_TEMP}/p06-v2-${name}"
+            export VF_PRESS_DB_PATH="${VF_PRESS_STORAGE_PATH}/app.db"
+            export APP_ENV=test
+            rm -rf "$VF_PRESS_STORAGE_PATH"; mkdir -p "$VF_PRESS_STORAGE_PATH"
+            php bin/migrate.php >/dev/null
+            php "$script" | tee "/tmp/p06-${name}.log"
+          }
+          run_gate bin/self-test.php foundation
+          run_gate bin/security-self-test.php security
+          run_gate bin/research-self-test.php research
+          run_gate bin/publication-self-test.php manuscript
+          run_gate bin/reader-self-test.php reader
+          grep -Fq 'REVISION_IMMUTABLE=PASS' /tmp/p06-manuscript.log
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/p06-reader.log
+          grep -Fq 'SAFE_MARKDOWN=PASS' /tmp/p06-reader.log
+          grep -Fq 'READER_NAVIGATION=PASS' /tmp/p06-reader.log
+          echo 'P06_PUBLISHER_READER_MACHINE=PASS'
+
+      - name: Build synthetic visual fixture
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export VF_PRESS_STORAGE_PATH="${RUNNER_TEMP}/p06-v2-visual"
+          export VF_PRESS_DB_PATH="${VF_PRESS_STORAGE_PATH}/app.db"
+          export APP_ENV=test
+          rm -rf "$VF_PRESS_STORAGE_PATH"; mkdir -p "$VF_PRESS_STORAGE_PATH"
+          php bin/migrate.php >/dev/null
+          PASS="$(openssl rand -hex 24)"; printf '%s' "$PASS" >/tmp/p06-v2-password
+          VF_PRESS_OWNER_USERNAME=visual-owner VF_PRESS_OWNER_PASSWORD="$PASS" VF_PRESS_OWNER_DISPLAY_NAME='Visual Owner' php bin/create-owner.php >/dev/null
+          unset PASS
+          cat >/tmp/p06-v2-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/vendor/autoload.php';
+          $c=VF\Press\Infrastructure\Config\AppConfig::fromEnvironment(getcwd());
+          $pdo=VF\Press\Infrastructure\Database\ConnectionFactory::create($c);
+          $audit=new VF\Press\Infrastructure\Security\AuditLogger($pdo);
+          $research=new VF\Press\Application\Research\ResearchService($pdo,$audit);
+          $store=new VF\Press\Infrastructure\Storage\ManuscriptStore($c->storagePath);
+          $pub=new VF\Press\Application\Publication\PublicationService($pdo,$audit,$store);
+          $rid=$research->createProject('Agent 可靠性研究','为什么 Agent 已经拥有 Tool 和 Memory，仍然经常不能可靠完成复杂、长期、跨步骤任务？','把个人实践整理成可以持续修订的知识体系。');
+          $pid=$pub->createPublication('BOOK','从 ChatGPT 到个人 Agent：一个普通人的 AI 自动化实践','从会回答，到能持续完成复杂任务','一本记录个人 AI 自动化实践、失败、修正和系统化过程的 Living Book。','把真正踩过的坑、建立过的系统和验证过的方法留下来，而不是重新包装一套空泛概念。','写给想把 AI 真正用进个人工作流、但不想先成为专业程序员的人。',$rid);
+          $chapters=[
+            ['从会聊天到会做事',"# 从会聊天到会做事\n\n第一次接触 ChatGPT 时，最强烈的感受是机器终于可以用自然语言沟通了。\n\n但真正把 AI 用进日常工作以后，我很快发现，**会回答和会做事是两件完全不同的事。**\n\n> 一个回答可以在十秒钟内结束；一个真实任务却可能跨越几十个步骤、多个系统和几天时间。\n\n如果 AI 不知道自己做到哪里，不知道哪些信息可信，不知道什么动作需要授权，也不知道最后如何证明事情真的完成，那么再聪明的模型也会不断把人拉回执行位。\n\n## 真正的分水岭\n\n当 AI 从“给我一个答案”进入“替我推进一件事”，系统必须开始回答几个问题：\n\n- 当前状态是什么？\n- 下一步应该做什么？\n- 哪些动作可以自动执行？\n- 哪些动作必须由 Owner 决定？\n- 中途失败以后从哪里恢复？\n- 最后用什么 Evidence 证明完成？\n\n这些问题看起来不像 AI 问题，却恰恰决定了 Agent 能不能长期可靠工作。\n\n## 从 Prompt 转向系统\n\nPrompt 仍然重要，但它不再是全部。真正稳定的个人自动化，更像一个由 Runtime、Authority、Memory、Tool 和 Verification 共同组成的小型操作系统。\n"],
+            ['Tool：让 AI 接触外部世界',"# Tool：让 AI 接触外部世界\n\n模型本身只能生成内容。Tool 让它第一次能够读取真实状态、修改外部系统，并把执行结果重新带回推理过程。\n\nTool 越强，Authority 和 Verification 就越重要。\n"],
+            ['Memory：为什么 Agent 需要记忆',"# Memory：为什么 Agent 需要记忆\n\n聊天记录很多，不等于 Agent 拥有可靠记忆。真正有用的 Memory 必须可检索、可追溯，并知道什么时候已经失效。\n"],
+            ['Agent Runtime：真正让 Agent 活起来的地方',"# Agent Runtime：真正让 Agent 活起来的地方\n\nRuntime 把一次模型调用变成可以暂停、恢复、重试、验证和持续推进的运行过程。\n"]
+          ];
+          $sid=''; foreach($chapters as $i=>[$title,$md]){$id=$pub->addSection($pid,$title,'CHAPTER');$pub->saveSection($pid,$id,$title,$md,'DRAFT');if($i===0)$sid=$id;}
+          file_put_contents('/tmp/p06-v2-pid',$pid); file_put_contents('/tmp/p06-v2-sid',$sid);
+          PHP
+          php /tmp/p06-v2-seed.php
+          echo 'SYNTHETIC_FIXTURE=PASS'
+
+      - name: Start routed runtime
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export VF_PRESS_STORAGE_PATH="${RUNNER_TEMP}/p06-v2-visual" VF_PRESS_DB_PATH="${RUNNER_TEMP}/p06-v2-visual/app.db" APP_ENV=test
+          cat >/tmp/p06-v2-router.php <<PHP
+          <?php
+          \$root='${GITHUB_WORKSPACE}/source/public'; \$p=parse_url(\$_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          \$f=realpath(\$root.\$p); \$r=realpath(\$root);
+          if(\$f!==false&&\$r!==false&&is_file(\$f)&&str_starts_with(\$f,\$r.DIRECTORY_SEPARATOR)) return false;
+          require \$root.'/index.php';
+          PHP
+          nohup env VF_PRESS_STORAGE_PATH="$VF_PRESS_STORAGE_PATH" VF_PRESS_DB_PATH="$VF_PRESS_DB_PATH" APP_ENV=test php -S 127.0.0.1:8100 -t public /tmp/p06-v2-router.php >/tmp/p06-v2-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8100/health >/dev/null && exit 0; sleep 1; done
+          cat /tmp/p06-v2-server.log; exit 1
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-v2-browser; cd /tmp/p06-v2-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Browser E2E and screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence-repo/evidence/p06/publisher-reader
+          cat >/tmp/p06-v2-browser/capture.js <<'JS'
+          const { chromium }=require('/tmp/p06-v2-browser/node_modules/playwright'); const fs=require('fs');
+          (async()=>{
+            const pass=fs.readFileSync('/tmp/p06-v2-password','utf8'); const pid=fs.readFileSync('/tmp/p06-v2-pid','utf8').trim(); const sid=fs.readFileSync('/tmp/p06-v2-sid','utf8').trim(); const base='http://127.0.0.1:8100';
+            const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1440,height:1050}});
+            await page.goto(`${base}/preview/publisher`); if(!page.url().includes('/login')) throw new Error('preview auth missing');
+            await page.getByLabel('用户名').fill('visual-owner'); await page.getByLabel('密码').fill(pass); await Promise.all([page.waitForURL('**/studio'),page.getByRole('button',{name:'登录'}).click()]);
+            await page.goto(`${base}/preview/publisher`); await page.getByText('OWNER PREVIEW · WORKING PUBLICATION').waitFor(); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader/01_publisher_desktop.png',fullPage:true});
+            await page.goto(`${base}/preview/publications/${pid}`); await page.getByText('这还不是正式 Edition。').waitFor(); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader/02_book_detail_desktop.png',fullPage:true});
+            const url=`${base}/preview/read/${pid}/${sid}`; await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor(); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader/03_reader_desktop.png',fullPage:true});
+            await page.getByRole('button',{name:'阅读设置'}).click();
+            await page.locator('[data-reader-font]').evaluate(el=>{el.value='23';el.dispatchEvent(new Event('input',{bubbles:true}));});
+            await page.locator('[data-reader-line]').evaluate(el=>{el.value='1.95';el.dispatchEvent(new Event('input',{bubbles:true}));});
+            await page.getByRole('button',{name:'暖色'}).click();
+            if(await page.locator('html').getAttribute('data-reader-theme')!=='warm') throw new Error('theme apply failed');
+            const font=await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--reader-font').trim()); if(font!=='23px') throw new Error(`font apply failed ${font}`);
+            await page.keyboard.press('Escape');
+            await page.setViewportSize({width:390,height:844}); await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor();
+            if(await page.locator('html').getAttribute('data-reader-theme')!=='warm') throw new Error('theme persistence failed');
+            await page.getByRole('button',{name:'打开目录'}).click(); await page.locator('[data-reader-toc-panel]').waitFor({state:'visible'}); await page.getByText('Tool：让 AI 接触外部世界').waitFor(); await page.keyboard.press('Escape');
+            await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader/04_reader_mobile.png',fullPage:true});
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          node /tmp/p06-v2-browser/capture.js
+          echo 'PUBLISHER_READER_BROWSER_E2E=PASS'
+
+      - name: Persist exact public-safe evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-v2-password
+          RESULT=FAIL; VISUAL=INCOMPLETE; [ "$JOB_STATUS" = success ] && RESULT=PASS && VISUAL=READY_FOR_OWNER_REVIEW
+          COUNT="$(find evidence-repo/evidence/p06/publisher-reader -maxdepth 1 -name '*.png' 2>/dev/null | wc -l)"
+          mkdir -p evidence-repo/evidence/p06/publisher-reader
+          cat >evidence-repo/evidence/p06/publisher-reader/RECEIPT.txt <<EOF
+          P06_PUBLISHER_READER_MACHINE=$RESULT
+          P06_PUBLISHER_READER_VISUAL=$VISUAL
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          DATA_MODE=SYNTHETIC_PUBLIC_SAFE
+          PREVIEW_AUTH_REQUIRED=YES
+          FORMAL_EDITION_EXPOSED=NO
+          SCREENSHOTS=$COUNT
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=PHP_SYNTAX,FOUNDATION_REGRESSION,SECURITY_REGRESSION,RESEARCH_REGRESSION,MANUSCRIPT_REGRESSION,SAFE_MARKDOWN,READER_NAVIGATION,PREVIEW_AUTH,PUBLISHER_DESKTOP,BOOK_DETAIL_DESKTOP,READER_DESKTOP,READER_MOBILE,READER_SETTINGS_PERSISTENCE
+          EOF
+          cd evidence-repo; git config user.name 'VF Public Runner'; git config user.email 'vf-public-runner@users.noreply.github.com'; git pull --rebase origin main; git add evidence/p06/publisher-reader
+          if ! git diff --cached --quiet; then git commit -m "evidence(P06): Publisher Reader V2 $RESULT $SOURCE_SHA"; git push origin HEAD:main; fi
+          echo "P06_PUBLISHER_READER_MACHINE=$RESULT"
