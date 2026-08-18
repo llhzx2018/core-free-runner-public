@@ -1,0 +1,144 @@
+name: P06 VF Press V0.1.0 Release Ready Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - triggers/p06-v010-release-ready.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: ad452176c063abed2eb1629d2683faf547c6117a
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout Runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Checkout exact release-ready source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Runtime and authority
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          test -n "$BROWSER"
+          echo "VF_PRESS_PDF_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.0'
+          grep -Fq '"lifecycle": "RELEASE_READY"' VF_PROJECT.json
+          grep -Fq '"online_update_integration": "PASS"' VF_PROJECT.json
+          grep -Fq '"operations_center": "PASS"' VF_PROJECT.json
+          grep -Fq '"branding_management": "PASS"' VF_PROJECT.json
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          find src bin public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+
+      - name: Fresh install and release-critical regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage dist /tmp/vf-press-* || true
+          mkdir -p storage
+          php bin/preflight.php | tee /tmp/pre
+          grep -Fq 'VF_PRESS_PREFLIGHT=PASS' /tmp/pre
+          php bin/migrate.php | tee /tmp/migrate
+          grep -Fq 'MIGRATION_PASS' /tmp/migrate
+          php bin/preflight.php | tee /tmp/pre2
+          grep -Fq 'SCHEMA=2' /tmp/pre2
+          php bin/self-test.php | grep -F 'FOUNDATION_SELF_TEST_PASS'
+          php bin/security-self-test.php | grep -F 'SECURITY_SELF_TEST_PASS'
+          php bin/living-publishing-self-test.php | tee /tmp/living
+          grep -Fq 'LIVING_PUBLISHING_SELF_TEST=PASS' /tmp/living
+          grep -Fq 'WEB_EXPORT=PASS' /tmp/living
+          grep -Fq 'PDF_EXPORT=PASS' /tmp/living
+          php bin/operations-self-test.php | tee /tmp/ops
+          grep -Fq 'OPERATIONS_SELF_TEST=PASS' /tmp/ops
+          grep -Fq 'BRANDING_RECOVERY=PASS' /tmp/ops
+          php bin/update-self-test.php | tee /tmp/update
+          grep -Fq 'UPDATE_SELF_TEST=PASS' /tmp/update
+          grep -Fq 'FAILED_UPDATE_ROLLBACK=PASS' /tmp/update
+
+      - name: Formal artifact exact source
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php bin/build-release.php dist | tee /tmp/build
+          grep -Fq 'RELEASE_BUILD=PASS' /tmp/build
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          unzip -l dist/VF_Press_V0.1.0_FULL.zip > /tmp/full
+          unzip -l dist/VF_Press_V0.1.0_UPDATE.zip > /tmp/updatezip
+          grep -Fq 'INSTALL_VPS.md' /tmp/full
+          grep -Fq 'vendor/autoload.php' /tmp/full
+          grep -Fq 'VF_UPDATE.json' /tmp/updatezip
+          ! grep -Eq '(^|[[:space:]])storage/' /tmp/full
+          ! grep -Fq '.git/' /tmp/full
+          ! unzip -p dist/VF_Press_V0.1.0_FULL.zip .env.example | grep -Eq 'VF_PRIVATE_READ_TOKEN=.+$'
+
+      - name: Cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage dist storage-restore-* /tmp/vf-press-* || true
+          test -z "$(git status --short --untracked-files=all)"
+
+      - name: Persist release-ready receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          [ "$STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          git -C runner-control pull --rebase origin main
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_V010_RELEASE_READY.txt <<EOF
+          P06_V010_RELEASE_READY=$RESULT
+          VERSION=0.1.0
+          SCHEMA=2
+          SOURCE_SHA=$SOURCE_SHA
+          RUN_ID=$GITHUB_RUN_ID
+          PREVIOUS_FULL_CANDIDATE_SHA=6e2e2495a2a026d10ee448aaa121fa2aaf60bfb0
+          MAIN_RECONCILIATION=CI_WORKFLOWS_ONLY
+          UPDATE_CORE=VERIFIED
+          UPDATE_ROLLBACK=VERIFIED
+          OPERATIONS_CENTER=VERIFIED
+          BRANDING_RECOVERY=VERIFIED
+          FORMAL_FULL_UPDATE_BUILD=VERIFIED
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_V010_RELEASE_READY.txt
+          git commit -m "evidence(P06): V0.1.0 release ready $RESULT $SOURCE_SHA run $GITHUB_RUN_ID" || true
+          git pull --rebase origin main
+          git push origin HEAD:main
+          test "$RESULT" = PASS
