@@ -1,0 +1,172 @@
+name: P06 VF Press V0.1.1 Browser First Install Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v011-browser-install-candidate.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: cba5ad2bef6b9a00e3bfbd2bbac84aade3a358b6
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Prepare and regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.1'
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          find src bin public deploy -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          rm -rf storage dist
+          php bin/migrate.php | grep -Fq 'MIGRATION_PASS'
+          php bin/self-test.php
+          php bin/security-self-test.php
+          php bin/research-self-test.php
+          php bin/publication-self-test.php
+          php bin/reader-self-test.php
+          php bin/edition-self-test.php
+          php bin/job-self-test.php
+          php bin/living-publishing-self-test.php
+          php bin/operations-self-test.php
+          php bin/update-self-test.php
+
+      - name: Build browser-first FULL and inspect root safety
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php bin/build-release.php dist | tee /tmp/build
+          grep -Fq 'RELEASE_BUILD=PASS' /tmp/build
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          test -s dist/VF_Press_V0.1.1_FULL.zip
+          test -s dist/VF_Press_V0.1.1_UPDATE.zip
+          unzip -l dist/VF_Press_V0.1.1_FULL.zip >/tmp/full-list
+          grep -Fq 'index.php' /tmp/full-list
+          grep -Fq '.vfpress-installer.php' /tmp/full-list
+          grep -Fq '.vfpress-runtime.php' /tmp/full-list
+          grep -Fq 'README_FIRST_INSTALL.txt' /tmp/full-list
+          ! grep -Eq '(^|[[:space:]])(src|bin|database|vendor|public|storage)/' /tmp/full-list
+          unzip -p dist/VF_Press_V0.1.1_UPDATE.zip VF_UPDATE.json | grep -Fq '"target_version": "0.1.1"'
+
+      - name: Real browser-first install HTTP E2E
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WEB=/tmp/vfpress-webroot
+          rm -rf "$WEB" /tmp/.vfpress-webroot-vfpress-runtime /tmp/.vfpress-webroot-vfpress-data
+          mkdir -p "$WEB"
+          unzip -q dist/VF_Press_V0.1.1_FULL.zip -d "$WEB"
+          test -f "$WEB/index.php"
+          test ! -d "$WEB/src"
+          test ! -d "$WEB/vendor"
+          cat >/tmp/vfpress-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          $file='/tmp/vfpress-webroot'.$path;
+          if ($path!=='/' && (is_file($file)||is_link($file))) return false;
+          require '/tmp/vfpress-webroot/index.php';
+          PHP
+          php -S 127.0.0.1:18777 -t "$WEB" /tmp/vfpress-router.php >/tmp/vfpress-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf /tmp/.vfpress-webroot-vfpress-runtime /tmp/.vfpress-webroot-vfpress-data' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18777/ >/tmp/install.html && break; sleep 1; done
+          grep -Fq '开始安装 VF Press' /tmp/install.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/install.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/install.headers -o /tmp/install.post -c /tmp/cookies -b /tmp/cookies \
+            -X POST http://127.0.0.1:18777/ \
+            --data-urlencode "_csrf=$CSRF" \
+            --data-urlencode 'site_name=科瓦罗出版测试' \
+            --data-urlencode 'username=owner-test' \
+            --data-urlencode 'display_name=Owner Test' \
+            --data-urlencode 'password=synthetic-browser-install-2026' \
+            --data-urlencode 'password_confirm=synthetic-browser-install-2026'
+          grep -Eq '^HTTP/1.1 303' /tmp/install.headers
+          grep -Fiq 'Location: /login' /tmp/install.headers
+          test -f "$WEB/.vfpress-bootstrap.php"
+          test ! -f "$WEB/.vfpress-runtime.php"
+          test -L "$WEB/assets"
+          test -d /tmp/.vfpress-webroot-vfpress-runtime
+          test -d /tmp/.vfpress-webroot-vfpress-data
+          test -f /tmp/.vfpress-webroot-vfpress-data/app.db
+          test "$(cat /tmp/.vfpress-webroot-vfpress-runtime/VERSION)" = '0.1.1'
+          test "$(sqlite3 /tmp/.vfpress-webroot-vfpress-data/app.db 'select max(version) from schema_migrations;')" = '2'
+          test "$(sqlite3 /tmp/.vfpress-webroot-vfpress-data/app.db 'pragma integrity_check;')" = 'ok'
+          curl -fsS -c /tmp/cookies -b /tmp/cookies http://127.0.0.1:18777/login >/tmp/login.html
+          grep -Fq '私人出版工作台' /tmp/login.html
+          LOGIN_CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -sS -D /tmp/login.headers -o /tmp/login.post -c /tmp/cookies -b /tmp/cookies \
+            -X POST http://127.0.0.1:18777/login \
+            --data-urlencode "_csrf=$LOGIN_CSRF" \
+            --data-urlencode 'username=owner-test' \
+            --data-urlencode 'password=synthetic-browser-install-2026'
+          grep -Eq '^HTTP/1.1 303' /tmp/login.headers
+          grep -Fiq 'Location: /studio' /tmp/login.headers
+          curl -fsS -b /tmp/cookies http://127.0.0.1:18777/studio >/tmp/studio.html
+          grep -Fq 'Publishing Studio' /tmp/studio.html
+          curl -fsS -b /tmp/cookies http://127.0.0.1:18777/studio/operations >/tmp/ops.html
+          grep -Fq '系统与运维' /tmp/ops.html
+          curl -fsS http://127.0.0.1:18777/health >/tmp/health.json
+          grep -Fq '"version":"0.1.1"' /tmp/health.json
+          grep -Fq '"schema":2' /tmp/health.json
+          echo BROWSER_FIRST_INSTALL_E2E=PASS
+
+      - name: Legacy unpack compatibility E2E
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WEB=/tmp/vfpress-legacy-webroot
+          rm -rf "$WEB" /tmp/.vfpress-legacy-webroot-vfpress-runtime /tmp/.vfpress-legacy-webroot-vfpress-data
+          mkdir -p "$WEB"
+          mkdir -p "$WEB/src" "$WEB/public" "$WEB/bin" "$WEB/vendor" "$WEB/storage"
+          echo legacy > "$WEB/storage/keep-me.txt"
+          unzip -q dist/VF_Press_V0.1.1_FULL.zip -d "$WEB"
+          grep -Fq 'index.php' <(unzip -l dist/VF_Press_V0.1.1_FULL.zip)
+          echo LEGACY_LAYOUT_DETECTION_FIXTURE=PASS
+
+      - name: Cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage dist
+          git status --porcelain --untracked-files=all > /tmp/status
+          test ! -s /tmp/status
+          echo P06_V011_BROWSER_FIRST_CANDIDATE=PASS
