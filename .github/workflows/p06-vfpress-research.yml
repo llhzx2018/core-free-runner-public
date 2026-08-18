@@ -1,0 +1,237 @@
+name: P06 VF Press Research Core Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-research.yml'
+      - 'requests/p06-vfpress-research-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-research-core
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_SHA: 794339cbc9da521911c80e039efc71c5e659d536
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout public-safe runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact VF Press source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 794339cbc9da521911c80e039efc71c5e659d536
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: source
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 composer curl >/dev/null
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          echo 'SOURCE_IDENTITY=PASS'
+
+      - name: Syntax migration and regression gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src bin public -type f -name '*.php' -print0)
+          rm -f storage/app.db storage/app.db-shm storage/app.db-wal
+          php bin/migrate.php >/dev/null
+          php bin/self-test.php >/dev/null
+          php bin/security-self-test.php >/dev/null
+          php bin/research-self-test.php
+          echo 'FOUNDATION_REGRESSION=PASS'
+          echo 'RESEARCH_SERVICE_MACHINE=PASS'
+
+      - name: Real Research HTTP E2E
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export VF_PRESS_OWNER_USERNAME='runner-owner'
+          export VF_PRESS_OWNER_PASSWORD='Runner-Owner-Password-2026!'
+          export VF_PRESS_OWNER_DISPLAY_NAME='Runner Owner'
+          php bin/create-owner.php >/dev/null
+
+          php -S 127.0.0.1:8096 -t public public/index.php >/tmp/vf-press-p06.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8096/health >/tmp/health.json; then break; fi
+            sleep 1
+          done
+          grep -Fq '"schema":2' /tmp/health.json
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8096/studio)
+          test "$HTTP_CODE" = '303'
+
+          curl -fsS -c /tmp/p06.cookies http://127.0.0.1:8096/login >/tmp/login.html
+          LOGIN_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/login.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          LOGIN_CODE=$(curl -sS -b /tmp/p06.cookies -c /tmp/p06.cookies -o /dev/null -w '%{http_code}' \
+            --data-urlencode "_csrf=$LOGIN_CSRF" \
+            --data-urlencode 'username=runner-owner' \
+            --data-urlencode 'password=Runner-Owner-Password-2026!' \
+            http://127.0.0.1:8096/login)
+          test "$LOGIN_CODE" = '303'
+
+          curl -fsS -b /tmp/p06.cookies http://127.0.0.1:8096/studio/research >/tmp/research-index.html
+          grep -Fq '你现在想弄懂什么？' /tmp/research-index.html
+          grep -Fq '/assets/research.css' /tmp/research-index.html
+          RESEARCH_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/research-index.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+
+          curl -sS -D /tmp/create.headers -o /dev/null -b /tmp/p06.cookies -c /tmp/p06.cookies \
+            --data-urlencode "_csrf=$RESEARCH_CSRF" \
+            --data-urlencode 'title=Agent 可靠性研究' \
+            --data-urlencode 'core_question=为什么 Agent 已经拥有 Tool 和 Memory，仍然经常不能可靠完成复杂、长期、跨步骤任务？' \
+            --data-urlencode 'interest_reason=把零散实践整理为一个真正可解释、可实践、可持续升级的知识体系。' \
+            http://127.0.0.1:8096/studio/research/create
+          grep -Eq '^HTTP/[^ ]+ 303' /tmp/create.headers
+          PROJECT_PATH=$(awk 'BEGIN{IGNORECASE=1} /^Location:/{gsub("\r",""); print $2}' /tmp/create.headers | tail -1)
+          test -n "$PROJECT_PATH"
+
+          curl -fsS -b /tmp/p06.cookies "http://127.0.0.1:8096$PROJECT_PATH" >/tmp/workspace.html
+          grep -Fq 'Agent 可靠性研究' /tmp/workspace.html
+          grep -Fq '资料与证据' /tmp/workspace.html
+          WORKSPACE_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/workspace.html',encoding='utf-8').read()
+          m=re.search(r'name="_csrf" value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+
+          curl -fsS -o /dev/null -b /tmp/p06.cookies \
+            --data-urlencode "_csrf=$WORKSPACE_CSRF" \
+            --data-urlencode 'question=Memory 与长期任务失败之间是什么关系？' \
+            "http://127.0.0.1:8096$PROJECT_PATH/question/add"
+
+          curl -fsS -o /dev/null -b /tmp/p06.cookies \
+            --data-urlencode "_csrf=$WORKSPACE_CSRF" \
+            --data-urlencode 'note_type=FINDING' \
+            --data-urlencode 'title=第一条真实发现' \
+            --data-urlencode 'body_markdown=可靠性不只取决于模型能力，还取决于 Runtime、Authority 与 Verification。' \
+            "http://127.0.0.1:8096$PROJECT_PATH/note/add"
+
+          curl -fsS -o /dev/null -b /tmp/p06.cookies \
+            --data-urlencode "_csrf=$WORKSPACE_CSRF" \
+            --data-urlencode 'source_type=WEB' \
+            --data-urlencode 'title=Agent Research Source' \
+            --data-urlencode 'author=VF Press Runner' \
+            --data-urlencode 'url=https://example.com/agent-research' \
+            --data-urlencode 'publisher=Example' \
+            --data-urlencode 'relation_note=用于验证 Research 与 Source 的真实关系。' \
+            "http://127.0.0.1:8096$PROJECT_PATH/source/add"
+
+          curl -fsS -o /dev/null -b /tmp/p06.cookies \
+            --data-urlencode "_csrf=$WORKSPACE_CSRF" \
+            --data-urlencode 'title=Agent 可靠性研究' \
+            --data-urlencode 'core_question=为什么 Agent 已经拥有 Tool 和 Memory，仍然经常不能可靠完成复杂、长期、跨步骤任务？' \
+            --data-urlencode 'interest_reason=把零散实践整理为一个真正可解释、可实践、可持续升级的知识体系。' \
+            --data-urlencode 'status=RESEARCH' \
+            --data-urlencode 'summary=已建立 Runtime、Authority、Verification 三层研究结构。' \
+            --data-urlencode 'findings=可靠 Agent 不是模型单点能力，而是运行环境、权限与验证共同作用。' \
+            --data-urlencode 'next_step=继续拆 Agent Runtime 的失败恢复机制。' \
+            "http://127.0.0.1:8096$PROJECT_PATH/update"
+
+          curl -fsS -b /tmp/p06.cookies "http://127.0.0.1:8096$PROJECT_PATH" >/tmp/workspace-final.html
+          grep -Fq 'Memory 与长期任务失败之间是什么关系？' /tmp/workspace-final.html
+          grep -Fq '第一条真实发现' /tmp/workspace-final.html
+          grep -Fq 'Agent Research Source' /tmp/workspace-final.html
+          grep -Fq '继续拆 Agent Runtime 的失败恢复机制。' /tmp/workspace-final.html
+
+          php -r '$pdo=new PDO("sqlite:storage/app.db");foreach(["research_projects","research_questions","research_notes","research_sources"] as $t){$c=(int)$pdo->query("SELECT COUNT(*) FROM $t")->fetchColumn();if($c<1){fwrite(STDERR,"missing runtime data:$t\n");exit(1);}}echo "RESEARCH_RUNTIME_DATA=PASS\n";'
+          echo 'OWNER_LOGIN_HTTP=PASS'
+          echo 'RESEARCH_WORKSPACE_HTTP=PASS'
+          echo 'RESEARCH_CREATE_HTTP=PASS'
+          echo 'RESEARCH_QUESTION_HTTP=PASS'
+          echo 'RESEARCH_NOTE_HTTP=PASS'
+          echo 'RESEARCH_SOURCE_HTTP=PASS'
+          echo 'RESEARCH_FINDINGS_NEXT_STEP_HTTP=PASS'
+
+      - name: Privacy and repository cleanliness
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test -z "$(git status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'PRIVATE_SOURCE_ARTIFACT=NO'
+          echo 'TOKEN_EXPOSED=NO'
+          echo 'USER_MANUAL_EXECUTION_REQUIRED=NO'
+
+      - name: Persist public-safe Research evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT='PASS'; else RESULT='FAIL'; fi
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_RESEARCH_LATEST.txt <<EOF
+          P06_RESEARCH_CORE_MACHINE=$RESULT
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          EXECUTION_MODE=EPHEMERAL_PRIVATE_READ_PUBLIC_SAFE_EVIDENCE
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=FOUNDATION_REGRESSION,RESEARCH_SERVICE,OWNER_LOGIN_HTTP,RESEARCH_WORKSPACE_HTTP,RESEARCH_CREATE_HTTP,RESEARCH_QUESTION_HTTP,RESEARCH_NOTE_HTTP,RESEARCH_SOURCE_HTTP,RESEARCH_FINDINGS_NEXT_STEP_HTTP,REPOSITORY_CLEANLINESS
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_RESEARCH_LATEST.txt
+          if git diff --cached --quiet; then
+            echo 'EVIDENCE_ALREADY_CURRENT=YES'
+          else
+            git commit -m "evidence(P06): Research Core $RESULT $SOURCE_SHA"
+            git push origin HEAD:main
+          fi
+          echo "P06_RESEARCH_CORE_MACHINE=$RESULT"
