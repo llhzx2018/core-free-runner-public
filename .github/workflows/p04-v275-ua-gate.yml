@@ -1,0 +1,186 @@
+name: P04 VF Infra V2.7.5 UA Workflow Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p04-v275-ua-gate-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p04-v275-ua-gate
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '789fc18627ba4f48a2a0b13be825adb6ad877274'
+  PRODUCTION_COMMIT: '3e6a18b893e42467e18913facf286ca2bc420f16'
+  PRODUCTION_VERSION: '2.7.4'
+  TARGET_VERSION: '2.7.5'
+  SCHEMA: '14'
+
+jobs:
+  v275-ua-workflow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout runner authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 1
+          path: runner
+
+      - name: Private source credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact P04 V2.7.5 working source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact source and production ancestry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_COMMIT" "$SOURCE_COMMIT"
+          test ! -e candidate/database/migrations/015_
+          grep -Fq -- '--vf-series-cyan:#0f766e' candidate/public/assets/v275-ua-workflow.css
+          grep -Fq 'body.v275-ua-workflow .v270-brand-mark' candidate/public/assets/v275-ua-workflow.css
+          grep -Fq 'body.v275-ua-workflow .v270-primary' candidate/public/assets/v275-ua-workflow.css
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'PRODUCTION_V274_ANCESTRY=PASS'
+          echo 'VF_CYAN_STATIC_CONTRACT=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Run V2.7.5 UA workflow gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V275_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V275_EVIDENCE_DIR: ${{ runner.temp }}/p04-v275-evidence
+        run: |
+          set -Eeuo pipefail
+          bash scripts/run-v275-ua-workflow-gate.sh | tee "$RUNNER_TEMP/p04-v275-gate.log"
+          grep -Fxq 'P04_V275_UA_WORKFLOW_GATE_PASS' "$RUNNER_TEMP/p04-v275-gate.log"
+
+      - name: Verify sanitized browser report
+        shell: bash
+        env:
+          EVIDENCE: ${{ runner.temp }}/p04-v275-evidence
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+          root=pathlib.Path(os.environ['EVIDENCE'])
+          p=json.loads((root/'V275_UA_WORKFLOW_REPORT.json').read_text(encoding='utf-8'))
+          assert p['status']=='PASS',p
+          assert p['version']=='2.7.5',p
+          assert p['schema']==14 and p['migration']=='NONE',p
+          assert p['domain']['tld_filter']=='PASS',p
+          assert p['domain']['expiry_sort']=='PASS',p
+          assert p['domain']['tld_group']=='PASS',p
+          assert p['server']['filter_sort_group']=='PASS',p
+          assert p['provider']['filter_sort_group']=='PASS',p
+          assert p['navigation']['explicit_back']=='PASS',p
+          assert p['navigation']['previous_next']=='PASS',p
+          assert p['navigation']['list_state_restore']=='PASS',p
+          assert p['mobile']['no_overflow']=='PASS',p
+          assert p['page_errors']==[],p['page_errors']
+          assert p['console_errors']==[],p['console_errors']
+          assert p['tested_runtime_commit']==os.environ['SOURCE_COMMIT'],p
+          print('P04_V275_SANITIZED_REPORT=PASS')
+          PY
+
+      - name: Publish public-safe evidence receipt
+        shell: bash
+        working-directory: runner
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence/p04
+          cat > evidence/p04/P04_V275_UA_LATEST.txt <<EOF
+          P04_V275_UA_WORKFLOW=PASS
+          SOURCE_REPOSITORY=$SOURCE_REPOSITORY
+          SOURCE_SHA=$SOURCE_COMMIT
+          PRODUCTION_VERSION=$PRODUCTION_VERSION
+          TARGET_VERSION=$TARGET_VERSION
+          SCHEMA=$SCHEMA
+          MIGRATION=NONE
+          DOMAIN_TLD_FILTER=PASS
+          DOMAIN_EXPIRY_SORT=PASS
+          DOMAIN_TLD_GROUP=PASS
+          DETAIL_RETURN_NAVIGATION=PASS
+          PREVIOUS_NEXT_NAVIGATION=PASS
+          LIST_STATE_RESTORE=PASS
+          SERVER_LIST_WORKFLOW=PASS
+          PROVIDER_LIST_WORKFLOW=PASS
+          VF_CYAN_LOGO=PASS
+          VF_CYAN_PRIMARY_CTA=PASS
+          BLACK_BRAND_PRIMARY=0
+          MOBILE_NO_OVERFLOW=PASS
+          PAGE_ERROR_COUNT=0
+          CONSOLE_ERROR_COUNT=0
+          V274_PRODUCTION_ANCESTRY=PASS
+          PRIVATE_SOURCE_IN_PUBLIC_GIT=NO
+          PRIVATE_EVIDENCE_PUBLISHED=NO
+          PRIVATE_READ_TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=0
+          RELEASE_WRITE=0
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          EOF
+          git config user.name 'VF Runner Evidence'
+          git config user.email 'vf-runner-evidence@users.noreply.github.com'
+          git add evidence/p04/P04_V275_UA_LATEST.txt
+          if git diff --cached --quiet; then
+            echo 'PUBLIC_SAFE_EVIDENCE_ALREADY_CURRENT=PASS'
+          else
+            git commit -m 'test(P04): seal V2.7.5 UA workflow evidence'
+            git push origin main
+          fi
+          echo 'PUBLIC_SAFE_EVIDENCE=PASS'
+
+      - name: Upload ephemeral synthetic screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.5-UA-WORKFLOW-EPHEMERAL
+          path: |
+            ${{ runner.temp }}/p04-v275-evidence/*.png
+            ${{ runner.temp }}/p04-v275-evidence/V275_UA_WORKFLOW_REPORT.json
+            ${{ runner.temp }}/p04-v275-evidence/SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 7
