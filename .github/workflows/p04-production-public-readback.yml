@@ -1,4 +1,4 @@
-name: P04 V2.7.1 One Shell IA Unification Gate (Temporary Harness)
+name: P04 Production Public Readback
 
 on:
   push:
@@ -7,117 +7,87 @@ on:
       - '.github/workflows/p04-production-public-readback.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: p04-v271-shell-unification-gate
+  group: p04-production-public-readback
   cancel-in-progress: false
 
-env:
-  PRODUCT_REPO: llhzx2018/vf-infra
-  PRODUCT_REF: feature/v2.7.1-shell-ia-unification
-
 jobs:
-  gate:
+  readback:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
+    env:
+      PROD_URL: https://infra.kewaro.com
+      EXPECTED_ASSET_BYTES: '41442'
+      EXPECTED_ASSET_SHA256: 3431cae2a905110669c8437fd2e2270bc74eacfe297ed4d9768eb3902a94eb10
+      RELEASE_ASSET_API: https://api.github.com/repos/llhzx2018/vf-infra/releases/assets/515855401
     steps:
-      - name: Checkout runner repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Checkout P04 V2.7.1 working branch
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.PRODUCT_REPO }}
-          ref: ${{ env.PRODUCT_REF }}
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
-          fetch-depth: 1
-          path: product
-
-      - name: Lock product identity
-        id: identity
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cd product
-          HEAD=$(git rev-parse HEAD)
-          test "$(tr -d '\r\n' < VERSION)" = '2.7.1'
-          test -f public/assets/v271-unified-shell.js
-          test -f public/assets/v271-unified-shell.css
-          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
-          echo "P04_V271_TESTED_HEAD=$HEAD"
-
-      - name: Install runtime and browser dependencies
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring >/dev/null
-          cd product
-          npm init -y >/dev/null 2>&1
-          npm install --silent playwright
-          npx playwright install --with-deps chromium >/dev/null
-          php -v | head -n 1
-          node --version
-
-      - name: Run V2.7.1 one-shell functional security browser gate
-        id: product_gate
-        continue-on-error: true
+      - name: Require unified read credential
         shell: bash
         env:
-          VF_V271_TESTED_RUNTIME_COMMIT: ${{ steps.identity.outputs.head }}
-          VF_V271_EVIDENCE_DIR: ${{ github.workspace }}/evidence
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           set -Eeuo pipefail
-          cd product
-          bash scripts/run-v271-shell-unification-gate.sh | tee "$GITHUB_WORKSPACE/p04-v271-gate.log"
+          test -n "$READ_TOKEN"
+          echo 'VF_PRIVATE_READ_TOKEN=AVAILABLE'
 
-      - name: Upload V2.7.1 visual evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: P04-V2.7.1-ONE-SHELL-IA-GATE
-          path: |
-            evidence/
-            p04-v271-gate.log
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Publish non-sensitive gate status
-        if: always()
+      - name: Live Production login page readback
         shell: bash
-        env:
-          TESTED_HEAD: ${{ steps.identity.outputs.head }}
-          GATE_OUTCOME: ${{ steps.product_gate.outcome }}
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
-          import json,os
-          outcome=os.environ.get('GATE_OUTCOME','unknown')
-          data={
-            'project':'P04 · VF Infra','version':'2.7.1','schema':14,'migration':'NONE',
-            'tested_head':os.environ.get('TESTED_HEAD',''),'run_id':int(os.environ['GITHUB_RUN_ID']),
-            'gate_outcome':outcome,
-            'secondary_user_shell':0 if outcome=='success' else 'NOT_ESTABLISHED',
-            'duplicate_settings':0 if outcome=='success' else 'NOT_ESTABLISHED',
-            'owner_task_requires_legacy_ui':0 if outcome=='success' else 'NOT_ESTABLISHED',
-            'function_loss':0 if outcome=='success' else 'NOT_ESTABLISHED',
-            'candidate':'NOT_AUTHORIZED','release':'NOT_AUTHORIZED','production_write':0
-          }
-          open('p04-v271-shell-gate-status.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2)+'\n')
+          out="$RUNNER_TEMP/login.html"
+          curl --fail --silent --show-error --location --max-time 20 --output "$out" "$PROD_URL/login.php"
+          python3 - "$out" <<'PY'
+          import re, pathlib, sys
+          text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
+          matches=re.findall(r'VF Infra\s*·\s*V([0-9]+(?:\.[0-9]+){2})', text)
+          if not matches:
+              print('PRODUCTION_VERSION_READBACK=NOT_FOUND')
+              raise SystemExit(2)
+          print('PRODUCTION_VERSION='+matches[-1])
+          print('LOGIN_CONTRACT=' + ('PASS' if 'name="csrf"' in text and 'name="password"' in text else 'FAIL'))
           PY
-          git config user.name 'P04 Gate Bot'
-          git config user.email 'actions@users.noreply.github.com'
-          git add p04-v271-shell-gate-status.json
-          git commit -m 'evidence(P04): publish V2.7.1 shell gate status' || true
-          git push origin HEAD:main
 
-      - name: Enforce gate result
-        if: always()
+      - name: Maintenance authentication boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          headers="$RUNNER_TEMP/maintenance.headers"
+          curl --silent --show-error --max-time 20 --output /dev/null --dump-header "$headers" "$PROD_URL/maintenance.php"
+          code=$(awk 'NR==1{print $2}' "$headers")
+          location=$(awk 'BEGIN{IGNORECASE=1}/^location:/{sub(/\r$/,"",$0); print substr($0,index($0,":")+2); exit}' "$headers")
+          echo "MAINTENANCE_UNAUTH_HTTP=$code"
+          echo "MAINTENANCE_LOCATION=$location"
+          case "$code" in 301|302|303|307|308) ;; *) echo 'MAINTENANCE_AUTH_BOUNDARY=FAIL'; exit 1;; esac
+          printf '%s' "$location" | grep -Fq 'login.php?return=maintenance.php'
+          echo 'MAINTENANCE_AUTH_BOUNDARY=PASS'
+
+      - name: Formal UPDATE remote identity readback
         shell: bash
         env:
-          GATE_OUTCOME: ${{ steps.product_gate.outcome }}
-        run: test "$GATE_OUTCOME" = 'success'
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/VF_Infra_V2.5.2_UPDATE.zip"
+          curl --fail --silent --show-error --location --max-time 60 \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer $READ_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$RELEASE_ASSET_API" -o "$out"
+          bytes=$(stat -c '%s' "$out")
+          sha=$(sha256sum "$out" | awk '{print $1}')
+          test "$bytes" = "$EXPECTED_ASSET_BYTES"
+          test "$sha" = "$EXPECTED_ASSET_SHA256"
+          test "$(unzip -Z1 "$out" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "$out")" = 'repair-v2.5.2.php'
+          echo "FORMAL_UPDATE_BYTES=$bytes"
+          echo "FORMAL_UPDATE_SHA256=$sha"
+          echo 'FORMAL_UPDATE_IDENTITY=PASS'
+
+      - name: Public readback summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P04_PRODUCTION_PUBLIC_READBACK=PASS'
+          echo 'NO_PRODUCTION_WRITE_EXECUTED=TRUE'
