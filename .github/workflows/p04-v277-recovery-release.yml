@@ -1,0 +1,117 @@
+name: P04 V2.7.7 Emergency Recovery Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v277-recovery-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8
+      SOURCE_TREE: 57109ca42abb71e9d4943761690d53e66d0240ff
+      TARGET_VERSION: 2.7.7
+    steps:
+      - name: Capability gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$GH_TOKEN"
+          ! gh release view "v$TARGET_VERSION" -R "$SOURCE_REPOSITORY" >/dev/null 2>&1
+          echo 'V277_RELEASE_CAPABILITY=PASS'
+
+      - name: Checkout exact recovery source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Recovery authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          ! grep -Fq 'v276-responsive-loading.css' candidate/public/index.php
+          ! grep -Fq 'v276-responsive-loading.js' candidate/public/index.php
+          ! grep -Fq 'MutationObserver' candidate/public/assets/v276-responsive-loading.js
+          ! grep -Fq 'v276-progress-track' candidate/public/assets/v276-responsive-loading.js
+          git -C candidate diff --exit-code v2.7.5 -- public/index.php public/assets/v275-ua-workflow.css public/assets/v275-ua-workflow.js public/assets/v274-ui-stability.css public/assets/v274-performance-bridge.js public/assets/v273-typography-rhythm.css public/assets/v272-backend-detail-ux.css public/assets/v272-backend-detail-ux.js public/assets/v271-unified-shell.css public/assets/v271-unified-shell.js public/assets/v270-reference-lock.css public/assets/v270-reference-lock.js
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          echo 'V277_V275_UI_AUTHORITY=PASS'
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Build exact artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/v277"
+          python scripts/build-v277-candidate-artifacts.py --output "$OUT" | tee "$RUNNER_TEMP/build.log"
+          grep -Fxq 'P04_V277_RECOVERY_ARTIFACT_PRE_GATE_PASS' "$RUNNER_TEMP/build.log"
+          php "$OUT/update-set/repair-v2.7.7.php" --self-test | tee "$RUNNER_TEMP/atomic.log"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS' "$RUNNER_TEMP/atomic.log"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+
+      - name: Prove V2.7.6 to V2.7.7 Source Exact
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v276"
+          gh release download v2.7.6 -R "$SOURCE_REPOSITORY" --pattern 'VF_Infra_V2.7.6_FULL.zip' --dir "$RUNNER_TEMP/v276"
+          python scripts/full-runtime-vs-update-result-source-exact-gate.py --baseline-full "$RUNNER_TEMP/v276/VF_Infra_V2.7.6_FULL.zip" --candidate-full "$OUT/VF_Infra_V2.7.7_FULL.zip" --candidate-update "$OUT/update-set/VF_Infra_V2.7.7_UPDATE.zip" --expected-source-version 2.7.6 --expected-target-version 2.7.7
+          test "$(sha256sum "$OUT/VF_Infra_V2.7.7_FULL.zip" | cut -d' ' -f1)" = '17bc5ad7154ae9fcf6101eb7b3c2740e6c217f6871f37306644638e96fb2bdc7'
+          test "$(sha256sum "$OUT/update-set/VF_Infra_V2.7.7_UPDATE.zip" | cut -d' ' -f1)" = '92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a'
+          test "$(sha256sum "$OUT/update-set/repair-v2.7.7.php" | cut -d' ' -f1)" = 'c49716696aa1a84d6c61efcde4fce2d4192189064db8511d66c50c550a29a8c5'
+          echo 'V277_SOURCE_EXACT_AND_HASH=PASS'
+
+      - name: Publish GitHub recovery release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh release create v2.7.7 -R "$SOURCE_REPOSITORY" --target "$SOURCE_COMMIT" --title 'VF Infra V2.7.7' --notes 'V2.7.7 紧急体验恢复：恢复 OWNER 已接受的 V2.7.5 UA/UI；撤销 V2.7.6 全局响应式、每页进度条与 Skeleton Overlay。Schema 14，无 Migration；Provider 继续 READ-ONLY FIRST。仅支持 V2.7.6 → V2.7.7。' "$OUT/VF_Infra_V2.7.7_FULL.zip" "$OUT/update-set/VF_Infra_V2.7.7_UPDATE.zip" "$OUT/update-set/VF_Infra_V2.7.7_ATOMIC.zip" "$OUT/update-set/repair-v2.7.7.php"
+          echo 'V277_GITHUB_RELEASE=PASS'
+
+      - name: Publish core-updates recovery authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v2.7.7" > "$RUNNER_TEMP/release.json"
+          release_id="$(jq -r .id "$RUNNER_TEMP/release.json")"
+          released_at="$(jq -r .published_at "$RUNNER_TEMP/release.json")"
+          asset_id="$(jq -r '.assets[] | select(.name=="VF_Infra_V2.7.7_UPDATE.zip") | .id' "$RUNNER_TEMP/release.json")"
+          asset_bytes="$(jq -r '.assets[] | select(.name=="VF_Infra_V2.7.7_UPDATE.zip") | .size' "$RUNNER_TEMP/release.json")"
+          test "$asset_bytes" = '46989'
+          jq -n --argjson release_id "$release_id" --argjson asset_id "$asset_id" --argjson asset_bytes "$asset_bytes" --arg released_at "$released_at" '{schema_version:"1.0",project_id:"P04",component_id:"APP",enabled:true,target_version:"2.7.7",update_type:"ATOMIC",from_versions:["2.7.6"],schema_from:"14",schema_to:"14",repository:"llhzx2018/vf-infra",release_tag:"v2.7.7",release_name:"VF Infra V2.7.7",release_id:$release_id,release_product_commit:"a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8",release_product_tree:"57109ca42abb71e9d4943761690d53e66d0240ff",asset_name:"VF_Infra_V2.7.7_UPDATE.zip",asset_id:$asset_id,asset_bytes:$asset_bytes,asset_sha256:"92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a",backup_required:true,rollback_supported:true,released_at:$released_at,minimum_php:"8.0.0",notes:"V2.7.7 Recovery：V2.7.6 已撤回；恢复 V2.7.5 UA/UI，撤销 V2.7.6 全局响应式、每页进度条和 Skeleton Overlay。Schema14，无 Migration；Provider READ-ONLY FIRST。同步专用进度条暂不在恢复版重做。"}' > "$RUNNER_TEMP/P04.json"
+          sha="$(gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .sha)"
+          encoded="$(base64 -w0 "$RUNNER_TEMP/P04.json")"
+          gh api --method PUT repos/llhzx2018/core-updates/contents/projects/P04.json -f message='release(P04): publish V2.7.7 recovery update' -f content="$encoded" -f sha="$sha" -f branch=main > "$RUNNER_TEMP/write.json"
+          jq -e '.commit.sha' "$RUNNER_TEMP/write.json" >/dev/null
+          gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .content | base64 -d | jq -e '.enabled == true and .target_version == "2.7.7" and .from_versions == ["2.7.6"] and .asset_sha256 == "92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a"' >/dev/null
+          echo "RELEASE_ID=$release_id"
+          echo "UPDATE_ASSET_ID=$asset_id"
+          echo 'P04_V277_RECOVERY_RELEASE=PASS'
+          echo 'ONLINE_UPDATE_AVAILABLE=YES'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
