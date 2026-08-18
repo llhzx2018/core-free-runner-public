@@ -1,0 +1,173 @@
+name: P04 VF Infra V2.7.4 Formal Artifact Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v274-artifact-gate.yml'
+      - 'requests/p04-v274-artifact-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p04-v274-public-artifact
+  cancel-in-progress: false
+
+jobs:
+  verify-artifacts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require registered private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact P04 V2.7.4 candidate ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: candidate/v2.7.4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p04
+
+      - name: Bind candidate identity and ancestry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_SHA="$(git -C p04 rev-parse HEAD)"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          test "$(tr -d '\r\n' < p04/VERSION)" = '2.7.4'
+          git -C p04 merge-base --is-ancestor fe0f364c7da7a4592c21a9cc36eb6a8f9563c505 HEAD
+          echo 'V273_FORMAL_RELEASE_ANCESTRY=PASS'
+
+      - name: Repository health before transient build output
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          test ! -e database/migrations/015_ || exit 1
+          python -m py_compile scripts/build-v274-update-release.py scripts/build-v274-candidate-artifacts.py scripts/validate-v274-candidate-artifacts.py scripts/full-runtime-vs-update-result-source-exact-gate.py
+          echo 'SOURCE_PRE_GATE=PASS'
+
+      - name: Prepare PHP 8.4 runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Download immutable V2.7.3 baseline FULL
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p04-v273"
+          gh release download v2.7.3 --repo llhzx2018/vf-infra --pattern 'VF_Infra_V2.7.3_FULL.zip' --dir "$RUNNER_TEMP/p04-v273"
+          test -s "$RUNNER_TEMP/p04-v273/VF_Infra_V2.7.3_FULL.zip"
+          echo "BASELINE_FULL_SHA256=$(sha256sum "$RUNNER_TEMP/p04-v273/VF_Infra_V2.7.3_FULL.zip" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo 'V273_BASELINE_FULL=PASS'
+
+      - name: Build deterministic V2.7.4 formal candidate artifacts
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          python scripts/build-v274-candidate-artifacts.py --output "$RUNNER_TEMP/p04-v274-artifacts"
+          python scripts/validate-v274-candidate-artifacts.py --artifacts "$RUNNER_TEMP/p04-v274-artifacts"
+          echo 'V274_ARTIFACT_BUILD_VALIDATE=PASS'
+
+      - name: Full Runtime vs Update Result Source Exact
+        shell: bash
+        working-directory: p04
+        run: |
+          set -Eeuo pipefail
+          python scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/p04-v273/VF_Infra_V2.7.3_FULL.zip" \
+            --candidate-full "$RUNNER_TEMP/p04-v274-artifacts/VF_Infra_V2.7.4_FULL.zip" \
+            --candidate-update "$RUNNER_TEMP/p04-v274-artifacts/update-set/VF_Infra_V2.7.4_UPDATE.zip" \
+            --expected-source-version 2.7.3 \
+            --expected-target-version 2.7.4
+          echo 'V274_FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS'
+
+      - name: Capture formal hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          A="$RUNNER_TEMP/p04-v274-artifacts"
+          echo "FULL_SHA256=$(sha256sum "$A/VF_Infra_V2.7.4_FULL.zip" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "FULL_BYTES=$(stat -c %s "$A/VF_Infra_V2.7.4_FULL.zip")" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA256=$(sha256sum "$A/update-set/VF_Infra_V2.7.4_UPDATE.zip" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(stat -c %s "$A/update-set/VF_Infra_V2.7.4_UPDATE.zip")" >> "$GITHUB_ENV"
+          echo "REPAIR_SHA256=$(sha256sum "$A/update-set/repair-v2.7.4.php" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "RUNTIME_FINGERPRINT=$(python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ['RUNNER_TEMP'])/'p04-v274-artifacts/runtime/release-manifest.json'
+          print(json.loads(p.read_text(encoding='utf-8'))['source_fingerprint'])
+          PY
+          )" >> "$GITHUB_ENV"
+
+      - name: Ensure no private source persistence in public runner repo
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -z "$(git -C runner-control status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_IN_PUBLIC_GIT=NO'
+          echo 'PRIVATE_SOURCE_IN_PUBLIC_ARTIFACT=NO'
+
+      - name: Write sanitized artifact evidence receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT='PASS'; else RESULT='FAIL'; fi
+          mkdir -p runner-control/evidence/p04
+          cat > runner-control/evidence/p04/P04_V274_ARTIFACT_LATEST.txt <<EOF
+          P04_V274_ARTIFACT_GATE=$RESULT
+          SOURCE_SHA=${SOURCE_SHA:-UNKNOWN}
+          SOURCE_VERSION=2.7.3
+          TARGET_VERSION=2.7.4
+          SCHEMA=14
+          MIGRATION=NONE
+          BASELINE_FULL_SHA256=${BASELINE_FULL_SHA256:-UNAVAILABLE}
+          FULL_SHA256=${FULL_SHA256:-UNAVAILABLE}
+          FULL_BYTES=${FULL_BYTES:-0}
+          UPDATE_SHA256=${UPDATE_SHA256:-UNAVAILABLE}
+          UPDATE_BYTES=${UPDATE_BYTES:-0}
+          REPAIR_SHA256=${REPAIR_SHA256:-UNAVAILABLE}
+          RUNTIME_FINGERPRINT=${RUNTIME_FINGERPRINT:-UNAVAILABLE}
+          FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=$RESULT
+          PRIVATE_SOURCE_IN_PUBLIC_GIT=NO
+          PRIVATE_SOURCE_IN_PUBLIC_ARTIFACT=NO
+          PRIVATE_READ_TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=0
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p04/P04_V274_ARTIFACT_LATEST.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence(P04): V2.7.4 artifact $RESULT ${SOURCE_SHA:-UNKNOWN}"
+            git push origin HEAD:main
+          fi
+          echo "P04_V274_ARTIFACT_GATE=$RESULT"
