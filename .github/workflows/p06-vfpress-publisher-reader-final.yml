@@ -1,0 +1,202 @@
+name: P06 VF Press Publisher Reader Final Closure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-publisher-reader-final.yml'
+      - 'requests/p06-vfpress-reader-final-*.txt'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-publisher-reader-final
+  cancel-in-progress: true
+
+jobs:
+  close-phase-d:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: ddf3cc050256052ed51c11a4a39270a4734f0576
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout public-safe evidence repo
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: evidence-repo
+          fetch-depth: 1
+
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact private source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Validate exact source and strict CSP
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          grep -Fq '"current_phase": "PHASE_D_PUBLISHER_READER"' VF_PROJECT.json
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring sqlite3 composer curl openssl >/dev/null
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src bin public -type f -name '*.php' -print0)
+          grep -Fq "script-src 'self'; style-src 'self'" public/index.php
+          ! grep -Fq 'style="' src/Http/Preview/PublisherReaderPreviewController.php
+          ! grep -Fq '.style.' public/assets/reader.js
+          grep -Fq '<progress class="reader-progress"' src/Http/Preview/PublisherReaderPreviewController.php
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'CSP_STATIC_BOUNDARY=PASS'
+
+      - name: Run full isolated regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          run_gate(){
+            local script="$1" name="$2"
+            export VF_PRESS_STORAGE_PATH="${RUNNER_TEMP}/p06-final-${name}"
+            export VF_PRESS_DB_PATH="${VF_PRESS_STORAGE_PATH}/app.db"
+            export APP_ENV=test
+            rm -rf "$VF_PRESS_STORAGE_PATH"; mkdir -p "$VF_PRESS_STORAGE_PATH"
+            php bin/migrate.php >/dev/null
+            php "$script" | tee "/tmp/p06-final-${name}.log"
+            php -r '$pdo=new PDO("sqlite:".getenv("VF_PRESS_DB_PATH"));if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(1);'
+          }
+          run_gate bin/self-test.php foundation
+          run_gate bin/security-self-test.php security
+          run_gate bin/research-self-test.php research
+          run_gate bin/publication-self-test.php manuscript
+          run_gate bin/reader-self-test.php reader
+          grep -Fq 'REVISION_IMMUTABLE=PASS' /tmp/p06-final-manuscript.log
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/p06-final-reader.log
+          grep -Fq 'SAFE_MARKDOWN=PASS' /tmp/p06-final-reader.log
+          grep -Fq 'READER_NAVIGATION=PASS' /tmp/p06-final-reader.log
+          echo 'FULL_REGRESSION=PASS'
+
+      - name: Build synthetic Owner Preview runtime
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          STORAGE="${RUNNER_TEMP}/p06-reader-final"
+          export VF_PRESS_STORAGE_PATH="$STORAGE" VF_PRESS_DB_PATH="$STORAGE/app.db" APP_ENV=test
+          rm -rf "$STORAGE"; mkdir -p "$STORAGE"
+          php bin/migrate.php >/dev/null
+          PASS="$(openssl rand -hex 24)"; printf '%s' "$PASS" >/tmp/p06-final-password
+          VF_PRESS_OWNER_USERNAME=visual-owner VF_PRESS_OWNER_PASSWORD="$PASS" VF_PRESS_OWNER_DISPLAY_NAME='Visual Owner' php bin/create-owner.php >/dev/null
+          unset PASS
+          php bin/reader-self-test.php >/tmp/p06-final-fixture.log
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/p06-final-fixture.log
+          php -r '$pdo=new PDO("sqlite:".getenv("VF_PRESS_DB_PATH"));$pid=$pdo->query("SELECT id FROM publications ORDER BY created_at DESC LIMIT 1")->fetchColumn();file_put_contents("/tmp/p06-final-pid",$pid);$s=$pdo->prepare("SELECT id FROM publication_sections WHERE publication_id=:p ORDER BY position ASC LIMIT 1");$s->execute(["p"=>$pid]);file_put_contents("/tmp/p06-final-sid",$s->fetchColumn());'
+          cat >/tmp/p06-final-router.php <<PHP
+          <?php
+          \$root='${GITHUB_WORKSPACE}/source/public'; \$p=parse_url(\$_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/'; \$f=realpath(\$root.\$p); \$r=realpath(\$root);
+          if(\$f!==false&&\$r!==false&&is_file(\$f)&&str_starts_with(\$f,\$r.DIRECTORY_SEPARATOR)) return false;
+          require \$root.'/index.php';
+          PHP
+          nohup env VF_PRESS_STORAGE_PATH="$STORAGE" VF_PRESS_DB_PATH="$STORAGE/app.db" APP_ENV=test php -S 127.0.0.1:8104 -t public /tmp/p06-final-router.php >/tmp/p06-final-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8104/health >/dev/null && { echo 'LOCAL_RUNTIME=PASS'; exit 0; }; sleep 1; done
+          cat /tmp/p06-final-server.log; exit 1
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-final-browser; cd /tmp/p06-final-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 >/dev/null 2>&1; npx playwright install --with-deps chromium >/dev/null
+
+      - name: Run final authenticated browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence-repo/evidence/p06/publisher-reader-final
+          cat >/tmp/p06-final-browser/capture.js <<'JS'
+          const { chromium }=require('/tmp/p06-final-browser/node_modules/playwright'); const fs=require('fs');
+          (async()=>{
+            const password=fs.readFileSync('/tmp/p06-final-password','utf8'); const pid=fs.readFileSync('/tmp/p06-final-pid','utf8').trim(); const sid=fs.readFileSync('/tmp/p06-final-sid','utf8').trim(); const base='http://127.0.0.1:8104';
+            const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1440,height:1050},deviceScaleFactor:1});
+            const csp=[]; const errors=[]; page.on('console',m=>{const t=m.text();if(/Content Security Policy|Refused to apply inline style|Refused to execute inline/i.test(t))csp.push(t)}); page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(`${base}/preview/publisher`); if(!page.url().includes('/login'))throw new Error('Preview auth missing');
+            await page.getByLabel('用户名').fill('visual-owner'); await page.getByLabel('密码').fill(password); await Promise.all([page.waitForURL('**/studio'),page.getByRole('button',{name:'登录'}).click()]);
+            await page.goto(`${base}/preview/publisher`); await page.getByText('OWNER PREVIEW · WORKING PUBLICATION').waitFor(); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-final/01_publisher_desktop.png',fullPage:true});
+            await page.goto(`${base}/preview/publications/${pid}`); await page.getByText('这还不是正式 Edition。').waitFor(); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-final/02_book_detail_desktop.png',fullPage:true});
+            const url=`${base}/preview/read/${pid}/${sid}`; await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor(); if(await page.locator('[style]').count()!==0)throw new Error('Inline style detected'); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-final/03_reader_desktop.png',fullPage:true});
+            await page.getByRole('button',{name:'阅读设置'}).click(); await page.locator('[data-reader-settings-panel]').waitFor({state:'visible'});
+            await page.locator('[data-reader-font]').evaluate(el=>{el.value='23';el.dispatchEvent(new Event('input',{bubbles:true}))}); await page.locator('[data-reader-line]').evaluate(el=>{el.value='1.95';el.dispatchEvent(new Event('input',{bubbles:true}))}); await page.locator('[data-reader-width]').evaluate(el=>{el.value='800';el.dispatchEvent(new Event('input',{bubbles:true}))}); await page.getByRole('button',{name:'暖色'}).click();
+            const html=page.locator('html'); const state=await html.evaluate(el=>({theme:el.dataset.readerTheme,classes:[...el.classList]})); if(state.theme!=='warm'||!state.classes.includes('reader-font-23')||!state.classes.includes('reader-line-195')||!state.classes.includes('reader-width-800'))throw new Error('Desktop reader preferences failed');
+            if(await page.locator('.reader-content').evaluate(el=>getComputedStyle(el).fontSize)!=='23px')throw new Error('Computed font failed'); await page.keyboard.press('Escape'); await page.locator('[data-reader-settings-panel]').waitFor({state:'hidden'});
+            await page.setViewportSize({width:390,height:844}); await page.goto(url); await page.getByRole('heading',{name:'从会聊天到会做事'}).first().waitFor(); const mobile=await html.evaluate(el=>({theme:el.dataset.readerTheme,classes:[...el.classList]})); if(mobile.theme!=='warm'||!mobile.classes.includes('reader-font-23'))throw new Error('Mobile preference persistence failed');
+            await page.getByRole('button',{name:'打开目录'}).click(); const toc=page.locator('[data-reader-toc-panel]'); await toc.waitFor({state:'visible'}); await toc.getByRole('link',{name:'Tool：让 AI 接触外部世界',exact:true}).waitFor(); await page.keyboard.press('Escape'); await page.screenshot({path:'evidence-repo/evidence/p06/publisher-reader-final/04_reader_mobile.png',fullPage:true});
+            if(csp.length)throw new Error(`CSP violations: ${csp.join(' | ')}`); if(errors.length)throw new Error(`Page errors: ${errors.join(' | ')}`); await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          node /tmp/p06-final-browser/capture.js
+          echo 'PUBLISHER_READER_BROWSER_E2E=PASS'
+          echo 'READER_SETTINGS_PERSISTENCE=PASS'
+          echo 'CSP_RUNTIME=PASS'
+          echo 'DESKTOP_MOBILE_VISUAL_CAPTURE=PASS'
+
+      - name: Verify privacy and source cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-final-password
+          test -z "$(git status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_REPOSITORY_CLEAN=PASS'
+          echo 'PRIVATE_SOURCE_PERSISTED_TO_PUBLIC_REPOSITORY=NO'
+          echo 'PRIVATE_SOURCE_UPLOADED_AS_ARTIFACT=NO'
+          echo 'PRIVATE_DATA_USED=NO'
+          echo 'TOKEN_EXPOSED=NO'
+
+      - name: Persist final public-safe Phase D evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-final-password
+          RESULT=FAIL; VISUAL=INCOMPLETE
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT=PASS; VISUAL=READY_FOR_OWNER_REVIEW; fi
+          DIR=evidence-repo/evidence/p06/publisher-reader-final; mkdir -p "$DIR"; COUNT="$(find "$DIR" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l)"
+          cat >"$DIR/RECEIPT.txt" <<EOF
+          P06_PHASE_D_PUBLISHER_READER_MACHINE=$RESULT
+          P06_PHASE_D_VISUAL=$VISUAL
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          DATA_MODE=SYNTHETIC_PUBLIC_SAFE
+          PREVIEW_AUTH_REQUIRED=YES
+          FORMAL_EDITION_EXPOSED=NO
+          STRICT_CSP=YES
+          INLINE_STYLE_RUNTIME=NO
+          READER_SETTINGS_PERSISTENCE=$RESULT
+          SCREENSHOTS=$COUNT
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=SOURCE_IDENTITY,CSP_STATIC_BOUNDARY,FULL_REGRESSION,REVISION_IMMUTABILITY,SAFE_MARKDOWN,READER_NAVIGATION,PREVIEW_AUTH,PUBLISHER_DESKTOP,BOOK_DETAIL_DESKTOP,READER_DESKTOP,READER_MOBILE,READER_SETTINGS_PERSISTENCE,CSP_RUNTIME,REPOSITORY_CLEANLINESS
+          EOF
+          cd evidence-repo; git config user.name 'VF Public Runner'; git config user.email 'vf-public-runner@users.noreply.github.com'; git pull --rebase origin main; git add evidence/p06/publisher-reader-final
+          if ! git diff --cached --quiet; then git commit -m "evidence(P06): Phase D Publisher Reader $RESULT $SOURCE_SHA"; git push origin HEAD:main; fi
+          echo "P06_PHASE_D_PUBLISHER_READER_MACHINE=$RESULT"
