@@ -1,0 +1,118 @@
+name: P06 VF Press Living Book Edition Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-edition.yml'
+      - 'requests/p06-vfpress-edition-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-edition
+  cancel-in-progress: false
+
+jobs:
+  edition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-press
+      SOURCE_SHA: 50178b3c8f5efde22471eb5302ae66b61f0b01fe
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout exact private source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 50178b3c8f5efde22471eb5302ae66b61f0b01fe
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring sqlite3 composer >/dev/null
+          php -r 'if(!extension_loaded("pdo_sqlite")){exit(1);} echo "PDO_SQLITE=PASS\n";'
+
+      - name: Source and syntax gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          find src bin public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          grep -Fq 'class EditionService' src/Application/Publication/EditionService.php
+          grep -Fq 'createEditionSnapshotFromRevision' src/Infrastructure/Storage/ManuscriptStore.php
+
+      - name: Fresh migration and full regression through Edition
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage
+          mkdir -p storage
+          php bin/migrate.php >/dev/null
+          php bin/self-test.php >/dev/null
+          php bin/security-self-test.php >/dev/null
+          php bin/research-self-test.php >/dev/null
+          php bin/publication-self-test.php >/dev/null
+          php bin/reader-self-test.php >/dev/null
+          php bin/edition-self-test.php | tee /tmp/edition.out
+          grep -Fq 'EDITION_SELF_TEST=PASS' /tmp/edition.out
+          grep -Fq 'IMMUTABLE_HISTORY=PASS' /tmp/edition.out
+          grep -Fq 'OWN_WEB_DISTRIBUTION=PASS' /tmp/edition.out
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo $p->query("PRAGMA integrity_check")->fetchColumn();')" = 'ok'
+          test -z "$(git status --short --untracked-files=all)"
+
+      - name: Persist public-safe evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = success ]; then RESULT=PASS; else RESULT=FAIL; fi
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_EDITION_LATEST.txt <<EOF
+          P06_PHASE_E_LIVING_BOOK_EDITION=$RESULT
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          EXECUTION_MODE=EPHEMERAL_PRIVATE_READ_PUBLIC_SAFE_EVIDENCE
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=SOURCE_IDENTITY,PHP_SYNTAX,FULL_REGRESSION,REVISION_TO_CANDIDATE,EDITION_SNAPSHOT_HASH,EDITION_IMMUTABILITY,PUBLISH,CURRENT_EDITION_POINTER,OWN_WEB_DISTRIBUTION,HISTORICAL_EDITION_RETIRE_GUARD,SQLITE_INTEGRITY
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_EDITION_LATEST.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence(P06): Living Book Edition $RESULT $SOURCE_SHA"
+            git push origin HEAD:main
+          fi
+          test "$RESULT" = PASS
