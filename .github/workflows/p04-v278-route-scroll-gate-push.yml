@@ -1,0 +1,109 @@
+name: P04 VF Infra V2.7.8 Route Scroll Hotfix Gate Push
+
+on:
+  push:
+    branches:
+      - 'verify/p04-v278-scroll-reset-*'
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: 'ec133d34c1f27098a01aa7b5e9f8e77ba8e847a2'
+  BASE_REF: 'v2.7.7'
+  TARGET_VERSION: '2.7.8'
+  SCHEMA: '14'
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout exact P04 hotfix
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact scope and identity gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          git -C candidate fetch origin "refs/tags/$BASE_REF:refs/tags/$BASE_REF"
+          mapfile -t changed < <(git -C candidate diff --name-only "$BASE_REF"...HEAD | sort)
+          expected=$(printf '%s\n' VERSION public/assets/v278-route-scroll-reset.js public/index.php | sort)
+          actual=$(printf '%s\n' "${changed[@]}")
+          test "$actual" = "$expected"
+          grep -Fq 'assets/v278-route-scroll-reset.js' candidate/public/index.php
+          ! grep -Fq 'v276-responsive-loading.js' candidate/public/index.php
+          ! grep -Fq 'v276-responsive-loading.css' candidate/public/index.php
+          echo 'P04_V278_SCOPE_GATE=PASS'
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Route scroll behavior
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          node --check public/assets/v278-route-scroll-reset.js
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          npm init -y >/dev/null 2>&1
+          npm install --silent jsdom@26
+          SCRIPT="$GITHUB_WORKSPACE/candidate/public/assets/v278-route-scroll-reset.js" node <<'NODE'
+          const fs = require('fs');
+          const {JSDOM} = require('jsdom');
+          const src = fs.readFileSync(process.env.SCRIPT, 'utf8');
+          const dom = new JSDOM('<!doctype html><body><button id="nav" data-v270-nav="providers">服务商</button><button id="plain">普通按钮</button><div class="v270-workspace"><main id="v270-app"></main></div></body>', {url:'https://infra.test/index.php#overview', runScripts:'outside-only', pretendToBeVisual:true});
+          const {window} = dom; const {document} = window;
+          let y=640;
+          Object.defineProperty(window,'scrollY',{get(){return y;}});
+          window.scrollTo=(x,nextY)=>{y=Number(nextY);document.documentElement.scrollTop=y;document.body.scrollTop=y;};
+          const workspace=document.querySelector('.v270-workspace'); const app=document.getElementById('v270-app');
+          workspace.scrollTop=500;app.scrollTop=320;document.documentElement.scrollTop=640;document.body.scrollTop=640;
+          window.eval(src);
+          document.getElementById('plain').click();
+          if(workspace.scrollTop!==500||app.scrollTop!==320||y!==640) throw new Error('ordinary click changed scroll');
+          window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+          setTimeout(()=>{
+            if(workspace.scrollTop!==0||app.scrollTop!==0||y!==0) throw new Error('hash route failed reset');
+            workspace.scrollTop=410;app.scrollTop=210;y=410;document.documentElement.scrollTop=410;document.body.scrollTop=410;
+            document.getElementById('nav').click();
+            setTimeout(()=>{
+              if(workspace.scrollTop!==0||app.scrollTop!==0||y!==0) throw new Error('nav click failed reset');
+              if(document.querySelector('.v276-progress-track')) throw new Error('global progress UI reintroduced');
+              console.log('P04_V278_ROUTE_SCROLL_RESET=PASS');
+            },120);
+          },120);
+          NODE
+          sleep 1
+
+      - name: Final hotfix verdict
+        run: |
+          echo 'P04_V278_HOTFIX_GATE=PASS'
+          echo 'ROUTE_SCROLL_RESET=PASS'
+          echo 'ORDINARY_CLICK_NO_SIDE_EFFECT=PASS'
+          echo 'PAGE_PROGRESS_REINTRODUCED=NO'
+          echo 'UI_REDESIGN=NO'
+          echo 'SCHEMA=14'
+          echo 'MIGRATION=NONE'
+          echo 'PRODUCTION_WRITE=0'
