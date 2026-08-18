@@ -1,0 +1,115 @@
+name: P06 VF Press V0.1.0 to V0.1.1 Real Online Update
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - triggers/p06-v010-to-v011-real-online-update.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: cea083cf04c74ae5bff2c6f2c92299b01fc3ad30
+
+jobs:
+  update_e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact installed V0.1.0 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: installed
+
+      - name: Prepare installed V0.1.0 runtime
+        working-directory: installed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.0'
+          composer dump-autoload --no-dev --optimize --no-interaction >/dev/null
+          rm -rf storage storage-restore-* dist
+          php bin/migrate.php | grep -Fq MIGRATION_PASS
+          test "$(sqlite3 storage/app.db 'select max(version) from schema_migrations;')" = 2
+          test "$(sqlite3 storage/app.db 'pragma integrity_check;')" = ok
+
+      - name: Use real product service, real manifest and real release asset
+        working-directory: installed
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p06-real-update.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd() . '/vendor/autoload.php';
+          use VF\Press\Application\Operations\OnlineUpdateService;
+          use VF\Press\Infrastructure\Config\AppConfig;
+          use VF\Press\Infrastructure\Database\ConnectionFactory;
+          use VF\Press\Infrastructure\Recovery\RecoveryService;
+          use VF\Press\Infrastructure\Security\AuditLogger;
+          use VF\Press\Infrastructure\Update\VFPressUpdateAdapter;
+
+          $base = getcwd();
+          $config = AppConfig::fromEnvironment($base);
+          $config->ensureRuntimeDirectories();
+          $pdo = ConnectionFactory::create($config);
+          $audit = new AuditLogger($pdo);
+          $recovery = new RecoveryService($pdo, $audit, $config->storagePath, $config->databasePath);
+          $adapter = new VFPressUpdateAdapter($pdo, $config, $audit, $recovery);
+          $service = new OnlineUpdateService($pdo, $config, $audit, $adapter);
+
+          $before = $service->check();
+          echo 'BEFORE_STATUS=' . ($before['status'] ?? 'UNKNOWN') . PHP_EOL;
+          echo 'BEFORE_VERSION=' . $service->currentVersion() . PHP_EOL;
+          if (($before['status'] ?? '') !== 'AVAILABLE' || ($before['target_version'] ?? '') !== '0.1.1') exit(20);
+
+          $result = $service->install();
+          echo 'INSTALL_STATUS=' . ($result['status'] ?? 'UNKNOWN') . PHP_EOL;
+          echo 'ROLLBACK_RESULT=' . ($result['rollback_result'] ?? 'UNKNOWN') . PHP_EOL;
+          if (!in_array(($result['status'] ?? ''), ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'], true)) exit(21);
+          if (!is_array($result['backup_locator'] ?? null)) exit(22);
+
+          clearstatcache(true, $base . '/VERSION');
+          echo 'AFTER_VERSION=' . trim((string) file_get_contents($base . '/VERSION')) . PHP_EOL;
+          if (trim((string) file_get_contents($base . '/VERSION')) !== '0.1.1') exit(23);
+          $schema = (string)(int)$pdo->query('SELECT MAX(version) FROM schema_migrations')->fetchColumn();
+          $integrity = (string)$pdo->query('PRAGMA integrity_check')->fetchColumn();
+          echo 'AFTER_SCHEMA=' . $schema . PHP_EOL;
+          echo 'AFTER_INTEGRITY=' . $integrity . PHP_EOL;
+          if ($schema !== '2' || $integrity !== 'ok') exit(24);
+          $after = $service->check();
+          echo 'AFTER_STATUS=' . ($after['status'] ?? 'UNKNOWN') . PHP_EOL;
+          if (($after['status'] ?? '') !== 'UP_TO_DATE') exit(25);
+          $recoveries = (int)$pdo->query('SELECT COUNT(*) FROM recovery_points')->fetchColumn();
+          $runs = (int)$pdo->query("SELECT COUNT(*) FROM update_runs WHERE status IN ('COMMITTED','COMMITTED_WITH_CLEANUP_WARNING')")->fetchColumn();
+          echo 'RECOVERY_POINTS=' . $recoveries . PHP_EOL;
+          echo 'COMMITTED_RUNS=' . $runs . PHP_EOL;
+          if ($recoveries < 1 || $runs < 1) exit(26);
+          echo 'REAL_ONLINE_UPDATE_0.1.0_TO_0.1.1=PASS' . PHP_EOL;
+          PHP
+          php /tmp/p06-real-update.php
+          test "$(cat VERSION)" = '0.1.1'
+          test "$(sqlite3 storage/app.db 'pragma integrity_check;')" = ok
+          test -d storage/backups
+          test -d storage/update-source-backups
+          echo P06_REAL_FORMAL_UPDATE_CHAIN=PASS
+
+      - name: Safety cleanup
+        if: always()
+        working-directory: installed
+        shell: bash
+        run: |
+          rm -rf storage storage-restore-* dist
+          echo PRIVATE_SOURCE_PERSISTED=NO
+          echo TOKEN_EXPOSED=NO
+          echo PRODUCTION_WRITE=NO
