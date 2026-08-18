@@ -1,0 +1,194 @@
+name: P06 VF Press Research Visual Evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-research-visual.yml'
+      - 'requests/p06-vfpress-research-visual-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-research-visual
+  cancel-in-progress: false
+
+jobs:
+  visual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: be24712b3d56f2aa2d6d7dd1c118f3beed144b74
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout public-safe evidence repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: evidence-repo
+          fetch-depth: 1
+
+      - name: Checkout exact private VF Press source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: be24712b3d56f2aa2d6d7dd1c118f3beed144b74
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: source
+
+      - name: Prepare PHP app and synthetic owner
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 composer >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          rm -f storage/app.db storage/app.db-shm storage/app.db-wal
+          php bin/migrate.php >/dev/null
+          PREVIEW_PASSWORD="$(openssl rand -hex 24)"
+          printf '%s' "$PREVIEW_PASSWORD" >/tmp/p06-preview-password
+          VF_PRESS_OWNER_USERNAME='visual-owner' \
+          VF_PRESS_OWNER_PASSWORD="$PREVIEW_PASSWORD" \
+          VF_PRESS_OWNER_DISPLAY_NAME='Visual Owner' \
+          php bin/create-owner.php >/dev/null
+          echo 'SYNTHETIC_OWNER_READY=YES'
+
+      - name: Start VF Press runtime
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          nohup php -S 127.0.0.1:8097 -t public public/index.php >/tmp/p06-visual-server.log 2>&1 &
+          echo $! >/tmp/p06-visual-server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8097/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/p06-visual-server.log
+          exit 1
+
+      - name: Prepare Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-browser
+          cd /tmp/p06-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Capture authenticated Research Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence-repo/evidence/p06/visual
+          cat >/tmp/p06-browser/capture.js <<'JS'
+          const { chromium } = require('/tmp/p06-browser/node_modules/playwright');
+          const fs = require('fs');
+
+          (async () => {
+            const password = fs.readFileSync('/tmp/p06-preview-password', 'utf8');
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage({ viewport: { width: 1440, height: 1050 }, deviceScaleFactor: 1 });
+
+            await page.goto('http://127.0.0.1:8097/login');
+            await page.getByLabel('用户名').fill('visual-owner');
+            await page.getByLabel('密码').fill(password);
+            await Promise.all([
+              page.waitForURL('**/studio'),
+              page.getByRole('button', { name: '登录' }).click(),
+            ]);
+
+            await page.goto('http://127.0.0.1:8097/studio/research');
+            await page.screenshot({ path: 'evidence-repo/evidence/p06/visual/01_research_index_desktop.png', fullPage: true });
+
+            await page.getByLabel('核心问题').fill('为什么 Agent 已经拥有 Tool 和 Memory，仍然经常不能可靠完成复杂、长期、跨步骤任务？');
+            await page.getByLabel(/研究标题/).fill('Agent 可靠性研究');
+            await page.getByLabel('为什么现在想弄懂它？').fill('从 ChatGPT、Skill、Workflow、Tool、Memory 一路进入 Agent Runtime 后，我想把零散实践整理成真正可解释、可验证的知识体系。');
+            await Promise.all([
+              page.waitForURL(/\/studio\/research\/[0-9a-f-]{36}$/),
+              page.getByRole('button', { name: '开始研究' }).click(),
+            ]);
+
+            const questions = [
+              'Memory 与长期任务失败之间是什么关系？',
+              'Agent Runtime 到底承担了哪些模型本身不能承担的责任？',
+              'Authority 为什么会直接影响 Agent 的可靠性？',
+              'Verification 应该放在任务生命周期的什么位置？',
+            ];
+            for (const q of questions) {
+              await page.getByPlaceholder('还有什么没有弄懂？').fill(q);
+              await Promise.all([
+                page.waitForLoadState('networkidle'),
+                page.getByRole('button', { name: '添加子问题' }).click(),
+              ]);
+            }
+
+            await page.locator('select[name="note_type"]').selectOption('FINDING');
+            await page.getByPlaceholder('笔记标题（可选）').fill('第一条关键发现');
+            await page.getByPlaceholder(/写下事实/).fill('可靠 Agent 不是“模型更聪明”这么简单。Runtime、Authority、Verification 共同决定它能不能稳定完成长期任务。');
+            await Promise.all([
+              page.waitForLoadState('networkidle'),
+              page.getByRole('button', { name: '保存笔记' }).click(),
+            ]);
+
+            await page.locator('select[name="source_type"]').selectOption('WEB');
+            await page.getByPlaceholder('来源标题').fill('Agent Runtime Research Notes');
+            await page.getByPlaceholder('作者').fill('VF Press Research');
+            await page.getByPlaceholder('出版方 / 网站').fill('Kewaro Press');
+            await page.getByPlaceholder('https://').fill('https://example.com/agent-runtime');
+            await page.getByPlaceholder('它为什么与这个研究有关？').fill('用于验证 Tool、Memory、Runtime、Authority 与 Verification 之间的关系。');
+            await Promise.all([
+              page.waitForLoadState('networkidle'),
+              page.getByRole('button', { name: '加入来源' }).click(),
+            ]);
+
+            await page.getByLabel('阶段摘要').fill('已经把 Agent 可靠性拆成 Runtime、Authority、Verification 三个层面。');
+            await page.getByLabel('当前发现').fill('模型能力只是起点。真正的可靠性来自可持续运行、明确 Authority、可恢复状态以及独立 Verification。');
+            await page.getByLabel('下一步').fill('继续拆 Agent Runtime 的状态机、恢复、重试与 Evidence 机制。');
+            await Promise.all([
+              page.waitForLoadState('networkidle'),
+              page.getByRole('button', { name: '保存研究状态' }).click(),
+            ]);
+
+            await page.screenshot({ path: 'evidence-repo/evidence/p06/visual/02_research_workspace_desktop.png', fullPage: true });
+            await page.setViewportSize({ width: 390, height: 844 });
+            await page.screenshot({ path: 'evidence-repo/evidence/p06/visual/03_research_workspace_mobile.png', fullPage: true });
+
+            await browser.close();
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          JS
+          node /tmp/p06-browser/capture.js
+          echo 'RUNTIME_VISUAL_CAPTURE=PASS'
+
+      - name: Persist public-safe visual evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f /tmp/p06-preview-password
+          cat >evidence-repo/evidence/p06/visual/VISUAL_RECEIPT.txt <<EOF
+          P06_RESEARCH_RUNTIME_VISUAL=READY_FOR_OWNER_REVIEW
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          DATA_MODE=SYNTHETIC_PUBLIC_SAFE
+          SCREENSHOTS=3
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_DATA_USED=NO
+          CREDENTIAL_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          EOF
+          cd evidence-repo
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/visual
+          git commit -m "evidence(P06): Research runtime visual $SOURCE_SHA"
+          git push origin HEAD:main
+          echo 'PUBLIC_SAFE_VISUAL_EVIDENCE=PASS'
