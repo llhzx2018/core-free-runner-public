@@ -1,0 +1,116 @@
+name: P06 VF Press RC1 Studio Auth Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-rc1-studio-auth-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+  VF_PRESS_OWNER_USERNAME: diag-owner
+  VF_PRESS_OWNER_PASSWORD: synthetic-diag-password-2026
+  VF_PRESS_OWNER_DISPLAY_NAME: Diagnostic Owner
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - name: Run focused Studio auth diagnostic
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl composer >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          rm -rf storage /tmp/vf-press-diag-* || true
+          mkdir -p storage
+          php bin/migrate.php >/dev/null
+          php bin/living-publishing-self-test.php >/dev/null
+          php bin/create-owner.php >/tmp/vf-press-diag-owner.log
+          grep -Fq 'OWNER_PROVISIONING_PASS' /tmp/vf-press-diag-owner.log
+          cat >/tmp/vf-press-diag-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          if($path!=='/' && is_file(getcwd().'/public'.$path)){return false;}
+          require getcwd().'/public/index.php';
+          PHP
+          php -S 127.0.0.1:8099 -t public /tmp/vf-press-diag-router.php >/tmp/vf-press-diag-server.log 2>&1 &
+          PID=$!; trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8099/health >/tmp/vf-press-diag-health 2>/dev/null; then break; fi
+            sleep 1
+          done
+          echo '--- HEALTH ---'
+          cat /tmp/vf-press-diag-health || true
+          CODE_PROTECTED="$(curl -sS -D /tmp/vf-press-diag-protected-headers -o /tmp/vf-press-diag-protected-body -w '%{http_code}' http://127.0.0.1:8099/studio/publishing)"
+          echo "PROTECTED_CODE=$CODE_PROTECTED"
+          cat /tmp/vf-press-diag-protected-headers || true
+          LOGIN_GET="$(curl -sS -D /tmp/vf-press-diag-login-get-headers -c /tmp/vf-press-diag-cookies -o /tmp/vf-press-diag-login -w '%{http_code}' http://127.0.0.1:8099/login)"
+          echo "LOGIN_GET_CODE=$LOGIN_GET"
+          CSRF="$(grep -oP 'name="_csrf" value="\K[^"]+' /tmp/vf-press-diag-login | head -1 || true)"
+          echo "CSRF_LENGTH=${#CSRF}"
+          echo '--- COOKIE AFTER LOGIN GET ---'
+          cat /tmp/vf-press-diag-cookies || true
+          LOGIN_POST="$(curl -sS -D /tmp/vf-press-diag-login-post-headers -b /tmp/vf-press-diag-cookies -c /tmp/vf-press-diag-cookies -o /tmp/vf-press-diag-login-result -w '%{http_code}' -X POST http://127.0.0.1:8099/login --data-urlencode "_csrf=$CSRF" --data-urlencode "username=$VF_PRESS_OWNER_USERNAME" --data-urlencode "password=$VF_PRESS_OWNER_PASSWORD")"
+          echo "LOGIN_POST_CODE=$LOGIN_POST"
+          cat /tmp/vf-press-diag-login-post-headers || true
+          echo '--- COOKIE AFTER LOGIN POST ---'
+          cat /tmp/vf-press-diag-cookies || true
+          DESK_CODE="$(curl -sS -D /tmp/vf-press-diag-desk-headers -b /tmp/vf-press-diag-cookies -o /tmp/vf-press-diag-desk -w '%{http_code}' http://127.0.0.1:8099/studio/publishing)"
+          echo "DESK_CODE=$DESK_CODE"
+          cat /tmp/vf-press-diag-desk-headers || true
+          echo '--- DESK BODY HEAD ---'
+          head -c 1200 /tmp/vf-press-diag-desk || true
+          echo
+          echo '--- SERVER LOG ---'
+          cat /tmp/vf-press-diag-server.log || true
+          test "$CODE_PROTECTED" = '303'
+          test "$LOGIN_GET" = '200'
+          test -n "$CSRF"
+          test "$LOGIN_POST" = '303'
+          test "$DESK_CODE" = '200'
+          grep -Fq 'Publishing Desk' /tmp/vf-press-diag-desk
+          echo 'P06_RC1_STUDIO_AUTH_DIAGNOSTIC=PASS'
+      - name: Persist diagnostic receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          [ "$STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          git -C runner-control pull --rebase origin main
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_RC1_STUDIO_AUTH_DIAGNOSTIC.txt <<EOF
+          P06_RC1_STUDIO_AUTH_DIAGNOSTIC=$RESULT
+          SOURCE_SHA=$SOURCE_SHA
+          RUN_ID=$GITHUB_RUN_ID
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_DATA_USED=NO
+          PRODUCTION_WRITE=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_RC1_STUDIO_AUTH_DIAGNOSTIC.txt
+          git commit -m "evidence(P06): RC1 Studio auth diagnostic $RESULT $SOURCE_SHA run $GITHUB_RUN_ID"
+          git push origin HEAD:main
+          test "$RESULT" = PASS
