@@ -1,0 +1,157 @@
+name: P06 VF Press RC1 Backup Restore Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-rc1-backup-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+  VF_PRESS_OWNER_USERNAME: backup-owner
+  VF_PRESS_OWNER_PASSWORD: synthetic-backup-password-2026
+  VF_PRESS_OWNER_DISPLAY_NAME: Backup Owner
+
+jobs:
+  backup_diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - id: prepare
+        name: Prepare exact RC1 data state
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          test -n "$BROWSER"
+          echo "VF_PRESS_PDF_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          rm -rf storage /tmp/vf-press-backup-diag-* || true
+          mkdir -p storage
+          php bin/migrate.php >/dev/null
+          php bin/living-publishing-self-test.php >/tmp/living.log
+          grep -Fq 'LIVING_PUBLISHING_SELF_TEST=PASS' /tmp/living.log
+          echo 'PREPARE=PASS'
+
+      - id: create
+        name: Create second Recovery Point via CLI
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/backup.php | tee /tmp/backup-cli.log
+          grep -Fq 'RECOVERY_POINT=PASS' /tmp/backup-cli.log
+          RID="$(grep '^RECOVERY_ID=' /tmp/backup-cli.log | cut -d= -f2)"
+          test -n "$RID"
+          echo "RID=$RID" >> "$GITHUB_ENV"
+          echo "BACKUP_CREATE=PASS"
+
+      - id: inspect
+        name: Inspect Recovery metadata and manifest
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test -f "storage/backups/$RID/manifest.json"
+          php -r '$p=new PDO("sqlite:storage/app.db");$q=$p->prepare("SELECT status,database_integrity,manifest_path FROM recovery_points WHERE id=:id");$q->execute(["id"=>getenv("RID")]);$r=$q->fetch(PDO::FETCH_ASSOC);if(!$r||$r["status"]!=="VERIFIED"||$r["database_integrity"]!=="ok")exit(1);echo json_encode($r,JSON_UNESCAPED_SLASHES),"\n";'
+          php -r '$m=json_decode(file_get_contents("storage/backups/".getenv("RID")."/manifest.json"),true,512,JSON_THROW_ON_ERROR);if(($m["recovery_id"]??"")!==getenv("RID")||empty($m["files"]))exit(1);echo "MANIFEST_FILES=",count($m["files"]),"\n";'
+          echo 'BACKUP_INSPECT=PASS'
+
+      - id: restore
+        name: Restore second Recovery Point to staging
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          TARGET="/tmp/vf-press-backup-diag-restore-$RANDOM"
+          echo "RESTORE_TARGET=$TARGET" >> "$GITHUB_ENV"
+          php bin/restore.php --recovery="$RID" --target="$TARGET" | tee /tmp/restore-cli.log
+          grep -Fq 'RESTORE_STAGING=PASS' /tmp/restore-cli.log
+          test -f "$TARGET/app.db"
+          test "$(php -r '$p=new PDO("sqlite:'"$TARGET"'/app.db");echo $p->query("PRAGMA integrity_check")->fetchColumn();')" = 'ok'
+          echo 'RESTORE=PASS'
+
+      - id: replay
+        name: Migration replay and schema readback
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/migrate.php | tee /tmp/replay.log
+          grep -Fq 'MIGRATION_PASS' /tmp/replay.log
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo (int)$p->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn();')" = '2'
+          echo 'REPLAY=PASS'
+
+      - id: cleanliness
+        name: Repository cleanliness
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RESTORE_TARGET" /tmp/vf-press-backup-diag-* || true
+          STATUS="$(git status --short --untracked-files=all)"
+          if [ -n "$STATUS" ]; then
+            echo 'GIT_STATUS_NOT_CLEAN'
+            printf '%s\n' "$STATUS"
+            exit 1
+          fi
+          echo 'CLEANLINESS=PASS'
+
+      - name: Persist granular receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+          A: ${{ steps.prepare.outcome }}
+          B: ${{ steps.create.outcome }}
+          C: ${{ steps.inspect.outcome }}
+          D: ${{ steps.restore.outcome }}
+          E: ${{ steps.replay.outcome }}
+          F: ${{ steps.cleanliness.outcome }}
+        run: |
+          set -Eeuo pipefail
+          [ "$STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          git -C runner-control pull --rebase origin main
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_RC1_BACKUP_DIAGNOSTIC.txt <<EOF
+          P06_RC1_BACKUP_DIAGNOSTIC=$RESULT
+          SOURCE_SHA=$SOURCE_SHA
+          RUN_ID=$GITHUB_RUN_ID
+          OUTCOME_PREPARE=$A
+          OUTCOME_BACKUP_CREATE=$B
+          OUTCOME_BACKUP_INSPECT=$C
+          OUTCOME_RESTORE=$D
+          OUTCOME_MIGRATION_REPLAY=$E
+          OUTCOME_CLEANLINESS=$F
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_DATA_USED=NO
+          PRODUCTION_WRITE=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_RC1_BACKUP_DIAGNOSTIC.txt
+          git commit -m "evidence(P06): RC1 backup diagnostic $RESULT $SOURCE_SHA run $GITHUB_RUN_ID"
+          git push origin HEAD:main
+          test "$RESULT" = PASS
