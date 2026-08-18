@@ -1,0 +1,50 @@
+name: P02 V2.5.2 Layout Debug
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v252-layout-debug.yml']
+permissions: {contents: read}
+jobs:
+  debug:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.2-editor-responsive-hotfix
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          persist-credentials: false
+      - name: Focused layout diagnostics
+        working-directory: p02
+        env: {PW: 'P02-Debug-${{ github.run_id }}!'}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl curl >/dev/null
+          npm install --no-save playwright@1.55.0 >/dev/null
+          ROOT="$RUNNER_TEMP/p02-debug"; SITE="$ROOT/site"; mkdir -p "$SITE"; bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S 127.0.0.1:18173 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18173/setup.php >/dev/null 2>&1 && break; sleep .2; done
+          curl -fsS -c "$ROOT/c" http://127.0.0.1:18173/setup.php > "$ROOT/s"
+          TOKEN=$(python3 - "$ROOT/s" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1]).read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H 'Origin: http://127.0.0.1:18173' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18173/setup.php)" = 303
+          cat > .debug.mjs <<'JS'
+          import {chromium} from 'playwright';
+          const b=await chromium.launch({channel:'chrome',headless:true}),c=await b.newContext({viewport:{width:1440,height:900}}),p=await c.newPage();
+          await p.goto('http://127.0.0.1:18173/',{waitUntil:'networkidle'});let s=await p.evaluate(async()=>await(await fetch('/api.php?action=session')).json());
+          if(!s.site.auth){await p.locator('[data-open-login]').click();await p.locator('#loginForm input[name="password"]').fill(process.env.PW);await p.locator('#loginSubmit').click();await p.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session')).json()).site.auth));s=await p.evaluate(async()=>await(await fetch('/api.php?action=session')).json());}
+          const csrf=s.csrf,post=(a,x)=>p.evaluate(async({a,x,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(x)})).json(),{a,x,csrf});
+          const cat=await post('category_save',{name:'debug',description:'',icon:'folder'}),it=await post('content_save',{category_id:Number(cat.id),title:'debug',content:'# debug\ntext',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});
+          await p.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid:Number(cat.id),iid:Number(it.id)});await p.waitForFunction(()=>state.articleMode==='edit');
+          const snap=label=>p.evaluate(label=>{const q=s=>document.querySelector(s),r=e=>e?e.getBoundingClientRect():null,cs=e=>e?getComputedStyle(e):null,l=q('#notebookLayout'),n=q('#notebookListPane'),z=q('#notebookResizer'),d=q('#notebookDetailScroll');return {label,state:{list:state.notebookListCollapsed,side:state.sidebarCollapsed,focus:state.notebookFocus,mode:state.articleMode},body:document.body.className,layout:l?.className,layoutGrid:cs(l)?.gridTemplateColumns,list:{display:cs(n)?.display,visibility:cs(n)?.visibility,width:r(n)?.width,x:r(n)?.x},resizer:{display:cs(z)?.display,width:r(z)?.width},detail:{width:r(d)?.width,x:r(d)?.x,gridColumn:cs(d)?.gridColumn},custom:l?.style.getPropertyValue('--notebook-list-width')};},label);
+          console.log('S0',JSON.stringify(await snap('initial')));await p.evaluate(()=>toggleNotebookListCollapsed(true));await p.waitForTimeout(100);console.log('S1',JSON.stringify(await snap('list-off')));await p.evaluate(()=>toggleSidebarCollapsed(true));await p.waitForTimeout(100);console.log('S2',JSON.stringify(await snap('both-off')));await p.evaluate(()=>toggleNotebookListCollapsed(false));await p.waitForTimeout(300);console.log('S3',JSON.stringify(await snap('list-restored')));await b.close();
+          JS
+          node .debug.mjs
+          kill "$(cat "$ROOT/pid")"
