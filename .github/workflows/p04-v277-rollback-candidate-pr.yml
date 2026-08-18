@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'requests/p04-v277-rollback-*.txt'
+      - 'requests/p04-v277-formal-release-*.txt'
 
 permissions:
   contents: read
@@ -149,16 +150,60 @@ jobs:
           sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
           runtime=json.loads((root/'runtime/release-manifest.json').read_text(encoding='utf-8'))
           assert update.read_bytes()==atomic.read_bytes()
+          assert sha(full)=='17bc5ad7154ae9fcf6101eb7b3c2740e6c217f6871f37306644638e96fb2bdc7'
+          assert sha(update)=='92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a'
+          assert sha(repair)=='c49716696aa1a84d6c61efcde4fce2d4192189064db8511d66c50c550a29a8c5'
+          assert runtime['source_fingerprint']=='bdd779bbc703569fa2ae76aeb8aa7821fa412a03249424dd55345e732fbcd828'
           print('P04_V277_RECOVERY_CANDIDATE_GATE=PASS')
-          print('SOURCE_SHA='+os.environ['SOURCE_COMMIT'])
-          print('SOURCE_TREE='+os.environ['SOURCE_TREE'])
-          print('FULL_BYTES='+str(full.stat().st_size)); print('FULL_SHA256='+sha(full))
-          print('UPDATE_BYTES='+str(update.stat().st_size)); print('UPDATE_SHA256='+sha(update))
-          print('ATOMIC_SHA256='+sha(atomic)); print('REPAIR_SHA256='+sha(repair))
+          print('FULL_SHA256='+sha(full)); print('UPDATE_SHA256='+sha(update)); print('REPAIR_SHA256='+sha(repair))
           print('RUNTIME_FINGERPRINT='+runtime['source_fingerprint'])
-          print('RECOVERY_BASELINE=2.7.5-UA-UI')
-          print('SCHEMA=14'); print('MIGRATION=NONE'); print('PRODUCTION_WRITE=0'); print('RELEASE_WRITE=0')
           PY
+
+      - name: Require formal release capability
+        if: contains(github.event.pull_request.title, 'formal rollback recovery release')
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 79; }
+          GH_TOKEN="$RELEASE_TOKEN" gh release view v2.7.7 -R "$SOURCE_REPOSITORY" >/dev/null 2>&1 && { echo 'V277_RELEASE_ALREADY_EXISTS' >&2; exit 80; } || true
+          echo 'V277_FORMAL_RELEASE_CAPABILITY=PASS'
+
+      - name: Publish V2.7.7 GitHub recovery release
+        if: contains(github.event.pull_request.title, 'formal rollback recovery release')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release create v2.7.7 -R "$SOURCE_REPOSITORY" --target "$SOURCE_COMMIT" --title 'VF Infra V2.7.7' --notes 'V2.7.7 紧急体验恢复：恢复 OWNER 已接受的 V2.7.5 UA/UI；撤销 V2.7.6 全局响应式、每页进度条与 Skeleton Overlay。Schema 14，无 Migration；Provider 继续 READ-ONLY FIRST。仅支持 V2.7.6 → V2.7.7。' "$ARTIFACT_DIR/VF_Infra_V2.7.7_FULL.zip" "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_UPDATE.zip" "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_ATOMIC.zip" "$ARTIFACT_DIR/update-set/repair-v2.7.7.php"
+          echo 'V277_GITHUB_RELEASE=PASS'
+
+      - name: Publish V2.7.7 core-updates authority
+        if: contains(github.event.pull_request.title, 'formal rollback recovery release')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v2.7.7" > "$RUNNER_TEMP/release.json"
+          release_id="$(jq -r .id "$RUNNER_TEMP/release.json")"
+          released_at="$(jq -r .published_at "$RUNNER_TEMP/release.json")"
+          asset_id="$(jq -r '.assets[] | select(.name=="VF_Infra_V2.7.7_UPDATE.zip") | .id' "$RUNNER_TEMP/release.json")"
+          asset_bytes="$(jq -r '.assets[] | select(.name=="VF_Infra_V2.7.7_UPDATE.zip") | .size' "$RUNNER_TEMP/release.json")"
+          test "$asset_bytes" = '46989'
+          jq -n --argjson release_id "$release_id" --argjson asset_id "$asset_id" --argjson asset_bytes "$asset_bytes" --arg released_at "$released_at" '{schema_version:"1.0",project_id:"P04",component_id:"APP",enabled:true,target_version:"2.7.7",update_type:"ATOMIC",from_versions:["2.7.6"],schema_from:"14",schema_to:"14",repository:"llhzx2018/vf-infra",release_tag:"v2.7.7",release_name:"VF Infra V2.7.7",release_id:$release_id,release_product_commit:"a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8",release_product_tree:"57109ca42abb71e9d4943761690d53e66d0240ff",asset_name:"VF_Infra_V2.7.7_UPDATE.zip",asset_id:$asset_id,asset_bytes:$asset_bytes,asset_sha256:"92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a",backup_required:true,rollback_supported:true,released_at:$released_at,minimum_php:"8.0.0",notes:"V2.7.7 Recovery：V2.7.6 已撤回；恢复 V2.7.5 UA/UI，撤销 V2.7.6 全局响应式、每页进度条和 Skeleton Overlay。Schema14，无 Migration；Provider READ-ONLY FIRST。同步专用进度条暂不在恢复版重做。"}' > "$RUNNER_TEMP/P04.json"
+          sha="$(gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .sha)"
+          encoded="$(base64 -w0 "$RUNNER_TEMP/P04.json")"
+          gh api --method PUT repos/llhzx2018/core-updates/contents/projects/P04.json -f message='release(P04): publish V2.7.7 recovery update' -f content="$encoded" -f sha="$sha" -f branch=main > "$RUNNER_TEMP/core-write.json"
+          jq -e '.commit.sha' "$RUNNER_TEMP/core-write.json" >/dev/null
+          gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .content | base64 -d | jq -e '.enabled == true and .target_version == "2.7.7" and .from_versions == ["2.7.6"] and .asset_sha256 == "92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a"' >/dev/null
+          echo "RELEASE_ID=$release_id"
+          echo "UPDATE_ASSET_ID=$asset_id"
+          echo 'P04_V277_FORMAL_RELEASE=PASS'
+          echo 'ONLINE_UPDATE_AVAILABLE=YES'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
 
       - name: Upload ephemeral recovery artifacts
         if: always()
