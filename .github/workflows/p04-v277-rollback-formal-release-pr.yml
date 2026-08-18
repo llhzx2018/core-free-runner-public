@@ -1,0 +1,246 @@
+name: P04 VF Infra V2.7.7 Rollback Formal Release PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v277-formal-release-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v277-rollback-formal-release-pr
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: 'a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8'
+  SOURCE_TREE: '57109ca42abb71e9d4943761690d53e66d0240ff'
+  TARGET_VERSION: '2.7.7'
+  SOURCE_VERSION: '2.7.6'
+  SCHEMA: '14'
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Registered capability gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          test -n "$RELEASE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 79; }
+          echo 'REGISTERED_RELEASE_CAPABILITY=PASS'
+
+      - name: Ensure V2.7.7 release does not already exist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "v${TARGET_VERSION}" -R "$SOURCE_REPOSITORY" >/dev/null 2>&1; then
+            echo 'V277_RELEASE_ALREADY_EXISTS' >&2
+            exit 80
+          fi
+
+      - name: Checkout exact V2.7.7 Recovery Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact source and rollback authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test ! -e candidate/database/migrations/015_\*
+          ! grep -Fq 'v276-responsive-loading.css' candidate/public/index.php
+          ! grep -Fq 'v276-responsive-loading.js' candidate/public/index.php
+          ! grep -Fq 'MutationObserver' candidate/public/assets/v276-responsive-loading.js
+          ! grep -Fq 'v276-progress-track' candidate/public/assets/v276-responsive-loading.js
+          ! grep -Fq '@media(max-width' candidate/public/assets/v276-responsive-loading.css
+          git -C candidate diff --exit-code v2.7.5 -- \
+            public/index.php \
+            public/assets/v270-personal-infra.css public/assets/v270-reference-lock.css public/assets/v270-reference-lock.js \
+            public/assets/v270-final-polish.css public/assets/v270-final-polish.js \
+            public/assets/v271-unified-shell.css public/assets/v271-unified-shell.js \
+            public/assets/v272-backend-detail-ux.css public/assets/v272-backend-detail-ux.js public/assets/v272-copy-polish.js \
+            public/assets/v273-typography-rhythm.css public/assets/v273-readable-floor.css \
+            public/assets/v274-ui-stability.css public/assets/v274-performance-bridge.js public/assets/v274-owned-route-primer.js \
+            public/assets/v275-ua-workflow.css public/assets/v275-ua-workflow.js
+          python candidate/scripts/repository-health-gate.py
+          python candidate/scripts/check-migrations.py
+          echo 'V277_V275_UI_SOURCE_EXACT=PASS'
+          echo 'V277_WITHDRAWN_OVERLAY_INACTIVE=PASS'
+
+      - name: Prepare PHP runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Prepare Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Re-run accepted V2.7.5 owner workflow on V2.7.7
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V275_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V275_EVIDENCE_DIR: ${{ runner.temp }}/p04-v277-formal-ui
+        run: |
+          set -Eeuo pipefail
+          sed -i "s/'2.7.5'/'2.7.7'/g; s/=='2.7.5'/=='2.7.7'/g; s/\['version'\]=='2.7.5'/['version']=='2.7.7'/g; s/\['release_kind'\]=='maintenance_release'/['release_kind']=='runtime_source'/g" scripts/run-v275-ua-workflow-gate.sh
+          sed -i "s/2\.7\.5/2.7.7/g" tests/e2e/v275-ua-workflow-v2.mjs
+          bash scripts/run-v275-ua-workflow-gate.sh | tee "$RUNNER_TEMP/p04-v277-formal-ui.log"
+          grep -Fxq 'P04_V275_UA_WORKFLOW_GATE_PASS' "$RUNNER_TEMP/p04-v277-formal-ui.log"
+          echo 'V277_V275_OWNER_WORKFLOW_BROWSER=PASS'
+
+      - name: Build exact formal recovery artifacts
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p04-v277-formal-artifacts"
+          python scripts/build-v277-candidate-artifacts.py --output "$OUT" | tee "$RUNNER_TEMP/p04-v277-formal-build.log"
+          grep -Fxq 'P04_V277_RECOVERY_ARTIFACT_PRE_GATE_PASS' "$RUNNER_TEMP/p04-v277-formal-build.log"
+          php "$OUT/update-set/repair-v2.7.7.php" --self-test | tee "$RUNNER_TEMP/p04-v277-formal-atomic.log"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS' "$RUNNER_TEMP/p04-v277-formal-atomic.log"
+          echo "ARTIFACT_DIR=$OUT" >> "$GITHUB_ENV"
+
+      - name: Download immutable V2.7.6 FULL and prove Source-Exact
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v276"
+          gh release download v2.7.6 -R "$SOURCE_REPOSITORY" --pattern 'VF_Infra_V2.7.6_FULL.zip' --dir "$RUNNER_TEMP/v276"
+          test -s "$RUNNER_TEMP/v276/VF_Infra_V2.7.6_FULL.zip"
+          python scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/v276/VF_Infra_V2.7.6_FULL.zip" \
+            --candidate-full "$ARTIFACT_DIR/VF_Infra_V2.7.7_FULL.zip" \
+            --candidate-update "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_UPDATE.zip" \
+            --expected-source-version 2.7.6 \
+            --expected-target-version 2.7.7
+          echo 'V277_FULL_RUNTIME_VS_UPDATE_SOURCE_EXACT=PASS'
+
+      - name: Verify formal artifact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['ARTIFACT_DIR'])
+          full=root/'VF_Infra_V2.7.7_FULL.zip'; update=root/'update-set/VF_Infra_V2.7.7_UPDATE.zip'; atomic=root/'update-set/VF_Infra_V2.7.7_ATOMIC.zip'; repair=root/'update-set/repair-v2.7.7.php'
+          sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          runtime=json.loads((root/'runtime/release-manifest.json').read_text(encoding='utf-8'))
+          assert update.read_bytes()==atomic.read_bytes()
+          assert sha(full)=='17bc5ad7154ae9fcf6101eb7b3c2740e6c217f6871f37306644638e96fb2bdc7'
+          assert sha(update)=='92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a'
+          assert sha(repair)=='c49716696aa1a84d6c61efcde4fce2d4192189064db8511d66c50c550a29a8c5'
+          assert runtime['source_fingerprint']=='bdd779bbc703569fa2ae76aeb8aa7821fa412a03249424dd55345e732fbcd828'
+          print('V277_FORMAL_ARTIFACT_IDENTITY=PASS')
+          PY
+
+      - name: Publish immutable V2.7.7 recovery release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/v277-release-notes.md" <<'EOF'
+          # VF Infra V2.7.7 Recovery
+
+          V2.7.7 是 V2.7.6 的紧急体验恢复版本。
+
+          - 恢复 OWNER 已接受的 V2.7.5 UA/UI。
+          - 撤销 V2.7.6 全局响应式 / 每页 Loading Progress / Skeleton Overlay。
+          - 保留 V2.7.5 已验收的列表搜索、筛选、排序、分组、详情站内返回与 VF 青色视觉基线。
+          - Schema 14 → 14，无 Migration。
+          - Provider 权限保持 READ-ONLY FIRST，不新增 DNS、VPS、付款或续费远程写能力。
+          - 正式 Recovery UPDATE 仅支持 V2.7.6 → V2.7.7。
+          EOF
+          gh release create v2.7.7 \
+            -R "$SOURCE_REPOSITORY" \
+            --target "$SOURCE_COMMIT" \
+            --title 'VF Infra V2.7.7' \
+            --notes-file "$RUNNER_TEMP/v277-release-notes.md" \
+            "$ARTIFACT_DIR/VF_Infra_V2.7.7_FULL.zip" \
+            "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_UPDATE.zip" \
+            "$ARTIFACT_DIR/update-set/VF_Infra_V2.7.7_ATOMIC.zip" \
+            "$ARTIFACT_DIR/update-set/repair-v2.7.7.php"
+          echo 'V277_GITHUB_RELEASE_WRITE=PASS'
+
+      - name: Remote release readback and publish core-updates authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v2.7.7" > "$RUNNER_TEMP/release.json"
+          python - <<'PY'
+          import json,os,pathlib
+          r=json.loads(pathlib.Path(os.environ['RUNNER_TEMP']+'/release.json').read_text())
+          assets={a['name']:a for a in r['assets']}
+          required=['VF_Infra_V2.7.7_FULL.zip','VF_Infra_V2.7.7_UPDATE.zip','VF_Infra_V2.7.7_ATOMIC.zip','repair-v2.7.7.php']
+          assert all(x in assets for x in required)
+          update=assets['VF_Infra_V2.7.7_UPDATE.zip']
+          assert update['size']==46989
+          payload={
+            'schema_version':'1.0','project_id':'P04','component_id':'APP','enabled':True,
+            'target_version':'2.7.7','update_type':'ATOMIC','from_versions':['2.7.6'],
+            'schema_from':'14','schema_to':'14','repository':'llhzx2018/vf-infra',
+            'release_tag':'v2.7.7','release_name':'VF Infra V2.7.7','release_id':r['id'],
+            'release_product_commit':'a4d8b91d64a5c0df7685eac8b44af896f1ec6ff8',
+            'release_product_tree':'57109ca42abb71e9d4943761690d53e66d0240ff',
+            'asset_name':'VF_Infra_V2.7.7_UPDATE.zip','asset_id':update['id'],'asset_bytes':update['size'],
+            'asset_sha256':'92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a',
+            'backup_required':True,'rollback_supported':True,'released_at':r['published_at'],
+            'minimum_php':'8.0.0',
+            'notes':'VF Infra V2.7.7 Recovery：V2.7.6 已撤回；本版仅支持 V2.7.6 → V2.7.7，恢复 OWNER 已接受的 V2.7.5 UA/UI，撤销 V2.7.6 全局响应式、每页进度条与 Skeleton Overlay。Schema 14 → 14，无 Migration；Provider 继续 READ-ONLY FIRST。同步专用进度反馈不在本恢复版重新设计。'
+          }
+          out=pathlib.Path(os.environ['RUNNER_TEMP']+'/P04.json')
+          out.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          pathlib.Path(os.environ['RUNNER_TEMP']+'/release-meta.txt').write_text(f"RELEASE_ID={r['id']}\nUPDATE_ASSET_ID={update['id']}\nRELEASED_AT={r['published_at']}\n",encoding='utf-8')
+          PY
+          current_sha="$(gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .sha)"
+          encoded="$(base64 -w0 "$RUNNER_TEMP/P04.json")"
+          gh api --method PUT repos/llhzx2018/core-updates/contents/projects/P04.json \
+            -f message='release(P04): publish V2.7.7 rollback recovery update' \
+            -f content="$encoded" -f sha="$current_sha" -f branch=main > "$RUNNER_TEMP/core-update-write.json"
+          core_commit="$(jq -r .commit.sha "$RUNNER_TEMP/core-update-write.json")"
+          test -n "$core_commit" -a "$core_commit" != null
+          echo "CORE_UPDATES_COMMIT=$core_commit" >> "$GITHUB_ENV"
+          echo 'V277_CORE_UPDATES_WRITE=PASS'
+
+      - name: Final remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api repos/$SOURCE_REPOSITORY/git/ref/tags/v2.7.7 --jq .object.sha)" = "$SOURCE_COMMIT"
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v2.7.7" --jq '.draft == false and .prerelease == false' | grep -Fxq true
+          gh api repos/llhzx2018/core-updates/contents/projects/P04.json?ref=main --jq .content | base64 -d > "$RUNNER_TEMP/P04-readback.json"
+          jq -e '.enabled == true and .target_version == "2.7.7" and .from_versions == ["2.7.6"] and .asset_sha256 == "92824bc833e8f56ea651104e98d25669860027e8058ccd4c431bc4da4071b86a"' "$RUNNER_TEMP/P04-readback.json" >/dev/null
+          cat "$RUNNER_TEMP/release-meta.txt"
+          echo "CORE_UPDATES_COMMIT=$CORE_UPDATES_COMMIT"
+          echo 'P04_V277_FORMAL_RELEASE=PASS'
+          echo 'ONLINE_UPDATE_AVAILABLE=YES'
+          echo 'PRODUCTION_UPGRADE=NOT_EXECUTED'
+          echo 'PRODUCTION_WRITE=0'
