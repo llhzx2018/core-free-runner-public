@@ -1,0 +1,222 @@
+name: P06 VF Press MVP Candidate Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-mvp-candidate.yml'
+      - 'requests/p06-vfpress-mvp-candidate-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-mvp-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-press
+      SOURCE_SHA: 2884167ad58683a512ab36ebeb9f28d3c8269f31
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_PRESS_OWNER_USERNAME: candidate-owner
+      VF_PRESS_OWNER_PASSWORD: synthetic-candidate-password-2026
+      VF_PRESS_OWNER_DISPLAY_NAME: Candidate Owner
+    steps:
+      - name: Checkout public-safe runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout exact private VF Press source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 2884167ad58683a512ab36ebeb9f28d3c8269f31
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Prepare PHP publishing runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          if [ -z "$BROWSER" ]; then
+            sudo apt-get install -y google-chrome-stable >/dev/null 2>&1 || true
+            BROWSER="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          fi
+          test -n "$BROWSER" || { echo 'PDF_BROWSER_UNAVAILABLE' >&2; exit 1; }
+          echo "VF_PRESS_PDF_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          php -r 'foreach(["pdo_sqlite","mbstring","zip","curl"] as $e){if(!extension_loaded($e)){fwrite(STDERR,"missing:$e\n");exit(1);}} echo "PHP_EXTENSIONS=PASS\n";'
+
+      - name: Exact source and static security gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          grep -Fq '"project_id": "P06"' VF_PROJECT.json
+          grep -Fq 'USER_INTERRUPT_GATE · VF Shared Authority' AGENTS.md
+          grep -Fq "store'=>false" src/Infrastructure/AI/OpenAIResponsesProvider.php
+          grep -Fq 'createEditionSnapshotFromRevision' src/Infrastructure/Storage/ManuscriptStore.php
+          grep -Fq 'PublishedReaderService' public/index.php
+          grep -Fq 'PublishingController' public/index.php
+          grep -Fq "script-src 'self'; style-src 'self'" public/index.php
+          ! grep -R --line-number -E '<style>|style=' src public/index.php || { echo 'INLINE_STYLE_BOUNDARY_FAIL' >&2; exit 1; }
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          COUNT=0
+          while IFS= read -r -d '' file; do php -l "$file" >/dev/null; COUNT=$((COUNT+1)); done < <(find src bin public -type f -name '*.php' -print0)
+          test "$COUNT" -gt 0
+          echo "PHP_FILES_CHECKED=$COUNT"
+
+      - name: Fresh install and full historical regression
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage storage-restore-* /tmp/vf-press-restore-* || true
+          mkdir -p storage
+          php bin/migrate.php | tee /tmp/migrate.out
+          php bin/self-test.php | tee /tmp/base.out
+          php bin/security-self-test.php | tee /tmp/security.out
+          php bin/research-self-test.php | tee /tmp/research.out
+          php bin/publication-self-test.php | tee /tmp/publication.out
+          php bin/reader-self-test.php | tee /tmp/reader.out
+          php bin/edition-self-test.php | tee /tmp/edition.out
+          php bin/job-self-test.php | tee /tmp/job.out
+          grep -Fq 'FOUNDATION_SELF_TEST_PASS' /tmp/base.out
+          grep -Fq 'SECURITY_SELF_TEST=PASS' /tmp/security.out
+          grep -Fq 'RESEARCH_SELF_TEST=PASS' /tmp/research.out
+          grep -Fq 'PUBLICATION_MANUSCRIPT_SELF_TEST=PASS' /tmp/publication.out
+          grep -Fq 'READER_SELF_TEST=PASS' /tmp/reader.out
+          grep -Fq 'EDITION_SELF_TEST=PASS' /tmp/edition.out
+          grep -Fq 'JOB_QUEUE_SELF_TEST=PASS' /tmp/job.out
+
+      - name: Living publishing export AI recovery end-to-end
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/living-publishing-self-test.php | tee /tmp/living.out
+          for marker in LIVING_PUBLISHING_SELF_TEST=PASS WEB_EXPORT=PASS EPUB_EXPORT=PASS PDF_EXPORT=PASS DISTRIBUTION_STATE=PASS AI_EDITORIAL_ISOLATION=PASS RECOVERY_POINT=PASS RESTORE_READBACK=PASS PUBLISHED_READER_AUTHORITY=PASS SQLITE_INTEGRITY=PASS; do
+            grep -Fq "$marker" /tmp/living.out
+          done
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo $p->query("PRAGMA integrity_check")->fetchColumn();')" = 'ok'
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo (int)$p->query("SELECT COUNT(*) FROM export_artifacts WHERE status=\"READY\"")->fetchColumn();')" -ge 3
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo (int)$p->query("SELECT COUNT(*) FROM recovery_points WHERE status=\"VERIFIED\"")->fetchColumn();')" -ge 1
+
+      - name: Public Edition HTTP and protected Studio E2E
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/create-owner.php >/tmp/owner.out
+          grep -Fq 'OWNER_PROVISIONING_PASS' /tmp/owner.out
+          cat >/tmp/vf-press-router.php <<'PHP'
+          <?php
+          $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+          $file = getcwd() . '/public' . $path;
+          if ($path !== '/' && is_file($file)) { return false; }
+          require getcwd() . '/public/index.php';
+          PHP
+          php -S 127.0.0.1:8099 -t public /tmp/vf-press-router.php >/tmp/php-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8099/health >/tmp/health.json && break; sleep 1; done
+          grep -Fq '"status":"ok"' /tmp/health.json
+          SLUG="$(php -r '$p=new PDO("sqlite:storage/app.db");echo $p->query("SELECT slug FROM publications WHERE current_edition_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1")->fetchColumn();')"
+          test -n "$SLUG"
+          curl -fsS -D /tmp/public.headers "http://127.0.0.1:8099/" -o /tmp/public.html
+          grep -Fq '科瓦罗出版' /tmp/public.html
+          grep -Fq '从 ChatGPT 到个人 Agent' /tmp/public.html
+          grep -Fiq "Content-Security-Policy: default-src 'self'" /tmp/public.headers
+          curl -fsS "http://127.0.0.1:8099/books/$SLUG" -o /tmp/book.html
+          grep -Fq 'Edition 0.1.0' /tmp/book.html
+          grep -Fq '开始阅读' /tmp/book.html
+          curl -fsS "http://127.0.0.1:8099/read/$SLUG" -o /tmp/read.html
+          grep -Fq 'Published Snapshot' /tmp/read.html
+          grep -Fq '从会聊天到会做事' /tmp/read.html
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/studio/publishing)"
+          test "$CODE" = '303'
+          curl -fsS -c /tmp/cookies http://127.0.0.1:8099/login -o /tmp/login.html
+          CSRF="$(grep -oP 'name="_csrf" value="\K[^"]+' /tmp/login.html | head -1)"
+          test -n "$CSRF"
+          LOGIN_CODE="$(curl -sS -b /tmp/cookies -c /tmp/cookies -o /tmp/login-result -w '%{http_code}' -X POST http://127.0.0.1:8099/login --data-urlencode "_csrf=$CSRF" --data-urlencode "username=$VF_PRESS_OWNER_USERNAME" --data-urlencode "password=$VF_PRESS_OWNER_PASSWORD")"
+          test "$LOGIN_CODE" = '303'
+          curl -fsS -b /tmp/cookies http://127.0.0.1:8099/studio/publishing -o /tmp/publishing.html
+          grep -Fq 'Publishing Desk' /tmp/publishing.html
+          grep -Fq 'Living Book' /tmp/publishing.html || true
+          echo 'PUBLIC_PUBLISHED_EDITION_HTTP=PASS'
+          echo 'PROTECTED_PUBLISHING_DESK_HTTP=PASS'
+
+      - name: Backup CLI, migration replay, privacy and cleanliness
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/backup.php | tee /tmp/backup.out
+          grep -Fq 'RECOVERY_POINT=PASS' /tmp/backup.out
+          RECOVERY_ID="$(grep '^RECOVERY_ID=' /tmp/backup.out | cut -d= -f2)"
+          test -n "$RECOVERY_ID"
+          RESTORE_TARGET="/tmp/vf-press-final-restore-$RANDOM"
+          php bin/restore.php --recovery="$RECOVERY_ID" --target="$RESTORE_TARGET" | tee /tmp/restore.out
+          grep -Fq 'RESTORE_STAGING=PASS' /tmp/restore.out
+          php bin/migrate.php >/tmp/replay.out
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo (int)$p->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn();')" = '2'
+          test "$(php -r '$p=new PDO("sqlite:'"$RESTORE_TARGET"'/app.db");echo $p->query("PRAGMA integrity_check")->fetchColumn();')" = 'ok'
+          rm -rf storage-restore-* /tmp/vf-press-restore-* "$RESTORE_TARGET" || true
+          test -z "$(git status --short --untracked-files=all)"
+          echo 'PRIVATE_SOURCE_PERSISTED_TO_PUBLIC_REPOSITORY=NO'
+          echo 'PRIVATE_SOURCE_UPLOADED_AS_ARTIFACT=NO'
+          echo 'TOKEN_EXPOSED=NO'
+
+      - name: Persist public-safe Candidate evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = success ]; then RESULT=PASS; else RESULT=FAIL; fi
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_MVP_CANDIDATE_LATEST.txt <<EOF
+          P06_MVP_CANDIDATE=$RESULT
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          SCHEMA=2
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          EXECUTION_MODE=EPHEMERAL_PRIVATE_READ_PUBLIC_SAFE_EVIDENCE
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=NO
+          MAIN_WRITE=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=FULL_HISTORICAL_REGRESSION,LIVING_BOOK,REVISION_TO_EDITION,EDITION_IMMUTABILITY,PUBLISHED_READER_AUTHORITY,WEB_EXPORT,EPUB_EXPORT,PDF_EXPORT,DISTRIBUTION_STATE,AI_EDITORIAL_ISOLATION,JOB_QUEUE_IDEMPOTENCY_RETRY,RECOVERY_POINT,RESTORE_READBACK,PUBLIC_PUBLISHED_EDITION_HTTP,PROTECTED_PUBLISHING_DESK_HTTP,STRICT_CSP,MIGRATION_REPLAY,SQLITE_INTEGRITY,REPOSITORY_CLEANLINESS
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_MVP_CANDIDATE_LATEST.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "evidence(P06): MVP Candidate $RESULT $SOURCE_SHA"
+            git push origin HEAD:main
+          fi
+          test "$RESULT" = PASS
