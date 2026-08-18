@@ -1,0 +1,213 @@
+name: P06 VF Press MVP RC1 Final V5 Isolated Gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+  VF_PRESS_OWNER_USERNAME: rc1-owner
+  VF_PRESS_OWNER_PASSWORD: synthetic-rc1-password-2026
+  VF_PRESS_OWNER_DISPLAY_NAME: RC1 Owner
+
+jobs:
+  final:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Checkout exact private source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Prepare Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          test -n "$BROWSER"
+          echo "VF_PRESS_PDF_BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          php -r 'foreach(["pdo","pdo_sqlite","sqlite3","json","mbstring","zip","curl"] as $e){if(!extension_loaded($e)){fwrite(STDERR,"MISSING:$e\n");exit(1);}}'
+
+      - name: Exact Identity and Static Gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.0-rc1'
+          grep -Fq '"project_id": "P06"' VF_PROJECT.json
+          grep -Fq '"version": "0.1.0-rc1"' VF_PROJECT.json
+          grep -Fq '"schema": 2' VF_PROJECT.json
+          grep -Fq '"lifecycle": "MVP_CANDIDATE"' VF_PROJECT.json
+          grep -Fq 'OWNER_PREDEPLOY_REVIEW_AND_PRODUCTION_DEPLOYMENT' VF_PROJECT.json
+          grep -Fq 'Web Root：**必须指向仓库 `public/` 目录**' docs/deployment/DEPLOYMENT_CONTRACT_V0.1.0_RC1.md
+          grep -Fq 'Production Storage：必须位于 Web Root 之外' docs/deployment/DEPLOYMENT_CONTRACT_V0.1.0_RC1.md
+          grep -Fq "store'=>false" src/Infrastructure/AI/OpenAIResponsesProvider.php
+          ! grep -R --line-number -E '<style>|style=' src/Http public/index.php
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          find src bin public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+
+      - name: Fresh Install Preflight
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage /tmp/vf-press-* || true
+          mkdir -p storage
+          php bin/preflight.php | tee /tmp/pre-before
+          grep -Fq 'VF_PRESS_PREFLIGHT=PASS' /tmp/pre-before
+          php bin/migrate.php | tee /tmp/migrate
+          grep -Fq 'MIGRATION_PASS' /tmp/migrate
+          ! grep -Fq 'Warning:' /tmp/migrate
+          php bin/preflight.php | tee /tmp/pre-after
+          grep -Fq 'VF_PRESS_PREFLIGHT=PASS' /tmp/pre-after
+          grep -Fq 'SCHEMA=2' /tmp/pre-after
+
+      - name: Full Regression
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/self-test.php | tee /tmp/t1
+          php bin/security-self-test.php | tee /tmp/t2
+          php bin/research-self-test.php | tee /tmp/t3
+          php bin/publication-self-test.php | tee /tmp/t4
+          php bin/reader-self-test.php | tee /tmp/t5
+          php bin/edition-self-test.php | tee /tmp/t6
+          php bin/job-self-test.php | tee /tmp/t7
+          grep -Fq 'FOUNDATION_SELF_TEST_PASS' /tmp/t1
+          grep -Fq 'SECURITY_SELF_TEST_PASS' /tmp/t2
+          grep -Fq 'RESEARCH_SELF_TEST_PASS' /tmp/t3
+          grep -Fq 'PUBLICATION_MANUSCRIPT_SELF_TEST=PASS' /tmp/t4
+          grep -Fq 'PUBLISHER_READER_SELF_TEST=PASS' /tmp/t5
+          grep -Fq 'EDITION_SELF_TEST=PASS' /tmp/t6
+          grep -Fq 'IMMUTABLE_HISTORY=PASS' /tmp/t6
+          grep -Fq 'JOB_QUEUE_SELF_TEST=PASS' /tmp/t7
+
+      - name: Living Publishing End-to-End
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/living-publishing-self-test.php | tee /tmp/living
+          for marker in LIVING_PUBLISHING_SELF_TEST=PASS WEB_EXPORT=PASS EPUB_EXPORT=PASS PDF_EXPORT=PASS DISTRIBUTION_STATE=PASS AI_EDITORIAL_ISOLATION=PASS RECOVERY_POINT=PASS RESTORE_READBACK=PASS PUBLISHED_READER_AUTHORITY=PASS SQLITE_INTEGRITY=PASS; do
+            grep -Fq "$marker" /tmp/living
+          done
+
+      - name: Robust HTTP and Studio E2E
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/create-owner.php >/tmp/owner
+          grep -Fq 'OWNER_PROVISIONING_PASS' /tmp/owner
+          cat >/tmp/vf-press-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          if($path!=='/' && is_file(getcwd().'/public'.$path)){return false;}
+          require getcwd().'/public/index.php';
+          PHP
+          php -S 127.0.0.1:8099 -t public /tmp/vf-press-router.php >/tmp/vf-press-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          READY=0
+          for i in $(seq 1 30); do
+            if ! kill -0 "$PID" 2>/dev/null; then cat /tmp/vf-press-server.log || true; exit 1; fi
+            if curl -fsS --max-time 2 http://127.0.0.1:8099/health >/tmp/health 2>/tmp/curl.err; then READY=1; break; fi
+            sleep 1
+          done
+          if [ "$READY" != 1 ]; then cat /tmp/curl.err || true; cat /tmp/vf-press-server.log || true; exit 1; fi
+          grep -Fq '"status":"ok"' /tmp/health
+          grep -Fq '"schema":2' /tmp/health
+          SLUG="$(php -r '$p=new PDO("sqlite:storage/app.db");$q=$p->prepare("SELECT slug FROM publications WHERE title=:title AND current_edition_id IS NOT NULL LIMIT 1");$q->execute(["title"=>"从 ChatGPT 到个人 Agent：一个普通人的 AI 自动化实践"]);echo $q->fetchColumn();')"
+          test -n "$SLUG"
+          curl -fsS -D /tmp/headers http://127.0.0.1:8099/ -o /tmp/home
+          grep -Fq '从 ChatGPT 到个人 Agent' /tmp/home
+          grep -Fiq "Content-Security-Policy: default-src 'self'" /tmp/headers
+          curl -fsS "http://127.0.0.1:8099/books/$SLUG" -o /tmp/book
+          grep -Fq 'Edition 0.1.0' /tmp/book
+          grep -Fq '开始阅读' /tmp/book
+          curl -fsS "http://127.0.0.1:8099/read/$SLUG" -o /tmp/read
+          grep -Fq 'Published Snapshot' /tmp/read
+          grep -Fq '从会聊天到会做事' /tmp/read
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/studio/publishing)" = '303'
+          curl -fsS -c /tmp/cookies http://127.0.0.1:8099/login -o /tmp/login
+          CSRF="$(grep -oP 'name="_csrf" value="\K[^"]+' /tmp/login | head -1)"
+          test -n "$CSRF"
+          LOGIN="$(curl -sS -b /tmp/cookies -c /tmp/cookies -o /tmp/login-result -w '%{http_code}' -X POST http://127.0.0.1:8099/login --data-urlencode "_csrf=$CSRF" --data-urlencode "username=$VF_PRESS_OWNER_USERNAME" --data-urlencode "password=$VF_PRESS_OWNER_PASSWORD")"
+          test "$LOGIN" = '303'
+          curl -fsS -b /tmp/cookies http://127.0.0.1:8099/studio/publishing -o /tmp/desk
+          grep -Fq 'Publishing Desk' /tmp/desk
+
+      - name: Backup Restore and Cleanliness
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/backup.php | tee /tmp/backup
+          grep -Fq 'RECOVERY_POINT=PASS' /tmp/backup
+          RID="$(grep '^RECOVERY_ID=' /tmp/backup | cut -d= -f2)"
+          test -n "$RID"
+          TARGET="/tmp/vf-press-v5-restore-$RANDOM"
+          php bin/restore.php --recovery="$RID" --target="$TARGET" | tee /tmp/restore
+          grep -Fq 'RESTORE_STAGING=PASS' /tmp/restore
+          test "$(php -r '$p=new PDO("sqlite:'"$TARGET"'/app.db");echo $p->query("PRAGMA integrity_check")->fetchColumn();')" = 'ok'
+          php bin/migrate.php >/dev/null
+          test "$(php -r '$p=new PDO("sqlite:storage/app.db");echo (int)$p->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn();')" = '2'
+          rm -rf "$TARGET" /tmp/vf-press-* || true
+          test -z "$(git status --short --untracked-files=all)"
+
+      - name: Persist final conflict-safe receipt
+        if: ${{ always() }}
+        shell: bash
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          [ "$STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          git -C runner-control pull --rebase origin main
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_MVP_RC1_FINAL_V5_LATEST.txt <<EOF
+          P06_MVP_RC1_FINAL_V5=$RESULT
+          VERSION=0.1.0-rc1
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          SCHEMA=2
+          RUN_ID=$GITHUB_RUN_ID
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          EXECUTION_MODE=ISOLATED_EPHEMERAL_PRIVATE_READ
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=NO
+          MAIN_WRITE=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=RC_IDENTITY,DEPLOYMENT_CONTRACT,PREFLIGHT,MIGRATION_NO_WARNING,FULL_REGRESSION,LIVING_BOOK,EDITION_IMMUTABILITY,CANONICAL_TEST_PUBLICATION,PUBLISHED_READER,WEB_EPUB_PDF,DISTRIBUTION,AI_ISOLATION,JOB_QUEUE,SQLITE_ONLINE_BACKUP,RESTORE,ROBUST_HTTP,STUDIO_AUTH,CSP,CLEANLINESS
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_MVP_RC1_FINAL_V5_LATEST.txt
+          git commit -m "evidence(P06): MVP RC1 Final V5 $RESULT $SOURCE_SHA run $GITHUB_RUN_ID"
+          git push origin HEAD:main
+          test "$RESULT" = PASS
