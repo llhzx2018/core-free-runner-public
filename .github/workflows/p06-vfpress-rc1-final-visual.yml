@@ -1,0 +1,156 @@
+name: P06 VF Press RC1 Final Runtime Visual Evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOURCE_SHA: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+  PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+  VF_PRESS_OWNER_USERNAME: visual-owner
+  VF_PRESS_OWNER_PASSWORD: synthetic-visual-password-2026
+  VF_PRESS_OWNER_DISPLAY_NAME: Visual Owner
+
+jobs:
+  visual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Checkout exact private source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 69c4d003b9a32d82bc6289ef5f90fe3282ba4782
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Prepare synthetic publishing runtime
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          test -n "$BROWSER"
+          echo "BROWSER=$BROWSER" >> "$GITHUB_ENV"
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          rm -rf storage /tmp/vf-press-visual-* || true
+          mkdir -p storage
+          php bin/migrate.php >/dev/null
+          VF_PRESS_PDF_BROWSER="$BROWSER" php bin/living-publishing-self-test.php >/tmp/vf-press-visual-seed.log
+          grep -Fq 'LIVING_PUBLISHING_SELF_TEST=PASS' /tmp/vf-press-visual-seed.log
+          php bin/create-owner.php >/dev/null
+          cat >/tmp/vf-press-visual-router.php <<'PHP'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI']??'/',PHP_URL_PATH)?:'/';
+          if($path!=='/' && is_file(getcwd().'/public'.$path)){return false;}
+          require getcwd().'/public/index.php';
+          PHP
+          php -S 127.0.0.1:8099 -t public /tmp/vf-press-visual-router.php >/tmp/vf-press-visual-server.log 2>&1 &
+          echo $! >/tmp/vf-press-visual-server.pid
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8099/health >/tmp/vf-press-visual-health 2>/dev/null; then READY=1; break; fi
+            sleep 1
+          done
+          test "$READY" = 1
+          grep -Fq '"status":"ok"' /tmp/vf-press-visual-health
+
+      - name: Install browser driver package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vf-press-playwright
+          cd /tmp/vf-press-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright-core@1.55.0 >/dev/null 2>&1
+
+      - name: Capture real Runtime screenshots
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          SLUG="$(php -r '$p=new PDO("sqlite:storage/app.db");$q=$p->prepare("SELECT slug FROM publications WHERE title=:title AND current_edition_id IS NOT NULL LIMIT 1");$q->execute(["title"=>"从 ChatGPT 到个人 Agent：一个普通人的 AI 自动化实践"]);echo $q->fetchColumn();')"
+          PUB_ID="$(php -r '$p=new PDO("sqlite:storage/app.db");$q=$p->prepare("SELECT id FROM publications WHERE title=:title AND current_edition_id IS NOT NULL LIMIT 1");$q->execute(["title"=>"从 ChatGPT 到个人 Agent：一个普通人的 AI 自动化实践"]);echo $q->fetchColumn();')"
+          test -n "$SLUG" && test -n "$PUB_ID"
+          export SLUG PUB_ID
+          mkdir -p /tmp/vf-press-visual-output
+          cat >/tmp/vf-press-playwright/capture.cjs <<'JS'
+          const { chromium } = require('playwright-core');
+          (async()=>{
+            const browser = await chromium.launch({headless:true, executablePath:process.env.BROWSER, args:['--no-sandbox','--disable-dev-shm-usage']});
+            const base='http://127.0.0.1:8099';
+            const desktop=await browser.newContext({viewport:{width:1440,height:1000},deviceScaleFactor:1});
+            let page=await desktop.newPage();
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.screenshot({path:'/tmp/vf-press-visual-output/01_publisher_desktop.png',fullPage:true});
+            await page.goto(base+'/books/'+process.env.SLUG,{waitUntil:'networkidle'});
+            await page.screenshot({path:'/tmp/vf-press-visual-output/02_book_detail_desktop.png',fullPage:true});
+            await page.goto(base+'/read/'+process.env.SLUG,{waitUntil:'networkidle'});
+            await page.screenshot({path:'/tmp/vf-press-visual-output/03_published_reader_desktop.png',fullPage:true});
+            await page.goto(base+'/login',{waitUntil:'networkidle'});
+            await page.fill('input[name="username"]',process.env.VF_PRESS_OWNER_USERNAME);
+            await page.fill('input[name="password"]',process.env.VF_PRESS_OWNER_PASSWORD);
+            await Promise.all([page.waitForURL('**/studio'),page.click('button[type="submit"]')]);
+            await page.goto(base+'/studio/publishing/'+process.env.PUB_ID,{waitUntil:'networkidle'});
+            await page.screenshot({path:'/tmp/vf-press-visual-output/05_publishing_desk_desktop.png',fullPage:true});
+            await desktop.close();
+
+            const mobile=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});
+            page=await mobile.newPage();
+            await page.goto(base+'/read/'+process.env.SLUG,{waitUntil:'networkidle'});
+            await page.screenshot({path:'/tmp/vf-press-visual-output/04_published_reader_mobile.png',fullPage:true});
+            await mobile.close();
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1);});
+          JS
+          node /tmp/vf-press-playwright/capture.cjs
+          test "$(find /tmp/vf-press-visual-output -type f -name '*.png' | wc -l)" = '5'
+
+      - name: Persist public-safe screenshots and receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          kill "$(cat /tmp/vf-press-visual-server.pid)" 2>/dev/null || true
+          git -C runner-control pull --rebase origin main
+          DEST=runner-control/evidence/p06/mvp-rc1-visual
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          cp /tmp/vf-press-visual-output/*.png "$DEST/"
+          for f in "$DEST"/*.png; do test -s "$f"; done
+          cat > "$DEST/VISUAL_RECEIPT.txt" <<EOF
+          P06_MVP_RC1_VISUAL=READY_FOR_OWNER_PREDEPLOY_REVIEW
+          VERSION=0.1.0-rc1
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          DATA_MODE=SYNTHETIC_PUBLIC_SAFE
+          SCREENSHOTS=5
+          PUBLISHER_DESKTOP=READY
+          BOOK_DETAIL_DESKTOP=READY
+          PUBLISHED_READER_DESKTOP=READY
+          PUBLISHED_READER_MOBILE=READY
+          PUBLISHING_DESK_DESKTOP=READY
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          PRIVATE_DATA_USED=NO
+          TOKEN_EXPOSED=NO
+          PRODUCTION_WRITE=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/mvp-rc1-visual
+          git commit -m "evidence(P06): RC1 final visual $SOURCE_SHA"
+          git push origin HEAD:main
