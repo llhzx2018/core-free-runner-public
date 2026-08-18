@@ -1,0 +1,147 @@
+name: P06 VF Press External Foundation Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p06-vfpress-foundation.yml'
+      - 'requests/p06-vfpress-foundation-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-vfpress-external-foundation
+  cancel-in-progress: false
+
+jobs:
+  foundation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-press
+      SOURCE_SHA: 9a63f1751d9c46ac61c070a06831cbfc94a80de7
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout public-safe runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 1
+
+      - name: Require registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_READ_CAPABILITY=PASS'
+
+      - name: Checkout exact private VF Press source ephemerally
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: 9a63f1751d9c46ac61c070a06831cbfc94a80de7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: source
+
+      - name: Exact source identity gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          grep -Fq '"project_id": "P06"' source/VF_PROJECT.json
+          grep -Fq '"runtime": "PHP"' source/VF_PROJECT.json
+          grep -Fq '"database": "SQLite"' source/VF_PROJECT.json
+          grep -Fq 'USER_INTERRUPT_GATE · VF Shared Authority' source/AGENTS.md
+          echo 'SOURCE_IDENTITY=PASS'
+
+      - name: Prepare PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 >/dev/null
+          if ! command -v composer >/dev/null 2>&1; then
+            sudo apt-get install -y composer >/dev/null
+          fi
+          php -r 'if(!extension_loaded("pdo_sqlite")){exit(1);} echo "PDO_SQLITE=PASS\n";'
+          echo 'PHP_RUNTIME=PASS'
+
+      - name: Composer and PHP syntax gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          composer validate --strict >/dev/null
+          composer dump-autoload --no-interaction --optimize >/dev/null
+          COUNT=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" >/dev/null
+            COUNT=$((COUNT+1))
+          done < <(find src bin public -type f -name '*.php' -print0)
+          test "$COUNT" -gt 0
+          echo "PHP_FILES_CHECKED=$COUNT"
+          echo 'COMPOSER_VALIDATE=PASS'
+          echo 'PHP_SYNTAX=PASS'
+
+      - name: Fresh migration and foundation self-test
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          rm -f storage/app.db storage/app.db-shm storage/app.db-wal
+          php bin/migrate.php >/dev/null
+          php bin/self-test.php >/dev/null
+          php -r '$pdo=new PDO("sqlite:storage/app.db");$schema=(int)$pdo->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn();if($schema!==1)exit(1);if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(1);$required=["research_projects","publications","publication_sections","revisions","editions","distribution_releases"];foreach($required as $t){$q=$pdo->prepare("SELECT COUNT(*) FROM sqlite_master WHERE type=\"table\" AND name=:n");$q->execute(["n"=>$t]);if((int)$q->fetchColumn()!==1)exit(1);}echo "SCHEMA=1 PASS\nSQLITE_INTEGRITY=PASS\nCORE_TABLES=PASS\n";'
+          echo 'FRESH_MIGRATION=PASS'
+          echo 'FOUNDATION_SELF_TEST=PASS'
+
+      - name: Migration replay and privacy gate
+        shell: bash
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          php bin/migrate.php >/dev/null
+          test "$(php -r '$pdo=new PDO("sqlite:storage/app.db");echo (int)$pdo->query("SELECT COUNT(*) FROM schema_migrations")->fetchColumn();')" = '1'
+          test -z "$(git status --short --untracked-files=all)"
+          echo 'MIGRATION_REPLAY=PASS'
+          echo 'SOURCE_REPOSITORY_CLEAN=PASS'
+          echo 'PRIVATE_SOURCE_PERSISTED_TO_PUBLIC_REPOSITORY=NO'
+          echo 'PRIVATE_SOURCE_UPLOADED_AS_ARTIFACT=NO'
+          echo 'TOKEN_EXPOSED=NO'
+
+      - name: Persist public-safe machine evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$JOB_STATUS" = 'success' ]; then RESULT='PASS'; else RESULT='FAIL'; fi
+          mkdir -p runner-control/evidence/p06
+          cat > runner-control/evidence/p06/P06_VF_PRESS_FOUNDATION_LATEST.txt <<EOF
+          P06_VF_PRESS_FOUNDATION=$RESULT
+          SOURCE_REPOSITORY=llhzx2018/vf-press
+          SOURCE_SHA=$SOURCE_SHA
+          EXECUTION_REPOSITORY=llhzx2018/core-free-runner-public
+          EXECUTION_MODE=EPHEMERAL_PRIVATE_READ_PUBLIC_SAFE_EVIDENCE
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_SOURCE_ARTIFACT=NO
+          TOKEN_EXPOSED=NO
+          USER_MANUAL_EXECUTION_REQUIRED=NO
+          CHECKS=SOURCE_IDENTITY,PHP_RUNTIME,COMPOSER_VALIDATE,PHP_SYNTAX,FRESH_MIGRATION,SELF_TEST,SQLITE_INTEGRITY,CORE_TABLES,MIGRATION_REPLAY,REPOSITORY_CLEANLINESS
+          EOF
+          cd runner-control
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_VF_PRESS_FOUNDATION_LATEST.txt
+          if git diff --cached --quiet; then
+            echo 'EVIDENCE_ALREADY_CURRENT=YES'
+          else
+            git commit -m "evidence(P06): foundation $RESULT $SOURCE_SHA"
+            git push origin HEAD:main
+          fi
+          echo "P06_VF_PRESS_FOUNDATION=$RESULT"
