@@ -24,6 +24,7 @@ env:
   ASSET_NAME: 'VF_Forge_V1.36.0_Atomic_Upgrade.zip'
   EVIDENCE_NAME: 'P03-V1.36.0-UNIFIED-RELEASE-PUBLIC-EVIDENCE'
   FIXTURE_PASS: 'Vf1360-Runner-Fixture!'
+  PHP_IMAGE: 'vf-forge-php84-v1360'
 
 jobs:
   release:
@@ -75,6 +76,22 @@ jobs:
           test "$(git show origin/main:database/schema/SCHEMA_VERSION | tr -d '\r\n')" = "$SCHEMA_TARGET"
           git diff --exit-code origin/main..HEAD -- database/schema database/migrations
 
+      - name: Build supported PHP 8.4 runtime
+        id: php84
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/Dockerfile.p03-v1360" <<'EOF'
+          FROM php:8.4.24-cli-bookworm
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libsqlite3-dev libzip-dev sqlite3 \
+            && docker-php-ext-install pdo_sqlite sqlite3 zip \
+            && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -q -t "$PHP_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1360" "$RUNNER_TEMP"
+          docker run --rm "$PHP_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," extensions PASS\n";'
+          docker run --rm -v "$RUNNER_TEMP/source:/app:ro" -w /app "$PHP_IMAGE" php -r 'require "src/app/Foundation.php"; require "src/app/bootstrap.php"; $x=vfab_php_security_baseline(); if(empty($x["ok"])){fwrite(STDERR,$x["reason"]."\n");exit(1);} echo "PHP_SECURITY_BASELINE_PASS ",PHP_VERSION,"\n";'
+
       - name: Build formal Atomic
         id: package
         shell: bash
@@ -120,37 +137,29 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd "$RUNNER_TEMP/source"
-          ROOT="$RUNNER_TEMP/upgrade-runtime"; DATA="$RUNNER_TEMP/upgrade-private"; COOKIE="$RUNNER_TEMP/upgrade-cookie"; URL='http://127.0.0.1:18092'
-          diag(){ rc=$?; echo "ATOMIC_DIAG_RC=$rc"; echo '--- bootstrap ---'; grep -E "VFAB_(VERSION|SCHEMA_VERSION)" "$ROOT/app/bootstrap.php" 2>/dev/null | head -4 || true; echo '--- result ---'; sed -n '1,80p' "$RUNNER_TEMP/result.html" 2>/dev/null | sed -E 's/value="[^"]+"/value="[redacted]"/g' || true; echo '--- repair form ---'; sed -n '1,40p' "$RUNNER_TEMP/repair.html" 2>/dev/null | sed -E 's/value="[^"]+"/value="[redacted]"/g' || true; echo '--- server ---'; tail -80 "$RUNNER_TEMP/upgrade-server.log" 2>/dev/null || true; exit $rc; }; trap diag ERR
-          echo STAGE=base_runtime
+          ROOT="$RUNNER_TEMP/upgrade-runtime"; DATA="$RUNNER_TEMP/upgrade-private"; COOKIE="$RUNNER_TEMP/upgrade-cookie"; URL='http://127.0.0.1:18092'; C='p03-v1360-upgrade'
+          diag(){ rc=$?; echo "ATOMIC_DIAG_RC=$rc"; echo '--- bootstrap ---'; grep -E "VFAB_(VERSION|SCHEMA_VERSION)" "$ROOT/app/bootstrap.php" 2>/dev/null | head -4 || true; echo '--- setup response ---'; sed -n '1,60p' "$RUNNER_TEMP/setup-post.txt" 2>/dev/null | sed -E 's/value="[^"]+"/value="[redacted]"/g' || true; echo '--- result ---'; sed -n '1,80p' "$RUNNER_TEMP/result.html" 2>/dev/null | sed -E 's/value="[^"]+"/value="[redacted]"/g' || true; echo '--- server ---'; docker logs "$C" 2>&1 | tail -80 || true; docker rm -f "$C" >/dev/null 2>&1 || true; exit $rc; }; trap diag ERR
           git worktree add --detach "$RUNNER_TEMP/upgrade-wt" origin/main >/dev/null
           python3 "$RUNNER_TEMP/upgrade-wt/scripts/build_runtime.py" "$ROOT" >/dev/null
           git worktree remove --force "$RUNNER_TEMP/upgrade-wt" >/dev/null
           mkdir -p "$DATA"
           grep -Fq "define('VFAB_VERSION', '1.35.4');" "$ROOT/app/bootstrap.php"
-          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" "$ROOT/app/bootstrap.php"
-          echo STAGE=server_start
-          php -S 127.0.0.1:18092 -t "$ROOT" >"$RUNNER_TEMP/upgrade-server.log" 2>&1 & SERVER_PID=$!
-          for i in $(seq 1 80); do if curl -fsS "$URL/setup.php" >/dev/null 2>&1; then READY=1; break; fi; sleep .25; done
-          test "${READY:-0}" = 1
-          echo STAGE=setup_get
+          docker run -d --rm --name "$C" -p 18092:18092 -v "$ROOT:/app" -v "$DATA:$DATA" -w /app "$PHP_IMAGE" php -S 0.0.0.0:18092 -t /app >/dev/null
+          READY=0; for i in $(seq 1 80); do if curl -fsS "$URL/setup.php" >/dev/null 2>&1; then READY=1; break; fi; sleep .25; done; test "$READY" = 1
           curl -fsS -c "$COOKIE" "$URL/setup.php" -o "$RUNNER_TEMP/setup.html"
           CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
           import re,sys
           s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
           PY
           )
-          echo STAGE=setup_post
           curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $URL" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Upgrade Fixture' --data-urlencode "data_root=$DATA" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$URL/setup.php" > "$RUNNER_TEMP/setup-post.txt"
           grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"
-          echo STAGE=login
           LOGIN=$(printf '{"password":"%s"}' "$FIXTURE_PASS")
           curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $URL" -H 'Content-Type: application/json' --data "$LOGIN" "$URL/api.php?action=login" -o "$RUNNER_TEMP/login.json"
           python3 - "$RUNNER_TEMP/login.json" <<'PY'
           import json,sys
           d=json.load(open(sys.argv[1]));assert d['ok'] and d['version']=='1.35.4'
           PY
-          echo STAGE=repair_get
           unzip -p "$RUNNER_TEMP/release/$ASSET_NAME" repair-v1.36.0.php > "$ROOT/repair-v1.36.0.php"
           curl -fsS -b "$COOKIE" "$URL/repair-v1.36.0.php" -o "$RUNNER_TEMP/repair.html"
           grep -q '执行原子升级' "$RUNNER_TEMP/repair.html"
@@ -159,18 +168,15 @@ jobs:
           s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
           PY
           )
-          echo STAGE=repair_post
           curl -fsS -b "$COOKIE" -H "Origin: $URL" --data-urlencode "_csrf=$RCSRF" --data-urlencode confirmation=UPGRADE "$URL/repair-v1.36.0.php" -o "$RUNNER_TEMP/result.html"
           grep -q '升级完成' "$RUNNER_TEMP/result.html"
-          echo STAGE=post_verify
           grep -Fq "define('VFAB_VERSION', '1.36.0');" "$ROOT/app/bootstrap.php"
           grep -Fq '个人项目状态中心' "$ROOT/index.php"
           test ! -e "$ROOT/repair-v1.36.0.php"
-          DB=$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1)
-          test -f "$DB"
-          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok
-          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
-          kill "$SERVER_PID" 2>/dev/null || true
+          DB=$(find "$DATA/database" -maxdepth 1 -type f -name '*.sqlite' | head -1); test -f "$DB"
+          test "$(docker exec "$C" sqlite3 "$DB" 'pragma integrity_check;')" = ok
+          test -z "$(docker exec "$C" sqlite3 "$DB" 'pragma foreign_key_check;')"
+          docker rm -f "$C" >/dev/null
           trap - ERR
           echo ATOMIC_UPGRADE_PASS
 
@@ -180,8 +186,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/source"
-          ROOT="$RUNNER_TEMP/browser-runtime"; DATA="$RUNNER_TEMP/browser-private"; URL='http://127.0.0.1:18093'; mkdir -p "$DATA"; python3 scripts/build_runtime.py "$ROOT" >/dev/null
-          php -S 127.0.0.1:18093 -t "$ROOT" >"$RUNNER_TEMP/browser-server.log" 2>&1 & SERVER_PID=$!
+          ROOT="$RUNNER_TEMP/browser-runtime"; DATA="$RUNNER_TEMP/browser-private"; URL='http://127.0.0.1:18093'; C='p03-v1360-browser'; mkdir -p "$DATA"; python3 scripts/build_runtime.py "$ROOT" >/dev/null
+          docker run -d --rm --name "$C" -p 18093:18093 -v "$ROOT:/app" -v "$DATA:$DATA" -w /app "$PHP_IMAGE" php -S 0.0.0.0:18093 -t /app >/dev/null
           READY=0; for i in $(seq 1 80); do if curl -fsS "$URL/setup.php" >/dev/null 2>&1; then READY=1; break; fi; sleep .25; done; test "$READY" = 1
           curl -fsS -c "$RUNNER_TEMP/browser-cookie" "$URL/setup.php" -o "$RUNNER_TEMP/browser-setup.html"
           CSRF=$(python3 - "$RUNNER_TEMP/browser-setup.html" <<'PY'
@@ -196,7 +202,7 @@ jobs:
           import{chromium}from'playwright';const b=await chromium.launch({headless:true}),p=await b.newPage({viewport:{width:1440,height:900}}),e=[];p.on('pageerror',x=>e.push(x.message));p.on('console',m=>{if(m.type()==='error')e.push(m.text())});await p.goto('http://127.0.0.1:18093/');await p.fill('#loginPassword',process.env.FIXTURE_PASS);await p.click('#loginForm button[type=submit]');await p.waitForSelector('#app:not([hidden])');const s=await p.locator('.sidebar').innerText();for(const t of['项目','需要关注','归档','设置'])if(!s.includes(t))throw Error('missing '+t);if(s.includes('今天'))throw Error('Today returned');await p.click('[data-route="settings"]');let x=await p.locator('#view').innerText();for(const t of['基础','账户与安全','备份与恢复','更新与维护','系统信息'])if(!x.includes(t))throw Error('missing settings '+t);for(const v of[{width:1440,height:900},{width:390,height:844}]){await p.setViewportSize(v);for(const r of['projects','settings']){await p.click(`[data-route="${r}"]`);await p.waitForTimeout(80);const m=await p.evaluate(()=>[document.documentElement.scrollWidth,document.documentElement.clientWidth]);if(m[0]>m[1]+2)throw Error('overflow '+r+' '+v.width)}}if(e.length)throw Error(e.join('\n'));console.log('BROWSER_PASS errors=0 responsive=1440,390');await b.close();
           JS
           FIXTURE_PASS="$FIXTURE_PASS" node "$RUNNER_TEMP/gate.mjs"
-          kill "$SERVER_PID" 2>/dev/null || true
+          docker rm -f "$C" >/dev/null
 
       - name: Publish Release and core-updates
         id: publish
@@ -236,6 +242,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           SOURCE_OUTCOME: ${{ steps.source.outcome }}
           CONTRACT_OUTCOME: ${{ steps.contract.outcome }}
+          PHP84_OUTCOME: ${{ steps.php84.outcome }}
           PACKAGE_OUTCOME: ${{ steps.package.outcome }}
           ATOMIC_OUTCOME: ${{ steps.atomic.outcome }}
           BROWSER_OUTCOME: ${{ steps.browser.outcome }}
@@ -243,6 +250,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence/p03-v1360-release
-          jq -n --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg status "$JOB_STATUS" --arg source_commit "$SOURCE_SHA" --arg source "$SOURCE_OUTCOME" --arg contract "$CONTRACT_OUTCOME" --arg package "$PACKAGE_OUTCOME" --arg atomic "$ATOMIC_OUTCOME" --arg browser "$BROWSER_OUTCOME" --arg publish "$PUBLISH_OUTCOME" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{workflow:"P03 V1.36.0 Unified Formal Release",run_id:($run|tonumber),attempt:($attempt|tonumber),job_status:$status,source_commit:$source_commit,steps:{source:$source,contract:$contract,package:$package,atomic:$atomic,browser:$browser,publish:$publish},updated_at:$at}' > evidence/p03-v1360-release/status.json
+          jq -n --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg status "$JOB_STATUS" --arg source_commit "$SOURCE_SHA" --arg source "$SOURCE_OUTCOME" --arg contract "$CONTRACT_OUTCOME" --arg php84 "$PHP84_OUTCOME" --arg package "$PACKAGE_OUTCOME" --arg atomic "$ATOMIC_OUTCOME" --arg browser "$BROWSER_OUTCOME" --arg publish "$PUBLISH_OUTCOME" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{workflow:"P03 V1.36.0 Unified Formal Release",run_id:($run|tonumber),attempt:($attempt|tonumber),job_status:$status,source_commit:$source_commit,steps:{source:$source,contract:$contract,php84:$php84,package:$package,atomic:$atomic,browser:$browser,publish:$publish},updated_at:$at}' > evidence/p03-v1360-release/status.json
           git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'; git add evidence/p03-v1360-release/status.json
           if ! git diff --cached --quiet; then git commit -m "evidence(P03): V1.36.0 runner readback $GITHUB_RUN_ID"; git pull --rebase origin release/p03-v1360-unified; git push origin HEAD:release/p03-v1360-unified; fi
