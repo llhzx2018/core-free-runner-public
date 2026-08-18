@@ -1,0 +1,105 @@
+name: P04 V2.7.4 Provider Cold Route Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v274-provider-cold-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Require private read token
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || exit 78
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: a7593cecd1e20e696db4fd38c04c7a85f578d500
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p04
+
+      - name: Prepare PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Chromium
+        working-directory: p04
+        run: |
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build and start runtime
+        working-directory: p04
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/build-release-tree.py "$RUNNER_TEMP/site" >/dev/null
+          php -S 127.0.0.1:18996 -t "$RUNNER_TEMP/site" >"$RUNNER_TEMP/site.log" 2>&1 &
+          echo "PHP_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 80); do curl -fsS http://127.0.0.1:18996/setup.php >/dev/null 2>&1 && exit 0; sleep .1; done
+          exit 1
+
+      - name: Reproduce cold Provider after fixtures
+        working-directory: p04
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          timeout 180s node --input-type=module <<'NODE'
+          import { chromium } from 'playwright';
+          import { execFileSync } from 'node:child_process';
+          const base='http://127.0.0.1:18996'; const webRoot=process.env.RUNNER_TEMP+'/site'; const password='Vf274ColdDiagAa1-20260818';
+          const browser=await chromium.launch({headless:true}); const context=await browser.newContext(); const page=await context.newPage();
+          page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(20000);
+          await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+          await page.locator('#site_name').fill('VF Infra'); await page.locator('#password').fill(password); await page.locator('#password_confirm').fill(password);
+          await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+          await page.locator('#admin-password').fill(password);
+          await Promise.all([page.waitForURL(/index\.php/),page.getByRole('button',{name:'登录'}).click()]);
+          await page.locator('#v270-root').waitFor({state:'attached'});
+          const csrf=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+          const domain='v274-diag.example.com';
+          const r=await page.evaluate(async({csrf,domain})=>{const x=await fetch('api.php?action=domain_save',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({domain,manual_expiry_date:'2026-10-01',renewal_price:'12.80',currency:'USD',renewal_policy:'auto',auto_renew:1,registrar:'Dynadot',notes:'V274 diag'})});return {status:x.status,text:await x.text()};},{csrf,domain});
+          if(r.status!==200) throw new Error('domain_save '+JSON.stringify(r));
+          for (const [script,args] of [
+            ['tests/fixtures/v260-user-task-fixture.php',[webRoot]],
+            ['tests/fixtures/v270-integration-fixture.php',[webRoot,domain]],
+            ['tests/fixtures/v270-final-polish-fixture.php',[webRoot,domain]],
+            ['tests/fixtures/v274-runtime-consolidation-fixture.php',[webRoot]],
+          ]) { const o=execFileSync('php',[script,...args],{encoding:'utf8',timeout:20000}); console.log('FIXTURE',script,o.trim().split('\n').slice(-1)[0]); }
+          await page.goto('about:blank');
+          const response=await page.goto(base+'/index.php#providers',{waitUntil:'domcontentloaded'});
+          await page.waitForTimeout(600);
+          const result=await page.evaluate(()=>({url:location.href,title:document.title,ready:document.readyState,root:!!document.getElementById('v270-root'),app:!!document.getElementById('v270-app'),body:(document.body?.innerText||'').slice(0,1200),html:(document.documentElement?.outerHTML||'').slice(0,1600)}));
+          console.log('HTTP_STATUS',response?.status()); console.log('COLD_DIAG',JSON.stringify(result));
+          if(response?.status()!==200 || !result.root || !result.app) throw new Error('cold provider root missing');
+          await page.locator('[data-v271-route="providers"]').waitFor({state:'attached',timeout:15000});
+          console.log('P04_V274_PROVIDER_COLD_ROUTE=PASS');
+          await browser.close();
+          NODE
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          kill "${PHP_PID:-0}" 2>/dev/null || true
+          tail -n 80 "$RUNNER_TEMP/site.log" || true
