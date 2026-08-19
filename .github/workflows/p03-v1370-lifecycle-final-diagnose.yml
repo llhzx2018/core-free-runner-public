@@ -4,13 +4,10 @@ on:
   push:
     branches: [main]
     paths: ['.github/workflows/p03-v1370-lifecycle-final-diagnose.yml']
-  pull_request:
-    branches: [main]
-    paths: ['ops/p03/final/**', '.github/workflows/p03-v1370-lifecycle-final-diagnose.yml']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   P03_REPOSITORY: llhzx2018/vf-forge
@@ -51,17 +48,58 @@ jobs:
           docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-life-final-diag" "$RUNNER_TEMP" >/dev/null
 
       - name: Exact candidate lifecycle diagnostic
+        id: lifecycle
+        shell: bash
+        run: |
+          set +e
+          cd p03
+          if [ "$(git rev-parse HEAD)" != "$P03_COMMIT" ] || [ "$(cat VERSION)" != '1.37.0' ]; then
+            echo 'CURRENT_REVERIFY_FAIL stage=identity line=0 rc=1' >"$RUNNER_TEMP/p03-lifecycle-safe.log"
+            echo '1' >"$RUNNER_TEMP/p03-lifecycle-rc"
+            exit 1
+          fi
+          bash tests/maintenance/current_reverify.sh >"$RUNNER_TEMP/p03-lifecycle-full.log" 2>&1
+          rc=$?
+          grep -E '^CURRENT_REVERIFY_(STAGE|FAIL)' "$RUNNER_TEMP/p03-lifecycle-full.log" >"$RUNNER_TEMP/p03-lifecycle-safe.log" || true
+          echo "$rc" >"$RUNNER_TEMP/p03-lifecycle-rc"
+          cat "$RUNNER_TEMP/p03-lifecycle-safe.log"
+          exit "$rc"
+
+      - name: Checkout public runner for safe receipt
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          token: ${{ github.token }}
+          persist-credentials: true
+          path: runner
+
+      - name: Publish public-safe lifecycle receipt
+        if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
-          cd p03
-          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
-          test "$(cat VERSION)" = '1.37.0'
-          bash tests/maintenance/current_reverify.sh
-
-      - name: Diagnostic final
-        shell: bash
-        run: |
-          echo 'P03_V1370_LIFECYCLE_FINAL_DIAGNOSE=PASS'
-          echo "P03_COMMIT=$P03_COMMIT"
-          echo 'PRODUCTION_WRITE=NO'
+          rc='UNKNOWN'
+          [ -f "$RUNNER_TEMP/p03-lifecycle-rc" ] && rc="$(cat "$RUNNER_TEMP/p03-lifecycle-rc")"
+          mkdir -p runner/ops/p03/receipts
+          {
+            echo '# P03 V1.37.0 Lifecycle Diagnostic Receipt'
+            echo
+            echo "P03_COMMIT=$P03_COMMIT"
+            echo "EXIT_CODE=$rc"
+            if [ -f "$RUNNER_TEMP/p03-lifecycle-safe.log" ]; then
+              cat "$RUNNER_TEMP/p03-lifecycle-safe.log"
+            else
+              echo 'CURRENT_REVERIFY_FAIL stage=runner_precondition line=0 rc=UNKNOWN'
+            fi
+            echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+            echo 'PRODUCTION_WRITE=NO'
+          } > runner/ops/p03/receipts/V1370_LIFECYCLE_DIAGNOSE.md
+          cd runner
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ops/p03/receipts/V1370_LIFECYCLE_DIAGNOSE.md
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'evidence(P03): V1.37.0 lifecycle diagnostic receipt'
+          git push origin HEAD:main
