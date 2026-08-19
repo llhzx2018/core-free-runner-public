@@ -1,0 +1,182 @@
+name: P03 V1.37.0 Atomic Final Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1370-atomic-final.yml'
+      - 'ops/p03/v1370-atomic-final/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 261cbe46ff3d570a69077fd877223b56f23d4bdc
+  BASE_SHA: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1370-atomic-final-php84
+
+jobs:
+  atomic-final:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Checkout exact private P03 V1.37.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Exact source and Atomic contract identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          git cat-file -e "$BASE_SHA^{commit}"
+          test "$(cat VERSION)" = '1.37.0'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" src/app/bootstrap.php
+          grep -Fq "TARGET_VERSION='1.37.0'" scripts/build_atomic.py
+          grep -Fq 'TARGET_SCHEMA=30' scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.36.2']" scripts/build_atomic.py
+          grep -Fq "'intelligence-api.php'" scripts/build_atomic.py
+          grep -Fq "'memory-api.php'" scripts/build_atomic.py
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert p['project_id']=='P03'
+          assert p['production_version']=='1.36.2'
+          assert p['working_version']=='1.37.0'
+          assert p['candidate_version']=='1.37.0'
+          assert p['schema_version']==30
+          assert p['migration']=='NONE'
+          assert p['version_semantics']['allowed_source_versions']==['1.36.2']
+          assert p['permanent_boundaries']['project_asset_storage']=='NONE'
+          assert p['production_write']=='NO'
+          print('P03_V1370_ATOMIC_IDENTITY=PASS')
+          PY
+
+      - name: Prepare PHP 8.4 Atomic environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 zip unzip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-v1370-atomic" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1370-atomic" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo "PHP84_ATOMIC_RUNTIME=PASS\n";'
+
+      - name: Reconstruct V1.36.2 base and V1.37.0 target runtimes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          rm -rf "$RUNNER_TEMP/v1370-base-worktree" "$RUNNER_TEMP/v1370-base-runtime" "$RUNNER_TEMP/v1370-target-runtime" "$RUNNER_TEMP/v1370-release"
+          git worktree add --detach "$RUNNER_TEMP/v1370-base-worktree" "$BASE_SHA" >/dev/null
+          python3 "$RUNNER_TEMP/v1370-base-worktree/scripts/build_runtime.py" "$RUNNER_TEMP/v1370-base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/v1370-target-runtime" >/dev/null
+          grep -Fq "define('VFAB_VERSION', '1.36.2');" "$RUNNER_TEMP/v1370-base-runtime/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" "$RUNNER_TEMP/v1370-base-runtime/app/bootstrap.php"
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" "$RUNNER_TEMP/v1370-target-runtime/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" "$RUNNER_TEMP/v1370-target-runtime/app/bootstrap.php"
+          test -f "$RUNNER_TEMP/v1370-target-runtime/intelligence-api.php"
+          test -f "$RUNNER_TEMP/v1370-target-runtime/app/ProjectIntelligenceService.php"
+          test -f "$RUNNER_TEMP/v1370-target-runtime/assets/project-intelligence.js"
+          test ! -e "$RUNNER_TEMP/v1370-target-runtime/app/.runtime.php"
+          git worktree remove --force "$RUNNER_TEMP/v1370-base-worktree" >/dev/null
+          echo "V1370_RUNTIME_RECONSTRUCTION=PASS base=$(find "$RUNNER_TEMP/v1370-base-runtime" -type f | wc -l) target=$(find "$RUNNER_TEMP/v1370-target-runtime" -type f | wc -l)"
+
+      - name: Build and reverse verify canonical V1.37.0 Atomic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          python3 scripts/build_atomic.py \
+            --base-runtime "$RUNNER_TEMP/v1370-base-runtime" \
+            --target-runtime "$RUNNER_TEMP/v1370-target-runtime" \
+            --output "$RUNNER_TEMP/v1370-release" | tee "$RUNNER_TEMP/v1370-package.json"
+          cd "$RUNNER_TEMP/v1370-release"
+          sha256sum -c SHA256SUMS.txt
+          unzip -t VF_Forge_V1.37.0_Atomic_Upgrade.zip
+          test "$(unzip -Z1 VF_Forge_V1.37.0_Atomic_Upgrade.zip | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 VF_Forge_V1.37.0_Atomic_Upgrade.zip)" = 'repair-v1.37.0.php'
+          php -l repair-v1.37.0.php
+          grep -Fq "const VFF_PACKAGE_ID='vf-forge';" repair-v1.37.0.php
+          grep -Fq "const VFF_PACKAGE_TYPE='app';" repair-v1.37.0.php
+          grep -Fq "const VFF_ATOMIC_TARGET='1.37.0';" repair-v1.37.0.php
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=30;' repair-v1.37.0.php
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.36.2"];' repair-v1.37.0.php
+          ! unzip -Z1 VF_Forge_V1.37.0_Atomic_Upgrade.zip | grep -E '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|cache|session|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+          python3 - <<'PY'
+          import json
+          p=json.load(open('PACKAGE_MANIFEST.json',encoding='utf-8'))
+          assert p['package_id']=='vf-forge'
+          assert p['package_type']=='app'
+          assert p['version']=='1.37.0'
+          assert p['schema']==30
+          assert p['allowed_source_versions']==['1.36.2']
+          source=open('SOURCE_MANIFEST.txt',encoding='utf-8').read()
+          assert 'intelligence-api.php' in source
+          assert 'memory-api.php' in source
+          assert 'app/ProjectIntelligenceService.php' in source
+          assert 'PRIVATE_DATA' not in source and '.runtime.php' not in source
+          print('V1370_ATOMIC_REVERSE_VERIFY=PASS',p['atomic_sha256'],p['source_manifest_sha256'],p['source_file_count'])
+          PY
+
+      - name: V1.36.2 to V1.37.0 success and rollback E2E
+        shell: bash
+        env:
+          V1370_RELEASE_DIR: ${{ runner.temp }}/v1370-release
+          V1370_TARGET_RUNTIME: ${{ runner.temp }}/v1370-target-runtime
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/v1370_atomic_e2e.sh
+
+      - name: Post-Atomic V1.37.0 affected regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/current_reverify.sh
+          bash tests/maintenance/project_intelligence_mcp.sh
+
+      - name: Final Atomic gate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          ZIP="$RUNNER_TEMP/v1370-release/VF_Forge_V1.37.0_Atomic_Upgrade.zip"
+          test -f "$ZIP"
+          ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          SRC_SHA=$(python3 -c 'import json;print(json.load(open("'$RUNNER_TEMP'/v1370-release/PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')
+          echo 'P03_V1370_ATOMIC_FINAL_GATE=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'FROM_VERSION=1.36.2'
+          echo 'TARGET_VERSION=1.37.0'
+          echo 'SCHEMA=30_TO_30'
+          echo 'MIGRATION=NONE'
+          echo "ATOMIC_SHA256=$ZIP_SHA"
+          echo "SOURCE_MANIFEST_SHA256=$SRC_SHA"
+          echo 'SUCCESS_UPGRADE=PASS'
+          echo 'SOURCE_DATABASE_ROLLBACK=PASS'
+          echo 'DATA_PRESERVATION=PASS'
+          echo 'ZERO_PROJECT_ASSET_STORAGE=PASS'
+          echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+          echo 'PRODUCTION_WRITE=NO'
