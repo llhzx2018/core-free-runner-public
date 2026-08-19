@@ -1,0 +1,149 @@
+name: P03 Project Intelligence R4 Final Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['ops/p03/**', '.github/workflows/p03-project-intelligence-r4.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: a7b1c8ffb812ca0a3dc7d9bcc1e39e1179ad9b07
+  P03_PREVIOUS_BROWSER_PASS: e251bab98614690357253e831b0ebfeaec5c7486
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-pi-r4-php84
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout exact private P03 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 8
+          path: p03
+
+      - name: Exact identity and controlled delta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          git cat-file -e "$P03_PREVIOUS_BROWSER_PASS^{commit}"
+          mapfile -t changed < <(git diff --name-only "$P03_PREVIOUS_BROWSER_PASS" HEAD)
+          printf 'R4_DELTA=%s\n' "${changed[*]}"
+          allowed='src/app/ProjectIntelligenceService.php public/mcp/index.php tests/maintenance/project_intelligence_mcp.sh tests/unit/project_intelligence_mcp_contract_test.py'
+          for f in "${changed[@]}"; do [[ " $allowed " == *" $f "* ]] || { echo "unexpected delta: $f"; exit 1; }; done
+          test "$(cat VERSION)" = '1.36.2'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          python3 scripts/repo_health.py .
+          echo 'R4_CONTROLLED_DELTA=PASS'
+
+      - name: Prepare host and PHP 8.4 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-r4" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-r4" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x))exit(1);} echo "PHP84_RUNTIME=PASS\n";'
+
+      - name: Source schema PHP JS and MCP contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          python3 tests/integration/source_integrity_test.py
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/unit/project_intelligence_contract_test.py
+          python3 tests/unit/project_intelligence_mcp_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/p03-r4-php-lint.log"
+          echo "PHP_LINT=PASS count=$(wc -l <"$RUNNER_TEMP/p03-r4-php-lint.log")"
+          node --check public/assets/app.js
+          node --check public/assets/experience.js
+          node --check public/assets/project-intelligence.js
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/p03-r4-runtime" >/dev/null
+          test -f "$RUNNER_TEMP/p03-r4-runtime/mcp/index.php"
+          test -f "$RUNNER_TEMP/p03-r4-runtime/app/ProjectIntelligenceService.php"
+          docker run --rm -v "$RUNNER_TEMP/p03-r4-runtime:/app" -w /app "$PHP_TEST_IMAGE" php cli/check-requirements.php
+          echo 'SOURCE_SCHEMA_RUNTIME_MCP_CONTRACTS=PASS'
+
+      - name: Fresh install Project Intelligence backup restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/current_reverify.sh
+
+      - name: MCP Project Intelligence E2E security
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/project_intelligence_mcp.sh
+
+      - name: Browser E2E Project Intelligence responsive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          RUNTIME="$RUNNER_TEMP/p03-r4-browser-runtime"
+          DATA_ROOT="$RUNNER_TEMP/p03-r4-browser-private"
+          COOKIE="$RUNNER_TEMP/p03-r4-browser-cookies"
+          BASE='http://127.0.0.1:18081'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"
+          mkdir -p "$DATA_ROOT"
+          python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          docker rm -f p03-r4-browser >/dev/null 2>&1 || true
+          docker run -d --rm --name p03-r4-browser -p 18081:18081 -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18081 -t /app >/dev/null
+          trap 'docker logs p03-r4-browser 2>/dev/null || true; docker rm -f p03-r4-browser >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for i in $(seq 1 80); do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi; sleep .25; done
+          test "$ready" = '1'
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/p03-r4-browser-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/p03-r4-browser-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Browser Fixture' --data-urlencode "data_root=$DATA_ROOT" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$BASE/setup.php" >"$RUNNER_TEMP/p03-r4-browser-setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/p03-r4-browser-setup-post.txt"
+          test "$(sqlite3 "$DATA_ROOT/database/"*.sqlite 'pragma integrity_check;')" = 'ok'
+          FIXTURE_PASS="$FIXTURE_PASS" node tests/maintenance/browser_reverify.mjs
+          docker rm -f p03-r4-browser >/dev/null
+          trap - EXIT
+
+      - name: Final public-safe R4 evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_PROJECT_INTELLIGENCE_R4_FINAL_VERIFY=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'SOURCE_SCHEMA_PHP_JS_RUNTIME=PASS'
+          echo 'FRESH_INSTALL_BACKUP_RESTORE=PASS'
+          echo 'MCP_PROJECT_INTELLIGENCE_SECURITY=PASS'
+          echo 'BROWSER_E2E_RESPONSIVE=PASS'
+          echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+          echo 'PRODUCTION_WRITE=NO'
