@@ -1,0 +1,161 @@
+name: P03 Project Intelligence Final Exact Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['ops/p03/final/**', '.github/workflows/p03-project-intelligence-final.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 3be2ded75acb79172e0c81082d133e08b8d68bc5
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-pi-final-php84
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout exact private P03 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p03
+
+      - name: Exact Current Truth identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          test "$(cat VERSION)" = '1.36.2'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert p['project_id']=='P03'
+          assert p['repository']=='llhzx2018/vf-forge'
+          assert p['production_version']=='1.36.2'
+          assert p['working_version']=='UNVERSIONED_NEXT'
+          assert p['candidate_version']=='NONE'
+          assert p['schema_version']==30
+          assert p['production_write']=='NO'
+          assert p['permanent_boundaries']['project_asset_storage']=='NONE'
+          print('P03_CURRENT_TRUTH=PASS')
+          PY
+          python3 scripts/repo_health.py .
+
+      - name: Prepare host and PHP 8.4 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-final" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-final" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo "PHP84_RUNTIME=PASS\n";'
+
+      - name: Source Schema PHP JS Runtime contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          python3 tests/integration/source_integrity_test.py
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/unit/project_intelligence_contract_test.py
+          python3 tests/unit/project_intelligence_mcp_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/p03-final-php-lint.log"
+          echo "PHP_LINT=PASS count=$(wc -l <"$RUNNER_TEMP/p03-final-php-lint.log")"
+          node --check public/assets/app.js
+          node --check public/assets/experience.js
+          node --check public/assets/project-intelligence.js
+          echo 'JAVASCRIPT_SYNTAX=PASS'
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/p03-final-runtime" >/dev/null
+          test -f "$RUNNER_TEMP/p03-final-runtime/intelligence-api.php"
+          test -f "$RUNNER_TEMP/p03-final-runtime/mcp/index.php"
+          test -f "$RUNNER_TEMP/p03-final-runtime/assets/project-intelligence.js"
+          test -f "$RUNNER_TEMP/p03-final-runtime/assets/project-intelligence.css"
+          test -f "$RUNNER_TEMP/p03-final-runtime/app/ProjectIntelligenceService.php"
+          test -f "$RUNNER_TEMP/p03-final-runtime/app/ExperienceService.php"
+          docker run --rm -v "$RUNNER_TEMP/p03-final-runtime:/app" -w /app "$PHP_TEST_IMAGE" php cli/check-requirements.php
+          echo 'SOURCE_SCHEMA_PHP_JS_RUNTIME=PASS'
+
+      - name: Fresh install Project Intelligence backup restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/current_reverify.sh
+
+      - name: MCP Project Intelligence security E2E
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/project_intelligence_mcp.sh
+
+      - name: Browser E2E Project Intelligence responsive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          RUNTIME="$RUNNER_TEMP/p03-final-browser-runtime"
+          DATA_ROOT="$RUNNER_TEMP/p03-final-browser-private"
+          COOKIE="$RUNNER_TEMP/p03-final-browser-cookies"
+          BASE='http://127.0.0.1:18081'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"
+          mkdir -p "$DATA_ROOT"
+          python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          docker rm -f p03-final-browser >/dev/null 2>&1 || true
+          docker run -d --rm --name p03-final-browser -p 18081:18081 -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18081 -t /app >/dev/null
+          trap 'docker logs p03-final-browser 2>/dev/null || true; docker rm -f p03-final-browser >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for i in $(seq 1 80); do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi; sleep .25; done
+          test "$ready" = '1'
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/p03-final-browser-setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/p03-final-browser-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge Browser Fixture' --data-urlencode "data_root=$DATA_ROOT" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$BASE/setup.php" >"$RUNNER_TEMP/p03-final-browser-setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/p03-final-browser-setup-post.txt"
+          test "$(sqlite3 "$DATA_ROOT/database/"*.sqlite 'pragma integrity_check;')" = 'ok'
+          FIXTURE_PASS="$FIXTURE_PASS" node tests/maintenance/browser_reverify.mjs
+          docker rm -f p03-final-browser >/dev/null
+          trap - EXIT
+
+      - name: Final public-safe evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_PROJECT_INTELLIGENCE_FINAL_EXACT_VERIFY=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'VERSION=1.36.2_WORKING_UNVERSIONED_NEXT'
+          echo 'SCHEMA=30'
+          echo 'SOURCE_SCHEMA_PHP_JS_RUNTIME=PASS'
+          echo 'FRESH_INSTALL_BACKUP_RESTORE=PASS'
+          echo 'MCP_PROJECT_INTELLIGENCE_SECURITY=PASS'
+          echo 'BROWSER_E2E_RESPONSIVE=PASS'
+          echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+          echo 'PRODUCTION_WRITE=NO'
