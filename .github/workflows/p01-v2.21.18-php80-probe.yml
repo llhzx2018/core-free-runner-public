@@ -1,4 +1,4 @@
-name: P01 V2.21.18 PHP80 Probe
+name: P01 V2.21.18 Atomic Diagnostics
 on:
   push:
     branches: [vf-agent-operations-v1]
@@ -13,7 +13,7 @@ jobs:
       R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
       W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Rebuild exact repair and capture lint diagnostics
+      - name: Rebuild exact repair and capture every atomic source diagnostic
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -26,10 +26,14 @@ jobs:
           OUT="$RUNNER_TEMP/p01-probe"; rm -rf "$OUT"; mkdir -p "$OUT"
           python3 runner/scripts/p01-build-maintenance-candidate-v22118.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit a501d2394502319b0af9caaf1c171bdf94940a9d --candidate-tree 6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca --production-commit 24c91ac9d76ac10780403bc2b326793c7c67c2ed >/tmp/build.json
           set +e
-          php -d display_errors=1 -l "$OUT/repair-v2.21.18.php" >/tmp/native.txt 2>&1
-          echo $? >/tmp/native.rc
-          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -d display_errors=1 -l repair-v2.21.18.php >/tmp/php80.txt 2>&1
-          echo $? >/tmp/php80.rc
+          php -d display_errors=1 -l "$OUT/repair-v2.21.18.php" >/tmp/native.txt 2>&1; echo $? >/tmp/native.rc
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -d display_errors=1 -l repair-v2.21.18.php >/tmp/php80.txt 2>&1; echo $? >/tmp/php80.rc
+          php "$OUT/repair-v2.21.18.php" --self-test >/tmp/selftest.txt 2>&1; echo $? >/tmp/selftest.rc
+          php "$OUT/repair-v2.21.18.php" --verify-source=production/src >/tmp/srcverify.txt 2>&1; echo $? >/tmp/srcverify.rc
+          cp -a production/src /tmp/p01-gate-only; printf '\nGATE_ONLY\n' >> /tmp/p01-gate-only/README.md
+          php "$OUT/repair-v2.21.18.php" --verify-source=/tmp/p01-gate-only >/tmp/gateonly.txt 2>&1; echo $? >/tmp/gateonly.rc
+          cp -a production/src /tmp/p01-tamper; printf '\n/* TAMPER */\n' >> /tmp/p01-tamper/assets/update.js
+          php "$OUT/repair-v2.21.18.php" --verify-source=/tmp/p01-tamper >/tmp/tamper.txt 2>&1; echo $? >/tmp/tamper.rc
           set -e
           sha256sum "$OUT/repair-v2.21.18.php" | awk '{print $1}' >/tmp/repair.sha
           stat -c '%s' "$OUT/repair-v2.21.18.php" >/tmp/repair.bytes
@@ -43,35 +47,34 @@ jobs:
           set -Eeuo pipefail
           python3 - <<'PY'
           import base64,json,os,urllib.request,urllib.error
-          def read(path,default=''):
-            try:return open(path,encoding='utf-8',errors='replace').read().strip()
-            except:return default
-          def intval(path):
-            try:return int(read(path,'-1'))
+          def read(p,d=''):
+            try:return open(p,encoding='utf-8',errors='replace').read().strip()
+            except:return d
+          def rc(p):
+            try:return int(read(p,'-1'))
             except:return -1
-          payload={
-            'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','gate':'PHP80_ATOMIC_LINT_PROBE',
-            'status':os.environ.get('S','unknown').upper(),'workflow_run_id':os.environ.get('RID',''),
-            'candidate_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','candidate_tree':'6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca',
-            'native_rc':intval('/tmp/native.rc'),'native_output':read('/tmp/native.txt'),
-            'php80_rc':intval('/tmp/php80.rc'),'php80_output':read('/tmp/php80.txt'),
-            'repair_sha256':read('/tmp/repair.sha'),'repair_bytes':intval('/tmp/repair.bytes'),
-            'private_data_persisted_publicly':False
-          }
-          payload['pass']=payload['native_rc']==0 and payload['php80_rc']==0
-          token=os.environ['W']; path='vf-agent/results/P01-V2.21.18-PHP80-PROBE.json'; api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/'+path
-          h={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}; sha=None
+          keys=['native','php80','selftest','srcverify','gateonly','tamper']
+          payload={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','gate':'ATOMIC_SOURCE_DIAGNOSTICS','workflow_run_id':os.environ.get('RID',''),'candidate_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','candidate_tree':'6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca','repair_sha256':read('/tmp/repair.sha'),'repair_bytes':rc('/tmp/repair.bytes'),'private_data_persisted_publicly':False}
+          for k in keys: payload[k+'_rc']=rc('/tmp/'+k+'.rc'); payload[k+'_output']=read('/tmp/'+k+'.txt')
+          payload['pass']=payload['native_rc']==0 and payload['php80_rc']==0 and payload['selftest_rc']==0 and payload['srcverify_rc']==0 and payload['gateonly_rc']==0 and payload['tamper_rc']!=0 and 'assets/update.js:sha' in payload['tamper_output']
+          payload['status']='SUCCESS' if payload['pass'] else 'FAILURE'
+          token=os.environ['W'];path='vf-agent/results/P01-V2.21.18-ATOMIC-DIAGNOSTICS.json';api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/'+path;h={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'};sha=None
           try:
             with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h),timeout=20) as r:sha=json.load(r).get('sha')
           except urllib.error.HTTPError as e:
             if e.code!=404:raise
-          body={'message':'evidence(P01): publish PHP 8.0 atomic lint probe','content':base64.b64encode((json.dumps(payload,indent=2,sort_keys=True)+'\n').encode()).decode(),'branch':'vf-agent-operations-v1'}
+          body={'message':'evidence(P01): publish atomic source diagnostics','content':base64.b64encode((json.dumps(payload,indent=2,sort_keys=True)+'\n').encode()).decode(),'branch':'vf-agent-operations-v1'}
           if sha:body['sha']=sha
           urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**h,'Content-Type':'application/json'}),timeout=20).read()
           PY
-      - name: Enforce PHP 8.0 compatibility
+      - name: Enforce diagnostics
         if: always()
         shell: bash
         run: |
           test "$(cat /tmp/native.rc)" = 0
           test "$(cat /tmp/php80.rc)" = 0
+          test "$(cat /tmp/selftest.rc)" = 0
+          test "$(cat /tmp/srcverify.rc)" = 0
+          test "$(cat /tmp/gateonly.rc)" = 0
+          test "$(cat /tmp/tamper.rc)" != 0
+          grep -q 'assets/update.js:sha' /tmp/tamper.txt
