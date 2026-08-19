@@ -1,0 +1,184 @@
+name: P01 V2.21.22 Current UX Gate
+
+on:
+  pull_request:
+    paths:
+      - 'requests/p01-v22122-current-ux-gate-*.txt'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p01-v22122-current-ux-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: startsWith(github.head_ref, 'agent/p01-v22122-current-ux-gate-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: maintenance/admin-consolidation-2.21.22-20260820
+    steps:
+      - name: Checkout runner fixtures
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Clone current P01 working source
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch "$PRODUCT_BRANCH" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          echo "SOURCE_SHA=$(git -C product rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SOURCE_TREE=$(git -C product rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.21.21'
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = '2.21.21'
+          grep -Fq "define('VF_VERSION', '2.21.21');" product/src/app/bootstrap.php
+
+      - name: Current structure and syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fq "['key'=>'data','label'=>'备份与恢复','href'=>'data-safety.php','icon'=>'recovery','children'=>[]]" product/src/app/AdminShell.php
+          grep -Fq "['key'=>'settings','label'=>'设置','href'=>'settings.php','icon'=>'settings','children'=>[]]" product/src/app/AdminShell.php
+          ! grep -Fq "data-safety.php#backups" product/src/app/AdminShell.php
+          ! grep -Fq "settings.php#brand" product/src/app/AdminShell.php
+          grep -Fq 'id="selectPage" type="checkbox" aria-label="选择本页"' product/src/links-admin.php
+          grep -Fq 'id="selectPageMobile" type="checkbox"' product/src/links-admin.php
+          grep -Fq 'data-vf-pager-for="backups"' product/src/data-safety.php
+          grep -Fq 'data-vf-pager-for="disasterPackages"' product/src/data-safety.php
+          ! grep -Fq 'data-data-panel=' product/src/data-safety.php
+          grep -Fq 'id="maintenance" data-panel="maintenance"' product/src/settings.php
+          grep -Fq 'body[data-vf-page="settings"] .vf-settings-section{display:block!important' product/src/assets/admin-consolidation.css
+          grep -Fq 'assets/favorite-affordance.css?v=22122' product/src/index.php
+          grep -Fq 'data-favorite-toggle=' product/src/index.php
+          grep -Fq "Number(link.is_favorite)?'取消收藏':'收藏'" product/src/index.php
+          ! grep -Fq "Number(link.is_favorite)?'取消收藏':'固定到首页'" product/src/index.php
+          grep -Fq '> 收藏</label>' product/src/index.php
+          find product/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          git -C product diff --check
+          echo 'CURRENT_STRUCTURE_AND_SYNTAX=PASS'
+
+      - name: Prepare browser runtime and fresh product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME_PATH="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          test -n "$CHROME_PATH" || { echo 'SYSTEM_CHROME_NOT_FOUND' >&2; exit 91; }
+          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+          rm -rf /tmp/vf-p01-current-ux
+          cp -a product/src /tmp/vf-p01-current-ux
+          cd /tmp/vf-p01-current-ux
+          php -S 127.0.0.1:18125 -t . > "$GITHUB_WORKSPACE/php-server-current-ux.log" 2>&1 & echo $! >/tmp/p01-current-ux.pid
+          for i in $(seq 1 30); do curl -fsS -c /tmp/vf-current.cookies -b /tmp/vf-current.cookies http://127.0.0.1:18125/setup.php -o /tmp/setup-current.html && break; sleep 1; done
+          CSRF=$(python3 -c "import re;t=open('/tmp/setup-current.html').read();m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',t);assert m;print(m.group(1))")
+          curl -fsS -c /tmp/vf-current.cookies -b /tmp/vf-current.cookies -X POST http://127.0.0.1:18125/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start Current UX Gate' \
+            --data-urlencode 'admin_password=CurrentUX!2026Strong' \
+            --data-urlencode 'admin_password_confirm=CurrentUX!2026Strong' >/tmp/setup-post-current.html
+          test -f app/.runtime.php
+          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture.php
+          php fixture.php
+          php -r 'require "app/bootstrap.php";$r=new VfRepository(vf_db());$d=$r->bootstrap(true);$links=$d["links"]??[];if(count($links)<3)throw new RuntimeException("fixture missing");$x=$links[0];$r->saveLink((int)$x["id"],["category_id"=>(int)$x["category_id"],"title"=>(string)$x["title"],"url"=>(string)$x["url"],"description"=>(string)($x["description"]??""),"is_private"=>(bool)($x["is_private"]??false),"is_favorite"=>false,"is_pending"=>true],"manual");echo "PENDING_FIXTURE_PASS\n";'
+          for i in $(seq 1 12); do php cli/backup.php >/dev/null; done
+          php cli/verify.php | tee "$GITHUB_WORKSPACE/cli-verify-current-ux.txt"
+          php -r 'require "app/bootstrap.php";$db=vf_db();$a=$db->query("PRAGMA integrity_check")->fetchColumn();if($a!=="ok")throw new RuntimeException("integrity ".$a);$fk=$db->query("PRAGMA foreign_key_check")->fetchAll();if($fk)throw new RuntimeException("foreign key");echo "SQLITE_BOUNDARY_PASS\n";'
+
+      - name: Real Chrome UX gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > p01-current-ux.mjs <<'JS'
+          import {chromium} from 'playwright-core';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18125/';
+          const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH,args:['--no-sandbox']});
+          const out={pass:false,sourceSha:process.env.SOURCE_SHA,structure:{},favorite:{},responsive:{},pageErrors:[]};
+          try{
+            const c=await browser.newContext({viewport:{width:1280,height:900}}),p=await c.newPage();
+            p.on('pageerror',e=>out.pageErrors.push(String(e)));
+            await p.goto(base,{waitUntil:'domcontentloaded'});await p.waitForTimeout(250);
+            await p.click('#loginButton');await p.fill('[name=password]','CurrentUX!2026Strong');await p.click('#loginSubmit');await p.waitForFunction(()=>document.body.classList.contains('is-admin'));
+            const boot=await p.evaluate(async()=>await (await fetch('api.php?action=bootstrap',{credentials:'same-origin'})).json());
+            const links=(boot.data&&boot.data.links)||[];const target=links.find(x=>Number(x.is_pending||0)!==1&&Number(x.is_favorite||0)!==1);if(!target)throw Error('NO_FAVORITE_TARGET');
+            const catId=Number(target.category_id),linkId=Number(target.id);
+            async function go(url,width=1280){await p.setViewportSize({width,height:900});await p.goto(base+url,{waitUntil:'domcontentloaded'});await p.waitForTimeout(260);const ov=await p.evaluate(()=>Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)-window.innerWidth);if(ov>1)throw Error(`OVERFLOW ${url} ${width}: ${ov}`);return ov;}
+
+            await go('#/category/'+catId,1280);
+            const shell=p.locator('[data-link-shell="'+linkId+'"]');await shell.waitFor();const star=shell.locator('[data-favorite-toggle="'+linkId+'"]');if(await star.count()!==1)throw Error('STAR_NOT_VISIBLE');if(await star.getAttribute('aria-pressed')!=='false')throw Error('STAR_INITIAL_STATE');
+            await Promise.all([p.waitForResponse(r=>r.url().includes('action=favorite')&&r.request().method()==='POST'),star.click()]);
+            await p.waitForFunction(id=>{const b=document.querySelector('[data-favorite-toggle="'+id+'"]');return b&&b.getAttribute('aria-pressed')==='true'&&b.classList.contains('active');},linkId);
+            const favCount=(await p.locator('#favoriteCount').innerText()).trim();if(favCount!=='1')throw Error('FAVORITE_COUNT '+favCount);
+            out.favorite.add={pass:true,count:favCount};
+
+            const menu=shell.locator('[data-link-menu="'+linkId+'"]');await menu.click();const menuText=await p.locator('.context-menu').innerText();if(!menuText.includes('取消收藏'))throw Error('MENU_FAVORITE_WORDING');if(menuText.includes('固定到首页'))throw Error('OLD_MENU_WORDING');await p.keyboard.press('Escape');
+
+            await p.locator('button[data-view="favorite"]').click();await p.waitForTimeout(180);if(!await p.locator('[data-link-shell="'+linkId+'"]').isVisible())throw Error('FAVORITE_VIEW_MISSING');const favStar=p.locator('[data-link-shell="'+linkId+'"] [data-favorite-toggle="'+linkId+'"]');if(await favStar.getAttribute('aria-pressed')!=='true')throw Error('FAVORITE_VIEW_STAR');
+            await Promise.all([p.waitForResponse(r=>r.url().includes('action=favorite')&&r.request().method()==='POST'),favStar.click()]);await p.waitForTimeout(180);if(!await p.getByText('还没有收藏网址',{exact:true}).isVisible())throw Error('FAVORITE_REMOVE_EMPTY');out.favorite.remove={pass:true};
+
+            await go('#/category/'+catId,1280);await p.evaluate(()=>{state.view='grid';renderListing();});if(!await p.locator('.link-card [data-favorite-toggle]').first().isVisible())throw Error('GRID_STAR_MISSING');out.favorite.grid=true;
+            await go('#/pending',1280);if(await p.locator('[data-favorite-toggle]').count()!==0)throw Error('PENDING_STAR_PRESENT');out.favorite.pendingHidden=true;
+
+            await go('links-admin.php',1280);if(await p.locator('.vf-links-toolbar #selectPage').count()!==0)throw Error('SELECT_IN_TOOLBAR');const selectHead=p.locator('thead .vf-links-select-col #selectPage');if(await selectHead.count()!==1)throw Error('SELECT_HEAD_MISSING');await selectHead.check();await p.waitForTimeout(80);if(await p.locator('#linksBody [data-select]:checked').count()===0)throw Error('SELECT_HEAD_NO_EFFECT');out.structure.selectPage=true;
+
+            await go('data-safety.php',1280);if(await p.locator('[data-vf-nav-group="data"] .vf-rail-submenu').count()!==0)throw Error('DATA_SUBMENU');for(const t of ['SQLite 备份','完整恢复','旧站迁移与数据库记录'])if(!await p.getByText(t,{exact:false}).first().isVisible())throw Error('DATA_SECTION '+t);const rows=p.locator('#backups .backup-item'),total=await rows.count(),visible=await rows.evaluateAll(a=>a.filter(x=>!x.hidden).length);if(total<12||visible!==10)throw Error('BACKUP_PAGER '+total+'/'+visible);const pager=p.locator('[data-vf-pager-for="backups"]');if(!await pager.isVisible())throw Error('BACKUP_PAGER_HIDDEN');await pager.locator('[data-vf-next]').click();await p.waitForTimeout(80);const visible2=await rows.evaluateAll(a=>a.filter(x=>!x.hidden).length);if(visible2<1||visible2>10)throw Error('BACKUP_PAGE2 '+visible2);out.structure.data={samePage:true,total,page1:visible,page2:visible2};
+
+            await go('settings.php',1280);if(await p.locator('[data-vf-nav-group="settings"] .vf-rail-submenu').count()!==0)throw Error('SETTINGS_SUBMENU');for(const id of ['brand','display','home','seo','account','maintenance'])if(!await p.locator('#'+id).isVisible())throw Error('SETTINGS_HIDDEN '+id);for(const t of ['RSS 订阅','系统状态'])if(!await p.getByText(t,{exact:true}).first().isVisible())throw Error('SETTINGS_LINK '+t);out.structure.settings={singlePage:true,sections:6};
+
+            const pages=['#/category/'+catId,'links-admin.php','links-admin.php?view=pending','health.php','duplicates.php','transfer.php','browser-helper.php','data-safety.php','settings.php','system.php','security.php','update.php'];
+            for(const w of [390,768,1024,1280]){out.responsive[w]={};for(const path of pages)out.responsive[w][path]=await go(path,w);}
+            if(out.pageErrors.length)throw Error('PAGE_ERRORS '+out.pageErrors.join('|'));
+            out.pass=true;fs.writeFileSync('p01-current-ux.json',JSON.stringify(out,null,2));console.log('P01_CURRENT_UX_GATE=PASS');await c.close();
+          }catch(e){out.error=String(e?.stack||e);fs.writeFileSync('p01-current-ux.json',JSON.stringify(out,null,2));console.error(e);process.exitCode=1;}finally{await browser.close();}
+          JS
+          node p01-current-ux.mjs | tee browser-current-ux.txt
+
+      - name: Publish PASS evidence
+        if: success()
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$SOURCE_SHA" --arg tree "$SOURCE_TREE" --slurpfile browser p01-current-ux.json '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.22_CURRENT_UX_WORKING_GATE",status:"SUCCESS",pass:true,working_version:"2.21.21",working_source_sha:$sha,working_source_tree:$tree,admin_consolidation:true,visible_favorite_star:true,one_click_favorite:true,backup_pagination:true,settings_single_page:true,full_responsive_gate:true,browser:$browser[0],schema_changed:false,browser_helper_changed:false,production_changed:false,private_data_used:false,workflow_run_id:env.GITHUB_RUN_ID}' >/tmp/evidence.json
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" evidence
+          mkdir -p evidence/vf-agent/results
+          cp /tmp/evidence.json evidence/vf-agent/results/P01-V2.21.22-CURRENT-UX-WORKING-GATE.json
+          git -C evidence config user.name VictorForge
+          git -C evidence config user.email llhzx2018@gmail.com
+          git -C evidence add vf-agent/results/P01-V2.21.22-CURRENT-UX-WORKING-GATE.json
+          git -C evidence commit -q -m 'evidence(P01): V2.21.22 current UX working gate PASS'
+          git -C evidence pull -q --rebase origin vf-agent-operations-v1
+          git -C evidence push -q origin HEAD:vf-agent-operations-v1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p01-v22122-current-ux-${{ github.run_id }}
+          path: |
+            p01-current-ux.json
+            browser-current-ux.txt
+            cli-verify-current-ux.txt
+            php-server-current-ux.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: test ! -f /tmp/p01-current-ux.pid || kill "$(cat /tmp/p01-current-ux.pid)" 2>/dev/null || true
