@@ -1,0 +1,182 @@
+name: P02 V2.5.20 Draft Concept Retirement Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['triggers/p02-v2520-draft-retirement.txt']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_BRANCH: maintenance/v2.5.20-draft-concept-retirement
+      BASELINE_REF: v2.5.19
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered capability
+        run: test -n "$RELEASE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_BRANCH }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.BASELINE_REF }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Static source and compatibility gates
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < product/VERSION)" = 2.5.20
+          php -l product/public/index.php
+          node --check product/public/assets/v2520-draft-retirement.js
+          cmp product/public/assets/app.js baseline/public/assets/app.js
+          grep -q "function draftKey" product/public/assets/app.js
+          grep -q "storage.set(draftKey" product/public/assets/app.js
+          grep -q "saveLocalDraft" product/public/assets/app.js
+          grep -q "autosave=debounce" product/public/assets/app.js
+          grep -q "v2520-draft-retirement.js" product/public/index.php
+          grep -q "data-editor-action=\\\"draft\\\"" product/public/assets/app.js
+          echo LOCAL_EDIT_RECOVERY_CORE_UNCHANGED=PASS
+          echo V2520_RUNTIME_WIRING=PASS
+
+      - name: Install real Chromium
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Real Chromium draft-retirement UX
+        run: |
+          set -Eeuo pipefail
+          cat > product/public/_v2520_fixture.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
+          <button id="draftBtn" class="side-tool">草稿 <b id="draftCount">0</b></button>
+          <div id="settingsPanel"><div class="settings-section"><div class="setting-row"><div><strong>自动保存本地草稿</strong><p>旧说明</p></div><div><input name="autosave_draft" type="checkbox" checked></div></div></div></div>
+          <div id="genericMenu"><button data-editor-action="draft">保存为草稿</button></div>
+          <div id="workspaceMenu"><button data-workspace-more="draft">保存为草稿</button></div>
+          <script>
+          window.state={status:'draft',mode:'all',categoryId:0,page:1,stats:{drafts:0},settingsSection:'content',site:{auth:true}};
+          window.storage={set:(k,v)=>localStorage.setItem(k,v),get:(k,d)=>localStorage.getItem(k)??d,remove:k=>localStorage.removeItem(k)};
+          window.__loadListCalls=0;
+          window.workspaceMoreMarkup=ctrl=>(ctrl&&ctrl.canDraft&&ctrl.canDraft())?'<button data-workspace-more="draft">保存为草稿</button>':'<button data-workspace-more="history">历史</button>';
+          window.renderSidebar=()=>{};
+          window.renderSettingsPanel=()=>{};
+          window.openEditor=async()=>{};
+          window.renderArticleWorkspace=()=>{};
+          window.loadBootstrap=async()=>({ok:true});
+          window.persistView=()=>{};
+          window.loadList=async()=>{window.__loadListCalls++;};
+          </script>
+          <script src="/assets/v2520-draft-retirement.js"></script>
+          </body></html>
+          HTML
+          python3 -m http.server 8120 --directory product/public >"$RUNNER_TEMP/v2520-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          cat > "$RUNNER_TEMP/v2520-test.cjs" <<'NODE'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            await page.goto('http://127.0.0.1:8120/_v2520_fixture.html',{waitUntil:'networkidle'});
+            await page.waitForTimeout(100);
+            const result=await page.evaluate(()=>({
+              draftHidden:document.querySelector('#draftBtn').hidden,
+              draftAria:document.querySelector('#draftBtn').getAttribute('aria-hidden'),
+              genericDraft:!!document.querySelector('[data-editor-action="draft"]'),
+              workspaceDraft:!!document.querySelector('[data-workspace-more="draft"]'),
+              recoveryTitle:document.querySelector('[name="autosave_draft"]').closest('.setting-row').querySelector('strong').textContent,
+              recoveryNote:document.querySelector('[name="autosave_draft"]').closest('.setting-row').querySelector('p').textContent,
+              stateStatus:state.status,
+              stateMode:state.mode,
+              generatedMore:workspaceMoreMarkup({canDraft:()=>true})
+            }));
+            if(!result.draftHidden||result.draftAria!=='true')throw new Error('draft nav remains visible');
+            if(result.genericDraft||result.workspaceDraft)throw new Error('formal draft action remains visible');
+            if(result.recoveryTitle!=='编辑恢复保护'||!result.recoveryNote.includes('不会创建资料库草稿'))throw new Error('recovery semantics not clarified');
+            if(result.stateStatus!=='active'||result.stateMode!=='all')throw new Error('empty legacy draft view not normalized');
+            if(result.generatedMore.includes('data-workspace-more="draft"'))throw new Error('article workspace can still generate draft action');
+            await page.evaluate(()=>{state.stats.drafts=2;state.settingsSection='content';renderSettingsPanel();});
+            await page.waitForTimeout(50);
+            if(await page.locator('#legacyDraftAccessV2520').count()!==1)throw new Error('legacy draft compatibility access missing');
+            await page.click('[data-open-legacy-drafts]');
+            const legacy=await page.evaluate(()=>({status:state.status,calls:window.__loadListCalls}));
+            if(legacy.status!=='draft'||legacy.calls<1)throw new Error('legacy draft compatibility access broken');
+            await page.setViewportSize({width:390,height:844});
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);
+            if(overflow)throw new Error('390px horizontal overflow');
+            console.log('DRAFT_PRIMARY_NAV_RETIRED=PASS');
+            console.log('FORMAL_DRAFT_CREATE_ACTIONS_RETIRED=PASS');
+            console.log('LOCAL_EDIT_RECOVERY_SEMANTICS=PASS');
+            console.log('LEGACY_DRAFT_COMPATIBILITY=PASS');
+            console.log('MOBILE_390_OVERFLOW=NONE');
+            await browser.close();
+          })().catch(err=>{console.error(err);process.exit(1);});
+          NODE
+          node "$RUNNER_TEMP/v2520-test.cjs"
+
+      - name: Reseal V2.5.20 runtime source manifest
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('.')
+          mf=json.loads((p/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          new={'full_path':'assets/v2520-draft-retirement.js','repo_path':'public/assets/v2520-draft-retirement.js'}
+          if not any(e.get('repo_path')==new['repo_path'] for e in mf['entries']): mf['entries'].append(new)
+          for e in mf['entries']:
+              data=(p/e['repo_path']).read_bytes()
+              h=hashlib.sha256(data).hexdigest()
+              e['bytes']=len(data);e['sha256']=h;e['repo_sha256']=h
+          mf['version']='2.5.20'
+          mf['source_baseline_full_sha256']='PENDING_FORMAL_CANDIDATE_ARTIFACT'
+          mf['mapping_contract']='Each declared runtime source file must exist exactly once at repo_path; hashes bind the Git-native V2.5.20 draft-concept-retirement candidate deploy tree. Formal release identity is not assigned by this candidate manifest.'
+          mf['runtime_source_file_count']=len(mf['entries'])
+          (p/'SOURCE_MANIFEST.json').write_text(json.dumps(mf,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          lines=[f"VF Library V2.5.20 CANDIDATE SOURCE_MANIFEST","FULL_SHA256  PENDING_FORMAL_CANDIDATE_ARTIFACT",f"RUNTIME_SOURCE_FILES  {len(mf['entries'])}","MAPPING_STATUS  CURRENT_GIT_CANDIDATE",""]
+          lines += [f"{e['repo_sha256']}  {e['repo_path']}  <=  {e['full_path']}" for e in mf['entries']]
+          (p/'SOURCE_MANIFEST.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          assert len(mf['entries'])==75
+          print('SOURCE_MANIFEST_75_OF_75=PASS')
+          PY
+          bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/v2520-deploy" >/dev/null
+          test "$(cat "$RUNNER_TEMP/v2520-deploy/VERSION.txt")" = 2.5.20
+          test -f "$RUNNER_TEMP/v2520-deploy/assets/v2520-draft-retirement.js"
+          echo BUILD_DEPLOY_TREE=PASS
+
+      - name: Commit resealed manifest to product branch
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Runner'
+          git config user.email 'vf-runner@users.noreply.github.com'
+          git add SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          if git diff --cached --quiet; then echo MANIFEST_ALREADY_CURRENT=YES; exit 0; fi
+          git commit -m 'chore(P02): reseal V2.5.20 source manifest'
+          git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/llhzx2018/vf-library.git"
+          git push origin "HEAD:${PRODUCT_BRANCH}"
+          echo PRODUCT_BRANCH_MANIFEST_PUSH=PASS
+          echo PRODUCTION_WRITE=NO
