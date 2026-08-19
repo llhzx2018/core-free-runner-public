@@ -1,0 +1,68 @@
+name: P03 V1.37.3 Setup Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1373-setup-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 7288a9391f2a2489f42ecf607ac9b96d34f2edd5
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Inspect setup GET without exposing tokens
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          RUNTIME="$RUNNER_TEMP/runtime"
+          DATA_ROOT="$RUNNER_TEMP/private"
+          rm -rf "$RUNTIME" "$DATA_ROOT"; mkdir -p "$DATA_ROOT"
+          python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          docker rm -f p03-v1373-setup-diag >/dev/null 2>&1 || true
+          docker run -d --rm --name p03-v1373-setup-diag -p 18082:18082 \
+            -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app php:8.4-cli-bookworm \
+            php -S 0.0.0.0:18082 -t /app >/dev/null
+          trap 'docker logs p03-v1373-setup-diag 2>&1 | sed -E "s/value=\"[^\"]+\"/value=\"[REDACTED]\"/g" || true; docker rm -f p03-v1373-setup-diag >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for i in $(seq 1 80); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/setup.php || true)
+            if [ "$code" != '000' ]; then ready=1; break; fi
+            sleep .25
+          done
+          test "$ready" = '1'
+          code=$(curl -sS -D "$RUNNER_TEMP/setup.headers" -o "$RUNNER_TEMP/setup.html" -w '%{http_code}' http://127.0.0.1:18082/setup.php || true)
+          echo "SETUP_HTTP=$code"
+          echo "SETUP_BYTES=$(stat -c%s "$RUNNER_TEMP/setup.html" 2>/dev/null || echo 0)"
+          echo 'SETUP_HEADERS_BEGIN'
+          grep -Ei '^(HTTP/|Content-Type:|X-Robots-Tag:|Location:)' "$RUNNER_TEMP/setup.headers" || true
+          echo 'SETUP_HEADERS_END'
+          echo 'SETUP_INPUT_NAMES_BEGIN'
+          grep -oE 'name="[A-Za-z0-9_-]+"' "$RUNNER_TEMP/setup.html" | sort -u || true
+          echo 'SETUP_INPUT_NAMES_END'
+          if grep -q 'name="setup_csrf"' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_CSRF_FIELD=PASS'; else echo 'SETUP_CSRF_FIELD=FAIL'; fi
+          if grep -q '<form' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_FORM=PASS'; else echo 'SETUP_FORM=FAIL'; fi
+          if grep -q 'Fatal error\|Uncaught Error\|Warning:' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_PHP_ERROR_MARKER=YES'; else echo 'SETUP_PHP_ERROR_MARKER=NO'; fi
+          docker logs p03-v1373-setup-diag 2>&1 | tail -n 30 | sed -E 's/value="[^"]+"/value="[REDACTED]"/g' || true
+          test "$code" = '200'
+          grep -q 'name="setup_csrf"' "$RUNNER_TEMP/setup.html"
+          echo 'P03_V1373_SETUP_DIAGNOSTIC=PASS'
