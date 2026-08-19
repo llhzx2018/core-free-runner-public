@@ -1,0 +1,111 @@
+name: P02 V2.5.15 Corrective Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2515-corrective.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Require registered private capability
+        env:
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$WRITE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: feature/v2.5.15-update-path-corrective
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Seal V2.5.15 corrective candidate
+        run: |
+          set -Eeuo pipefail
+          cd product
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.14
+          test -f public/assets/v2514-writing-typography.css
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('VERSION'); p.write_text('2.5.15\n',encoding='utf-8')
+          ch=Path('CHANGELOG.md'); s=ch.read_text(encoding='utf-8')
+          entry='''## V2.5.15 · V2.5.13 在线升级路径纠正 · 2026-08-19\n\n- 保留 V2.5.14 已验证的临时工作台中文写作排版优化，不增加新的产品功能。\n- 纠正 OWNER 真实 Production 已为 V2.5.13 的升级来源事实，正式提供 V2.5.13 → V2.5.15 Atomic 更新路径。\n- 不改写 V2.5.14 已发布 Release；V2.5.14 保留为历史制品。\n- Schema 2401 不变，无 Migration。\n\n'''
+          if not s.startswith('## V2.5.15 · V2.5.13 在线升级路径纠正'):
+              ch.write_text(entry+s,encoding='utf-8')
+          PY
+          python3 scripts/generate-source-manifest.py
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.15
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          python3 scripts/repository-gates.py
+          bash scripts/verify-repository.sh
+          git diff --check
+          echo V2515_SOURCE_AND_PRIVACY_GATES=PASS
+
+      - name: Fresh install and real Chromium typography regression
+        run: |
+          set -Eeuo pipefail
+          cd product
+          ROOT="$RUNNER_TEMP/p02-v2515"; SITE="$ROOT/site"; NODE="$ROOT/node"; mkdir -p "$SITE" "$NODE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.15
+          PW='P02-V2515-Corrective!'; PORT=18315
+          php -S 127.0.0.1:$PORT -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80);do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/c" "http://127.0.0.1:$PORT/setup.php" > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          x=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',x);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:$PORT/setup.php")" = 303
+          cd "$NODE"; npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund puppeteer-core@24.16.0 >/dev/null 2>&1
+          CHROME=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true); test -n "$CHROME"
+          cat > test.mjs <<'JS'
+          import puppeteer from 'puppeteer-core';
+          const [url,password,chrome]=process.argv.slice(2);const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const browser=await puppeteer.launch({headless:true,executablePath:chrome,args:['--no-sandbox','--disable-dev-shm-usage']});
+          const page=await browser.newPage();await page.setViewport({width:1440,height:900});
+          await page.goto(url,{waitUntil:'networkidle0'});
+          await page.evaluate(async password=>{const r=await fetch('/api.php?action=login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});if(!r.ok)throw new Error('login '+r.status);},password);
+          await page.reload({waitUntil:'networkidle0'});await page.click('#scratchLaunchV259');
+          await page.waitForSelector('#scratchWorkspaceV259 [data-scratch-editor]:not([disabled])',{timeout:12000});
+          const d=await page.$eval('[data-scratch-editor]',e=>{const s=getComputedStyle(e);return {fontFamily:s.fontFamily,fontSize:s.fontSize,lineHeight:s.lineHeight,paddingLeft:s.paddingLeft,paddingRight:s.paddingRight};});
+          if(d.fontSize!=='17px'||parseFloat(d.lineHeight)<31.5||parseFloat(d.paddingLeft)<180||!/Microsoft YaHei UI/.test(d.fontFamily))throw new Error('desktop typography '+JSON.stringify(d));
+          const editor=await page.$('[data-scratch-editor]');await editor.type('V2.5.15 排版回归：中文编辑舒适度。',{delay:3});
+          await page.waitForFunction(()=>document.querySelector('[data-scratch-status]')?.textContent?.includes('已保存'),{timeout:10000});
+          await page.setViewport({width:390,height:844});await sleep(250);
+          const m=await page.$eval('[data-scratch-editor]',e=>{const s=getComputedStyle(e);return {fontSize:s.fontSize,lineHeight:s.lineHeight,paddingLeft:s.paddingLeft,paddingRight:s.paddingRight,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth};});
+          if(m.fontSize!=='16px'||parseFloat(m.lineHeight)<28.8||parseFloat(m.paddingLeft)!==18||m.scrollWidth>m.clientWidth+1)throw new Error('mobile typography '+JSON.stringify(m));
+          console.log('V2515_REAL_CHROMIUM_TYPOGRAPHY=PASS',d,m);await browser.close();
+          JS
+          node test.mjs "http://127.0.0.1:$PORT/" "$PW" "$CHROME"
+          php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.15" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+          echo FRESH_INSTALL=PASS
+          echo SCRATCH_AUTOSAVE=PASS
+          echo PRODUCTION_WRITE=NO
+
+      - name: Push verified private candidate
+        run: |
+          set -Eeuo pipefail
+          cd product
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION CHANGELOG.md SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          git commit -m "VF Library V2.5.15 · correct V2.5.13 update path"
+          git push origin HEAD:feature/v2.5.15-update-path-corrective
+          echo VERIFIED_CANDIDATE_PUSH=PASS
