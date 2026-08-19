@@ -1,0 +1,118 @@
+name: P04 V2.8.1 Branding Compatibility Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v281-branding-gate.yml'
+      - 'requests/p04-v281-branding-gate.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v281-branding-gate
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '21e8be4bf165348e6e24d0b77e4283e33d22e1d5'
+  TARGET_VERSION: '2.8.1'
+
+jobs:
+  branding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Require private source credential
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Exact source and syntax gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          php -l candidate/src/app/BrandAssetService.php
+          node --check candidate/public/assets/v279-common-branding.js
+          grep -Fq "private const MAX_BYTES = ['logo' => 4194304, 'favicon' => 2097152];" candidate/src/app/BrandAssetService.php
+          grep -Fq "private const MAX_EDGE = ['logo' => 4096, 'favicon' => 2048];" candidate/src/app/BrandAssetService.php
+          grep -Fq '支持常见 1024×1024 图片' candidate/public/assets/v279-common-branding.js
+          echo 'P04_V281_BRANDING_STATIC_GATE=PASS'
+
+      - name: Build exact V2.8.1 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME="$RUNNER_TEMP/p04-v281-runtime"
+          python3 candidate/scripts/build-release-tree.py "$RUNTIME" --source-root candidate | tee "$RUNNER_TEMP/p04-v281-build.log"
+          test "$(tr -d '\r\n' < "$RUNTIME/VERSION.txt")" = '2.8.1'
+          mkdir -p "$RUNNER_TEMP/p04-v281-private"
+          chmod 700 "$RUNNER_TEMP/p04-v281-private"
+          cat > "$RUNTIME/config.php" <<PHP
+          <?php
+          return [
+            'app_name' => 'VF Infra Test',
+            'base_url' => 'http://localhost',
+            'allowed_hosts' => ['localhost'],
+            'host_mode' => 'serve_all',
+            'trusted_proxy_ips' => [],
+            'rdap_allow_http' => false,
+            'data_path' => '$RUNNER_TEMP/p04-v281-private',
+            'timezone' => 'Asia/Shanghai',
+            'app_key' => '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'session_name' => 'vf_infra_v281_test',
+          ];
+          PHP
+          chmod 600 "$RUNTIME/config.php"
+          echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
+          echo 'P04_V281_RUNTIME_BUILD=PASS'
+
+      - name: Real common Branding write-read-reset gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/integration/common_branding_contract_v279.php "$RUNTIME" | tee "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS logo_1024_square_accepted' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS favicon_1024_square_accepted' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS brand_files_resolvable' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS logo_inside_private_brand_dir' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS brand_file_owner_only' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS brand_dir_owner_only' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'PASS reset_to_default' "$RUNNER_TEMP/p04-v281-branding.log"
+          grep -Fxq 'P04_V281_COMMON_BRANDING_CONTRACT_PASS' "$RUNNER_TEMP/p04-v281-branding.log"
+          echo 'P04_V281_BRANDING_REAL_WRITE_GATE=PASS'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.1-BRANDING-GATE
+          path: |
+            ${{ runner.temp }}/p04-v281-build.log
+            ${{ runner.temp }}/p04-v281-branding.log
+          if-no-files-found: warn
+          retention-days: 14
