@@ -1,0 +1,178 @@
+name: P01 Admin Consolidation Diagnostic Gate V3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v22122-admin-gate-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p01-v22122-admin-gate-v3
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_BRANCH: maintenance/admin-consolidation-2.21.22-20260820
+      PRODUCT_REPO: llhzx2018/vf-start
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Execute diagnostic gate
+        id: diagnostic
+        continue-on-error: true
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          STAGE=bootstrap
+          SOURCE_SHA=''
+          SOURCE_TREE=''
+          finish_fail(){
+            code=$?
+            python3 - "$STAGE" "$code" "$SOURCE_SHA" "$SOURCE_TREE" <<'PY'
+          import json,sys,pathlib
+          stage,code,sha,tree=sys.argv[1:]
+          browser={}
+          p=pathlib.Path('p01-admin-browser.json')
+          if p.exists():
+              try: browser=json.loads(p.read_text())
+              except Exception: browser={'raw':'unreadable'}
+          out={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'ADMIN_CONSOLIDATION_DIAGNOSTIC_V3','status':'FAILURE','pass':False,'failure_stage':stage,'exit_code':int(code),'working_source_sha':sha,'working_source_tree':tree,'browser':browser,'schema_changed':False,'browser_helper_changed':False,'production_changed':False,'private_data_used':False}
+          pathlib.Path('/tmp/p01-admin-gate-v3.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          PY
+            exit "$code"
+          }
+          trap finish_fail ERR
+
+          STAGE=credential
+          test -n "$READ_TOKEN"
+
+          STAGE=clone
+          git clone -q --depth 1 --branch "$PRODUCT_BRANCH" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          SOURCE_SHA=$(git -C product rev-parse HEAD)
+          SOURCE_TREE=$(git -C product rev-parse HEAD^{tree})
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.21.21'
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = '2.21.21'
+          grep -Fq "define('VF_VERSION', '2.21.21');" product/src/app/bootstrap.php
+
+          STAGE=static
+          grep -Fq "['key'=>'data','label'=>'备份与恢复','href'=>'data-safety.php','icon'=>'recovery','children'=>[]]" product/src/app/AdminShell.php
+          grep -Fq "['key'=>'settings','label'=>'设置','href'=>'settings.php','icon'=>'settings','children'=>[]]" product/src/app/AdminShell.php
+          ! grep -Fq "data-safety.php#backups" product/src/app/AdminShell.php
+          ! grep -Fq "settings.php#brand" product/src/app/AdminShell.php
+          grep -Fq 'id="selectPage" type="checkbox" aria-label="选择本页"' product/src/links-admin.php
+          grep -Fq 'data-vf-pager-for="backups"' product/src/data-safety.php
+          grep -Fq 'data-vf-pager-for="disasterPackages"' product/src/data-safety.php
+          ! grep -Fq 'data-data-panel=' product/src/data-safety.php
+          grep -Fq 'id="maintenance" data-panel="maintenance"' product/src/settings.php
+          grep -Fq 'body[data-vf-page="settings"] .vf-settings-section{display:block!important' product/src/assets/admin-consolidation.css
+          node --check product/src/assets/admin-consolidation.js
+          node --check product/src/assets/links-admin.js
+          node --check product/src/assets/data-recovery.js
+          find product/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+
+          STAGE=dependencies
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq >/dev/null
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+
+          STAGE=fresh-install
+          rm -rf /tmp/vf-p01-admin-gate
+          cp -a product/src /tmp/vf-p01-admin-gate
+          cd /tmp/vf-p01-admin-gate
+          php -S 127.0.0.1:18123 -t . > "$GITHUB_WORKSPACE/php-server-v3.log" 2>&1 & echo $! >/tmp/p01-admin-v3.pid
+          for i in $(seq 1 30); do curl -fsS -c /tmp/vf-admin-v3.cookies -b /tmp/vf-admin-v3.cookies http://127.0.0.1:18123/setup.php -o /tmp/setup-v3.html && break; sleep 1; done
+          CSRF=$(python3 -c "import re;t=open('/tmp/setup-v3.html').read();m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',t);assert m;print(m.group(1))")
+          curl -fsS -c /tmp/vf-admin-v3.cookies -b /tmp/vf-admin-v3.cookies -X POST http://127.0.0.1:18123/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start Admin Gate' --data-urlencode 'admin_password=AdminGate!2026Strong' --data-urlencode 'admin_password_confirm=AdminGate!2026Strong' >/tmp/setup-post-v3.html
+          test -f app/.runtime.php
+          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture.php
+          php fixture.php
+          php -r 'require "app/bootstrap.php";$r=new VfRepository(vf_db());$d=$r->bootstrap(true);$links=$d["links"]??[];if(!$links)throw new RuntimeException("fixture missing");$x=$links[0];$r->saveLink((int)$x["id"],["category_id"=>(int)$x["category_id"],"title"=>(string)$x["title"],"url"=>(string)$x["url"],"description"=>(string)($x["description"]??""),"is_private"=>(bool)($x["is_private"]??false),"is_pending"=>true],"manual");'
+          for i in $(seq 1 12); do php cli/backup.php >/dev/null; done
+          php cli/verify.php > "$GITHUB_WORKSPACE/cli-verify-v3.txt"
+          DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          cd "$GITHUB_WORKSPACE"
+
+          STAGE=browser-script
+          cat > p01-admin-gate-v3.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18123/';
+          const browser=await chromium.launch({headless:true});
+          const r={pass:false,widths:{},structure:{},pageErrors:[]};
+          try{
+            const c=await browser.newContext({viewport:{width:1280,height:900}});const p=await c.newPage();p.on('pageerror',e=>r.pageErrors.push(String(e)));
+            await p.goto(base,{waitUntil:'networkidle'});await p.click('#loginButton');await p.fill('[name=password]','AdminGate!2026Strong');await p.click('#loginSubmit');await p.waitForFunction(()=>document.body.classList.contains('is-admin'));
+            async function go(path,width){await p.setViewportSize({width,height:900});await p.goto(base+path,{waitUntil:'networkidle'});await p.waitForTimeout(160);const ov=await p.evaluate(()=>Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)-window.innerWidth);if(ov>1)throw Error(`OVERFLOW ${path} ${width}: ${ov}`);return ov;}
+            for(const path of ['links-admin.php','links-admin.php?view=pending']){await go(path,1280);const h=p.locator('thead .vf-links-select-col #selectPage');if(await h.count()!==1)throw Error('SELECT_HEADER '+path);if(await p.locator('.vf-links-toolbar #selectPage').count())throw Error('SELECT_TOOLBAR '+path);if(await p.locator('#selectPageMobile').isVisible())throw Error('SELECT_MOBILE_DESKTOP '+path);const n0=await p.locator('#linksBody [data-select]:checked').count();await h.check();await p.waitForTimeout(100);const n1=await p.locator('#linksBody [data-select]:checked').count();if(n1<=n0)throw Error('SELECT_FUNCTION '+path);await go(path,390);if(!await p.locator('#selectPageMobile').isVisible())throw Error('SELECT_MOBILE_HIDDEN '+path);r.structure[path]={selected:n1};}
+            await go('data-safety.php',1280);if(await p.locator('[data-vf-nav-group="data"] .vf-rail-submenu').count())throw Error('DATA_SUBMENU');for(const t of ['SQLite 备份','完整恢复','旧站迁移与数据库记录'])if(!await p.getByText(t,{exact:false}).first().isVisible())throw Error('DATA '+t);const rows=p.locator('#backups .backup-item');const total=await rows.count();if(total<12)throw Error('BACKUPS '+total);const v1=await rows.evaluateAll(a=>a.filter(x=>!x.hidden).length);if(v1!==10)throw Error('BACKUP_PAGE1 '+v1);const pg=p.locator('[data-vf-pager-for="backups"]');if(!await pg.isVisible())throw Error('PAGER_HIDDEN');await pg.locator('[data-vf-next]').click();await p.waitForTimeout(80);const v2=await rows.evaluateAll(a=>a.filter(x=>!x.hidden).length);if(v2<1||v2>10)throw Error('BACKUP_PAGE2 '+v2);r.structure.data={total,v1,v2};
+            await go('settings.php',1280);if(await p.locator('[data-vf-nav-group="settings"] .vf-rail-submenu').count())throw Error('SETTINGS_SUBMENU');for(const id of ['brand','display','home','seo','account','maintenance'])if(!await p.locator('#'+id).isVisible())throw Error('SETTINGS_HIDDEN '+id);for(const t of ['RSS 订阅','系统状态'])if(!await p.getByText(t,{exact:true}).first().isVisible())throw Error('SETTINGS_LINK '+t);r.structure.settings={sections:6};
+            const pages=['links-admin.php','links-admin.php?view=pending','health.php','duplicates.php','transfer.php','browser-helper.php','data-safety.php','settings.php','system.php','security.php','update.php'];for(const w of [390,768,1024,1280]){r.widths[w]={};for(const path of pages)r.widths[w][path]=await go(path,w);}
+            if(r.pageErrors.length)throw Error('PAGE_ERRORS '+r.pageErrors.join('|'));r.pass=true;fs.writeFileSync('p01-admin-browser.json',JSON.stringify(r,null,2));console.log('BROWSER_PASS');await c.close();
+          }catch(e){r.error=String(e?.stack||e);fs.writeFileSync('p01-admin-browser.json',JSON.stringify(r,null,2));console.error(e);process.exitCode=1;}finally{await browser.close();}
+          JS
+
+          STAGE=browser
+          node p01-admin-gate-v3.mjs > browser-v3.txt
+
+          STAGE=finalize
+          python3 - "$SOURCE_SHA" "$SOURCE_TREE" <<'PY'
+          import json,sys,pathlib
+          sha,tree=sys.argv[1:]
+          browser=json.loads(pathlib.Path('p01-admin-browser.json').read_text())
+          out={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'ADMIN_CONSOLIDATION_DIAGNOSTIC_V3','status':'SUCCESS','pass':True,'failure_stage':'','working_source_sha':sha,'working_source_tree':tree,'browser':browser,'schema_changed':False,'browser_helper_changed':False,'production_changed':False,'private_data_used':False}
+          pathlib.Path('/tmp/p01-admin-gate-v3.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          PY
+          trap - ERR
+
+      - name: Publish diagnostic evidence
+        if: always()
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f /tmp/p01-admin-gate-v3.json || echo '{"schema":"vf-public-runner-result/v1","project_id":"P01","gate":"ADMIN_CONSOLIDATION_DIAGNOSTIC_V3","status":"FAILURE","pass":false,"failure_stage":"pre-diagnostic-step","production_changed":false,"private_data_used":false}' > /tmp/p01-admin-gate-v3.json
+          python3 - <<'PY'
+          import json,os
+          p='/tmp/p01-admin-gate-v3.json';x=json.load(open(p));x['workflow_run_id']=os.environ['GITHUB_RUN_ID'];open(p,'w').write(json.dumps(x,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" evidence
+          mkdir -p evidence/vf-agent/results
+          cp /tmp/p01-admin-gate-v3.json evidence/vf-agent/results/P01-ADMIN-CONSOLIDATION-DIAGNOSTIC-V3.json
+          git -C evidence config user.name VictorForge
+          git -C evidence config user.email llhzx2018@gmail.com
+          git -C evidence add vf-agent/results/P01-ADMIN-CONSOLIDATION-DIAGNOSTIC-V3.json
+          git -C evidence commit -q -m 'evidence(P01): admin consolidation diagnostic v3'
+          git -C evidence pull -q --rebase origin vf-agent-operations-v1
+          git -C evidence push -q origin HEAD:vf-agent-operations-v1
+
+      - name: Enforce gate result
+        if: always()
+        shell: bash
+        run: jq -e '.pass==true' /tmp/p01-admin-gate-v3.json >/dev/null
+
+      - name: Cleanup
+        if: always()
+        run: test ! -f /tmp/p01-admin-v3.pid || kill "$(cat /tmp/p01-admin-v3.pid)" 2>/dev/null || true
