@@ -1,0 +1,175 @@
+name: S01 Ops V1.21.791 Corrective Regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-ops-121791-corrective-regression.yml'
+      - 'requests/s01-ops-121791-corrective-regression.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    env:
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WP_DIR: /tmp/vf-ops-121791-wp
+      WP_URL: http://127.0.0.1:8091
+      DB_NAME: wordpress
+      DB_USER: wordpress
+      DB_PASS: wordpress
+      DB_HOST: 127.0.0.1:3306
+      ADMIN_USER: admin
+      ADMIN_PASS: adminpass
+      ADMIN_EMAIL: admin@example.invalid
+      EVIDENCE_DIR: /tmp/vf-ops-121791-evidence
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+          MARIADB_ROOT_PASSWORD: rootpass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout exact Ops v1.21.791
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: v1.21.791
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source and static gates
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '01f111cff3c7a423343e9ba3374dd8702bfdfe06'
+          test "$(tr -d '\r\n' < VERSION)" = '1.21.791'
+          grep -Fq '* Version: 1.21.791' vf-ops.php
+          git diff --name-only v1.21.790..HEAD | sort > /tmp/actual.txt
+          printf '%s\n' VERSION includes/wp-update/bootstrap.php includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php vf-ops.php | sort > /tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+          find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l >/tmp/ops-121791-php-lint.txt
+          echo "OPS_121791_PHP_LINT_FILES=$(grep -c 'No syntax errors detected' /tmp/ops-121791-php-lint.txt)"
+          echo 'OPS_121791_EXACT_SOURCE_GATE=PASS'
+
+      - name: Install runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mariadb-client php-mysql php-xml php-curl php-zip unzip curl >/dev/null
+          sudo update-alternatives --set php /usr/bin/php8.3 || true
+          curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x /tmp/wp-cli.phar
+          sudo mv /tmp/wp-cli.phar /usr/local/bin/wp
+          php -v
+          wp --version
+
+      - name: Install WordPress and exact plugin
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$WP_DIR" "$EVIDENCE_DIR"
+          mkdir -p "$WP_DIR" "$EVIDENCE_DIR"
+          wp core download --path="$WP_DIR" --version=6.8.3 --force --allow-root
+          wp config create --path="$WP_DIR" --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost="$DB_HOST" --skip-check --force --allow-root
+          wp core install --path="$WP_DIR" --url="$WP_URL" --title='VF Ops 1.21.791 Regression' --admin_user="$ADMIN_USER" --admin_password="$ADMIN_PASS" --admin_email="$ADMIN_EMAIL" --skip-email --allow-root
+          mkdir -p "$WP_DIR/wp-content/plugins/vf-ops"
+          cp -R "$GITHUB_WORKSPACE/source/." "$WP_DIR/wp-content/plugins/vf-ops/"
+          curl -fsSLo /tmp/simply-static.zip https://downloads.wordpress.org/plugin/simply-static.latest-stable.zip
+          unzip -q /tmp/simply-static.zip -d "$WP_DIR/wp-content/plugins"
+          wp plugin activate simply-static --path="$WP_DIR" --allow-root
+          wp plugin activate vf-ops --path="$WP_DIR" --allow-root
+          wp plugin is-active vf-ops --path="$WP_DIR" --allow-root
+          V="$(wp plugin get vf-ops --field=version --path="$WP_DIR" --allow-root | tr -d '\r')"
+          test "$V" = '1.21.791'
+          echo "OPS_121791_WP_ACTIVE_VERSION=$V"
+
+      - name: Adapt proven Phase 3 harness to exact corrective version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp "$GITHUB_WORKSPACE/source/.github/phase3/current-reverification.php" /tmp/current-reverification-121791.php
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/current-reverification-121791.php')
+          s=p.read_text(encoding='utf-8')
+          assert "'1.21.788'" in s
+          s=s.replace("'1.21.788'","'1.21.791'")
+          p.write_text(s,encoding='utf-8')
+          PY
+          php -l /tmp/current-reverification-121791.php
+          cp "$GITHUB_WORKSPACE/source/.github/phase3/finalize-build.php" /tmp/finalize-build-121791.php
+          php -l /tmp/finalize-build-121791.php
+
+      - name: Run proven core runtime regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          EVIDENCE_DIR="$EVIDENCE_DIR" VF_PHASE3_SOURCE_COMMIT='01f111cff3c7a423343e9ba3374dd8702bfdfe06' \
+            wp eval-file /tmp/current-reverification-121791.php --path="$WP_DIR" --allow-root | tee "$EVIDENCE_DIR/core-run.log"
+          grep -Fq 'PHASE3_CORE_PASS' "$EVIDENCE_DIR/core-run.log"
+          python3 - <<'PY'
+          import json, os
+          p=os.path.join(os.environ['EVIDENCE_DIR'],'phase3-core.json')
+          d=json.load(open(p,encoding='utf-8'))
+          for k in ['fresh_install','authenticated_crud','authorization','backup_restore','fault_injection','update_contract','atomic_filesystem','translation','privacy_security','install_survivability','migration_integrity','health_source_stability']:
+              if d.get(k)!='PASS': raise SystemExit(f'{k}={d.get(k)}')
+          if d.get('version')!='1.21.791': raise SystemExit('version mismatch')
+          if d.get('schema')!='6.0.0': raise SystemExit('schema mismatch')
+          print('OPS_121791_CORE_RUNTIME_REGRESSION=PASS')
+          PY
+
+      - name: Run Simply Static build and artifact gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:8091 -t "$WP_DIR" >"$EVIDENCE_DIR/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 30); do curl -fsS "$WP_URL" >/dev/null && break; sleep 1; done
+          curl -fsS "$WP_URL" >/dev/null
+          set +e
+          for i in $(seq 1 30); do
+            EVIDENCE_DIR="$EVIDENCE_DIR" wp eval-file /tmp/finalize-build-121791.php --path="$WP_DIR" --allow-root >"$EVIDENCE_DIR/build-$i.log" 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ]; then cat "$EVIDENCE_DIR/build-$i.log"; break; fi
+            if [ "$rc" -ne 75 ]; then cat "$EVIDENCE_DIR/build-$i.log"; exit "$rc"; fi
+            sleep 2
+          done
+          set -e
+          python3 - <<'PY'
+          import json, os
+          p=os.path.join(os.environ['EVIDENCE_DIR'],'phase3-core.json')
+          d=json.load(open(p,encoding='utf-8'))
+          for k in ['simply_static_build','artifact_gate','async_build_protocol']:
+              if d.get(k)!='PASS': raise SystemExit(f'{k}={d.get(k)}')
+          b=d.get('details',{}).get('build',{})
+          if not b.get('artifact_hash') or int(b.get('artifact_files',0)) < 1: raise SystemExit('artifact identity missing')
+          print('OPS_121791_STATIC_BUILD=PASS')
+          print('OPS_121791_ARTIFACT_GATE=PASS')
+          print('OPS_121791_MINIMAL_FULL_CORRECTIVE_REGRESSION=PASS')
+          PY
+
+      - name: Final no-write boundary
+        shell: bash
+        run: |
+          echo 'PRIVATE_REPO_WRITE=0'
+          echo 'MAIN_PROMOTION=0'
+          echo 'RELEASE_WRITE=0'
+          echo 'CORE_UPDATES_WRITE=0'
+          echo 'PRODUCTION_WRITE=0'
