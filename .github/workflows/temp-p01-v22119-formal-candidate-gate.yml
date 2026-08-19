@@ -1,0 +1,143 @@
+name: TEMP P01 V2.21.19 Formal Candidate Gate
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-formal-candidate-gate.yml']
+permissions:
+  contents: write
+env:
+  CANDIDATE: 2784d8de583b016e78887b707e12ed0e89489a7d
+  CANDIDATE_TREE: 5f41e32177d8e25f97a4084a399fdf7aa1d0970d
+  PRODUCTION: 89f55e9a772904ebe03537ec54c2891e13a52c80
+  VERSION: 2.21.19
+  SOURCE_VERSION: 2.21.17
+  ADMIN_PASS: FormalCandidate-P01-22119!Strong
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact private source
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail;test -n "$READ_TOKEN"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$CANDIDATE";git -C candidate checkout -q --detach FETCH_HEAD
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" production
+          git -C production fetch -q --depth 1 origin "$PRODUCTION";git -C production checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE";test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE";test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION";test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.4', extensions: 'pdo_sqlite, sqlite3, curl, zip, mbstring', coverage: none}
+      - name: Static and exact-source gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0|xargs -0 -n1 php -l >/dev/null
+          for f in candidate/src/assets/*.js;do node --check "$f";done
+          php candidate/src/cli/verify.php >/tmp/preverify.txt 2>&1 || true
+          echo STATIC_GATE=PASS
+      - name: Build deterministic ephemeral artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail;OUT="$RUNNER_TEMP/p01-v22119-formal";mkdir -p "$OUT"
+          python3 scripts/temp-p01-v22119-build.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" > /tmp/build.json
+          jq -e '.status=="BUILD_PASS" and .version=="2.21.19" and .source_version=="2.21.17" and .candidate_commit==env.CANDIDATE and .candidate_tree==env.CANDIDATE_TREE and .production_commit==env.PRODUCTION' /tmp/build.json >/dev/null
+          (cd "$OUT"&&sha256sum -c SHA256SUMS.txt >/dev/null);for f in "$OUT"/*.zip;do unzip -t "$f" >/dev/null;done
+      - name: Privacy FULL and package-shape gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os,pathlib,re,zipfile
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22119-formal';secret=re.compile(rb'(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})')
+          for p in out.iterdir():
+            if not p.is_file():continue
+            if secret.search(p.read_bytes()):raise SystemExit('secret-like material detected')
+            if p.suffix!='.zip':continue
+            with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+              if len(names)!=len(set(names)):raise SystemExit('duplicate zip member')
+              for n in names:
+                q=pathlib.PurePosixPath(n)
+                if n.startswith('/') or '\\' in n or '..' in q.parts:raise SystemExit('unsafe zip path')
+                if any(x in {'.git','PRIVATE_DATA','private_data','node_modules'} for x in q.parts):raise SystemExit('forbidden path')
+                if n.lower().endswith(('.sqlite','.sqlite3','.db','.env','.log')):raise SystemExit('runtime/private file in package')
+                if ((z.getinfo(n).external_attr>>16)&0o170000)==0o120000:raise SystemExit('symlink member')
+          repair='repair-v2.21.19.php'
+          for kind in ('ATOMIC','UPDATE'):
+            p=out/f'VF_Start_V2.21.19_{kind}.zip'
+            with zipfile.ZipFile(p) as z:
+              assert z.namelist()==[repair];assert z.read(repair)==(out/repair).read_bytes()
+          print('PRIVACY_PACKAGE=PASS')
+          PY
+      - name: Atomic PHP 8.0 source and tamper gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail;OUT="$RUNNER_TEMP/p01-v22119-formal"
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -l repair-v2.21.19.php >/dev/null
+          php "$OUT/repair-v2.21.19.php" --self-test >/tmp/selftest.json
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true and .source_files>0 and .target_files>0' /tmp/selftest.json >/dev/null
+          php "$OUT/repair-v2.21.19.php" --verify-source=production/src >/tmp/source.json;jq -e '.ok==true' /tmp/source.json >/dev/null
+          cp -a production/src /tmp/p01-tamper;printf '\n/* FORMAL_RUNTIME_TAMPER */\n' >>/tmp/p01-tamper/app/AdminShell.php
+          set +e;php "$OUT/repair-v2.21.19.php" --verify-source=/tmp/p01-tamper >/tmp/tamper.out 2>&1;rc=$?;set -e;test "$rc" -ne 0;grep -q 'app/AdminShell.php:sha' /tmp/tamper.out
+      - name: Fresh FULL clean install gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail;OUT="$RUNNER_TEMP/p01-v22119-formal";mkdir -p /tmp/p01-fresh;unzip -q "$OUT/VF_Start_V2.21.19_FULL.zip" -d /tmp/p01-fresh
+          php -S 127.0.0.1:18219 -t /tmp/p01-fresh >/tmp/fresh.log 2>&1&pid=$!;for i in $(seq 1 30);do curl -fsS -c /tmp/fresh.c http://127.0.0.1:18219/setup.php -o /tmp/fresh.html&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re;m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/fresh.html').read());assert m;print(m.group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/fresh.c -c /tmp/fresh.c -X POST http://127.0.0.1:18219/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start V22119 Fresh' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null;kill "$pid" 2>/dev/null||true
+          php /tmp/p01-fresh/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+          php -r 'require "/tmp/p01-fresh/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn()!==0)exit(1);if((int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn()!==0)exit(2);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(3);echo "FRESH_ZERO_DATA=PASS\n";'
+      - name: Exact 2.21.17 to 2.21.19 upgrade data backup and idempotency
+        shell: bash
+        run: |
+          set -Eeuo pipefail;OUT="$RUNNER_TEMP/p01-v22119-formal"
+          install_source(){ root="$1";port="$2";pass="$3";cp -a production/src "$root";php -S 127.0.0.1:$port -t "$root" >"/tmp/server-$port.log" 2>&1&pid=$!;for i in $(seq 1 30);do curl -fsS -c "/tmp/c-$port" "http://127.0.0.1:$port/setup.php" -o "/tmp/s-$port"&&break||sleep 1;done;csrf=$(python3 - "$port" <<'PY'
+          import re,sys;m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/s-'+sys.argv[1]).read());assert m;print(m.group(1))
+          PY
+          );curl -fsSL -b "/tmp/c-$port" -c "/tmp/c-$port" -X POST "http://127.0.0.1:$port/setup.php" --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Upgrade Gate' --data-urlencode "admin_password=$pass" --data-urlencode "admin_password_confirm=$pass" >/dev/null;kill "$pid" 2>/dev/null||true;}
+          install_source /tmp/p01-upgrade 18220 "$ADMIN_PASS"
+          php -r 'require "/tmp/p01-upgrade/app/bootstrap.php";$r=new VfRepository(vf_db());$cid=$r->createCategory(["name"=>"V22119 Sentinel","description"=>"synthetic","is_private"=>1]);$r->saveLink(null,["category_id"=>$cid,"title"=>"V22119 Preserve","url"=>"https://example.com/v22119-preserve","description"=>"keep","is_private"=>1],"manual");$b=(new VfBackupManager(vf_db()))->create("V22119 pre-upgrade","pre-update",true);file_put_contents("/tmp/backup-key",$b["backup_key"]);if(($b["validation_status"]??"")!=="valid")exit(2);echo "PRE_UPGRADE=PASS\n";'
+          php "$OUT/repair-v2.21.19.php" --run=/tmp/p01-upgrade >/tmp/upgrade.json;jq -e '.ok==true and .already_current==false and .schema=="2026080902" and .integrity=="ok" and .fk==0' /tmp/upgrade.json >/dev/null
+          test "$(tr -d '\r\n' </tmp/p01-upgrade/VERSION.txt)" = "$VERSION";php /tmp/p01-upgrade/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+          php -r 'require "/tmp/p01-upgrade/app/bootstrap.php";$d=vf_db();$q=$d->prepare("SELECT COUNT(*) FROM links WHERE title=? AND url=?");$q->execute(["V22119 Preserve","https://example.com/v22119-preserve"]);if((int)$q->fetchColumn()!==1)exit(1);$v=(new VfBackupManager($d))->verify(trim(file_get_contents("/tmp/backup-key")));if(($v["validation_status"]??"")!=="valid")exit(2);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(3);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(4);echo "DATA_BACKUP_SQLITE=PASS\n";'
+          php "$OUT/repair-v2.21.19.php" --run=/tmp/p01-upgrade >/tmp/repeat.json;jq -e '.ok==true and .already_current==true' /tmp/repeat.json >/dev/null
+      - name: Atomic rollback and interruption recovery gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail;OUT="$RUNNER_TEMP/p01-v22119-formal"
+          install_source(){ root="$1";port="$2";cp -a production/src "$root";php -S 127.0.0.1:$port -t "$root" >/tmp/srv-$port.log 2>&1&pid=$!;for i in $(seq 1 30);do curl -fsS -c /tmp/x-$port http://127.0.0.1:$port/setup.php -o /tmp/h-$port&&break||sleep 1;done;csrf=$(python3 - "$port" <<'PY'
+          import re,sys;m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/h-'+sys.argv[1]).read());assert m;print(m.group(1))
+          PY
+          );curl -fsSL -b /tmp/x-$port -c /tmp/x-$port -X POST http://127.0.0.1:$port/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Atomic Recovery' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null;kill "$pid" 2>/dev/null||true;}
+          install_source /tmp/p01-soft 18221
+          set +e;VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$OUT/repair-v2.21.19.php" --run=/tmp/p01-soft >/tmp/soft.out 2>&1;rc=$?;set -e;test "$rc" -ne 0;test "$(tr -d '\r\n' </tmp/p01-soft/VERSION.txt)" = "$SOURCE_VERSION";php /tmp/p01-soft/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+          install_source /tmp/p01-hard 18222
+          set +e;VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$OUT/repair-v2.21.19.php" --run=/tmp/p01-hard >/tmp/hard.out 2>&1;rc=$?;set -e;test "$rc" = 97
+          php "$OUT/repair-v2.21.19.php" --run=/tmp/p01-hard >/tmp/recover.json;jq -e '.ok==true and .already_current==false and .interrupted_recovered==true' /tmp/recover.json >/dev/null;test "$(tr -d '\r\n' </tmp/p01-hard/VERSION.txt)" = "$VERSION";php /tmp/p01-hard/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+      - name: Publish formal candidate evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail;status=SUCCESS;[ "${{ job.status }}" = success ]||status=FAILURE
+          python3 - "$status" <<'PY'
+          import json,os,sys,pathlib
+          st=sys.argv[1];build={}
+          if pathlib.Path('/tmp/build.json').exists():build=json.load(open('/tmp/build.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','source_version':'2.21.17','gate':'FORMAL_CANDIDATE_ARTIFACT_GATE','status':st,'pass':st=='SUCCESS','source_sha':os.environ['CANDIDATE'],'source_tree':os.environ['CANDIDATE_TREE'],'production_sha':os.environ['PRODUCTION'],'schema_version':'2026080902','release_authorized':False,'production_changed':False,'private_data_persisted_publicly':False,'workflow_run_id':os.environ['GITHUB_RUN_ID'],'build':build}
+          open('/tmp/formal-evidence.json','w').write(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git out;mkdir -p out/vf-agent/results;cp /tmp/formal-evidence.json out/vf-agent/results/P01-V2.21.19-FORMAL-CANDIDATE-GATE.json;git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.19-FORMAL-CANDIDATE-GATE.json;git -C out commit -q -m 'evidence(P01): publish V2.21.19 formal candidate gate';git -C out pull -q --rebase origin vf-agent-operations-v1;git -C out push -q origin HEAD:vf-agent-operations-v1;test "$status" = SUCCESS
+      - if: always()
+        shell: bash
+        run: rm -rf candidate production out /tmp/p01-* "$RUNNER_TEMP/p01-v22119-formal" || true
