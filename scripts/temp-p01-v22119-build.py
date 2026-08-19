@@ -5,7 +5,7 @@ from pathlib import Path
 
 HERE=Path(__file__).resolve().parent
 VERSION='2.21.19'
-SOURCE_VERSION='2.21.17'
+SOURCE_VERSION='2.21.18'
 SCHEMA='2026080902'
 GATE_ONLY_FILES={'.gitignore','CHANGELOG.md','DEPLOY-HERE.txt','FULL-PACKAGE-NOTES.txt','README.md','UPGRADE-V2.txt','robots.txt'}
 LEGACY_EXTENSION_ZIP='VF-Start-Browser-Extension.zip'
@@ -28,7 +28,7 @@ def main():
     if sd.get('VERSION.txt',b'').strip()!=SOURCE_VERSION.encode():raise SystemExit('production VERSION mismatch')
     tr=runtime_boundary(td);sr=runtime_boundary(sd)
     changed=sorted(k for k in set(tr)&set(sr) if sha(tr[k])!=sha(sr[k]));added=sorted(set(tr)-set(sr));removed=sorted(set(sr)-set(tr))
-    ext=json.loads(td['browser-extension/manifest.json'].decode());
+    ext=json.loads(td['browser-extension/manifest.json'].decode())
     if str(ext.get('version'))!='1.6.4':raise SystemExit('browser extension version drift')
     rm=dict(json.loads(td.get('release-manifest.json',b'{}').decode() or '{}'))
     rm.update({'project':'VF Start','project_id':'P01','project_slug':'vf-start','version':VERSION,'source_version':SOURCE_VERSION,'release_type':'formal-artifact-candidate-gate','stage':'FORMAL_ARTIFACT_CANDIDATE_GATE','deployable':True,'release_authorized':False,'source_commit':a.candidate_commit,'source_tree':a.candidate_tree,'production_source_commit':a.production_commit,'schema_version':SCHEMA,'schema_change':False,'schema_migrations':[],'runtime_data_included':False,'seed_user_business_data_included':False,'runtime_hashed_file_count':len(tr),'runtime_files':{k:sha(v) for k,v in sorted(tr.items())},'atomic_runtime_boundary':{'source_version':SOURCE_VERSION,'target_version':VERSION,'source_app_gate_count':len(sr),'target_app_gate_count':len(tr),'gate_only_files_excluded':sorted(GATE_ONLY_FILES),'legacy_extension_zip_excluded':LEGACY_EXTENSION_ZIP,'runtime_shape_changed':bool(added or removed),'runtime_changed':changed,'runtime_added':added,'runtime_removed':removed},'browser_extension':{'version':'1.6.4','release_unit':'INDEPENDENT','released_this_round':False,'mechanical_version_bump':False},'update':{'project_id':'P01','component_id':'APP','manifest_truth':'llhzx2018/core-updates/projects/P01.json','release_truth':'GitHub Release','asset_name':f'VF_Start_V{VERSION}_UPDATE.zip','supported_from':[SOURCE_VERSION],'backup_required':True,'rollback_supported':True}})
