@@ -1,0 +1,348 @@
+name: P01 V2.21.21 Formal Artifact Gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.21-formal-artifact-gate
+  cancel-in-progress: false
+
+env:
+  CANDIDATE: 0b62c96b787e03b0dda6ef8493d29755b6baf83e
+  CANDIDATE_TREE: 02b6199ab82f2fb03dd9d8048288421037869e4e
+  PRODUCTION: 383552dc5035cb60b4cd131907d05d87c3171b9b
+  VERSION: 2.21.21
+  SOURCE_VERSION: 2.21.20
+  SCHEMA: 2026080902
+
+jobs:
+  artifact-gate:
+    if: startsWith(github.head_ref, 'agent/p01-22121-formal-artifact-gate')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout runner gate branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Require registered credentials without exposing values
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'REGISTERED_CAPABILITIES=PASS'
+
+      - name: Checkout exact private Candidate and Production Truth
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Checkout exact private Production source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+
+      - name: Exact identities and private-source boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          grep -F "define('VF_VERSION', '2.21.21');" candidate/src/app/bootstrap.php >/dev/null
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -F "define('VF_VERSION', '2.21.20');" production/src/app/bootstrap.php >/dev/null
+          if git -C candidate config --get remote.origin.url | grep -Eq 'x-access-token|github_pat_|ghp_'; then exit 1; fi
+          if git -C production config --get remote.origin.url | grep -Eq 'x-access-token|github_pat_|ghp_'; then exit 1; fi
+          if find candidate production -path '*/.git' -prune -o -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '.env' \) -print | grep -q .; then
+            echo 'private runtime material present in repository source' >&2; exit 1
+          fi
+          echo 'EXACT_IDENTITIES=PASS'
+          echo 'PRIVATE_SOURCE_EPHEMERAL_BOUNDARY=PASS'
+
+      - name: Install formal-gate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 unzip jq >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","SimpleXML","mbstring","openssl"] as $x){if(!extension_loaded($x)&&!class_exists($x))exit(1);} echo "FORMAL_RUNTIME=PASS\n";'
+
+      - name: Build deterministic formal candidate artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          python3 runner/scripts/p01-build-maintenance-candidate-22121.py \
+            --candidate candidate/src \
+            --production production/src \
+            --out "$OUT" \
+            --candidate-commit "$CANDIDATE" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION" \
+            > "$RUNNER_TEMP/p01-v22121-build.json"
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p01-v22121-build.json'),encoding='utf-8'))
+          assert x['status']=='BUILD_PASS',x
+          assert x['version']=='2.21.21',x
+          assert x['source_version']=='2.21.20',x
+          assert x['candidate_commit']=='0b62c96b787e03b0dda6ef8493d29755b6baf83e',x
+          assert x['candidate_tree']=='02b6199ab82f2fb03dd9d8048288421037869e4e',x
+          assert x['production_commit']=='383552dc5035cb60b4cd131907d05d87c3171b9b',x
+          assert x['runtime_added']==['assets/data-recovery.js','assets/update-reload.js'],x
+          assert len(x['runtime_delta'])==23,x
+          print('DETERMINISTIC_FORMAL_BUILD=PASS')
+          PY
+
+      - name: SHA ZIP path privacy and package-shape gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          for f in "$OUT"/*.zip; do unzip -t "$f" >/dev/null; done
+          python3 - <<'PY'
+          import os,re,zipfile,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22121-artifact-gate'
+          forbidden_parts={'.git','PRIVATE_DATA','private_data','node_modules'}
+          forbidden_suffixes={'.sqlite','.sqlite3','.db','.env','.log'}
+          secret=re.compile(rb'(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|VF_PRIVATE_READ_TOKEN\s*=\s*[^\s]+|VF_RELEASE_WRITE_TOKEN\s*=\s*[^\s]+)')
+          for p in out.iterdir():
+              if not p.is_file(): continue
+              data=p.read_bytes()
+              if secret.search(data): raise SystemExit(f'secret-like payload in {p.name}')
+              if p.suffix!='.zip': continue
+              with zipfile.ZipFile(p) as z:
+                  names=z.namelist()
+                  if len(names)!=len(set(names)): raise SystemExit(f'duplicate member: {p.name}')
+                  for n in names:
+                      q=pathlib.PurePosixPath(n)
+                      if n.startswith('/') or '\\' in n or '..' in q.parts: raise SystemExit(f'unsafe path: {p.name}:{n}')
+                      if any(x in forbidden_parts for x in q.parts): raise SystemExit(f'forbidden path: {p.name}:{n}')
+                      if any(n.lower().endswith(x) for x in forbidden_suffixes): raise SystemExit(f'forbidden runtime data: {p.name}:{n}')
+                      mode=(z.getinfo(n).external_attr>>16)&0o170000
+                      if mode==0o120000: raise SystemExit(f'symlink member: {p.name}:{n}')
+          repair='repair-v2.21.21.php'
+          for kind in ['ATOMIC','UPDATE']:
+              p=out/f'VF_Start_V2.21.21_{kind}.zip'
+              with zipfile.ZipFile(p) as z:
+                  if z.namelist()!=[repair]: raise SystemExit(f'{kind} package shape mismatch')
+                  if z.read(repair)!=(out/repair).read_bytes(): raise SystemExit(f'{kind} repair bytes mismatch')
+          with zipfile.ZipFile(out/'VF_Start_V2.21.21_FULL.zip') as z:
+              names=set(z.namelist())
+              for required in ['index.php','setup.php','VERSION.txt','app/bootstrap.php','assets/data-recovery.js','assets/update-reload.js']:
+                  if required not in names: raise SystemExit(f'FULL missing {required}')
+          print('SHA_ZIP_PATH_PRIVACY=PASS')
+          print('FORMAL_PACKAGE_SHAPE=PASS')
+          PY
+
+      - name: PHP 8.0 Atomic self-test exact source gate and tamper negative
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -l repair-v2.21.21.php >/dev/null
+          php "$OUT/repair-v2.21.21.php" --self-test > "$RUNNER_TEMP/p01-v22121-selftest.json"
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p01-v22121-selftest.json'))
+          assert x['ok'] is True,x
+          assert x['global_barrier'] is True,x
+          assert x['interruption_recovery'] is True,x
+          assert x['target_files']==x['source_files']+2,x
+          print('ATOMIC_SELF_TEST=PASS')
+          PY
+          php "$OUT/repair-v2.21.21.php" --verify-source=production/src > "$RUNNER_TEMP/p01-v22121-source-verify.json"
+          jq -e '.ok==true' "$RUNNER_TEMP/p01-v22121-source-verify.json" >/dev/null
+          rm -rf /tmp/p01-v22121-gate-only /tmp/p01-v22121-runtime-tamper
+          cp -a production/src /tmp/p01-v22121-gate-only
+          printf '\nP01_GATE_ONLY_VARIANT\n' >> /tmp/p01-v22121-gate-only/README.md
+          php "$OUT/repair-v2.21.21.php" --verify-source=/tmp/p01-v22121-gate-only | jq -e '.ok==true' >/dev/null
+          cp -a production/src /tmp/p01-v22121-runtime-tamper
+          printf '\n/* P01_TRUE_RUNTIME_TAMPER */\n' >> /tmp/p01-v22121-runtime-tamper/app/AdminShell.php
+          set +e
+          php "$OUT/repair-v2.21.21.php" --verify-source=/tmp/p01-v22121-runtime-tamper > "$RUNNER_TEMP/p01-runtime-tamper.out" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -q 'app/AdminShell.php:sha' "$RUNNER_TEMP/p01-runtime-tamper.out"
+          echo 'EXACT_2_21_20_SOURCE_GATE=PASS'
+          echo 'TRUE_RUNTIME_TAMPER_FAIL_CLOSED=PASS'
+
+      - name: User-installable FULL package gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          ROOT=/tmp/p01-v22121-fresh
+          rm -rf "$ROOT" && mkdir -p "$ROOT"
+          unzip -q "$OUT/VF_Start_V2.21.21_FULL.zip" -d "$ROOT"
+          php -S 127.0.0.1:18171 -t "$ROOT" > "$RUNNER_TEMP/p01-v22121-fresh-server.log" 2>&1 & echo $! > /tmp/p01-v22121-fresh.pid
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/p01-fresh.cookies" http://127.0.0.1:18171/ -o "$RUNNER_TEMP/p01-fresh-root.html" && break; sleep 1; done
+          curl -fsS -c "$RUNNER_TEMP/p01-fresh.cookies" -b "$RUNNER_TEMP/p01-fresh.cookies" http://127.0.0.1:18171/setup.php -o "$RUNNER_TEMP/p01-fresh-setup.html"
+          csrf=$(python3 - <<'PY'
+          import re,os
+          s=open(os.path.join(os.environ['RUNNER_TEMP'],'p01-fresh-setup.html'),encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -L -b "$RUNNER_TEMP/p01-fresh.cookies" -c "$RUNNER_TEMP/p01-fresh.cookies" -X POST http://127.0.0.1:18171/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Formal Fresh' \
+            --data-urlencode 'admin_password=FormalFresh-P01-22121!Strong' \
+            --data-urlencode 'admin_password_confirm=FormalFresh-P01-22121!Strong' \
+            -o "$RUNNER_TEMP/p01-fresh-post.html"
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" > "$RUNNER_TEMP/p01-v22121-fresh-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/p01-v22121-fresh-verify.txt"
+          php -r 'require "/tmp/p01-v22121-fresh/app/bootstrap.php";$d=vf_db();$c=(int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn();$l=(int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn();if($c!==0||$l!==0)exit(1);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(2);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(3);echo "FRESH_FULL_ZERO_DATA=PASS\n";'
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          node - <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{const b=await chromium.launch({headless:true});try{const p=await b.newPage({viewport:{width:1440,height:900}}),base='http://127.0.0.1:18171/';await p.goto(base,{waitUntil:'networkidle'});await p.click('#loginButton');await p.fill('[name=password]','FormalFresh-P01-22121!Strong');await p.click('#loginSubmit');await p.waitForFunction(()=>document.body.classList.contains('is-admin'));await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});const top=await p.locator('.vf-rail-item>span').allTextContents();if(JSON.stringify(top)!==JSON.stringify(['网址','浏览器助手','备份与恢复','设置','更新']))throw Error('FULL ADMIN '+JSON.stringify(top));await p.goto(base+'settings.php',{waitUntil:'networkidle'});if(!(await p.locator('.vf-admin-page-body').isVisible()))throw Error('settings unavailable');console.log('FULL_OWNER_LOGIN_CORE_BACKEND=PASS')}finally{await b.close()}})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          echo 'USER_INSTALLABLE_FULL_PACKAGE_GATE=PASS'
+
+      - name: Exact 2.21.20 to 2.21.21 upgrade and preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          ROOT=/tmp/p01-v22121-upgrade
+          rm -rf "$ROOT" && cp -a production/src "$ROOT"
+          php -S 127.0.0.1:18172 -t "$ROOT" > "$RUNNER_TEMP/p01-v22121-upgrade-server.log" 2>&1 & echo $! > /tmp/p01-v22121-upgrade.pid
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/p01-upgrade.cookies" http://127.0.0.1:18172/setup.php -o "$RUNNER_TEMP/p01-upgrade-setup.html" && break; sleep 1; done
+          csrf=$(python3 - <<'PY'
+          import re,os
+          s=open(os.path.join(os.environ['RUNNER_TEMP'],'p01-upgrade-setup.html'),encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -L -b "$RUNNER_TEMP/p01-upgrade.cookies" -c "$RUNNER_TEMP/p01-upgrade.cookies" -X POST http://127.0.0.1:18172/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Formal Upgrade' \
+            --data-urlencode 'admin_password=FormalUpgrade-P01-22120!Strong' \
+            --data-urlencode 'admin_password_confirm=FormalUpgrade-P01-22120!Strong' \
+            -o "$RUNNER_TEMP/p01-upgrade-post.html"
+          kill "$(cat /tmp/p01-v22121-upgrade.pid)" 2>/dev/null || true
+          php -r 'require "/tmp/p01-v22121-upgrade/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"Formal Upgrade Sentinel","description"=>"synthetic preservation","is_private"=>1]);$r->saveLink(null,["category_id"=>$c,"title"=>"Formal Upgrade Link","url"=>"https://example.com/p01-v22121","description"=>"keep","is_private"=>1]);$b=(new VfBackupManager(vf_db()))->create("Formal artifact pre-upgrade","pre-update",true);file_put_contents(getenv("RUNNER_TEMP")."/p01-upgrade-backup-key",$b["backup_key"]);echo "PRE_UPGRADE_SYNTHETIC_DATA=PASS\n";'
+          php "$OUT/repair-v2.21.21.php" --run="$ROOT" > "$RUNNER_TEMP/p01-v22121-upgrade.json"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$VERSION"
+          test -f "$ROOT/assets/data-recovery.js"
+          test -f "$ROOT/assets/update-reload.js"
+          php "$ROOT/cli/verify.php" > "$RUNNER_TEMP/p01-v22121-upgrade-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/p01-v22121-upgrade-verify.txt"
+          php -r 'require "/tmp/p01-v22121-upgrade/app/bootstrap.php";$d=vf_db();$q=$d->query("SELECT COUNT(*) FROM links WHERE title=\"Formal Upgrade Link\" AND url=\"https://example.com/p01-v22121\"");if((int)$q->fetchColumn()!==1)exit(1);$key=trim(file_get_contents(getenv("RUNNER_TEMP")."/p01-upgrade-backup-key"));$v=(new VfBackupManager($d))->verify($key);if(($v["validation_status"]??"")!=="valid")exit(2);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(3);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(4);echo "UPGRADE_DATA_BACKUP_SQLITE=PASS\n";'
+          php "$OUT/repair-v2.21.21.php" --run="$ROOT" > "$RUNNER_TEMP/p01-v22121-upgrade-repeat.json"
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p01-v22121-upgrade.json'));assert x['ok'] and not x['already_current'],x
+          y=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p01-v22121-upgrade-repeat.json'));assert y['ok'] and y['already_current'],y
+          print('EXACT_2_21_20_TO_2_21_21_UPGRADE=PASS')
+          print('ATOMIC_REPEAT_IDEMPOTENCY=PASS')
+          PY
+
+      - name: Soft failure rollback and hard interruption recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          setup_root(){
+            local ROOT="$1" PORT="$2" LABEL="$3"
+            rm -rf "$ROOT" && cp -a production/src "$ROOT"
+            php -S 127.0.0.1:"$PORT" -t "$ROOT" > "$RUNNER_TEMP/${LABEL}-server.log" 2>&1 & local pid=$!
+            for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/${LABEL}.cookies" http://127.0.0.1:"$PORT"/setup.php -o "$RUNNER_TEMP/${LABEL}-setup.html" && break; sleep 1; done
+            local csrf; csrf=$(python3 - "$RUNNER_TEMP/${LABEL}-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+            )
+            curl -fsS -L -b "$RUNNER_TEMP/${LABEL}.cookies" -c "$RUNNER_TEMP/${LABEL}.cookies" -X POST http://127.0.0.1:"$PORT"/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=$LABEL" --data-urlencode 'admin_password=FormalRecovery-P01-22120!Strong' --data-urlencode 'admin_password_confirm=FormalRecovery-P01-22120!Strong' -o "$RUNNER_TEMP/${LABEL}-post.html"
+            kill "$pid" 2>/dev/null || true
+            php -r "require '$ROOT/app/bootstrap.php';\$r=new VfRepository(vf_db());\$c=\$r->createCategory(['name'=>'Recovery Sentinel','description'=>'keep','is_private'=>1]);\$r->saveLink(null,['category_id'=>\$c,'title'=>'Recovery Link','url'=>'https://example.com/recovery-$LABEL','description'=>'keep','is_private'=>1]);"
+          }
+          setup_root /tmp/p01-v22121-soft 18173 p01-soft
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$OUT/repair-v2.21.21.php" --run=/tmp/p01-v22121-soft > "$RUNNER_TEMP/p01-soft.out" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n' < /tmp/p01-v22121-soft/VERSION.txt)" = "$SOURCE_VERSION"
+          php "$OUT/repair-v2.21.21.php" --verify-source=/tmp/p01-v22121-soft | jq -e '.ok==true' >/dev/null
+          php -r 'require "/tmp/p01-v22121-soft/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE title=\"Recovery Link\"")->fetchColumn()!==1)exit(1);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(2);echo "SOFT_ROLLBACK_DATA=PASS\n";'
+          setup_root /tmp/p01-v22121-hard 18174 p01-hard
+          set +e
+          VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$OUT/repair-v2.21.21.php" --run=/tmp/p01-v22121-hard > "$RUNNER_TEMP/p01-hard.out" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -eq 97
+          php "$OUT/repair-v2.21.21.php" --run=/tmp/p01-v22121-hard > "$RUNNER_TEMP/p01-hard-recover.json"
+          test "$(tr -d '\r\n' < /tmp/p01-v22121-hard/VERSION.txt)" = "$VERSION"
+          jq -e '.ok==true and .interrupted_recovered==true' "$RUNNER_TEMP/p01-hard-recover.json" >/dev/null
+          php -r 'require "/tmp/p01-v22121-hard/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE title=\"Recovery Link\"")->fetchColumn()!==1)exit(1);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(2);echo "HARD_RECOVERY_DATA=PASS\n";'
+          echo 'SOFT_FAILURE_ROLLBACK=PASS'
+          echo 'HARD_INTERRUPTION_RECOVERY=PASS'
+
+      - name: Publish safe formal-gate evidence
+        shell: bash
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-artifact-gate"
+          update="$OUT/VF_Start_V2.21.21_UPDATE.zip"
+          full="$OUT/VF_Start_V2.21.21_FULL.zip"
+          repair="$OUT/repair-v2.21.21.php"
+          jq -n \
+            --arg candidate "$CANDIDATE" --arg tree "$CANDIDATE_TREE" --arg production "$PRODUCTION" \
+            --arg update_sha "$(sha256sum "$update"|awk '{print $1}')" --argjson update_bytes "$(stat -c%s "$update")" \
+            --arg full_sha "$(sha256sum "$full"|awk '{print $1}')" --argjson full_bytes "$(stat -c%s "$full")" \
+            --arg repair_sha "$(sha256sum "$repair"|awk '{print $1}')" \
+            '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.21_FORMAL_ARTIFACT_GATE",status:"SUCCESS",pass:true,candidate_source_sha:$candidate,candidate_source_tree:$tree,production_source_sha:$production,source_version:"2.21.20",version:"2.21.21",schema_version:"2026080902",schema_changed:false,browser_helper:"1.6.4",full_package_gate:true,exact_atomic_upgrade:true,soft_rollback:true,hard_interruption_recovery:true,idempotency:true,sqlite_integrity:true,business_data_preserved:true,backup_preserved:true,runtime_added:["assets/data-recovery.js","assets/update-reload.js"],artifacts:{update:{name:"VF_Start_V2.21.21_UPDATE.zip",bytes:$update_bytes,sha256:$update_sha},full:{name:"VF_Start_V2.21.21_FULL.zip",bytes:$full_bytes,sha256:$full_sha},repair:{name:"repair-v2.21.21.php",sha256:$repair_sha}},release_authorized:false,production_changed:false,private_data_used:false,private_source_persisted_publicly:false}' > /tmp/p01-v22121-formal-evidence.json
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/p01-v22121-formal-evidence.json out/vf-agent/results/P01-V2.21.21-FORMAL-ARTIFACT-GATE.json
+          git -C out config user.name VictorForge
+          git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.21-FORMAL-ARTIFACT-GATE.json
+          git -C out commit -q -m 'evidence(P01): V2.21.21 formal artifact gate PASS'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+          echo 'FORMAL_ARTIFACT_GATE=PASS'
+
+      - name: Cleanup all private/generated material
+        if: always()
+        shell: bash
+        run: |
+          test ! -f /tmp/p01-v22121-fresh.pid || kill "$(cat /tmp/p01-v22121-fresh.pid)" 2>/dev/null || true
+          rm -rf candidate production runner out \
+            "$RUNNER_TEMP/p01-v22121-artifact-gate" \
+            /tmp/p01-v22121-gate-only /tmp/p01-v22121-runtime-tamper \
+            /tmp/p01-v22121-fresh /tmp/p01-v22121-upgrade /tmp/p01-v22121-soft /tmp/p01-v22121-hard
+          rm -f /tmp/p01-v22121-*.pid /tmp/p01-v22121-formal-evidence.json "$RUNNER_TEMP"/p01-* || true
+          echo 'FORMAL_GATE_EPHEMERAL_CLEANUP=DONE'
