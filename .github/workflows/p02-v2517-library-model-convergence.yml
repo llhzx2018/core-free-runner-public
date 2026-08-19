@@ -1,0 +1,274 @@
+name: P02 V2.5.17 Library Model Convergence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2517-library-model-convergence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engineer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      TARGET_BRANCH: maintenance/v2.5.17-library-model-convergence
+    steps:
+      - name: Require registered VF capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+          echo CAPABILITY_GATE=PASS
+
+      - name: Checkout exact P02 maintenance branch
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+
+      - name: Patch V2.5.17 product model convergence
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = "2.5.16"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          root=Path('.')
+          Path('VERSION').write_text('2.5.17\n',encoding='utf-8')
+
+          changelog=Path('CHANGELOG.md').read_text(encoding='utf-8')
+          section='''## V2.5.17 · 资料库模型收敛 · 2026-08-19\n\n- 明确“临时工作台 = 真正的便签 / 随手记；资料库 = 长期保存资料”的产品边界。\n- 左侧资料库导航隐藏历史“便签 / 文章资料”一级筛选，只保留全部内容、收藏、最近使用与分类。\n- 旧 quick/article 本地视图状态自动安全回落到“全部内容”，底层 content_mode 兼容字段与历史数据不迁移。\n- 最近使用统一记录打开、阅读、编辑、复制或调用过的资料；文章不再依赖可选开关才进入最近使用。\n- 用户可见 quick/article 术语收敛为“普通资料 / 长文资料”；Schema 继续 2401，无 Migration。\n\n'''
+          if not changelog.startswith('## V2.5.17'):
+              Path('CHANGELOG.md').write_text(section+changelog,encoding='utf-8')
+
+          css_path=Path('public/assets/v254-common-branding.css')
+          css=css_path.read_text(encoding='utf-8')
+          marker='/* V2.5.17_LIBRARY_MODEL_CONVERGENCE */'
+          css_patch='''\n/* V2.5.17_LIBRARY_MODEL_CONVERGENCE */\n.side-item[data-mode="quick"],.side-item[data-mode="article"]{display:none!important}\n'''
+          if marker not in css:
+              css_path.write_text(css.rstrip()+css_patch,encoding='utf-8')
+
+          js_path=Path('public/assets/v254-common-branding.js')
+          js=js_path.read_text(encoding='utf-8')
+          js_marker='V2.5.17_LIBRARY_MODEL_CONVERGENCE'
+          js_patch=r'''
+
+/* V2.5.17_LIBRARY_MODEL_CONVERGENCE */
+(function(){
+  'use strict';
+  const legacyModes=new Set(['quick','article']);
+  const usageTimers=new Map();
+  let metadataTimer=0;
+
+  function latestUsageAt(item){
+    const values=[item&&item.last_opened_at,item&&item.last_copied_at].filter(Boolean).map(String).sort();
+    return values.length?values[values.length-1]:(item&&item.updated_at)||'';
+  }
+
+  function normalizeLibraryMode(){
+    if(typeof state==='undefined')return false;
+    if(!legacyModes.has(String(state.mode||'')))return false;
+    state.mode='all';
+    state.status='active';
+    if(typeof storage!=='undefined'){
+      storage.set('vftb-mode','all');
+      storage.set('vftb-status','active');
+    }
+    return true;
+  }
+
+  function simplifyVisibleConcepts(root){
+    root=root||document;
+    root.querySelectorAll('select[name="default_start"] option[value="quick"],select[name="default_start"] option[value="article"]').forEach(node=>node.remove());
+    root.querySelectorAll('select option[value="quick"]').forEach(node=>{if(node.closest('select[name="default_start"]'))return;node.textContent='普通资料';});
+    root.querySelectorAll('select option[value="article"]').forEach(node=>{if(node.closest('select[name="default_start"]'))return;node.textContent='长文资料';});
+    root.querySelectorAll('select[name="content_mode"]').forEach(select=>{const field=select.closest('.field');if(field)field.hidden=true;});
+    root.querySelectorAll('[name="article_open_counts_recent"]').forEach(input=>{const row=input.closest('.setting-row,.field');if(row)row.hidden=true;});
+    root.querySelectorAll('.row-kind[title="便签"]').forEach(node=>node.setAttribute('title','资料'));
+    root.querySelectorAll('.notebook-title-meta').forEach(node=>{const text=String(node.textContent||'');if(text==='便签')node.textContent='资料';else if(text.endsWith(' · 便签'))node.textContent=text.slice(0,-3)+'资料';});
+    root.querySelectorAll('button,[role="menuitem"],option').forEach(node=>{
+      const text=String(node.textContent||'').trim();
+      if(text==='新建便签')node.textContent='新建资料';
+      else if(text==='新建文章')node.textContent='新建长文';
+    });
+  }
+
+  function refreshRecentMetadataSoon(){
+    if(metadataTimer)clearTimeout(metadataTimer);
+    metadataTimer=setTimeout(()=>{
+      metadataTimer=0;
+      if(typeof refreshNavigationMetadata==='function')refreshNavigationMetadata().catch(()=>{});
+    },180);
+  }
+
+  function queueUsage(id){
+    id=Number(id)||0;
+    if(!id||typeof api!=='function')return;
+    if(usageTimers.has(id))clearTimeout(usageTimers.get(id));
+    usageTimers.set(id,setTimeout(async()=>{
+      usageTimers.delete(id);
+      try{
+        const result=await api('content_open',{method:'POST',body:{id},progress:false});
+        if(typeof state!=='undefined'&&state.readerItem&&Number(state.readerItem.id)===id){
+          state.readerItem.open_count=result.open_count;
+          state.readerItem.last_opened_at=result.last_opened_at;
+        }
+        refreshRecentMetadataSoon();
+      }catch(error){}
+    },650));
+  }
+
+  if(typeof state!=='undefined')normalizeLibraryMode();
+
+  if(typeof scheduleArticleOpen==='function')scheduleArticleOpen=function(){};
+
+  if(typeof openReader==='function'){
+    const originalOpenReader=openReader;
+    openReader=function(id){
+      const result=originalOpenReader.apply(this,arguments);
+      queueUsage(id);
+      return result;
+    };
+  }
+
+  if(typeof openEditor==='function'){
+    const originalOpenEditor=openEditor;
+    openEditor=async function(id){
+      const result=await originalOpenEditor.apply(this,arguments);
+      if(Number(id)>0)queueUsage(id);
+      simplifyVisibleConcepts(document);
+      return result;
+    };
+  }
+
+  if(typeof loadBootstrap==='function'){
+    const originalLoadBootstrap=loadBootstrap;
+    loadBootstrap=async function(){
+      const result=await originalLoadBootstrap.apply(this,arguments);
+      const changed=normalizeLibraryMode();
+      simplifyVisibleConcepts(document);
+      if(changed&&typeof loadList==='function'&&state.site&&state.site.auth)await loadList({scrollTop:0});
+      return result;
+    };
+  }
+
+  if(typeof renderSettingsPanel==='function'){
+    const originalRenderSettingsPanel2517=renderSettingsPanel;
+    renderSettingsPanel=function(){
+      const result=originalRenderSettingsPanel2517.apply(this,arguments);
+      simplifyVisibleConcepts(document);
+      return result;
+    };
+  }
+
+  if(typeof modeCopy==='function'){
+    const originalModeCopy=modeCopy;
+    modeCopy=function(){
+      if(typeof state!=='undefined'&&state.status==='active'&&state.mode==='recent')return ['最近使用','最近打开、阅读、编辑、复制或调用过的资料'];
+      return originalModeCopy.apply(this,arguments);
+    };
+  }
+
+  if(typeof notebookTitleMarkup==='function'){
+    const originalNotebookTitleMarkup=notebookTitleMarkup;
+    notebookTitleMarkup=function(item,selectedId){
+      const view=(typeof state!=='undefined'&&(state.notebookView||state.readerReturn||state))||null;
+      if(view&&view.mode==='recent')return originalNotebookTitleMarkup(Object.assign({},item,{updated_at:latestUsageAt(item)}),selectedId);
+      return originalNotebookTitleMarkup(item,selectedId);
+    };
+  }
+
+  document.addEventListener('click',event=>{
+    const trigger=event.target&&event.target.closest?event.target.closest('[data-notebook-item]'):null;
+    if(trigger)queueUsage(trigger.dataset.notebookItem);
+  },true);
+
+  const observer=new MutationObserver(()=>simplifyVisibleConcepts(document));
+  document.addEventListener('DOMContentLoaded',()=>{
+    normalizeLibraryMode();
+    simplifyVisibleConcepts(document);
+    observer.observe(document.body,{childList:true,subtree:true});
+  },{once:true});
+})();
+'''
+          if js_marker not in js:
+              js_path.write_text(js.rstrip()+js_patch+'\n',encoding='utf-8')
+
+          # Reseal existing runtime manifest without changing the runtime file inventory.
+          manifest_path=Path('SOURCE_MANIFEST.json')
+          manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
+          manifest['version']='2.5.17'
+          manifest['mapping_contract']=str(manifest.get('mapping_contract','')).replace('V2.5.16','V2.5.17')
+          entries=manifest['entries']
+          for entry in entries:
+              p=Path(entry['repo_path'])
+              if not p.is_file():
+                  raise SystemExit('missing runtime file: '+entry['repo_path'])
+              raw=p.read_bytes(); sha=hashlib.sha256(raw).hexdigest()
+              entry['bytes']=len(raw); entry['sha256']=sha; entry['repo_sha256']=sha
+          manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+
+          txt_path=Path('SOURCE_MANIFEST.txt')
+          lines=['VF Library Source Manifest','Version: 2.5.17','Schema: 2401','Runtime source files: '+str(len(entries)),'']
+          for e in entries:
+              lines.append(f"{e['sha256']}  {e['bytes']:>8}  {e['repo_path']} -> {e['full_path']}")
+          txt_path.write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
+
+      - name: Static and build verification
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = "2.5.17"
+          node --check public/assets/v254-common-branding.js
+          grep -q 'V2.5.17_LIBRARY_MODEL_CONVERGENCE' public/assets/v254-common-branding.js
+          grep -q 'data-mode="quick"' public/index.php
+          grep -q 'data-mode="article"' public/index.php
+          grep -q 'side-item\[data-mode="quick"\]' public/assets/v254-common-branding.css
+          grep -q "最近打开、阅读、编辑、复制或调用过的资料" public/assets/v254-common-branding.js
+          grep -q "scheduleArticleOpen=function(){}" public/assets/v254-common-branding.js
+          bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/p02-v2517-deploy" >/dev/null
+          test "$(cat "$RUNNER_TEMP/p02-v2517-deploy/VERSION.txt")" = "2.5.17"
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          m=json.loads(Path('SOURCE_MANIFEST.json').read_text())
+          assert m['version']=='2.5.17' and m['schema']==2401 and len(m['entries'])==m['runtime_source_file_count']==74
+          for e in m['entries']:
+              raw=Path(e['repo_path']).read_bytes();h=hashlib.sha256(raw).hexdigest()
+              assert len(raw)==e['bytes'] and h==e['sha256']==e['repo_sha256'],e['repo_path']
+          print('SOURCE_MANIFEST_74_OF_74=PASS')
+          print('SCHEMA=2401')
+          print('PRODUCTION_WRITE=NO')
+          PY
+
+      - name: Commit and push maintenance branch
+        working-directory: product
+        shell: bash
+        env:
+          TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION CHANGELOG.md SOURCE_MANIFEST.json SOURCE_MANIFEST.txt public/assets/v254-common-branding.js public/assets/v254-common-branding.css
+          git diff --cached --quiet && { echo NO_CHANGES=YES; exit 0; }
+          git commit -m "feat(library): converge notes and recent usage model"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-library.git"
+          git push origin HEAD:${TARGET_BRANCH}
+          echo P02_V2517_ENGINEERING_PUSH=PASS
