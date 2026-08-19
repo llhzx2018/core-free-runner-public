@@ -1,0 +1,135 @@
+name: TEMP P01 V2.21.19 Formal Release
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-formal-release.yml']
+permissions:
+  contents: write
+env:
+  CANDIDATE: 2784d8de583b016e78887b707e12ed0e89489a7d
+  CANDIDATE_TREE: 64626d98737f1efdddd2230a636d7b13e6a36032
+  PRODUCTION: a501d2394502319b0af9caaf1c171bdf94940a9d
+  VERSION: 2.21.19
+  SOURCE_VERSION: 2.21.18
+  TAG: v2.21.19
+  UPDATE_BYTES: '1072258'
+  UPDATE_SHA: ba8eec70c9fc08208aa66a2a7c091772d1b460ad4ed05984e6390d5f413a82b7
+  FULL_BYTES: '490884'
+  FULL_SHA: b95781a5de1943f823ff4a8deb9095e4596718b2a3fe5bc9e4748cfb7a1d191f
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout release infrastructure
+        uses: actions/checkout@v4
+      - name: Checkout exact private source
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$CANDIDATE"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" production
+          git -C production fetch -q --depth 1 origin "$PRODUCTION"
+          git -C production checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+      - name: Build and verify immutable formal bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22119-release";mkdir -p "$OUT"
+          python3 scripts/temp-p01-v22119-build.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" > /tmp/build.json
+          jq -e '.status=="BUILD_PASS" and .version==env.VERSION and .source_version==env.SOURCE_VERSION and .candidate_commit==env.CANDIDATE and .candidate_tree==env.CANDIDATE_TREE and .production_commit==env.PRODUCTION' /tmp/build.json >/dev/null
+          UPDATE="$OUT/VF_Start_V${VERSION}_UPDATE.zip";FULL="$OUT/VF_Start_V${VERSION}_FULL.zip"
+          test "$(stat -c %s "$UPDATE")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$UPDATE"|awk '{print $1}')" = "$UPDATE_SHA"
+          test "$(stat -c %s "$FULL")" = "$FULL_BYTES"
+          test "$(sha256sum "$FULL"|awk '{print $1}')" = "$FULL_SHA"
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          unzip -t "$UPDATE" >/dev/null;unzip -t "$FULL" >/dev/null
+          python3 - <<'PY'
+          import os,pathlib,zipfile
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22119-release'
+          for p in (out/f'VF_Start_V{os.environ["VERSION"]}_UPDATE.zip',out/f'VF_Start_V{os.environ["VERSION"]}_FULL.zip'):
+            with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))
+              for n in names:
+                q=pathlib.PurePosixPath(n)
+                assert not n.startswith('/') and '\\' not in n and '..' not in q.parts
+                assert not any(x in {'.git','PRIVATE_DATA','private_data','node_modules'} for x in q.parts)
+                assert not n.lower().endswith(('.sqlite','.sqlite3','.db','.env','.log'))
+          PY
+      - name: Publish exact GitHub tag release and assets
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          REPO=llhzx2018/vf-start;OUT="$RUNNER_TEMP/p01-v22119-release"
+          if tag_sha=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null); then
+            test "$tag_sha" = "$CANDIDATE"
+          else
+            gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$CANDIDATE" >/dev/null
+          fi
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$CANDIDATE"
+          if gh api "repos/$REPO/releases/tags/$TAG" >/tmp/existing-release.json 2>/dev/null; then
+            echo 'Release already exists; entering strict readback mode.'
+          else
+            cat >/tmp/release-notes.md <<EOF
+          # VF Start V2.21.19
+
+          Reference-driven UI / UA refinement release.
+
+          - Source: V2.21.18
+          - Target: V2.21.19
+          - Schema: 2026080902 / unchanged
+          - Browser Helper: 1.6.4 / unchanged
+          - Candidate Product Commit: $CANDIDATE
+          - Formal Artifact Gate: PASS
+          EOF
+            gh release create "$TAG" "$OUT/VF_Start_V${VERSION}_UPDATE.zip" "$OUT/VF_Start_V${VERSION}_FULL.zip" --repo "$REPO" --title "VF Start V${VERSION}" --notes-file /tmp/release-notes.md >/dev/null
+          fi
+          gh api "repos/$REPO/releases/tags/$TAG" >/tmp/release.json
+          jq -e --arg tag "$TAG" '.tag_name==$tag and .draft==false and .prerelease==false' /tmp/release.json >/dev/null
+          mkdir -p /tmp/release-readback
+          rm -f /tmp/release-readback/*
+          gh release download "$TAG" --repo "$REPO" --dir /tmp/release-readback --pattern "VF_Start_V${VERSION}_UPDATE.zip" --pattern "VF_Start_V${VERSION}_FULL.zip"
+          U=/tmp/release-readback/VF_Start_V${VERSION}_UPDATE.zip;F=/tmp/release-readback/VF_Start_V${VERSION}_FULL.zip
+          test -f "$U";test -f "$F"
+          test "$(stat -c %s "$U")" = "$UPDATE_BYTES";test "$(sha256sum "$U"|awk '{print $1}')" = "$UPDATE_SHA"
+          test "$(stat -c %s "$F")" = "$FULL_BYTES";test "$(sha256sum "$F"|awk '{print $1}')" = "$FULL_SHA"
+          jq -e --arg u "VF_Start_V${VERSION}_UPDATE.zip" --arg f "VF_Start_V${VERSION}_FULL.zip" --argjson ub "$UPDATE_BYTES" --argjson fb "$FULL_BYTES" '([.assets[]|select(.name==$u and .size==$ub)]|length)==1 and ([.assets[]|select(.name==$f and .size==$fb)]|length)==1' /tmp/release.json >/dev/null
+          jq '{id,tag_name,published_at,html_url,assets:[.assets[]|{name,size,id}]}' /tmp/release.json >/tmp/release-summary.json
+      - name: Publish formal release evidence
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os
+          r=json.load(open('/tmp/release.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':os.environ['VERSION'],'source_version':os.environ['SOURCE_VERSION'],'gate':'FORMAL_RELEASE','status':'SUCCESS','pass':True,'release_authorized':True,'production_changed':False,'core_updates_published':False,'source_sha':os.environ['CANDIDATE'],'source_tree':os.environ['CANDIDATE_TREE'],'production_sha':os.environ['PRODUCTION'],'tag':os.environ['TAG'],'release_id':r['id'],'released_at':r.get('published_at'),'update_asset':{'name':f'VF_Start_V{os.environ["VERSION"]}_UPDATE.zip','bytes':int(os.environ['UPDATE_BYTES']),'sha256':os.environ['UPDATE_SHA']},'full_asset':{'name':f'VF_Start_V{os.environ["VERSION"]}_FULL.zip','bytes':int(os.environ['FULL_BYTES']),'sha256':os.environ['FULL_SHA']},'workflow_run_id':os.environ['GITHUB_RUN_ID'],'private_source_persisted_publicly':False,'private_data_used':False}
+          open('/tmp/evidence.json','w').write(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.19-FORMAL-RELEASE.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.19-FORMAL-RELEASE.json
+          git -C out commit -q -m 'evidence(P01): publish V2.21.19 formal release'
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: rm -rf candidate production "$RUNNER_TEMP/p01-v22119-release" /tmp/release-readback
