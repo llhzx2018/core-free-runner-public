@@ -1,0 +1,70 @@
+name: TEMP P01 V22119 UI Diagnostic
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-regression-diagnostic.yml']
+permissions:
+  contents: write
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      ADMIN_PASS: Reference-P01-22119!Strong
+    steps:
+      - name: Execute regression with captured diagnostics
+        shell: bash
+        run: |
+          set +e
+          bash -Eeuo pipefail <<'RUN' >/tmp/regression.log 2>&1
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch maintenance/reference-driven-ui-2.21.19-20260819 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" product
+          git -C product rev-parse HEAD >/tmp/source-sha
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 >/dev/null
+          command -v google-chrome >/dev/null
+          mkdir -p "$RUNNER_TEMP/p01-node";cd "$RUNNER_TEMP/p01-node";npm init -y >/dev/null 2>&1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+          cd "$GITHUB_WORKSPACE"
+          php -l product/src/index.php >/dev/null;php -l product/src/app/AdminShell.php >/dev/null;node --check product/src/assets/reference-ui.js
+          cp -a product/src /tmp/p01-ui
+          php -S 127.0.0.1:18119 -t /tmp/p01-ui >/tmp/p01-ui-server.log 2>&1 & echo $! >/tmp/p01-ui.pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/p01-ui.cookies http://127.0.0.1:18119/setup.php -o /tmp/setup.html&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re;s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/p01-ui.cookies -c /tmp/p01-ui.cookies -X POST http://127.0.0.1:18119/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Reference Preview' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null
+          php -r 'require "/tmp/p01-ui/app/bootstrap.php";$r=new VfRepository(vf_db());$cats=[];foreach([["工作工具","每天高频打开的工作入口"],["AI 与开发","AI、代码与部署服务"],["内容与资料","阅读、出版与知识资料"],["运营服务","域名、支付与运营平台"]] as $i=>$row){$cats[]=$r->createCategory(["name"=>$row[0],"description"=>$row[1],"is_private"=>0,"sort_order"=>400-$i*10]);}$links=[[$cats[0],"GitHub","https://github.com/",1],[$cats[0],"Cloudflare","https://www.cloudflare.com/",0],[$cats[0],"CloudPanel","https://www.cloudpanel.io/",0],[$cats[1],"OpenAI","https://openai.com/",1],[$cats[1],"Vercel","https://vercel.com/",0],[$cats[1],"MDN","https://developer.mozilla.org/",0],[$cats[2],"Leanpub","https://leanpub.com/",0],[$cats[2],"Wikipedia","https://www.wikipedia.org/",0],[$cats[2],"Internet Archive","https://archive.org/",0],[$cats[3],"Dynadot","https://www.dynadot.com/",0],[$cats[3],"PayPal","https://www.paypal.com/",0],[$cats[3],"Stripe","https://stripe.com/",0]];foreach($links as $i=>$x){$r->saveLink(null,["category_id"=>$x[0],"title"=>$x[1],"url"=>$x[2],"description"=>"Synthetic reference fixture","is_private"=>0,"is_favorite"=>$x[3],"sort_order"=>400-$i],"manual");}echo "FIXTURE_PASS\n";'
+          php /tmp/p01-ui/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+          mkdir -p "$RUNNER_TEMP/p01-shots"
+          cat > "$RUNNER_TEMP/p01-node/e2e.mjs" <<'JS'
+          import fs from'node:fs';import{chromium}from'playwright-core';const base='http://127.0.0.1:18119';const b=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});const c=await b.newContext({viewport:{width:1440,height:1000}});const p=await c.newPage();const r={front:{},admin:{},widths:{}};await p.goto(base+'/',{waitUntil:'networkidle'});await p.waitForSelector('.home-page',{timeout:12000});r.front.attr=await p.evaluate(()=>document.documentElement.getAttribute('data-vf-reference-ui'));r.front.css=await p.evaluate(()=>performance.getEntriesByType('resource').some(x=>x.name.includes('reference-ui.css')));r.front.command=await p.locator('.command-hero').evaluate(el=>getComputedStyle(el).display);r.front.quick=await p.locator('.quick-link').count();r.front.roots=await p.locator('.root-card').count();r.front.order=await p.evaluate(()=>{const s=document.querySelector('.spaces'),h=document.querySelector('.home-columns');return !!(s&&h&&(s.compareDocumentPosition(h)&Node.DOCUMENT_POSITION_FOLLOWING));});if(r.front.attr!=='1'||!r.front.css||r.front.command!=='none'||r.front.roots<4||!r.front.order)throw new Error('FRONT_GATE '+JSON.stringify(r.front));await p.screenshot({path:process.env.RUNNER_TEMP+'/p01-shots/home-desktop.png',fullPage:true});for(const w of[1440,1280,1024,768,430,390,375]){await p.setViewportSize({width:w,height:w<700?844:900});await p.waitForTimeout(100);const v=await p.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body.scrollWidth}));r.widths['front_'+w]=v;if(v.scroll>v.client||v.body>v.client)throw new Error('FRONT_OVERFLOW_'+w+' '+JSON.stringify(v));}await p.setViewportSize({width:390,height:844});await p.screenshot({path:process.env.RUNNER_TEMP+'/p01-shots/home-mobile.png',fullPage:true});await p.setViewportSize({width:1440,height:1000});await p.goto(base+'/login.php');await p.locator('input[type=password]').fill(process.env.ADMIN_PASS);await p.locator('button[type=submit],input[type=submit]').first().click();await p.waitForLoadState('networkidle');await p.goto(base+'/links-admin.php',{waitUntil:'networkidle'});await p.waitForSelector('#linksBody tr',{timeout:12000});r.admin.rails=await p.locator('.vf-admin-rail').count();r.admin.rows=await p.locator('#linksBody tr').count();r.admin.css=await p.evaluate(()=>performance.getEntriesByType('resource').some(x=>x.name.includes('reference-ui.css')));r.admin.batch0=await p.locator('#batchBar').evaluate(el=>getComputedStyle(el).display);const q=p.locator('#linksBody input[type=checkbox]');if(await q.count()>=2){await q.nth(0).check();await q.nth(1).check();await p.waitForTimeout(100);}r.admin.batch2=await p.locator('#batchBar').evaluate(el=>getComputedStyle(el).display);if(r.admin.rails!==1||r.admin.rows<8||!r.admin.css||r.admin.batch0!=='none'||r.admin.batch2==='none')throw new Error('ADMIN_GATE '+JSON.stringify(r.admin));await p.screenshot({path:process.env.RUNNER_TEMP+'/p01-shots/admin-desktop.png',fullPage:true});for(const w of[1440,1024,768,430,390,375]){await p.setViewportSize({width:w,height:w<700?844:900});await p.waitForTimeout(100);const v=await p.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,body:document.body.scrollWidth}));r.widths['admin_'+w]=v;if(v.scroll>v.client||v.body>v.client)throw new Error('ADMIN_OVERFLOW_'+w+' '+JSON.stringify(v));}await p.setViewportSize({width:390,height:844});await p.screenshot({path:process.env.RUNNER_TEMP+'/p01-shots/admin-mobile.png',fullPage:true});fs.writeFileSync('/tmp/ui-result.json',JSON.stringify(r,null,2));await b.close();
+          JS
+          cd "$RUNNER_TEMP/p01-node";ADMIN_PASS="$ADMIN_PASS" node e2e.mjs
+          RUN
+          rc=$?
+          echo "$rc" >/tmp/regression.rc
+          [ -f /tmp/p01-ui.pid ]&&kill "$(cat /tmp/p01-ui.pid)" 2>/dev/null||true
+          exit 0
+      - name: Publish diagnostic evidence always
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rc=$(cat /tmp/regression.rc 2>/dev/null||echo 999);sha=$(cat /tmp/source-sha 2>/dev/null||echo unknown)
+          python3 - "$rc" "$sha" <<'PY'
+          import json,sys,os
+          rc=int(sys.argv[1]);sha=sys.argv[2];tail=''
+          try:tail='\n'.join(open('/tmp/regression.log',encoding='utf-8',errors='replace').read().splitlines()[-30:])
+          except:pass
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','gate':'REFERENCE_UI_DIAGNOSTIC','status':'SUCCESS' if rc==0 else 'FAILURE','pass':rc==0,'source_sha':sha,'run_id':os.environ['GITHUB_RUN_ID'],'rc':rc,'log_tail':tail,'private_data_persisted_publicly':False}
+          if rc==0:
+            try:q['browser']=json.load(open('/tmp/ui-result.json'))
+            except:pass
+          open('/tmp/evidence.json','w').write(json.dumps(q,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git out;mkdir -p out/vf-agent/results out/evidence/p01/v22119;cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.19-REFERENCE-UI-DIAGNOSTIC.json;[ "$rc" = 0 ]&&cp "$RUNNER_TEMP"/p01-shots/*.png out/evidence/p01/v22119/||true;git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.19-REFERENCE-UI-DIAGNOSTIC.json evidence/p01/v22119;git -C out commit -q -m 'evidence(P01): publish V2.21.19 UI diagnostic';git -C out push -q origin HEAD:vf-agent-operations-v1
