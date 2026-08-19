@@ -35,7 +35,7 @@ jobs:
           grep -q 'data-recovery.js?v=22121' p/src/data-safety.php
           ! grep -q 'data-data-panel="history"' p/src/data-safety.php
           ! grep -q 'data-data-panel="lifecycle"' p/src/data-safety.php
-          git -C p status --porcelain | test ! -s /dev/stdin
+          test -z "$(git -C p status --porcelain)"
           git -C p rev-parse HEAD^{tree} >/tmp/product-tree
       - uses: shivammathur/setup-php@v2
         with:
@@ -46,21 +46,24 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p evidence
-          sudo apt-get update -qq;sudo apt-get install -y -qq sqlite3 jq >/dev/null
-          npm init -y >/dev/null 2>&1;npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1;npx playwright install chromium >/dev/null
-          rm -rf /tmp/vf-p01-22121;cp -a p/src /tmp/vf-p01-22121;cd /tmp/vf-p01-22121
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq >/dev/null
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          rm -rf /tmp/vf-p01-22121
+          cp -a p/src /tmp/vf-p01-22121
+          cd /tmp/vf-p01-22121
           php -S 127.0.0.1:18121 -t . > "$GITHUB_WORKSPACE/evidence/php-server.log" 2>&1 & echo $! >/tmp/p01.pid
-          for i in $(seq 1 30);do curl -fsS http://127.0.0.1:18121/setup.php -o /tmp/setup.html&&break;sleep 1;done
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18121/setup.php -o /tmp/setup.html && break; sleep 1; done
           curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies http://127.0.0.1:18121/setup.php -o /tmp/setup.html
           CSRF=$(python3 -c "import re;t=open('/tmp/setup.html').read();m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',t);assert m;print(m.group(1))")
           curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies -X POST http://127.0.0.1:18121/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF P01 22121 Gate' --data-urlencode 'admin_password=MaintenanceTest!2026' --data-urlencode 'admin_password_confirm=MaintenanceTest!2026' -o /tmp/setup-post.html
           test -f app/.runtime.php
-          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture_22121.php;php fixture_22121.php
-          cat > lifecycle_fixture.php <<'PHP'
-          <?php
-declare(strict_types=1);require 'app/bootstrap.php';$r=new VfRepository(vf_db());$d=$r->bootstrap(true);$ids=[];foreach(($d['links']??[]) as $x)$ids[]=(int)$x['id'];if(count($ids)<3)throw new RuntimeException('fixture links missing');$r->bulkLinks([$ids[count($ids)-2]],'archive',null);$r->bulkLinks([$ids[count($ids)-1]],'delete',null);echo "LIFECYCLE_FIXTURE_PASS\n";
-          PHP
-          php lifecycle_fixture.php;php cli/verify.php | tee "$GITHUB_WORKSPACE/evidence/cli-verify.txt"
+          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture_22121.php
+          php fixture_22121.php
+          php -r 'require "app/bootstrap.php";$r=new VfRepository(vf_db());$d=$r->bootstrap(true);$ids=[];foreach(($d["links"]??[]) as $x)$ids[]=(int)$x["id"];if(count($ids)<3)throw new RuntimeException("fixture links missing");$r->bulkLinks([$ids[count($ids)-2]],"archive",null);$r->bulkLinks([$ids[count($ids)-1]],"delete",null);echo "LIFECYCLE_FIXTURE_PASS\n";'
+          php cli/verify.php | tee "$GITHUB_WORKSPACE/evidence/cli-verify.txt"
       - name: Real Chrome product gate
         env:
           P01_BASE: http://127.0.0.1:18121/
@@ -78,7 +81,13 @@ declare(strict_types=1);require 'app/bootstrap.php';$r=new VfRepository(vf_db())
       - name: SQLite and backup boundary
         run: |
           set -Eeuo pipefail
-          cd /tmp/vf-p01-22121;DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;");test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok;test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')";BACKUP=$(php cli/backup.php);test -f "$BACKUP";echo DATA_BACKUP_PASS | tee "$GITHUB_WORKSPACE/evidence/data-backup.txt"
+          cd /tmp/vf-p01-22121
+          DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          BACKUP=$(php cli/backup.php)
+          test -f "$BACKUP"
+          echo DATA_BACKUP_PASS | tee "$GITHUB_WORKSPACE/evidence/data-backup.txt"
       - name: Publish safe evidence
         if: success()
         env:
@@ -86,7 +95,15 @@ declare(strict_types=1);require 'app/bootstrap.php';$r=new VfRepository(vf_db())
         run: |
           set -Eeuo pipefail
           jq -n --arg sha "$EXPECTED_HEAD" --arg tree "$(cat /tmp/product-tree)" --slurpfile browser evidence/browser.json --slurpfile gov evidence/product-governance.json '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.21_PRODUCT_FINAL_GATE",status:"SUCCESS",pass:true,working_source_sha:$sha,working_source_tree:$tree,browser:$browser[0],product_governance:$gov[0],fresh_install:true,sqlite_integrity:true,backup:true,schema_changed:false,version_not_bumped:true,production_changed:false,private_data_used:false}' >/tmp/evidence.json
-          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out;mkdir -p out/vf-agent/results;cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.21-PRODUCT-FINAL-GATE.json;git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.21-PRODUCT-FINAL-GATE.json;git -C out commit -q -m 'evidence(P01): V2.21.21 product final gate PASS';git -C out pull -q --rebase origin vf-agent-operations-v1;git -C out push -q origin HEAD:vf-agent-operations-v1
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.21-PRODUCT-FINAL-GATE.json
+          git -C out config user.name VictorForge
+          git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.21-PRODUCT-FINAL-GATE.json
+          git -C out commit -q -m 'evidence(P01): V2.21.21 product final gate PASS'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -96,4 +113,4 @@ declare(strict_types=1);require 'app/bootstrap.php';$r=new VfRepository(vf_db())
           retention-days: 30
       - name: Cleanup
         if: always()
-        run: test ! -f /tmp/p01.pid||kill "$(cat /tmp/p01.pid)" 2>/dev/null||true
+        run: test ! -f /tmp/p01.pid || kill "$(cat /tmp/p01.pid)" 2>/dev/null || true
