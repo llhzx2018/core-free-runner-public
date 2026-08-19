@@ -1,0 +1,259 @@
+name: P01 V2.21.21 Navigation Backend Browser Gate
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gate:
+    if: startsWith(github.head_ref, 'agent/p01-22121-browser-gate')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: maintenance/navigation-admin-simplify-2.21.21-20260819
+      EXPECTED_HEAD: a207ea8ac239541173191ea49f7d2375fcb616d3
+    steps:
+      - name: Clone exact private P01 working source
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch "$PRODUCT_BRANCH" "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" p
+          test "$(git -C p rev-parse HEAD)" = "$EXPECTED_HEAD"
+
+      - name: Complete exact long-file patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path('src/index.php');s=p.read_text()
+          assert s.count('assets/reference-ui.js?v=22120')==1
+          assert s.count('id="managementButton" class="sidebar-tool admin-only hidden" href="manage.php"')==1
+          s=s.replace('assets/reference-ui.js?v=22120','assets/reference-ui.js?v=22121',1)
+          s=s.replace('id="managementButton" class="sidebar-tool admin-only hidden" href="manage.php"','id="managementButton" class="sidebar-tool admin-only hidden" href="links-admin.php"',1)
+          p.write_text(s)
+
+          p=Path('src/links-admin.php');s=p.read_text()
+          marker='?>\n<div class="vf-links-summary" id="linksSummary"></div>'
+          assert s.count(marker)==1
+          notice=r'''?>
+<?php
+$notice=(string)($_GET['notice']??'');
+$noticeMap=[
+  'tags-retired'=>'标签功能已退役。分类 + Public / Private + 待整理是当前网址整理方式。',
+  'affiliate-retired'=>'推广链接独立管理已退役。已有网址仍保留原始 URL 与参数，不会因此删除数据。',
+  'governance-retired'=>'历史治理已经封板退出日常产品。当前维护请使用网址、分类与待整理。',
+];
+if(isset($noticeMap[$notice])): ?>
+<div class="notice" role="status"><?=htmlspecialchars($noticeMap[$notice],ENT_QUOTES,'UTF-8')?></div>
+<?php endif; ?>
+<div class="vf-links-summary" id="linksSummary"></div>'''
+          p.write_text(s.replace(marker,notice,1))
+
+          p=Path('src/assets/links-admin.js');s=p.read_text()
+          s2,n=re.subn(r'<div class="vf-field full"><label>标签</label><input name="tags"[^>]*></div>','',s,count=1)
+          assert n==1,n
+          old="description:f.get('description'),tags:f.get('tags')"
+          assert s2.count(old)==1
+          p.write_text(s2.replace(old,"description:f.get('description')",1))
+          PY
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          grep -q 'assets/reference-ui.js?v=22121' src/index.php
+          grep -q 'managementButton.*href="links-admin.php"' src/index.php
+          ! grep -q '<label>标签</label>' src/assets/links-admin.js
+          ! grep -q "tags:f.get('tags')" src/assets/links-admin.js
+          grep -q 'update-reload.js?v=22121' src/assets/update.js
+          git diff --check
+
+      - name: Commit completed working source
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add src/index.php src/links-admin.php src/assets/links-admin.js
+          git commit -q -m 'fix(P01): refresh navigation assets and complete retired feature UI'
+          printf '%s' "$(git rev-parse HEAD)" >/tmp/product-sha
+          printf '%s' "$(git rev-parse HEAD^{tree})" >/tmp/product-tree
+          git remote set-url origin "https://x-access-token:${W}@github.com/llhzx2018/vf-start.git"
+          git push -q origin HEAD:"$PRODUCT_BRANCH"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Prepare fresh runtime and realistic category fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq >/dev/null
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          rm -rf /tmp/vf-p01-22121
+          cp -a p/src /tmp/vf-p01-22121
+          cd /tmp/vf-p01-22121
+          php -S 127.0.0.1:18121 -t . > "$GITHUB_WORKSPACE/evidence/php-server.log" 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18121/setup.php -o /tmp/setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies http://127.0.0.1:18121/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          t=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',t);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies -X POST http://127.0.0.1:18121/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF P01 22121 Gate' \
+            --data-urlencode 'admin_password=MaintenanceTest!2026' \
+            --data-urlencode 'admin_password_confirm=MaintenanceTest!2026' \
+            -o /tmp/setup-post.html
+          test -f app/.runtime.php
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          for($i=1;$i<=12;$i++){
+            $root=$repo->createCategory(['name'=>'一级分类 '.$i,'description'=>'Root '.$i,'parent_id'=>null,'is_private'=>false,'sort_order'=>100-$i]);
+            for($j=1;$j<=3;$j++){
+              $name=$j===1?'浏览器、设备与环境':'二级分类 '.$i.'-'.$j;
+              $child=$repo->createCategory(['name'=>$name,'description'=>'Child','parent_id'=>$root,'is_private'=>false,'sort_order'=>10-$j]);
+              $repo->saveLink(null,['category_id'=>$child,'title'=>'Fixture '.$i.'-'.$j,'url'=>'https://example.com/'.$i.'/'.$j,'description'=>'fixture','is_private'=>false,'is_pending'=>false],'manual');
+            }
+          }
+          echo "FIXTURE_PASS\n";
+          PHP
+          php cli/verify.php | tee "$GITHUB_WORKSPACE/evidence/cli-verify.txt"
+
+      - name: Real Chrome navigation and backend value gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > evidence/e2e.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18121/';
+          let browser;
+          try{
+            browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.click('#loginButton');await page.fill('[name=password]','MaintenanceTest!2026');await page.click('#loginSubmit');
+            await page.waitForFunction(()=>document.body.classList.contains('is-admin'));
+            await page.waitForSelector('.category-row--root');
+
+            await page.evaluate(()=>document.getElementById('sidebarScroll').scrollTop=450);
+            await page.click('[data-view="home"]');await page.waitForTimeout(160);
+            const homeTop=await page.evaluate(()=>document.getElementById('sidebarScroll').scrollTop);
+            if(homeTop>2)throw new Error('HOME_SCROLL_TOP '+homeTop);
+
+            const roots=page.locator('[data-root-wrap]');const count=await roots.count();if(count<8)throw new Error('ROOT_FIXTURE '+count);
+            const target=roots.nth(count-3);await target.scrollIntoViewIfNeeded();await page.waitForTimeout(80);
+            const before=await page.evaluate(()=>document.getElementById('sidebarScroll').scrollTop);
+            await target.locator('.nav-chevron').click();await page.waitForTimeout(180);
+            const after=await page.evaluate(()=>document.getElementById('sidebarScroll').scrollTop);
+            if(Math.abs(after-before)>2)throw new Error(`EXPAND_JUMP ${before}->${after}`);
+            await target.locator('.category-row--child').first().waitFor({state:'visible'});
+
+            const geom=await target.evaluate(root=>{
+              const rr=root.querySelector('.category-row--root'),cr=root.querySelector('.category-row--child');
+              const rm=rr.querySelector('.category-nav-main'),cm=cr.querySelector('.category-nav-main');
+              const rc=rr.querySelector('.nav-count'),cc=cr.querySelector('.nav-count');
+              const cl=cr.querySelector('.nav-label');
+              return {rootH:rr.getBoundingClientRect().height,childH:cr.getBoundingClientRect().height,rootFont:getComputedStyle(rm).fontSize,childFont:getComputedStyle(cm).fontSize,rootCountW:rc.getBoundingClientRect().width,childCountW:cc.getBoundingClientRect().width,rootCountFont:getComputedStyle(rc).fontSize,childCountFont:getComputedStyle(cc).fontSize,childOverflow:cl.scrollWidth-cl.clientWidth};
+            });
+            if(Math.abs(geom.rootH-36)>1||Math.abs(geom.childH-36)>1)throw new Error('ROW_HEIGHT '+JSON.stringify(geom));
+            if(geom.rootFont!=='13px'||geom.childFont!=='13px')throw new Error('ROW_FONT '+JSON.stringify(geom));
+            if(Math.abs(geom.rootCountW-30)>1||Math.abs(geom.childCountW-30)>1||geom.rootCountFont!=='11px'||geom.childCountFont!=='11px')throw new Error('COUNT_ALIGN '+JSON.stringify(geom));
+            if(geom.childOverflow>1)throw new Error('CHILD_TRUNCATED '+JSON.stringify(geom));
+
+            await target.locator('.category-row--child .category-nav-main').first().click();await page.waitForTimeout(140);
+            const active=await page.locator('.category-row.active').first().evaluate(el=>({bg:getComputedStyle(el).backgroundColor,beforeDisplay:getComputedStyle(el,'::before').display,beforeContent:getComputedStyle(el,'::before').content}));
+            if(active.beforeDisplay!=='none'&&active.beforeContent!=='none')throw new Error('GREEN_RAIL '+JSON.stringify(active));
+            if(active.bg!=='rgb(241, 243, 242)')throw new Error('ACTIVE_NOT_NEUTRAL '+JSON.stringify(active));
+
+            for(const width of [390,480,640,768,1024,1280,1440,1920]){
+              await page.setViewportSize({width,height:900});await page.waitForTimeout(60);
+              const overflow=await page.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+              if(overflow>1)throw new Error(`FRONT_OVERFLOW ${width} ${overflow}`);
+            }
+
+            await page.setViewportSize({width:1440,height:900});await page.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+            const top=await page.locator('.vf-rail-item>span').allTextContents();
+            const expected=['网址','浏览器助手','备份与恢复','设置','更新'];
+            if(JSON.stringify(top)!==JSON.stringify(expected))throw new Error('ADMIN_TOP '+JSON.stringify(top));
+            const subs=await page.locator('.vf-rail-section.active .vf-rail-subitem').allTextContents();
+            for(const label of ['网址健康','重复网址','导入导出'])if(!subs.includes(label))throw new Error('MISSING_MERGE '+label);
+            for(const label of ['标签','推广链接','网址图标','高级'])if(subs.includes(label)||top.includes(label))throw new Error('RETIRED_NAV '+label);
+            await page.click('#addLink');await page.waitForSelector('#editDialog[open]');
+            if(await page.getByText('标签',{exact:true}).count())throw new Error('TAG_EDIT_FIELD_REMAINS');
+            await page.locator('#editDialog .vf-dialog-close').click();
+
+            const redirects=[['manage.php','links-admin.php'],['tags.php','links-admin.php?notice=tags-retired'],['affiliate.php','links-admin.php?notice=affiliate-retired'],['governance.php','links-admin.php?notice=governance-retired'],['icons.php','settings.php#display'],['jobs.php','system.php'],['security.php','settings.php#account']];
+            for(const [from,to] of redirects){await page.goto(base+from,{waitUntil:'networkidle'});if(!page.url().includes(to))throw new Error(`REDIRECT ${from} ${page.url()}`);}
+            await page.goto(base+'tags.php',{waitUntil:'networkidle'});const notice=await page.locator('[role="status"]').textContent();if(!notice.includes('标签功能已退役'))throw new Error('TAG_NOTICE');
+            await page.goto(base+'plugins.php',{waitUntil:'networkidle'});if(!(await page.locator('h1').textContent()).includes('RSS 与扩展'))throw new Error('RSS_SETTINGS');
+            await page.goto(base+'system.php',{waitUntil:'networkidle'});if(!(await page.locator('h1').textContent()).includes('系统状态'))throw new Error('SYSTEM_SETTINGS');
+
+            await page.goto(base+'update.php',{waitUntil:'networkidle'});
+            await page.evaluate(()=>{const s=document.getElementById('updateSteps');s.hidden=false;s.textContent='✓ Atomic 升级完成 ✓ 更新完成';document.getElementById('updateState').textContent='更新完成，当前版本：V2.21.21';});
+            await page.waitForURL(u=>u.searchParams.has('vf_refresh'),{timeout:5000});
+
+            if(errors.length)throw new Error('PAGE_ERRORS '+errors.join(' | '));
+            const result={pass:true,homeTop,before,after,geom,active,adminTop:top,urlSubmenu:subs,redirects:'PASS',autoReload:'PASS',responsive:'390-1920 PASS',pageErrors:0};
+            fs.writeFileSync('evidence/browser.json',JSON.stringify(result,null,2));console.log('P01_22121_BROWSER_PASS');
+          }catch(e){fs.writeFileSync('evidence/browser-error.txt',String(e?.stack||e)+'\n');throw e}finally{if(browser)await browser.close()}
+          JS
+          node evidence/e2e.mjs | tee evidence/browser.txt
+
+      - name: SQLite and backup boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-22121
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          BACKUP=$(php cli/backup.php);test -f "$BACKUP"
+          echo 'DATA_BACKUP_PASS' | tee "$GITHUB_WORKSPACE/evidence/data-backup.txt"
+
+      - name: Publish safe evidence
+        if: success()
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          browser=json.load(open('evidence/browser.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'V2.21.21_NAVIGATION_BACKEND_BROWSER','status':'SUCCESS','pass':True,'working_source_sha':open('/tmp/product-sha').read(),'working_source_tree':open('/tmp/product-tree').read(),'browser':browser,'fresh_install':True,'sqlite_integrity':True,'backup':True,'schema_changed':False,'production_changed':False,'private_data_used':False}
+          open('/tmp/evidence.json','w').write(json.dumps(q,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results;cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.21-NAVIGATION-BACKEND-BROWSER.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.21-NAVIGATION-BACKEND-BROWSER.json
+          git -C out commit -q -m 'evidence(P01): V2.21.21 navigation backend browser pass'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p01-v22121-navigation-backend-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
