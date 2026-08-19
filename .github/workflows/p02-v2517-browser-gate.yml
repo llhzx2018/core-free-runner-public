@@ -1,0 +1,208 @@
+name: P02 V2.5.17 Real Browser Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2517-browser-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_BRANCH: maintenance/v2.5.17-library-model-convergence
+    steps:
+      - name: Require registered private capability
+        env:
+          READ_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$READ_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_BRANCH }}'
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Runtime prerequisites and source exact
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip sqlite3 >/dev/null
+          php -v
+          php -m | grep -qi pdo_sqlite
+          php -m | grep -qi sqlite3
+          php -m | grep -qi zip
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.17
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.17
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          m=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert len(m['entries'])==74
+          for e in m['entries']:
+              b=pathlib.Path(e['repo_path']).read_bytes();h=hashlib.sha256(b).hexdigest()
+              assert len(b)==e['bytes'],e['repo_path']
+              assert h==e['sha256']==e['repo_sha256'],e['repo_path']
+          print('SOURCE_MANIFEST_74_OF_74=PASS')
+          PY
+
+      - name: Build fresh runtime and run real Chromium
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-v2517-browser"
+          SITE="$ROOT/site"
+          mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.17
+          npm -g ls playwright >/dev/null 2>&1 || npm i -g playwright@1.55.0 >/dev/null
+          playwright install chromium >/dev/null
+          php -S 127.0.0.1:18737 -t "$SITE" >"$RUNNER_TEMP/p02-v2517-php.log" 2>&1 &
+          PID=$!
+          trap 'kill $PID || true; echo "--- PHP LOG ---"; tail -120 "$RUNNER_TEMP/p02-v2517-php.log" || true' EXIT
+          sleep 1
+          cat > "$RUNNER_TEMP/p02-v2517-browser.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          const assert=(ok,msg)=>{if(!ok)throw new Error(msg)};
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1000}});
+            const base='http://127.0.0.1:18737';
+            await page.goto(base+'/setup.php',{waitUntil:'networkidle'});
+            assert(await page.locator('.ready').count()===1,'SETUP_PREFLIGHT_NOT_READY');
+            await page.fill('#password','P02-V2517-Test-Only!');
+            await page.fill('#password_confirm','P02-V2517-Test-Only!');
+            await Promise.all([
+              page.waitForURL(base+'/',{timeout:15000}),
+              page.click('button[type="submit"]')
+            ]);
+            await page.waitForSelector('#allCount',{state:'visible'});
+            await page.waitForFunction(()=>document.body&&document.body.dataset.vftbVersion==='2.5.17');
+
+            const sidebar=await page.evaluate(()=>({
+              quick:getComputedStyle(document.querySelector('.side-item[data-mode="quick"]')).display,
+              article:getComputedStyle(document.querySelector('.side-item[data-mode="article"]')).display,
+              all:document.querySelector('.side-item[data-mode="all"]')?.textContent||'',
+              fav:document.querySelector('.side-item[data-mode="favorite"]')?.textContent||'',
+              recent:document.querySelector('.side-item[data-mode="recent"]')?.textContent||''
+            }));
+            assert(sidebar.quick==='none'&&sidebar.article==='none','LEGACY_MODE_NAV_VISIBLE');
+            assert(sidebar.all.includes('全部内容')&&sidebar.fav.includes('我的收藏')&&sidebar.recent.includes('最近使用'),'PRIMARY_IA_MISSING');
+
+            for(const legacy of ['quick','article']){
+              await page.evaluate(v=>localStorage.setItem('vftb-mode',v),legacy);
+              await page.reload({waitUntil:'networkidle'});
+              await page.waitForSelector('#allCount',{state:'visible'});
+              await page.waitForFunction(()=>localStorage.getItem('vftb-mode')==='all');
+            }
+
+            const created=await page.evaluate(async()=>{
+              const session=await fetch('/api.php?action=session',{credentials:'same-origin'}).then(r=>r.json());
+              const csrf=session.csrf;
+              const post=async(action,body)=>{
+                const r=await fetch('/api.php?action='+action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});
+                const j=await r.json(); if(!r.ok||j.ok===false)throw new Error(action+':'+JSON.stringify(j));return j;
+              };
+              const cat=await post('category_save',{name:'V2517 浏览器验证'});
+              const base={category_id:cat.id,description:'',tags:'',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]};
+              const quick=await post('content_save',{...base,title:'V2517 普通资料',content:'普通资料正文',content_mode:'quick',content_format:'plain',primary_action:'copy'});
+              const article=await post('content_save',{...base,title:'V2517 长文资料',content:'# 长文资料\n\n真实阅读测试。',content_mode:'article',content_format:'markdown',primary_action:'read'});
+              const editable=await post('content_save',{...base,title:'V2517 编辑资料',content:'编辑测试',content_mode:'quick',content_format:'plain',primary_action:'copy'});
+              const boot=await fetch('/api.php?action=app_bootstrap',{credentials:'same-origin'}).then(r=>r.json());
+              const recent=await fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20',{credentials:'same-origin'}).then(r=>r.json());
+              return {cat:cat.id,quick:quick.id,article:article.id,editable:editable.id,articleOpenSetting:Number(boot.data.settings.article_open_counts_recent||0),recentTotal:Number(recent.data.pagination.total||0)};
+            });
+            assert(created.articleOpenSetting===0,'LEGACY_ARTICLE_OPEN_SETTING_NOT_ZERO');
+            assert(created.recentTotal===0,'RECENT_NOT_EMPTY_BEFORE_USE');
+
+            await page.reload({waitUntil:'networkidle'});
+            await page.waitForSelector(`[data-open="${created.quick}"]`,{state:'visible'});
+            await page.click(`[data-open="${created.quick}"]`);
+            await sleep(950);
+            let recent=await page.evaluate(async()=>fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20',{credentials:'same-origin'}).then(r=>r.json()));
+            assert(Number(recent.data.pagination.total)===1,'QUICK_OPEN_NOT_RECENT');
+            assert(Number(recent.data.items[0].id)===Number(created.quick),'QUICK_RECENT_ID_MISMATCH');
+            assert(Boolean(recent.data.items[0].last_opened_at),'QUICK_LAST_OPENED_MISSING');
+
+            await sleep(1100);
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.waitForSelector(`[data-open="${created.article}"]`,{state:'visible'});
+            await page.click(`[data-open="${created.article}"]`);
+            await sleep(950);
+            recent=await page.evaluate(async()=>fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20',{credentials:'same-origin'}).then(r=>r.json()));
+            assert(Number(recent.data.pagination.total)===2,'ARTICLE_OPEN_NOT_RECENT_WITH_SETTING_OFF');
+            assert(Number(recent.data.items[0].id)===Number(created.article),'ARTICLE_NOT_LATEST_RECENT');
+            assert(Boolean(recent.data.items[0].last_opened_at),'ARTICLE_LAST_OPENED_MISSING');
+
+            await sleep(1100);
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.waitForSelector(`[data-item-more="${created.editable}"]`,{state:'visible'});
+            await page.click(`[data-item-more="${created.editable}"]`);
+            await page.waitForSelector('[data-edit]',{state:'visible'});
+            await page.click('[data-edit]');
+            await page.waitForSelector('#contentForm',{state:'visible'});
+            await sleep(950);
+            const editorModel=await page.evaluate(()=>{
+              const select=document.querySelector('select[name="content_mode"]');
+              return {exists:!!select,hidden:!!(select&&select.closest('.field')&&select.closest('.field').hidden)};
+            });
+            assert(editorModel.exists&&editorModel.hidden,'CONTENT_MODE_STILL_USER_VISIBLE');
+            recent=await page.evaluate(async()=>fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20',{credentials:'same-origin'}).then(r=>r.json()));
+            assert(Number(recent.data.pagination.total)===3,'EDIT_NOT_RECENT');
+            assert(Number(recent.data.items[0].id)===Number(created.editable),'EDIT_NOT_LATEST_RECENT');
+
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.waitForFunction(()=>Number(document.querySelector('#recentCount')?.textContent||0)===3,{timeout:7000});
+            await page.click('.side-item[data-mode="recent"]');
+            await page.waitForFunction(()=>document.body.innerText.includes('最近打开、阅读、编辑、复制或调用过的资料'));
+            const legacyVisibleText=await page.evaluate(()=>{
+              const s=document.body.innerText;
+              return {sidebarQuick:[...document.querySelectorAll('.side-item')].some(n=>getComputedStyle(n).display!=='none'&&n.textContent.includes('便签')),sidebarArticle:[...document.querySelectorAll('.side-item')].some(n=>getComputedStyle(n).display!=='none'&&n.textContent.includes('文章资料'))};
+            });
+            assert(!legacyVisibleText.sidebarQuick&&!legacyVisibleText.sidebarArticle,'LEGACY_TERMS_VISIBLE_IN_PRIMARY_NAV');
+
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.click('#addContentMenuBtn');
+            await sleep(100);
+            const createMenuText=await page.evaluate(()=>document.body.innerText);
+            assert(createMenuText.includes('新建资料'),'NEW_MATERIAL_LABEL_MISSING');
+            assert(createMenuText.includes('新建长文'),'NEW_LONGFORM_LABEL_MISSING');
+
+            const mobile=await browser.newPage({viewport:{width:390,height:844}});
+            await mobile.goto(base+'/',{waitUntil:'networkidle'});
+            const overflow=await mobile.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
+            assert(overflow<=1,'MOBILE_OVERFLOW_'+overflow);
+            const mobileLegacy=await mobile.evaluate(()=>({q:getComputedStyle(document.querySelector('.side-item[data-mode="quick"]')).display,a:getComputedStyle(document.querySelector('.side-item[data-mode="article"]')).display}));
+            assert(mobileLegacy.q==='none'&&mobileLegacy.a==='none','MOBILE_LEGACY_NAV_VISIBLE');
+
+            await browser.close();
+            console.log('PRIMARY_LIBRARY_IA=PASS');
+            console.log('LEGACY_MODE_FALLBACK=PASS');
+            console.log('QUICK_OPEN_RECENT=PASS');
+            console.log('ARTICLE_OPEN_RECENT_SETTING_OFF=PASS');
+            console.log('EDIT_RECENT=PASS');
+            console.log('RECENT_ORDERING=PASS');
+            console.log('VISIBLE_TERMINOLOGY_CONVERGENCE=PASS');
+            console.log('MOBILE_390_OVERFLOW=NONE');
+            console.log('REAL_CHROMIUM_V2517=PASS');
+          })().catch(async e=>{console.error(e&&e.stack||e);process.exit(1)});
+          JS
+          NODE_PATH="$(npm root -g)" node "$RUNNER_TEMP/p02-v2517-browser.cjs"
+          echo SCHEMA=2401
+          echo PRODUCTION_WRITE=NO
