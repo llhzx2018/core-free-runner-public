@@ -1,0 +1,88 @@
+name: P02 V2.5.8 Production Source Package
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v258-production-source-package.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REF: 56ea24d4bd42b94450f64b3d75a244816b9e9ab9
+      UPDATE_NAME: VF_Library_V2.5.8_UPDATE.zip
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_REF }}'
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build deterministic V2.5.6 source package twice
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/repository-gates.py
+          cp scripts/build-release-v2.5.4.py "$RUNNER_TEMP/b.py"
+          python3 - "$RUNNER_TEMP/b.py" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          old="ROOT=Path(__file__).resolve().parents[1]; SRCVER='2.5.2'; VER='2.5.4'; SCHEMA=2401; DT=(2026,8,19,2,0,0)"
+          new="ROOT=Path.cwd(); SRCVER='2.5.6'; VER='2.5.8'; SCHEMA=2401; DT=(2026,8,19,5,10,0)"
+          assert old in s;s=s.replace(old,new).replace("default='build/release-v2.5.4'","default='build/release-v2.5.8'").replace("default='release/v2.5.4'","default='release/v2.5.8'")
+          start="notes=out/f'VF_Library_V{VER}_RELEASE_NOTES.md'; notes.write_text(f'''"; end="''')\n arts=[sz,fz,uz,az,rf,notes]"; i=s.index(start);j=s.index(end,i)
+          notes="""notes=out/f'VF_Library_V{VER}_RELEASE_NOTES.md'; notes.write_text(f'''# VF Library V{VER}\n\nV2.5.8 corrects preset-template interaction for the current V2.5.6 Production line.\n\n- New content is only a quick-note / article chooser and opens blank.\n- Presets are inserted from the editor toolbar at the current cursor.\n- Fixes literal backslash-n output in preset content.\n- Keeps the focused 4 quick-note + 4 article preset set.\n- Browser run 32217196209 passed editor interaction and newline normalization.\n- Schema {SCHEMA}; no migration. Existing {SRCVER} sites use UPDATE.\n''')\n arts=[sz,fz,uz,az,rf,notes]"""
+          s=s[:i]+notes+s[j+len(end):]
+          s=s.replace("'candidate_browser':'PASS_RUN_32206056733_PLUS_32146866564'","'candidate_browser':'PASS_RUN_32217196209_PLUS_COMMIT_32217282730'")
+          s=s.replace("'main_readback':'PRODUCTION_2.5.2_CURRENT_EXPECTED_NOT_PROMOTED'","'main_readback':'PRODUCTION_2.5.6_OWNER_VISUAL_EVIDENCE'")
+          p.write_text(s)
+          PY
+          TREE=$(git show -s --format=%T "$PRODUCT_REF")
+          python3 "$RUNNER_TEMP/b.py" --out build/a --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.8 >/dev/null
+          python3 "$RUNNER_TEMP/b.py" --out build/b --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.8 >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          a=Path('build/a');b=Path('build/b'); ha={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in a.iterdir() if p.is_file()};hb={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in b.iterdir() if p.is_file()};assert ha==hb;(a/'atomic-manifest.json').exists() if False else None
+          print('DETERMINISTIC_PRODUCTION_SOURCE_BUILD=PASS')
+          for n,h in sorted(ha.items()):print(n,h)
+          PY
+          unzip -p build/a/$UPDATE_NAME atomic-manifest.json | jq -e '.source_version=="2.5.6" and .target_version=="2.5.8" and .source_schema==2401 and .target_schema==2401' >/dev/null
+          echo PACKAGE_SOURCE_IDENTITY=2.5.6_TO_2.5.8_PASS
+      - name: Existing Production-line upgrade V2.5.6 to V2.5.8
+        working-directory: product
+        env:
+          READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/up"; SRC="$ROOT/src"; SITE="$ROOT/site"; mkdir -p "$ROOT"; git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-library.git" "$SRC"; git -C "$SRC" checkout -q v2.5.6; mkdir -p "$SITE"; bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null
+          PW="P02-V258-PROD-${{ github.run_id }}!"; php -S 127.0.0.1:18288 -t "$SITE" >/dev/null 2>&1 & PID=$!; for _ in $(seq 1 80);do curl -fsS http://127.0.0.1:18288/setup.php >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/c" http://127.0.0.1:18288/setup.php > "$ROOT/setup"; TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1]).read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          ); test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H 'Origin: http://127.0.0.1:18288' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18288/setup.php)" = 303
+          SESSION=$(curl -fsS -b "$ROOT/c" http://127.0.0.1:18288/api.php?action=session); CSRF=$(jq -r .csrf<<<"$SESSION"); CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"V258 Sentinel","icon":"folder"}' 'http://127.0.0.1:18288/api.php?action=category_save');CID=$(jq -r .id<<<"$CAT"); ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V258 Preserve",content:"keep",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}'); SAVED=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" 'http://127.0.0.1:18288/api.php?action=content_save');IID=$(jq -r .id<<<"$SAVED");curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" 'http://127.0.0.1:18288/api.php?action=content_favorite'|jq -e .ok >/dev/null
+          PKG="$(pwd)/build/a/$UPDATE_NAME";BYTES=$(stat -c%s "$PKG");SHA=$(sha256sum "$PKG"|awk '{print $1}');cat > "$ROOT/up.php" <<'PHP'
+          <?php
+          $s=$argv[1];$p=$argv[2];$b=(int)$argv[3];$h=$argv[4];$o=$argv[5];require $s.'/app/bootstrap.php';require_once $s.'/app/CoreUpdates/UpdateAdapter.php';require_once $s.'/app/CoreUpdates/UpdateCore.php';require_once $s.'/app/VfLibraryCoreUpdateAdapter.php';$m=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'current_version'=>'2.5.6','target_version'=>'2.5.8','update_type'=>'ATOMIC','from_versions'=>['2.5.6'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.8','asset_name'=>'VF_Library_V2.5.8_UPDATE.zip','asset_bytes'=>$b,'asset_sha256'=>$h,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-19T05:10:00Z'];$c=new CoreUpdates\UpdateCore('P02','APP');if(($c->check('2.5.6','2401',$m)['status']??'')!=='AVAILABLE')exit(2);if(($c->verifyPackage($p,$m)['status']??'')!=='VERIFIED')exit(3);$r=$c->upgrade('2.5.6','2401',new VfLibraryCoreUpdateAdapter(),$p,$m);file_put_contents($o,json_encode($r));if(!in_array($r['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)||empty($r['backup_locator']))exit(4);
+          PHP
+          php "$ROOT/up.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$ROOT/result";test "$(cat "$SITE/VERSION.txt")" = 2.5.8;jq -e '.backup_locator|length>0' "$ROOT/result">/dev/null;curl -fsS -b "$ROOT/c" "http://127.0.0.1:18288/api.php?action=content_get&id=$IID"|jq -e '(.item.is_favorite|tonumber)==1 and .item.content=="keep"'>/dev/null;php "$SITE/cli/verify.php"|jq -e '.ok==true and .version=="2.5.8" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0'>/dev/null;kill "$PID";echo EXISTING_DATA_2.5.6_TO_2.5.8=PASS;echo AUTOMATIC_BACKUP_DATA_FAVORITE_SQLITE=PASS
+      - name: Replace Release assets with verified Production-source build
+        working-directory: product
+        env:
+          GH_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          gh release upload v2.5.8 build/a/* --repo llhzx2018/vf-library --clobber
+          BYTES=$(stat -c%s build/a/$UPDATE_NAME);SHA=$(sha256sum build/a/$UPDATE_NAME|awk '{print $1}');mkdir -p "$RUNNER_TEMP/r";gh release download v2.5.8 --repo llhzx2018/vf-library --pattern "$UPDATE_NAME" --dir "$RUNNER_TEMP/r";test "$(stat -c%s "$RUNNER_TEMP/r/$UPDATE_NAME")" = "$BYTES";test "$(sha256sum "$RUNNER_TEMP/r/$UPDATE_NAME"|awk '{print $1}')" = "$SHA";RID=$(gh release view v2.5.8 --repo llhzx2018/vf-library --json databaseId --jq .databaseId);echo RELEASE_ID=$RID;echo UPDATE_BYTES=$BYTES;echo UPDATE_SHA256=$SHA;echo REMOTE_READBACK=PASS;echo PRODUCTION_WRITE=NO
