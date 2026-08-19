@@ -12,12 +12,13 @@ permissions:
 
 env:
   P03_REPOSITORY: llhzx2018/vf-forge
-  P03_COMMIT: d9a7bb9c09f867ab407b377a8632c23f57570d77
+  P03_COMMIT: 27e387c9ac2b91721289d1c96e504c16696bbb7d
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
 
 jobs:
   diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - name: Checkout exact private candidate
         uses: actions/checkout@v4
@@ -29,40 +30,66 @@ jobs:
           fetch-depth: 0
           path: p03
 
-      - name: Inspect setup GET without exposing tokens
+      - name: Verify fresh install GET POST and Schema 30
         shell: bash
         run: |
           set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
           cd p03
           RUNTIME="$RUNNER_TEMP/runtime"
           DATA_ROOT="$RUNNER_TEMP/private"
-          rm -rf "$RUNTIME" "$DATA_ROOT"; mkdir -p "$DATA_ROOT"
+          COOKIE="$RUNNER_TEMP/cookie"
+          BASE='http://127.0.0.1:18082'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"; mkdir -p "$DATA_ROOT"
           python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
-          docker rm -f p03-v1373-setup-diag >/dev/null 2>&1 || true
-          docker run -d --rm --name p03-v1373-setup-diag -p 18082:18082 \
-            -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app php:8.4-cli-bookworm \
-            php -S 0.0.0.0:18082 -t /app >/dev/null
-          trap 'docker logs p03-v1373-setup-diag 2>&1 | sed -E "s/value=\"[^\"]+\"/value=\"[REDACTED]\"/g" || true; docker rm -f p03-v1373-setup-diag >/dev/null 2>&1 || true' EXIT
+          test -f "$RUNTIME/app/schema.sql"
+          test -f "$RUNTIME/app/SetupSupport.php"
+          (cd "$RUNTIME" && php -S 127.0.0.1:18082 -t "$RUNTIME" >"$RUNNER_TEMP/setup-server.log" 2>&1 & echo $! >"$RUNNER_TEMP/setup-server.pid")
+          cleanup(){ kill "$(cat "$RUNNER_TEMP/setup-server.pid")" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
           ready=0
           for i in $(seq 1 80); do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/setup.php || true)
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/setup.php" || true)
             if [ "$code" != '000' ]; then ready=1; break; fi
             sleep .25
           done
           test "$ready" = '1'
-          code=$(curl -sS -D "$RUNNER_TEMP/setup.headers" -o "$RUNNER_TEMP/setup.html" -w '%{http_code}' http://127.0.0.1:18082/setup.php || true)
+          code=$(curl -sS -D "$RUNNER_TEMP/setup.headers" -c "$COOKIE" -o "$RUNNER_TEMP/setup.html" -w '%{http_code}' "$BASE/setup.php" || true)
           echo "SETUP_HTTP=$code"
           echo "SETUP_BYTES=$(stat -c%s "$RUNNER_TEMP/setup.html" 2>/dev/null || echo 0)"
-          echo 'SETUP_HEADERS_BEGIN'
           grep -Ei '^(HTTP/|Content-Type:|X-Robots-Tag:|Location:)' "$RUNNER_TEMP/setup.headers" || true
-          echo 'SETUP_HEADERS_END'
           echo 'SETUP_INPUT_NAMES_BEGIN'
           grep -oE 'name="[A-Za-z0-9_-]+"' "$RUNNER_TEMP/setup.html" | sort -u || true
           echo 'SETUP_INPUT_NAMES_END'
-          if grep -q 'name="setup_csrf"' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_CSRF_FIELD=PASS'; else echo 'SETUP_CSRF_FIELD=FAIL'; fi
-          if grep -q '<form' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_FORM=PASS'; else echo 'SETUP_FORM=FAIL'; fi
-          if grep -q 'Fatal error\|Uncaught Error\|Warning:' "$RUNNER_TEMP/setup.html"; then echo 'SETUP_PHP_ERROR_MARKER=YES'; else echo 'SETUP_PHP_ERROR_MARKER=NO'; fi
-          docker logs p03-v1373-setup-diag 2>&1 | tail -n 30 | sed -E 's/value="[^"]+"/value="[REDACTED]"/g' || true
+          if grep -q 'Fatal error\|Uncaught Error\|Warning:' "$RUNNER_TEMP/setup.html"; then cat "$RUNNER_TEMP/setup-server.log"; exit 1; fi
           test "$code" = '200'
           grep -q 'name="setup_csrf"' "$RUNNER_TEMP/setup.html"
+          grep -q 'name="password"' "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Forge V1373 Setup Fixture' \
+            --data-urlencode "data_root=$DATA_ROOT" \
+            --data-urlencode "password=$FIXTURE_PASS" \
+            --data-urlencode "password_confirm=$FIXTURE_PASS" \
+            "$BASE/setup.php" >"$RUNNER_TEMP/setup-post.txt"
+          if ! grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"; then
+            echo 'SETUP_POST_REDIRECT=FAIL'; cat "$RUNNER_TEMP/setup-server.log"; exit 1
+          fi
+          DB=$(find "$DATA_ROOT/database" -maxdepth 1 -type f -name '*.sqlite' | head -n1)
+          test -n "$DB" -a -f "$DB"
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          sqlite3 "$DB" "select version,migration_id,status from schema_migrations order by version desc limit 1;" | grep -q '^30|M030_EXTERNAL_AUTHORITY_MEMORY_INDEX|applied$'
+          test -f "$RUNTIME/app/.runtime.php"
+          test ! -f "$RUNTIME/app/schema.sql"
           echo 'P03_V1373_SETUP_DIAGNOSTIC=PASS'
+          echo 'FRESH_INSTALL=PASS'
+          echo 'SCHEMA=30'
+          echo 'MIGRATION=M030_EXTERNAL_AUTHORITY_MEMORY_INDEX'
+          echo 'PRODUCTION_WRITE=NO'
