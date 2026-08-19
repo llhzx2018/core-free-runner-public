@@ -1,0 +1,50 @@
+name: TEMP P01 V22119 Fast UI Gate V3
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-fast-ui-v3.yml']
+permissions:
+  contents: write
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      ADMIN_PASS: Reference-P01-22119!Strong
+      BASE_URL: http://127.0.0.1:18521
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.4', extensions: 'pdo_sqlite, sqlite3, curl, zip, mbstring', coverage: none}
+      - name: Prepare exact current source and synthetic site
+        shell: bash
+        run: |
+          set -Eeuo pipefail;test -n "$READ_TOKEN";command -v google-chrome >/dev/null
+          git clone -q --depth 1 --branch maintenance/reference-driven-ui-2.21.19-20260819 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" product;git -C product rev-parse HEAD >/tmp/source-sha;git -C product rev-parse HEAD^{tree} >/tmp/source-tree
+          find product/src -type f -name '*.php' -print0|xargs -0 -n1 php -l >/dev/null;node --check product/src/assets/reference-ui.js
+          mkdir -p "$RUNNER_TEMP/node";cd "$RUNNER_TEMP/node";npm init -y >/dev/null 2>&1;PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+          cp -a "$GITHUB_WORKSPACE/product/src" /tmp/p01-v22119;php -S 127.0.0.1:18521 -t /tmp/p01-v22119 >/tmp/server.log 2>&1&echo $!>/tmp/server.pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/c http://127.0.0.1:18521/setup.php -o /tmp/s&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/s').read());assert m;print(m.group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/c -c /tmp/c -X POST http://127.0.0.1:18521/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Reference UI' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null
+          php -r 'require "/tmp/p01-v22119/app/bootstrap.php";$r=new VfRepository(vf_db());$ids=[];foreach([["工作工具",100],["AI 与开发",90],["内容与资料",80],["运营服务",70]] as $x)$ids[]=$r->createCategory(["name"=>$x[0],"description"=>"reference fixture","is_private"=>0,"sort_order"=>$x[1]]);foreach($ids as $i=>$c)for($j=0;$j<3;$j++)$r->saveLink(null,["category_id"=>$c,"title"=>"Reference ".$i."-".$j,"url"=>"https://example.com/".$i."/".$j,"description"=>"reference fixture","is_private"=>0,"is_favorite"=>($j===0?1:0),"sort_order"=>100-$j]);if(strtolower((string)vf_db()->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);'
+      - name: Chrome gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail;cd "$RUNNER_TEMP/node";ADMIN_PASS="$ADMIN_PASS" BASE_URL="$BASE_URL" node "$GITHUB_WORKSPACE/scripts/temp-p01-v22119-fast-gate.mjs"
+      - name: Publish PASS evidence
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -Eeuo pipefail;python3 - <<'PY'
+          import json,os
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','gate':'REFERENCE_UI_BROWSER_REGRESSION','status':'SUCCESS','pass':True,'source_sha':open('/tmp/source-sha').read().strip(),'source_tree':open('/tmp/source-tree').read().strip(),'browser':json.load(open('/tmp/p01-v22119-browser.json')),'private_data_persisted_publicly':False,'workflow_run_id':os.environ['GITHUB_RUN_ID']};open('/tmp/e.json','w').write(json.dumps(q,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git out;mkdir -p out/vf-agent/results;cp /tmp/e.json out/vf-agent/results/P01-V2.21.19-REFERENCE-UI-BROWSER.json;git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.19-REFERENCE-UI-BROWSER.json;git -C out commit -q -m 'evidence(P01): seal V2.21.19 reference UI browser regression';git -C out pull -q --rebase origin vf-agent-operations-v1;git -C out push -q origin HEAD:vf-agent-operations-v1
+      - if: always()
+        run: '[ -f /tmp/server.pid ]&&kill "$(cat /tmp/server.pid)" 2>/dev/null||true;rm -rf product out /tmp/p01-v22119 "$RUNNER_TEMP/node" || true'
