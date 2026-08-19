@@ -1,0 +1,90 @@
+name: P03 Bootstrap Exact Repair
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/p03/bootstrap-repair/**'
+      - '.github/workflows/p03-bootstrap-repair.yml'
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  EXPECTED_DEVELOP_HEAD: d1517f7d796e9e0a5ee2514761e036c5d2426a5b
+  SEALED_MAIN_HEAD: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require existing release write credential
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"
+          echo 'RELEASE_WRITE_CREDENTIAL=PASS'
+
+      - name: Checkout exact current develop
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.EXPECTED_DEVELOP_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p03
+
+      - name: Restore full main bootstrap and change only version identity
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$EXPECTED_DEVELOP_HEAD"
+          remote_head=$(git ls-remote "https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git" refs/heads/develop | awk '{print $1}')
+          test "$remote_head" = "$EXPECTED_DEVELOP_HEAD" || { echo "DEVELOP_DRIFT expected=$EXPECTED_DEVELOP_HEAD actual=$remote_head" >&2; exit 73; }
+          git cat-file -e "$SEALED_MAIN_HEAD^{commit}"
+          git show "$SEALED_MAIN_HEAD:src/app/bootstrap.php" > "$RUNNER_TEMP/bootstrap.main.php"
+          python3 - "$RUNNER_TEMP/bootstrap.main.php" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1])
+          s=p.read_text(encoding='utf-8')
+          old="define('VFAB_VERSION', '1.36.2');"
+          new="define('VFAB_VERSION', '1.37.0');"
+          assert s.count(old)==1, s.count(old)
+          assert new not in s
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          cp "$RUNNER_TEMP/bootstrap.main.php" src/app/bootstrap.php
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" src/app/bootstrap.php
+          test "$(grep -Fc "define('VFAB_VERSION'" src/app/bootstrap.php)" = '1'
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          repaired=Path('src/app/bootstrap.php').read_text(encoding='utf-8')
+          main=subprocess.check_output(['git','show','3962a68bbbcfbfc5aece6a338effebcafac759a9:src/app/bootstrap.php'],text=True)
+          normalized=repaired.replace("define('VFAB_VERSION', '1.37.0');","define('VFAB_VERSION', '1.36.2');",1)
+          assert normalized==main
+          print('BOOTSTRAP_FULL_RESTORE_EXACT=PASS')
+          print('BOOTSTRAP_LINES='+str(len(repaired.splitlines())))
+          PY
+          numstat=$(git diff --numstat "$SEALED_MAIN_HEAD" -- src/app/bootstrap.php)
+          echo "BOOTSTRAP_NUMSTAT=$numstat"
+          test "$numstat" = $'1\t1\tsrc/app/bootstrap.php'
+          php -l src/app/bootstrap.php
+          git config user.name 'VF Release Bridge'
+          git config user.email 'vf-release@users.noreply.github.com'
+          git add src/app/bootstrap.php
+          test "$(git diff --cached --name-only)" = 'src/app/bootstrap.php'
+          git commit -m 'fix: restore full bootstrap for V1.37.0 candidate'
+          new_sha=$(git rev-parse HEAD)
+          git push "https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git" HEAD:develop
+          echo "P03_BOOTSTRAP_REPAIR=PASS"
+          echo "NEW_DEVELOP_HEAD=$new_sha"
