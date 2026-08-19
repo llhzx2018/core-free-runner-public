@@ -1,0 +1,102 @@
+name: P04 V2.8.5 Online Channel E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v285-online-channel-e2e.yml'
+      - 'requests/p04-v285-online-channel-e2e.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: b73179673801452469a276ec744e15612ee7f38a
+      AUTHORITY_COMMIT: 92b927564933305383384804c82a043eb362d135
+      TARGET_VERSION: 2.8.5
+      RELEASE_ID: '372985763'
+      ASSET_ID: '520742167'
+      ASSET_BYTES: '1244056'
+      ASSET_SHA: e7896773928f6e21b024c628f047d04c57007b9287e0cd67d1eb7c0eb635f13c
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3
+          ini-file: production
+
+      - name: Real online update channel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          D="$RUNNER_TEMP/v285"; mkdir -p "$D" "$GITHUB_WORKSPACE/evidence"
+          gh api repos/llhzx2018/core-updates/contents/projects/P04.json -H 'Accept: application/vnd.github.raw+json' > "$D/P04.json"
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v$TARGET_VERSION" > "$D/release.json"
+          jq -e --arg v "$TARGET_VERSION" --arg c "$SOURCE_COMMIT" --arg s "$ASSET_SHA" --argjson r "$RELEASE_ID" --argjson a "$ASSET_ID" --argjson b "$ASSET_BYTES" '.target_version==$v and .from_versions==["2.7.9","2.8.0","2.8.1","2.8.2","2.8.3","2.8.4"] and .schema_from=="14" and .schema_to=="14" and .release_id==$r and .release_product_commit==$c and .asset_id==$a and .asset_bytes==$b and .asset_sha256==$s and .backup_required==true and .rollback_supported==true' "$D/P04.json" >/dev/null
+          jq -e --arg v "v$TARGET_VERSION" --arg c "$SOURCE_COMMIT" --argjson r "$RELEASE_ID" '.tag_name==$v and .target_commitish==$c and .id==$r and .draft==false and .prerelease==false' "$D/release.json" >/dev/null
+          cat > "$D/evaluate.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          final class Support { public static function randomHex(int $bytes=8): string { return bin2hex(random_bytes($bytes)); } }
+          $root=getenv('SOURCE_ROOT');
+          require $root.'/src/app/Core/Update/UpdateContract.php';
+          require $root.'/src/app/Core/Update/UpdateTransportInterface.php';
+          require $root.'/src/app/Core/Update/UpdateSourceInterface.php';
+          require $root.'/src/app/Core/Update/UpdateRepositoryClient.php';
+          require $root.'/src/app/Core/Update/UpdateManifestService.php';
+          $client=new \VFInfra\Core\Update\UpdateRepositoryClient();
+          $source=$client->fetchProjectManifest(); $m=$source['manifest'];
+          $asset=$client->resolveReleaseAsset((string)$m['repository'],(string)$m['release_tag'],(string)$m['asset_name']);
+          if((int)$asset['id']!==(int)getenv('ASSET_ID')||(int)$asset['size']!==(int)getenv('ASSET_BYTES')) throw new RuntimeException('asset identity');
+          $d=$client->download((string)$asset['url'],getenv('DOWNLOAD_PATH'),(int)$m['asset_bytes'],(string)$m['asset_sha256']);
+          if(!hash_equals(strtolower(getenv('ASSET_SHA')),strtolower((string)$d['sha256']))) throw new RuntimeException('asset hash');
+          foreach(['2.7.9','2.8.0','2.8.1','2.8.2','2.8.3','2.8.4'] as $v){$e=(new \VFInfra\Core\Update\UpdateManifestService($client,$v,14))->evaluate($m);if(($e['status']??'')!=='update_available'||empty($e['can_update']))throw new RuntimeException($v.' unavailable');}
+          $current=(new \VFInfra\Core\Update\UpdateManifestService($client,'2.8.5',14))->evaluate($m);
+          if(($current['status']??'')!=='up_to_date'||!empty($current['can_update']))throw new RuntimeException('target not current');
+          $stale=(new \VFInfra\Core\Update\UpdateManifestService($client,'2.7.8',14))->evaluate($m);
+          if(($stale['status']??'')!=='intermediate_required'||!empty($stale['can_update']))throw new RuntimeException('stale not blocked');
+          $wrong=(new \VFInfra\Core\Update\UpdateManifestService($client,'2.8.4',13))->evaluate($m);
+          if(($wrong['status']??'')!=='schema_incompatible'||!empty($wrong['can_update']))throw new RuntimeException('schema not blocked');
+          file_put_contents(getenv('REPORT_PATH'),json_encode(['status'=>'PASS','target'=>'2.8.5','asset_id'=>$asset['id'],'asset_bytes'=>$d['bytes'],'asset_sha256'=>$d['sha256'],'allowed_sources'=>['2.7.9','2.8.0','2.8.1','2.8.2','2.8.3','2.8.4'],'target_status'=>$current['status'],'stale_status'=>$stale['status'],'wrong_schema_status'=>$wrong['status'],'production_write'=>0,'production_upgrade'=>'NOT_EXECUTED'],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n");
+          echo "P04_V285_REAL_UPDATE_CLIENT=PASS\n";
+          PHP
+          SOURCE_ROOT="$GITHUB_WORKSPACE/source" DOWNLOAD_PATH="$D/VF_Infra_V2.8.5_UPDATE.zip" REPORT_PATH="$GITHUB_WORKSPACE/evidence/P04_V285_ONLINE_CHANNEL.json" ASSET_ID="$ASSET_ID" ASSET_BYTES="$ASSET_BYTES" ASSET_SHA="$ASSET_SHA" php "$D/evaluate.php"
+          test "$(stat -c %s "$D/VF_Infra_V2.8.5_UPDATE.zip")" = "$ASSET_BYTES"
+          test "$(sha256sum "$D/VF_Infra_V2.8.5_UPDATE.zip"|awk '{print $1}')" = "$ASSET_SHA"
+          unzip -t "$D/VF_Infra_V2.8.5_UPDATE.zip" >/dev/null
+          test "$(unzip -Z1 "$D/VF_Infra_V2.8.5_UPDATE.zip"|wc -l|tr -d ' ')" = 1
+          test "$(unzip -Z1 "$D/VF_Infra_V2.8.5_UPDATE.zip")" = repair-v2.8.5.php
+          unzip -p "$D/VF_Infra_V2.8.5_UPDATE.zip" repair-v2.8.5.php > "$D/repair.php"
+          php "$D/repair.php" --self-test | grep -F 'ATOMIC_SELF_TEST_PASS target=2.8.5 schema=14'
+          grep -Fq 'VF_INFRA_ONLINE_HANDOFF_V1' "$D/repair.php"
+          grep -Fq 'OnlineUpdateHandoff::authorize' "$D/repair.php"
+          grep -Fq 'OnlineUpdateHandoff::recordRepairResult' "$D/repair.php"
+          grep -Fq 'ReleaseManifestIntegrityVerifier::verify(__DIR__,VF_INFRA_ATOMIC_TARGET)' "$D/repair.php"
+          echo 'P04_V285_ONLINE_CHANNEL_E2E_PASS'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.5-ONLINE-CHANNEL-EVIDENCE
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
