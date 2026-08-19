@@ -1,0 +1,94 @@
+name: P03 V1.37.3 Postinstall API Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1373-postinstall-api-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: daf8ba696c436f0d82da592abdb3d172abe369b1
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Fresh install then inspect anonymous session API safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          cd p03
+          RUNTIME="$RUNNER_TEMP/runtime"
+          DATA_ROOT="$RUNNER_TEMP/private"
+          COOKIE="$RUNNER_TEMP/cookie"
+          BASE='http://127.0.0.1:18083'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"; mkdir -p "$DATA_ROOT"
+          python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          (cd "$RUNTIME" && php -S 127.0.0.1:18083 -t "$RUNTIME" >"$RUNNER_TEMP/server.log" 2>&1 & echo $! >"$RUNNER_TEMP/server.pid")
+          cleanup(){ kill "$(cat "$RUNNER_TEMP/server.pid")" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Forge V1373 API Diagnostic' \
+            --data-urlencode "data_root=$DATA_ROOT" \
+            --data-urlencode "password=$FIXTURE_PASS" \
+            --data-urlencode "password_confirm=$FIXTURE_PASS" \
+            "$BASE/setup.php" >"$RUNNER_TEMP/setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"
+
+          code=$(curl -sS -D "$RUNNER_TEMP/session.headers" -b "$COOKIE" -o "$RUNNER_TEMP/session.body" -w '%{http_code}' "$BASE/api.php?action=session" || true)
+          echo "SESSION_HTTP=$code"
+          echo "SESSION_BYTES=$(stat -c%s "$RUNNER_TEMP/session.body" 2>/dev/null || echo 0)"
+          echo 'SESSION_HEADERS_BEGIN'
+          grep -Ei '^(HTTP/|Content-Type:|X-Robots-Tag:|Location:)' "$RUNNER_TEMP/session.headers" || true
+          echo 'SESSION_HEADERS_END'
+          python3 - "$RUNNER_TEMP/session.body" <<'PY'
+          import json,sys
+          raw=open(sys.argv[1],'rb').read()
+          try:
+              d=json.loads(raw.decode('utf-8'))
+              print('SESSION_JSON=YES')
+              print('SESSION_OK='+str(bool(d.get('ok'))).upper())
+              print('SESSION_AUTHENTICATED='+str(bool(d.get('authenticated'))).upper())
+          except Exception:
+              print('SESSION_JSON=NO')
+              text=raw.decode('utf-8','replace')
+              safe=text[:240].replace('\n',' ').replace('\r',' ')
+              print('SESSION_SAFE_PREFIX='+safe)
+          PY
+          echo 'SERVER_LOG_BEGIN'
+          tail -n 60 "$RUNNER_TEMP/server.log" | sed -E 's/(password|csrf|token|cookie|session)[^ ]*/[REDACTED]/Ig'
+          echo 'SERVER_LOG_END'
+          test "$code" = '200'
+          python3 - "$RUNNER_TEMP/session.body" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d.get('ok') is True and d.get('authenticated') is False
+          PY
+          echo 'P03_V1373_POSTINSTALL_SESSION=PASS'
