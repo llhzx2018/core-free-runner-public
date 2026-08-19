@@ -10,6 +10,7 @@ sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbs
 command -v google-chrome >/dev/null
 mkdir -p "$RUNNER_TEMP/p01-node"; cd "$RUNNER_TEMP/p01-node"; npm init -y >/dev/null 2>&1
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+cp "$GITHUB_WORKSPACE/scripts/temp-p01-v22119-ui-smoke.mjs" "$RUNNER_TEMP/p01-node/e2e.mjs"
 cd "$GITHUB_WORKSPACE"
 php -l product/src/index.php >/dev/null
 php -l product/src/app/AdminShell.php >/dev/null
@@ -37,4 +38,4 @@ echo "FIXTURE_PASS\n";'
 php /tmp/p01-ui/cli/verify.php | grep -q 'VERIFY_PASS=YES'
 sqlite3 /tmp/p01-ui/private_data/vf.sqlite 'PRAGMA integrity_check;' | grep -qx ok
 
-ADMIN_PASS="$ADMIN_PASS" node "$GITHUB_WORKSPACE/scripts/temp-p01-v22119-ui-smoke.mjs"
+ADMIN_PASS="$ADMIN_PASS" node "$RUNNER_TEMP/p01-node/e2e.mjs"
