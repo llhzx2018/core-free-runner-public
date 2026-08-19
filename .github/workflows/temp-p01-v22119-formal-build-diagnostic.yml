@@ -1,0 +1,54 @@
+name: TEMP P01 V2.21.19 Formal Build Diagnostic
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-formal-build-diagnostic.yml']
+permissions:
+  contents: write
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE: 2784d8de583b016e78887b707e12ed0e89489a7d
+      CANDIDATE_TREE: 5f41e32177d8e25f97a4084a399fdf7aa1d0970d
+      PRODUCTION: a501d2394502319b0af9caaf1c171bdf94940a9d
+      VERSION: 2.21.19
+      SOURCE_VERSION: 2.21.18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.4', extensions: 'pdo_sqlite, sqlite3, curl, zip, mbstring', coverage: none}
+      - name: Diagnose
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          bash -Eeuo pipefail <<'RUN' >/tmp/diag.log 2>&1
+          echo STAGE_CLONE
+          git clone -q --depth 1 --branch maintenance/reference-driven-ui-2.21.19-20260819 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" candidate
+          git clone -q --depth 1 --branch v2.21.18 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" production
+          echo "CANDIDATE=$(git -C candidate rev-parse HEAD) TREE=$(git -C candidate rev-parse HEAD^{tree}) VERSION=$(cat candidate/src/VERSION.txt)"
+          echo "PRODUCTION=$(git -C production rev-parse HEAD) VERSION=$(cat production/src/VERSION.txt)"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE";test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE";test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          echo STAGE_PHP_LINT
+          while IFS= read -r -d '' f;do php -l "$f" >/tmp/lint 2>&1||{ echo "PHP_LINT_FAIL=$f";cat /tmp/lint;exit 21;};done < <(find candidate/src -type f -name '*.php' -print0)
+          echo STAGE_JS_CHECK
+          for f in candidate/src/assets/*.js;do node --check "$f"||{ echo "JS_CHECK_FAIL=$f";exit 22;};done
+          echo STAGE_BUILD
+          OUT="$RUNNER_TEMP/p01-v22119-diagnostic";mkdir -p "$OUT";python3 scripts/temp-p01-v22119-build.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" >/tmp/build.json
+          cat /tmp/build.json
+          echo DIAGNOSTIC_PASS
+          RUN
+          rc=$?;echo "$rc">/tmp/diag.rc;cat /tmp/diag.log;exit 0
+      - name: Publish diagnostic
+        if: always()
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -Eeuo pipefail;rc=$(cat /tmp/diag.rc 2>/dev/null||echo 999);python3 - "$rc" <<'PY'
+          import json,os,pathlib,sys
+          rc=int(sys.argv[1]);q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','gate':'FORMAL_BUILD_DIAGNOSTIC','status':'SUCCESS' if rc==0 else 'FAILURE','pass':rc==0,'rc':rc,'source_sha':os.environ['CANDIDATE'],'production_sha':os.environ['PRODUCTION'],'log':'\n'.join(open('/tmp/diag.log',encoding='utf-8',errors='replace').read().splitlines()[-100:]) if pathlib.Path('/tmp/diag.log').exists() else '','workflow_run_id':os.environ['GITHUB_RUN_ID']};open('/tmp/e.json','w').write(json.dumps(q,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git out;mkdir -p out/vf-agent/results;cp /tmp/e.json out/vf-agent/results/P01-V2.21.19-FORMAL-BUILD-DIAGNOSTIC.json;git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.19-FORMAL-BUILD-DIAGNOSTIC.json;git -C out commit -q -m 'evidence(P01): publish V2.21.19 formal build diagnostic';git -C out pull -q --rebase origin vf-agent-operations-v1;git -C out push -q origin HEAD:vf-agent-operations-v1;test "$rc" = 0
