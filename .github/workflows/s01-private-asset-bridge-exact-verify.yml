@@ -1,0 +1,247 @@
+name: S01 Private Asset Bridge Exact Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-private-asset-bridge-exact-verify.yml'
+      - 'requests/s01-private-asset-bridge-exact-verify.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  m3u8:
+    runs-on: ubuntu-24.04
+    env:
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact M3U8 v1.25.3
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: v1.25.3
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source and diff gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "4db0265c346dbabe91f206af33a16dba77bb2939"
+          test "$(tr -d '\r\n' < VERSION)" = "1.25.3"
+          grep -Fq '* Version: 1.25.3' src/vf-tool-m3u8.php
+          printf '%s\n' \
+            VERSION \
+            src/includes/update/bootstrap.php \
+            src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php \
+            src/vf-tool-m3u8.php | sort > /tmp/expected.txt
+          git diff --name-only v1.25.2..HEAD | sort > /tmp/actual.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=json.loads(Path('src/PACKAGE_PROFILE.json').read_text())
+          m=json.loads(Path('src/plugin-manifest.json').read_text())
+          print('M3U8_PACKAGE_PROFILE_VERSION='+str(p.get('pluginVersion')))
+          print('M3U8_PLUGIN_MANIFEST_VERSION='+str(m.get('version')))
+          assert str(p.get('pluginVersion')) == '1.25.2'
+          assert str(m.get('version')) == '1.25.2'
+          print('M3U8_SOURCE_IDENTITY_DRIFT=CONFIRMED_VERSION_HEADER_1.25.3_MANIFESTS_1.25.2')
+          PY
+
+      - name: PHP syntax gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/m3u8-php-lint.txt
+          echo "M3U8_PHP_LINT_FILES=$(grep -c 'No syntax errors detected' /tmp/m3u8-php-lint.txt)"
+          php -l src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php
+          php -l src/includes/update/bootstrap.php
+
+      - name: Bridge wiring and secret-safety static gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fq "class-vf-m3u8-private-asset-download-bridge-v1.php" src/includes/update/bootstrap.php
+          grep -Fq "VF_M3U8_Private_Asset_Download_Bridge_V1::register();" src/includes/update/bootstrap.php
+          grep -Fq "https" src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php
+          grep -Fq "api.github.com" src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php
+          if grep -REn '(github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+|Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9])' \
+            src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php src/includes/update/bootstrap.php; then
+            echo 'SECRET_PATTERN_DETECTED'
+            exit 1
+          fi
+
+      - name: Bridge behavior gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/test-m3u8-bridge.php <<'PHP'
+          <?php
+          define('ABSPATH', __DIR__);
+          final class WP_Error { public function __construct(public string $code, public string $message='') {} }
+          function is_wp_error($v): bool { return $v instanceof WP_Error; }
+          function wp_parse_url($url) { return parse_url($url); }
+          $GLOBALS['vf_test_filters']=[];
+          function add_filter($tag,$callback,$priority=10,$accepted_args=1){ $GLOBALS['vf_test_filters'][]=[$tag,$callback,$priority,$accepted_args]; return true; }
+          require getcwd().'/src/includes/update/class-vf-m3u8-update-contract-v1.php';
+          class VF_M3U8_Update_Client_V1 {
+              public array $calls=[];
+              public function pre_download($reply,$package,$upgrader,$hook){$this->calls[]=['pre_download',$hook];return ['phase'=>'pre_download','hook'=>$hook];}
+              public function pre_install($response,$hook){$this->calls[]=['pre_install',$hook];return ['phase'=>'pre_install','hook'=>$hook];}
+              public function post_install($response,$hook,$result){$this->calls[]=['post_install',$hook];return ['phase'=>'post_install','hook'=>$hook];}
+          }
+          require getcwd().'/src/includes/update/class-vf-m3u8-private-asset-download-bridge-v1.php';
+          function check($ok,$msg){if(!$ok){throw new RuntimeException($msg);}}
+          $valid='https://api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/12345';
+          check(VF_M3U8_Private_Asset_Download_Bridge_V1::validate_private_asset_api_url($valid)===true,'valid URL rejected');
+          foreach([
+              'http://api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/1',
+              'https://github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/1',
+              'https://api.github.com/repos/other/repo/releases/assets/1',
+              $valid.'?token=bad',
+              $valid.'#frag',
+              'https://user:pass@api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/1',
+              'https://api.github.com:444/repos/llhzx2018/vf-tools-m3u8/releases/assets/1'
+          ] as $bad){check(is_wp_error(VF_M3U8_Private_Asset_Download_Bridge_V1::validate_private_asset_api_url($bad)),'unsafe URL accepted: '.$bad);}
+          $client=new VF_M3U8_Update_Client_V1();
+          $GLOBALS['vf_m3u8_update_client_v1']=$client;
+          $exact=['plugin'=>VF_M3U8_Update_Contract_V1::PLUGIN_BASENAME];
+          $r=VF_M3U8_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact);
+          check($r['phase']==='pre_download' && $r['hook']['type']==='plugin','pre_download normalization failed');
+          $r=VF_M3U8_Private_Asset_Download_Bridge_V1::pre_install(true,['plugins'=>[VF_M3U8_Update_Contract_V1::PLUGIN_BASENAME]]);
+          check($r['phase']==='pre_install' && $r['hook']['type']==='plugin','pre_install normalization failed');
+          $r=VF_M3U8_Private_Asset_Download_Bridge_V1::post_install(true,$exact,['destination'=>'x']);
+          check($r['phase']==='post_install' && $r['hook']['type']==='plugin','post_install normalization failed');
+          check(VF_M3U8_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,['plugin'=>'other/other.php'])===false,'other plugin intercepted');
+          check(VF_M3U8_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact+['type'=>'plugin'])===false,'explicit plugin type should remain client-owned');
+          check(VF_M3U8_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact+['type'=>'theme'])===false,'theme context intercepted');
+          VF_M3U8_Private_Asset_Download_Bridge_V1::register();
+          check(count($GLOBALS['vf_test_filters'])===3,'filter count mismatch');
+          check($GLOBALS['vf_test_filters'][0][0]==='upgrader_pre_download' && $GLOBALS['vf_test_filters'][0][2]===9 && $GLOBALS['vf_test_filters'][0][3]===4,'pre_download registration mismatch');
+          check($GLOBALS['vf_test_filters'][1][0]==='upgrader_pre_install' && $GLOBALS['vf_test_filters'][1][3]===2,'pre_install registration mismatch');
+          check($GLOBALS['vf_test_filters'][2][0]==='upgrader_post_install' && $GLOBALS['vf_test_filters'][2][3]===3,'post_install registration mismatch');
+          echo "M3U8_PRIVATE_ASSET_BRIDGE_BEHAVIOR=PASS\n";
+          echo "M3U8_EXACT_SOURCE=4db0265c346dbabe91f206af33a16dba77bb2939\n";
+          echo "M3U8_CANDIDATE_GATE=BLOCKED_BY_INTERNAL_IDENTITY_DRIFT\n";
+          PHP
+          php /tmp/test-m3u8-bridge.php
+
+  ops:
+    runs-on: ubuntu-24.04
+    env:
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact Ops v1.21.791
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: v1.21.791
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source and diff gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "01f111cff3c7a423343e9ba3374dd8702bfdfe06"
+          test "$(tr -d '\r\n' < VERSION)" = "1.21.791"
+          grep -Fq '* Version: 1.21.791' vf-ops.php
+          printf '%s\n' \
+            VERSION \
+            includes/wp-update/bootstrap.php \
+            includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php \
+            vf-ops.php | sort > /tmp/expected.txt
+          git diff --name-only v1.21.790..HEAD | sort > /tmp/actual.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+          echo 'OPS_DIFF_SCOPE=PASS_4_FILES_ONLY'
+
+      - name: PHP syntax gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v
+          find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l > /tmp/ops-php-lint.txt
+          echo "OPS_PHP_LINT_FILES=$(grep -c 'No syntax errors detected' /tmp/ops-php-lint.txt)"
+          php -l includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php
+          php -l includes/wp-update/bootstrap.php
+
+      - name: Bridge wiring and secret-safety static gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fq "class-vf-ops-private-asset-download-bridge-v1.php" includes/wp-update/bootstrap.php
+          grep -Fq "VF_Ops_Private_Asset_Download_Bridge_V1::register();" includes/wp-update/bootstrap.php
+          grep -Fq "api.github.com" includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php
+          if grep -REn '(github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+|Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9])' \
+            includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php includes/wp-update/bootstrap.php; then
+            echo 'SECRET_PATTERN_DETECTED'
+            exit 1
+          fi
+
+      - name: Bridge behavior gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/test-ops-bridge.php <<'PHP'
+          <?php
+          define('ABSPATH', __DIR__);
+          final class WP_Error { public function __construct(public string $code, public string $message='') {} }
+          function is_wp_error($v): bool { return $v instanceof WP_Error; }
+          function wp_parse_url($url) { return parse_url($url); }
+          $GLOBALS['vf_test_filters']=[];
+          function add_filter($tag,$callback,$priority=10,$accepted_args=1){ $GLOBALS['vf_test_filters'][]=[$tag,$callback,$priority,$accepted_args]; return true; }
+          require getcwd().'/includes/wp-update/class-vf-ops-update-contract-v1.php';
+          class VF_Ops_Update_Client_V1 {
+              public array $calls=[];
+              public function pre_download($reply,$package,$upgrader,$hook){$this->calls[]=['pre_download',$hook];return ['phase'=>'pre_download','hook'=>$hook];}
+              public function pre_install($response,$hook){$this->calls[]=['pre_install',$hook];return ['phase'=>'pre_install','hook'=>$hook];}
+              public function post_install($response,$hook,$result){$this->calls[]=['post_install',$hook];return ['phase'=>'post_install','hook'=>$hook];}
+          }
+          $GLOBALS['ops_client']=new VF_Ops_Update_Client_V1();
+          function vf_ops_wp_update_client_v1(): VF_Ops_Update_Client_V1 { return $GLOBALS['ops_client']; }
+          require getcwd().'/includes/wp-update/class-vf-ops-private-asset-download-bridge-v1.php';
+          function check($ok,$msg){if(!$ok){throw new RuntimeException($msg);}}
+          $valid='https://api.github.com/repos/llhzx2018/vf-tools-ops/releases/assets/54321';
+          check(VF_Ops_Private_Asset_Download_Bridge_V1::validate_private_asset_api_url($valid)===true,'valid URL rejected');
+          foreach([
+              'http://api.github.com/repos/llhzx2018/vf-tools-ops/releases/assets/1',
+              'https://github.com/repos/llhzx2018/vf-tools-ops/releases/assets/1',
+              'https://api.github.com/repos/other/repo/releases/assets/1',
+              $valid.'?token=bad',
+              $valid.'#frag',
+              'https://user:pass@api.github.com/repos/llhzx2018/vf-tools-ops/releases/assets/1',
+              'https://api.github.com:444/repos/llhzx2018/vf-tools-ops/releases/assets/1'
+          ] as $bad){check(is_wp_error(VF_Ops_Private_Asset_Download_Bridge_V1::validate_private_asset_api_url($bad)),'unsafe URL accepted: '.$bad);}
+          $exact=['plugin'=>VF_Ops_Update_Contract_V1::PLUGIN_FILE];
+          $r=VF_Ops_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact);
+          check($r['phase']==='pre_download' && $r['hook']['type']==='plugin','pre_download normalization failed');
+          $r=VF_Ops_Private_Asset_Download_Bridge_V1::pre_install(true,['plugins'=>[VF_Ops_Update_Contract_V1::PLUGIN_FILE]]);
+          check($r['phase']==='pre_install' && $r['hook']['type']==='plugin','pre_install normalization failed');
+          $r=VF_Ops_Private_Asset_Download_Bridge_V1::post_install(true,$exact,['destination'=>'x']);
+          check($r['phase']==='post_install' && $r['hook']['type']==='plugin','post_install normalization failed');
+          check(VF_Ops_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,['plugin'=>'other/other.php'])===false,'other plugin intercepted');
+          check(VF_Ops_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact+['type'=>'plugin'])===false,'explicit plugin type should remain client-owned');
+          check(VF_Ops_Private_Asset_Download_Bridge_V1::pre_download(false,$valid,null,$exact+['type'=>'theme'])===false,'theme context intercepted');
+          VF_Ops_Private_Asset_Download_Bridge_V1::register();
+          check(count($GLOBALS['vf_test_filters'])===3,'filter count mismatch');
+          check($GLOBALS['vf_test_filters'][0][0]==='upgrader_pre_download' && $GLOBALS['vf_test_filters'][0][2]===9 && $GLOBALS['vf_test_filters'][0][3]===4,'pre_download registration mismatch');
+          check($GLOBALS['vf_test_filters'][1][0]==='upgrader_pre_install' && $GLOBALS['vf_test_filters'][1][3]===2,'pre_install registration mismatch');
+          check($GLOBALS['vf_test_filters'][2][0]==='upgrader_post_install' && $GLOBALS['vf_test_filters'][2][3]===3,'post_install registration mismatch');
+          echo "OPS_PRIVATE_ASSET_BRIDGE_BEHAVIOR=PASS\n";
+          echo "OPS_EXACT_SOURCE=01f111cff3c7a423343e9ba3374dd8702bfdfe06\n";
+          echo "OPS_EXACT_SOURCE_REVERIFICATION=PASS\n";
+          PHP
+          php /tmp/test-ops-bridge.php
