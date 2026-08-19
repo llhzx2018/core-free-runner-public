@@ -1,0 +1,175 @@
+name: P02 V2.5.12 Standard Asset Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2512-candidate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: feature/v2.5.12-update-contract
+      SOURCE_VERSION: 2.5.10
+      TARGET_VERSION: 2.5.12
+      SCHEMA_VERSION: '2401'
+    steps:
+      - name: Require registered private capability
+        env:
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$WRITE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_BRANCH }}'
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare V2.5.12 candidate source
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.11
+          printf '2.5.12\n' > VERSION
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('CHANGELOG.md');s=p.read_text(encoding='utf-8')
+          entry='''## V2.5.12 · Online Update 标准资产兼容发布\n\n- 不改变 V2.5.11 已验收的 Scratch Tabs 功能与 UA/UI，仅修正正式在线更新交付合同。\n- OWNER 真实 Production 已为 V2.5.10；V2.5.11 的 source-specific bridge 已验证，但 V2.5.10 UpdateService 按安全合同只接受 `VF_Library_V{target}_UPDATE.zip` 标准资产名。\n- 为保持既有 GitHub Release / Asset 身份不可变，不重写 V2.5.11；改由 V2.5.12 提供标准 `VF_Library_V2.5.12_UPDATE.zip`，直接支持 V2.5.10 → V2.5.12。\n- 保留 V2.5.11 的最终 Scratch UX：显式 TAB 点击从顶部打开、桌面单行工作台、实时“行数 · 保存状态”。\n- Schema 2401 不变，无 Migration。\n\n'''
+          if not s.startswith('## V2.5.12'):
+              p.write_text(entry+s,encoding='utf-8')
+          PY
+          rm -rf "$RUNNER_TEMP/deploy2512";bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/deploy2512" >/dev/null
+          python3 - "$RUNNER_TEMP/deploy2512" <<'PY'
+          from pathlib import Path
+          import json,hashlib,sys
+          dep=Path(sys.argv[1]);root=Path('.')
+          m=json.loads(Path('SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          m['version']='2.5.12'
+          m['schema']=2401
+          m['mapping_contract']='Each declared runtime source file must exist exactly once at repo_path; hashes bind the Git-native V2.5.12 candidate deploy tree. Formal release identity is not assigned by this candidate manifest.'
+          def h(b):return hashlib.sha256(b).hexdigest()
+          for e in m['entries']:
+              fp=dep/e['full_path'];rp=root/e['repo_path']
+              assert fp.is_file(),e['full_path'];assert rp.is_file(),e['repo_path']
+              fb=fp.read_bytes();rb=rp.read_bytes();assert fb==rb,(e['full_path'],e['repo_path'])
+              e['bytes']=len(fb);e['sha256']=h(fb);e['repo_sha256']=h(rb)
+          m['runtime_source_file_count']=len(m['entries'])
+          Path('SOURCE_MANIFEST.json').write_text(json.dumps(m,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          print('SOURCE_MANIFEST_RESEALED='+str(len(m['entries'])))
+          PY
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.12
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          node --check public/assets/scratch-tabs.js
+          python3 scripts/repository-gates.py
+          git diff --check
+          echo CANDIDATE_SOURCE_AND_PRIVACY=PASS
+
+      - name: Build standard V2.5.12 candidate package
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          cp scripts/build-release-v2.5.4.py "$RUNNER_TEMP/build-v2512.py"
+          python3 - "$RUNNER_TEMP/build-v2512.py" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text(encoding='utf-8')
+          old="ROOT=Path(__file__).resolve().parents[1]; SRCVER='2.5.2'; VER='2.5.4'; SCHEMA=2401; DT=(2026,8,19,2,0,0)"
+          new="ROOT=Path.cwd(); SRCVER='2.5.10'; VER='2.5.12'; SCHEMA=2401; DT=(2026,8,19,8,12,0)"
+          assert old in s;s=s.replace(old,new,1)
+          s=s.replace("default='build/release-v2.5.4'","default='build/release-v2.5.12'").replace("default='release/v2.5.4'","default='release/v2.5.12'")
+          p.write_text(s,encoding='utf-8')
+          PY
+          python3 -m py_compile "$RUNNER_TEMP/build-v2512.py"
+          python3 "$RUNNER_TEMP/build-v2512.py" --out build/candidate-2512 --source-commit "$(git rev-parse HEAD)" --source-tree "$(git write-tree)" --source-ref feature/v2.5.12-update-contract > "$RUNNER_TEMP/build.json"
+          test -s build/candidate-2512/VF_Library_V2.5.12_UPDATE.zip
+          unzip -t build/candidate-2512/VF_Library_V2.5.12_UPDATE.zip >/dev/null
+          unzip -p build/candidate-2512/VF_Library_V2.5.12_UPDATE.zip atomic-manifest.json | jq -e '.source_version=="2.5.10" and .target_version=="2.5.12" and .source_schema==2401 and .target_schema==2401' >/dev/null
+          echo STANDARD_ASSET_IDENTITY=PASS
+
+      - name: Fresh install and actual V2.5.10 update contract
+        working-directory: product
+        env:
+          PW: 'P02-V2512-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          # Fresh install.
+          ROOT="$RUNNER_TEMP/fresh2512";SITE="$ROOT/site";mkdir -p "$SITE";unzip -q build/candidate-2512/VF_Library_V2.5.12_FULL.zip -d "$SITE";test "$(cat "$SITE/VERSION.txt")" = 2.5.12
+          php -S 127.0.0.1:18262 -t "$SITE" >/dev/null 2>&1 & PID=$!
+          for _ in $(seq 1 80);do curl -fsS http://127.0.0.1:18262/setup.php >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/c" http://127.0.0.1:18262/setup.php > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H 'Origin: http://127.0.0.1:18262' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18262/setup.php)" = 303
+          php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.12" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+          kill "$PID";wait "$PID" 2>/dev/null||true
+          echo FULL_FRESH_INSTALL=PASS
+
+          # Existing-data V2.5.10 -> V2.5.12 using the exact standard asset contract.
+          ROOT="$RUNNER_TEMP/up2510to2512";SRC="$ROOT/src";SITE="$ROOT/site";mkdir -p "$ROOT"
+          git clone -q --no-checkout https://x-access-token:${{ secrets.VF_RELEASE_WRITE_TOKEN }}@github.com/llhzx2018/vf-library.git "$SRC";git -C "$SRC" checkout -q v2.5.10
+          mkdir -p "$SITE";bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null;test "$(cat "$SITE/VERSION.txt")" = 2.5.10
+          php -S 127.0.0.1:18263 -t "$SITE" >/dev/null 2>&1 & PID=$!
+          for _ in $(seq 1 80);do curl -fsS http://127.0.0.1:18263/setup.php >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/c" http://127.0.0.1:18263/setup.php > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H 'Origin: http://127.0.0.1:18263' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18263/setup.php)" = 303
+          SESSION=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18263/api.php?action=session');CSRF=$(jq -r .csrf<<<"$SESSION")
+          CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"V2512 Preserve","icon":"folder"}' 'http://127.0.0.1:18263/api.php?action=category_save');CID=$(jq -r .id<<<"$CAT")
+          ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V2512 Existing",content:"keep",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')
+          SAVED=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" 'http://127.0.0.1:18263/api.php?action=content_save');IID=$(jq -r .id<<<"$SAVED")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" 'http://127.0.0.1:18263/api.php?action=content_favorite' | jq -e .ok >/dev/null
+          SNEW=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{}' 'http://127.0.0.1:18263/scratch-action.php?action=create');SID=$(jq -r .tab.id<<<"$SNEW")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$(jq -nc --argjson id "$SID" --arg c $'V2510 Scratch\nline2' '{id:$id,content:$c,cursor_pos:8,scroll_top:4}')" 'http://127.0.0.1:18263/scratch-action.php?action=save' | jq -e '.tab.content|contains("V2510 Scratch")' >/dev/null
+          PKG="$(pwd)/build/candidate-2512/VF_Library_V2.5.12_UPDATE.zip";BYTES=$(stat -c%s "$PKG");SHA=$(sha256sum "$PKG"|awk '{print $1}')
+          cat > "$ROOT/check.php" <<'PHP'
+          <?php
+          $site=$argv[1];$pkg=$argv[2];$bytes=(int)$argv[3];$sha=$argv[4];$manifest=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'current_version'=>'2.5.10','target_version'=>'2.5.12','update_type'=>'ATOMIC','from_versions'=>['2.5.10'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.12','release_id'=>1,'product_identity'=>'candidate','asset_name'=>'VF_Library_V2.5.12_UPDATE.zip','asset_bytes'=>$bytes,'asset_sha256'=>$sha,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-19T08:12:00Z'];require $site.'/app/bootstrap.php';require_once $site.'/app/UpdateService.php';$svc=new VfLibraryUpdateService(fn()=>$manifest,null,fn()=>2401);$r=$svc->check(true);if(($r['core']['status']??'')!=='AVAILABLE'||empty($r['status']['can_update']))exit(2);$core=new CoreUpdates\UpdateCore('P02','APP');if(($core->verifyPackage($pkg,$manifest)['status']??'')!=='VERIFIED')exit(3);require_once $site.'/app/VfLibraryCoreUpdateAdapter.php';$u=$core->upgrade('2.5.10','2401',new VfLibraryCoreUpdateAdapter(),$pkg,$manifest);file_put_contents($argv[5],json_encode($u));if(!in_array($u['status']??'',['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)||empty($u['backup_locator']))exit(4);
+          PHP
+          php "$ROOT/check.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$ROOT/result"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.12;jq -e '.backup_locator|length>0' "$ROOT/result" >/dev/null
+          SESSION2=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18263/api.php?action=session');CSRF2=$(jq -r .csrf<<<"$SESSION2");jq -e '.site.auth==true'<<<"$SESSION2" >/dev/null
+          curl -fsS -b "$ROOT/c" "http://127.0.0.1:18263/api.php?action=content_get&id=$IID" | jq -e '(.item.title=="V2512 Existing") and ((.item.is_favorite|tonumber)==1) and (.item.content=="keep")' >/dev/null
+          LIST=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18263/scratch-action.php?action=list');jq -e --argjson id "$SID" '.data.open[]|select(.id==$id)|.content|contains("V2510 Scratch")'<<<"$LIST" >/dev/null
+          POST=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d '{}' 'http://127.0.0.1:18263/scratch-action.php?action=create');POSTSID=$(jq -r .tab.id<<<"$POST")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d "$(jq -nc --argjson id "$POSTSID" --arg c $'V2512 Scratch\nline2\nline3' '{id:$id,content:$c,cursor_pos:8,scroll_top:0}')" 'http://127.0.0.1:18263/scratch-action.php?action=save' | jq -e '.tab.content|contains("V2512 Scratch")' >/dev/null
+          php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.12" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+          kill "$PID";wait "$PID" 2>/dev/null||true
+          echo ACTUAL_V2510_UPDATE_SERVICE=AVAILABLE
+          echo EXISTING_DATA_2_5_10_TO_2_5_12=PASS
+          echo BACKUP_DATA_FAVORITE_SESSION_SCRATCH=PASS
+          echo SQLITE_INTEGRITY_FK=PASS
+
+      - name: Commit verified private candidate
+        working-directory: product
+        env:
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Release Bot';git config user.email 'actions@users.noreply.github.com'
+          git add VERSION CHANGELOG.md SOURCE_MANIFEST.json
+          git diff --cached --check
+          git commit -m 'VF Library V2.5.12 · standard online update asset contract'
+          git remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-library.git"
+          git push origin HEAD:feature/v2.5.12-update-contract
+          echo CANDIDATE_SHA=$(git rev-parse HEAD)
+          echo PRIVATE_BRANCH_PUSH=PASS
+          echo PRODUCTION_WRITE=NO
