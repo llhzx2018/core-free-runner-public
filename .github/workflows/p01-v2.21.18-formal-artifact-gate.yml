@@ -1,0 +1,207 @@
+name: P01 V2.21.18 Formal Artifact Gate
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-v2.21.18-formal-artifact-gate.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p01-v2.21.18-formal-artifact-gate
+  cancel-in-progress: false
+env:
+  CANDIDATE: a501d2394502319b0af9caaf1c171bdf94940a9d
+  CANDIDATE_TREE: 6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca
+  PRODUCTION: 24c91ac9d76ac10780403bc2b326793c7c67c2ed
+  VERSION: 2.21.18
+  SOURCE_VERSION: 2.21.17
+  SCHEMA: 2026080902
+jobs:
+  artifact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact authorities
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://github.com/llhzx2018/core-free-runner-public.git runner
+          git clone -q --depth 1 --branch candidate/v2.21.18-20260819 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" candidate
+          git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" production
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -F "define('VF_VERSION', '2.21.18');" candidate/src/app/bootstrap.php >/dev/null
+          grep -F "define('VF_VERSION', '2.21.17');" production/src/app/bootstrap.php >/dev/null
+          if find candidate production -path '*/.git' -prune -o -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '.env' \) -print | grep -q .; then exit 1; fi
+          echo EXACT_AUTHORITIES=PASS
+      - name: Install gate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 unzip >/dev/null
+          command -v google-chrome >/dev/null
+          mkdir -p "$RUNNER_TEMP/p01-node"; cd "$RUNNER_TEMP/p01-node"; npm init -y >/dev/null 2>&1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","SimpleXML","mbstring","openssl"] as $x){if(!extension_loaded($x)&&!class_exists($x))exit(1);} echo "FORMAL_RUNTIME=PASS\n";'
+      - name: Build deterministic formal bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22118-artifact-gate"; rm -rf "$OUT"; mkdir -p "$OUT"
+          python3 runner/scripts/p01-build-maintenance-candidate-v22118.py \
+            --candidate candidate/src --production production/src --out "$OUT" \
+            --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" \
+            > "$RUNNER_TEMP/p01-build.json"
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p01-build.json')))
+          assert x['status']=='BUILD_PASS',x
+          assert x['version']=='2.21.18' and x['source_version']=='2.21.17',x
+          assert x['candidate_commit']=='a501d2394502319b0af9caaf1c171bdf94940a9d',x
+          assert x['candidate_tree']=='6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca',x
+          assert x['production_commit']=='24c91ac9d76ac10780403bc2b326793c7c67c2ed',x
+          assert x['runtime_added']==['assets/navigation-stability.js','assets/update-core.js'],x
+          assert x['runtime_removed']==[],x
+          assert x['runtime_changed']==['VERSION.txt','app/bootstrap.php','assets/update.js','index.php'],x
+          print('FORMAL_BUILD=PASS')
+          PY
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22118-artifact-gate'
+          names=['VF_Start_V2.21.18_FULL.zip','VF_Start_V2.21.18_UPDATE.zip','VF_Start_V2.21.18_ATOMIC.zip','VF_Start_V2.21.18_SOURCE.zip','repair-v2.21.18.php']
+          q={n:{'sha256':hashlib.sha256((out/n).read_bytes()).hexdigest(),'bytes':(out/n).stat().st_size} for n in names}
+          pathlib.Path('/tmp/artifacts.json').write_text(json.dumps(q,sort_keys=True))
+          PY
+      - name: Package privacy shape and atomic source gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22118-artifact-gate"
+          for f in "$OUT"/*.zip; do unzip -t "$f" >/dev/null; done
+          python3 - <<'PY'
+          import os,re,zipfile,pathlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22118-artifact-gate'
+          forbidden_parts={'.git','PRIVATE_DATA','private_data','node_modules'}; forbidden_suffixes={'.sqlite','.sqlite3','.db','.env','.log'}
+          secret=re.compile(rb'(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|VF_PRIVATE_READ_TOKEN\s*=\s*[^\s]+)')
+          for p in out.iterdir():
+            if not p.is_file(): continue
+            if secret.search(p.read_bytes()): raise SystemExit('secret-like payload '+p.name)
+            if p.suffix!='.zip': continue
+            with zipfile.ZipFile(p) as z:
+              names=z.namelist(); assert len(names)==len(set(names))
+              for n in names:
+                q=pathlib.PurePosixPath(n)
+                if n.startswith('/') or '\\' in n or '..' in q.parts: raise SystemExit('unsafe path '+n)
+                if any(x in forbidden_parts for x in q.parts) or any(n.lower().endswith(x) for x in forbidden_suffixes): raise SystemExit('private path '+n)
+                if ((z.getinfo(n).external_attr>>16)&0o170000)==0o120000: raise SystemExit('symlink '+n)
+          repair='repair-v2.21.18.php'
+          for kind in ['ATOMIC','UPDATE']:
+            with zipfile.ZipFile(out/f'VF_Start_V2.21.18_{kind}.zip') as z:
+              assert z.namelist()==[repair]
+              assert z.read(repair)==(out/repair).read_bytes()
+          print('PACKAGE_PRIVACY_SHAPE=PASS')
+          PY
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -l repair-v2.21.18.php >/dev/null
+          php "$OUT/repair-v2.21.18.php" --self-test > /tmp/selftest.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/selftest.json')); assert x['ok'] is True and x['global_barrier'] is True and x['interruption_recovery'] is True,x
+          assert x['target_files']==x['source_files']+2,x
+          PY
+          php "$OUT/repair-v2.21.18.php" --verify-source=production/src > /tmp/srcverify.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/srcverify.json')); assert x['ok'] is True,x
+          PY
+          cp -a production/src /tmp/p01-gate-only; printf '\nGATE_ONLY\n' >> /tmp/p01-gate-only/README.md
+          php "$OUT/repair-v2.21.18.php" --verify-source=/tmp/p01-gate-only >/dev/null
+          cp -a production/src /tmp/p01-tamper; printf '\n/* TAMPER */\n' >> /tmp/p01-tamper/assets/update.js
+          set +e; php "$OUT/repair-v2.21.18.php" --verify-source=/tmp/p01-tamper >/tmp/tamper.out 2>&1; rc=$?; set -e
+          test "$rc" -ne 0; grep -q 'assets/update.js:sha' /tmp/tamper.out
+          echo ATOMIC_SOURCE_GATES=PASS
+      - name: Fresh FULL install zero-data gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22118-artifact-gate"; rm -rf /tmp/p01-full; mkdir /tmp/p01-full
+          unzip -q "$OUT/VF_Start_V2.21.18_FULL.zip" -d /tmp/p01-full
+          php -S 127.0.0.1:18181 -t /tmp/p01-full >/tmp/full-server.log 2>&1 & pid=$!
+          for i in $(seq 1 30);do curl -fsS -c /tmp/full.cookies http://127.0.0.1:18181/setup.php -o /tmp/full-setup && break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/full-setup').read()).group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/full.cookies -c /tmp/full.cookies -X POST http://127.0.0.1:18181/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Formal Fresh' --data-urlencode 'admin_password=FormalFresh-P01-22118!Strong' --data-urlencode 'admin_password_confirm=FormalFresh-P01-22118!Strong' >/dev/null
+          kill "$pid" 2>/dev/null||true
+          php /tmp/p01-full/cli/verify.php | grep -q 'VERIFY_PASS=YES'
+          php -r 'require "/tmp/p01-full/app/bootstrap.php";$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn()!==0||(int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn()!==0)exit(1);echo "FRESH_FULL_ZERO_DATA=PASS\n";'
+      - name: Exact upgrade rollback interruption and Chrome gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22118-artifact-gate"
+          setup_site(){ root="$1"; port="$2"; pass="$3"; cp -a production/src "$root"; php -S 127.0.0.1:"$port" -t "$root" >/tmp/site-$port.log 2>&1 & p=$!; for i in $(seq 1 30);do curl -fsS -c /tmp/c-$port http://127.0.0.1:"$port"/setup.php -o /tmp/s-$port&&break||sleep 1;done; csrf=$(python3 - "$port" <<'PY'
+          import re,sys
+          p=sys.argv[1];print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/s-'+p).read()).group(1))
+          PY
+          ); curl -fsSL -b /tmp/c-$port -c /tmp/c-$port -X POST http://127.0.0.1:"$port"/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Upgrade Gate' --data-urlencode "admin_password=$pass" --data-urlencode "admin_password_confirm=$pass" >/dev/null; kill "$p" 2>/dev/null||true; php "$root/cli/verify.php"|grep -q 'VERIFY_PASS=YES'; php -r 'require $argv[1]."/app/bootstrap.php";$r=new VfRepository(vf_db());$r->createCategory(["name"=>"Runner Sentinel","description"=>"preserve","is_private"=>1]);' "$root"; }
+          rm -rf /tmp/p01-upgrade; setup_site /tmp/p01-upgrade 18182 'FormalUpgrade-P01-22117!Strong'
+          php "$OUT/repair-v2.21.18.php" --run=/tmp/p01-upgrade >/tmp/upgrade.json
+          test "$(tr -d '\r\n' </tmp/p01-upgrade/VERSION.txt)" = '2.21.18'
+          php /tmp/p01-upgrade/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+          php -r 'require "/tmp/p01-upgrade/app/bootstrap.php";$d=vf_db();$q=$d->prepare("SELECT COUNT(*) FROM categories WHERE name=?");$q->execute(["Runner Sentinel"]);if((int)$q->fetchColumn()!==1)exit(1);if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);echo "UPGRADE_DATA=PASS\n";'
+          rm -rf /tmp/p01-rollback; setup_site /tmp/p01-rollback 18183 'FormalRollback-P01-22117!Strong'
+          set +e; VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$OUT/repair-v2.21.18.php" --run=/tmp/p01-rollback >/tmp/rb.out 2>&1; rc=$?; set -e; test "$rc" -ne 0
+          test "$(tr -d '\r\n' </tmp/p01-rollback/VERSION.txt)" = '2.21.17'; php "$OUT/repair-v2.21.18.php" --verify-source=/tmp/p01-rollback >/dev/null
+          php -r 'require "/tmp/p01-rollback/app/bootstrap.php";$d=vf_db();$q=$d->prepare("SELECT COUNT(*) FROM categories WHERE name=?");$q->execute(["Runner Sentinel"]);exit((int)$q->fetchColumn()===1?0:1);'
+          rm -rf /tmp/p01-interrupt; setup_site /tmp/p01-interrupt 18184 'FormalInterrupt-P01-22117!Strong'
+          set +e; VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$OUT/repair-v2.21.18.php" --run=/tmp/p01-interrupt >/tmp/int.out 2>&1; rc=$?; set -e; test "$rc" -eq 97
+          php "$OUT/repair-v2.21.18.php" --run=/tmp/p01-interrupt >/tmp/int-recover.json
+          test "$(tr -d '\r\n' </tmp/p01-interrupt/VERSION.txt)" = '2.21.18'
+          php -r 'require "/tmp/p01-interrupt/app/bootstrap.php";$d=vf_db();$q=$d->prepare("SELECT COUNT(*) FROM categories WHERE name=?");$q->execute(["Runner Sentinel"]);exit((int)$q->fetchColumn()===1?0:1);'
+          php -S 127.0.0.1:18185 -t /tmp/p01-upgrade >/tmp/chrome-server.log 2>&1 & echo $! >/tmp/chrome-pid
+          cat > "$RUNNER_TEMP/p01-node/e2e.mjs" <<'JS'
+          import{chromium}from'playwright-core';const b=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});try{const p=await b.newPage({viewport:{width:1440,height:900}}),errs=[];p.on('pageerror',e=>errs.push(String(e)));await p.goto('http://127.0.0.1:18185/',{waitUntil:'networkidle'});await p.click('#loginButton');await p.fill('[name=password]','FormalUpgrade-P01-22117!Strong');await p.click('#loginSubmit');await p.waitForFunction(()=>document.documentElement.dataset.vfNavigationStability==='3');let scripts=await p.evaluate(()=>[...document.scripts].map(x=>x.src));if(!scripts.some(x=>x.includes('update.js?v=22118'))||!scripts.some(x=>x.includes('navigation-stability.js?v=22118')))throw Error('cache-loader');let order=await p.evaluate(()=>{let k={links:state.links,recent:state.recent};state.links=[{id:101,title:'A',url:'https://a.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:30,legacy_position:1,click_count:0,tags:[]},{id:102,title:'B',url:'https://b.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:20,legacy_position:2,click_count:999,tags:[]},{id:103,title:'C',url:'https://c.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:10,legacy_position:3,click_count:5000,tags:[]}];state.recent=[];let before=topLinks(3).map(x=>x.id),o=window.open;window.open=()=>({opener:null});openLink(state.links[1]);window.open=o;let after=topLinks(3).map(x=>x.id),recent=state.recent[0]?.id;state.links=k.links;state.recent=k.recent;return{before,after,recent}});if(JSON.stringify(order.before)!=='[101,102,103]'||JSON.stringify(order.after)!=='[101,102,103]'||order.recent!==102)throw Error('order');await p.evaluate(()=>{state.categories=[{id:91001,parent_id:null,name:'Runner Category',description:'x',sort_order:1,legacy_position:1,effective_private:0,is_private:0}];state.links=[{id:92001,title:'Public',url:'https://p.example',category_id:91001,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:1,legacy_position:1,click_count:0,tags:[]}];state.mode='category';state.selected=91001;state.privacyScope='public';state.sidebarScope='public';render()});await p.click('[data-sidebar-scope="private"]');let s=await p.evaluate(()=>({m:state.mode,id:+state.selected,p:state.privacyScope,ss:state.sidebarScope,h:location.hash,n:filteredAndSortedLinks().length,home:!!document.querySelector('.home-page')}));if(s.m!=='category'||s.id!==91001||s.p!=='private'||s.ss!=='private'||s.h!=='#/private/category/91001'||s.n!==0||s.home)throw Error('scope '+JSON.stringify(s));for(const w of [390,480,640,768,1024,1280,1440,1920]){await p.setViewportSize({width:w,height:900});await p.waitForTimeout(120);let d=await p.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));if(d>1)throw Error('overflow '+w+':'+d)}if(errs.length)throw Error(errs.join('|'));console.log('UPGRADED_REAL_CHROME=PASS')}finally{await b.close()}
+          JS
+          cd "$RUNNER_TEMP/p01-node"; node e2e.mjs
+          kill "$(cat /tmp/chrome-pid)" 2>/dev/null||true
+          echo UPGRADE_ROLLBACK_INTERRUPTION_CHROME=PASS
+      - name: Publish sanitized formal gate evidence
+        if: always()
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,urllib.error
+          try: artifacts=json.load(open('/tmp/artifacts.json'))
+          except: artifacts={}
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','source_version':'2.21.17','gate':'FORMAL_ARTIFACT_GATE','status':os.environ['JOB_STATUS'].upper(),'pass':os.environ['JOB_STATUS']=='success','candidate_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','candidate_tree':'6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca','production_sha':'24c91ac9d76ac10780403bc2b326793c7c67c2ed','schema_version':'2026080902','workflow_run_id':os.environ['RUN_ID'],'artifacts':artifacts,'private_data_persisted_publicly':False}
+          token=os.environ['WRITE_TOKEN'];api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/vf-agent/results/P01-V2.21.18-FORMAL-ARTIFACT-GATE.json';h={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'};sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h)) as x:sha=json.load(x).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          body={'message':'evidence(P01): publish V2.21.18 formal artifact gate','content':base64.b64encode((json.dumps(q,indent=2,sort_keys=True)+'\n').encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:body['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**h,'Content-Type':'application/json'})).read()
+          PY
+      - name: Cleanup
+        if: always()
+        run: |
+          for f in /tmp/chrome-pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null||true; done
+          rm -rf candidate production /tmp/p01-* "$RUNNER_TEMP/p01-node" "$RUNNER_TEMP/p01-v22118-artifact-gate" || true
