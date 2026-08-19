@@ -1,0 +1,143 @@
+name: P03 V1.37.1 Sidebar Scroll Visual Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/p03/v1371-sidebar/**'
+      - '.github/workflows/p03-v1371-sidebar-scroll.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 80c679ec2af4ff8a913bcdfdc80f64bc541c54f8
+
+jobs:
+  sidebar-scroll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact private P03 maintenance source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p03
+
+      - name: Static sidebar contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          test -f public/assets/project-intelligence-shell.css
+          grep -Fq 'project-intelligence-shell.css' public/index.php
+          grep -Fq '#projectShortcuts' public/assets/project-intelligence-shell.css
+          grep -Fq 'overflow-y:auto' public/assets/project-intelligence-shell.css
+          grep -Fq 'scrollbar-gutter:stable' public/assets/project-intelligence-shell.css
+          grep -Fq '.sidebar-spacer{display:none}' public/assets/project-intelligence-shell.css
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/p03-runtime" >/dev/null
+          test -f "$RUNNER_TEMP/p03-runtime/assets/project-intelligence-shell.css"
+          grep -Fq 'project-intelligence-shell.css' "$RUNNER_TEMP/p03-runtime/index.php"
+          echo 'P03_SIDEBAR_STATIC_CONTRACT=PASS'
+
+      - name: Chromium sidebar viewport regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > "$RUNNER_TEMP/sidebar-scroll.mjs" <<'EOF'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const root = process.cwd();
+          const css = [
+            'public/assets/experience.css',
+            'public/assets/project-intelligence.css',
+            'public/assets/project-intelligence-shell.css'
+          ].map(p => fs.readFileSync(path.join(root,p),'utf8')).join('\n');
+
+          const projects = Array.from({length:16},(_,i)=>`<button class="nav-item project-shortcut" type="button"><span>P${String(i+1).padStart(2,'0')} · Project ${i+1}</span><i class="health-dot warn"></i></button>`).join('');
+          const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body class="pi-mode"><div class="app-shell"><aside class="sidebar"><button class="brand brand-button"><div class="brandmark">VF</div><div><strong>VF Forge</strong><small>Project Intelligence</small></div></button><nav class="primary-nav"><button class="nav-item">概览</button><button class="nav-item active">项目 <b>16</b></button><button class="nav-item">关注 <b>3</b></button><button class="nav-item">动态</button><button class="nav-item">关系</button></nav><div class="sidebar-divider"></div><div class="sidebar-label">当前项目</div><div id="projectShortcuts">${projects}</div><div class="sidebar-spacer"></div><button class="nav-item settings-entry"><span>设置</span><span>⌘</span></button><div class="runtime-card"><span>Runtime</span><strong>V1.37.1</strong><small>Schema 30 · Storage NONE</small></div><button class="nav-item logout-entry"><span>退出</span></button></aside><main class="main-shell"><header class="topbar">项目</header><div class="content"></div></main></div></body></html>`;
+
+          const browser = await chromium.launch({headless:true});
+          const page = await browser.newPage({viewport:{width:1319,height:652}});
+          await page.setContent(html,{waitUntil:'domcontentloaded'});
+
+          async function snapshot(){
+            return page.evaluate(()=>{
+              const sidebar=document.querySelector('.sidebar');
+              const nav=document.querySelector('.primary-nav');
+              const list=document.querySelector('#projectShortcuts');
+              const settings=document.querySelector('.settings-entry');
+              const runtime=document.querySelector('.runtime-card');
+              const logout=document.querySelector('.logout-entry');
+              const brand=document.querySelector('.brand');
+              const cs=getComputedStyle(list);
+              return {
+                vh:innerHeight,
+                sidebar:sidebar.getBoundingClientRect().toJSON(),
+                nav:nav.getBoundingClientRect().toJSON(),
+                brand:brand.getBoundingClientRect().toJSON(),
+                list:list.getBoundingClientRect().toJSON(),
+                settings:settings.getBoundingClientRect().toJSON(),
+                runtime:runtime.getBoundingClientRect().toJSON(),
+                logout:logout.getBoundingClientRect().toJSON(),
+                scrollHeight:list.scrollHeight,
+                clientHeight:list.clientHeight,
+                scrollTop:list.scrollTop,
+                overflowY:cs.overflowY,
+                overflowX:cs.overflowX
+              };
+            });
+          }
+
+          const before=await snapshot();
+          if(before.overflowY!=='auto') throw new Error(`overflowY=${before.overflowY}`);
+          if(before.overflowX!=='hidden') throw new Error(`overflowX=${before.overflowX}`);
+          if(!(before.clientHeight>40 && before.scrollHeight>before.clientHeight)) throw new Error(`scroll contract ${before.clientHeight}/${before.scrollHeight}`);
+          for(const key of ['settings','runtime','logout']){
+            if(before[key].top<0 || before[key].bottom>before.vh+0.5) throw new Error(`${key} outside viewport ${JSON.stringify(before[key])}`);
+          }
+          if(before.brand.top<0 || before.nav.top<0) throw new Error('fixed upper navigation outside viewport');
+          await page.evaluate(()=>{const x=document.querySelector('#projectShortcuts');x.scrollTop=x.scrollHeight;});
+          await page.waitForTimeout(50);
+          const after=await snapshot();
+          if(after.scrollTop<=0) throw new Error('project shortcut list did not scroll');
+          if(Math.abs(after.brand.top-before.brand.top)>.5 || Math.abs(after.nav.top-before.nav.top)>.5) throw new Error('brand/primary nav moved with shortcut scroll');
+          for(const key of ['settings','runtime','logout']){
+            if(Math.abs(after[key].top-before[key].top)>.5 || after[key].bottom>after.vh+0.5) throw new Error(`${key} moved/outside viewport after shortcut scroll`);
+          }
+          await page.screenshot({path:process.env.RUNNER_TEMP+'/p03-v1371-sidebar-1319x652.png',fullPage:true});
+
+          await page.setViewportSize({width:1440,height:900});
+          await page.evaluate(()=>{document.querySelector('#projectShortcuts').scrollTop=0;});
+          const desktop=await snapshot();
+          for(const key of ['settings','runtime','logout']) if(desktop[key].bottom>desktop.vh+0.5) throw new Error(`desktop ${key} outside viewport`);
+          await page.screenshot({path:process.env.RUNNER_TEMP+'/p03-v1371-sidebar-1440x900.png',fullPage:true});
+          console.log('P03_SIDEBAR_CHROMIUM_PASS',JSON.stringify({small:{client:before.clientHeight,scroll:before.scrollHeight,scrollTop:after.scrollTop},desktop:{client:desktop.clientHeight,scroll:desktop.scrollHeight}}));
+          await browser.close();
+          EOF
+          node "$RUNNER_TEMP/sidebar-scroll.mjs"
+
+      - name: Final sidebar evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_V1371_SIDEBAR_SCROLL_GATE=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'VIEWPORT_1319x652=PASS'
+          echo 'VIEWPORT_1440x900=PASS'
+          echo 'PROJECT_SHORTCUT_SCROLL=PASS'
+          echo 'PRIMARY_NAV_FIXED=PASS'
+          echo 'SETTINGS_RUNTIME_LOGOUT_VISIBLE=PASS'
+          echo 'PRODUCTION_WRITE=NO'
