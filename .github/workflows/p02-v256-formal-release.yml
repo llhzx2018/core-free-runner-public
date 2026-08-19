@@ -1,0 +1,201 @@
+name: P02 V2.5.6 Formal Verify And Publish
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v256-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-library
+      PRODUCT_REF: bd00710e19f9c81f345fc9410c8b0eed8f86b5b7
+      SOURCE_VERSION: 2.5.5
+      TARGET_VERSION: 2.5.6
+      SCHEMA: 2401
+      RELEASE_TAG: v2.5.6
+      UPDATE_NAME: VF_Library_V2.5.6_UPDATE.zip
+    steps:
+      - name: Require registered capabilities
+        env:
+          READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: bd00710e19f9c81f345fc9410c8b0eed8f86b5b7
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare formal deterministic builder
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          python3 scripts/repository-gates.py
+          node --check public/assets/app.js
+          grep -Fq 'PRESET_CONTENT_TEMPLATES' public/assets/app.js
+          grep -Fq '待办清单' public/assets/app.js
+          grep -Fq '学习 / 课程笔记' public/assets/app.js
+          php -l public/index.php >/dev/null
+          cp scripts/build-release-v2.5.4.py "$RUNNER_TEMP/build-v256.py"
+          python3 - "$RUNNER_TEMP/build-v256.py" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          old="ROOT=Path(__file__).resolve().parents[1]; SRCVER='2.5.2'; VER='2.5.4'; SCHEMA=2401; DT=(2026,8,19,2,0,0)"
+          new="ROOT=Path.cwd(); SRCVER='2.5.5'; VER='2.5.6'; SCHEMA=2401; DT=(2026,8,19,3,45,0)"
+          assert old in s; s=s.replace(old,new)
+          s=s.replace("default='build/release-v2.5.4'","default='build/release-v2.5.6'")
+          s=s.replace("default='release/v2.5.4'","default='release/v2.5.6'")
+          start="notes=out/f'VF_Library_V{VER}_RELEASE_NOTES.md'; notes.write_text(f'''"
+          end="''')\n arts=[sz,fz,uz,az,rf,notes]"
+          i=s.index(start); j=s.index(end,i)
+          notes="""notes=out/f'VF_Library_V{VER}_RELEASE_NOTES.md'; notes.write_text(f'''# VF Library V{VER}\n\nV2.5.6 adds a focused personal-use preset template quick start.\n\n- Quick notes: blank, checklist, quick capture, step list, daily note.\n- Articles: blank, general organization, how-to, research/material organization, learning/course note.\n- Presets only prefill Markdown at creation time and detach immediately after creation.\n- No custom-template management, no template binding, no new data model.\n- Candidate Chrome run 32212820073 passed fresh install and preset interactions.\n- Schema remains {SCHEMA}; no migration. Existing {SRCVER} sites use UPDATE; FULL is clean install only.\n''')\n arts=[sz,fz,uz,az,rf,notes]"""
+          s=s[:i]+notes+s[j+len(end):]
+          s=s.replace("'candidate_browser':'PASS_RUN_32206056733_PLUS_32146866564'","'candidate_browser':'PASS_RUN_32212820073'")
+          s=s.replace("'main_readback':'PRODUCTION_2.5.2_CURRENT_EXPECTED_NOT_PROMOTED'","'main_readback':'PRODUCTION_2.5.5_CONFIRMED_NOT_PROMOTED'")
+          p.write_text(s,encoding='utf-8')
+          PY
+          python3 -m py_compile "$RUNNER_TEMP/build-v256.py"
+
+      - name: Deterministic build twice
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git show -s --format=%T "$PRODUCT_REF")
+          python3 "$RUNNER_TEMP/build-v256.py" --out build/formal-a --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.6 > "$RUNNER_TEMP/build-a.json"
+          python3 "$RUNNER_TEMP/build-v256.py" --out build/formal-b --source-commit "$PRODUCT_REF" --source-tree "$TREE" --source-ref release/v2.5.6 > "$RUNNER_TEMP/build-b.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          a=Path('build/formal-a'); b=Path('build/formal-b')
+          fa={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in a.iterdir() if p.is_file()}
+          fb={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in b.iterdir() if p.is_file()}
+          assert fa==fb,(fa,fb)
+          required={'VF_Library_V2.5.6_UPDATE.zip','VF_Library_V2.5.6_FULL.zip','VF_Library_V2.5.6_ATOMIC.zip','VF_Library_V2.5.6_SOURCE.zip','repair-v2.5.6.php','VF_Library_V2.5.6_RELEASE_NOTES.md','VF_Library_V2.5.6_RELEASE_MANIFEST.json','SHA256SUMS.txt'}
+          assert required<=set(fa),set(fa)
+          print('DETERMINISTIC_BUILD=PASS')
+          for n,h in sorted(fa.items()): print(n,h)
+          PY
+          unzip -t build/formal-a/VF_Library_V2.5.6_UPDATE.zip >/dev/null
+          unzip -t build/formal-a/VF_Library_V2.5.6_FULL.zip >/dev/null
+          unzip -t build/formal-a/VF_Library_V2.5.6_ATOMIC.zip >/dev/null
+          echo FORMAL_ARCHIVE_GATES=PASS
+
+      - name: FULL fresh install
+        working-directory: product
+        env:
+          PW: P02-V256-FRESH-${{ github.run_id }}!
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/fresh256"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          unzip -q build/formal-a/VF_Library_V2.5.6_FULL.zip -d "$SITE"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.6
+          php -S 127.0.0.1:18262 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18262/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" http://127.0.0.1:18262/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H 'Origin: http://127.0.0.1:18262' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18262/setup.php)" = 303
+          php "$SITE/cli/verify.php" > "$ROOT/verify.json"
+          jq -e '.ok==true and .version=="2.5.6" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' "$ROOT/verify.json" >/dev/null
+          kill "$(cat "$ROOT/pid")"
+          echo FULL_FRESH_INSTALL=PASS
+
+      - name: Existing data UpdateCore V2.5.5 to V2.5.6
+        working-directory: product
+        env:
+          PW: P02-V256-UPGRADE-${{ github.run_id }}!
+          READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/upgrade256"; SRC="$ROOT/source255"; SITE="$ROOT/site"; mkdir -p "$ROOT"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-library.git" "$SRC"
+          git -C "$SRC" checkout -q v2.5.5
+          mkdir -p "$SITE"; bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.5
+          php -S 127.0.0.1:18263 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18263/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" http://127.0.0.1:18263/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H 'Origin: http://127.0.0.1:18263' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18263/setup.php)" = 303
+          SESSION=$(curl -fsS -b "$ROOT/cookie" http://127.0.0.1:18263/api.php?action=session); CSRF=$(jq -r '.csrf' <<<"$SESSION")
+          CAT=$(curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"V256 Upgrade Sentinel","description":"keep","icon":"folder"}' 'http://127.0.0.1:18263/api.php?action=category_save'); CID=$(jq -r '.id' <<<"$CAT"); test "$CID" != null
+          ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V256 Existing Data",description:"survive",content:"## Existing\n\n- [ ] keep",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')
+          SAVED=$(curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" 'http://127.0.0.1:18263/api.php?action=content_save'); IID=$(jq -r '.id' <<<"$SAVED"); test "$IID" != null
+          curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" 'http://127.0.0.1:18263/api.php?action=content_favorite' | jq -e '.ok==true' >/dev/null
+          PKG="$(pwd)/build/formal-a/$UPDATE_NAME"; BYTES=$(stat -c%s "$PKG"); SHA=$(sha256sum "$PKG"|awk '{print $1}')
+          cat > "$ROOT/upgrade.php" <<'PHP'
+          <?php
+          $site=$argv[1];$package=$argv[2];$bytes=(int)$argv[3];$sha=$argv[4];
+          require $site.'/app/bootstrap.php';require_once $site.'/app/CoreUpdates/UpdateAdapter.php';require_once $site.'/app/CoreUpdates/UpdateCore.php';require_once $site.'/app/VfLibraryCoreUpdateAdapter.php';
+          $manifest=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'current_version'=>'2.5.5','target_version'=>'2.5.6','update_type'=>'ATOMIC','from_versions'=>['2.5.5'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.6','asset_name'=>'VF_Library_V2.5.6_UPDATE.zip','asset_bytes'=>$bytes,'asset_sha256'=>$sha,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-19T03:45:00Z'];
+          $core=new CoreUpdates\UpdateCore('P02','APP');$check=$core->check('2.5.5','2401',$manifest);if(($check['status']??'')!=='AVAILABLE')exit(2);$verify=$core->verifyPackage($package,$manifest);if(($verify['status']??'')!=='VERIFIED')exit(3);$adapter=new VfLibraryCoreUpdateAdapter();$result=$core->upgrade('2.5.5','2401',$adapter,$package,$manifest);file_put_contents($argv[5],json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));if(!in_array($result['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true))exit(4);if(empty($result['backup_locator']))exit(5);
+          PHP
+          php "$ROOT/upgrade.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$ROOT/result.json"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.6
+          jq -e '.status=="COMMITTED" or .status=="COMMITTED_WITH_CLEANUP_WARNING"' "$ROOT/result.json" >/dev/null
+          jq -e '.backup_locator|length>0' "$ROOT/result.json" >/dev/null
+          SESSION2=$(curl -fsS -b "$ROOT/cookie" http://127.0.0.1:18263/api.php?action=session); CSRF2=$(jq -r '.csrf' <<<"$SESSION2")
+          curl -fsS -b "$ROOT/cookie" "http://127.0.0.1:18263/api.php?action=content_get&id=$IID" | jq -e '.item.title=="V256 Existing Data" and (.item.is_favorite|tonumber)==1' >/dev/null
+          POST=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V256 Post Upgrade Write",description:"after",content:"write works",content_mode:"quick",content_format:"plain",primary_action:"copy",status:"active"}')
+          curl -fsS -b "$ROOT/cookie" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d "$POST" 'http://127.0.0.1:18263/api.php?action=content_save' | jq -e '.ok==true' >/dev/null
+          php "$SITE/cli/verify.php" > "$ROOT/verify.json"; jq -e '.ok==true and .version=="2.5.6" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' "$ROOT/verify.json" >/dev/null
+          kill "$(cat "$ROOT/pid")"
+          echo EXISTING_DATA_UPDATECORE_255_TO_256=PASS
+          echo AUTOMATIC_BACKUP=PASS
+          echo BUSINESS_DATA_FAVORITE_PRESERVATION=PASS
+          echo POST_UPGRADE_WRITE=PASS
+
+      - name: Publish V2.5.6 Release and remote readback
+        working-directory: product
+        env:
+          GH_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          if gh release view "$RELEASE_TAG" --repo "$PRODUCT_REPO" >/dev/null 2>&1; then
+            echo RELEASE_ALREADY_EXISTS=YES
+          else
+            gh release create "$RELEASE_TAG" --repo "$PRODUCT_REPO" --target "$PRODUCT_REF" --title 'VF Library V2.5.6' --notes-file build/formal-a/VF_Library_V2.5.6_RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" build/formal-a/* --repo "$PRODUCT_REPO" --clobber
+          gh release view "$RELEASE_TAG" --repo "$PRODUCT_REPO" --json databaseId,tagName,isDraft,isPrerelease,targetCommitish,assets > "$RUNNER_TEMP/release256.json"
+          jq -e '.tagName=="v2.5.6" and .isDraft==false and .isPrerelease==false' "$RUNNER_TEMP/release256.json" >/dev/null
+          BYTES=$(stat -c%s "build/formal-a/$UPDATE_NAME"); SHA=$(sha256sum "build/formal-a/$UPDATE_NAME"|awk '{print $1}')
+          mkdir -p "$RUNNER_TEMP/readback256"
+          GH_TOKEN='${{ secrets.VF_PRIVATE_READ_TOKEN }}' gh release download "$RELEASE_TAG" --repo "$PRODUCT_REPO" --pattern "$UPDATE_NAME" --dir "$RUNNER_TEMP/readback256"
+          test "$(stat -c%s "$RUNNER_TEMP/readback256/$UPDATE_NAME")" = "$BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/readback256/$UPDATE_NAME"|awk '{print $1}')" = "$SHA"
+          echo RELEASE_ID=$(jq -r '.databaseId' "$RUNNER_TEMP/release256.json")
+          echo UPDATE_BYTES=$BYTES
+          echo UPDATE_SHA256=$SHA
+          echo REMOTE_UPDATE_BYTES_SHA256=PASS
+          echo V256_FORMAL_RELEASE=PASS
+          echo PRODUCTION_WRITE=NO
