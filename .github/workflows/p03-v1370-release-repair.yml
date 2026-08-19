@@ -1,0 +1,118 @@
+name: P03 V1.37.0 Release Checksum Repair
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1370-release-repair.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  TAG: v1.37.0
+  TAG_SHA: 296675dde8d2d76a48ffae603af5e911586be748
+  BASE_SHA: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+  EXPECTED_UPDATE_SHA256: 78bab1069a115d0cc96f5abe66b71e2989e01d5acda20c4b474d70a018638ba6
+
+jobs:
+  repair-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require established release credential
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"
+
+      - name: Checkout exact P03 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-forge
+          ref: ${{ env.TAG_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Deterministically rebuild formal checksum evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$TAG_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+          rm -rf "$RUNNER_TEMP/v1370-base-wt" "$RUNNER_TEMP/v1370-base-runtime" "$RUNNER_TEMP/v1370-target-runtime" "$RUNNER_TEMP/v1370-release"
+          git worktree add --detach "$RUNNER_TEMP/v1370-base-wt" "$BASE_SHA" >/dev/null
+          python3 "$RUNNER_TEMP/v1370-base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/v1370-base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/v1370-target-runtime" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/v1370-base-runtime" --target-runtime "$RUNNER_TEMP/v1370-target-runtime" --output "$RUNNER_TEMP/v1370-release" >/dev/null
+          git worktree remove --force "$RUNNER_TEMP/v1370-base-wt" >/dev/null
+          cd "$RUNNER_TEMP/v1370-release"
+          cp VF_Forge_V1.37.0_Atomic_Upgrade.zip VF_Forge_V1.37.0_UPDATE.zip
+          UPDATE_SHA=$(sha256sum VF_Forge_V1.37.0_UPDATE.zip | awk '{print $1}')
+          test "$UPDATE_SHA" = "$EXPECTED_UPDATE_SHA256"
+          cat > RELEASE_NOTES.md <<'EOF'
+          # P03 · VF Forge V1.37.0
+
+          Project Intelligence / Engineering Memory 重构正式版本。
+
+          - Source Authority: GitHub
+          - Production Source Before Upgrade: V1.36.2 / Schema 30
+          - Target: V1.37.0 / Schema 30
+          - Migration: NONE
+          - Project Asset Storage: NONE
+          - Atomic Upgrade Success: PASS
+          - Failure Source + SQLite Rollback: PASS
+          - Production Source Exact Manifest Verification: PASS
+          - Project Intelligence + MCP Contract: PASS
+          - Private/User Data in Release Asset: NONE
+          EOF
+          sha256sum VF_Forge_V1.37.0_UPDATE.zip repair-v1.37.0.php SOURCE_MANIFEST.txt PACKAGE_MANIFEST.json RELEASE_NOTES.md > RELEASE_SHA256SUMS.txt
+          grep -Fq "$EXPECTED_UPDATE_SHA256  VF_Forge_V1.37.0_UPDATE.zip" RELEASE_SHA256SUMS.txt
+          echo 'V1370_RELEASE_CHECKSUM_REBUILD=PASS'
+
+      - name: Upload only missing checksum asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$P03_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/before.json"
+          python3 - "$RUNNER_TEMP/before.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));a={x['name'] for x in d.get('assets',[])}
+          assert 'VF_Forge_V1.37.0_UPDATE.zip' in a
+          assert 'RELEASE_SHA256SUMS.txt' not in a
+          print('V1370_RELEASE_PARTIAL_STATE_CONFIRMED')
+          PY
+          gh release upload "$TAG" "$RUNNER_TEMP/v1370-release/RELEASE_SHA256SUMS.txt" --repo "$P03_REPOSITORY"
+          echo 'V1370_RELEASE_CHECKSUM_UPLOAD=PASS'
+
+      - name: Final release asset reverse readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/published"; mkdir -p "$RUNNER_TEMP/published"
+          gh release download "$TAG" --repo "$P03_REPOSITORY" --pattern 'VF_Forge_V1.37.0_UPDATE.zip' --pattern 'RELEASE_SHA256SUMS.txt' --dir "$RUNNER_TEMP/published"
+          test -f "$RUNNER_TEMP/published/VF_Forge_V1.37.0_UPDATE.zip"
+          test -f "$RUNNER_TEMP/published/RELEASE_SHA256SUMS.txt"
+          ACTUAL_SHA=$(sha256sum "$RUNNER_TEMP/published/VF_Forge_V1.37.0_UPDATE.zip" | awk '{print $1}')
+          BYTES=$(stat -c %s "$RUNNER_TEMP/published/VF_Forge_V1.37.0_UPDATE.zip")
+          test "$ACTUAL_SHA" = "$EXPECTED_UPDATE_SHA256"
+          grep -Fq "$EXPECTED_UPDATE_SHA256  VF_Forge_V1.37.0_UPDATE.zip" "$RUNNER_TEMP/published/RELEASE_SHA256SUMS.txt"
+          gh api "repos/$P03_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/after.json"
+          python3 - "$RUNNER_TEMP/after.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));assets={x['name']:x for x in d.get('assets',[])}
+          assert set(['VF_Forge_V1.37.0_UPDATE.zip','RELEASE_SHA256SUMS.txt']).issubset(assets)
+          print('V1370_RELEASE_ASSETS_COMPLETE','release_id='+str(d['id']),'update_asset_id='+str(assets['VF_Forge_V1.37.0_UPDATE.zip']['id']),'checksum_asset_id='+str(assets['RELEASE_SHA256SUMS.txt']['id']))
+          PY
+          echo "P03_V1370_FORMAL_RELEASE_REPAIRED=PASS sha256=$ACTUAL_SHA bytes=$BYTES"
