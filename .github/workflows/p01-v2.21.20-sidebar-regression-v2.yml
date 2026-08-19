@@ -1,0 +1,97 @@
+name: P01 V2.21.20 Sidebar Regression V2
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['.github/workflows/p01-v2.21.20-sidebar-regression-v2.yml']
+permissions:
+  contents: read
+jobs:
+  sidebar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Exact source / syntax / fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch maintenance/sidebar-density-2.21.20-20260819 "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" c
+          cd c
+          ACTUAL="$(git rev-parse HEAD)"; echo "$ACTUAL" >/tmp/sha; test "$ACTUAL" = '46a3e2362d3c396e845f20fecd22d5745d728581'; git rev-parse HEAD^{tree} >/tmp/tree
+          find src -type f -name '*.php' -print0|xargs -0 -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0|xargs -0 -n1 node --check >/dev/null
+          grep -q 'sidebar-refinement.css?v=22120' src/assets/reference-ui.js
+          grep -q 'reference-ui.js?v=22120' src/index.php
+          sudo apt-get update -qq; sudo apt-get install -y -qq php-sqlite3 sqlite3 >/dev/null
+          cp -a src /tmp/p; cd /tmp/p; php -S 127.0.0.1:18090 -t . >/tmp/p01-22120-v2.log 2>&1 & echo $! >/tmp/pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/c http://127.0.0.1:18090/setup.php -o /tmp/setup&&break||sleep 1;done
+          CSRF=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/setup').read()).group(1))
+          PY
+          )
+          curl -fsSL -c /tmp/c -b /tmp/c -X POST http://127.0.0.1:18090/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF' --data-urlencode 'admin_password=Runner-P01-22120!Strong' --data-urlencode 'admin_password_confirm=Runner-P01-22120!Strong' >/dev/null
+          php cli/verify.php|tee /tmp/verify; grep -q 'VERIFY_PASS=YES' /tmp/verify
+          DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;"); test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok; test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          mkdir -p "$RUNNER_TEMP/n";cd "$RUNNER_TEMP/n";npm init -y >/dev/null 2>&1;PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+      - name: Real Chrome production-row geometry
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/n/sidebar.mjs" <<'JS'
+          import{chromium}from'playwright-core';
+          const b=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});
+          try{
+            const p=await b.newPage({viewport:{width:1319,height:900}}),errs=[];p.on('pageerror',e=>errs.push(String(e)));
+            await p.goto('http://127.0.0.1:18090/',{waitUntil:'networkidle'});await p.click('#loginButton');await p.fill('[name=password]','Runner-P01-22120!Strong');await p.click('#loginSubmit');
+            await p.waitForFunction(()=>document.documentElement.dataset.vfReferenceUi==='4'&&!!document.querySelector('link[data-vf-sidebar-refinement]'));
+            await p.evaluate(()=>{
+              document.body.classList.add('is-admin');
+              const nav=document.querySelector('#unifiedCategoryNav');
+              const row=(id,name,count,active)=>`<div class="category-node category-node--child" data-category-node="${id}" data-parent-id="100"><span class="category-guide" aria-hidden="true"></span><div class="category-row category-row--child category-nav-row child${active?' active':''}"><button class="category-nav-main" data-category="${id}"><span class="nav-label">${name}</span></button><span class="nav-count">${count}</span><span class="category-actions"><span class="nav-drag" draggable="true">⋮⋮</span><button class="nav-more" title="编辑分类">•••</button></span></div></div>`;
+              nav.innerHTML=row(102,'浏览器、设备与环境',13,true)+row(103,'账号、邮箱与身份管理',18,false);
+            });
+            await p.waitForTimeout(200);
+            const q=await p.evaluate(()=>{
+              const rows=[...document.querySelectorAll('.category-row--child')],row=rows[0],long=rows[1],label=row.querySelector('.nav-label'),longLabel=long.querySelector('.nav-label'),count=row.querySelector('.nav-count'),actions=row.querySelector('.category-actions'),sidebar=document.querySelector('.sidebar'),rs=getComputedStyle(row),as=getComputedStyle(actions),before=getComputedStyle(row,'::before');
+              return {sidebarWidth:sidebar.getBoundingClientRect().width,labelWidth:label.getBoundingClientRect().width,labelOverflow:label.scrollWidth-label.clientWidth,longLabelWidth:longLabel.getBoundingClientRect().width,longLabelOverflow:longLabel.scrollWidth-longLabel.clientWidth,countWidth:count.getBoundingClientRect().width,actionsWidth:actions.getBoundingClientRect().width,actionsPosition:as.position,bg:rs.backgroundColor,railWidth:before.width,overflow:Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth)};
+            });
+            console.log('GEOMETRY',JSON.stringify(q));
+            if(q.sidebarWidth<258||q.sidebarWidth>262)throw Error('sidebar width '+q.sidebarWidth);
+            if(q.countWidth>27||q.actionsPosition!=='absolute'||q.actionsWidth>51)throw Error('tail contract '+JSON.stringify(q));
+            if(q.labelWidth<145||q.longLabelWidth<145||q.labelOverflow>1||q.longLabelOverflow>1)throw Error('label contract '+JSON.stringify(q));
+            if(q.bg!=='rgb(247, 247, 247)')throw Error('active bg '+q.bg);
+            if(Math.abs(parseFloat(q.railWidth)-2)>.2)throw Error('rail '+q.railWidth);
+            if(q.overflow>1)throw Error('desktop overflow '+q.overflow);
+            const before=await p.$eval('.category-row--child.active',e=>({x:e.getBoundingClientRect().x,w:e.getBoundingClientRect().width}));await p.hover('.category-row--child.active');await p.waitForTimeout(180);
+            const after=await p.$eval('.category-row--child.active',e=>({x:e.getBoundingClientRect().x,w:e.getBoundingClientRect().width,count:+getComputedStyle(e.querySelector('.nav-count')).opacity,more:+getComputedStyle(e.querySelector('.nav-more')).opacity}));
+            if(Math.abs(before.x-after.x)>.1||Math.abs(before.w-after.w)>.1||after.count>.1||after.more<.8)throw Error('hover contract '+JSON.stringify({before,after}));
+            for(const w of [390,480,768,1024,1319,1440]){await p.setViewportSize({width:w,height:900});await p.waitForTimeout(150);const d=await p.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));if(d>1)throw Error('overflow '+w+':'+d)}
+            if(errs.length)throw Error(errs.join('|'));console.log('P01_V22120_SIDEBAR_REAL_CHROME_V2=PASS');
+          }finally{await b.close()}
+          JS
+          cd "$RUNNER_TEMP/n";node sidebar.mjs
+      - name: Publish sanitized evidence
+        if: always()
+        shell: bash
+        env:
+          S: ${{ job.status }}
+          RID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import os,json,base64,urllib.request,urllib.error
+          def r(p):
+            try:return open(p).read().strip()
+            except:return''
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.20','gate':'SIDEBAR_REAL_CHROME_V2','status':os.environ['S'].upper(),'pass':os.environ['S']=='success','source_sha':r('/tmp/sha'),'source_tree':r('/tmp/tree'),'workflow_run_id':os.environ['RID'],'fixture_contract':'production_row_markup','private_data_persisted_publicly':False};c=json.dumps(q,indent=2)+'\n';t=os.environ['W'];api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/vf-agent/results/P01-V2.21.20-SIDEBAR-REAL-CHROME-V2.json';h={'Authorization':'Bearer '+t,'Accept':'application/vnd.github+json'};sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h)) as x:sha=json.load(x).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          body={'message':'evidence(P01): publish V2.21.20 sidebar Chrome V2','content':base64.b64encode(c.encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:body['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**h,'Content-Type':'application/json'})).read()
+          PY
+      - if: always()
+        run: if [ -f /tmp/pid ];then kill $(cat /tmp/pid) 2>/dev/null||true;fi
