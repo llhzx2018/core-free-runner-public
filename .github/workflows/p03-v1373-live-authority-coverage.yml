@@ -1,0 +1,108 @@
+name: P03 V1.37.3 Live Authority Coverage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1373-live-authority-coverage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 06604154b3ae8b26b222a14b7961a6fc4709c7c3
+
+jobs:
+  live-coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact private P03 bootstrap work
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Read live VF authorities into ephemeral Schema 30
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl sqlite3 >/dev/null
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          cat > "$RUNNER_TEMP/p03-live-coverage.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getcwd();
+          require_once $root.'/src/app/bootstrap.php';
+          require_once $root.'/src/app/AuthorityMemoryService.php';
+          require_once $root.'/src/app/PortfolioIntelligenceBootstrapService.php';
+
+          $db=new PDO('sqlite::memory:');
+          $db->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+          $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE,PDO::FETCH_ASSOC);
+          $db->exec((string)file_get_contents($root.'/database/schema/current.sql'));
+          $now=gmdate('c');
+          $repos=[
+            ['P01','VF Start','vf-start','llhzx2018/vf-start'],
+            ['P02','VF Library','vf-library','llhzx2018/vf-library'],
+            ['P03','VF Forge','vf-forge','llhzx2018/vf-forge'],
+            ['P04','VF Infra','vf-infra','llhzx2018/vf-infra'],
+            ['P05','VF SEO','vf-seo','llhzx2018/vf-seo'],
+            ['S01-C01','VF Tools Theme','vf-tools-theme','llhzx2018/vf-tools-theme'],
+            ['S01-C02','VF Tools Ops','vf-tools-ops','llhzx2018/vf-tools-ops'],
+            ['S01-C03','VF Tools M3U8','vf-tools-m3u8','llhzx2018/vf-tools-m3u8'],
+          ];
+          $memory=new VfAuthorityMemoryService($db);
+          $bootstrap=new VfPortfolioIntelligenceBootstrapService($db);
+          $report=[];$totalEvents=0;$totalRelations=0;$totalReleases=0;$totalTags=0;$syncPass=0;
+          foreach($repos as [$code,$name,$slug,$repo]){
+            $db->prepare("INSERT INTO projects(uuid,name,slug,project_code,description,source_repo_url,stage,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+               ->execute([vfab_uuid(),$name,$slug,$code,'LIVE AUTHORITY COVERAGE FIXTURE','https://github.com/'.$repo,'observed','active',$now,$now]);
+            $pid=(int)$db->lastInsertId();
+            try{
+              $source=$memory->connectGithub($pid,$repo,'env:VF_PRIVATE_READ_TOKEN');
+              $sync=$memory->syncGithub($pid,(int)$source['id']);
+              $boot=$bootstrap->bootstrapProject($pid);
+              $objects=(int)$db->query("SELECT COUNT(*) FROM authority_objects WHERE project_id=".$pid)->fetchColumn();
+              $releases=(int)$db->query("SELECT COUNT(*) FROM authority_objects WHERE project_id=".$pid." AND object_type='RELEASE'")->fetchColumn();
+              $tags=(int)$db->query("SELECT COUNT(*) FROM authority_objects WHERE project_id=".$pid." AND object_type='TAG'")->fetchColumn();
+              $events=(int)$db->query("SELECT COUNT(*) FROM timeline_events WHERE project_id=".$pid." AND provenance_kind='portfolio_bootstrap'")->fetchColumn();
+              $relations=(int)$db->query("SELECT COUNT(*) FROM truth_relations WHERE project_id=".$pid)->fetchColumn();
+              $report[]=['project'=>$code,'repository'=>$repo,'status'=>'PASS','objects'=>$objects,'releases'=>$releases,'tags'=>$tags,'events'=>$events,'relations'=>$relations,'boot_events'=>(int)$boot['events_created'],'boot_relations'=>(int)$boot['relations_created']];
+              $totalEvents+=$events;$totalRelations+=$relations;$totalReleases+=$releases;$totalTags+=$tags;$syncPass++;
+            }catch(Throwable $e){
+              $report[]=['project'=>$code,'repository'=>$repo,'status'=>'ERROR','error'=>preg_replace('/[^A-Za-z0-9 _.:\/-]/','?',substr($e->getMessage(),0,180))];
+            }
+          }
+
+          $beforeEvents=(int)$db->query("SELECT COUNT(*) FROM timeline_events WHERE provenance_kind='portfolio_bootstrap'")->fetchColumn();
+          $beforeRelations=(int)$db->query("SELECT COUNT(*) FROM truth_relations")->fetchColumn();
+          $second=$bootstrap->bootstrapPortfolio(100);
+          $afterEvents=(int)$db->query("SELECT COUNT(*) FROM timeline_events WHERE provenance_kind='portfolio_bootstrap'")->fetchColumn();
+          $afterRelations=(int)$db->query("SELECT COUNT(*) FROM truth_relations")->fetchColumn();
+          if($beforeEvents!==$afterEvents||$beforeRelations!==$afterRelations||(int)$second['events_created']!==0||(int)$second['relations_created']!==0)throw new RuntimeException('LIVE bootstrap idempotence failed');
+          if($syncPass<6)throw new RuntimeException('Too few live repositories synchronized: '.$syncPass);
+          if($totalReleases<6)throw new RuntimeException('Live release coverage too thin: '.$totalReleases);
+          if($totalEvents<12)throw new RuntimeException('Meaningful live event coverage too thin: '.$totalEvents);
+          if($totalRelations<12)throw new RuntimeException('Live relation coverage too thin: '.$totalRelations);
+          if((int)$db->query('SELECT COUNT(*) FROM assets')->fetchColumn()!==0||(int)$db->query('SELECT COUNT(*) FROM asset_files')->fetchColumn()!==0)throw new RuntimeException('Project asset storage was used');
+
+          foreach($report as $r)echo 'P03_LIVE '.json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES).PHP_EOL;
+          echo "P03_V1373_LIVE_AUTHORITY_COVERAGE=PASS repos=$syncPass releases=$totalReleases tags=$totalTags events=$totalEvents relations=$totalRelations idempotent=YES storage=NONE".PHP_EOL;
+          PHP
+          php "$RUNNER_TEMP/p03-live-coverage.php"
+          echo 'SCHEMA=30'
+          echo 'MIGRATION=NONE'
+          echo 'EXTERNAL_WRITE=NO'
+          echo 'PRODUCTION_WRITE=NO'
