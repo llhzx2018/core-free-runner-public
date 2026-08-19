@@ -1,0 +1,74 @@
+name: P01 V2.21.21 Atomic Source Probe
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: startsWith(github.head_ref, 'agent/p01-22121-formal-artifact-gate')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE: 0b62c96b787e03b0dda6ef8493d29755b6baf83e
+      CANDIDATE_TREE: 02b6199ab82f2fb03dd9d8048288421037869e4e
+      PRODUCTION: 383552dc5035cb60b4cd131907d05d87c3171b9b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: runner
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCTION }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+      - name: Build and show Atomic source checks
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-atomic-probe"
+          python3 runner/scripts/p01-build-maintenance-candidate-22121.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" >/dev/null
+          REPAIR="$OUT/repair-v2.21.21.php"
+          echo '--- SELF TEST ---'
+          php "$REPAIR" --self-test
+          echo '--- EXACT SOURCE ---'
+          set +e
+          php "$REPAIR" --verify-source=production/src 2>&1 | tee "$RUNNER_TEMP/exact-source.txt"
+          exact_rc=${PIPESTATUS[0]}
+          set -e
+          echo "EXACT_SOURCE_EXIT=$exact_rc"
+          echo '--- GATE-ONLY VARIANT ---'
+          rm -rf /tmp/p01-v22121-gate-only /tmp/p01-v22121-runtime-tamper
+          cp -a production/src /tmp/p01-v22121-gate-only
+          printf '\nP01_GATE_ONLY_VARIANT\n' >> /tmp/p01-v22121-gate-only/README.md
+          set +e
+          php "$REPAIR" --verify-source=/tmp/p01-v22121-gate-only 2>&1 | tee "$RUNNER_TEMP/gate-only.txt"
+          gate_rc=${PIPESTATUS[0]}
+          set -e
+          echo "GATE_ONLY_EXIT=$gate_rc"
+          echo '--- RUNTIME TAMPER ---'
+          cp -a production/src /tmp/p01-v22121-runtime-tamper
+          printf '\n/* P01_TRUE_RUNTIME_TAMPER */\n' >> /tmp/p01-v22121-runtime-tamper/app/AdminShell.php
+          set +e
+          php "$REPAIR" --verify-source=/tmp/p01-v22121-runtime-tamper 2>&1 | tee "$RUNNER_TEMP/runtime-tamper.txt"
+          tamper_rc=${PIPESTATUS[0]}
+          set -e
+          echo "RUNTIME_TAMPER_EXIT=$tamper_rc"
+          test "$exact_rc" -eq 0
+          test "$gate_rc" -eq 0
+          test "$tamper_rc" -ne 0
+          grep -q 'app/AdminShell.php:sha' "$RUNNER_TEMP/runtime-tamper.txt"
+          echo 'ATOMIC_SOURCE_PROBE=PASS'
