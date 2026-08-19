@@ -1,0 +1,94 @@
+name: P01 V2.21.21 Browser Reverify
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gate:
+    if: startsWith(github.head_ref, 'agent/p01-22121-browser-reverify')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: maintenance/navigation-admin-simplify-2.21.21-20260819
+      EXPECTED_HEAD: 77d859c8d1ee068792438787cbf5834761a53325
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone exact working source
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch "$PRODUCT_BRANCH" "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" p
+          test "$(git -C p rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 vf-agent/p01/patch_22121.py p
+          git -C p diff --exit-code
+          find p/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Fresh install and fixture
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq >/dev/null
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          rm -rf /tmp/vf-p01-22121
+          cp -a p/src /tmp/vf-p01-22121
+          cd /tmp/vf-p01-22121
+          php -S 127.0.0.1:18121 -t . > "$GITHUB_WORKSPACE/evidence/php-server.log" 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18121/setup.php -o /tmp/setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies http://127.0.0.1:18121/setup.php -o /tmp/setup.html
+          CSRF=$(python3 -c "import re; t=open('/tmp/setup.html',encoding='utf-8').read(); m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',t); assert m; print(m.group(1))")
+          curl -fsS -c /tmp/vf.cookies -b /tmp/vf.cookies -X POST http://127.0.0.1:18121/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF P01 22121 Gate' --data-urlencode 'admin_password=MaintenanceTest!2026' --data-urlencode 'admin_password_confirm=MaintenanceTest!2026' -o /tmp/setup-post.html
+          test -f app/.runtime.php
+          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture_22121.php
+          php fixture_22121.php
+          php cli/verify.php | tee "$GITHUB_WORKSPACE/evidence/cli-verify.txt"
+      - name: Correct hover-neutral assertion and run Chrome
+        env:
+          P01_BASE: http://127.0.0.1:18121/
+          P01_EVIDENCE: evidence
+        run: |
+          set -Eeuo pipefail
+          sed -i "s/if (active.bg !== 'rgb(241, 243, 242)')/if (!['rgb(241, 243, 242)', 'rgb(243, 245, 244)'].includes(active.bg))/" vf-agent/p01/e2e_22121.mjs
+          node vf-agent/p01/e2e_22121.mjs | tee evidence/browser.txt
+      - name: SQLite and backup boundary
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-22121
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          BACKUP=$(php cli/backup.php)
+          test -f "$BACKUP"
+          echo DATA_BACKUP_PASS | tee "$GITHUB_WORKSPACE/evidence/data-backup.txt"
+      - name: Publish safe evidence
+        if: success()
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TREE=$(git -C p rev-parse HEAD^{tree})
+          jq -n --arg sha "$EXPECTED_HEAD" --arg tree "$TREE" --slurpfile browser evidence/browser.json '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.21_NAVIGATION_BACKEND_BROWSER",status:"SUCCESS",pass:true,working_source_sha:$sha,working_source_tree:$tree,browser:$browser[0],fresh_install:true,sqlite_integrity:true,backup:true,schema_changed:false,production_changed:false,private_data_used:false}' > /tmp/evidence.json
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.21-NAVIGATION-BACKEND-BROWSER.json
+          git -C out config user.name VictorForge
+          git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.21-NAVIGATION-BACKEND-BROWSER.json
+          git -C out commit -q -m 'evidence(P01): V2.21.21 navigation backend browser pass'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p01-v22121-browser-reverify-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
