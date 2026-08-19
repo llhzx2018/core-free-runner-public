@@ -36,6 +36,6 @@ $links=[[$cats[0],"GitHub","https://github.com/",1],[$cats[0],"Cloudflare","http
 foreach($links as $i=>$x){$r->saveLink(null,["category_id"=>$x[0],"title"=>$x[1],"url"=>$x[2],"description"=>"Synthetic reference fixture","is_private"=>0,"is_favorite"=>$x[3],"sort_order"=>400-$i],"manual");}
 echo "FIXTURE_PASS\n";'
 php /tmp/p01-ui/cli/verify.php | grep -q 'VERIFY_PASS=YES'
-sqlite3 /tmp/p01-ui/private_data/vf.sqlite 'PRAGMA integrity_check;' | grep -qx ok
+php -r 'require "/tmp/p01-ui/app/bootstrap.php";$v=strtolower((string)vf_db()->query("PRAGMA integrity_check")->fetchColumn());if($v!=="ok")exit(1);echo "SQLITE_INTEGRITY=PASS\n";'
 
 ADMIN_PASS="$ADMIN_PASS" node "$RUNNER_TEMP/p01-node/e2e.mjs"
