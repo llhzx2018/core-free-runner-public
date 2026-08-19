@@ -23,7 +23,7 @@ for(const width of [1920,1440,1280,1024,768,480,430,390,375]){
   await page.setViewportSize({width,height:width<700?844:900});await page.waitForTimeout(120);
   const v=await page.evaluate(()=>({client:document.documentElement.clientWidth,html:document.documentElement.scrollWidth,body:document.body.scrollWidth,search:document.querySelector('.top-search')?.getBoundingClientRect().width||0}));
   if(v.html>v.client+1||v.body>v.client+1)throw new Error('FRONT_OVERFLOW '+width+' '+JSON.stringify(v));
-  if(width<=700&&v.search>44)throw new Error('MOBILE_SEARCH '+width+' '+JSON.stringify(v));
+  if(width<=700&&(v.search<38||v.search>64))throw new Error('MOBILE_SEARCH_TOUCH_TARGET '+width+' '+JSON.stringify(v));
   result.widths['front_'+width]=v;
 }
 await page.setViewportSize({width:1440,height:900});
