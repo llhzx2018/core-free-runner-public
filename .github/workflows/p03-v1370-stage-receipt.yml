@@ -1,0 +1,102 @@
+name: P03 V1.37.0 Stage Receipt
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/p03/stage/**'
+      - '.github/workflows/p03-v1370-stage-receipt.yml'
+
+permissions:
+  contents: write
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: d1517f7d796e9e0a5ee2514761e036c5d2426a5b
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1370-stage-php84
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p03
+
+      - name: Prepare PHP 8.4 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-stage" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-stage" "$RUNNER_TEMP" >/dev/null
+
+      - name: Run lifecycle and capture safe stage receipt
+        id: life
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          cd p03
+          bash tests/maintenance/current_reverify.sh >"$RUNNER_TEMP/full.log" 2>&1
+          rc=$?
+          grep -E '^CURRENT_REVERIFY_(STAGE|FAIL)|^(FRESH_INSTALL_SCHEMA30_PASS|AUTH_CSRF_ORIGIN_PASS|PROJECT_DECISION_INTELLIGENCE_PASS|ZERO_PROJECT_ASSET_STORAGE_FAIL_CLOSED_PASS|BACKUP_VERIFY_PASS|RESTORE_EXECUTE_PASS|PROJECT_STATE_RESTORE_PASS|DECISION_MEMORY_RESTORE_PASS|HTTP_PROJECT_INTELLIGENCE_BACKUP_RESTORE_PASS)$' "$RUNNER_TEMP/full.log" >"$RUNNER_TEMP/safe.log" || true
+          cat "$RUNNER_TEMP/safe.log"
+          echo "$rc" >"$RUNNER_TEMP/rc"
+          exit "$rc"
+
+      - name: Checkout public runner main for receipt
+        if: always()
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          token: ${{ github.token }}
+          persist-credentials: true
+          path: runner
+
+      - name: Write sanitized receipt
+        if: always()
+        shell: bash
+        env:
+          LIFE_OUTCOME: ${{ steps.life.outcome }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p runner/ops/p03/receipts
+          rc='UNKNOWN'; [ -f "$RUNNER_TEMP/rc" ] && rc="$(cat "$RUNNER_TEMP/rc")"
+          {
+            echo '# P03 V1.37.0 Stage Receipt'
+            echo
+            echo "P03_COMMIT=$P03_COMMIT"
+            echo "LIFECYCLE=$LIFE_OUTCOME"
+            echo "EXIT_CODE=$rc"
+            [ -f "$RUNNER_TEMP/safe.log" ] && cat "$RUNNER_TEMP/safe.log"
+            echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+            echo 'PRODUCTION_WRITE=NO'
+          } > runner/ops/p03/receipts/V1370_STAGE_RECEIPT.md
+          cd runner
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ops/p03/receipts/V1370_STAGE_RECEIPT.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'evidence(P03): V1.37.0 lifecycle stage receipt'
+            git push origin HEAD:main
+          fi
+          test "$LIFE_OUTCOME" = 'success'
