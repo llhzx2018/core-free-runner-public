@@ -1,0 +1,156 @@
+name: P02 V2.5.9 Scratch Tabs Verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v259-scratch-tabs-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REF: feature/v2.5.9-scratch-tabs
+      TEST_PORT: '18291'
+    steps:
+      - name: Require private read capability
+        env:
+          READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_REF }}'
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Static and repository gates
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.9'
+          php -l src/app/ScratchTabsService.php >/dev/null
+          php -l public/scratch-action.php >/dev/null
+          node --check public/assets/scratch-tabs.js
+          node --check public/assets/v254-common-branding.js
+          python3 scripts/generate-source-manifest.py >/dev/null
+          python3 scripts/repository-gates.py
+          echo STATIC_AND_REPOSITORY_GATES=PASS
+
+      - name: Scratch API persistence and organize flow
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/scratch-api"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = '2.5.9'
+          PW='P02-V259-Scratch-API!'
+          php -S 127.0.0.1:${TEST_PORT} -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS "http://127.0.0.1:${TEST_PORT}/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/c" "http://127.0.0.1:${TEST_PORT}/setup.php" > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H "Origin: http://127.0.0.1:${TEST_PORT}" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:${TEST_PORT}/setup.php")" = 303
+          SESSION=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:${TEST_PORT}/api.php?action=session"); CSRF=$(jq -r .csrf<<<"$SESSION"); test -n "$CSRF"
+          BASE="http://127.0.0.1:${TEST_PORT}"
+          post(){ curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$2" "$BASE/scratch-action.php?action=$1"; }
+          LIST=$(curl -fsS -b "$ROOT/c" "$BASE/scratch-action.php?action=list"); jq -e '.ok==true and .data.open_count==0'<<<"$LIST" >/dev/null
+          A=$(post create '{}'); AID=$(jq -r .tab.id<<<"$A"); test "$AID" -gt 0
+          post save "$(jq -nc --argjson id "$AID" --arg c $'第一条临时记录\n第二行' '{id:$id,content:$c,cursor_pos:7,scroll_top:19}')" | jq -e '.ok==true and .tab.title=="第一条临时记录"' >/dev/null
+          B=$(post create '{}'); BID=$(jq -r .tab.id<<<"$B");
+          post save "$(jq -nc --argjson id "$BID" --arg c '第二个临时页' '{id:$id,content:$c,cursor_pos:6,scroll_top:0}')" | jq -e '.ok==true' >/dev/null
+          kill "$PID"; wait "$PID" 2>/dev/null || true
+          php -S 127.0.0.1:${TEST_PORT} -t "$SITE" >"$ROOT/server2.log" 2>&1 & PID=$!
+          for _ in $(seq 1 80); do curl -fsS "$BASE/api.php?action=session" >/dev/null 2>&1 && break; sleep .25; done
+          LIST=$(curl -fsS -b "$ROOT/c" "$BASE/scratch-action.php?action=list"); jq -e --argjson a "$AID" --argjson b "$BID" '.data.open_count==2 and ([.data.open[].id]|index($a))!=null and ([.data.open[].id]|index($b))!=null and ([.data.open[]|select(.id==$a).content][0]|contains("第一条临时记录"))'<<<"$LIST" >/dev/null
+          post close "$(jq -nc --argjson id "$AID" '{id:$id}')" | jq -e '.ok==true and .tab.is_open==false' >/dev/null
+          post reopen "$(jq -nc --argjson id "$AID" '{id:$id}')" | jq -e '.ok==true and .tab.is_open==true and (.tab.content|contains("第一条临时记录"))' >/dev/null
+          CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"99 待整理","icon":"folder"}' "$BASE/api.php?action=category_save"); CID=$(jq -r .id<<<"$CAT"); test "$CID" -gt 0
+          ORG=$(post organize "$(jq -nc --argjson id "$AID" --argjson cid "$CID" '{id:$id,title:"临时记录整理结果",category_id:$cid,content_mode:"quick"}')"); IID=$(jq -r .item_id<<<"$ORG"); test "$IID" -gt 0
+          curl -fsS -b "$ROOT/c" "$BASE/api.php?action=content_get&id=$IID" | jq -e '.item.title=="临时记录整理结果" and .item.content_mode=="quick" and (.item.content|contains("第一条临时记录"))' >/dev/null
+          LIST=$(curl -fsS -b "$ROOT/c" "$BASE/scratch-action.php?action=list"); jq -e --argjson a "$AID" '([.data.open[].id]|index($a))==null'<<<"$LIST" >/dev/null
+          post close "$(jq -nc --argjson id "$BID" '{id:$id}')" >/dev/null
+          post discard "$(jq -nc --argjson id "$BID" '{id:$id}')" | jq -e '.ok==true' >/dev/null
+          LIST=$(curl -fsS -b "$ROOT/c" "$BASE/scratch-action.php?action=list"); jq -e '.data.open_count==0'<<<"$LIST" >/dev/null
+          php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.9" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+          echo SCRATCH_API_PERSISTENCE=PASS
+          echo CLOSE_REOPEN_NO_DATA_LOSS=PASS
+          echo ORGANIZE_TO_FORMAL_CONTENT=PASS
+          echo SCHEMA_2401_NO_MIGRATION=PASS
+
+      - name: Browser Notepad-like scratch workflow
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/scratch-browser"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          PW='P02-V259-Scratch-Browser!'
+          PORT=18292
+          php -S 127.0.0.1:$PORT -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/c" "http://127.0.0.1:$PORT/setup.php" > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:$PORT/setup.php")" = 303
+          mkdir -p "$ROOT/node"; cd "$ROOT/node"; npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund puppeteer-core@24.16.0 >/dev/null 2>&1
+          CHROME=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true); test -n "$CHROME"
+          cat > "$ROOT/test.mjs" <<'JS'
+          import puppeteer from 'puppeteer-core';
+          const [url,password,chrome]=process.argv.slice(2);
+          const browser=await puppeteer.launch({headless:true,executablePath:chrome,args:['--no-sandbox','--disable-dev-shm-usage']});
+          const page=await browser.newPage();await page.setViewport({width:1440,height:1000});
+          await page.goto(url,{waitUntil:'networkidle0'});
+          await page.evaluate(async password=>{const r=await fetch('/api.php?action=login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});if(!r.ok)throw new Error('login '+r.status);},password);
+          await page.reload({waitUntil:'networkidle0'});
+          await page.waitForSelector('#scratchLaunchV259',{visible:true,timeout:12000});
+          await page.click('#scratchLaunchV259');
+          await page.waitForSelector('#scratchWorkspaceV259 [data-scratch-editor]:not([disabled])',{timeout:10000});
+          let editor=await page.$('[data-scratch-editor]');await editor.type('Chrome临时一\n第二行',{delay:16});
+          await page.waitForFunction(()=>document.querySelector('[data-scratch-status]')?.textContent.includes('已自动保存'),{timeout:10000});
+          await page.click('[data-scratch-add]');await page.waitForFunction(()=>document.querySelectorAll('[data-scratch-tab]').length===2,{timeout:8000});
+          editor=await page.$('[data-scratch-editor]');await editor.type('第二个临时页',{delay:12});await page.waitForFunction(()=>document.querySelector('[data-scratch-status]')?.textContent.includes('已自动保存'),{timeout:10000});
+          const first=await page.$$('[data-scratch-tab]');await first[0].click();await page.waitForFunction(()=>document.querySelector('[data-scratch-editor]').value.includes('Chrome临时一'));
+          await page.reload({waitUntil:'networkidle0'});
+          await page.waitForSelector('#scratchWorkspaceV259 [data-scratch-editor]:not([disabled])',{timeout:12000});
+          if(await page.$$eval('[data-scratch-tab]',els=>els.length)!==2)throw new Error('tabs not restored after reload');
+          if(!(await page.$eval('[data-scratch-editor]',el=>el.value)).includes('Chrome临时一'))throw new Error('active tab content not restored');
+          await page.$eval('[data-scratch-tab].active [data-scratch-close]',el=>el.click());await page.waitForFunction(()=>document.querySelectorAll('[data-scratch-tab]').length===1,{timeout:8000});
+          await page.click('[data-scratch-recent]');await page.waitForSelector('[data-scratch-reopen]');await page.click('[data-scratch-reopen]');await page.waitForFunction(()=>document.querySelectorAll('[data-scratch-tab]').length===2,{timeout:8000});
+          const reopened=await page.$eval('[data-scratch-editor]',el=>el.value);if(!reopened.includes('Chrome临时一'))throw new Error('reopened content lost');
+          await page.evaluate(async()=>{const s=await (await fetch('/api.php?action=session')).json();const b=await (await fetch('/api.php?action=app_bootstrap')).json();if(!(b.data.categories||[]).some(c=>String(c.name).includes('待整理'))){await fetch('/api.php?action=category_save',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify({name:'99 待整理',icon:'folder'})});}});
+          await page.click('[data-scratch-organize]');await page.waitForSelector('.scratch-organize-overlay-v259');await page.click('[data-organize-submit]');await page.waitForFunction(()=>document.querySelectorAll('[data-scratch-tab]').length===1,{timeout:10000});
+          await page.setViewport({width:390,height:844});await new Promise(r=>setTimeout(r,250));
+          const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth+1);if(overflow)throw new Error('mobile horizontal overflow');
+          await browser.close();console.log('BROWSER_SCRATCH_TABS=PASS');console.log('AUTOSAVE_RELOAD_RESTORE=PASS');console.log('CLOSE_REOPEN=PASS');console.log('ORGANIZE_UI=PASS');console.log('MOBILE_OVERFLOW=PASS');
+          JS
+          node "$ROOT/test.mjs" "http://127.0.0.1:$PORT/" "$PW" "$CHROME"
+
+      - name: Final source identity
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          echo "PRODUCT_HEAD=$(git rev-parse HEAD)"
+          echo "PRODUCT_VERSION=$(cat VERSION)"
+          echo P02_V259_SCRATCH_TABS_CANDIDATE=PASS
+          echo PRODUCTION_WRITE=NO
