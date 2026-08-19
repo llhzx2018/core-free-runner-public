@@ -1,0 +1,110 @@
+name: P04 V2.8.6 Package Candidate Fast
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v286-package-candidate-fast.yml'
+      - 'requests/p04-v286-package-candidate-fast.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: d98c2bc9281f259b6ba9f90855b01e42b73eabb3
+      TARGET_VERSION: 2.8.6
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3, fileinfo, mbstring
+          ini-file: production
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Verify exact source and build deterministic candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          php -l public/index.php >/dev/null
+          node --check public/assets/v284-long-action-feedback.js
+          node --check public/assets/v286-production-maintenance.js
+          python3 -m py_compile scripts/build-release-tree.py scripts/build-v286-update-release.py
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          rm -rf "$RUNNER_TEMP/v286-runtime-a" "$RUNNER_TEMP/v286-runtime-b" "$RUNNER_TEMP/v286-update-a" "$RUNNER_TEMP/v286-update-b" "$RUNNER_TEMP/v286-out"
+          mkdir -p "$RUNNER_TEMP/v286-out" "$GITHUB_WORKSPACE/evidence"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v286-runtime-a" | tee "$GITHUB_WORKSPACE/evidence/release-tree.json"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v286-runtime-b" >/dev/null
+          diff -qr "$RUNNER_TEMP/v286-runtime-a" "$RUNNER_TEMP/v286-runtime-b"
+          jq -e '.version=="2.8.6" and .target_schema==14 and .release_kind=="maintenance_release"' "$RUNNER_TEMP/v286-runtime-a/release-manifest.json" >/dev/null
+          python3 scripts/build-v286-update-release.py --target-runtime "$RUNNER_TEMP/v286-runtime-a" --output "$RUNNER_TEMP/v286-update-a" | tee "$GITHUB_WORKSPACE/evidence/update-build.json"
+          python3 scripts/build-v286-update-release.py --target-runtime "$RUNNER_TEMP/v286-runtime-a" --output "$RUNNER_TEMP/v286-update-b" >/dev/null
+          cmp "$RUNNER_TEMP/v286-update-a/VF_Infra_V2.8.6_UPDATE.zip" "$RUNNER_TEMP/v286-update-b/VF_Infra_V2.8.6_UPDATE.zip"
+          php "$RUNNER_TEMP/v286-update-a/repair-v2.8.6.php" --self-test | tee "$GITHUB_WORKSPACE/evidence/atomic-self-test.txt"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS target=2.8.6 schema=14' "$GITHUB_WORKSPACE/evidence/atomic-self-test.txt"
+          jq -e '.version=="2.8.6" and .schema==14 and .allowed_source_versions==["2.7.9","2.8.0","2.8.1","2.8.2","2.8.3","2.8.4","2.8.5"] and .diagnostics_result_visible==true and .settings_select_alignment==true and .v271_long_action_bridge==true' "$RUNNER_TEMP/v286-update-a/PACKAGE_MANIFEST.json" >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,zipfile
+          runtime=Path(os.environ['RUNNER_TEMP'])/'v286-runtime-a'
+          out=Path(os.environ['RUNNER_TEMP'])/'v286-out'
+          update_dir=Path(os.environ['RUNNER_TEMP'])/'v286-update-a'
+          full=out/'VF_Infra_V2.8.6_FULL.zip'
+          with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                  rel=f.relative_to(runtime).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,f.read_bytes())
+          update=update_dir/'VF_Infra_V2.8.6_UPDATE.zip'
+          def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+          manifest=json.loads((runtime/'release-manifest.json').read_text(encoding='utf-8'))
+          pkg=json.loads((update_dir/'PACKAGE_MANIFEST.json').read_text(encoding='utf-8'))
+          report={
+            'status':'PASS','version':'2.8.6','schema':14,'product_source':os.environ['SOURCE_COMMIT'],
+            'runtime_file_count_including_manifest':manifest['file_count']+1,
+            'runtime_fingerprint':manifest['source_fingerprint'],
+            'payload_file_count':pkg.get('payload_file_count'),
+            'allowed_sources':pkg['allowed_source_versions'],
+            'full':{'bytes':full.stat().st_size,'sha256':sha(full)},
+            'update':{'bytes':update.stat().st_size,'sha256':sha(update)},
+            'atomic_self_test':'PASS','production_write':0
+          }
+          Path(os.environ['GITHUB_WORKSPACE'],'evidence','P04_V286_FORMAL_CANDIDATE.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(report,ensure_ascii=False))
+          PY
+          cp "$RUNNER_TEMP/v286-out/VF_Infra_V2.8.6_FULL.zip" "$GITHUB_WORKSPACE/evidence/"
+          cp "$RUNNER_TEMP/v286-update-a/VF_Infra_V2.8.6_UPDATE.zip" "$GITHUB_WORKSPACE/evidence/"
+          cp "$RUNNER_TEMP/v286-update-a/PACKAGE_MANIFEST.json" "$GITHUB_WORKSPACE/evidence/"
+          echo 'P04_V286_PACKAGE_CANDIDATE=PASS'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Upload candidate evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.6-PACKAGE-CANDIDATE
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
