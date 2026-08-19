@@ -1,0 +1,138 @@
+name: P04 V2.8.5 Formal Release R5
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v285-formal-release-r5.yml'
+      - 'requests/p04-v285-formal-release-r5.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: b73179673801452469a276ec744e15612ee7f38a
+      TARGET_VERSION: 2.8.5
+      EXPECTED_FULL_BYTES: '575671'
+      EXPECTED_FULL_SHA: eadb10e16e53004040e4e823bb215f81398b7a06313cc1f4a66fac6b2c9d1374
+      EXPECTED_UPDATE_BYTES: '1244056'
+      EXPECTED_UPDATE_SHA: e7896773928f6e21b024c628f047d04c57007b9287e0cd67d1eb7c0eb635f13c
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact formal source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3
+          ini-file: production
+
+      - name: Rebuild and match candidate exactly
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          rm -rf "$RUNNER_TEMP/v285-runtime" "$RUNNER_TEMP/v285-update" "$RUNNER_TEMP/v285-formal"
+          mkdir -p "$RUNNER_TEMP/v285-formal" "$GITHUB_WORKSPACE/evidence"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v285-runtime" > "$GITHUB_WORKSPACE/evidence/release-tree.json"
+          python3 scripts/build-v285-update-release.py --target-runtime "$RUNNER_TEMP/v285-runtime" --output "$RUNNER_TEMP/v285-update" > "$GITHUB_WORKSPACE/evidence/update-build.json"
+          php "$RUNNER_TEMP/v285-update/repair-v2.8.5.php" --self-test | tee "$GITHUB_WORKSPACE/evidence/atomic-self-test.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, zipfile
+          runtime=Path(os.environ['RUNNER_TEMP'])/'v285-runtime'; out=Path(os.environ['RUNNER_TEMP'])/'v285-formal'
+          full=out/'VF_Infra_V2.8.5_FULL.zip'
+          with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                  rel=f.relative_to(runtime).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16); z.writestr(info,f.read_bytes())
+          def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+          if full.stat().st_size != int(os.environ['EXPECTED_FULL_BYTES']) or sha(full) != os.environ['EXPECTED_FULL_SHA']:
+              raise SystemExit('V285_FULL_CANDIDATE_IDENTITY_MISMATCH')
+          update=Path(os.environ['RUNNER_TEMP'])/'v285-update'/'VF_Infra_V2.8.5_UPDATE.zip'
+          if update.stat().st_size != int(os.environ['EXPECTED_UPDATE_BYTES']) or sha(update) != os.environ['EXPECTED_UPDATE_SHA']:
+              raise SystemExit('V285_UPDATE_CANDIDATE_IDENTITY_MISMATCH')
+          print('P04_V285_CANDIDATE_IDENTITY_EXACT=PASS')
+          PY
+          cp "$RUNNER_TEMP/v285-update/VF_Infra_V2.8.5_UPDATE.zip" "$RUNNER_TEMP/v285-formal/"
+
+      - name: Create exact tag and formal GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TAG="v$TARGET_VERSION"
+          if gh api "repos/$SOURCE_REPOSITORY/git/ref/tags/$TAG" >/tmp/tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/tag.json)" = "$SOURCE_COMMIT" || { echo 'V285_EXISTING_TAG_DRIFT'; exit 1; }
+          else
+            gh api --method POST "repos/$SOURCE_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SOURCE_COMMIT" >/tmp/tag.json
+          fi
+          if gh api "repos/$SOURCE_REPOSITORY/releases/tags/$TAG" >/tmp/release.json 2>/dev/null; then
+            test "$(jq -r '.target_commitish' /tmp/release.json)" = "$SOURCE_COMMIT" || { echo 'V285_EXISTING_RELEASE_DRIFT'; exit 1; }
+          else
+            BODY=$(cat <<'EOF'
+          VF Infra V2.8.5 maintenance release.
+
+          - 保留设置左侧主分栏，只取消右侧二级 TAB。
+          - 数据管理同页显示导入导出与备份恢复。
+          - 系统信息同页显示系统信息与诊断。
+          - 修复服务商等异步一级页面进入后落在中段的问题；同页刷新/同步保留当前位置。
+          - 保留 V2.8.4 长耗时操作反馈、防重复点击、Source Exact、升级前备份和失败回滚。
+          - Schema 14，无 Migration，无 Provider 写权限变化。
+          EOF
+          )
+            gh api --method POST "repos/$SOURCE_REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$SOURCE_COMMIT" -f name="VF Infra V2.8.5" -f body="$BODY" -F draft=false -F prerelease=false >/tmp/release.json
+          fi
+          RELEASE_ID=$(jq -r '.id' /tmp/release.json)
+          echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          assets=$(gh api "repos/$SOURCE_REPOSITORY/releases/$RELEASE_ID/assets")
+          if echo "$assets" | jq -e '.[] | select(.name=="VF_Infra_V2.8.5_FULL.zip" or .name=="VF_Infra_V2.8.5_UPDATE.zip")' >/dev/null; then
+            echo 'V285_RELEASE_ASSET_PREEXISTS'; exit 1
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP/v285-formal/VF_Infra_V2.8.5_FULL.zip" "$RUNNER_TEMP/v285-formal/VF_Infra_V2.8.5_UPDATE.zip" --repo "$SOURCE_REPOSITORY"
+
+      - name: Remote release readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TAG="v$TARGET_VERSION"
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/$TAG" > /tmp/release-final.json
+          test "$(jq -r '.target_commitish' /tmp/release-final.json)" = "$SOURCE_COMMIT"
+          test "$(jq -r '.draft' /tmp/release-final.json)" = 'false'
+          test "$(jq -r '.prerelease' /tmp/release-final.json)" = 'false'
+          FULL_ID=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.8.5_FULL.zip")|.id' /tmp/release-final.json)
+          UPDATE_ID=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.8.5_UPDATE.zip")|.id' /tmp/release-final.json)
+          FULL_SIZE=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.8.5_FULL.zip")|.size' /tmp/release-final.json)
+          UPDATE_SIZE=$(jq -r '.assets[]|select(.name=="VF_Infra_V2.8.5_UPDATE.zip")|.size' /tmp/release-final.json)
+          test "$FULL_SIZE" = "$EXPECTED_FULL_BYTES"
+          test "$UPDATE_SIZE" = "$EXPECTED_UPDATE_BYTES"
+          gh api -H 'Accept: application/octet-stream' "repos/$SOURCE_REPOSITORY/releases/assets/$FULL_ID" > /tmp/full.zip
+          gh api -H 'Accept: application/octet-stream' "repos/$SOURCE_REPOSITORY/releases/assets/$UPDATE_ID" > /tmp/update.zip
+          test "$(sha256sum /tmp/full.zip|awk '{print $1}')" = "$EXPECTED_FULL_SHA"
+          test "$(sha256sum /tmp/update.zip|awk '{print $1}')" = "$EXPECTED_UPDATE_SHA"
+          jq -n --argjson release "$(jq -r '.id' /tmp/release-final.json)" --argjson full "$FULL_ID" --argjson update "$UPDATE_ID" --arg source "$SOURCE_COMMIT" --arg fullsha "$EXPECTED_FULL_SHA" --arg updatesha "$EXPECTED_UPDATE_SHA" --argjson fullbytes "$EXPECTED_FULL_BYTES" --argjson updatebytes "$EXPECTED_UPDATE_BYTES" '{status:"PASS",version:"2.8.5",release_id:$release,product_source:$source,full:{asset_id:$full,bytes:$fullbytes,sha256:$fullsha},update:{asset_id:$update,bytes:$updatebytes,sha256:$updatesha},remote_exact_readback:"PASS",production_write:0}' > "$GITHUB_WORKSPACE/evidence/P04_V285_FORMAL_RELEASE.json"
+          cat "$GITHUB_WORKSPACE/evidence/P04_V285_FORMAL_RELEASE.json"
+          echo 'P04_V285_FORMAL_RELEASE_PASS'
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.5-FORMAL-RELEASE-EVIDENCE
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
