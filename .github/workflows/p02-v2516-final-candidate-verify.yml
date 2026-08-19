@@ -1,0 +1,78 @@
+name: P02 V2.5.16 Final Candidate Verify
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REF: 71fd40b8e69d21cbdd18ee3f0f92751686b3a960
+      SEALED_V2515_REF: 8c1ec28e45212b733a449278874a942e9138c785
+    steps:
+      - name: Require registered private capability
+        env:
+          READ_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$READ_TOKEN"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_REF }}'
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Exact source manifest verification
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.16
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.16
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          test "$(jq -r .repo_sha256 SOURCE_MANIFEST.json)" = "$(sha256sum SOURCE_MANIFEST.txt|awk '{print $1}')"
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          m=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert len(m['entries'])==74
+          for e in m['entries']:
+              b=pathlib.Path(e['repo_path']).read_bytes(); h=hashlib.sha256(b).hexdigest()
+              assert len(b)==e['bytes'], e['repo_path']
+              assert h==e['sha256']==e['repo_sha256'], e['repo_path']
+          print('SOURCE_MANIFEST_74_OF_74=PASS')
+          PY
+          echo SOURCE_EXACT=PASS
+      - name: Build and browser visual-surface regression
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/final2516"; mkdir -p "$ROOT/site" "$ROOT/baseline-assets"
+          bash scripts/build-deploy-tree.sh "$ROOT/site" >/dev/null
+          test "$(cat "$ROOT/site/VERSION.txt")" = 2.5.16
+          npm -g ls playwright >/dev/null 2>&1 || npm i -g playwright@1.55.0 >/dev/null
+          playwright install chromium >/dev/null
+          git show "$SEALED_V2515_REF:public/assets/app.css" > "$ROOT/baseline-assets/app.css"
+          git show "$SEALED_V2515_REF:public/assets/scratch-tabs.css" > "$ROOT/baseline-assets/scratch-tabs.css"
+          mkdir -p "$ROOT/site/candidate"
+          cp -R "$ROOT/site/assets" "$ROOT/site/candidate/assets"
+          cat > "$ROOT/site/candidate/index.html" <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/candidate/assets/app.css"><link rel="stylesheet" href="/candidate/assets/scratch-tabs.css"></head><body><header class="topbar">VF Library</header><div class="workspace"><aside class="sidebar"><div class="side-item active">分类</div></aside><main class="main"><div class="page"><div class="content-list"><div class="content-row">长时间阅读表面</div></div></div></main></div><div class="scratch-workspace-v259"><div class="scratch-editor-wrap-v259"><textarea class="scratch-editor-v259">写作表面</textarea></div></div></body></html>
+          HTML
+          cp -R "$ROOT/baseline-assets" "$ROOT/site/baseline-assets"
+          php -S 127.0.0.1:18736 -t "$ROOT/site" >"$RUNNER_TEMP/php.log" 2>&1 & PID=$!; trap 'kill $PID || true' EXIT; sleep 1
+          cat > "$RUNNER_TEMP/check.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{const b=await chromium.launch({headless:true});const p=await b.newPage({viewport:{width:1440,height:1000}});const base='http://127.0.0.1:18736';await p.goto(base+'/candidate/index.html',{waitUntil:'networkidle'});const light=await p.evaluate(()=>{document.documentElement.removeAttribute('data-theme');const c=getComputedStyle(document.documentElement),q=s=>getComputedStyle(document.querySelector(s)).backgroundColor;const vars={};for(const k of ['--bg','--surface','--surface-soft','--surface-muted','--border','--border-strong'])vars[k]=c.getPropertyValue(k).trim();return{vars,main:q('.main'),sidebar:q('.sidebar'),card:q('.content-list'),scratch:q('.scratch-editor-v259')}});if(light.vars['--bg']!=='#f2f2ef'||light.vars['--surface']!=='#fafaf8')throw Error('LIGHT_TOKENS');for(const k of ['main','sidebar','card','scratch'])if(light[k]==='rgb(255, 255, 255)')throw Error('PURE_WHITE_'+k);await p.evaluate(()=>document.documentElement.setAttribute('data-theme','dark'));const cand=await p.evaluate(()=>{const c=getComputedStyle(document.documentElement),v={};for(const k of ['--bg','--surface','--surface-soft','--surface-muted','--border','--border-strong'])v[k]=c.getPropertyValue(k).trim();return v});const bp=await b.newPage();await bp.setContent('<html data-theme="dark"><head></head><body></body></html>');await bp.addStyleTag({url:base+'/baseline-assets/app.css'});await bp.addStyleTag({url:base+'/baseline-assets/scratch-tabs.css'});const old=await bp.evaluate(()=>{const c=getComputedStyle(document.documentElement),v={};for(const k of ['--bg','--surface','--surface-soft','--surface-muted','--border','--border-strong'])v[k]=c.getPropertyValue(k).trim();return v});if(JSON.stringify(cand)!==JSON.stringify(old))throw Error('DARK_DRIFT');const m=await b.newPage({viewport:{width:390,height:844}});await m.goto(base+'/candidate/index.html',{waitUntil:'networkidle'});const ov=await m.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(ov>1)throw Error('MOBILE_OVERFLOW_'+ov);await b.close();console.log('EYE_COMFORT_LIGHT=PASS');console.log('DARK_MODE_BASELINE_MATCH=PASS');console.log('MOBILE_390_OVERFLOW=NONE')})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          NODE_PATH="$(npm root -g)" node "$RUNNER_TEMP/check.cjs"
+          echo FINAL_CANDIDATE_VERIFY=PASS
+          echo SCHEMA=2401
+          echo PRODUCTION_WRITE=NO
