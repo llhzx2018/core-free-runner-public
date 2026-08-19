@@ -1,0 +1,146 @@
+name: P02 V2.5.5 Editor Scroll Anchor Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v255-editor-scroll-anchor-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.5-editor-scroll-anchor-hotfix
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare exact V2.5.5 candidate runtime
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test -n '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.5'
+          test -s public/assets/v255-hotfix.js
+          grep -Fq 'assets/v255-hotfix.js' public/index.php
+          node --check public/assets/v255-hotfix.js
+          node --check public/assets/app.js
+          php -l public/index.php >/dev/null
+          python3 scripts/repository-gates.py
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip php-curl sqlite3 curl >/dev/null
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Browser regression - typing must not jump editor viewport
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: 'P02-V255-${{ github.run_id }}-${{ github.run_attempt }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-v255"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = '2.5.5'
+          test -s "$SITE/assets/v255-hotfix.js"
+          php -d display_errors=0 -S 127.0.0.1:18255 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18255/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie.txt" http://127.0.0.1:18255/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie.txt" -c "$ROOT/cookie.txt" -H 'Origin: http://127.0.0.1:18255' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18255/setup.php)" = 303
+
+          cat > .v255-scroll-anchor.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage();
+          const errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+          await page.goto('http://127.0.0.1:18255/',{waitUntil:'networkidle'});
+          let sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          if(!sess?.site?.auth){
+            await page.locator('[data-open-login]').click();
+            await page.locator('#loginForm input[name="password"]').fill(process.env.AUDIT_PASSWORD);
+            await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));
+            sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          }
+          const csrf=sess.csrf;
+          const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+          const c=await post('category_save',{name:'V255 Scroll Anchor Audit',description:'',icon:'folder'}); const cid=Number(c.id); if(!cid)throw new Error('category create failed');
+
+          async function assertStableTyping(label, selector, prepare) {
+            await prepare();
+            const ta=page.locator(selector); await ta.waitFor({state:'visible'});
+            const seed=Array.from({length:95},(_,i)=>`第 ${i+1} 行：这是用于验证编辑器长内容滚动稳定性的测试文字。`).join('\n');
+            await ta.fill(seed);
+            await page.waitForTimeout(120);
+            await page.evaluate(sel=>{const ta=document.querySelector(sel);const main=document.querySelector('#notebookDetailScroll')||document.querySelector('#main');main.scrollTop=Math.max(0,main.scrollHeight-main.clientHeight-40);ta.focus({preventScroll:true});ta.setSelectionRange(ta.value.length,ta.value.length);},selector);
+            await page.waitForTimeout(80);
+            const before=await page.evaluate(sel=>{const ta=document.querySelector(sel);const main=document.querySelector('#notebookDetailScroll')||document.querySelector('#main');return {scroll:main.scrollTop,max:main.scrollHeight-main.clientHeight,start:ta.selectionStart,end:ta.selectionEnd,len:ta.value.length};},selector);
+            if(before.scroll<150)throw new Error(label+' precondition scroll too small '+JSON.stringify(before));
+            const typed='ABCDE12345上上下下';
+            let expected=before.len;
+            const samples=[];
+            for(const ch of typed){
+              await page.keyboard.type(ch,{delay:15}); expected+=ch.length; await page.waitForTimeout(45);
+              const s=await page.evaluate(sel=>{const ta=document.querySelector(sel);const main=document.querySelector('#notebookDetailScroll')||document.querySelector('#main');return {scroll:main.scrollTop,start:ta.selectionStart,end:ta.selectionEnd,len:ta.value.length};},selector);
+              samples.push(s);
+              if(s.scroll<before.scroll-80)throw new Error(label+' viewport jumped upward '+JSON.stringify({before,samples}));
+              if(s.start!==s.len||s.end!==s.len)throw new Error(label+' caret lost end position '+JSON.stringify({s,expected}));
+            }
+            console.log(label+'=PASS '+JSON.stringify({before,last:samples[samples.length-1]}));
+          }
+
+          await assertStableTyping('GENERIC_QUICK_EDITOR_SCROLL_ANCHOR','.content-editor',async()=>{
+            await page.evaluate(()=>openNewContent('quick'));
+            await page.waitForSelector('#contentForm');
+            await page.selectOption('#contentForm select[name="category_id"]',String(cid));
+            await page.fill('#contentForm input[name="title"]','V2.5.5 便签输入稳定性');
+          });
+
+          const article=await post('content_save',{category_id:cid,title:'V2.5.5 文章输入稳定性',description:'scroll anchor audit',content:'# 初始文章\n\n用于验证。',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'}); const iid=Number(article.id); if(!iid)throw new Error('article create failed');
+          await assertStableTyping('ARTICLE_EDITOR_SCROLL_ANCHOR','#articleSource',async()=>{
+            await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});
+            await page.waitForFunction(()=>state.articleMode==='edit');
+          });
+
+          if(errors.length)throw new Error(errors.join(' | '));
+          await browser.close();
+          console.log('P02_V255_EDITOR_SCROLL_ANCHOR_BROWSER=PASS');
+          JS
+          node .v255-scroll-anchor.mjs
+
+      - name: Regression sanity
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          php -l public/index.php >/dev/null
+          node --check public/assets/v255-hotfix.js
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.5'
+          echo P02_V255_EDITOR_SCROLL_ANCHOR_VERIFY=PASS
+          echo SCHEMA=2401
+          echo MIGRATION=NONE
+          echo PRODUCTION_WRITE=NO
+          echo PRIVATE_SOURCE_PERSISTED=NO
+
+      - name: Cleanup
+        if: always()
+        working-directory: p02
+        run: |
+          if test -f "$RUNNER_TEMP/p02-v255/server.pid"; then kill "$(cat "$RUNNER_TEMP/p02-v255/server.pid")" 2>/dev/null || true; fi
+          rm -rf "$RUNNER_TEMP/p02-v255" .v255-scroll-anchor.mjs node_modules package.json package-lock.json || true
