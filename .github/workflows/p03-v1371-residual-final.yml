@@ -1,0 +1,155 @@
+name: P03 V1.37.1 Residual Final Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1371-residual-final.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: c7bc5216af5363b4524611595418e8e67edb55e6
+  BASE_SHA: 296675dde8d2d76a48ffae603af5e911586be748
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1371-residual-php84
+
+jobs:
+  residual-final:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact private V1.37.1 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Prepare PHP 8.4 Atomic environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 zip unzip >/dev/null
+          cat > "$RUNNER_TEMP/Dockerfile.p03-v1371" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1371" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo "PHP84_RUNTIME=PASS\n";'
+
+      - name: Build exact V1.37.0 to V1.37.1 Atomic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          git worktree add --detach "$RUNNER_TEMP/base-wt" "$BASE_SHA" >/dev/null
+          python3 "$RUNNER_TEMP/base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/target-runtime" >/dev/null
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" "$RUNNER_TEMP/base-runtime/app/bootstrap.php"
+          grep -Fq "define('VFAB_VERSION', '1.37.1');" "$RUNNER_TEMP/target-runtime/app/bootstrap.php"
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/base-runtime" --target-runtime "$RUNNER_TEMP/target-runtime" --output "$RUNNER_TEMP/v1371-release" >/dev/null
+          cd "$RUNNER_TEMP/v1371-release"
+          sha256sum -c SHA256SUMS.txt
+          test "$(unzip -Z1 VF_Forge_V1.37.1_Atomic_Upgrade.zip)" = 'repair-v1.37.1.php'
+          grep -Fq "const VFF_ATOMIC_TARGET='1.37.1';" repair-v1.37.1.php
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.37.0"];' repair-v1.37.1.php
+          echo 'P03_V1371_ATOMIC_REBUILD=PASS'
+
+      - name: V1.37.0 to V1.37.1 success and injected rollback E2E
+        shell: bash
+        env:
+          V1370_RELEASE_DIR: ${{ runner.temp }}/v1371-release
+          V1370_TARGET_RUNTIME: ${{ runner.temp }}/target-runtime
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          cp tests/maintenance/v1370_atomic_e2e.sh "$RUNNER_TEMP/v1371-atomic-e2e.sh"
+          python3 - "$RUNNER_TEMP/v1371-atomic-e2e.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          # Two-phase placeholders avoid 1.36.2→1.37.0 being transformed again into 1.37.1.
+          s=s.replace('1.36.2','__P03_BASE_VERSION__')
+          s=s.replace('1.37.0','__P03_TARGET_VERSION__')
+          s=s.replace('__P03_BASE_VERSION__','1.37.0')
+          s=s.replace('__P03_TARGET_VERSION__','1.37.1')
+          s=s.replace('V1370','V1371').replace('v1370','v1371')
+          p.write_text(s,encoding='utf-8')
+          PY
+          bash -n "$RUNNER_TEMP/v1371-atomic-e2e.sh"
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" "$RUNNER_TEMP/v1371-atomic-e2e.sh"
+          grep -Fq "define('VFAB_VERSION', '1.37.1');" "$RUNNER_TEMP/v1371-atomic-e2e.sh"
+          BASE_SHA="$BASE_SHA" bash "$RUNNER_TEMP/v1371-atomic-e2e.sh"
+          echo 'P03_V1371_ATOMIC_SUCCESS_ROLLBACK=PASS'
+
+      - name: Chromium owner screenshot regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > final-ui.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const css=['public/assets/experience.css','public/assets/project-intelligence.css','public/assets/project-intelligence-shell.css'].map(p=>fs.readFileSync(p,'utf8')).join('\n');
+          const browser=await chromium.launch({headless:true});
+
+          const p1=await browser.newPage({viewport:{width:1319,height:652}});
+          const projects=Array.from({length:16},(_,i)=>`<button class="nav-item project-shortcut"><span>P${i+1} · Project ${i+1}</span></button>`).join('');
+          await p1.setContent(`<!doctype html><style>${css}</style><div class="app-shell"><aside class="sidebar"><button class="brand"><strong>VF Forge</strong></button><nav class="primary-nav"><button class="nav-item">概览</button><button class="nav-item">项目</button><button class="nav-item">关注</button><button class="nav-item">动态</button><button class="nav-item">关系</button></nav><div class="sidebar-divider"></div><div class="sidebar-label">当前项目</div><div id="projectShortcuts">${projects}</div><div class="sidebar-spacer"></div><button class="nav-item settings-entry">设置</button><div class="runtime-card"><span>Runtime</span><strong>V1.37.1</strong></div><button class="nav-item logout-entry">退出</button></aside><main class="main-shell"></main></div>`);
+          const before=await p1.evaluate(()=>{const x=document.querySelector('#projectShortcuts'),r=document.querySelector('.runtime-card').getBoundingClientRect(),n=document.querySelector('.primary-nav').getBoundingClientRect();return{client:x.clientHeight,scroll:x.scrollHeight,top:x.scrollTop,runtimeBottom:r.bottom,navTop:n.top,overflow:getComputedStyle(x).overflowY}});
+          if(before.overflow!=='auto'||before.scroll<=before.client||before.runtimeBottom>innerHeight+.5)throw new Error('sidebar precondition '+JSON.stringify(before));
+          await p1.evaluate(()=>{const x=document.querySelector('#projectShortcuts');x.scrollTop=x.scrollHeight});
+          const after=await p1.evaluate(()=>{const x=document.querySelector('#projectShortcuts'),r=document.querySelector('.runtime-card').getBoundingClientRect(),n=document.querySelector('.primary-nav').getBoundingClientRect();return{top:x.scrollTop,runtimeBottom:r.bottom,navTop:n.top}});
+          if(after.top<=0||after.runtimeBottom>652.5||Math.abs(after.navTop-before.navTop)>.5)throw new Error('sidebar scroll '+JSON.stringify(after));
+          console.log('OWNER_SCREENSHOT_1_SIDEBAR=PASS',JSON.stringify({before,after}));
+
+          const p2=await browser.newPage({viewport:{width:1319,height:652}}); const errors=[]; p2.on('pageerror',e=>errors.push(String(e.message||e)));
+          await p2.setContent(`<!doctype html><body><div id="toast"></div><div id="app"><button data-route="overview">概览</button><button data-route="projects"><b id="navProjectCount"></b></button><button data-route="attention"><b id="navAttentionCount"></b></button><button data-route="activity">动态</button><button data-route="relations">关系</button><button data-route="search">搜索</button><button id="toolsite" data-open-project="7">VF ToolSite</button><div id="breadcrumb"></div><div id="view" tabindex="-1"></div></div></body>`);
+          await p2.evaluate(()=>{const json=(body,status=200)=>Promise.resolve(new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}}));window.fetch=(url)=>{const u=new URL(String(url),'http://forge.local/'),a=u.searchParams.get('action');if(a==='portfolio')return json({ok:true,data:{projects:[],attention:[],recent_activity:[]}});if(a==='project')return json({ok:true,data:{context:{project:{id:7,code:'S01',name:'VF ToolSite',description:'无 Authority 项目'},production:null,current_state:'正常项目上下文',requires_user:false,block:'',health_attention:{}},sources:[],truth:{truth:{}},decisions:[],relations:[],activity:[],declaration:{schema_version:30,lifecycle:'STABLE_OPERATIONS'}}});if(a==='activity')return json({ok:true,events:[]});if(a==='relations')return json({ok:true,relations:[]});return json({ok:true,results:[]})}});
+          await p2.addScriptTag({path:path.resolve('public/assets/project-intelligence.js')});
+          await p2.waitForTimeout(850); await p2.click('#toolsite'); await p2.waitForTimeout(180);
+          const state=await p2.evaluate(()=>({crumb:document.querySelector('#breadcrumb')?.textContent||'',text:document.querySelector('#view')?.textContent||'',toast:document.querySelector('#toast')?.textContent||'',cls:document.querySelector('#toast')?.className||''}));
+          if(errors.length||!state.crumb.includes('VF ToolSite')||!state.text.includes('VF ToolSite')||state.text.includes('无法恢复项目上下文')||state.toast.includes('canonical_url')||state.cls.includes('error'))throw new Error('null Authority '+JSON.stringify({errors,state}));
+          if(state.text.includes('打开 Production')||state.text.includes('GitHub ↗'))throw new Error('missing Authority link rendered');
+          console.log('OWNER_SCREENSHOT_2_NULL_AUTHORITY=PASS',JSON.stringify(state));
+          await browser.close();
+          EOF
+          node final-ui.mjs
+
+      - name: Residual final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/v1371-release"
+          echo 'P03_V1371_RESIDUAL_FINAL_GATE=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'FROM=1.37.0'
+          echo 'TARGET=1.37.1'
+          echo 'SCHEMA=30_TO_30'
+          echo 'MIGRATION=NONE'
+          echo 'ATOMIC_SUCCESS_DATA_PRESERVATION_ROLLBACK=PASS'
+          echo 'OWNER_SCREENSHOT_1_SIDEBAR=PASS'
+          echo 'OWNER_SCREENSHOT_2_NULL_AUTHORITY=PASS'
+          echo "ATOMIC_SHA256=$(sha256sum VF_Forge_V1.37.1_Atomic_Upgrade.zip | awk '{print $1}')"
+          echo "ATOMIC_BYTES=$(stat -c%s VF_Forge_V1.37.1_Atomic_Upgrade.zip)"
+          echo "SOURCE_MANIFEST_SHA256=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')"
+          echo 'PRODUCTION_WRITE=NO'
