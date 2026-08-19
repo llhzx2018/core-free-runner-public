@@ -1,0 +1,121 @@
+name: P02 V2.5.17 Source Manifest Reseal
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  reseal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REF: d9a33c0eb46b7f425225b3a837463f4483a9114b
+      TARGET_BRANCH: maintenance/v2.5.17-library-model-convergence
+    steps:
+      - name: Require registered private capability
+        env:
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$WRITE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_REF }}'
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild exact V2.5.17 source manifests
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.17
+          git switch -c "$TARGET_BRANCH"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+
+          jp=Path('SOURCE_MANIFEST.json')
+          obj=json.loads(jp.read_text(encoding='utf-8'))
+          entries=obj.get('entries',[])
+          assert len(entries)==74, len(entries)
+
+          lines=[
+              'VF Library V2.5.17 CANDIDATE SOURCE_MANIFEST',
+              'FULL_SHA256  PENDING_FORMAL_CANDIDATE_ARTIFACT',
+              'RUNTIME_SOURCE_FILES  74',
+              'MAPPING_STATUS  CURRENT_GIT_CANDIDATE',
+              ''
+          ]
+          for e in entries:
+              repo=Path(e['repo_path'])
+              assert repo.is_file(), e['repo_path']
+              data=repo.read_bytes()
+              sha=hashlib.sha256(data).hexdigest()
+              e['bytes']=len(data)
+              e['sha256']=sha
+              e['repo_sha256']=sha
+              lines.append(f"{sha}  {e['repo_path']}  <=  {e['full_path']}")
+
+          txt='\n'.join(lines)+'\n'
+          Path('SOURCE_MANIFEST.txt').write_text(txt,encoding='utf-8')
+          repo_sha=hashlib.sha256(txt.encode('utf-8')).hexdigest()
+
+          obj['version']='2.5.17'
+          obj['schema']=2401
+          obj['runtime_source_file_count']=74
+          obj['source_baseline_full_sha256']='PENDING_FORMAL_CANDIDATE_ARTIFACT'
+          obj['mapping_contract']='Each declared runtime source file must exist exactly once at repo_path; hashes bind the Git-native V2.5.17 candidate deploy tree. Formal release identity is not assigned by this candidate manifest.'
+          obj['repo_sha256']=repo_sha
+          jp.write_text(json.dumps(obj,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+
+          re=json.loads(jp.read_text(encoding='utf-8'))
+          assert re['version']=='2.5.17'
+          assert re['schema']==2401
+          assert re['runtime_source_file_count']==74
+          assert re['repo_sha256']==hashlib.sha256(Path('SOURCE_MANIFEST.txt').read_bytes()).hexdigest()
+          for e in re['entries']:
+              data=Path(e['repo_path']).read_bytes()
+              sha=hashlib.sha256(data).hexdigest()
+              assert e['bytes']==len(data)
+              assert e['sha256']==sha and e['repo_sha256']==sha
+          print('SOURCE_MANIFEST_RESEAL=PASS')
+          print('RUNTIME_SOURCE_FILES=74')
+          print('REPO_SHA256='+repo_sha)
+          PY
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.17
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          test "$(jq -r .repo_sha256 SOURCE_MANIFEST.json)" = "$(sha256sum SOURCE_MANIFEST.txt | awk '{print $1}')"
+          while read -r expected repo _ target; do
+            test -f "$repo"
+            test "$(sha256sum "$repo"|awk '{print $1}')" = "$expected"
+          done < <(awk '$3=="<="' SOURCE_MANIFEST.txt)
+          git diff --check
+          echo SOURCE_EXACT=PASS
+          echo SCHEMA=2401
+          echo PRODUCTION_WRITE=NO
+
+      - name: Push corrected candidate source
+        working-directory: product
+        env:
+          WRITE_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          if git diff --cached --quiet; then
+            echo SOURCE_MANIFEST_ALREADY_EXACT=PASS
+            exit 0
+          fi
+          git commit -m 'chore(source): reseal V2.5.17 source manifest'
+          git push "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/vf-library.git" HEAD:"$TARGET_BRANCH"
