@@ -1,0 +1,152 @@
+name: P01 V2.21.19 Formal Release
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['vf-agent/triggers/P01-V2.21.19-FORMAL-RELEASE.json']
+permissions:
+  contents: write
+concurrency:
+  group: p01-v2.21.19-formal-release
+  cancel-in-progress: false
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  CORE_REPO: llhzx2018/core-updates
+  VERSION: 2.21.19
+  SOURCE_VERSION: 2.21.18
+  SCHEMA: 2026080902
+  PRODUCTION: c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3
+  DEVELOP_BEFORE: c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3
+  CANDIDATE_BRANCH: candidate/v2.21.19-20260819
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Resolve formal artifact authority and registered capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN";test -n "$WRITE_TOKEN"
+          python3 - <<'PY'
+          import json,urllib.request,os
+          u='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/vf-agent-operations-v1/vf-agent/results/P01-V2.21.19-FORMAL-ARTIFACT-GATE.json';x=json.load(urllib.request.urlopen(u));assert x['pass'] is True and x['status']=='SUCCESS',x
+          assert x['production_sha']=='c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3',x
+          a=x['artifacts'];update=a['VF_Start_V2.21.19_UPDATE.zip'];full=a['VF_Start_V2.21.19_FULL.zip']
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+            for k,v in [('CANDIDATE',x['candidate_sha']),('CANDIDATE_TREE',x['candidate_tree']),('UPDATE_SHA',update['sha256']),('UPDATE_BYTES',str(update['bytes'])),('FULL_SHA',full['sha256']),('FULL_BYTES',str(full['bytes']))]:f.write(f'{k}={v}\n')
+          PY
+      - name: Checkout exact authorities and deterministic builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://github.com/llhzx2018/core-free-runner-public.git runner
+          git clone -q --branch "$CANDIDATE_BRANCH" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git clone -q --branch main "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" production
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE";test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE";test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(git -C production rev-parse origin/develop)" = "$DEVELOP_BEFORE"
+          test "$(tr -d '\r\n'<candidate/VERSION)" = "$VERSION";test "$(tr -d '\r\n'<production/VERSION)" = "$SOURCE_VERSION"
+      - name: Deterministically rebuild immutable release bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-release";rm -rf "$OUT";mkdir -p "$OUT"
+          python3 runner/scripts/p01-build-maintenance-candidate-v22119.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit "$CANDIDATE" --candidate-tree "$CANDIDATE_TREE" --production-commit "$PRODUCTION" >/tmp/build.json
+          (cd "$OUT"&&sha256sum -c SHA256SUMS.txt >/dev/null)
+          test "$(sha256sum "$OUT/VF_Start_V2.21.19_UPDATE.zip"|awk '{print $1}')" = "$UPDATE_SHA";test "$(stat -c '%s' "$OUT/VF_Start_V2.21.19_UPDATE.zip")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$OUT/VF_Start_V2.21.19_FULL.zip"|awk '{print $1}')" = "$FULL_SHA";test "$(stat -c '%s' "$OUT/VF_Start_V2.21.19_FULL.zip")" = "$FULL_BYTES"
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -l repair-v2.21.19.php >/dev/null
+          php "$OUT/repair-v2.21.19.php" --self-test >/tmp/selftest.json;python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/selftest.json'));assert x['ok'] is True and x['global_barrier'] is True and x['interruption_recovery'] is True,x
+          PY
+      - name: Pre-publication authority drift gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main|awk '{print $1}')" = "$PRODUCTION"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop|awk '{print $1}')" = "$DEVELOP_BEFORE"
+          rm -rf core-old;git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/${CORE_REPO}.git" core-old
+          python3 - <<'PY'
+          import json
+          x=json.load(open('core-old/projects/P01.json'));assert x['target_version']=='2.21.18' and x['release_tag']=='v2.21.18',x
+          PY
+          if gh release view "v$VERSION" --repo "$PRODUCT_REPO" >/dev/null 2>&1;then target=$(gh release view "v$VERSION" --repo "$PRODUCT_REPO" --json targetCommitish --jq .targetCommitish);test "$target" = "$CANDIDATE";fi
+      - name: Publish immutable private GitHub Release and read back bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-release"
+          if ! gh release view "v$VERSION" --repo "$PRODUCT_REPO" >/dev/null 2>&1;then
+            gh release create "v$VERSION" "$OUT/VF_Start_V2.21.19_UPDATE.zip" "$OUT/VF_Start_V2.21.19_ATOMIC.zip" "$OUT/VF_Start_V2.21.19_FULL.zip" "$OUT/VF_Start_V2.21.19_SOURCE.zip" "$OUT/repair-v2.21.19.php" "$OUT/VF_Start_V2.21.19_RELEASE_NOTES.md" "$OUT/VF_Start_V2.21.19_RELEASE_MANIFEST.json" "$OUT/SHA256SUMS.txt" --repo "$PRODUCT_REPO" --target "$CANDIDATE" --title 'VF Start V2.21.19' --notes 'V2.21.18 → V2.21.19 reference-driven UI release. Makes the homepage visibly navigation-first, improves category scanning and links management, refines mobile behavior, preserves the single AdminShell, keeps Schema 2026080902 unchanged, and leaves Browser Helper 1.6.4 unchanged.'
+          fi
+          gh release view "v$VERSION" --repo "$PRODUCT_REPO" --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,publishedAt >/tmp/release.json
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open('/tmp/release.json'));assert x['tagName']=='v2.21.19' and x['targetCommitish']==os.environ['CANDIDATE'] and not x['isDraft'] and not x['isPrerelease'] and int(x['databaseId'])>0,x
+          PY
+          rm -rf /tmp/release-readback;mkdir /tmp/release-readback;gh release download "v$VERSION" --repo "$PRODUCT_REPO" --dir /tmp/release-readback --pattern 'VF_Start_V2.21.19_UPDATE.zip' --pattern 'VF_Start_V2.21.19_FULL.zip'
+          test "$(sha256sum /tmp/release-readback/VF_Start_V2.21.19_UPDATE.zip|awk '{print $1}')" = "$UPDATE_SHA";test "$(stat -c '%s' /tmp/release-readback/VF_Start_V2.21.19_UPDATE.zip)" = "$UPDATE_BYTES"
+          test "$(sha256sum /tmp/release-readback/VF_Start_V2.21.19_FULL.zip|awk '{print $1}')" = "$FULL_SHA";test "$(stat -c '%s' /tmp/release-readback/VF_Start_V2.21.19_FULL.zip)" = "$FULL_BYTES"
+      - name: Promote Working Truth to exact released candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          current=$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop|awk '{print $1}');test "$current" = "$DEVELOP_BEFORE"
+          git -C candidate remote set-url origin "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git";git -C candidate push -q origin "$CANDIDATE:refs/heads/develop"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop|awk '{print $1}')" = "$CANDIDATE";test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main|awk '{print $1}')" = "$PRODUCTION"
+      - name: Publish core-updates P01 2.21.19 manifest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RELEASE_ID=$(python3 -c 'import json;print(json.load(open("/tmp/release.json"))["databaseId"])');RELEASED_AT=$(python3 -c 'import json;print(json.load(open("/tmp/release.json"))["publishedAt"])')
+          rm -rf core;git clone -q --depth 1 --branch main "https://x-access-token:${WRITE_TOKEN}@github.com/${CORE_REPO}.git" core
+          python3 - "$RELEASE_ID" "$RELEASED_AT" <<'PY'
+          import json,sys,os
+          p='core/projects/P01.json';x=json.load(open(p));assert x['target_version']=='2.21.18' and x['release_tag']=='v2.21.18',x
+          x.update({'schema_version':'1.0','project_id':'P01','component_id':'APP','enabled':True,'target_version':'2.21.19','update_type':'ATOMIC','from_versions':['2.21.18'],'schema_from':'2026080902','schema_to':'2026080902','repository':'llhzx2018/vf-start','release_tag':'v2.21.19','asset_name':'VF_Start_V2.21.19_UPDATE.zip','asset_bytes':int(os.environ['UPDATE_BYTES']),'asset_sha256':os.environ['UPDATE_SHA'],'release_id':int(sys.argv[1]),'release_identity':'v2.21.19@'+os.environ['CANDIDATE'],'backup_required':True,'rollback_supported':True,'released_at':sys.argv[2],'minimum_php':'8.0.0'})
+          open(p,'w').write(json.dumps(x,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git -C core config user.name VictorForge;git -C core config user.email llhzx2018@gmail.com;git -C core add projects/P01.json;git -C core commit -q -m 'release(P01): publish VF Start V2.21.19';git -C core push -q origin main;git -C core rev-parse HEAD >/tmp/core-updates-sha
+      - name: Online discovery and package preparation E2E from exact 2.21.18
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq;sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          rm -rf /tmp/p01-online;cp -a production/src /tmp/p01-online;php -S 127.0.0.1:18419 -t /tmp/p01-online >/tmp/online.log 2>&1 & echo $! >/tmp/online.pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/online.c http://127.0.0.1:18419/setup.php -o /tmp/online.s&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/online.s').read());assert m;print(m.group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/online.c -c /tmp/online.c -X POST http://127.0.0.1:18419/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Online Gate' --data-urlencode 'admin_password=Online-P01-22118!Strong' --data-urlencode 'admin_password_confirm=Online-P01-22118!Strong' >/dev/null
+          VF_PRIVATE_READ_TOKEN="$READ_TOKEN" UPDATE_SHA="$UPDATE_SHA" UPDATE_BYTES="$UPDATE_BYTES" php -r 'require "/tmp/p01-online/app/bootstrap.php";$m=new VfUpdateManager(vf_db());$r=$m->check(true);if(empty($r["ok"])||$r["current_version"]!=="2.21.18"||$r["latest_version"]!=="2.21.19"||empty($r["available"])||empty($r["can_update"]))throw new Exception(json_encode($r));$p=$m->prepare();if(empty($p["ok"])||$p["from_version"]!=="2.21.18"||$p["to_version"]!=="2.21.19"||$p["update_package_sha256"]!==getenv("UPDATE_SHA")||(int)$p["update_package_bytes"]!==(int)getenv("UPDATE_BYTES")||empty($p["recovery_key"]))throw new Exception(json_encode($p));echo json_encode(["check"=>$r,"prepare"=>$p],JSON_UNESCAPED_SLASHES);' >/tmp/online-e2e.json
+          kill "$(cat /tmp/online.pid)" 2>/dev/null||true
+      - name: Final remote readback and seal release evidence
+        env:
+          EVIDENCE_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main|awk '{print $1}')" = "$PRODUCTION";test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop|awk '{print $1}')" = "$CANDIDATE"
+          rm -rf core-read;git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/${CORE_REPO}.git" core-read
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open('core-read/projects/P01.json'));assert x['target_version']=='2.21.19' and x['from_versions']==['2.21.18'] and x['release_tag']=='v2.21.19',x;assert x['asset_sha256']==os.environ['UPDATE_SHA'] and int(x['asset_bytes'])==int(os.environ['UPDATE_BYTES']),x
+          PY
+          python3 - <<'PY'
+          import json,os
+          rel=json.load(open('/tmp/release.json'));online=json.load(open('/tmp/online-e2e.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','source_version':'2.21.18','gate':'FORMAL_RELEASE_AND_ONLINE_CHANNEL','status':'SUCCESS','pass':True,'candidate_sha':os.environ['CANDIDATE'],'candidate_tree':os.environ['CANDIDATE_TREE'],'production_main_sha':os.environ['PRODUCTION'],'develop_sha':os.environ['CANDIDATE'],'schema_version':'2026080902','release_id':int(rel['databaseId']),'release_tag':'v2.21.19','release_target':rel['targetCommitish'],'update_asset':{'name':'VF_Start_V2.21.19_UPDATE.zip','bytes':int(os.environ['UPDATE_BYTES']),'sha256':os.environ['UPDATE_SHA']},'full_asset':{'name':'VF_Start_V2.21.19_FULL.zip','bytes':int(os.environ['FULL_BYTES']),'sha256':os.environ['FULL_SHA']},'core_updates_sha':open('/tmp/core-updates-sha').read().strip(),'core_updates_target':'2.21.19','online_discovery':{'current_version':online['check']['current_version'],'latest_version':online['check']['latest_version'],'available':online['check']['available'],'can_update':online['check']['can_update'],'prepare_ok':online['prepare']['ok'],'recovery_point_created':bool(online['prepare'].get('recovery_key'))},'production_upgrade_executed':False,'private_data_persisted_publicly':False,'workflow_run_id':os.environ.get('GITHUB_RUN_ID','')}
+          open('/tmp/result.json','w').write(json.dumps(q,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${EVIDENCE_TOKEN}@github.com/llhzx2018/core-free-runner-public.git evidence;mkdir -p evidence/vf-agent/results;cp /tmp/result.json evidence/vf-agent/results/P01-V2.21.19-FORMAL-RELEASE-ONLINE.json;git -C evidence config user.name VictorForge;git -C evidence config user.email llhzx2018@gmail.com;git -C evidence add vf-agent/results/P01-V2.21.19-FORMAL-RELEASE-ONLINE.json;git -C evidence commit -q -m 'evidence(P01): seal V2.21.19 formal release and online channel';git -C evidence pull -q --rebase origin vf-agent-operations-v1;git -C evidence push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: |
+          [ -f /tmp/online.pid ]&&kill "$(cat /tmp/online.pid)" 2>/dev/null||true
+          rm -rf runner candidate production core-old core core-read evidence /tmp/p01-online /tmp/release-readback "$RUNNER_TEMP/p01-release" || true
