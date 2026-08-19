@@ -1,0 +1,193 @@
+name: P03 V1.37.3 Final Exact Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1373-final-exact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 6fec46c887854a8c46cc9ffe62b10291099068b3
+  BASE_TAG: v1.37.2
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1373-final-php84
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout exact private V1.37.3 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Prepare PHP 8.4 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 zip unzip >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-v1373" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1373" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo "PHP84_RUNTIME=PASS\n";'
+
+      - name: Source Schema Bootstrap and Runtime contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          test "$(cat VERSION)" = '1.37.3'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          grep -Fq "define('VFAB_VERSION', '1.37.3');" src/app/bootstrap.php
+          grep -Fq "TARGET_VERSION='1.37.3'" scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.37.2']" scripts/build_atomic.py
+          python3 tests/integration/source_integrity_test.py
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/unit/project_intelligence_contract_test.py
+          python3 tests/unit/project_intelligence_mcp_contract_test.py
+          python3 tests/unit/project_intelligence_v1372_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          php tests/integration/project_intelligence_v1372_read_model_test.php
+          php tests/integration/portfolio_intelligence_bootstrap_test.php
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/p03-v1373-php-lint.log"
+          echo "PHP_LINT=PASS count=$(wc -l <"$RUNNER_TEMP/p03-v1373-php-lint.log")"
+          node --check public/assets/app.js
+          node --check public/assets/experience.js
+          node --check public/assets/project-intelligence.js
+          node --check public/assets/project-intelligence-v1372.js
+          node --check public/assets/project-intelligence-v1373.js
+          rm -rf "$RUNNER_TEMP/v1373-runtime"
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/v1373-runtime" >/dev/null
+          test -f "$RUNNER_TEMP/v1373-runtime/app/PortfolioIntelligenceBootstrapService.php"
+          test -f "$RUNNER_TEMP/v1373-runtime/assets/project-intelligence-v1373.js"
+          test -f "$RUNNER_TEMP/v1373-runtime/intelligence-api.php"
+          ! find "$RUNNER_TEMP/v1373-runtime" -type f | grep -E '(/database/|\.sqlite3?$|\.db$|/PRIVATE_DATA/|/uploads/|/session/|/logs/|/tmp/)'
+          docker run --rm -v "$RUNNER_TEMP/v1373-runtime:/app" -w /app "$PHP_TEST_IMAGE" php cli/check-requirements.php
+          echo 'P03_V1373_SOURCE_RUNTIME=PASS'
+
+      - name: Fresh install backup restore regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/current_reverify.sh
+
+      - name: MCP Project Intelligence security regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          bash tests/maintenance/project_intelligence_mcp.sh
+
+      - name: Atomic 1.37.2 to 1.37.3 success and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          rm -rf "$RUNNER_TEMP/base-wt" "$RUNNER_TEMP/base-runtime" "$RUNNER_TEMP/target-runtime" "$RUNNER_TEMP/release"
+          git worktree add --detach "$RUNNER_TEMP/base-wt" "$BASE_TAG" >/dev/null
+          python3 "$RUNNER_TEMP/base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/target-runtime" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/base-runtime" --target-runtime "$RUNNER_TEMP/target-runtime" --output "$RUNNER_TEMP/release" >/dev/null
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c SHA256SUMS.txt
+          SHA=$(sha256sum VF_Forge_V1.37.3_Atomic_Upgrade.zip | awk '{print $1}')
+          SRC=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')
+          COUNT=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_file_count"])')
+          test "$COUNT" = '55'
+          echo "P03_V1373_ATOMIC_SHA=$SHA"
+          echo "P03_V1373_SOURCE_MANIFEST_SHA=$SRC"
+          echo "P03_V1373_SOURCE_FILES=$COUNT"
+          cd "$GITHUB_WORKSPACE/p03"
+          cp tests/maintenance/v1370_atomic_e2e.sh "$RUNNER_TEMP/v1373-atomic-e2e.sh"
+          python3 - "$RUNNER_TEMP/v1373-atomic-e2e.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          s=s.replace('1.36.2','__P03_BASE_VERSION__')
+          s=s.replace('1.37.0','__P03_TARGET_VERSION__')
+          s=s.replace('__P03_BASE_VERSION__','1.37.2')
+          s=s.replace('__P03_TARGET_VERSION__','1.37.3')
+          s=s.replace('V1370','V1373').replace('v1370','v1373')
+          p.write_text(s,encoding='utf-8')
+          PY
+          V1373_RELEASE_DIR="$RUNNER_TEMP/release" V1373_TARGET_RUNTIME="$RUNNER_TEMP/target-runtime" BASE_SHA="$(git rev-parse v1.37.2)" bash "$RUNNER_TEMP/v1373-atomic-e2e.sh" | tee "$RUNNER_TEMP/v1373-atomic.log"
+          grep -Fq "V1373_PRODUCTION_SOURCE_EXACT_PASS 55 $SRC" "$RUNNER_TEMP/v1373-atomic.log"
+          grep -Fq 'V1373_ATOMIC_SUCCESS_PASS' "$RUNNER_TEMP/v1373-atomic.log"
+          grep -Fq 'V1373_SOURCE_AND_DATABASE_ROLLBACK_PASS' "$RUNNER_TEMP/v1373-atomic.log"
+          grep -Fq 'V1373_ATOMIC_E2E_PASS' "$RUNNER_TEMP/v1373-atomic.log"
+          echo 'P03_V1373_ATOMIC_SUCCESS_ROLLBACK=PASS'
+
+      - name: Browser E2E Project Intelligence responsive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          RUNTIME="$RUNNER_TEMP/p03-v1373-browser-runtime"
+          DATA_ROOT="$RUNNER_TEMP/p03-v1373-browser-private"
+          COOKIE="$RUNNER_TEMP/p03-v1373-browser-cookies"
+          BASE='http://127.0.0.1:18081'
+          rm -rf "$RUNTIME" "$DATA_ROOT" "$COOKIE"
+          mkdir -p "$DATA_ROOT"
+          python3 scripts/build_runtime.py "$RUNTIME" >/dev/null
+          docker rm -f p03-v1373-browser >/dev/null 2>&1 || true
+          docker run -d --rm --name p03-v1373-browser -p 18081:18081 -v "$RUNTIME:/app" -v "$DATA_ROOT:$DATA_ROOT" -w /app "$PHP_TEST_IMAGE" php -S 0.0.0.0:18081 -t /app >/dev/null
+          trap 'docker logs p03-v1373-browser 2>/dev/null || true; docker rm -f p03-v1373-browser >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for i in $(seq 1 80); do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi; sleep .25; done
+          test "$ready" = '1'
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/setup.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge V1373 Fixture' --data-urlencode "data_root=$DATA_ROOT" --data-urlencode "password=$FIXTURE_PASS" --data-urlencode "password_confirm=$FIXTURE_PASS" "$BASE/setup.php" >"$RUNNER_TEMP/setup-post.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post.txt"
+          FIXTURE_PASS="$FIXTURE_PASS" node tests/maintenance/browser_reverify.mjs
+          docker rm -f p03-v1373-browser >/dev/null
+          trap - EXIT
+          echo 'P03_V1373_BROWSER=PASS'
+
+      - name: Final exact evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_V1373_FINAL_EXACT=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'VERSION=1.37.3'
+          echo 'SOURCE_VERSION=1.37.2'
+          echo 'SCHEMA=30'
+          echo 'MIGRATION=NONE'
+          echo 'PORTFOLIO_BOOTSTRAP=PASS'
+          echo 'FRESH_INSTALL_BACKUP_RESTORE=PASS'
+          echo 'MCP_SECURITY=PASS'
+          echo 'ATOMIC_SUCCESS_ROLLBACK=PASS'
+          echo 'BROWSER_E2E=PASS'
+          echo 'PROJECT_ASSET_STORAGE=NONE'
+          echo 'PRIVATE_SOURCE_PUBLISHED=NO'
+          echo 'PRODUCTION_WRITE=NO'
