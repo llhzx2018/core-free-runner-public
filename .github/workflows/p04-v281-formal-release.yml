@@ -1,0 +1,135 @@
+name: P04 V2.8.1 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v281-formal-release.yml'
+      - 'requests/p04-v281-formal-release.txt'
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '4ec29d1e0a67bd7c5cf458508c04359cd02e5e46'
+  VERSION: '2.8.1'
+  EXPECTED_FULL_BYTES: '566538'
+  EXPECTED_FULL_SHA256: 'b27761cf4e0312410330b784cbf2d52e6ae4eeeb87083018646832f83de9c05d'
+  EXPECTED_UPDATE_BYTES: '53905'
+  EXPECTED_UPDATE_SHA256: '551fbc8201dab1753c452d963c4f1663269e13fbaf9fc3180f6d8898a4ff2bb0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact tested source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Preflight exact main and no prior V2.8.1 release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < product/VERSION)" = "$VERSION"
+          test "$(gh api repos/llhzx2018/vf-infra/branches/main --jq .commit.sha)" = "$SOURCE_COMMIT"
+          if gh release view v2.8.1 -R llhzx2018/vf-infra >/dev/null 2>&1; then echo 'V281_RELEASE_ALREADY_EXISTS' >&2; exit 40; fi
+          if gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.8.1 >/dev/null 2>&1; then echo 'V281_TAG_ALREADY_EXISTS' >&2; exit 41; fi
+          echo 'P04_V281_FORMAL_PREFLIGHT=PASS'
+
+      - name: Rebuild and exact-match Candidate assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          R="$RUNNER_TEMP/runtime"; O="$RUNNER_TEMP/update"
+          python3 product/scripts/build-release-tree.py "$R" --source-root product
+          python3 - "$R" "$RUNNER_TEMP/VF_Infra_V2.8.1_FULL.zip" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+            for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              i=zipfile.ZipInfo(p.relative_to(root).as_posix(),date_time=(1980,1,1,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.create_system=3; i.external_attr=(0o100644<<16); z.writestr(i,p.read_bytes())
+          PY
+          python3 product/scripts/build-v281-update-release.py --target-runtime "$R" --output "$O"
+          cp "$O/VF_Infra_V2.8.1_UPDATE.zip" "$RUNNER_TEMP/VF_Infra_V2.8.1_UPDATE.zip"
+          FULL="$RUNNER_TEMP/VF_Infra_V2.8.1_FULL.zip"; UPDATE="$RUNNER_TEMP/VF_Infra_V2.8.1_UPDATE.zip"
+          test "$(stat -c %s "$FULL")" = "$EXPECTED_FULL_BYTES"
+          test "$(sha256sum "$FULL" | awk '{print $1}')" = "$EXPECTED_FULL_SHA256"
+          test "$(stat -c %s "$UPDATE")" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum "$UPDATE" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          php "$O/repair-v2.8.1.php" --self-test | grep -F 'ATOMIC_SELF_TEST_PASS target=2.8.1 schema=14'
+          python3 - "$O/PACKAGE_MANIFEST.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['allowed_source_versions']==['2.7.9','2.8.0']
+          assert m['release_kind']=='branding_compatibility_bugfix'
+          print('P04_V281_FORMAL_ASSET_EXACT_MATCH=PASS')
+          PY
+          echo 'P04_V281_CANDIDATE_ASSET_EXACT=PASS'
+
+      - name: Create v2.8.1 Release and upload exact assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh release create v2.8.1 \
+            "$RUNNER_TEMP/VF_Infra_V2.8.1_FULL.zip" \
+            "$RUNNER_TEMP/VF_Infra_V2.8.1_UPDATE.zip" \
+            -R llhzx2018/vf-infra \
+            --target "$SOURCE_COMMIT" \
+            --title 'VF Infra V2.8.1' \
+            --notes-file product/docs/operations/package/RELEASE_NOTES.md
+          echo 'P04_V281_RELEASE_CREATE=PASS'
+
+      - name: Remote Release and asset readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.8.1 --jq .object.sha)" = "$SOURCE_COMMIT"
+          REL="$RUNNER_TEMP/release.json"
+          gh api repos/llhzx2018/vf-infra/releases/tags/v2.8.1 > "$REL"
+          test "$(jq -r .tag_name "$REL")" = 'v2.8.1'
+          test "$(jq -r .name "$REL")" = 'VF Infra V2.8.1'
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download v2.8.1 -R llhzx2018/vf-infra --dir "$RUNNER_TEMP/readback"
+          F="$RUNNER_TEMP/readback/VF_Infra_V2.8.1_FULL.zip"; U="$RUNNER_TEMP/readback/VF_Infra_V2.8.1_UPDATE.zip"
+          test "$(stat -c %s "$F")" = "$EXPECTED_FULL_BYTES"
+          test "$(sha256sum "$F" | awk '{print $1}')" = "$EXPECTED_FULL_SHA256"
+          test "$(stat -c %s "$U")" = "$EXPECTED_UPDATE_BYTES"
+          test "$(sha256sum "$U" | awk '{print $1}')" = "$EXPECTED_UPDATE_SHA256"
+          echo 'P04_V281_REMOTE_RELEASE_READBACK=PASS'
+          echo "RELEASE_ID=$(jq -r .id "$REL")"
+          jq -r '.assets[] | "ASSET_ID="+(.id|tostring)+" NAME="+.name+" BYTES="+(.size|tostring)' "$REL"
+          echo 'TAG_SOURCE='"$SOURCE_COMMIT"
+          echo 'FULL_SHA256='"$EXPECTED_FULL_SHA256"
+          echo 'UPDATE_SHA256='"$EXPECTED_UPDATE_SHA256"
+          echo 'PRODUCTION_WRITE=0'
+
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.1-FORMAL-RELEASE-EVIDENCE
+          path: |
+            ${{ runner.temp }}/release.json
+            ${{ runner.temp }}/VF_Infra_V2.8.1_FULL.zip
+            ${{ runner.temp }}/VF_Infra_V2.8.1_UPDATE.zip
+          if-no-files-found: warn
+          retention-days: 30
