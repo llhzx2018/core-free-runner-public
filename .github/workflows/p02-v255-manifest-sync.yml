@@ -1,0 +1,88 @@
+name: P02 V2.5.5 Source Manifest Sync
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v255-manifest-sync.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.5-editor-scroll-anchor-hotfix
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Regenerate exact V2.5.5 runtime manifest
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.5'
+          ROOT="$RUNNER_TEMP/manifest"; DEP="$ROOT/deploy"; mkdir -p "$ROOT"
+          bash scripts/build-deploy-tree.sh "$DEP" >/dev/null
+          python3 - "$DEP" <<'PY'
+          import hashlib,json,sys
+          from pathlib import Path
+          dep=Path(sys.argv[1]); repo=Path.cwd()
+          old=json.loads((repo/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          mapping={e['full_path']:e['repo_path'] for e in old['entries']}
+          mapping['assets/v255-hotfix.js']='public/assets/v255-hotfix.js'
+          actual=[]
+          for p in sorted(x for x in dep.rglob('*') if x.is_file()):
+              rel=p.relative_to(dep).as_posix()
+              if rel not in mapping: raise SystemExit(f'missing repo mapping: {rel}')
+              rp=repo/mapping[rel]
+              if not rp.is_file(): raise SystemExit(f'missing repo file: {mapping[rel]}')
+              b=p.read_bytes(); rb=rp.read_bytes()
+              h=lambda x:hashlib.sha256(x).hexdigest()
+              actual.append({'full_path':rel,'repo_path':mapping[rel],'bytes':len(b),'sha256':h(b),'repo_sha256':h(rb)})
+          extra=sorted(set(mapping)-{e['full_path'] for e in actual})
+          if extra: raise SystemExit('stale manifest mappings: '+','.join(extra))
+          out={
+            'project':'P02 · VF Library','version':'2.5.5','schema':2401,
+            'source_baseline_full_sha256':'PENDING_FORMAL_CANDIDATE_ARTIFACT',
+            'mapping_contract':'Each declared runtime source file must exist exactly once at repo_path; hashes bind the Git-native V2.5.5 candidate deploy tree. Formal release identity is not assigned by this candidate manifest.',
+            'runtime_source_file_count':len(actual),'entries':actual
+          }
+          (repo/'SOURCE_MANIFEST.json').write_text(json.dumps(out,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          print('V255_SOURCE_MANIFEST_FILES='+str(len(actual)))
+          PY
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          x=json.loads(Path('SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert x['version']=='2.5.5' and x['schema']==2401
+          assert x['runtime_source_file_count']==len(x['entries'])
+          assert any(e['full_path']=='assets/v255-hotfix.js' for e in x['entries'])
+          print('V255_SOURCE_MANIFEST=PASS')
+          PY
+
+      - name: Commit manifest to product hotfix branch
+        working-directory: p02
+        env:
+          GH_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          SHA=$(gh api 'repos/llhzx2018/vf-library/contents/SOURCE_MANIFEST.json?ref=maintenance/v2.5.5-editor-scroll-anchor-hotfix' --jq .sha)
+          CONTENT=$(base64 -w0 SOURCE_MANIFEST.json)
+          gh api -X PUT 'repos/llhzx2018/vf-library/contents/SOURCE_MANIFEST.json' \
+            -f message='chore(v2.5.5): sync runtime source manifest' \
+            -f content="$CONTENT" -f sha="$SHA" -f branch='maintenance/v2.5.5-editor-scroll-anchor-hotfix' >/tmp/result.json
+          test -n "$(jq -r '.commit.sha' /tmp/result.json)"
+          echo PRODUCT_MANIFEST_COMMIT=$(jq -r '.commit.sha' /tmp/result.json)
+          echo PRODUCTION_WRITE=NO
