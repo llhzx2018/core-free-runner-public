@@ -1,0 +1,105 @@
+name: P03 V1.37.2 Atomic E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1372-atomic-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: d39417b5cdd3347f2648664e6a343b3e50f54e63
+  BASE_SHA: c7bc5216af5363b4524611595418e8e67edb55e6
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+  PHP_TEST_IMAGE: vf-forge-v1372-atomic-php84
+
+jobs:
+  atomic-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact private V1.37.2 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Prepare PHP 8.4 Atomic fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 zip unzip >/dev/null
+          cat > "$RUNNER_TEMP/Dockerfile.p03-v1372" <<'EOF'
+          FROM php:8.4-cli-bookworm
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update \
+            && apt-get install -y --no-install-recommends libzip-dev libsqlite3-dev sqlite3 curl \
+            && docker-php-ext-install pdo_sqlite zip \
+            && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v1372" "$RUNNER_TEMP" >/dev/null
+
+      - name: Build exact V1.37.2 Atomic package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          test "$(cat VERSION)" = '1.37.2'
+          grep -Fq "define('VFAB_VERSION', '1.37.2');" src/app/bootstrap.php
+          git worktree add --detach "$RUNNER_TEMP/base-wt" "$BASE_SHA" >/dev/null
+          python3 "$RUNNER_TEMP/base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/v1372-target-runtime" >/dev/null
+          grep -Fq "define('VFAB_VERSION', '1.37.1');" "$RUNNER_TEMP/base-runtime/app/bootstrap.php"
+          grep -Fq "define('VFAB_VERSION', '1.37.2');" "$RUNNER_TEMP/v1372-target-runtime/app/bootstrap.php"
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/base-runtime" --target-runtime "$RUNNER_TEMP/v1372-target-runtime" --output "$RUNNER_TEMP/v1372-release" >/dev/null
+          cd "$RUNNER_TEMP/v1372-release"
+          sha256sum -c SHA256SUMS.txt
+          test "$(unzip -Z1 VF_Forge_V1.37.2_Atomic_Upgrade.zip)" = 'repair-v1.37.2.php'
+          SHA=$(sha256sum VF_Forge_V1.37.2_Atomic_Upgrade.zip | awk '{print $1}')
+          SRC=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')
+          COUNT=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_file_count"])')
+          test "$SHA" = '671164cacb20def505a7df2aa03161bb8e33919d303cc5fbc002187660f85220'
+          test "$SRC" = '60366fc683f9ad173d6cba54c953a0fb5a341314205a4a6a8d5244edb5bc1f72'
+          test "$COUNT" = '53'
+          echo "P03_V1372_PACKAGE_EXACT=PASS sha=$SHA source=$SRC files=$COUNT"
+
+      - name: Execute V1.37.1 to V1.37.2 success and rollback E2E
+        shell: bash
+        env:
+          V1372_RELEASE_DIR: ${{ runner.temp }}/v1372-release
+          V1372_TARGET_RUNTIME: ${{ runner.temp }}/v1372-target-runtime
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          cp tests/maintenance/v1370_atomic_e2e.sh "$RUNNER_TEMP/v1372-atomic-e2e.sh"
+          python3 - "$RUNNER_TEMP/v1372-atomic-e2e.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          s=s.replace('1.36.2','__P03_BASE_VERSION__')
+          s=s.replace('1.37.0','__P03_TARGET_VERSION__')
+          s=s.replace('__P03_BASE_VERSION__','1.37.1')
+          s=s.replace('__P03_TARGET_VERSION__','1.37.2')
+          s=s.replace('V1370','V1372').replace('v1370','v1372')
+          p.write_text(s,encoding='utf-8')
+          PY
+          bash -n "$RUNNER_TEMP/v1372-atomic-e2e.sh"
+          BASE_SHA="$BASE_SHA" bash "$RUNNER_TEMP/v1372-atomic-e2e.sh" | tee "$RUNNER_TEMP/v1372-e2e.log"
+          grep -Fq 'V1372_PRODUCTION_SOURCE_EXACT_PASS 53 60366fc683f9ad173d6cba54c953a0fb5a341314205a4a6a8d5244edb5bc1f72' "$RUNNER_TEMP/v1372-e2e.log"
+          grep -Fq 'V1372_ATOMIC_SUCCESS_PASS' "$RUNNER_TEMP/v1372-e2e.log"
+          grep -Fq 'V1372_SOURCE_AND_DATABASE_ROLLBACK_PASS' "$RUNNER_TEMP/v1372-e2e.log"
+          grep -Fq 'V1372_ATOMIC_E2E_PASS' "$RUNNER_TEMP/v1372-e2e.log"
+          echo 'P03_V1372_SUCCESS_AND_ROLLBACK=PASS'
+          echo 'PRODUCTION_WRITE=NO'
