@@ -1,0 +1,82 @@
+name: P01 V2.21.19 Candidate Seal
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['vf-agent/triggers/P01-V2.21.19-CANDIDATE.json']
+permissions:
+  contents: write
+concurrency:
+  group: p01-v2.21.19-candidate-seal
+  cancel-in-progress: false
+jobs:
+  seal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      WORK_BRANCH: maintenance/reference-driven-ui-2.21.19-20260819
+      CANDIDATE_BRANCH: candidate/v2.21.19-20260819
+      EXPECTED_WORK_SHA: a6e017e2400c8202ee763a5831f01595d5b30c9e
+      EXPECTED_BASE_SHA: c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3
+      VERSION: 2.21.19
+      SOURCE_VERSION: 2.21.18
+    steps:
+      - name: Gate on exact browser regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,urllib.request
+          u='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/vf-agent-operations-v1/vf-agent/results/P01-V2.21.19-REFERENCE-UI-BROWSER.json'
+          x=json.load(urllib.request.urlopen(u));assert x['pass'] is True and x['status']=='SUCCESS',x
+          assert x['source_sha']=='a6e017e2400c8202ee763a5831f01595d5b30c9e',x
+          PY
+      - name: Create exact versioned candidate
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN";test -n "$WRITE_TOKEN"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main|awk '{print $1}')" = "$EXPECTED_BASE_SHA"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop|awk '{print $1}')" = "$EXPECTED_BASE_SHA"
+          git clone -q --branch "$WORK_BRANCH" "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          test "$(git -C product rev-parse HEAD)" = "$EXPECTED_WORK_SHA"
+          test "$(tr -d '\r\n' < product/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -F "define('VF_VERSION', '2.21.18');" product/src/app/bootstrap.php >/dev/null
+          printf '%s\n' "$VERSION" > product/VERSION
+          printf '%s\n' "$VERSION" > product/src/VERSION.txt
+          python3 - <<'PY'
+          p='product/src/app/bootstrap.php';s=open(p,encoding='utf-8').read();old="define('VF_VERSION', '2.21.18');";new="define('VF_VERSION', '2.21.19');";assert s.count(old)==1;s=s.replace(old,new,1);open(p,'w',encoding='utf-8',newline='\n').write(s)
+          PY
+          grep -F 'assets/reference-ui.css?v=22119' product/src/index.php >/dev/null
+          grep -F 'assets/reference-ui.js?v=22119' product/src/index.php >/dev/null
+          git -C product config user.name VictorForge;git -C product config user.email llhzx2018@gmail.com
+          git -C product add VERSION src/VERSION.txt src/app/bootstrap.php
+          git -C product commit -q -m 'chore(P01): seal V2.21.19 reference-driven candidate identity'
+          CANDIDATE=$(git -C product rev-parse HEAD);TREE=$(git -C product rev-parse HEAD^{tree})
+          git -C product push -q origin HEAD:"refs/heads/$WORK_BRANCH"
+          remote_candidate=$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/$CANDIDATE_BRANCH"|awk '{print $1}')
+          if [ -n "$remote_candidate" ];then test "$remote_candidate" = "$CANDIDATE";else git -C product push -q origin "$CANDIDATE:refs/heads/$CANDIDATE_BRANCH";fi
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/$CANDIDATE_BRANCH"|awk '{print $1}')" = "$CANDIDATE"
+          printf '%s' "$CANDIDATE" >/tmp/candidate-sha;printf '%s' "$TREE" >/tmp/candidate-tree
+      - name: Publish candidate evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CANDIDATE=$(cat /tmp/candidate-sha);TREE=$(cat /tmp/candidate-tree)
+          python3 - "$CANDIDATE" "$TREE" <<'PY'
+          import json,sys,os
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.19','source_version':'2.21.18','gate':'CANDIDATE_SEAL','status':'SUCCESS','pass':True,'candidate_sha':sys.argv[1],'candidate_tree':sys.argv[2],'production_sha':'c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3','develop_before':'c0e9cdb0cbb2c806d900cbc73f492f7ab4ae3bc3','schema_version':'2026080902','browser_helper_version':'1.6.4','private_data_persisted_publicly':False,'workflow_run_id':os.environ.get('GITHUB_RUN_ID','')}
+          open('/tmp/result.json','w').write(json.dumps(q,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git evidence
+          mkdir -p evidence/vf-agent/results;cp /tmp/result.json evidence/vf-agent/results/P01-V2.21.19-CANDIDATE-SEAL.json
+          git -C evidence config user.name VictorForge;git -C evidence config user.email llhzx2018@gmail.com;git -C evidence add vf-agent/results/P01-V2.21.19-CANDIDATE-SEAL.json;git -C evidence commit -q -m 'evidence(P01): seal V2.21.19 candidate';git -C evidence pull -q --rebase origin vf-agent-operations-v1;git -C evidence push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: rm -rf product evidence || true
