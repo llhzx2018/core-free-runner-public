@@ -1,0 +1,346 @@
+name: P01 VF Start V2.21.21 Formal Release
+
+on:
+  push:
+    branches:
+      - agent/p01-v22121-formal-release-20260819
+    paths:
+      - '.github/workflows/p01-v22121-formal-release.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p01-v22121-formal-release
+  cancel-in-progress: false
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  CANDIDATE: 0b62c96b787e03b0dda6ef8493d29755b6baf83e
+  CANDIDATE_TREE: 02b6199ab82f2fb03dd9d8048288421037869e4e
+  PRODUCTION: 383552dc5035cb60b4cd131907d05d87c3171b9b
+  VERSION: '2.21.21'
+  SOURCE_VERSION: '2.21.20'
+  SCHEMA: '2026080902'
+  TAG: v2.21.21
+  UPDATE_BYTES: '1070348'
+  UPDATE_SHA: ddb3b78d8bac153692ecaf897c2ca66a325b385355ade7a84d1c5a99183d9df4
+  FULL_BYTES: '489980'
+  FULL_SHA: 94dbc98b8d4eb798c46ff5f7627d130ec13dd0bfc7270f676ef8e7400fd07363
+  REPAIR_SHA: a2766e422f62064493e800a8101b1105b84038463aad339312077d6bb9602d24
+  PRODUCTION_URL: https://start.kewaro.com/
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact release infrastructure
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: agent/p01-v22121-formal-release-20260819
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Require sealed V2.21.21 Formal Artifact evidence
+        shell: bash
+        env:
+          OPS_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${OPS_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" "$RUNNER_TEMP/ops"
+          E="$RUNNER_TEMP/ops/vf-agent/results/P01-V2.21.21-FORMAL-ARTIFACT-GATE.json"
+          test -f "$E"
+          jq -e \
+            --arg c "$CANDIDATE" \
+            --arg t "$CANDIDATE_TREE" \
+            --arg p "$PRODUCTION" \
+            --arg u "$UPDATE_SHA" \
+            --arg f "$FULL_SHA" \
+            '.project_id=="P01" and .gate=="V2.21.21_FORMAL_ARTIFACT_GATE" and .status=="SUCCESS" and .pass==true and .candidate_source_sha==$c and .candidate_source_tree==$t and .production_source_sha==$p and .version=="2.21.21" and .source_version=="2.21.20" and .schema_version=="2026080902" and .release_authorized==false and .production_changed==false and .update_asset.sha256==$u and .full_asset.sha256==$f' "$E" >/dev/null
+          echo 'SEALED_FORMAL_ARTIFACT_EVIDENCE=PASS'
+
+      - name: Unified release credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 78; }
+          echo 'UNIFIED_RELEASE_CREDENTIALS=PASS'
+
+      - name: Checkout exact Candidate and current Production source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$CANDIDATE"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" production
+          git -C production fetch -q --depth 1 origin "$PRODUCTION"
+          git -C production checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          echo 'SOURCE_IDENTITIES=PASS'
+
+      - name: Rebuild and verify immutable Formal Release bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p01-v22121-release"
+          mkdir -p "$OUT"
+          python3 scripts/p01-build-maintenance-candidate-22121.py \
+            --candidate candidate/src \
+            --production production/src \
+            --out "$OUT" \
+            --candidate-commit "$CANDIDATE" \
+            --candidate-tree "$CANDIDATE_TREE" \
+            --production-commit "$PRODUCTION" > "$RUNNER_TEMP/build.json"
+          jq -e '.status=="BUILD_PASS" and .version=="2.21.21" and .source_version=="2.21.20"' "$RUNNER_TEMP/build.json" >/dev/null
+          UPDATE="$OUT/VF_Start_V${VERSION}_UPDATE.zip"
+          FULL="$OUT/VF_Start_V${VERSION}_FULL.zip"
+          REPAIR="$OUT/repair-v${VERSION}.php"
+          test "$(stat -c %s "$UPDATE")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$UPDATE" | awk '{print $1}')" = "$UPDATE_SHA"
+          test "$(stat -c %s "$FULL")" = "$FULL_BYTES"
+          test "$(sha256sum "$FULL" | awk '{print $1}')" = "$FULL_SHA"
+          test "$(sha256sum "$REPAIR" | awk '{print $1}')" = "$REPAIR_SHA"
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          unzip -t "$UPDATE" >/dev/null
+          unzip -t "$FULL" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          python3 - <<'PY'
+          import os,pathlib,zipfile
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-v22121-release'
+          for p in (out/'VF_Start_V2.21.21_UPDATE.zip',out/'VF_Start_V2.21.21_FULL.zip'):
+              with zipfile.ZipFile(p) as z:
+                  names=z.namelist()
+                  assert len(names)==len(set(names))
+                  for n in names:
+                      q=pathlib.PurePosixPath(n)
+                      assert not n.startswith('/') and '\\' not in n and '..' not in q.parts
+                      assert not any(x in {'.git','PRIVATE_DATA','private_data','node_modules'} for x in q.parts)
+                      assert not n.lower().endswith(('.sqlite','.sqlite3','.db','.env','.log'))
+          PY
+          echo "PUBLISH_DIR=$OUT" >> "$GITHUB_ENV"
+          echo 'FORMAL_REBUILD_MATCHES_VERIFIED_ARTIFACT=PASS'
+
+      - name: Create exact tag and GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if tag_sha=$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null); then
+            test "$tag_sha" = "$CANDIDATE" || { echo "TAG_IDENTITY_CONFLICT=$tag_sha" >&2; exit 1; }
+          else
+            gh api --method POST "repos/$PRODUCT_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$CANDIDATE" >/dev/null
+          fi
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$CANDIDATE"
+
+          if gh api "repos/$PRODUCT_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            echo 'RELEASE_ALREADY_PRESENT=YES'
+          else
+            cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          # VF Start V2.21.21
+
+          Maintenance release focused on navigation stability, backend value simplification, and post-update reload behavior.
+
+          - Source: V2.21.20
+          - Target: V2.21.21
+          - Schema: 2026080902 / unchanged
+          - Browser Helper: 1.6.4 / unchanged
+          - Candidate Product Commit: $CANDIDATE
+          - Product Machine Gate: PASS / 32266302528
+          - Formal Artifact Gate: PASS / 32269185193
+          - Production Upgrade: NOT INCLUDED
+          EOF
+            gh release create "$TAG" \
+              "$PUBLISH_DIR/VF_Start_V${VERSION}_UPDATE.zip" \
+              "$PUBLISH_DIR/VF_Start_V${VERSION}_FULL.zip" \
+              --repo "$PRODUCT_REPO" \
+              --target "$CANDIDATE" \
+              --title "VF Start V${VERSION}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" >/dev/null
+          fi
+          gh api "repos/$PRODUCT_REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          jq -e --arg tag "$TAG" '.tag_name==$tag and .draft==false and .prerelease==false' "$RUNNER_TEMP/release.json" >/dev/null
+          echo 'TAG_AND_RELEASE=PASS'
+
+      - name: Strict remote Release asset readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/release-readback"
+          rm -f "$RUNNER_TEMP/release-readback"/*
+          gh release download "$TAG" --repo "$PRODUCT_REPO" --dir "$RUNNER_TEMP/release-readback" \
+            --pattern "VF_Start_V${VERSION}_UPDATE.zip" \
+            --pattern "VF_Start_V${VERSION}_FULL.zip"
+          U="$RUNNER_TEMP/release-readback/VF_Start_V${VERSION}_UPDATE.zip"
+          F="$RUNNER_TEMP/release-readback/VF_Start_V${VERSION}_FULL.zip"
+          test -f "$U" && test -f "$F"
+          test "$(stat -c %s "$U")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$U" | awk '{print $1}')" = "$UPDATE_SHA"
+          test "$(stat -c %s "$F")" = "$FULL_BYTES"
+          test "$(sha256sum "$F" | awk '{print $1}')" = "$FULL_SHA"
+          jq -e --arg u "VF_Start_V${VERSION}_UPDATE.zip" --arg f "VF_Start_V${VERSION}_FULL.zip" --argjson ub "$UPDATE_BYTES" --argjson fb "$FULL_BYTES" '([.assets[]|select(.name==$u and .size==$ub)]|length)==1 and ([.assets[]|select(.name==$f and .size==$fb)]|length)==1' "$RUNNER_TEMP/release.json" >/dev/null
+          echo "RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo "PUBLISHED_AT=$(jq -r '.published_at' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo "UPDATE_ASSET_ID=$(jq -r --arg n "VF_Start_V${VERSION}_UPDATE.zip" '.assets[]|select(.name==$n)|.id' "$RUNNER_TEMP/release.json")" >> "$GITHUB_ENV"
+          echo 'REMOTE_RELEASE_ASSET_IDENTITY=PASS'
+
+      - name: Checkout current core-updates authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Advance P01 online update channel to V2.21.21
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -e '.schema_version=="1.0" and .project_id=="P01" and .component_id=="APP" and .enabled==true and .target_version=="2.21.20" and .update_type=="ATOMIC" and .from_versions==["2.21.19"] and .schema_from=="2026080902" and .schema_to=="2026080902" and .repository=="llhzx2018/vf-start" and .release_tag=="v2.21.20" and .asset_name=="VF_Start_V2.21.20_UPDATE.zip" and .asset_bytes==1070924 and .asset_sha256=="7a08571d11418b7b4a779b279b18db38b67a8ea77e470d0f0bc4e379b64e0b77" and .release_id==372994729 and .release_identity=="v2.21.20@393ac2fafa56cbde66767b7e1afed78742c12c9d" and .backup_required==true and .rollback_supported==true and .released_at=="2026-08-19T11:25:51Z" and .minimum_php=="8.0.0"' updates/projects/P01.json >/dev/null
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('updates/projects/P01.json')
+          x={
+            'schema_version':'1.0',
+            'project_id':'P01',
+            'component_id':'APP',
+            'enabled':True,
+            'target_version':'2.21.21',
+            'update_type':'ATOMIC',
+            'from_versions':['2.21.20'],
+            'schema_from':'2026080902',
+            'schema_to':'2026080902',
+            'repository':'llhzx2018/vf-start',
+            'release_tag':'v2.21.21',
+            'asset_name':'VF_Start_V2.21.21_UPDATE.zip',
+            'asset_bytes':int(os.environ['UPDATE_BYTES']),
+            'asset_sha256':os.environ['UPDATE_SHA'],
+            'release_id':int(os.environ['RELEASE_ID']),
+            'release_identity':'v2.21.21@'+os.environ['CANDIDATE'],
+            'backup_required':True,
+            'rollback_supported':True,
+            'released_at':os.environ['PUBLISHED_AT'],
+            'minimum_php':'8.0.0'
+          }
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          git -C updates config user.name VictorForge
+          git -C updates config user.email llhzx2018@gmail.com
+          git -C updates add projects/P01.json
+          git -C updates diff --cached --exit-code >/dev/null && { echo 'CORE_UPDATES_NO_CHANGE' >&2; exit 1; } || true
+          git -C updates commit -q -m 'release(P01): publish VF Start V2.21.21 update channel'
+          git -C updates push origin HEAD:main
+          echo "CORE_UPDATES_COMMIT=$(git -C updates rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo 'CORE_UPDATES_PUBLISH=PASS'
+
+      - name: Independent core-updates remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/core-updates.git" "$RUNNER_TEMP/updates-readback"
+          M="$RUNNER_TEMP/updates-readback/projects/P01.json"
+          jq -e --argjson rid "$RELEASE_ID" --arg c "$CANDIDATE" --arg sha "$UPDATE_SHA" --argjson bytes "$UPDATE_BYTES" '.target_version=="2.21.21" and .from_versions==["2.21.20"] and .schema_from=="2026080902" and .schema_to=="2026080902" and .release_tag=="v2.21.21" and .asset_name=="VF_Start_V2.21.21_UPDATE.zip" and .asset_bytes==$bytes and .asset_sha256==$sha and .release_id==$rid and .release_identity==("v2.21.21@"+$c)' "$M" >/dev/null
+          test "$(git -C "$RUNNER_TEMP/updates-readback" rev-parse HEAD)" = "$CORE_UPDATES_COMMIT"
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Production public readback and source-exact online discovery only
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring sqlite3 >/dev/null
+          code=$(curl -LsS -o "$RUNNER_TEMP/production-home.html" -w '%{http_code}' --max-time 20 "$PRODUCTION_URL")
+          test "$code" = 200
+          cp -a production/src "$RUNNER_TEMP/p01-discovery"
+          php -S 127.0.0.1:18231 -t "$RUNNER_TEMP/p01-discovery" >"$RUNNER_TEMP/p01-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/p01-server.pid"
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/p01.cookies" http://127.0.0.1:18231/setup.php -o "$RUNNER_TEMP/setup.html" && break || sleep 1; done
+          csrf=$(python3 - <<'PY'
+          import os,re,pathlib
+          s=(pathlib.Path(os.environ['RUNNER_TEMP'])/'setup.html').read_text(encoding='utf-8')
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          ADMIN_PASS='Discovery-P01-22121-Local!Strong'
+          curl -fsSL -b "$RUNNER_TEMP/p01.cookies" -c "$RUNNER_TEMP/p01.cookies" -X POST http://127.0.0.1:18231/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Release Discovery' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null
+          kill "$(cat "$RUNNER_TEMP/p01-server.pid")" 2>/dev/null || true
+          php "$RUNNER_TEMP/p01-discovery/cli/verify.php" | grep -q 'VERIFY_PASS=YES'
+          php -r '
+          require getenv("RUNNER_TEMP")."/p01-discovery/app/bootstrap.php";
+          $m=new VfUpdateManager(vf_db(),["current_version"=>"2.21.20"]);
+          $r=$m->check(true); $s=$m->status();
+          file_put_contents(getenv("RUNNER_TEMP")."/discovery.json",json_encode(["check"=>$r,"status"=>$s],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n");
+          if(($r["ok"]??false)!==true)exit(1);
+          if(($r["current_version"]??"")!=="2.21.20")exit(2);
+          if(($r["latest_version"]??"")!=="2.21.21")exit(3);
+          if(($r["available"]??false)!==true)exit(4);
+          if(($r["can_update"]??false)!==true)exit(5);
+          if(($s["available"]??false)!==true||($s["can_update"]??false)!==true)exit(6);
+          if(($s["requirements"]["credential"]["ok"]??false)!==true)exit(7);
+          if(($s["requirements"]["source_allowed"]??false)!==true)exit(8);
+          if(($s["requirements"]["schema"]["ok"]??false)!==true)exit(9);
+          echo "SOURCE_EXACT_ONLINE_DISCOVERY=PASS\n";'
+          echo 'PRODUCTION_CHANGED=NO'
+
+      - name: Publish formal release and discovery evidence
+        if: success()
+        shell: bash
+        env:
+          OPS_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib,re
+          rt=pathlib.Path(os.environ['RUNNER_TEMP'])
+          r=json.loads((rt/'release.json').read_text())
+          d=json.loads((rt/'discovery.json').read_text())
+          home=(rt/'production-home.html').read_text(encoding='utf-8',errors='replace')
+          versions=sorted(set(re.findall(r'(?i)(?:V|version[^0-9]{0,8})(2\.21\.\d+)',home)))
+          q={
+            'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.21','source_version':'2.21.20',
+            'gate':'FORMAL_RELEASE_AND_ONLINE_DISCOVERY','status':'SUCCESS','pass':True,
+            'release_authorized':True,'production_upgrade_authorized':False,'production_changed':False,
+            'source_sha':os.environ['CANDIDATE'],'source_tree':os.environ['CANDIDATE_TREE'],'production_sha':os.environ['PRODUCTION'],
+            'tag':'v2.21.21','release_id':r['id'],'released_at':r.get('published_at'),
+            'update_asset':{'name':'VF_Start_V2.21.21_UPDATE.zip','bytes':int(os.environ['UPDATE_BYTES']),'sha256':os.environ['UPDATE_SHA']},
+            'full_asset':{'name':'VF_Start_V2.21.21_FULL.zip','bytes':int(os.environ['FULL_BYTES']),'sha256':os.environ['FULL_SHA']},
+            'repair_sha256':os.environ['REPAIR_SHA'],'core_updates_commit':os.environ['CORE_UPDATES_COMMIT'],
+            'online_discovery':{'current_version':d['check']['current_version'],'latest_version':d['check']['latest_version'],'available':d['check']['available'],'can_update':d['check']['can_update'],'credential_ok':d['status']['requirements']['credential']['ok'],'source_allowed':d['status']['requirements']['source_allowed'],'schema_ok':d['status']['requirements']['schema']['ok'],'production_public_http_status':200,'production_public_version_tokens':versions,'method':'EXACT_PRODUCTION_SOURCE + LIVE_CORE_UPDATES + LIVE_GITHUB_RELEASE / READ_ONLY'},
+            'workflow_run_id':os.environ['GITHUB_RUN_ID'],'private_source_persisted_publicly':False,'private_data_used':False
+          }
+          (rt/'evidence.json').write_text(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${OPS_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" "$RUNNER_TEMP/evidence-out"
+          mkdir -p "$RUNNER_TEMP/evidence-out/vf-agent/results"
+          cp "$RUNNER_TEMP/evidence.json" "$RUNNER_TEMP/evidence-out/vf-agent/results/P01-V2.21.21-FORMAL-RELEASE.json"
+          git -C "$RUNNER_TEMP/evidence-out" config user.name VictorForge
+          git -C "$RUNNER_TEMP/evidence-out" config user.email llhzx2018@gmail.com
+          git -C "$RUNNER_TEMP/evidence-out" add vf-agent/results/P01-V2.21.21-FORMAL-RELEASE.json
+          git -C "$RUNNER_TEMP/evidence-out" commit -q -m 'evidence(P01): publish V2.21.21 formal release'
+          git -C "$RUNNER_TEMP/evidence-out" push -q origin HEAD:vf-agent-operations-v1
+          echo 'FORMAL_RELEASE_EVIDENCE=PASS'
+
+      - name: Cleanup private source
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          test -f "$RUNNER_TEMP/p01-server.pid" && kill "$(cat "$RUNNER_TEMP/p01-server.pid")" 2>/dev/null
+          rm -rf candidate production "$RUNNER_TEMP/p01-v22121-release" "$RUNNER_TEMP/release-readback" "$RUNNER_TEMP/p01-discovery" "$RUNNER_TEMP/ops" "$RUNNER_TEMP/evidence-out" "$RUNNER_TEMP/updates-readback"
