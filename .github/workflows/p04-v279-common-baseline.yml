@@ -1,0 +1,152 @@
+name: P04 VF Infra V2.7.9 Common Baseline Gate
+
+on:
+  pull_request:
+    branches: [gate/p04-v279-common-baseline]
+    paths:
+      - triggers/p04-v279-common-baseline.txt
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 0b8fc8edd7c26a03e35039a519451f427e851e1f
+  BASE_SHA: ec133d34c1f27098a01aa7b5e9f8e77ba8e847a2
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact P04 maintenance source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+
+      - name: Exact source and scope gate
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(cat VERSION)" = '2.7.9'
+          git cat-file -e "$BASE_SHA^{commit}"
+          git diff --name-only "$BASE_SHA" "$SOURCE_SHA" | tee /tmp/p04-v279-files.txt
+          test -s /tmp/p04-v279-files.txt
+          if grep -E '^(database/migrations/|src/app/Core/(Provider|Billing|Update)|src/app/Domain|src/app/Server)' /tmp/p04-v279-files.txt; then
+            echo 'P04_V279_SCOPE_VIOLATION'
+            exit 79
+          fi
+          echo P04_V279_EXACT_SOURCE_SCOPE=PASS
+
+      - name: Repository health and syntax
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p04-v279-php-lint.txt
+          node --check public/assets/v279-common-branding.js
+          node --check public/assets/v278-route-scroll-reset.js
+          node --check public/assets/v275-ua-workflow.js
+          echo P04_V279_SYNTAX=PASS
+
+      - name: Existing critical contracts
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/core_updates_contract_v252.php
+          php tests/integration/provider_billing_contract_v250.php src
+          php tests/integration/provider_billing_pagination_v256.php src
+          php tests/integration/project_membership_contract_v257.php src
+          php tests/unit/provider_currency_contract_v256.php src
+          php tests/unit/provider_billing_persistence_contract_v256.php .
+          php tests/unit/job_partial_health_contract_v256.php .
+          echo P04_V279_EXISTING_CONTRACTS=PASS
+
+      - name: Build exact V2.7.9 release tree
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p04-v279-runtime /tmp/p04-v279-data
+          python scripts/build-release-tree.py /tmp/p04-v279-runtime >/tmp/p04-v279-build.json
+          test "$(cat /tmp/p04-v279-runtime/VERSION.txt)" = '2.7.9'
+          test -f /tmp/p04-v279-runtime/app/BrandAssetService.php
+          test -f /tmp/p04-v279-runtime/branding-upload.php
+          test -f /tmp/p04-v279-runtime/branding-reset.php
+          test -f /tmp/p04-v279-runtime/branding-asset.php
+          test -f /tmp/p04-v279-runtime/assets/v279-common-branding.js
+          test ! -e /tmp/p04-v279-runtime/branding
+          echo P04_V279_RELEASE_TREE=PASS
+
+      - name: Real private branding persistence contract
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p04-v279-data
+          chmod 700 /tmp/p04-v279-data
+          cat >/tmp/p04-v279-runtime/config.php <<'PHP'
+          <?php
+          return [
+            'app_name' => 'VF Infra Gate',
+            'base_url' => 'https://localhost',
+            'allowed_hosts' => ['localhost'],
+            'host_mode' => 'serve_all',
+            'trusted_proxy_ips' => [],
+            'rdap_allow_http' => false,
+            'data_path' => '/tmp/p04-v279-data',
+            'timezone' => 'Asia/Shanghai',
+            'app_key' => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'session_name' => 'vf_infra_gate',
+          ];
+          PHP
+          chmod 600 /tmp/p04-v279-runtime/config.php
+          php tests/integration/common_branding_contract_v279.php /tmp/p04-v279-runtime
+          test ! -e /tmp/p04-v279-runtime/branding
+          test -d /tmp/p04-v279-data/branding
+          echo P04_V279_PRIVATE_BRANDING=PASS
+
+      - name: Public baseline source assertions
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fq 'branding-upload.php' public/assets/v279-common-branding.js
+          grep -Fq 'branding-reset.php' public/assets/v279-common-branding.js
+          grep -Fq 'v279-favicon' public/index.php
+          grep -Fq 'BrandAssetService' public/login.php
+          grep -Fq 'pre_import' src/app/ImportExportService.php
+          grep -Fq 'Database::transaction' src/app/ImportExportService.php
+          test -f src/app/BackupService.php
+          test -f src/app/Core/Update/OnlineUpdateService.php
+          test -f src/app/Migrator.php
+          echo P04_V279_PUBLIC_BASELINE_SOURCE=PASS
+
+      - name: Safety cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/p04-v279-runtime /tmp/p04-v279-data /tmp/p04-v279-files.txt /tmp/p04-v279-build.json /tmp/p04-v279-php-lint.txt
+          echo PRIVATE_SOURCE_PERSISTED=NO
+          echo TOKEN_EXPOSED=NO
+          echo PRODUCTION_WRITE=NO
