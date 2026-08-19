@@ -1,0 +1,242 @@
+name: P03 V1.37.0 Formal Release Direct R4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1370-formal-release-direct-r4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p03-v1370-formal-release
+  cancel-in-progress: false
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  CORE_UPDATES_REPOSITORY: llhzx2018/core-updates
+  CANDIDATE_COMMIT: 11909e07b682765346d4ef890402b4ce00b91291
+  PRODUCTION_MAIN_BEFORE: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+  SOURCE_VERSION: 1.36.2
+  TARGET_VERSION: 1.37.0
+  TARGET_SCHEMA: '30'
+  RELEASE_TAG: v1.37.0
+  ASSET_NAME: VF_Forge_V1.37.0_UPDATE.zip
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Credentials permissions and tools
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"; test -n "$READ_TOKEN"
+          for repo in "$P03_REPOSITORY" "$CORE_UPDATES_REPOSITORY"; do
+            code=$(curl -sS -o "$RUNNER_TEMP/perm.json" -w '%{http_code}' -H "Authorization: Bearer $RELEASE_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$repo"); test "$code" = '200'
+            python3 - "$RUNNER_TEMP/perm.json" "$repo" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert (d.get('permissions') or {}).get('push') is True,sys.argv[2]
+          PY
+          done
+          sudo apt-get update -qq; sudo apt-get install -y -qq php-cli php-sqlite3 php-zip sqlite3 unzip zip curl >/dev/null; gh --version >/dev/null
+
+      - name: Checkout exact Candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Checkout sealed Production baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.PRODUCTION_MAIN_BEFORE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+
+      - name: Exact Current Truth gate
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"; test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_MAIN_BEFORE"
+          test "$(cat candidate/VERSION)" = '1.37.0'; test "$(cat production/VERSION)" = '1.36.2'; test "$(cat candidate/database/schema/SCHEMA_VERSION)" = '30'; test "$(cat production/database/schema/SCHEMA_VERSION)" = '30'
+          repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"; main=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}'); dev=$(git ls-remote "$repo" refs/heads/develop | awk '{print $1}'); test "$dev" = "$CANDIDATE_COMMIT"; case "$main" in "$PRODUCTION_MAIN_BEFORE"|"$CANDIDATE_COMMIT") ;; *) exit 73;; esac
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_MAIN_BEFORE" "$CANDIDATE_COMMIT"; test "$(git -C candidate diff --numstat "$PRODUCTION_MAIN_BEFORE" "$CANDIDATE_COMMIT" -- src/app/bootstrap.php)" = $'1\t1\tsrc/app/bootstrap.php'
+
+      - name: Install temporary V1.37.0 Atomic builder launcher
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >"$RUNNER_TEMP/prepare.py" <<'PY'
+          from pathlib import Path
+          import re,sys
+          root=Path(sys.argv[1]); dst=root/'scripts'/'_release_build_atomic_v1370.py'; s=(root/'scripts'/'build_atomic.py').read_text(encoding='utf-8')
+          def one(p,r,l):
+              global s
+              n=len(re.findall(p,s,flags=re.M)); assert n==1,(l,n); s=re.sub(p,r,s,count=1,flags=re.M)
+          one(r"^TARGET_VERSION\s*=\s*['\"][^'\"]+['\"]","TARGET_VERSION='1.37.0'",'target'); one(r"^TARGET_SCHEMA\s*=\s*\d+","TARGET_SCHEMA=30",'schema'); one(r"^ALLOWED_SOURCES\s*=\s*\[[^\n]*\]","ALLOWED_SOURCES=['1.36.2']",'sources')
+          m=re.search(r'MANAGED_ROOT_FILES\s*=\s*\[(.*?)\]',s,re.S); assert m; add=[]
+          for name in ['intelligence-api.php','memory-api.php']:
+              if name not in m.group(1): add.append(f"    '{name}',\n")
+          if add: s=s[:m.start(1)]+''.join(add)+s[m.start(1):]
+          m=re.search(r'MANAGED_DIRS\s*=\s*\[(.*?)\]',s,re.S); assert m
+          for name in ['app','assets','cli','mcp']: assert name in m.group(1)
+          dst.write_text(s,encoding='utf-8'); print(dst)
+          PY
+          cat >"$RUNNER_TEMP/invoke.py" <<'PY'
+          import ast,subprocess,sys,os,shutil
+          from pathlib import Path
+          root=Path(sys.argv[1]).resolve(); builder=Path(sys.argv[2]).resolve(); out=Path(sys.argv[3]).resolve(); tree=ast.parse(builder.read_text()); specs=[]
+          for n in ast.walk(tree):
+              if not (isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='add_argument'): continue
+              vals=[a.value for a in n.args if isinstance(a,ast.Constant) and isinstance(a.value,str)]
+              if not vals: continue
+              kws={k.arg:k.value for k in n.keywords if k.arg}; req=isinstance(kws.get('required'),ast.Constant) and kws['required'].value is True; pos=not vals[0].startswith('-'); dest=''
+              if 'dest' in kws and isinstance(kws['dest'],ast.Constant): dest=str(kws['dest'].value)
+              if not dest: dest=vals[0].lstrip('-').replace('-','_'); specs.append((vals,req,pos,dest))
+          def v(d):
+              d=d.lower()
+              if any(x in d for x in ['output','out','zip','artifact']): return str(out)
+              if 'source' in d and 'version' in d: return '1.36.2'
+              if 'target' in d and 'version' in d: return '1.37.0'
+              if 'schema' in d: return '30'
+              if 'commit' in d or 'sha' in d: return os.environ['CANDIDATE_COMMIT']
+              if any(x in d for x in ['root','repo','source_dir','source_path','project_dir']): return str(root)
+          args=[]; missing=[]
+          for vals,req,pos,d in specs:
+              x=v(d)
+              if pos:
+                  if x is None: missing.append(d)
+                  else: args.append(x)
+              elif req:
+                  if x is None: missing.append(d)
+                  else: args += [vals[0],x]
+              elif x is not None and any(k in d.lower() for k in ['output','out','zip','artifact','root','repo','source_dir','source_path','project_dir']): args += [vals[0],x]
+          assert not missing,missing; before=set(root.rglob('*.zip')); last=None
+          for a in [args,[]]:
+              r=subprocess.run(['python3',str(builder),*a],cwd=root,text=True,capture_output=True); last=r
+              if r.returncode==0: break
+          else: print(last.stderr[-1500:],file=sys.stderr); raise SystemExit(last.returncode or 1)
+          found=[out] if out.exists() else sorted([p for p in root.rglob('*.zip') if p not in before],key=lambda p:p.stat().st_mtime,reverse=True); assert found
+          if found[0]!=out: shutil.copy2(found[0],out)
+          PY
+
+      - name: Build Candidate Atomic and run rollback regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 "$RUNNER_TEMP/prepare.py" candidate >"$RUNNER_TEMP/builder"; python3 "$RUNNER_TEMP/invoke.py" candidate "$(cat "$RUNNER_TEMP/builder")" "$RUNNER_TEMP/candidate-$ASSET_NAME"; test -s "$RUNNER_TEMP/candidate-$ASSET_NAME"
+          cp candidate/tests/integration/v1354_atomic_managed_scope_regression.py "$RUNNER_TEMP/reg.py"; python3 - "$RUNNER_TEMP/reg.py" <<'PY'
+          from pathlib import Path
+          import re,sys
+          p=Path(sys.argv[1]); s=p.read_text().replace('1.35.4','1.37.0').replace('1.35.3','1.36.2'); s=re.sub(r'(?<!\d)29(?!\d)','30',s); p.write_text(s)
+          PY
+          cp "$(cat "$RUNNER_TEMP/builder")" candidate/scripts/build_atomic.py; CANDIDATE_ROOT="$PWD/candidate" PRODUCTION_ROOT="$PWD/production" ATOMIC_ZIP="$RUNNER_TEMP/candidate-$ASSET_NAME" python3 "$RUNNER_TEMP/reg.py"
+
+      - name: Promote main idempotently
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"; main=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}'); test "$(git ls-remote "$repo" refs/heads/develop | awk '{print $1}')" = "$CANDIDATE_COMMIT"; if [ "$main" = "$PRODUCTION_MAIN_BEFORE" ]; then git -C candidate push "$repo" "$CANDIDATE_COMMIT:refs/heads/main"; elif [ "$main" != "$CANDIDATE_COMMIT" ]; then exit 73; fi; test "$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')" = "$CANDIDATE_COMMIT"
+
+      - name: Checkout exact promoted main
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: formal
+
+      - name: Build formal exact-main Atomic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 "$RUNNER_TEMP/prepare.py" formal >"$RUNNER_TEMP/formal-builder"; python3 "$RUNNER_TEMP/invoke.py" formal "$(cat "$RUNNER_TEMP/formal-builder")" "$RUNNER_TEMP/$ASSET_NAME"; test -s "$RUNNER_TEMP/$ASSET_NAME"
+
+      - name: Create or validate canonical remote Release Asset
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"; tag=$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}'); if [ -z "$tag" ]; then git -C formal push "$repo" "$CANDIDATE_COMMIT:refs/tags/$RELEASE_TAG"; tag=$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}'); fi; test "$tag" = "$CANDIDATE_COMMIT"
+          if ! gh release view "$RELEASE_TAG" --repo "$P03_REPOSITORY" >/dev/null 2>&1; then echo 'VF Forge V1.37.0 — Project Intelligence. Schema 30→30, source V1.36.2 only.' >"$RUNNER_TEMP/notes"; gh release create "$RELEASE_TAG" "$RUNNER_TEMP/$ASSET_NAME" --repo "$P03_REPOSITORY" --title 'VF Forge V1.37.0' --notes-file "$RUNNER_TEMP/notes" --verify-tag; fi
+          rm -rf "$RUNNER_TEMP/remote"; mkdir -p "$RUNNER_TEMP/remote"; gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/remote"; test -f "$RUNNER_TEMP/remote/$ASSET_NAME"
+          python3 - "$RUNNER_TEMP/$ASSET_NAME" "$RUNNER_TEMP/remote/$ASSET_NAME" <<'PY'
+          import zipfile,hashlib,json,sys,re
+          def load(p):
+              with zipfile.ZipFile(p) as z:
+                  payload={}; mans=[]
+                  for n in z.namelist():
+                      if n.endswith('manifest.json'): mans.append(json.loads(z.read(n))); continue
+                      payload[n]=hashlib.sha256(z.read(n)).hexdigest()
+                  return payload,mans
+          local,lm=load(sys.argv[1]); remote,rm=load(sys.argv[2]); assert local==remote; assert lm and rm
+          blob=json.dumps(rm[0],sort_keys=True); assert '1.37.0' in blob and '1.36.2' in blob and re.search(r'(?<!\d)30(?!\d)',blob)
+          PY
+          sha256sum "$RUNNER_TEMP/remote/$ASSET_NAME" | awk '{print $1}' >"$RUNNER_TEMP/canonical.sha"; stat -c%s "$RUNNER_TEMP/remote/$ASSET_NAME" >"$RUNNER_TEMP/canonical.bytes"
+
+      - name: Publish core-updates from canonical remote Asset
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone --depth=1 "https://x-access-token:${RELEASE_TOKEN}@github.com/${CORE_UPDATES_REPOSITORY}.git" "$RUNNER_TEMP/core" >/dev/null 2>&1; sha=$(cat "$RUNNER_TEMP/canonical.sha"); bytes=$(cat "$RUNNER_TEMP/canonical.bytes")
+          python3 - "$RUNNER_TEMP/core/projects/P03.json" "$sha" "$bytes" <<'PY'
+          import json,sys
+          p,sha,b=sys.argv[1],sys.argv[2],int(sys.argv[3]); d=json.load(open(p)); req=['version','source_commit','tag','asset','bytes','sha256','schema_from','schema_to','from_versions','backup_required','rollback_supported']; assert not [k for k in req if k not in d]; assert d['version'] in ['1.36.2','1.37.0']; d.update({'version':'1.37.0','source_commit':'11909e07b682765346d4ef890402b4ce00b91291','tag':'v1.37.0','asset':'VF_Forge_V1.37.0_UPDATE.zip','bytes':b,'sha256':sha,'schema_from':30,'schema_to':30,'from_versions':['1.36.2'],'backup_required':True,'rollback_supported':True}); open(p,'w').write(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+          PY
+          cd "$RUNNER_TEMP/core"; git config user.name 'VF Release Bridge'; git config user.email 'vf-release@users.noreply.github.com'; git add projects/P03.json; if ! git diff --cached --quiet; then git commit -m 'release(P03): publish VF Forge V1.37.0'; git push origin HEAD:main; fi
+
+      - name: Final remote readback
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"; test "$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')" = "$CANDIDATE_COMMIT"; test "$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}')" = "$CANDIDATE_COMMIT"; rm -rf "$RUNNER_TEMP/read"; mkdir -p "$RUNNER_TEMP/read"; gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/read"; sha=$(sha256sum "$RUNNER_TEMP/read/$ASSET_NAME" | awk '{print $1}'); bytes=$(stat -c%s "$RUNNER_TEMP/read/$ASSET_NAME"); test "$sha" = "$(cat "$RUNNER_TEMP/canonical.sha")"; test "$bytes" = "$(cat "$RUNNER_TEMP/canonical.bytes")"; git -C "$RUNNER_TEMP/core" fetch origin main >/dev/null 2>&1; git -C "$RUNNER_TEMP/core" reset --hard origin/main >/dev/null
+          python3 - "$RUNNER_TEMP/core/projects/P03.json" "$sha" "$bytes" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['version']=='1.37.0' and d['source_commit']=='11909e07b682765346d4ef890402b4ce00b91291' and d['tag']=='v1.37.0' and d['asset']=='VF_Forge_V1.37.0_UPDATE.zip' and d['sha256']==sys.argv[2] and int(d['bytes'])==int(sys.argv[3]) and d['schema_from']==30 and d['schema_to']==30 and d['from_versions']==['1.36.2']
+          PY
+          echo "$sha" >"$RUNNER_TEMP/finalsha"; echo "$bytes" >"$RUNNER_TEMP/finalbytes"; echo 'P03_V1370_RELEASE_READY=PASS'
+
+      - name: Checkout public runner main and publish final receipt
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          token: ${{ github.token }}
+          persist-credentials: true
+          path: runner
+
+      - name: Final receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p runner/ops/p03/release; rm -f runner/ops/p03/release/P03_V1370_RELEASE_BLOCKED.md
+          {
+            echo '# P03 V1.37.0 RELEASE READY'; echo; echo 'RESULT=PASS'; echo 'PROJECT=P03 · VF Forge'; echo 'PRODUCTION_INSTALLED=1.36.2'; echo 'AVAILABLE_VERSION=1.37.0'; echo 'SOURCE_COMMIT=11909e07b682765346d4ef890402b4ce00b91291'; echo 'TAG=v1.37.0'; echo 'ASSET=VF_Forge_V1.37.0_UPDATE.zip'; echo "ASSET_SHA256=$(cat "$RUNNER_TEMP/finalsha")"; echo "ASSET_BYTES=$(cat "$RUNNER_TEMP/finalbytes")"; echo 'SCHEMA_FROM=30'; echo 'SCHEMA_TO=30'; echo 'MIGRATION=NONE'; echo 'FROM_VERSIONS=1.36.2'; echo 'CORE_UPDATES=REMOTE_READBACK_PASS'; echo 'GITHUB_RELEASE=REMOTE_READBACK_PASS'; echo 'PRODUCTION_WRITE=NO';
+          } > runner/ops/p03/release/P03_V1370_RELEASE_READY.md
+          cd runner; git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'; git add -A ops/p03/release; if ! git diff --cached --quiet; then git commit -m 'evidence(P03): V1.37.0 release ready R4'; git push origin HEAD:main; fi
+          echo 'FINAL_RELEASE_READY_RECEIPT=PASS'
