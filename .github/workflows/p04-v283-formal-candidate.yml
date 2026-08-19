@@ -1,0 +1,160 @@
+name: P04 V2.8.3 Formal Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v283-formal-candidate.yml'
+      - 'requests/p04-v283-formal-candidate.txt'
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '6180307a393783b3ee61dd2f5a65c6516a0d406d'
+  TARGET_VERSION: '2.8.3'
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Source health and regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = '2.8.3'
+          python3 candidate/scripts/repository-health-gate.py
+          python3 candidate/scripts/check-migrations.py
+          python3 -m py_compile candidate/scripts/build-release-tree.py candidate/scripts/build-v282-update-release.py candidate/scripts/build-v283-update-release.py
+          find candidate/src candidate/public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          find candidate/public/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          php candidate/tests/integration/v283_release_manifest_integrity_contract.php candidate | tee "$RUNNER_TEMP/v283-integrity.log"
+          grep -Fxq 'PASS stale_bootstrap_constant_does_not_poison_target_verification' "$RUNNER_TEMP/v283-integrity.log"
+          grep -Fxq 'PASS content_mismatch_detected' "$RUNNER_TEMP/v283-integrity.log"
+          grep -Fxq 'PASS unlisted_source_detected' "$RUNNER_TEMP/v283-integrity.log"
+          grep -Fxq 'P04_V283_RELEASE_MANIFEST_INTEGRITY_CONTRACT_PASS' "$RUNNER_TEMP/v283-integrity.log"
+          php candidate/tests/integration/v282_atomic_transaction_contract.php candidate | tee "$RUNNER_TEMP/tx.log"
+          grep -Fxq 'P04_V282_ATOMIC_TRANSACTION_CONTRACT_PASS' "$RUNNER_TEMP/tx.log"
+          echo 'P04_V283_SOURCE_HEALTH_REGRESSION=PASS'
+
+      - name: Build deterministic FULL and UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          R1="$RUNNER_TEMP/runtime-a"; R2="$RUNNER_TEMP/runtime-b"
+          O1="$RUNNER_TEMP/update-a"; O2="$RUNNER_TEMP/update-b"
+          python3 candidate/scripts/build-release-tree.py "$R1" --source-root candidate | tee "$RUNNER_TEMP/build-a.log"
+          python3 candidate/scripts/build-release-tree.py "$R2" --source-root candidate | tee "$RUNNER_TEMP/build-b.log"
+          diff -ru "$R1" "$R2"
+          python3 - "$R1/release-manifest.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['version']=='2.8.3' and m['target_schema']==14 and m['release_kind']=='maintenance_release'
+          assert m['file_count']==len(m['files'])
+          print('P04_V283_RELEASE_MANIFEST=PASS')
+          print('RUNTIME_FINGERPRINT='+m['source_fingerprint'])
+          PY
+          python3 - "$R1" "$RUNNER_TEMP/VF_Infra_V2.8.3_FULL.zip" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+            for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              i=zipfile.ZipInfo(p.relative_to(root).as_posix(),date_time=(1980,1,1,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.create_system=3; i.external_attr=(0o100644<<16); z.writestr(i,p.read_bytes())
+          PY
+          python3 candidate/scripts/build-v283-update-release.py --target-runtime "$R1" --output "$O1" | tee "$RUNNER_TEMP/update-a.log"
+          python3 candidate/scripts/build-v283-update-release.py --target-runtime "$R1" --output "$O2" | tee "$RUNNER_TEMP/update-b.log"
+          cmp "$O1/VF_Infra_V2.8.3_UPDATE.zip" "$O2/VF_Infra_V2.8.3_UPDATE.zip"
+          cmp "$O1/VF_Infra_V2.8.3_UPDATE.zip" "$O1/VF_Infra_V2.8.3_ATOMIC.zip"
+          php "$O1/repair-v2.8.3.php" --self-test | tee "$RUNNER_TEMP/selftest.log"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS target=2.8.3 schema=14' "$RUNNER_TEMP/selftest.log"
+          grep -Fq 'ReleaseManifestIntegrityVerifier::verify(__DIR__,VF_INFRA_ATOMIC_TARGET)' "$O1/repair-v2.8.3.php"
+          ! grep -Fq '$diag=(new SystemDiagnosticsService())->run(false)' "$O1/repair-v2.8.3.php"
+          python3 - "$O1/PACKAGE_MANIFEST.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['version']=='2.8.3' and m['schema']==14
+          assert m['allowed_source_versions']==['2.7.9','2.8.0','2.8.1','2.8.2']
+          assert m['stale_bootstrap_constant_independent'] is True
+          assert m['post_repair_integrity_verifier']=='ReleaseManifestIntegrityVerifier@target-version-explicit'
+          print('P04_V283_RUNTIME_SAFE_ATOMIC=PASS')
+          PY
+          cp "$O1/VF_Infra_V2.8.3_UPDATE.zip" "$RUNNER_TEMP/VF_Infra_V2.8.3_UPDATE.zip"
+          cp "$O1/PACKAGE_MANIFEST.json" "$RUNNER_TEMP/V283_PACKAGE_MANIFEST.json"
+          echo "RUNTIME=$R1" >> "$GITHUB_ENV"
+          echo 'P04_V283_DETERMINISTIC_ARTIFACTS=PASS'
+
+      - name: Verify all supported immutable upgrade sources source-exact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for src in 2.7.9 2.8.0 2.8.1 2.8.2; do
+            d="$RUNNER_TEMP/src-${src}"; mkdir -p "$d"
+            gh release download "v${src}" -R llhzx2018/vf-infra --pattern "VF_Infra_V${src}_FULL.zip" --dir "$d"
+            python3 candidate/scripts/full-runtime-vs-update-result-source-exact-gate.py \
+              --baseline-full "$d/VF_Infra_V${src}_FULL.zip" \
+              --candidate-full "$RUNNER_TEMP/VF_Infra_V2.8.3_FULL.zip" \
+              --candidate-update "$RUNNER_TEMP/VF_Infra_V2.8.3_UPDATE.zip" \
+              --expected-source-version "$src" --expected-target-version 2.8.3
+            echo "P04_${src}_TO_2.8.3_SOURCE_EXACT=PASS"
+          done
+
+      - name: Branding regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/private"; chmod 700 "$RUNNER_TEMP/private"
+          cat > "$RUNTIME/config.php" <<PHP
+          <?php
+          return ['app_name'=>'VF Infra Candidate','base_url'=>'http://localhost','allowed_hosts'=>['localhost'],'host_mode'=>'serve_all','trusted_proxy_ips'=>[],'rdap_allow_http'=>false,'data_path'=>'$RUNNER_TEMP/private','timezone'=>'Asia/Shanghai','app_key'=>'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef','session_name'=>'vf283'];
+          PHP
+          chmod 600 "$RUNTIME/config.php"
+          php candidate/tests/integration/common_branding_contract_v279.php "$RUNTIME" | tee "$RUNNER_TEMP/branding.log"
+          grep -Fxq 'PASS logo_1024_square_accepted' "$RUNNER_TEMP/branding.log"
+          grep -Fxq 'PASS favicon_1024_square_accepted' "$RUNNER_TEMP/branding.log"
+          grep -Fxq 'P04_V281_COMMON_BRANDING_CONTRACT_PASS' "$RUNNER_TEMP/branding.log"
+          echo 'P04_V283_BRANDING_REGRESSION=PASS'
+
+      - name: Emit exact identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,os,pathlib
+          t=pathlib.Path(os.environ['RUNNER_TEMP']); f=t/'VF_Infra_V2.8.3_FULL.zip'; u=t/'VF_Infra_V2.8.3_UPDATE.zip'; sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+          print('P04_V283_FORMAL_CANDIDATE=PASS'); print('SOURCE_SHA='+os.environ['SOURCE_COMMIT']); print('FULL_BYTES='+str(f.stat().st_size)); print('FULL_SHA256='+sha(f)); print('UPDATE_BYTES='+str(u.stat().st_size)); print('UPDATE_SHA256='+sha(u)); print('ALLOWED_SOURCES=2.7.9,2.8.0,2.8.1,2.8.2'); print('SCHEMA=14'); print('PRODUCTION_WRITE=0'); print('RELEASE_WRITE=0')
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.3-FORMAL-CANDIDATE
+          path: |
+            ${{ runner.temp }}/VF_Infra_V2.8.3_FULL.zip
+            ${{ runner.temp }}/VF_Infra_V2.8.3_UPDATE.zip
+            ${{ runner.temp }}/V283_PACKAGE_MANIFEST.json
+            ${{ runner.temp }}/*.log
+          if-no-files-found: warn
+          retention-days: 14
