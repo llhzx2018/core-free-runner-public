@@ -8,7 +8,7 @@ const page = await context.newPage();
 const result = {front:{},admin:{},widths:{}};
 
 await page.goto(base+'/',{waitUntil:'domcontentloaded',timeout:15000});
-await page.waitForSelector('html[data-vf-reference-ui="2"]',{timeout:10000});
+await page.waitForSelector('html[data-vf-reference-ui="3"]',{timeout:10000});
 await page.waitForSelector('.home-page',{timeout:10000});
 await page.waitForTimeout(180);
 result.front=await page.evaluate(()=>({
@@ -18,7 +18,7 @@ result.front=await page.evaluate(()=>({
   categories:document.querySelectorAll('.ref-home-categories').length,
   hero:document.querySelector('.command-hero')?getComputedStyle(document.querySelector('.command-hero')).display:'missing'
 }));
-if(result.front.ref!=='2'||!result.front.css||result.front.roots<4||result.front.categories!==1||!['none','missing'].includes(result.front.hero))throw new Error('FRONT_GATE '+JSON.stringify(result.front));
+if(result.front.ref!=='3'||!result.front.css||result.front.roots<4||result.front.categories!==1||!['none','missing'].includes(result.front.hero))throw new Error('FRONT_GATE '+JSON.stringify(result.front));
 for(const width of [1920,1440,1280,1024,768,480,430,390,375]){
   await page.setViewportSize({width,height:width<700?844:900});await page.waitForTimeout(120);
   const v=await page.evaluate(()=>({client:document.documentElement.clientWidth,html:document.documentElement.scrollWidth,body:document.body.scrollWidth,search:document.querySelector('.top-search')?.getBoundingClientRect().width||0}));
@@ -31,7 +31,7 @@ const login=await page.evaluate(async pass=>{const r=await fetch('/api.php?actio
 if(login.status!==200||!login.body.ok)throw new Error('LOGIN_GATE '+JSON.stringify(login));
 await page.goto(base+'/links-admin.php',{waitUntil:'domcontentloaded',timeout:15000});
 await page.waitForSelector('#linksBody tr',{timeout:10000});
-await page.waitForSelector('html[data-vf-reference-ui="2"]',{timeout:5000});
+await page.waitForSelector('html[data-vf-reference-ui="3"]',{timeout:5000});
 result.admin=await page.evaluate(()=>({
   rails:document.querySelectorAll('.vf-admin-rail').length,
   rows:document.querySelectorAll('#linksBody tr').length,
