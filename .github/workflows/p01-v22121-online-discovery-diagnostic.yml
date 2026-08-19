@@ -1,0 +1,132 @@
+name: P01 V2.21.21 Online Discovery Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p01-v22121-online-discovery-diagnostic.yml']
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  PRODUCTION_SOURCE: 383552dc5035cb60b4cd131907d05d87c3171b9b
+  PRODUCTION_URL: https://start.kewaro.com/
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - id: authority
+        name: Live release and core-updates authority
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          gh api repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main > "$RUNNER_TEMP/core-content.json"
+          python3 - <<'PY'
+          import base64,json,os,pathlib
+          rt=pathlib.Path(os.environ['RUNNER_TEMP']); x=json.loads((rt/'core-content.json').read_text()); m=json.loads(base64.b64decode(x['content']).decode())
+          assert m['target_version']=='2.21.21' and m['from_versions']==['2.21.20'] and m['release_id']==373177269
+          assert m['asset_bytes']==1070348 and m['asset_sha256']=='ddb3b78d8bac153692ecaf897c2ca66a325b385355ade7a84d1c5a99183d9df4'
+          (rt/'manifest.json').write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n')
+          PY
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.21.21 > "$RUNNER_TEMP/release.json"
+          jq -e '.id==373177269 and .tag_name=="v2.21.21" and .draft==false and .prerelease==false' "$RUNNER_TEMP/release.json" >/dev/null
+
+      - id: source
+        name: Exact Production source and public HTTP
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" production
+          git -C production fetch -q --depth 1 origin "$PRODUCTION_SOURCE"
+          git -C production checkout -q --detach FETCH_HEAD
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_SOURCE"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = '2.21.20'
+          test "$(curl -LsS -o "$RUNNER_TEMP/production-home.html" -w '%{http_code}' --max-time 20 "$PRODUCTION_URL")" = 200
+
+      - id: fixture
+        name: Source-exact local fixture
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d production/src
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring sqlite3 >/dev/null
+          cp -a production/src "$RUNNER_TEMP/p01-discovery"
+          php -S 127.0.0.1:18231 -t "$RUNNER_TEMP/p01-discovery" > "$RUNNER_TEMP/server.log" 2>&1 & echo $! > "$RUNNER_TEMP/server.pid"
+          for i in $(seq 1 30); do curl -fsS -c "$RUNNER_TEMP/cookies" http://127.0.0.1:18231/setup.php -o "$RUNNER_TEMP/setup.html" && break || sleep 1; done
+          csrf=$(python3 - <<'PY'
+          import os,re,pathlib
+          s=(pathlib.Path(os.environ['RUNNER_TEMP'])/'setup.html').read_text(encoding='utf-8'); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          PASS='Discovery-P01-22121-Diagnostic!Strong'
+          curl -fsSL -b "$RUNNER_TEMP/cookies" -c "$RUNNER_TEMP/cookies" -X POST http://127.0.0.1:18231/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Discovery Diagnostic' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" >/dev/null
+          kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true
+          php "$RUNNER_TEMP/p01-discovery/cli/verify.php" | grep -q 'VERIFY_PASS=YES'
+
+      - id: discovery
+        name: Source-exact updater discovery
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d "$RUNNER_TEMP/p01-discovery"
+          php -r '
+          require getenv("RUNNER_TEMP")."/p01-discovery/app/bootstrap.php";
+          $m=new VfUpdateManager(vf_db(),["current_version"=>"2.21.20"]);
+          $r=$m->check(true); $s=$m->status();
+          file_put_contents(getenv("RUNNER_TEMP")."/discovery.json",json_encode(["check"=>$r,"status"=>$s],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n");
+          if(($r["ok"]??false)!==true)exit(1);
+          if(($r["current_version"]??"")!=="2.21.20")exit(2);
+          if(($r["latest_version"]??"")!=="2.21.21")exit(3);
+          if(($r["available"]??false)!==true)exit(4);
+          if(($r["can_update"]??false)!==true)exit(5);
+          if(($s["requirements"]["credential"]["ok"]??false)!==true)exit(6);
+          if(($s["requirements"]["source_allowed"]??false)!==true)exit(7);
+          if(($s["requirements"]["schema"]["ok"]??false)!==true)exit(8);'
+
+      - name: Always publish diagnostic receipt
+        if: always()
+        shell: bash
+        env:
+          OPS_TOKEN: ${{ github.token }}
+          AUTHORITY_OUTCOME: ${{ steps.authority.outcome }}
+          SOURCE_OUTCOME: ${{ steps.source.outcome }}
+          FIXTURE_OUTCOME: ${{ steps.fixture.outcome }}
+          DISCOVERY_OUTCOME: ${{ steps.discovery.outcome }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib
+          rt=pathlib.Path(os.environ['RUNNER_TEMP'])
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'PRODUCTION_ONLINE_DISCOVERY_DIAGNOSTIC','authority':os.environ['AUTHORITY_OUTCOME'],'source':os.environ['SOURCE_OUTCOME'],'fixture':os.environ['FIXTURE_OUTCOME'],'discovery':os.environ['DISCOVERY_OUTCOME'],'production_changed':False,'update_prepare_called':False,'update_install_called':False,'production_upgrade_authorized':False,'workflow_run_id':os.environ['GITHUB_RUN_ID']}
+          p=rt/'discovery.json'
+          if p.exists():
+              d=json.loads(p.read_text()); q['discovery_payload']=d
+          q['pass']=all(q[k]=='success' for k in ('authority','source','fixture','discovery')); q['status']='SUCCESS' if q['pass'] else 'DIAGNOSTIC_FAILURE'
+          (rt/'diagnostic.json').write_text(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${OPS_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" "$RUNNER_TEMP/out"
+          mkdir -p "$RUNNER_TEMP/out/vf-agent/results"
+          cp "$RUNNER_TEMP/diagnostic.json" "$RUNNER_TEMP/out/vf-agent/results/P01-V2.21.21-ONLINE-DISCOVERY-DIAGNOSTIC.json"
+          git -C "$RUNNER_TEMP/out" config user.name VictorForge; git -C "$RUNNER_TEMP/out" config user.email llhzx2018@gmail.com
+          git -C "$RUNNER_TEMP/out" add vf-agent/results/P01-V2.21.21-ONLINE-DISCOVERY-DIAGNOSTIC.json
+          git -C "$RUNNER_TEMP/out" commit -q -m 'evidence(P01): diagnose V2.21.21 online discovery'
+          git -C "$RUNNER_TEMP/out" push -q origin HEAD:vf-agent-operations-v1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/server.pid" && kill "$(cat "$RUNNER_TEMP/server.pid")" 2>/dev/null || true
+          rm -rf production "$RUNNER_TEMP/p01-discovery" "$RUNNER_TEMP/out"
