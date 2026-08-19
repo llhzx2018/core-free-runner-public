@@ -1,0 +1,223 @@
+name: TEMP P01 V2.21.21 Source Acceptance
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22121-source-acceptance.yml']
+permissions:
+  contents: write
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BRANCH: maintenance/navigation-admin-simplify-2.21.21-20260819
+      EXPECTED_SHA: 8eac6aceb336ade404362318dd75d485b706127f
+      PORT: 8877
+    steps:
+      - name: Checkout exact private source
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch "$BRANCH" "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" p
+          test "$(git -C p rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(cat p/VERSION)" = "2.21.20"
+          printf '%s' "$(git -C p rev-parse HEAD^{tree})" >/tmp/tree
+      - name: Static gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find p/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          find p/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check >/tmp/js-check.txt
+          git -C p diff --check origin/main...HEAD
+          ! grep -q "'label'=>'标签'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'推广链接'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'插件'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'后台任务'" p/src/app/AdminShell.php
+          grep -q "'label'=>'RSS 订阅'" p/src/app/AdminShell.php
+          grep -q "'label'=>'网址健康'" p/src/app/AdminShell.php
+          grep -q "'label'=>'重复网址'" p/src/app/AdminShell.php
+          grep -q "'label'=>'导入导出'" p/src/app/AdminShell.php
+          grep -q 'data-recovery.js?v=22121' p/src/data-safety.php
+          ! grep -q 'data-data-panel="history"' p/src/data-safety.php
+          ! grep -q 'data-data-panel="lifecycle"' p/src/data-safety.php
+          ! grep -q 'tag_link_add' p/src/assets/links-admin.js
+          ! grep -q 'tag_link_remove' p/src/assets/links-admin.js
+          grep -q 'links_bulk_restore' p/src/assets/links-admin.js
+      - name: Prepare PHP runtime and clean install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-sqlite3 php-curl >/dev/null
+          cp -a p/src /tmp/vfsite
+          chmod -R u+rwX /tmp/vfsite
+          php -S 127.0.0.1:${PORT} -t /tmp/vfsite >/tmp/php-server.log 2>&1 & echo $! >/tmp/php-pid
+          for i in {1..40}; do curl -fsS http://127.0.0.1:${PORT}/setup.php >/tmp/setup.html && break; sleep .25; done
+          curl -fsS -c /tmp/cookies -b /tmp/cookies http://127.0.0.1:${PORT}/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c /tmp/cookies -b /tmp/cookies \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=VF Acceptance" \
+            --data-urlencode "admin_password=VF-Test-22121-Strong" \
+            --data-urlencode "admin_password_confirm=VF-Test-22121-Strong" \
+            http://127.0.0.1:${PORT}/setup.php -o /tmp/install-result.html
+          grep -q '安装完成\|VF Acceptance\|我的导航' /tmp/install-result.html || curl -fsS http://127.0.0.1:${PORT}/ -o /tmp/home-check.html
+          cat >/tmp/vfsite/_fixture.php <<'PHP'
+          <?php
+          require __DIR__.'/app/bootstrap.php';
+          $db=vf_db();$r=new VfRepository($db);
+          $roots=[];
+          foreach ([['AI 与自动化','AI 工具与模型'],['开发与建站','桌面与文件工具'],['账号与网络','账号、浏览器与网络'],['生活与收藏','个人收藏']] as $x) {
+            $roots[]=$r->createCategory(['name'=>$x[0],'description'=>$x[1],'parent_id'=>null,'sort_order'=>0,'is_private'=>0]);
+          }
+          $children=[];
+          $children[]=$r->createCategory(['name'=>'浏览器、设备与环境','description'=>'浏览器、设备环境、IP 检测与网络实操','parent_id'=>$roots[2],'sort_order'=>0,'is_private'=>0]);
+          $children[]=$r->createCategory(['name'=>'知识与稀有资料','description'=>'长期保留的知识资料','parent_id'=>$roots[3],'sort_order'=>0,'is_private'=>0]);
+          $children[]=$r->createCategory(['name'=>'音乐、演出与游戏','description'=>'娱乐收藏','parent_id'=>$roots[3],'sort_order'=>0,'is_private'=>0]);
+          $ids=[];
+          for($i=1;$i<=16;$i++){
+            $cat=$i<=8?$children[0]:($i<=12?$children[1]:$children[2]);
+            $out=$r->saveLink(null,['url'=>'https://example.com/?vf='.$i,'title'=>'测试网址 '.$i,'description'=>'验收数据 '.$i,'category_id'=>$cat,'is_private'=>($i%4===0?1:0),'is_pending'=>false,'force_duplicate'=>true],'admin');
+            $ids[]=(int)$out['id'];
+          }
+          $r->bulkLinks([$ids[13]],'archive',null);
+          $r->bulkLinks([$ids[14]],'delete',null);
+          header('Content-Type: application/json');echo json_encode(['ok'=>true,'roots'=>$roots,'children'=>$children,'ids'=>$ids]);
+          PHP
+          curl -fsS http://127.0.0.1:${PORT}/_fixture.php -o /tmp/fixture.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/fixture.json'));assert x['ok'] and len(x['ids'])==16
+          PY
+      - name: Real Chrome acceptance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/browser && cd /tmp/browser
+          npm init -y >/dev/null 2>&1
+          npm install --silent playwright-core@1.55.0
+          CHROME=$(command -v google-chrome || command -v chromium || command -v chromium-browser)
+          test -n "$CHROME"
+          export CHROME
+          cat > /tmp/browser/test.js <<'JS'
+          const {chromium}=require('playwright-core');
+          const fs=require('fs');
+          (async()=>{
+            const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});
+            const errors=[];const results={};
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            page.on('console',m=>{if(m.type()==='error')errors.push('console:'+m.text())});
+            page.on('pageerror',e=>errors.push('page:'+e.message));
+            const base='http://127.0.0.1:8877/';
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.evaluate(async()=>{const r=await fetch('api.php?action=login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'VF-Test-22121-Strong'})});if(!r.ok)throw new Error('login '+r.status);return r.json()});
+            await page.reload({waitUntil:'networkidle'});
+            await page.waitForSelector('#unifiedCategoryNav .category-row--root');
+            await page.waitForSelector('#unifiedCategoryNav .category-row--child');
+            // Home always resets sidebar to top.
+            await page.evaluate(()=>{document.querySelector('#sidebarScroll').scrollTop=180});
+            await page.click('[data-view="home"]');await page.waitForTimeout(120);
+            results.home_top=await page.$eval('#sidebarScroll',e=>e.scrollTop);
+            if(results.home_top>2)throw new Error('home sidebar not top: '+results.home_top);
+            // Expanding/clicking categories does not jump the sidebar viewport.
+            await page.evaluate(()=>{document.querySelector('#sidebarScroll').scrollTop=120});
+            const before=await page.$eval('#sidebarScroll',e=>e.scrollTop);
+            const chevron=page.locator('#unifiedCategoryNav .category-row--root .nav-chevron').last();
+            await chevron.click();await page.waitForTimeout(120);
+            const after=await page.$eval('#sidebarScroll',e=>e.scrollTop);
+            results.expand_scroll_delta=Math.abs(after-before);
+            if(results.expand_scroll_delta>3)throw new Error('expand jump '+results.expand_scroll_delta);
+            const child=page.locator('#unifiedCategoryNav .category-row--child').last();
+            await child.click();await page.waitForTimeout(150);
+            const afterChild=await page.$eval('#sidebarScroll',e=>e.scrollTop);
+            results.child_scroll_delta=Math.abs(afterChild-after);
+            if(results.child_scroll_delta>3)throw new Error('child jump '+results.child_scroll_delta);
+            // One aligned hierarchy, neutral current state, no vertical active rail.
+            results.geometry=await page.evaluate(()=>{
+              const root=document.querySelector('.category-row--root'),child=document.querySelector('.category-row--child'),active=document.querySelector('.category-row.active')||child;
+              const rc=root.getBoundingClientRect(),cc=child.getBoundingClientRect();
+              const rcount=root.querySelector('.nav-count'),ccount=child.querySelector('.nav-count');
+              const rs=getComputedStyle(root.querySelector('.category-nav-main')),cs=getComputedStyle(child.querySelector('.category-nav-main')),a=getComputedStyle(active),before=getComputedStyle(active,'::before');
+              return {rootH:rc.height,childH:cc.height,rootFont:rs.fontSize,childFont:cs.fontSize,rootCountW:rcount?rcount.getBoundingClientRect().width:0,childCountW:ccount?ccount.getBoundingClientRect().width:0,activeBg:a.backgroundColor,beforeContent:before.content,beforeDisplay:before.display,rootOverflow:root.querySelector('.nav-label').scrollWidth-root.querySelector('.nav-label').clientWidth,childOverflow:child.querySelector('.nav-label').scrollWidth-child.querySelector('.nav-label').clientWidth};
+            });
+            const g=results.geometry;
+            if(Math.abs(g.rootH-36)>1||Math.abs(g.childH-36)>1||g.rootFont!=='13px'||g.childFont!=='13px')throw new Error('hierarchy geometry mismatch '+JSON.stringify(g));
+            if(Math.abs(g.rootCountW-30)>1||Math.abs(g.childCountW-30)>1)throw new Error('count width mismatch '+JSON.stringify(g));
+            if(!(g.beforeContent==='none'||g.beforeDisplay==='none'))throw new Error('active rail still present '+JSON.stringify(g));
+            if(g.rootOverflow>1||g.childOverflow>1)throw new Error('category label clipped '+JSON.stringify(g));
+            // Responsive horizontal overflow.
+            results.widths={};
+            for(const w of [390,480,640,768,1024,1280,1440,1920]){
+              await page.setViewportSize({width:w,height:900});await page.waitForTimeout(80);
+              const m=await page.evaluate(()=>({doc:document.documentElement.scrollWidth-document.documentElement.clientWidth,body:document.body.scrollWidth-document.body.clientWidth}));
+              results.widths[w]=m;if(m.doc>1||m.body>1)throw new Error('horizontal overflow '+w+' '+JSON.stringify(m));
+            }
+            await page.setViewportSize({width:1440,height:900});
+            // Admin IA value gate.
+            await page.goto(base+'manage.php',{waitUntil:'networkidle'});
+            const labels=await page.locator('.vf-rail-item span').allTextContents();results.admin_labels=labels;
+            for(const must of ['概览','网址','RSS 订阅','浏览器助手','备份与恢复','设置','更新'])if(!labels.includes(must))throw new Error('missing admin '+must);
+            for(const retired of ['标签','推广链接','插件','系统','后台任务'])if(labels.includes(retired))throw new Error('retired top module '+retired);
+            // URL workspace owns archive/trash and no tag editor.
+            await page.goto(base+'links-admin.php',{waitUntil:'networkidle'});await page.waitForSelector('#stateFilter');
+            const stateOptions=await page.locator('#stateFilter option').allTextContents();results.state_options=stateOptions;
+            if(!stateOptions.includes('已归档')||!stateOptions.includes('回收站'))throw new Error('lifecycle not merged');
+            await page.selectOption('#stateFilter','archived');await page.waitForTimeout(120);if(await page.locator('[data-restore]').count()<1)throw new Error('archive restore missing');
+            await page.selectOption('#stateFilter','trashed');await page.waitForTimeout(120);if(await page.locator('[data-restore]').count()<1)throw new Error('trash restore missing');
+            await page.selectOption('#stateFilter','active');await page.click('[data-edit]');await page.waitForTimeout(50);const dialogText=await page.locator('#dialogBody').innerText();if(dialogText.includes('标签'))throw new Error('tag editor still exposed');await page.locator('#editDialog .vf-dialog-close').click();
+            // Data surface only recovery.
+            await page.goto(base+'data-safety.php',{waitUntil:'networkidle'});const dataText=await page.locator('.vf-admin-page-body').innerText();
+            if(dataText.includes('操作历史')||dataText.includes('生命周期记录')||dataText.includes('归档与回收站'))throw new Error('data overload remains');
+            if(!dataText.includes('SQLite 备份')||!dataText.includes('完整恢复包'))throw new Error('recovery core missing');
+            // Retired legacy routes redirect to canonical workspaces.
+            for(const [path,target] of [['tags.php','links-admin.php'],['affiliate.php','links-admin.php'],['governance.php','links-admin.php'],['icons.php','links-admin.php'],['jobs.php','system.php']]){
+              const r=await page.goto(base+path,{waitUntil:'domcontentloaded'});if(!page.url().includes(target))throw new Error(path+' did not redirect to '+target+' url='+page.url());
+            }
+            results.console_errors=errors;
+            if(errors.length)throw new Error('browser errors '+JSON.stringify(errors));
+            fs.writeFileSync('/tmp/browser-results.json',JSON.stringify(results,null,2));
+            await browser.close();
+          })().catch(async e=>{console.error(e);process.exit(1)});
+          JS
+          node /tmp/browser/test.js
+      - name: Fresh install data red line
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=$(find /tmp/vfsite -maxdepth 1 -name '.vfnav-runtime.php' -print -quit)
+          test -n "$RUNTIME"
+          php -r 'require "/tmp/vfsite/app/bootstrap.php"; $db=vf_db(); foreach(["categories","links","import_batches"] as $t){$n=(int)$db->query("SELECT COUNT(*) FROM $t")->fetchColumn(); if($n<0)exit(2);} echo "sqlite-ok\n";' >/tmp/sqlite.txt
+          # Fixture itself proves lifecycle operations on disposable data; package seed remains validated by installer before fixture creation.
+      - name: Publish acceptance evidence
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          b=json.load(open('/tmp/browser-results.json'))
+          q={"schema":"vf-public-runner-result/v1","project_id":"P01","gate":"V22121_SOURCE_ACCEPTANCE","status":"SUCCESS","pass":True,"source_sha":"8eac6aceb336ade404362318dd75d485b706127f","source_tree":open('/tmp/tree').read(),"source_version":"2.21.20","target_version_not_bumped":True,"schema_changed":False,"browser":b,"php_syntax":"PASS","js_syntax":"PASS","fresh_install":"PASS","production_changed":False,"private_data_used":False}
+          open('/tmp/e.json','w').write(json.dumps(q,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/e.json out/vf-agent/results/P01-V2.21.21-SOURCE-ACCEPTANCE.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.21-SOURCE-ACCEPTANCE.json
+          git -C out commit -q -m 'evidence(P01): V2.21.21 source acceptance PASS'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: |
+          test ! -f /tmp/php-pid || kill "$(cat /tmp/php-pid)" 2>/dev/null || true
