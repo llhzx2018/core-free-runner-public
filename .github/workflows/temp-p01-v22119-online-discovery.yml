@@ -1,0 +1,127 @@
+name: TEMP P01 V2.21.19 Online Discovery
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22119-online-discovery.yml']
+permissions:
+  contents: write
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  PRODUCTION_SOURCE: a501d2394502319b0af9caaf1c171bdf94940a9d
+  PRODUCTION_VERSION: 2.21.18
+  TARGET_VERSION: 2.21.19
+  EXPECTED_RELEASE_ID: '372928279'
+  EXPECTED_UPDATE_BYTES: '1072258'
+  EXPECTED_UPDATE_SHA: ba8eec70c9fc08208aa66a2a7c091772d1b460ad4ed05984e6390d5f413a82b7
+  PRODUCTION_URL: https://start.kewaro.com/
+  ADMIN_PASS: Discovery-P01-22119!Strong
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Install runtime and checkout exact Production source
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring sqlite3 jq >/dev/null
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" production
+          git -C production fetch -q --depth 1 origin "$PRODUCTION_SOURCE"
+          git -C production checkout -q --detach FETCH_HEAD
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_SOURCE"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$PRODUCTION_VERSION"
+      - name: Read live Production without mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -LsS -o /tmp/production-home.html -w '%{http_code}' --max-time 20 "$PRODUCTION_URL")
+          test "$code" = 200
+          printf '%s' "$code" >/tmp/production-http
+          python3 - <<'PY'
+          import re,json
+          s=open('/tmp/production-home.html',encoding='utf-8',errors='replace').read()
+          versions=sorted(set(re.findall(r'(?i)(?:V|version[^0-9]{0,8})(2\.21\.\d+)',s)))
+          open('/tmp/public-readback.json','w').write(json.dumps({'http_status':200,'version_tokens':versions,'bytes':len(s.encode())},ensure_ascii=False))
+          PY
+      - name: Fresh local fixture from exact Production source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a production/src /tmp/p01-discovery
+          php -S 127.0.0.1:18231 -t /tmp/p01-discovery >/tmp/p01-discovery-server.log 2>&1 & echo $! >/tmp/p01-discovery.pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/p01-discovery.cookies http://127.0.0.1:18231/setup.php -o /tmp/setup.html&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/p01-discovery.cookies -c /tmp/p01-discovery.cookies -X POST http://127.0.0.1:18231/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Online Discovery' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null
+          kill "$(cat /tmp/p01-discovery.pid)" 2>/dev/null||true
+          php /tmp/p01-discovery/cli/verify.php|grep -q 'VERIFY_PASS=YES'
+      - name: Execute source-exact live online discovery only
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r '
+          require "/tmp/p01-discovery/app/bootstrap.php";
+          $m=new VfUpdateManager(vf_db(),["current_version"=>"2.21.18"]);
+          $r=$m->check(true);$s=$m->status();
+          $out=["check"=>$r,"status"=>$s];
+          file_put_contents("/tmp/discovery.json",json_encode($out,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)."\n");
+          if(($r["ok"]??false)!==true)exit(1);
+          if(($r["current_version"]??"")!=="2.21.18")exit(2);
+          if(($r["latest_version"]??"")!=="2.21.19")exit(3);
+          if(($r["available"]??false)!==true)exit(4);
+          if(($r["can_update"]??false)!==true)exit(5);
+          if(($s["available"]??false)!==true||($s["can_update"]??false)!==true)exit(6);
+          if(($s["requirements"]["credential"]["ok"]??false)!==true)exit(7);
+          if(($s["requirements"]["source_allowed"]??false)!==true)exit(8);
+          if(($s["requirements"]["schema"]["ok"]??false)!==true)exit(9);
+          echo "SOURCE_EXACT_ONLINE_DISCOVERY=PASS\n";'
+      - name: Independent live release authority readback
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          auth="Authorization: Bearer $READ_TOKEN"
+          curl -fsSL -H "$auth" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main >/tmp/core.json
+          python3 - <<'PY'
+          import base64,json
+          x=json.load(open('/tmp/core.json'));m=json.loads(base64.b64decode(x['content']).decode())
+          assert m['target_version']=='2.21.19';assert m['from_versions']==['2.21.18'];assert m['release_id']==372928279
+          assert m['asset_bytes']==1072258;assert m['asset_sha256']=='ba8eec70c9fc08208aa66a2a7c091772d1b460ad4ed05984e6390d5f413a82b7'
+          open('/tmp/manifest.json','w').write(json.dumps(m,ensure_ascii=False,indent=2)+'\n')
+          PY
+          curl -fsSL -H "$auth" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-start/releases/tags/v2.21.19 >/tmp/release.json
+          jq -e '.id==372928279 and .tag_name=="v2.21.19" and .draft==false and .prerelease==false' /tmp/release.json >/dev/null
+          jq -e '([.assets[]|select(.name=="VF_Start_V2.21.19_UPDATE.zip" and .size==1072258)]|length)==1' /tmp/release.json >/dev/null
+      - name: Publish discovery evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os
+          d=json.load(open('/tmp/discovery.json'));p=json.load(open('/tmp/public-readback.json'));m=json.load(open('/tmp/manifest.json'));r=json.load(open('/tmp/release.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'PRODUCTION_ONLINE_DISCOVERY','status':'SUCCESS','pass':True,'production_url':os.environ['PRODUCTION_URL'],'production_expected_version':os.environ['PRODUCTION_VERSION'],'production_source_sha':os.environ['PRODUCTION_SOURCE'],'production_public_http_status':p['http_status'],'production_public_version_tokens':p['version_tokens'],'production_public_page_bytes':p['bytes'],'discovery_method':'EXACT_PRODUCTION_SOURCE + LIVE_CORE_UPDATES + LIVE_GITHUB_RELEASE / READ_ONLY','authenticated_production_backend_status_observed':False,'source_exact_update_check_observed':True,'current_version':d['check']['current_version'],'latest_version':d['check']['latest_version'],'available':d['check']['available'],'can_update':d['check']['can_update'],'reason':d['check']['reason'],'schema_current':d['status']['current_schema'],'credential_ok':d['status']['requirements']['credential']['ok'],'source_allowed':d['status']['requirements']['source_allowed'],'schema_ok':d['status']['requirements']['schema']['ok'],'release_id':r['id'],'release_tag':r['tag_name'],'update_asset':{'name':m['asset_name'],'bytes':m['asset_bytes'],'sha256':m['asset_sha256']},'production_changed':False,'update_prepare_called':False,'update_install_called':False,'workflow_run_id':os.environ['GITHUB_RUN_ID'],'private_source_persisted_publicly':False,'private_data_used':False}
+          open('/tmp/evidence.json','w').write(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results;cp /tmp/evidence.json out/vf-agent/results/P01-V2.21.19-ONLINE-DISCOVERY.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-V2.21.19-ONLINE-DISCOVERY.json
+          git -C out commit -q -m 'evidence(P01): publish V2.21.19 online discovery'
+          git -C out push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: |
+          [ -f /tmp/p01-discovery.pid ]&&kill "$(cat /tmp/p01-discovery.pid)" 2>/dev/null||true
+          rm -rf production /tmp/p01-discovery
