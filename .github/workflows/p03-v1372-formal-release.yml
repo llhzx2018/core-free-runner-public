@@ -1,0 +1,251 @@
+name: P03 V1.37.2 Formal Release Distribution
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1372-formal-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  CORE_UPDATES_REPOSITORY: llhzx2018/core-updates
+  RELEASE_SOURCE: d39417b5cdd3347f2648664e6a343b3e50f54e63
+  BASE_SHA: c7bc5216af5363b4524611595418e8e67edb55e6
+  RELEASE_TAG: v1.37.2
+  ASSET_NAME: VF_Forge_V1.37.2_UPDATE.zip
+  EXPECTED_SHA256: a39e8f28cb49f1c467df1c1b760ad23da98d6edd1ba2f2312d61f971319ba8e7
+  EXPECTED_SOURCE_MANIFEST_SHA256: 91f2e9968a8bb56144451a6629d42ea9c544d8eb426a96cfa0f48a919a2e83b5
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require established release credential
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: test -n "$TOKEN"
+
+      - name: Checkout exact V1.37.2 release source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.RELEASE_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Verify remote Git authority before publication
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo="https://x-access-token:${TOKEN}@github.com/${P03_REPOSITORY}.git"
+          MAIN=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')
+          DEVELOP=$(git ls-remote "$repo" refs/heads/develop | awk '{print $1}')
+          test "$MAIN" = "$RELEASE_SOURCE"
+          test "$DEVELOP" = "$RELEASE_SOURCE"
+          if git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | grep -q .; then
+            echo "Tag $RELEASE_TAG already exists before canonical publication" >&2; exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$P03_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists before canonical publication" >&2; exit 1
+          fi
+          echo 'P03_V1372_REMOTE_GIT_AUTHORITY=PASS'
+
+      - name: Deterministically rebuild formal V1.37.2 UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 zip unzip >/dev/null
+          cd p03
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE"
+          test "$(cat VERSION)" = '1.37.2'
+          test "$(cat database/schema/SCHEMA_VERSION)" = '30'
+          rm -rf "$RUNNER_TEMP/base-wt" "$RUNNER_TEMP/base-runtime" "$RUNNER_TEMP/target-runtime" "$RUNNER_TEMP/release"
+          git worktree add --detach "$RUNNER_TEMP/base-wt" "$BASE_SHA" >/dev/null
+          python3 "$RUNNER_TEMP/base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/target-runtime" >/dev/null
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/base-runtime" --target-runtime "$RUNNER_TEMP/target-runtime" --output "$RUNNER_TEMP/release" >/dev/null
+          cd "$RUNNER_TEMP/release"
+          sha256sum -c SHA256SUMS.txt
+          cp VF_Forge_V1.37.2_Atomic_Upgrade.zip "$ASSET_NAME"
+          SHA=$(sha256sum "$ASSET_NAME" | awk '{print $1}')
+          BYTES=$(stat -c%s "$ASSET_NAME")
+          SRC=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_manifest_sha256"])')
+          COUNT=$(python3 -c 'import json;print(json.load(open("PACKAGE_MANIFEST.json"))["source_file_count"])')
+          test "$SHA" = "$EXPECTED_SHA256"
+          test "$SRC" = "$EXPECTED_SOURCE_MANIFEST_SHA256"
+          test "$COUNT" = '53'
+          test "$(unzip -Z1 "$ASSET_NAME")" = 'repair-v1.37.2.php'
+          unzip -p "$ASSET_NAME" repair-v1.37.2.php > repair-published.php
+          grep -Fq "const VFF_ATOMIC_TARGET='1.37.2';" repair-published.php
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=30;' repair-published.php
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.37.1"];' repair-published.php
+          ! unzip -Z1 "$ASSET_NAME" | grep -E '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|cache|session|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+          cat > RELEASE_NOTES.md <<'EOF'
+          # P03 · VF Forge V1.37.2
+
+          Project Intelligence whole-site integrity maintenance release based on OWNER real-use feedback.
+
+          - 左侧栏改为整个区域自然滚动，取消“当前项目”小范围嵌套滚动。
+          - Runtime 从大卡片压缩为轻量版本标识。
+          - VF Project Intelligence 状态与错误提示统一回青色体系，取消突兀的大面积红色块。
+          - 新增 resilient Project Intelligence read model：真实 Current Truth 优先来自 GitHub Authority Observation / VF_PROJECT declaration；旧 Forge 缓存只在没有 Authority declaration 时作为受控 fallback。
+          - 兼容不同 VF_PROJECT 结构：production_version、production_truth.current_version、version、schema_version、schema 等统一归一化。
+          - Working 优先读取 develop 分支直接观察到的 VERSION；UNSET / UNKNOWN 等占位符不再冒充版本。
+          - GitHub Authority 支持登录后后台自动刷新，Observation 由系统生成，不要求 OWNER 手工维护版本状态。
+          - Decision Memory 合并 first-class Decision 与仍有效历史 Decision / Rule；Authority Pointer 可形成 Relation Context。
+          - 退休 Asset / Upload / Package Identity 待办、“无阻断”类状态句和重复 INBOX_CONFIRM 不再污染 OWNER Attention / 动态。
+          - Source: V1.37.1 / Schema 30
+          - Target: V1.37.2 / Schema 30
+          - Migration: NONE
+          - Runtime Source Exact: 53 / 53 PASS
+          - Atomic Success: PASS
+          - Source + SQLite Failure Rollback: PASS
+          - Project Asset Storage: NONE
+          - Private/User Data in Release Asset: NONE
+          EOF
+          sha256sum "$ASSET_NAME" repair-v1.37.2.php SOURCE_MANIFEST.txt PACKAGE_MANIFEST.json RELEASE_NOTES.md > RELEASE_SHA256SUMS.txt
+          grep -Fq "$EXPECTED_SHA256  $ASSET_NAME" RELEASE_SHA256SUMS.txt
+          {
+            echo "UPDATE_BYTES=$BYTES"
+            echo "UPDATE_SHA=$SHA"
+            echo "SOURCE_SHA=$SRC"
+          } >> "$GITHUB_ENV"
+          echo "P03_V1372_FORMAL_PACKAGE=PASS sha=$SHA bytes=$BYTES source_manifest=$SRC count=$COUNT"
+
+      - name: Publish formal GitHub Release V1.37.2
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/release"
+          gh release create "$RELEASE_TAG" \
+            "$ASSET_NAME" \
+            RELEASE_SHA256SUMS.txt \
+            --repo "$P03_REPOSITORY" \
+            --target "$RELEASE_SOURCE" \
+            --title 'P03 · VF Forge V1.37.2' \
+            --notes-file RELEASE_NOTES.md
+          gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assets={a['name']:a for a in d.get('assets',[])}
+          assert d['tag_name']=='v1.37.2' and not d['draft'] and not d['prerelease']
+          assert 'VF_Forge_V1.37.2_UPDATE.zip' in assets and 'RELEASE_SHA256SUMS.txt' in assets
+          a=assets['VF_Forge_V1.37.2_UPDATE.zip']
+          print('P03_V1372_RELEASE_CREATED','release_id='+str(d['id']),'asset_id='+str(a['id']),'bytes='+str(a['size']))
+          open('/tmp/release_id','w').write(str(d['id']))
+          open('/tmp/asset_id','w').write(str(a['id']))
+          open('/tmp/checksum_id','w').write(str(assets['RELEASE_SHA256SUMS.txt']['id']))
+          open('/tmp/published_at','w').write(str(d['published_at']))
+          PY
+
+      - name: Independent remote Release asset readback
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo="https://x-access-token:${TOKEN}@github.com/${P03_REPOSITORY}.git"
+          TAG_SHA=$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}')
+          test "$TAG_SHA" = "$RELEASE_SOURCE"
+          rm -rf "$RUNNER_TEMP/readback"; mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$ASSET_NAME" --pattern 'RELEASE_SHA256SUMS.txt' --dir "$RUNNER_TEMP/readback"
+          SHA=$(sha256sum "$RUNNER_TEMP/readback/$ASSET_NAME" | awk '{print $1}')
+          BYTES=$(stat -c%s "$RUNNER_TEMP/readback/$ASSET_NAME")
+          test "$SHA" = "$EXPECTED_SHA256"
+          test "$BYTES" = "$UPDATE_BYTES"
+          grep -Fq "$EXPECTED_SHA256  $ASSET_NAME" "$RUNNER_TEMP/readback/RELEASE_SHA256SUMS.txt"
+          unzip -t "$RUNNER_TEMP/readback/$ASSET_NAME" >/dev/null
+          test "$(unzip -Z1 "$RUNNER_TEMP/readback/$ASSET_NAME")" = 'repair-v1.37.2.php'
+          echo "P03_V1372_RELEASE_REMOTE_READBACK=PASS sha=$SHA bytes=$BYTES"
+
+      - name: Publish core-updates P03 V1.37.2 manifest
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone --depth=1 "https://x-access-token:${TOKEN}@github.com/${CORE_UPDATES_REPOSITORY}.git" "$RUNNER_TEMP/core-updates" >/dev/null 2>&1
+          cd "$RUNNER_TEMP/core-updates"
+          RELEASE_ID=$(cat /tmp/release_id)
+          ASSET_ID=$(cat /tmp/asset_id)
+          PUBLISHED_AT=$(cat /tmp/published_at)
+          python3 - "$RELEASE_ID" "$ASSET_ID" "$PUBLISHED_AT" "$UPDATE_BYTES" <<'PY'
+          from pathlib import Path
+          import json,sys
+          release_id,asset_id,published,bytes_=sys.argv[1:]
+          d={
+            'schema_version':'1.0','project_id':'P03','component_id':'APP','enabled':True,
+            'target_version':'1.37.2','update_type':'ATOMIC','from_versions':['1.37.1'],
+            'schema_from':'30','schema_to':'30','repository':'llhzx2018/vf-forge',
+            'release_tag':'v1.37.2','release_id':int(release_id),
+            'product_identity':'d39417b5cdd3347f2648664e6a343b3e50f54e63',
+            'asset_name':'VF_Forge_V1.37.2_UPDATE.zip','asset_id':int(asset_id),
+            'asset_bytes':int(bytes_),'asset_sha256':'a39e8f28cb49f1c467df1c1b760ad23da98d6edd1ba2f2312d61f971319ba8e7',
+            'backup_required':True,'rollback_supported':True,'released_at':published,
+            'release_notes':{'summary':'V1.37.2：整栏自然滚动、青色视觉收口、Runtime 压缩，并重接 Project Intelligence 全站真实 Authority 数据。'},
+            'notes':'Schema 30 unchanged. Upgrade from V1.37.1 only. Migration NONE. Runtime source exact 53/53, Atomic success/data preservation/failure rollback PASS. PROJECT-ASSET STORAGE = NONE.'
+          }
+          Path('projects/P03.json').write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add projects/P03.json
+          git commit -m 'release(P03): publish V1.37.2 update manifest'
+          git push origin HEAD:main
+          CORE_SHA=$(git rev-parse HEAD)
+          echo "CORE_UPDATES_COMMIT=$CORE_SHA" >> "$GITHUB_ENV"
+          echo "P03_V1372_CORE_UPDATES_PUBLISH=PASS sha=$CORE_SHA"
+
+      - name: Independent core-updates remote readback
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/core-readback"
+          git clone --depth=1 "https://x-access-token:${TOKEN}@github.com/${CORE_UPDATES_REPOSITORY}.git" "$RUNNER_TEMP/core-readback" >/dev/null 2>&1
+          python3 - "$RUNNER_TEMP/core-readback/projects/P03.json" "$UPDATE_BYTES" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); b=int(sys.argv[2])
+          assert d['target_version']=='1.37.2'
+          assert d['from_versions']==['1.37.1']
+          assert d['schema_from']=='30' and d['schema_to']=='30'
+          assert d['release_tag']=='v1.37.2'
+          assert d['product_identity']=='d39417b5cdd3347f2648664e6a343b3e50f54e63'
+          assert d['asset_name']=='VF_Forge_V1.37.2_UPDATE.zip'
+          assert d['asset_sha256']=='a39e8f28cb49f1c467df1c1b760ad23da98d6edd1ba2f2312d61f971319ba8e7'
+          assert d['asset_bytes']==b
+          assert d['backup_required'] is True and d['rollback_supported'] is True
+          print('P03_V1372_CORE_UPDATES_REMOTE_READBACK=PASS')
+          PY
+
+      - name: Formal distribution evidence
+        shell: bash
+        run: |
+          echo 'P03_V1372_FORMAL_DISTRIBUTION_GATE=PASS'
+          echo "RELEASE_SOURCE=$RELEASE_SOURCE"
+          echo "TAG=$RELEASE_TAG"
+          echo "ASSET=$ASSET_NAME"
+          echo "ASSET_SHA256=$UPDATE_SHA"
+          echo "ASSET_BYTES=$UPDATE_BYTES"
+          echo "SOURCE_MANIFEST_SHA256=$SOURCE_SHA"
+          echo "RELEASE_ID=$(cat /tmp/release_id)"
+          echo "ASSET_ID=$(cat /tmp/asset_id)"
+          echo "CHECKSUM_ASSET_ID=$(cat /tmp/checksum_id)"
+          echo "CORE_UPDATES_COMMIT=$CORE_UPDATES_COMMIT"
+          echo 'PRODUCTION_WRITE=NO'
