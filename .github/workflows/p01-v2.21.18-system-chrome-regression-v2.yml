@@ -1,0 +1,90 @@
+name: P01 V2.21.18 System Chrome Regression V2
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['.github/workflows/p01-v2.21.18-system-chrome-regression-v2.yml']
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Exact source and runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --quiet --depth 1 --branch maintenance/prototype-refactor-2.21.18-20260819 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" candidate
+          cd candidate
+          test "$(git rev-parse HEAD)" = '1c8d9cc0fa75ff312fae1a5c08dd6559dcb26cd2'
+          git rev-parse HEAD >/tmp/source-sha;git rev-parse HEAD^{tree} >/tmp/source-tree
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          command -v google-chrome >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq php-sqlite3 sqlite3 >/dev/null
+          mkdir -p "$RUNNER_TEMP/p01-node";cd "$RUNNER_TEMP/p01-node";npm init -y >/dev/null 2>&1;PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i --no-audit --no-fund playwright-core@1.57.0 >/dev/null 2>&1
+      - name: Fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a candidate/src /tmp/p01;cd /tmp/p01;php -S 127.0.0.1:18086 -t . >/tmp/server.log 2>&1 & echo $! >/tmp/pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/c http://127.0.0.1:18086/setup.php -o /tmp/s && break||sleep 1;done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/s').read();print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -fsS -L -c /tmp/c -b /tmp/c -X POST http://127.0.0.1:18086/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start Runner' --data-urlencode 'admin_password=Runner-P01-22118!Strong' --data-urlencode 'admin_password_confirm=Runner-P01-22118!Strong' >/tmp/post
+          php cli/verify.php|tee /tmp/verify;grep -q 'VERIFY_PASS=YES' /tmp/verify
+          DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;");test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok;test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          echo FRESH_INSTALL_SQLITE=PASS
+      - name: Real Chrome UX
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p01-node/e2e.mjs" <<'JS'
+          import {chromium} from 'playwright-core';
+          const b=await chromium.launch({headless:true,executablePath:'/usr/bin/google-chrome',args:['--no-sandbox']});
+          try{const p=await b.newPage({viewport:{width:1440,height:900}}),errs=[];p.on('pageerror',e=>errs.push(String(e)));await p.goto('http://127.0.0.1:18086/',{waitUntil:'networkidle'});await p.click('#loginButton');await p.fill('[name=password]','Runner-P01-22118!Strong');await p.click('#loginSubmit');await p.waitForFunction(()=>document.documentElement.dataset.vfNavigationStability==='3');
+          const order=await p.evaluate(()=>{let keep={links:state.links,recent:state.recent};state.links=[{id:101,title:'A',url:'https://a.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:30,legacy_position:1,click_count:0,tags:[]},{id:102,title:'B',url:'https://b.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:20,legacy_position:2,click_count:999,tags:[]},{id:103,title:'C',url:'https://c.example',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:10,legacy_position:3,click_count:5000,tags:[]}];state.recent=[];let before=topLinks(3).map(x=>x.id),o=window.open;window.open=()=>({opener:null});openLink(state.links[1]);window.open=o;let after=topLinks(3).map(x=>x.id),recent=state.recent[0]?.id;state.links=keep.links;state.recent=keep.recent;return{before,after,recent}});if(JSON.stringify(order.before)!=='[101,102,103]'||JSON.stringify(order.after)!=='[101,102,103]'||order.recent!==102)throw Error('order '+JSON.stringify(order));
+          await p.evaluate(()=>{state.categories=[{id:91001,parent_id:null,name:'Runner Category',description:'x',sort_order:1,legacy_position:1,effective_private:0,is_private:0}];state.links=[{id:92001,title:'Public',url:'https://p.example',category_id:91001,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:1,legacy_position:1,click_count:0,tags:[]}];state.mode='category';state.selected=91001;state.privacyScope='public';state.sidebarScope='public';render()});
+          await p.click('[data-sidebar-scope="private"]');let scope=await p.evaluate(()=>({mode:state.mode,selected:+state.selected,privacy:state.privacyScope,sidebar:state.sidebarScope,hash:location.hash,links:filteredAndSortedLinks().length,home:!!document.querySelector('.home-page')}));if(scope.mode!=='category'||scope.selected!==91001||scope.privacy!=='private'||scope.sidebar!=='private'||scope.links!==0||scope.home||scope.hash!=='#/private/category/91001')throw Error('scope '+JSON.stringify(scope));
+          await p.evaluate(()=>{state.mode='home';state.selected=0;state.privacyScope='';render()});let home=await p.evaluate(()=>({note:document.querySelector('.home-quick-section .section-head p')?.textContent||'',intro:document.querySelector('.home-intro .page-subtitle')?.textContent||'',pluginAfter:document.querySelector('.home-workspace')?.nextElementSibling?.id==='pluginHomeSummary'}));if(!home.note.includes('稳定手动顺序')||home.note.includes('自动推荐')||!home.intro.includes('搜索与分类优先')||!home.pluginAfter)throw Error('home '+JSON.stringify(home));
+          for(const w of [390,480,640,768,1024,1280,1440,1920]){await p.setViewportSize({width:w,height:900});let d=await p.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));if(d>1)throw Error('overflow '+w+':'+d)}if(errs.length)throw Error(errs.join('|'));console.log('REAL_CHROME_UX=PASS');}finally{await b.close()}
+          JS
+          cd "$RUNNER_TEMP/p01-node";node e2e.mjs
+      - name: Backup restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail;cd /tmp/p01
+          php <<'PHP'
+          <?php require 'app/bootstrap.php';$d=vf_db();$r=new VfRepository($d);$r->createCategory(['name'=>'Sentinel','description'=>'r','is_private'=>1]);$m=new VfBackupManager($d);$b=$m->create('reg','regression',true);$k=$b['backup_key'];if(($m->verify($k)['validation_status']??'')!=='valid')throw new Exception('verify');$r->createCategory(['name'=>'Transient','description'=>'r','is_private'=>1]);VfBackupManager::performRestore($k);$d=vf_db();$q=$d->prepare('SELECT COUNT(*) FROM categories WHERE name=?');$q->execute(['Sentinel']);if((int)$q->fetchColumn()!==1)throw new Exception('sentinel');$q->execute(['Transient']);if((int)$q->fetchColumn()!==0)throw new Exception('transient');echo "BACKUP_RESTORE=PASS\n";
+          PHP
+      - name: Publish verdict
+        if: always()
+        shell: bash
+        env:
+          S: ${{ job.status }}
+          RID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os,json,base64,urllib.request,urllib.error
+          def r(p):
+            try:return open(p).read().strip()
+            except:return ''
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','gate':'SYSTEM_CHROME_REGRESSION_V2','status':os.environ['S'].upper(),'pass':os.environ['S']=='success','source_sha':r('/tmp/source-sha'),'source_tree':r('/tmp/source-tree'),'workflow_run_id':os.environ['RID'],'schema_version':'2026080902','private_data_persisted_publicly':False};t=os.environ['WRITE_TOKEN'];c=json.dumps(q,indent=2,sort_keys=True)+'\n';path='vf-agent/results/P01-V2.21.18-SYSTEM-CHROME-REGRESSION-V2.json';api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/'+path;h={'Accept':'application/vnd.github+json','Authorization':'Bearer '+t,'X-GitHub-Api-Version':'2022-11-28'};sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h)) as x:sha=json.load(x).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          b={'message':'evidence(P01): publish 2.21.18 Chrome V2','content':base64.b64encode(c.encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:b['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(b).encode(),method='PUT',headers={**h,'Content-Type':'application/json'})).read()
+          PY
+      - if: always()
+        shell: bash
+        run: if [ -f /tmp/pid ];then kill $(cat /tmp/pid) 2>/dev/null||true;fi
