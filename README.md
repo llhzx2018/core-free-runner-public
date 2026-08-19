@@ -1,22 +1,32 @@
 # core-free-runner-public
 
-VF 公共测试 / Evidence 基础设施，用于只包含可公开测试输入和可公开 Evidence 的 Runner 工作负载。
+VF 固定的 **Public-safe GitHub Hosted Runner + Evidence 基础设施**。
 
-## 正式命名层
+## Current Authority
 
-本仓属于 `core-*` 公共基础设施层，Current 人读命名统一继承 `llhzx2018/gov-doc` 的 `VF 正式命名层 V1.0`。
+唯一 Current 入口：[`docs/authority/CURRENT.md`](docs/authority/CURRENT.md)
 
 ```text
-vf-*      = 软件产品 / 软件组件
-skill-*   = AI Skill
-core-*    = 跨项目公共基础设施
-gov-*     = 治理、规范与长期文档 Authority
+PUBLIC TEST STORAGE / EXECUTION = core-free-runner-public
 ```
 
-## 边界
+允许：Synthetic Fixture、公开测试输入、可公开 Workflow/Harness、脱敏 Evidence、非敏感日志与测试元数据。
 
-- 只允许 Synthetic Fixture；
-- 只允许可公开 Evidence；
-- 禁止私人源码、凭据、Production DB、PRIVATE_DATA；
-- 受控验证时允许创建并清理项目专用的一次性 Workflow；
-- Secret / Token 不作为普通文件长期存储。
+禁止持久化：私人源码、PRIVATE_DATA、真实数据库、Production Backup、Secret Value、Session/Cookie、管理员凭据。
+
+经授权可以在 Hosted Runner 临时工作区通过 Runtime Secret checkout exact private source 做验证，但私有源码不得进入 Public Git History 或 Public Artifact，Job 结束后必须随临时环境清理。
+
+一次性项目 Workflow / PR 默认：
+
+```text
+create temporary branch / PR
+→ run
+→ record public-safe evidence
+→ close WITHOUT merge
+```
+
+只有被正式裁决为可复用公共 Harness 的 Workflow 才进入 main。
+
+`develop` / sandbox / request / trigger 文件可以作为历史执行 Provenance，不要求机械合并到 main。
+
+Secret / Token 只通过 Actions Secrets / Runtime 注入，不作为普通文件长期存储，日志必须脱敏。默认不创建第三套长期测试空间。
