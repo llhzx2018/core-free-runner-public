@@ -1,0 +1,138 @@
+name: P02 V2.5.11 From V2.5.10 Bridge R2
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2511-from2510-bridge-r2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-library
+      PRODUCT_REF: 8fd1a43197163b1b8b0e9ec64fb6540df1b35467
+      SOURCE_VERSION: 2.5.10
+      TARGET_VERSION: 2.5.11
+      RELEASE_TAG: v2.5.11
+      BRIDGE_NAME: VF_Library_V2.5.11_FROM_V2.5.10_UPDATE.zip
+    steps:
+      - name: Require registered capability
+        env:
+          TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: test -n "$TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: 8fd1a43197163b1b8b0e9ec64fb6540df1b35467
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build source-specific bridge
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.11
+          python3 scripts/repository-gates.py
+          git diff --check
+          cp scripts/build-release-v2.5.4.py "$RUNNER_TEMP/build-bridge.py"
+          python3 - "$RUNNER_TEMP/build-bridge.py" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text(encoding='utf-8')
+          old="ROOT=Path(__file__).resolve().parents[1]; SRCVER='2.5.2'; VER='2.5.4'; SCHEMA=2401; DT=(2026,8,19,2,0,0)"
+          new="ROOT=Path.cwd(); SRCVER='2.5.10'; VER='2.5.11'; SCHEMA=2401; DT=(2026,8,19,7,28,21)"
+          assert old in s;s=s.replace(old,new,1)
+          s=s.replace("default='build/release-v2.5.4'","default='build/release-v2.5.11'").replace("default='release/v2.5.4'","default='release/v2.5.11'")
+          p.write_text(s,encoding='utf-8')
+          PY
+          python3 "$RUNNER_TEMP/build-bridge.py" --out build/from2510 --source-commit "$PRODUCT_REF" --source-tree "$(git show -s --format=%T "$PRODUCT_REF")" --source-ref release/v2.5.11 >/tmp/build.json
+          mv build/from2510/VF_Library_V2.5.11_UPDATE.zip "build/from2510/$BRIDGE_NAME"
+          unzip -t "build/from2510/$BRIDGE_NAME" >/dev/null
+          unzip -p "build/from2510/$BRIDGE_NAME" atomic-manifest.json | jq -e '.source_version=="2.5.10" and .target_version=="2.5.11" and .source_schema==2401 and .target_schema==2401' >/dev/null
+          echo BRIDGE_PACKAGE_IDENTITY=PASS
+          echo BRIDGE_BYTES=$(stat -c%s "build/from2510/$BRIDGE_NAME")
+          echo BRIDGE_SHA256=$(sha256sum "build/from2510/$BRIDGE_NAME"|awk '{print $1}')
+
+      - name: Existing-data V2.5.10 to V2.5.11
+        working-directory: product
+        env:
+          PW: 'P02-V2511-BRIDGE-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/up2510";SRC="$ROOT/src";SITE="$ROOT/site";mkdir -p "$ROOT"
+          git clone -q --no-checkout https://x-access-token:${{ secrets.VF_RELEASE_WRITE_TOKEN }}@github.com/llhzx2018/vf-library.git "$SRC"
+          git -C "$SRC" checkout -q v2.5.10
+          mkdir -p "$SITE";bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.10
+          php -S 127.0.0.1:18261 -t "$SITE" >"$ROOT/server.log" 2>&1 & PID=$!
+          for _ in $(seq 1 80);do curl -fsS http://127.0.0.1:18261/setup.php >/dev/null 2>&1&&break;sleep .25;done
+          curl -fsS -c "$ROOT/c" http://127.0.0.1:18261/setup.php > "$ROOT/setup"
+          TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H 'Origin: http://127.0.0.1:18261' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" http://127.0.0.1:18261/setup.php)" = 303
+          SESSION=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18261/api.php?action=session');CSRF=$(jq -r .csrf<<<"$SESSION");jq -e '.site.auth==true'<<<"$SESSION" >/dev/null
+          CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"Bridge 2510","icon":"folder"}' 'http://127.0.0.1:18261/api.php?action=category_save');CID=$(jq -r .id<<<"$CAT")
+          ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"Bridge Existing",content:"keep me",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')
+          SAVED=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" 'http://127.0.0.1:18261/api.php?action=content_save');IID=$(jq -r .id<<<"$SAVED")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" 'http://127.0.0.1:18261/api.php?action=content_favorite' | jq -e .ok >/dev/null
+          SNEW=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{}' 'http://127.0.0.1:18261/scratch-action.php?action=create');SID=$(jq -r .tab.id<<<"$SNEW")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$(jq -nc --argjson id "$SID" --arg c $'升级前 Scratch\n第二行' '{id:$id,content:$c,cursor_pos:8,scroll_top:5}')" 'http://127.0.0.1:18261/scratch-action.php?action=save' | jq -e '.tab.content|contains("升级前 Scratch")' >/dev/null
+          PKG="$(pwd)/build/from2510/$BRIDGE_NAME";BYTES=$(stat -c%s "$PKG");SHA=$(sha256sum "$PKG"|awk '{print $1}')
+          cat > "$ROOT/up.php" <<'PHP'
+          <?php
+          $site=$argv[1];$pkg=$argv[2];$bytes=(int)$argv[3];$sha=$argv[4];$out=$argv[5];require $site.'/app/bootstrap.php';require_once $site.'/app/CoreUpdates/UpdateAdapter.php';require_once $site.'/app/CoreUpdates/UpdateCore.php';require_once $site.'/app/VfLibraryCoreUpdateAdapter.php';$m=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'current_version'=>'2.5.10','target_version'=>'2.5.11','update_type'=>'ATOMIC','from_versions'=>['2.5.10'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.11','asset_name'=>'VF_Library_V2.5.11_FROM_V2.5.10_UPDATE.zip','asset_bytes'=>$bytes,'asset_sha256'=>$sha,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-19T07:28:21Z'];$c=new CoreUpdates\UpdateCore('P02','APP');if(($c->check('2.5.10','2401',$m)['status']??'')!=='AVAILABLE')exit(2);if(($c->verifyPackage($pkg,$m)['status']??'')!=='VERIFIED')exit(3);$r=$c->upgrade('2.5.10','2401',new VfLibraryCoreUpdateAdapter(),$pkg,$m);file_put_contents($out,json_encode($r));if(!in_array($r['status']??'',['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)||empty($r['backup_locator']))exit(4);
+          PHP
+          php "$ROOT/up.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$ROOT/result"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.11
+          jq -e '.backup_locator|length>0' "$ROOT/result" >/dev/null
+          SESSION2=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18261/api.php?action=session');CSRF2=$(jq -r .csrf<<<"$SESSION2");jq -e '.site.auth==true'<<<"$SESSION2" >/dev/null
+          curl -fsS -b "$ROOT/c" "http://127.0.0.1:18261/api.php?action=content_get&id=$IID" | jq -e '(.item.title=="Bridge Existing") and ((.item.is_favorite|tonumber)==1) and (.item.content|contains("keep me"))' >/dev/null
+          LIST=$(curl -fsS -b "$ROOT/c" 'http://127.0.0.1:18261/scratch-action.php?action=list');jq -e --argjson id "$SID" '.data.open[]|select(.id==$id)|.content|contains("升级前 Scratch")'<<<"$LIST" >/dev/null
+          POST=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d '{}' 'http://127.0.0.1:18261/scratch-action.php?action=create');POSTSID=$(jq -r .tab.id<<<"$POST")
+          curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d "$(jq -nc --argjson id "$POSTSID" --arg c $'升级后 Scratch\n第二行\n第三行' '{id:$id,content:$c,cursor_pos:8,scroll_top:0}')" 'http://127.0.0.1:18261/scratch-action.php?action=save' | jq -e '.tab.content|contains("升级后 Scratch")' >/dev/null
+          php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.11" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+          kill "$PID";wait "$PID" 2>/dev/null||true
+          echo EXISTING_DATA_2_5_10_TO_2_5_11=PASS
+          echo AUTOMATIC_BACKUP_DATA_FAVORITE_SESSION=PASS
+          echo PREEXISTING_SCRATCH_PRESERVED=PASS
+          echo POST_UPGRADE_SCRATCH_WRITE=PASS
+          echo SQLITE_INTEGRITY_FK=PASS
+
+      - name: Publish bridge asset and remote readback
+        working-directory: product
+        env:
+          GH_TOKEN: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          gh release view "$RELEASE_TAG" --repo "$PRODUCT_REPO" >/dev/null
+          gh release upload "$RELEASE_TAG" "build/from2510/$BRIDGE_NAME" --repo "$PRODUCT_REPO"
+          BYTES=$(stat -c%s "build/from2510/$BRIDGE_NAME");SHA=$(sha256sum "build/from2510/$BRIDGE_NAME"|awk '{print $1}')
+          gh release view "$RELEASE_TAG" --repo "$PRODUCT_REPO" --json databaseId,tagName,isDraft,isPrerelease,assets > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" "$BYTES" <<'PY'
+          import json,os,sys
+          x=json.load(open(sys.argv[1]));size=int(sys.argv[2]);assert x['tagName']=='v2.5.11' and not x['isDraft'] and not x['isPrerelease'];a={v['name']:int(v['size']) for v in x['assets']};assert a.get(os.environ['BRIDGE_NAME'])==size;print('RELEASE_ID='+str(x['databaseId']))
+          PY
+          mkdir -p "$RUNNER_TEMP/readback";gh release download "$RELEASE_TAG" --repo "$PRODUCT_REPO" --pattern "$BRIDGE_NAME" --dir "$RUNNER_TEMP/readback"
+          test "$(stat -c%s "$RUNNER_TEMP/readback/$BRIDGE_NAME")" = "$BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/readback/$BRIDGE_NAME"|awk '{print $1}')" = "$SHA"
+          unzip -p "$RUNNER_TEMP/readback/$BRIDGE_NAME" atomic-manifest.json | jq -e '.source_version=="2.5.10" and .target_version=="2.5.11"' >/dev/null
+          echo REMOTE_BRIDGE_BYTES_SHA256_IDENTITY=PASS
+          echo BRIDGE_BYTES=$BYTES
+          echo BRIDGE_SHA256=$SHA
+          echo PRODUCTION_WRITE=NO
