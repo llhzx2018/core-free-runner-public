@@ -1,0 +1,102 @@
+name: P01 V2.21.18 Cache Bust Patch
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-v2.21.18-cache-bust-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: llhzx2018/vf-start
+  SOURCE_BRANCH: maintenance/prototype-refactor-2.21.18-20260819
+  RESULT_ID: P01-V2.21.18-CACHE-BUST-PATCH
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Patch exact maintenance branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          git clone --quiet --branch "$SOURCE_BRANCH" --single-branch "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${SOURCE_REPO}.git" source
+          cd source
+          BEFORE=$(git rev-parse HEAD)
+          test "$(tr -d '\r\n' < VERSION)" = '2.21.17'
+          grep -F '<script src="assets/update.js?v=2190" defer></script>' src/index.php >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.php')
+          s=p.read_text(encoding='utf-8')
+          old='<script src="assets/update.js?v=2190" defer></script>'
+          new='<script src="assets/update.js?v=22118" defer></script>'
+          if s.count(old)!=1:
+              raise SystemExit('unexpected loader identity count')
+          p.write_text(s.replace(old,new),encoding='utf-8')
+          PY
+          grep -F '<script src="assets/update.js?v=22118" defer></script>' src/index.php >/dev/null
+          git diff --check
+          git config user.name 'vf-public-runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add src/index.php
+          git commit -m 'fix(P01): bust 2.21.18 runtime loader cache'
+          git push origin HEAD:"$SOURCE_BRANCH"
+          AFTER=$(git rev-parse HEAD)
+          TREE=$(git rev-parse HEAD^{tree})
+          printf '%s\n' "$BEFORE" > /tmp/before
+          printf '%s\n' "$AFTER" > /tmp/after
+          printf '%s\n' "$TREE" > /tmp/tree
+          echo "PATCH_BEFORE=$BEFORE"
+          echo "PATCH_AFTER=$AFTER"
+          echo "PATCH_TREE=$TREE"
+
+      - name: Publish sanitized result
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,urllib.error
+          token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          def read(path):
+              try:return open(path).read().strip()
+              except:return ''
+          payload={
+            'schema':'vf-public-runner-result/v1',
+            'project_id':'P01',
+            'target_version':'2.21.18',
+            'gate':'CACHE_BUST_PATCH',
+            'status':os.environ.get('JOB_STATUS','unknown').upper(),
+            'pass':os.environ.get('JOB_STATUS')=='success',
+            'source_branch':os.environ['SOURCE_BRANCH'],
+            'before_sha':read('/tmp/before'),
+            'after_sha':read('/tmp/after'),
+            'after_tree':read('/tmp/tree'),
+            'workflow_run_id':os.environ.get('RUN_ID','')
+          }
+          content=json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n'
+          path=f"vf-agent/results/{os.environ['RESULT_ID']}.json"
+          api=f"https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/{path}"
+          headers={'Accept':'application/vnd.github+json','Authorization':f'Bearer {token}','X-GitHub-Api-Version':'2022-11-28'}
+          sha=None
+          try:
+              req=urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=headers)
+              with urllib.request.urlopen(req,timeout=20) as r: sha=json.load(r).get('sha')
+          except urllib.error.HTTPError as e:
+              if e.code!=404: raise
+          body={'message':f'evidence(P01): publish {os.environ["RESULT_ID"]}','content':base64.b64encode(content.encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha: body['sha']=sha
+          req=urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**headers,'Content-Type':'application/json'})
+          with urllib.request.urlopen(req,timeout=20) as r:r.read()
+          PY
