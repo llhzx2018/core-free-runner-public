@@ -1,0 +1,105 @@
+name: P01 Exact Index Cache + Retired Notice Patch
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'vf-agent/triggers/p01-index-patch-22121-pr.txt'
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BRANCH: maintenance/navigation-admin-simplify-2.21.21-20260819
+      EXPECTED_HEAD: a867db472efc9a286a3fa5b28350aa0e8d96237d
+    steps:
+      - name: Clone exact P01 working source
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch "$BRANCH" "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" p
+          test "$(git -C p rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: Apply exact bounded patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.php');s=p.read_text()
+          assert s.count('assets/reference-ui.js?v=22120')==1
+          assert s.count('id="managementButton" class="sidebar-tool admin-only hidden" href="manage.php"')==1
+          s=s.replace('assets/reference-ui.js?v=22120','assets/reference-ui.js?v=22121',1)
+          s=s.replace('id="managementButton" class="sidebar-tool admin-only hidden" href="manage.php"','id="managementButton" class="sidebar-tool admin-only hidden" href="links-admin.php"',1)
+          p.write_text(s)
+
+          p=Path('src/links-admin.php');s=p.read_text()
+          marker='?>\n<div class="vf-links-summary" id="linksSummary"></div>'
+          assert s.count(marker)==1
+          notice=r'''?>
+<?php
+$notice=(string)($_GET['notice']??'');
+$noticeMap=[
+  'tags-retired'=>'标签功能已退役。分类 + Public / Private + 待整理是当前网址整理方式。',
+  'affiliate-retired'=>'推广链接独立管理已退役。已有网址仍保留原始 URL 与参数，不会因此删除数据。',
+  'governance-retired'=>'历史治理已经封板退出日常产品。当前维护请使用网址、分类与待整理。',
+];
+if(isset($noticeMap[$notice])): ?>
+<div class="notice" role="status"><?=htmlspecialchars($noticeMap[$notice],ENT_QUOTES,'UTF-8')?></div>
+<?php endif; ?>
+<div class="vf-links-summary" id="linksSummary"></div>'''
+          p.write_text(s.replace(marker,notice,1))
+          PY
+      - name: Verify exact semantics and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p
+          php -l src/index.php >/dev/null
+          php -l src/links-admin.php >/dev/null
+          node --check src/assets/reference-ui.js >/dev/null
+          node --check src/assets/update.js >/dev/null
+          node --check src/assets/update-reload.js >/dev/null
+          grep -q 'assets/reference-ui.js?v=22121' src/index.php
+          grep -q 'managementButton.*href="links-admin.php"' src/index.php
+          grep -q '标签功能已退役' src/links-admin.php
+          grep -q '推广链接独立管理已退役' src/links-admin.php
+          grep -q '历史治理已经封板' src/links-admin.php
+          git diff --check
+      - name: Commit and push exact source
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add src/index.php src/links-admin.php
+          git commit -q -m 'fix(P01): refresh navigation assets and explain retired features'
+          printf '%s' "$(git rev-parse HEAD)" >/tmp/sha
+          printf '%s' "$(git rev-parse HEAD^{tree})" >/tmp/tree
+          git remote set-url origin "https://x-access-token:${W}@github.com/llhzx2018/vf-start.git"
+          git push -q origin HEAD:"$BRANCH"
+      - name: Publish safe evidence
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'INDEX_CACHE_RETIRE_NOTICE_PATCH','status':'SUCCESS','pass':True,'source_sha':open('/tmp/sha').read(),'source_tree':open('/tmp/tree').read(),'index_cache_buster':'22121','management_entry':'links-admin.php','retired_notices':['tags','affiliate','historical-governance'],'production_changed':False,'schema_changed':False,'private_data_used':False}
+          open('/tmp/e.json','w').write(json.dumps(q,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results
+          cp /tmp/e.json out/vf-agent/results/P01-INDEX-CACHE-RETIRE-NOTICE-PATCH.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com
+          git -C out add vf-agent/results/P01-INDEX-CACHE-RETIRE-NOTICE-PATCH.json
+          git -C out commit -q -m 'evidence(P01): index cache and retired notice patch pass'
+          git -C out pull -q --rebase origin vf-agent-operations-v1
+          git -C out push -q origin HEAD:vf-agent-operations-v1
