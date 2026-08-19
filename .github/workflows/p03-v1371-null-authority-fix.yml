@@ -1,0 +1,79 @@
+name: P03 V1.37.1 Null Authority Fix Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1371-null-authority-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_BRANCH: maintenance/v1.37.1-owner-runtime-bugfix
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require private write credential
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+
+      - name: Checkout P03 maintenance branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: p03
+
+      - name: Patch null-safe Authority URL contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('public/assets/project-intelligence.js')
+          s=p.read_text(encoding='utf-8')
+          old="function sourceUrl(s={}){const u=String(s.canonical_url||'');return /^https:\\/\\//i.test(u)?u:''}"
+          new="function sourceUrl(s){const u=String(s?.canonical_url||'');return /^https:\\/\\//i.test(u)?u:''}"
+          if new in s:
+              print('NULL_AUTHORITY_GUARD_ALREADY_PRESENT')
+          else:
+              assert old in s, 'expected sourceUrl contract not found'
+              s=s.replace(old,new,1)
+              p.write_text(s,encoding='utf-8')
+              print('NULL_AUTHORITY_GUARD_PATCHED')
+          PY
+          node --check public/assets/project-intelligence.js
+          grep -Fq "function sourceUrl(s){const u=String(s?.canonical_url||'')" public/assets/project-intelligence.js
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/p03-runtime" >/dev/null
+          node --check "$RUNNER_TEMP/p03-runtime/assets/project-intelligence.js"
+          git diff --check
+
+      - name: Commit maintenance fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/assets/project-intelligence.js
+          if git diff --cached --quiet; then
+            echo 'P03_NULL_AUTHORITY_COMMIT=UNCHANGED'
+          else
+            git commit -m 'fix(P03): tolerate projects without Authority URLs'
+            git push origin HEAD:"$P03_BRANCH"
+          fi
+          echo "P03_NULL_AUTHORITY_FIX=PASS sha=$(git rev-parse HEAD)"
