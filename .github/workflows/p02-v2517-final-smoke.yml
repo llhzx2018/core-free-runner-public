@@ -1,0 +1,91 @@
+name: P02 V2.5.17 Final Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2517-final-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.17-library-model-convergence
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source exact and fresh install
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip sqlite3 >/dev/null
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.17
+          test "$(jq -r .version SOURCE_MANIFEST.json)" = 2.5.17
+          test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401
+          test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          node --check public/assets/v254-common-branding.js
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          m=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'));assert len(m['entries'])==74
+          for e in m['entries']:
+              b=pathlib.Path(e['repo_path']).read_bytes();h=hashlib.sha256(b).hexdigest();assert len(b)==e['bytes'] and h==e['sha256']==e['repo_sha256'],e['repo_path']
+          assert hashlib.sha256(pathlib.Path('SOURCE_MANIFEST.txt').read_bytes()).hexdigest()==m['repo_sha256']
+          print('SOURCE_MANIFEST_74_OF_74=PASS')
+          print('SOURCE_MANIFEST_TXT_SHA=PASS')
+          PY
+          SITE="$RUNNER_TEMP/site";mkdir -p "$SITE";bash scripts/build-deploy-tree.sh "$SITE" >/dev/null;test "$(cat "$SITE/VERSION.txt")" = 2.5.17
+          php -S 127.0.0.1:18742 -t "$SITE" >"$RUNNER_TEMP/php.log" 2>&1 & echo $! > "$RUNNER_TEMP/php.pid"
+          sleep 1
+          curl -fsS -c "$RUNNER_TEMP/cookies" http://127.0.0.1:18742/setup.php > "$RUNNER_TEMP/setup.html"
+          CSRF="$(python3 - "$RUNNER_TEMP/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )";test -n "$CSRF"
+          curl -sS -D "$RUNNER_TEMP/headers" -o /dev/null -b "$RUNNER_TEMP/cookies" -H 'Origin: http://127.0.0.1:18742' -H 'Referer: http://127.0.0.1:18742/setup.php' --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'password=P02-V2517-Final!' --data-urlencode 'password_confirm=P02-V2517-Final!' http://127.0.0.1:18742/setup.php
+          grep -Eq '^HTTP/.* 303' "$RUNNER_TEMP/headers"
+          echo FRESH_INSTALL=PASS
+      - name: Real Chromium final product semantics
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PID="$(cat "$RUNNER_TEMP/php.pid")";trap 'kill "$PID" || true; echo "--- PHP LOG ---"; tail -160 "$RUNNER_TEMP/php.log" || true' EXIT
+          npm -g ls playwright >/dev/null 2>&1 || npm i -g playwright@1.55.0 >/dev/null
+          playwright install chromium >/dev/null
+          cat > "$RUNNER_TEMP/smoke.cjs" <<'JS'
+          const {chromium}=require('playwright');const assert=(x,m)=>{if(!x)throw Error(m)},sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          (async()=>{const browser=await chromium.launch({headless:true}),page=await browser.newPage({viewport:{width:1440,height:1000}}),base='http://127.0.0.1:18742';
+          const recent=()=>page.evaluate(()=>fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20').then(r=>r.json()));
+          const openItem=async id=>{let n=page.locator(`[data-notebook-item="${id}"]`);if(await n.count()){await n.first().click();return}n=page.locator(`[data-open="${id}"]`);if(await n.count()){await n.first().click();return}throw Error('NO_OPEN_'+id)};
+          const openMore=async id=>{let n=page.locator(`[data-notebook-more="${id}"]`);if(await n.count()){await n.first().click();return}n=page.locator(`[data-item-more="${id}"]`);if(await n.count()){await n.first().click();return}throw Error('NO_MORE_'+id)};
+          await page.goto(base+'/',{waitUntil:'networkidle'});await page.click('[data-open-login]');await page.fill('input[name=password]','P02-V2517-Final!');await page.click('#loginSubmit');await page.waitForFunction(()=>document.querySelector('#accountBtn')?.textContent.includes('退出'));
+          let ia=await page.evaluate(()=>({q:getComputedStyle(document.querySelector('.side-item[data-mode=quick]')).display,a:getComputedStyle(document.querySelector('.side-item[data-mode=article]')).display}));assert(ia.q==='none'&&ia.a==='none','LEGACY_NAV_VISIBLE');
+          for(const v of ['quick','article']){await page.evaluate(x=>localStorage.setItem('vftb-mode',x),v);await page.reload({waitUntil:'networkidle'});await page.waitForFunction(()=>localStorage.getItem('vftb-mode')==='all')}
+          const c=await page.evaluate(async()=>{const s=await fetch('/api.php?action=session').then(r=>r.json()),csrf=s.csrf,p=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)}),j=await r.json();if(!r.ok||j.ok===false)throw Error(a+JSON.stringify(j));return j};const cat=await p('category_save',{name:'V2517 Final Smoke'}),b={category_id:cat.id,description:'',tags:'',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]},q=await p('content_save',{...b,title:'普通资料',content:'普通',content_mode:'quick',content_format:'plain',primary_action:'copy'}),a=await p('content_save',{...b,title:'长文资料',content:'# 长文',content_mode:'article',content_format:'markdown',primary_action:'read'}),e=await p('content_save',{...b,title:'编辑资料',content:'编辑',content_mode:'quick',content_format:'plain',primary_action:'copy'}),boot=await fetch('/api.php?action=app_bootstrap').then(r=>r.json());return{cat:cat.id,q:q.id,a:a.id,e:e.id,setting:Number(boot.data.settings.article_open_counts_recent||0)}});assert(c.setting===0,'OLD_SETTING_CHANGED');
+          await page.evaluate(()=>localStorage.setItem('vftb-content-view','notebook'));await page.reload({waitUntil:'networkidle'});await sleep(1000);let r=await recent();assert(Number(r.data.pagination.total)===0,'AUTO_SELECTION_POLLUTED_RECENT');
+          await openItem(c.q);await sleep(900);r=await recent();assert(Number(r.data.pagination.total)===1&&Number(r.data.items[0].id)===Number(c.q),'QUICK_RECENT_FAIL');
+          await sleep(1050);await page.goto(base+'/',{waitUntil:'networkidle'});await openItem(c.a);await sleep(900);r=await recent();assert(Number(r.data.pagination.total)===2&&Number(r.data.items[0].id)===Number(c.a),'ARTICLE_RECENT_FAIL');
+          await sleep(1050);await page.goto(base+'/',{waitUntil:'networkidle'});await openMore(c.e);const edit=page.locator('.context[data-recent-item-id] [data-edit]');assert(await edit.count()===1,'ITEM_MENU_NOT_SCOPED');await edit.click();await page.waitForSelector('#contentForm');await sleep(900);assert(await page.evaluate(()=>{const s=document.querySelector('select[name=content_mode]');return !!(s&&s.closest('.field')?.hidden)}),'CONTENT_MODE_VISIBLE');r=await recent();assert(Number(r.data.pagination.total)===3&&Number(r.data.items[0].id)===Number(c.e),'EDIT_RECENT_FAIL');const stamp=r.data.items[0].last_opened_at;
+          await sleep(1050);await page.goto(base+'/',{waitUntil:'networkidle'});await openMore(c.e);const cm=page.locator(`[data-category-more="${c.cat}"]`);assert(await cm.count()===1,'CATEGORY_MORE_MISSING');await cm.click();const ce=page.locator('.context [data-edit]');assert(await ce.count()===1,'CATEGORY_EDIT_MISSING');await ce.click();await sleep(900);r=await recent();const er=r.data.items.find(x=>Number(x.id)===Number(c.e));assert(er&&er.last_opened_at===stamp,'CATEGORY_EDIT_POLLUTED_RECENT');
+          if(await page.locator('.modal-overlay').count())await page.keyboard.press('Escape');await page.goto(base+'/',{waitUntil:'networkidle'});await page.waitForFunction(()=>Number(document.querySelector('#recentCount')?.textContent||0)===3);await page.click('.side-item[data-mode=recent]');await page.waitForFunction(()=>document.body.innerText.includes('最近打开、阅读、编辑、复制或调用过的资料'));
+          await page.goto(base+'/',{waitUntil:'networkidle'});await page.click('#addContentMenuBtn');await sleep(100);const text=await page.evaluate(()=>document.body.innerText);assert(text.includes('新建资料')&&text.includes('新建长文'),'CREATE_LABELS_FAIL');
+          const mobile=await browser.newPage({viewport:{width:390,height:844}});await mobile.goto(base+'/',{waitUntil:'networkidle'});assert(await mobile.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth)<=1,'MOBILE_OVERFLOW');
+          await browser.close();console.log('PRIMARY_LIBRARY_IA=PASS');console.log('LEGACY_MODE_FALLBACK=PASS');console.log('AUTO_SELECTION_RECENT=PASS');console.log('QUICK_OPEN_RECENT=PASS');console.log('ARTICLE_OPEN_RECENT_SETTING_OFF=PASS');console.log('EDIT_RECENT=PASS');console.log('CATEGORY_EDIT_RECENT_ISOLATION=PASS');console.log('CREATE_LABELS=PASS');console.log('MOBILE_390_OVERFLOW=NONE');console.log('REAL_CHROMIUM_V2517=PASS')})().catch(e=>{console.error(e.stack||e);process.exit(1)});
+          JS
+          NODE_PATH="$(npm root -g)" node "$RUNNER_TEMP/smoke.cjs"
+          echo SCHEMA=2401
+          echo PRODUCTION_WRITE=NO
