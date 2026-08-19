@@ -1,0 +1,239 @@
+name: P04 V2.8.6 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v286-formal-release.yml'
+      - 'requests/p04-v286-formal-release.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: d98c2bc9281f259b6ba9f90855b01e42b73eabb3
+      SOURCE_TREE: 40a5ae119812676aaf2f6e5a89e0e9c238876457
+      EXPECTED_MAIN: 906f16a39f305d7bbc668cd8d371a34304944a67
+      TARGET_VERSION: 2.8.6
+      EXPECTED_FULL_BYTES: '579762'
+      EXPECTED_FULL_SHA: 1f77d7522a2cad2c4e3a0f4528dff410aaa4d8f3cb5b0c77465c8f9b7016bf40
+      EXPECTED_UPDATE_BYTES: '1250606'
+      EXPECTED_UPDATE_SHA: 990437edf412efa4ffda89caf32823f059f945c205a34ed87db7db9486fe6106
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered release capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          test -n "$GH_TOKEN"
+          echo 'RELEASE_CAPABILITY=PASS'
+
+      - name: Verify current remote authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAIN_SHA=$(gh api "repos/$SOURCE_REPOSITORY/branches/main" --jq '.commit.sha')
+          test "$MAIN_SHA" = "$EXPECTED_MAIN"
+          echo "MAIN_NON_FORCE_PROMOTION_READBACK=$MAIN_SHA"
+          TAG="v$TARGET_VERSION"
+          if gh api "repos/$SOURCE_REPOSITORY/git/ref/tags/$TAG" >/tmp/existing-tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/existing-tag.json)" = "$SOURCE_COMMIT"
+          fi
+
+      - name: Checkout exact tested product source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Setup PHP and Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3, fileinfo, mbstring
+          ini-file: production
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Rebuild exact formal artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          php -l public/index.php >/dev/null
+          node --check public/assets/v286-production-maintenance.js
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          rm -rf "$RUNNER_TEMP/v286-runtime" "$RUNNER_TEMP/v286-update" "$RUNNER_TEMP/v286-formal" "$RUNNER_TEMP/v286-readback"
+          mkdir -p "$RUNNER_TEMP/v286-formal" "$RUNNER_TEMP/v286-readback" "$GITHUB_WORKSPACE/evidence"
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/v286-runtime" > "$GITHUB_WORKSPACE/evidence/release-tree.json"
+          python3 scripts/build-v286-update-release.py --target-runtime "$RUNNER_TEMP/v286-runtime" --output "$RUNNER_TEMP/v286-update" > "$GITHUB_WORKSPACE/evidence/update-build.json"
+          php "$RUNNER_TEMP/v286-update/repair-v2.8.6.php" --self-test | tee "$GITHUB_WORKSPACE/evidence/atomic-self-test.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, os, zipfile
+          runtime=Path(os.environ['RUNNER_TEMP'])/'v286-runtime'
+          out=Path(os.environ['RUNNER_TEMP'])/'v286-formal'
+          full=out/'VF_Infra_V2.8.6_FULL.zip'
+          with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                  rel=f.relative_to(runtime).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,f.read_bytes())
+          update=Path(os.environ['RUNNER_TEMP'])/'v286-update'/'VF_Infra_V2.8.6_UPDATE.zip'
+          def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+          assert full.stat().st_size == int(os.environ['EXPECTED_FULL_BYTES'])
+          assert sha(full) == os.environ['EXPECTED_FULL_SHA']
+          assert update.stat().st_size == int(os.environ['EXPECTED_UPDATE_BYTES'])
+          assert sha(update) == os.environ['EXPECTED_UPDATE_SHA']
+          manifest=json.loads((runtime/'release-manifest.json').read_text(encoding='utf-8'))
+          assert manifest['version']=='2.8.6' and manifest['target_schema']==14
+          print('P04_V286_FORMAL_IDENTITY_EXACT=PASS')
+          PY
+          cp "$RUNNER_TEMP/v286-update/VF_Infra_V2.8.6_UPDATE.zip" "$RUNNER_TEMP/v286-formal/"
+          cp "$RUNNER_TEMP/v286-update/PACKAGE_MANIFEST.json" "$RUNNER_TEMP/v286-formal/"
+
+      - name: Create exact tag and GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TAG="v$TARGET_VERSION"
+          if gh api "repos/$SOURCE_REPOSITORY/git/ref/tags/$TAG" >/tmp/tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/tag.json)" = "$SOURCE_COMMIT"
+          else
+            gh api --method POST "repos/$SOURCE_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SOURCE_COMMIT" >/tmp/tag.json
+          fi
+          if gh api "repos/$SOURCE_REPOSITORY/releases/tags/$TAG" >/tmp/release.json 2>/dev/null; then
+            test "$(jq -r '.target_commitish' /tmp/release.json)" = "$SOURCE_COMMIT"
+          else
+            cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          VF Infra V2.8.6 maintenance release.
+
+          - 修复“重新检查系统”点击后缺少即时反馈、结果容易被刷新覆盖的问题；现在会显示执行状态并保留诊断结果。
+          - 修复设置页“时区 / 默认币种”下拉框纵向错位。
+          - 将“自动任务”调整为更适合个人使用的“后台自动任务”表达，明确日常无需手动操作。
+          - 修复当前 V2.8.x `data-v271-action` 与既有长耗时反馈层 `data-action` 的兼容桥，恢复 Busy / 防重复点击保护。
+          - Schema 继续为 14，无 Migration；Provider Authority 继续 READ_ONLY_FIRST。
+          - Exact Tested Product Source: d98c2bc9281f259b6ba9f90855b01e42b73eabb3
+          EOF
+            gh release create "$TAG" --repo "$SOURCE_REPOSITORY" --target "$SOURCE_COMMIT" --title "VF Infra V2.8.6" --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh api "repos/$SOURCE_REPOSITORY/releases/tags/$TAG" > /tmp/release.json
+          fi
+          RELEASE_ID=$(jq -r '.id' /tmp/release.json)
+          test -n "$RELEASE_ID" && test "$RELEASE_ID" != null
+          echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          echo "RELEASED_AT=$(jq -r '.published_at' /tmp/release.json)" >> "$GITHUB_ENV"
+
+      - name: Upload exact assets and remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TAG="v$TARGET_VERSION"
+          cd "$RUNNER_TEMP/v286-formal"
+          EXISTING=$(gh api "repos/$SOURCE_REPOSITORY/releases/$RELEASE_ID/assets")
+          for name in VF_Infra_V2.8.6_FULL.zip VF_Infra_V2.8.6_UPDATE.zip; do
+            if echo "$EXISTING" | jq -e --arg n "$name" '.[]|select(.name==$n)' >/dev/null; then
+              echo "EXISTING_ASSET_UNEXPECTED=$name" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" VF_Infra_V2.8.6_FULL.zip VF_Infra_V2.8.6_UPDATE.zip --repo "$SOURCE_REPOSITORY"
+          ASSETS=$(gh api "repos/$SOURCE_REPOSITORY/releases/$RELEASE_ID/assets")
+          FULL_ID=$(echo "$ASSETS" | jq -r '.[]|select(.name=="VF_Infra_V2.8.6_FULL.zip")|.id')
+          UPDATE_ID=$(echo "$ASSETS" | jq -r '.[]|select(.name=="VF_Infra_V2.8.6_UPDATE.zip")|.id')
+          test -n "$FULL_ID"; test -n "$UPDATE_ID"
+          test "$(echo "$ASSETS" | jq -r '.[]|select(.name=="VF_Infra_V2.8.6_FULL.zip")|.size')" = "$EXPECTED_FULL_BYTES"
+          test "$(echo "$ASSETS" | jq -r '.[]|select(.name=="VF_Infra_V2.8.6_UPDATE.zip")|.size')" = "$EXPECTED_UPDATE_BYTES"
+          mkdir -p "$RUNNER_TEMP/v286-readback"
+          cd "$RUNNER_TEMP/v286-readback"
+          gh release download "$TAG" --repo "$SOURCE_REPOSITORY" --pattern 'VF_Infra_V2.8.6_*.zip'
+          echo "$EXPECTED_FULL_SHA  VF_Infra_V2.8.6_FULL.zip" | sha256sum -c -
+          echo "$EXPECTED_UPDATE_SHA  VF_Infra_V2.8.6_UPDATE.zip" | sha256sum -c -
+          echo "FULL_ASSET_ID=$FULL_ID" >> "$GITHUB_ENV"
+          echo "UPDATE_ASSET_ID=$UPDATE_ID" >> "$GITHUB_ENV"
+          echo 'FORMAL_REMOTE_ASSET_READBACK=PASS'
+
+      - name: Publish core-updates P04 manifest
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ env.GH_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: updates
+
+      - name: Commit core-updates V2.8.6
+        working-directory: updates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os
+          p=Path('projects/P04.json')
+          d=json.loads(p.read_text(encoding='utf-8'))
+          assert d['project_id']=='P04' and d['target_version']=='2.8.5'
+          d.update({
+            'target_version':'2.8.6',
+            'from_versions':['2.7.9','2.8.0','2.8.1','2.8.2','2.8.3','2.8.4','2.8.5'],
+            'release_tag':'v2.8.6',
+            'release_name':'VF Infra V2.8.6',
+            'release_id':int(os.environ['RELEASE_ID']),
+            'release_product_commit':os.environ['SOURCE_COMMIT'],
+            'release_product_tree':os.environ['SOURCE_TREE'],
+            'asset_name':'VF_Infra_V2.8.6_UPDATE.zip',
+            'asset_id':int(os.environ['UPDATE_ASSET_ID']),
+            'asset_bytes':int(os.environ['EXPECTED_UPDATE_BYTES']),
+            'asset_sha256':os.environ['EXPECTED_UPDATE_SHA'],
+            'released_at':os.environ['RELEASED_AT'],
+            'notes':'V2.8.6 修复 Production 真实使用发现的诊断按钮反馈/结果保留、设置时区与默认币种对齐、后台自动任务文案，以及当前 data-v271-action 与长耗时反馈层的兼容桥。Schema 继续为 14，无 Migration；Provider 继续 READ-ONLY FIRST。正式 Atomic UPDATE 支持 V2.7.9、V2.8.0、V2.8.1、V2.8.2、V2.8.3、V2.8.4、V2.8.5 → V2.8.6。'
+          })
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          python3 -m json.tool projects/P04.json >/dev/null
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add projects/P04.json
+          git commit -m 'release(P04): publish VF Infra V2.8.6'
+          git push origin HEAD:main
+          echo "CORE_UPDATES_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Core-updates remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C updates fetch origin main
+          test "$(git -C updates rev-parse origin/main)" = "$CORE_UPDATES_COMMIT"
+          git -C updates show origin/main:projects/P04.json > "$GITHUB_WORKSPACE/evidence/P04.json"
+          jq -e --arg c "$SOURCE_COMMIT" --arg sha "$EXPECTED_UPDATE_SHA" --argjson rid "$RELEASE_ID" --argjson aid "$UPDATE_ASSET_ID" '.target_version=="2.8.6" and .release_product_commit==$c and .release_id==$rid and .asset_id==$aid and .asset_sha256==$sha and .from_versions==["2.7.9","2.8.0","2.8.1","2.8.2","2.8.3","2.8.4","2.8.5"]' "$GITHUB_WORKSPACE/evidence/P04.json" >/dev/null
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v$TARGET_VERSION" > "$GITHUB_WORKSPACE/evidence/release.json"
+          gh api "repos/$SOURCE_REPOSITORY/git/ref/tags/v$TARGET_VERSION" > "$GITHUB_WORKSPACE/evidence/tag.json"
+          echo "FORMAL_RELEASE=PASS" | tee "$GITHUB_WORKSPACE/evidence/result.txt"
+          echo "CORE_UPDATES=PASS" | tee -a "$GITHUB_WORKSPACE/evidence/result.txt"
+          echo "PRODUCTION_WRITE=0" | tee -a "$GITHUB_WORKSPACE/evidence/result.txt"
+
+      - name: Upload formal evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.6-FORMAL-RELEASE-EVIDENCE
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
