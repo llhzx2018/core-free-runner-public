@@ -1,0 +1,313 @@
+name: P01 VF Start V2.21.22 Admin Consolidation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'requests/p01-v22122-admin-consolidation-*.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p01-v22122-admin-consolidation
+  cancel-in-progress: false
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  BRANCH: maintenance/admin-consolidation-2.21.22-20260820
+  BASE_COMMIT: 0b62c96b787e03b0dda6ef8493d29755b6baf83e
+  VERSION: '2.21.22'
+
+jobs:
+  engineer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout maintenance branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --branch "$BRANCH" "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.21.21'
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = '2.21.21'
+          git -C product merge-base --is-ancestor "$BASE_COMMIT" HEAD
+
+      - name: Apply full backend consolidation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('product')
+
+          def replace(path, old, new, count=1):
+              p=root/path
+              s=p.read_text(encoding='utf-8')
+              if s.count(old) < count:
+                  raise SystemExit(f'anchor missing: {path}: {old[:80]!r}')
+              s=s.replace(old,new,count)
+              p.write_text(s,encoding='utf-8',newline='\n')
+
+          # 1) Sidebar: only URL management keeps task-level children.
+          replace(Path('src/app/AdminShell.php'), """        ['key'=>'data','label'=>'备份与恢复','href'=>'data-safety.php#backups','icon'=>'recovery','children'=>[
+            ['href'=>'data-safety.php#backups','label'=>'SQLite 备份'],
+            ['href'=>'data-safety.php#disaster','label'=>'完整恢复'],
+        ]],
+        ['key'=>'settings','label'=>'设置','href'=>'settings.php','icon'=>'settings','children'=>[
+            ['href'=>'settings.php#brand','label'=>'基础与品牌'],
+            ['href'=>'settings.php#display','label'=>'显示与分页'],
+            ['href'=>'settings.php#home','label'=>'首页'],
+            ['href'=>'settings.php#seo','label'=>'公开与 SEO'],
+            ['href'=>'settings.php#account','label'=>'管理员账号'],
+            ['href'=>'workbench.php?route=rss','label'=>'RSS 订阅'],
+            ['href'=>'system.php','label'=>'系统状态'],
+        ]],""", """        ['key'=>'data','label'=>'备份与恢复','href'=>'data-safety.php','icon'=>'recovery','children'=>[]],
+        ['key'=>'settings','label'=>'设置','href'=>'settings.php','icon'=>'settings','children'=>[]],""")
+          replace(Path('src/app/AdminShell.php'), """<link rel="stylesheet" href="<?=htmlspecialchars(vf_admin_asset_url('assets/reference-ui.css'),ENT_QUOTES,'UTF-8')?>">
+<?= $headHtml ?>""", """<link rel="stylesheet" href="<?=htmlspecialchars(vf_admin_asset_url('assets/reference-ui.css'),ENT_QUOTES,'UTF-8')?>">
+<link rel="stylesheet" href="<?=htmlspecialchars(vf_admin_asset_url('assets/admin-consolidation.css'),ENT_QUOTES,'UTF-8')?>">
+<?= $headHtml ?>""")
+          replace(Path('src/app/AdminShell.php'), """<script src="<?=htmlspecialchars(vf_admin_asset_url('assets/reference-ui.js'),ENT_QUOTES,'UTF-8')?>" defer></script>
+</head>""", """<script src="<?=htmlspecialchars(vf_admin_asset_url('assets/reference-ui.js'),ENT_QUOTES,'UTF-8')?>" defer></script>
+<script src="<?=htmlspecialchars(vf_admin_asset_url('assets/admin-consolidation.js'),ENT_QUOTES,'UTF-8')?>" defer></script>
+</head>""")
+
+          # 2) URL list template: select-current-page belongs in the selection column header.
+          replace(Path('src/links-admin.php'), """      <select id="categoryFilter"><option value="">全部分类</option></select>
+      <label class="btn"><input id="selectPage" type="checkbox"> 选择本页</label>""", """      <select id="categoryFilter"><option value="">全部分类</option></select>
+      <label class="btn vf-select-page-mobile"><input id="selectPageMobile" type="checkbox"> 选择本页</label>""")
+          replace(Path('src/links-admin.php'), """<div class="table-wrap"><table class="vf-links-table"><thead><tr><th class="vf-links-select-col"></th><th>网址</th>""", """<div class="table-wrap"><table class="vf-links-table"><thead><tr><th class="vf-links-select-col"><label class="vf-select-page" title="选择本页"><input id="selectPage" type="checkbox" aria-label="选择本页"><span class="vf-visually-hidden">选择本页</span></label></th><th>网址</th>""")
+          replace(Path('src/links-admin.php'), "assets/links-admin.js?v=22121", "assets/links-admin.js?v=22122")
+
+          # 3) Backup + recovery: one page, daily task first, rare recovery/migration lower.
+          data_safety = r'''<?php
+declare(strict_types=1);
+require __DIR__ . '/app/bootstrap.php';
+vf_security_headers(true);
+header('X-Robots-Tag: noindex, nofollow, noarchive');
+header('Cache-Control: no-store, private');
+if (!vf_is_installed()) { header('Location: setup.php'); exit; }
+if (!vf_is_admin()) { header('Location: ./'); exit; }
+$csrf=vf_csrf_token();
+require_once __DIR__.'/app/AdminShell.php';
+vf_admin_shell_begin([
+    'title'=>'备份与恢复',
+    'description'=>'日常备份、完整恢复和旧站迁移集中在这一页；常用操作在前，低频恢复工具在后。',
+    'group'=>'data',
+    'eyebrow'=>'',
+    'csrf'=>$csrf,
+    'actions'=>'',
+]);
+?>
+<div class="summary" id="summary"></div>
+<section class="card vf-data-section" id="backups">
+  <div class="card-head"><div><h2>SQLite 备份</h2><p>自动备份默认开启；需要时可以手动创建、下载、上传、校验或恢复。</p></div></div>
+  <div class="backup-policy" id="backupPolicy"><label class="backup-switch"><input type="checkbox" id="autoBackupEnabled"><span>启用自动备份</span></label><label><span>间隔（小时）</span><input type="number" id="autoBackupInterval" min="1" max="720" value="24"></label><label><span>保留天数</span><input type="number" id="backupRetentionDays" min="1" max="3650" value="30"></label><label><span>至少保留</span><input type="number" id="backupKeepRecent" min="1" max="1000" value="10"></label><button class="btn policy-save" id="saveBackupPolicy">保存设置</button></div>
+  <div class="toolbar"><div><strong>备份列表</strong><div class="muted" id="backupPolicyStatus">自动备份设置加载中…</div></div><div class="actions"><button class="btn primary" id="createBackup2">创建手动备份</button><label class="btn file">上传备份<input type="file" id="uploadBackup" accept=".sqlite,.sqlite3,.db,application/vnd.sqlite3"></label></div></div>
+  <div id="backupsList"><div id="backups"></div></div>
+  <div class="vf-list-pager" data-vf-pager-for="backups" hidden><span data-vf-page-info></span><div><button class="btn" type="button" data-vf-prev>上一页</button><button class="btn" type="button" data-vf-next>下一页</button></div></div>
+</section>
+<section class="card vf-data-section" id="disaster">
+  <div class="toolbar"><div><strong>完整恢复</strong><div class="muted">服务器故障或整站迁移时使用。这里直接管理完整恢复包，不再单独拆一个菜单。</div></div><div class="actions"><label class="btn file">上传恢复包<input type="file" id="uploadDisaster" accept=".gz,.tgz,application/gzip"></label><button class="btn primary" id="createDisaster">创建完整恢复包</button></div></div>
+  <div id="disasterPackages"></div>
+  <div class="vf-list-pager" data-vf-pager-for="disasterPackages" hidden><span data-vf-page-info></span><div><button class="btn" type="button" data-vf-prev>上一页</button><button class="btn" type="button" data-vf-next>下一页</button></div></div>
+</section>
+<details class="advanced-box vf-data-advanced" id="migration"><summary>旧站迁移与数据库记录</summary>
+  <div class="card migration-card">
+    <div class="card-head"><div class="migration-title"><span class="migration-icon">↥</span><div><h2>从旧 VF Start 迁移</h2><p>选择旧站 SQLite 备份。系统会先校验，再显示网址和分类数量，确认后才替换数据。</p></div></div><label class="btn primary file">选择旧站备份<input type="file" id="quickMigrationFile" accept=".sqlite,.sqlite3,.db,application/vnd.sqlite3"></label></div>
+    <div class="migration-status" id="quickMigrationStatus">还没有选择文件。迁移不会覆盖当前域名、管理员密码和服务器配置。</div>
+  </div>
+  <div class="card vf-migration-details-card"><div class="card-head"><div><h2>数据库 migration</h2><p>仅用于故障排查，日常无需查看。</p></div><button class="btn small" data-refresh>重新检查</button></div><div id="migrations"></div></div>
+</details>
+<div class="modal" id="modal"><div class="dialog"><h2 id="modalTitle"></h2><div id="modalBody"></div><div class="dialog-actions"><button class="btn" id="modalCancel">取消</button><button class="btn primary" id="modalConfirm">确认</button></div></div></div><div class="toast" id="toast"></div>
+<?php vf_admin_shell_end(['assets/data-recovery.js?v=22122']); ?>
+'''
+          (root/'src/data-safety.php').write_text(data_safety,encoding='utf-8',newline='\n')
+
+          # 4) Settings: one long-form page; low-frequency tools become in-page links, not sidebar children.
+          replace(Path('src/settings.php'), "'description'=>'只保留全站长期配置：品牌、显示、首页、公开 SEO 和管理员账号。插件、浏览器助手、更新都有独立入口。',", "'description'=>'品牌、显示、首页、公开 SEO 和管理员账号集中在这一页；低频维护入口放在页面底部。',")
+          marker='''    <div class="vf-settings-savebar"><span id="settingsState">正在读取当前设置…</span><button class="btn primary" id="saveSettings" type="submit" disabled>保存设置</button></div>'''
+          maintenance='''    <section class="vf-settings-section vf-settings-surface" id="maintenance" data-panel="maintenance">
+      <div class="vf-settings-intro"><h2>维护与扩展</h2><p>这些不是日常设置，不占左侧菜单；需要时从这里进入。</p></div>
+      <div class="vf-settings-link-grid">
+        <a class="vf-settings-link-card" href="workbench.php?route=rss"><strong>RSS 订阅</strong><span>管理 RSS 扩展与订阅源。</span><b>打开</b></a>
+        <a class="vf-settings-link-card" href="system.php"><strong>系统状态</strong><span>检查数据库、备份、目录、隐私与维护状态。</span><b>打开</b></a>
+      </div>
+    </section>
+
+'''+marker
+          replace(Path('src/settings.php'), marker, maintenance)
+          replace(Path('src/settings.php'), "assets/settings-admin.js?v=22114", "assets/settings-admin.js?v=22122")
+
+          # Plugin workspaces visually belong to Settings now that Plugins/RSS are not top-level modules.
+          replace(Path('src/workbench.php'), "'group' => 'plugins',", "'group' => 'settings',")
+          replace(Path('src/workbench.php'), "'eyebrow' => '插件',", "'eyebrow' => '设置',")
+          replace(Path('src/workbench.php'), "'nav_children' => $navChildren,", "'nav_children' => [],")
+
+          # 5) Shared polish + backup pagination + mobile select-page mirror.
+          css=r'''
+/* V2.21.22 backend consolidation: one task per page, no pseudo-submenus. */
+.vf-visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+body[data-vf-page="links-admin"] .vf-links-select-col{width:44px!important;min-width:44px!important;padding:0!important;text-align:center!important}
+body[data-vf-page="links-admin"] .vf-select-page{width:100%;min-height:38px;display:grid;place-items:center;cursor:pointer}
+body[data-vf-page="links-admin"] .vf-select-page input{width:16px;height:16px;margin:0}
+body[data-vf-page="links-admin"] .vf-select-page-mobile{display:none!important}
+body[data-vf-page="data-safety"] .vf-data-section{display:block!important;margin-bottom:12px!important}
+body[data-vf-page="data-safety"] .vf-data-advanced{margin-top:12px}
+body[data-vf-page="data-safety"] .vf-data-advanced>summary{cursor:pointer;color:var(--vf-admin-text);font-size:12.5px;font-weight:680}
+.vf-list-pager{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;color:var(--vf-admin-muted);font-size:11.5px}
+.vf-list-pager>div{display:flex;gap:6px}
+.vf-settings-link-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.vf-settings-link-card{position:relative;display:grid;gap:4px;min-height:92px;padding:14px 42px 14px 14px;border:1px solid var(--vf-admin-border);border-radius:9px;background:var(--vf-admin-surface);color:inherit;text-decoration:none}
+.vf-settings-link-card:hover{background:var(--vf-admin-surface-soft);border-color:var(--vf-admin-border-strong)}
+.vf-settings-link-card strong{color:var(--vf-admin-strong);font-size:13px}
+.vf-settings-link-card span{color:var(--vf-admin-muted);font-size:11.5px;line-height:1.5}
+.vf-settings-link-card b{position:absolute;right:14px;top:14px;color:var(--vf-admin-primary);font-size:11px}
+@media(max-width:768px){
+  body[data-vf-page="links-admin"] .vf-select-page-mobile{display:inline-flex!important;align-items:center;justify-content:flex-start;gap:7px}
+  .vf-settings-link-grid{grid-template-columns:1fr}
+  .vf-list-pager{align-items:flex-start;flex-direction:column}
+}
+'''.lstrip()
+          (root/'src/assets/admin-consolidation.css').write_text(css,encoding='utf-8',newline='\n')
+
+          js=r'''(()=>{'use strict';
+function setupSelectPageMirror(){
+  const main=document.getElementById('selectPage');
+  const mobile=document.getElementById('selectPageMobile');
+  if(!main||!mobile)return;
+  const sync=()=>{mobile.checked=main.checked;mobile.indeterminate=main.indeterminate;};
+  mobile.addEventListener('change',()=>{main.checked=mobile.checked;main.indeterminate=false;main.dispatchEvent(new Event('change',{bubbles:true}));sync();});
+  main.addEventListener('change',()=>setTimeout(sync,0));
+  const body=document.getElementById('linksBody');
+  if(body)new MutationObserver(()=>queueMicrotask(sync)).observe(body,{childList:true,subtree:true});
+  sync();
+}
+function setupPager(boxId,pageSize=10){
+  const box=document.getElementById(boxId);
+  const pager=document.querySelector('[data-vf-pager-for="'+boxId+'"]');
+  if(!box||!pager)return;
+  const info=pager.querySelector('[data-vf-page-info]');
+  const prev=pager.querySelector('[data-vf-prev]');
+  const next=pager.querySelector('[data-vf-next]');
+  let page=1;
+  function items(){return [...box.querySelectorAll('.backup-list > .backup-item')];}
+  function render(reset=false){
+    const rows=items();
+    if(reset)page=1;
+    const pages=Math.max(1,Math.ceil(rows.length/pageSize));
+    page=Math.min(Math.max(1,page),pages);
+    const start=(page-1)*pageSize,end=start+pageSize;
+    rows.forEach((row,i)=>row.hidden=i<start||i>=end);
+    pager.hidden=rows.length<=pageSize;
+    if(info)info.textContent='第 '+page+' / '+pages+' 页 · '+rows.length+' 条';
+    if(prev)prev.disabled=page<=1;
+    if(next)next.disabled=page>=pages;
+  }
+  prev?.addEventListener('click',()=>{page--;render();});
+  next?.addEventListener('click',()=>{page++;render();});
+  let scheduled=false;
+  new MutationObserver(()=>{if(scheduled)return;scheduled=true;queueMicrotask(()=>{scheduled=false;render(true);});}).observe(box,{childList:true,subtree:true});
+  render(true);
+}
+document.addEventListener('DOMContentLoaded',()=>{
+  setupSelectPageMirror();
+  setupPager('backups',10);
+  setupPager('disasterPackages',10);
+});
+})();
+'''
+          (root/'src/assets/admin-consolidation.js').write_text(js,encoding='utf-8',newline='\n')
+
+          # 6) Maintenance version identity.
+          (root/'VERSION').write_text('2.21.22\n',encoding='utf-8')
+          (root/'src/VERSION.txt').write_text('2.21.22\n',encoding='utf-8')
+          replace(Path('src/app/bootstrap.php'), "define('VF_VERSION', '2.21.21');", "define('VF_VERSION', '2.21.22');")
+
+          changelog=root/'src/CHANGELOG.md'
+          old=changelog.read_text(encoding='utf-8')
+          entry='''# VF Start V2.21.22\n\n- 后台导航继续收口：备份与恢复、设置取消伪二级菜单；网址工作区仅保留真正需要快速切换的任务入口。\n- 网址列表“选择本页”从筛选工具栏移到表格选择列头，避免在中等桌面宽度换行错位；移动端保留独立选择本页入口。\n- 备份与恢复改为单页完成 SQLite 备份、完整恢复和旧站迁移；SQLite 备份与完整恢复包均增加客户端分页。\n- 设置页保持品牌、显示、首页、SEO、管理员账号纵向单页；RSS 与系统状态降为页面底部低频维护入口。\n- Schema 2026080902 不变；Browser Helper 1.6.4 不变；不改用户业务数据。\n\n'''
+          if not old.startswith('# VF Start V2.21.22'):
+              changelog.write_text(entry+old,encoding='utf-8',newline='\n')
+          PY
+
+      - name: Static and syntax gates
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Verify candidate source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < product/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = "$VERSION"
+          grep -Fq "define('VF_VERSION', '2.21.22');" product/src/app/bootstrap.php
+          grep -Fq "['key'=>'data','label'=>'备份与恢复','href'=>'data-safety.php','icon'=>'recovery','children'=>[]]" product/src/app/AdminShell.php
+          grep -Fq "['key'=>'settings','label'=>'设置','href'=>'settings.php','icon'=>'settings','children'=>[]]" product/src/app/AdminShell.php
+          ! grep -Fq "data-safety.php#backups" product/src/app/AdminShell.php
+          ! grep -Fq "settings.php#brand" product/src/app/AdminShell.php
+          grep -Fq 'id="selectPage" type="checkbox" aria-label="选择本页"' product/src/links-admin.php
+          grep -Fq 'data-vf-pager-for="backups"' product/src/data-safety.php
+          grep -Fq 'data-vf-pager-for="disasterPackages"' product/src/data-safety.php
+          ! grep -Fq 'data-data-panel=' product/src/data-safety.php
+          grep -Fq '维护与扩展' product/src/settings.php
+          grep -Fq "'group' => 'settings'" product/src/workbench.php
+          node --check product/src/assets/admin-consolidation.js
+          git -C product diff --check
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find product/src -type f -name '*.php' -print0)
+          echo 'P01_V22122_STATIC_GATE=PASS'
+
+      - name: Commit candidate source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product config user.name VictorForge
+          git -C product config user.email llhzx2018@gmail.com
+          git -C product add VERSION src
+          git -C product commit -m 'fix(P01): consolidate admin workflows for V2.21.22'
+          git -C product push origin HEAD:"$BRANCH"
+          echo "CANDIDATE_SHA=$(git -C product rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "CANDIDATE_TREE=$(git -C product rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+
+      - name: Publish engineering evidence
+        env:
+          OPS_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib
+          q={
+            'schema':'vf-public-runner-result/v1','project_id':'P01','gate':'V2.21.22_ADMIN_CONSOLIDATION_ENGINEERING',
+            'status':'SUCCESS','pass':True,'version':'2.21.22','base_version':'2.21.21',
+            'base_commit':os.environ['BASE_COMMIT'],'candidate_sha':os.environ['CANDIDATE_SHA'],'candidate_tree':os.environ['CANDIDATE_TREE'],
+            'sidebar':{'links_children':'KEPT','backup_children':'REMOVED','settings_children':'REMOVED'},
+            'select_page_header':True,'backup_pagination':True,'disaster_pagination':True,
+            'backup_restore_single_page':True,'settings_single_page':True,'rss_system_low_frequency_links':True,
+            'schema_changed':False,'browser_helper_changed':False,'production_changed':False,
+            'workflow_run_id':os.environ['GITHUB_RUN_ID']
+          }
+          pathlib.Path('/tmp/evidence.json').write_text(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${OPS_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" evidence
+          mkdir -p evidence/vf-agent/results
+          cp /tmp/evidence.json evidence/vf-agent/results/P01-V2.21.22-ADMIN-CONSOLIDATION-ENGINEERING.json
+          git -C evidence config user.name VictorForge
+          git -C evidence config user.email llhzx2018@gmail.com
+          git -C evidence add vf-agent/results/P01-V2.21.22-ADMIN-CONSOLIDATION-ENGINEERING.json
+          git -C evidence commit -q -m 'evidence(P01): V2.21.22 admin consolidation engineering'
+          git -C evidence push -q origin HEAD:vf-agent-operations-v1
