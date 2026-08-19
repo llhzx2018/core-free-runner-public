@@ -1,0 +1,120 @@
+name: P01 Favorite Star Affordance Patch
+
+on:
+  pull_request:
+    paths:
+      - 'requests/p01-v22122-favorite-affordance-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v22122-favorite-affordance-write
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: startsWith(github.head_ref, 'agent/p01-v22122-favorite-affordance-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: maintenance/admin-consolidation-2.21.22-20260820
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN"
+
+      - name: Clone current maintenance source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --branch "$PRODUCT_BRANCH" "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          test -f product/src/assets/favorite-affordance.css
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.21.21'
+          test "$(tr -d '\r\n' < product/src/VERSION.txt)" = '2.21.21'
+
+      - name: Patch visible favorite interaction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('product/src/index.php')
+          s=p.read_text(encoding='utf-8')
+          def once(old,new,label):
+              global s
+              n=s.count(old)
+              if n!=1:
+                  raise SystemExit(f'{label}: expected 1 anchor, got {n}')
+              s=s.replace(old,new,1)
+
+          once('''  <link rel="stylesheet" href="assets/frontend.css?v=22114">\n  <link rel="stylesheet" href="assets/reference-ui.css?v=22119">''','''  <link rel="stylesheet" href="assets/frontend.css?v=22114">\n  <link rel="stylesheet" href="assets/favorite-affordance.css?v=22122">\n  <link rel="stylesheet" href="assets/reference-ui.css?v=22119">''','favorite css load')
+
+          anchor='''function linkCardMarkup(link) {'''
+          helper='''function favoriteToggleMarkup(link,kind) {\n  if(!(state.site&&state.site.auth)||state.batchMode||Number(link.is_pending||0)===1)return '';\n  var active=Number(link.is_favorite)===1,label=active?'取消收藏':'收藏';\n  return '<button class="favorite-toggle '+(active?'active ':'')+(kind==='card'?'card-favorite-btn':'list-favorite-btn')+'" type="button" data-favorite-toggle="'+link.id+'" aria-pressed="'+(active?'true':'false')+'" aria-label="'+label+'" title="'+label+'">'+icon('star',17)+'</button>';\n}\nfunction linkCardMarkup(link) {'''
+          once(anchor,helper,'favorite helper')
+
+          once('''((state.site&&state.site.auth)?'<button class="card-menu-btn" data-link-menu="'+link.id+'" aria-label="网址操作">'+icon('more',17)+'</button>':'')''','''((state.site&&state.site.auth)?'<span class="card-actions">'+favoriteToggleMarkup(link,'card')+'<button class="card-menu-btn" data-link-menu="'+link.id+'" aria-label="网址操作">'+icon('more',17)+'</button></span>':'')''','grid favorite action')
+
+          once('''((state.site&&state.site.auth)?'<button class="list-action" data-link-menu="'+link.id+'" aria-label="网址操作">'+icon('more',17)+'</button>':'<span class="list-action">'+icon('external',16)+'</span>')''','''((state.site&&state.site.auth)?'<span class="link-row-actions">'+favoriteToggleMarkup(link,'list')+'<button class="list-action" data-link-menu="'+link.id+'" aria-label="网址操作">'+icon('more',17)+'</button></span>':'<span class="list-action">'+icon('external',16)+'</span>')''','list favorite action')
+
+          old='''  $$('[data-link-menu]').forEach(function (node) { node.addEventListener('click',function (event) { event.stopPropagation(); openLinkContextMenu(Number(node.getAttribute('data-link-menu')),node); }); });'''
+          new='''  $$('[data-favorite-toggle]').forEach(function(button){button.addEventListener('click',async function(event){event.preventDefault();event.stopPropagation();var id=Number(button.getAttribute('data-favorite-toggle')),link=state.links.find(function(item){return Number(item.id)===id;});if(!link)return;var favorite=Number(link.is_favorite)!==1;button.disabled=true;try{preserveCurrentPosition();await api('favorite',{method:'POST',body:{id:id,favorite:favorite}});await load(false);toast(favorite?'已加入收藏':'已取消收藏');}catch(error){button.disabled=false;toast(error.message,'error');}});});\n'''+old
+          once(old,new,'favorite wire')
+
+          replacements=[
+            ("+(Number(link.is_favorite)?'取消收藏':'固定到首页')+", "+(Number(link.is_favorite)?'取消收藏':'收藏')+", 'context wording'),
+            ("if (state.mode === 'favorite') return {title:'我的收藏',description:'固定在首页和搜索结果前列的常用网址。'", "if (state.mode === 'favorite') return {title:'我的收藏',description:'点击网址旁的星星即可收藏或取消；收藏的网址会优先进入首页常用入口。'", 'favorite description'),
+            ("note='把常用网址固定到首页后，会同时集中显示在这里。';", "note='点击任一网址右侧的 ☆ 即可收藏；收藏后会集中显示在这里。';", 'favorite empty'),
+            ("var quickNote = favorites.length ? '固定在首页的常用网址，拖动可调整顺序。' : '根据打开次数和最近使用自动推荐。';", "var quickNote = favorites.length ? '收藏的网址会优先显示在这里，拖动可调整顺序。' : '根据打开次数和最近使用自动推荐。';", 'home note'),
+            ("<p>在网址菜单中固定到首页。</p>", "<p>点击网址旁的 ☆ 收藏常用网址。</p>", 'home empty'),
+            ("<summary><span>更多设置</span><small>图标、标签、备用网址、首页固定与待整理</small></summary>", "<summary><span>更多设置</span><small>图标、标签、备用网址、收藏与待整理</small></summary>", 'modal summary'),
+            ("> 固定到首页</label>", "> 收藏</label>", 'modal checkbox'),
+          ]
+          for old,new,label in replacements:
+              once(old,new,label)
+
+          p.write_text(s,encoding='utf-8',newline='\n')
+          PY
+
+      - name: Static checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l product/src/index.php >/dev/null
+          grep -Fq 'assets/favorite-affordance.css?v=22122' product/src/index.php
+          grep -Fq 'data-favorite-toggle=' product/src/index.php
+          grep -Fq "aria-label=\"'+label+'\"" product/src/index.php
+          grep -Fq "Number(link.is_favorite)?'取消收藏':'收藏'" product/src/index.php
+          ! grep -Fq "Number(link.is_favorite)?'取消收藏':'固定到首页'" product/src/index.php
+          grep -Fq '> 收藏</label>' product/src/index.php
+          node --check product/src/assets/admin-consolidation.js
+          git -C product diff --check
+          echo 'FAVORITE_AFFORDANCE_STATIC=PASS'
+
+      - name: Commit and push maintenance source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product config user.name VictorForge
+          git -C product config user.email llhzx2018@gmail.com
+          git -C product add src/index.php src/assets/favorite-affordance.css
+          if git -C product diff --cached --quiet; then
+            echo 'FAVORITE_PATCH_ALREADY_PRESENT=YES'
+          else
+            git -C product commit -m 'fix(P01): expose one-click favorite stars'
+            git -C product push origin HEAD:"$PRODUCT_BRANCH"
+          fi
+          echo "PRODUCT_SHA=$(git -C product rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "PRODUCT_TREE=$(git -C product rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "P01_FAVORITE_AFFORDANCE_WRITE=PASS"
+          echo "PRODUCT_SHA=$PRODUCT_SHA"
+          echo "PRODUCT_TREE=$PRODUCT_TREE"
