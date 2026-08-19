@@ -1,0 +1,157 @@
+name: P04 V2.8.6 Diagnostics Hotfix Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v286-diagnostics-hotfix-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_BRANCH: hotfix/v2.8.6-diagnostics-run
+      EXPECTED_HEAD: 7542c023234d37823d12ea839cbafc476ca57474
+      PUSH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout P04 hotfix branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_BRANCH }}
+          token: ${{ env.PUSH_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Setup runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3
+          ini-file: production
+
+      - name: Patch and verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PUSH_TOKEN"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('src/app/SystemDiagnosticsService.php')
+          s=p.read_text(encoding='utf-8')
+          needle="""        $pdo = Database::connection();
+                  $checks = [];
+                  $add = static function (string $key, string $label, string $status, string $detail, string $next = '') use (&$checks): void {
+          """
+          repl="""        $checks = [];
+                  $cron = [];
+                  $add = static function (string $key, string $label, string $status, string $detail, string $next = '') use (&$checks): void {
+          """
+          if s.count(needle)!=1: raise SystemExit('DIAGNOSTICS_OPEN_DRIFT')
+          s=s.replace(needle,repl,1)
+          marker="""        $add('php', 'PHP 运行环境',"""
+          if s.count(marker)!=1: raise SystemExit('DIAGNOSTICS_TRY_DRIFT')
+          s=s.replace(marker,"""        try {
+                      $pdo = Database::connection();
+          
+                  $add('php', 'PHP 运行环境',""",1)
+          summary="""        $summary = ['ok' => 0, 'warning' => 0, 'blocked' => 0];"""
+          if s.count(summary)!=1: raise SystemExit('DIAGNOSTICS_SUMMARY_DRIFT')
+          catch="""        } catch (Throwable $e) {
+                      $reference = Support::randomHex(6);
+                      error_log('[VF Infra][' . $reference . '] diagnostics: ' . Support::sanitizeError($e->getMessage()));
+                      $add('diagnostics_internal', '诊断执行完整性', 'blocked', '部分检查未完成 · 参考 ' . $reference, '请先处理已显示检查项；如持续出现，请使用参考编号定位服务器日志。');
+                  }
+          
+          """
+          s=s.replace(summary,catch+summary,1)
+          p.write_text(s,encoding='utf-8')
+
+          p=Path('public/assets/v284-long-action-feedback.js')
+          s=p.read_text(encoding='utf-8')
+          block="""    domain_check: {
+                title: '正在检查域名',
+                detail: '正在查询 RDAP，请勿重复点击。',
+                selectors: ['[data-action=\"check-domain\"]'],
+                clickedOnly: true,
+              },
+          """
+          if s.count(block)!=1: raise SystemExit('FEEDBACK_KNOWN_DRIFT')
+          s=s.replace(block,block+"""    diagnostics_run: {
+                title: '正在检查系统',
+                detail: '正在执行完整诊断，请稍候，不要重复点击。',
+                selectors: ['[data-v271-action=\"diagnostics-run\"]'],
+                clickedOnly: true,
+              },
+          """,1)
+          s=s.replace("    'check-domain': 'domain_check',\n", "    'check-domain': 'domain_check',\n    'diagnostics-run': 'diagnostics_run',\n",1)
+          s=s.replace("event.target.closest('[data-action]')", "event.target.closest('[data-action], [data-v271-action=\"diagnostics-run\"]')",1)
+          s=s.replace("String(button.dataset.action || '')", "String(button.dataset.action || button.dataset.v271Action || '')",1)
+          for required in ["diagnostics_run", "'diagnostics-run': 'diagnostics_run'", "button.dataset.v271Action"]:
+              if required not in s: raise SystemExit('FEEDBACK_PATCH_MISSING_'+required)
+          p.write_text(s,encoding='utf-8')
+
+          Path('VERSION').write_text('2.8.6\n',encoding='utf-8')
+          p=Path('CHANGELOG.md'); s=p.read_text(encoding='utf-8'); p.write_text("""## V2.8.6
+
+- 修复“重新检查系统”在诊断异常时看起来没有反应：单项异常不再让整块诊断退化为“未知 / 0”，已完成检查继续显示，并给出安全参考编号。
+- “重新检查系统”接入统一长耗时反馈：立即显示正在检查、等待秒数、Indeterminate Progress，并阻止重复点击。
+- Schema 14，无 Migration，无 Provider 写权限变化。
+
+"""+s,encoding='utf-8')
+          p=Path('docs/operations/package/RELEASE_NOTES.md'); s=p.read_text(encoding='utf-8'); p.write_text("""# VF Infra V2.8.6
+
+- 修复系统诊断手工重检无明显反馈与异常时整块结果被吞掉的问题。
+- 诊断异常改为 fail-partial：保留已完成检查，追加“诊断执行完整性”阻断项与安全参考编号。
+- 手工诊断接入 V2.8.4 Busy / 等待秒数 / Indeterminate Progress / 防重复提交合同。
+- 保留 V2.8.5 设置左侧主分栏、无右侧二级 TAB、数据管理与系统信息单页连续内容。
+- Schema 14，无 Migration，无 Provider 写权限变化。
+
+"""+s,encoding='utf-8')
+          p=Path('scripts/build-release-tree.py'); s=p.read_text(encoding='utf-8')
+          s=s.replace("'2.8.3','2.8.4','2.8.5'}", "'2.8.3','2.8.4','2.8.5','2.8.6'}",1)
+          note="""if version=='2.8.5':
+              version_note='V2.8.5 retains the primary Settings sidebar, removes only nested content tabs, combines Data Management and System Information subcontent into one continuous page per primary section, and resets async top-level routes after render so Provider opens at the page top without disrupting same-page refresh position.'
+          """
+          if note not in s: raise SystemExit('RELEASE_TREE_NOTE_DRIFT')
+          s=s.replace(note,"""if version=='2.8.6':
+              version_note='V2.8.6 makes System Diagnostics fail-partial instead of fail-silent and connects the manual diagnostics action to the established long-running-operation feedback contract; Schema remains 14 and Provider authority remains read-only first.'
+          elif version=='2.8.5':
+              version_note='V2.8.5 retains the primary Settings sidebar, removes only nested content tabs, combines Data Management and System Information subcontent into one continuous page per primary section, and resets async top-level routes after render so Provider opens at the page top without disrupting same-page refresh position.'
+          """,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+
+          test "$(cat VERSION)" = '2.8.6'
+          php -l src/app/SystemDiagnosticsService.php >/dev/null
+          node --check public/assets/v284-long-action-feedback.js
+          python3 -m py_compile scripts/build-release-tree.py
+          php -r '
+            class Database { public static function connection(){ throw new RuntimeException("forced diagnostic failure"); } }
+            class Support { public static function randomHex($b=8){ return "abc123def456"; } public static function sanitizeError($v){ return "sanitized"; } public static function now(){ return "2026-08-19 11:42:00"; } }
+            require "src/app/SystemDiagnosticsService.php";
+            $r=(new SystemDiagnosticsService())->run(true);
+            if(($r["status"]??"")!=="blocked" || ($r["summary"]["blocked"]??0)!==1 || ($r["checks"][0]["key"]??"")!=="diagnostics_internal") exit(2);
+            echo "V286_DIAGNOSTICS_FAIL_PARTIAL_PASS\n";
+          '
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo P04_V286_DIAGNOSTICS_HOTFIX_PASS
+          echo PRODUCTION_WRITE=0
+
+      - name: Commit tested hotfix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION CHANGELOG.md docs/operations/package/RELEASE_NOTES.md src/app/SystemDiagnosticsService.php public/assets/v284-long-action-feedback.js scripts/build-release-tree.py
+          git commit -m 'fix(P04): restore system diagnostics action feedback'
+          git push origin HEAD:"$SOURCE_BRANCH"
+          echo "P04_V286_TESTED_COMMIT=$(git rev-parse HEAD)"
+          echo PRODUCTION_WRITE=0
