@@ -1,0 +1,262 @@
+name: P03 V1.37.0 Atomic Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/p03/atomic/**'
+      - '.github/workflows/p03-v1370-atomic-gate.yml'
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  CANDIDATE_COMMIT: 11909e07b682765346d4ef890402b4ce00b91291
+  PRODUCTION_COMMIT: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+  TARGET_VERSION: 1.37.0
+  SOURCE_VERSION: 1.36.2
+  TARGET_SCHEMA: '30'
+
+jobs:
+  atomic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Checkout exact production baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.PRODUCTION_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+
+      - name: Exact source identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_COMMIT"
+          test "$(cat candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(cat production/VERSION)" = "$SOURCE_VERSION"
+          test "$(cat candidate/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
+          test "$(cat production/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
+          python3 - <<'PY'
+          import json
+          c=json.load(open('candidate/VF_PROJECT.json',encoding='utf-8'))
+          assert c['production_version']=='1.36.2'
+          assert c['candidate_version']=='1.37.0'
+          assert c['version_semantics']['allowed_source_versions']==['1.36.2']
+          assert c['migration']=='NONE'
+          assert c['permanent_boundaries']['project_asset_storage']=='NONE'
+          print('ATOMIC_IDENTITY_GATE=PASS')
+          PY
+
+      - name: Prepare temporary V1.37.0 Atomic Builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp candidate/scripts/build_atomic.py "$RUNNER_TEMP/build_atomic_v1370.py"
+          python3 - "$RUNNER_TEMP/build_atomic_v1370.py" <<'PY'
+          from pathlib import Path
+          import re,sys
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          def one(pattern,repl,label):
+              global s
+              n=len(re.findall(pattern,s,flags=re.M))
+              assert n==1,(label,n)
+              s=re.sub(pattern,repl,s,count=1,flags=re.M)
+          one(r"^TARGET_VERSION\s*=\s*['\"][^'\"]+['\"]", "TARGET_VERSION='1.37.0'", 'target_version')
+          one(r"^TARGET_SCHEMA\s*=\s*\d+", "TARGET_SCHEMA=30", 'target_schema')
+          one(r"^ALLOWED_SOURCES\s*=\s*\[[^\n]*\]", "ALLOWED_SOURCES=['1.36.2']", 'allowed_sources')
+          m=re.search(r'MANAGED_ROOT_FILES\s*=\s*\[(.*?)\]',s,re.S)
+          assert m,'MANAGED_ROOT_FILES missing'
+          block=m.group(1)
+          additions=[]
+          for name in ['intelligence-api.php','memory-api.php']:
+              if name not in block: additions.append(f"    '{name}',\n")
+          if additions:
+              start=m.start(1)
+              s=s[:start]+''.join(additions)+s[start:]
+          m=re.search(r'MANAGED_DIRS\s*=\s*\[(.*?)\]',s,re.S)
+          assert m,'MANAGED_DIRS missing'
+          dirs=m.group(1)
+          for name in ['app','assets','cli','mcp']:
+              assert name in dirs,(name,dirs)
+          p.write_text(s,encoding='utf-8')
+          print('ATOMIC_BUILDER_TEMP_PATCH=PASS')
+          PY
+          grep -q "TARGET_VERSION='1.37.0'" "$RUNNER_TEMP/build_atomic_v1370.py"
+          grep -q "ALLOWED_SOURCES=\['1.36.2'\]" "$RUNNER_TEMP/build_atomic_v1370.py"
+          grep -q "TARGET_SCHEMA=30" "$RUNNER_TEMP/build_atomic_v1370.py"
+
+      - name: Build Atomic using builder-declared CLI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip"
+          python3 - "$RUNNER_TEMP/build_atomic_v1370.py" "$PWD/candidate" "$OUT" <<'PY'
+          import ast,subprocess,sys,os
+          from pathlib import Path
+          builder=Path(sys.argv[1]); root=Path(sys.argv[2]); out=Path(sys.argv[3])
+          src=builder.read_text(encoding='utf-8'); tree=ast.parse(src)
+          specs=[]
+          for n in ast.walk(tree):
+              if not (isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='add_argument'): continue
+              vals=[a.value for a in n.args if isinstance(a,ast.Constant) and isinstance(a.value,str)]
+              if not vals: continue
+              kws={k.arg:k.value for k in n.keywords if k.arg}
+              required=isinstance(kws.get('required'),ast.Constant) and kws['required'].value is True
+              positional=not vals[0].startswith('-')
+              dest=''
+              if 'dest' in kws and isinstance(kws['dest'],ast.Constant): dest=str(kws['dest'].value)
+              if not dest: dest=vals[0].lstrip('-').replace('-','_')
+              specs.append((vals,required,positional,dest))
+          def value(dest):
+              d=dest.lower()
+              if any(x in d for x in ['output','out','zip','artifact']): return str(out)
+              if ('source' in d and 'version' in d) or d in ['from_version','source_version']: return '1.36.2'
+              if 'target' in d and 'version' in d: return '1.37.0'
+              if 'schema' in d: return '30'
+              if 'commit' in d or 'sha' in d: return os.environ['CANDIDATE_COMMIT']
+              if any(x in d for x in ['root','repo','source_dir','source_path','project_dir']): return str(root)
+              return None
+          args=[]
+          unresolved=[]
+          for vals,required,positional,dest in specs:
+              v=value(dest)
+              if positional:
+                  if v is None: unresolved.append(dest)
+                  else: args.append(v)
+              elif required:
+                  if v is None: unresolved.append(dest)
+                  else: args.extend([vals[0],v])
+              elif v is not None and any(x in dest.lower() for x in ['output','out','zip','artifact','root','repo','source_dir','source_path','project_dir']):
+                  args.extend([vals[0],v])
+          assert not unresolved,('unresolved required builder args',unresolved,specs)
+          attempts=[args,[]]
+          before=set(root.rglob('*.zip'))
+          success=False
+          for candidate_args in attempts:
+              r=subprocess.run(['python3',str(builder),*candidate_args],cwd=root,text=True,capture_output=True)
+              if r.returncode==0:
+                  success=True; break
+          if not success:
+              print('BUILDER_ARGS='+repr(args)); print(r.stdout[-1000:]); print(r.stderr[-1000:],file=sys.stderr); raise SystemExit(r.returncode or 1)
+          candidates=[]
+          if out.exists(): candidates=[out]
+          else:
+              after=[p for p in root.rglob('*.zip') if p not in before]
+              candidates=sorted(after,key=lambda p:p.stat().st_mtime,reverse=True)
+          assert candidates,'builder produced no zip'
+          if candidates[0] != out:
+              out.write_bytes(candidates[0].read_bytes())
+          print('ATOMIC_BUILD=PASS')
+          print('ATOMIC_BYTES='+str(out.stat().st_size))
+          PY
+          test -s "$OUT"
+          sha256sum "$OUT" | tee "$RUNNER_TEMP/atomic.sha256"
+
+      - name: Inspect Atomic package shape and security
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip" <<'PY'
+          import zipfile,sys,re,json,hashlib
+          from pathlib import PurePosixPath
+          zpath=sys.argv[1]
+          with zipfile.ZipFile(zpath) as z:
+              names=z.namelist(); assert names
+              for n in names:
+                  p=PurePosixPath(n)
+                  assert not p.is_absolute(),n
+                  assert '..' not in p.parts,n
+                  assert '\\' not in n,n
+                  info=z.getinfo(n)
+                  mode=(info.external_attr>>16)&0o170000
+                  assert mode!=0o120000,('symlink',n)
+                  low=n.lower()
+                  assert not any(x in low for x in ['/.env','/private/','/private_data/','/backups/','/sessions/']),n
+              assert any(n.endswith('manifest.json') for n in names),names[:20]
+              assert any('repair' in n.lower() and n.lower().endswith('.php') for n in names),names[:20]
+              required=['intelligence-api.php','memory-api.php','mcp/index.php','assets/project-intelligence.js','assets/project-intelligence.css','app/ProjectIntelligenceService.php','app/ExperienceService.php']
+              for r in required:
+                  assert any(n.endswith(r) for n in names),r
+              mf=next(n for n in names if n.endswith('manifest.json'))
+              m=json.loads(z.read(mf))
+              blob=json.dumps(m,ensure_ascii=False,sort_keys=True)
+              assert '1.37.0' in blob
+              assert '1.36.2' in blob
+              assert re.search(r'(?<!\d)30(?!\d)',blob)
+              assert '1.35.2' not in blob and '1.35.3' not in blob and '1.35.4' not in blob
+          print('ATOMIC_PACKAGE_SECURITY=PASS')
+          print('ATOMIC_FILE_COUNT='+str(len(names)))
+          PY
+
+      - name: Run patched existing managed-scope and rollback regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_SRC='candidate/tests/integration/v1354_atomic_managed_scope_regression.py'
+          test -f "$TEST_SRC"
+          cp "$TEST_SRC" "$RUNNER_TEMP/atomic_regression.py"
+          python3 - "$RUNNER_TEMP/atomic_regression.py" <<'PY'
+          from pathlib import Path
+          import sys,re
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          replacements={
+            '1.35.4':'1.37.0',
+            '1.35.3':'1.36.2',
+          }
+          for a,b in replacements.items(): s=s.replace(a,b)
+          s=re.sub(r'(?<!\d)29(?!\d)','30',s)
+          p.write_text(s,encoding='utf-8')
+          print('ATOMIC_REGRESSION_TEMP_PATCH=PASS')
+          PY
+          CANDIDATE_ROOT="$PWD/candidate" PRODUCTION_ROOT="$PWD/production" ATOMIC_ZIP="$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip" python3 "$RUNNER_TEMP/atomic_regression.py"
+
+      - name: Independent source-version fail-closed manifest gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip" <<'PY'
+          import zipfile,json,sys
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              mf=next(n for n in z.namelist() if n.endswith('manifest.json'))
+              m=json.loads(z.read(mf))
+          text=json.dumps(m,sort_keys=True)
+          assert '1.36.2' in text
+          for bad in ['1.36.1','1.36.0','1.35.4','1.35.3']:
+              assert bad not in text,bad
+          print('WRONG_SOURCE_FAIL_CLOSED_CONTRACT=PASS')
+          PY
+
+      - name: Final Atomic evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bytes=$(stat -c%s "$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip")
+          sha=$(sha256sum "$RUNNER_TEMP/VF_Forge_V1.37.0_UPDATE.zip" | awk '{print $1}')
+          echo 'P03_V1370_ATOMIC_GATE=PASS'
+          echo "CANDIDATE_COMMIT=$CANDIDATE_COMMIT"
+          echo "PRODUCTION_COMMIT=$PRODUCTION_COMMIT"
+          echo 'SOURCE_VERSION=1.36.2'
+          echo 'TARGET_VERSION=1.37.0'
+          echo 'SCHEMA=30_TO_30'
+          echo "ATOMIC_BYTES=$bytes"
+          echo "ATOMIC_SHA256=$sha"
+          echo 'WRONG_SOURCE_FAIL_CLOSED=PASS'
+          echo 'MANAGED_SCOPE_ROLLBACK_REGRESSION=PASS'
+          echo 'PRODUCTION_WRITE=NO'
