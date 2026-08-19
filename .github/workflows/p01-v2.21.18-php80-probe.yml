@@ -11,8 +11,9 @@ jobs:
     timeout-minutes: 15
     env:
       R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Rebuild and lint verbosely
+      - name: Rebuild exact repair and capture lint diagnostics
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -20,7 +21,57 @@ jobs:
           git clone -q --depth 1 --branch candidate/v2.21.18-20260819 "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" candidate
           git clone -q --depth 1 --branch main "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" production
           test "$(git -C candidate rev-parse HEAD)" = 'a501d2394502319b0af9caaf1c171bdf94940a9d'
-          OUT="$RUNNER_TEMP/p01-probe";mkdir -p "$OUT"
-          python3 runner/scripts/p01-build-maintenance-candidate-v22118.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit a501d2394502319b0af9caaf1c171bdf94940a9d --candidate-tree 6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca --production-commit 24c91ac9d76ac10780403bc2b326793c7c67c2ed
-          php -l "$OUT/repair-v2.21.18.php"
-          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -d display_errors=1 -l repair-v2.21.18.php
+          test "$(git -C candidate rev-parse HEAD^{tree})" = '6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca'
+          test "$(git -C production rev-parse HEAD)" = '24c91ac9d76ac10780403bc2b326793c7c67c2ed'
+          OUT="$RUNNER_TEMP/p01-probe"; rm -rf "$OUT"; mkdir -p "$OUT"
+          python3 runner/scripts/p01-build-maintenance-candidate-v22118.py --candidate candidate/src --production production/src --out "$OUT" --candidate-commit a501d2394502319b0af9caaf1c171bdf94940a9d --candidate-tree 6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca --production-commit 24c91ac9d76ac10780403bc2b326793c7c67c2ed >/tmp/build.json
+          set +e
+          php -d display_errors=1 -l "$OUT/repair-v2.21.18.php" >/tmp/native.txt 2>&1
+          echo $? >/tmp/native.rc
+          docker run --rm -v "$OUT:/work:ro" -w /work php:8.0-cli php -d display_errors=1 -l repair-v2.21.18.php >/tmp/php80.txt 2>&1
+          echo $? >/tmp/php80.rc
+          set -e
+          sha256sum "$OUT/repair-v2.21.18.php" | awk '{print $1}' >/tmp/repair.sha
+          stat -c '%s' "$OUT/repair-v2.21.18.php" >/tmp/repair.bytes
+      - name: Publish sanitized diagnostics
+        if: always()
+        shell: bash
+        env:
+          S: ${{ job.status }}
+          RID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,urllib.error
+          def read(path,default=''):
+            try:return open(path,encoding='utf-8',errors='replace').read().strip()
+            except:return default
+          def intval(path):
+            try:return int(read(path,'-1'))
+            except:return -1
+          payload={
+            'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','gate':'PHP80_ATOMIC_LINT_PROBE',
+            'status':os.environ.get('S','unknown').upper(),'workflow_run_id':os.environ.get('RID',''),
+            'candidate_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','candidate_tree':'6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca',
+            'native_rc':intval('/tmp/native.rc'),'native_output':read('/tmp/native.txt'),
+            'php80_rc':intval('/tmp/php80.rc'),'php80_output':read('/tmp/php80.txt'),
+            'repair_sha256':read('/tmp/repair.sha'),'repair_bytes':intval('/tmp/repair.bytes'),
+            'private_data_persisted_publicly':False
+          }
+          payload['pass']=payload['native_rc']==0 and payload['php80_rc']==0
+          token=os.environ['W']; path='vf-agent/results/P01-V2.21.18-PHP80-PROBE.json'; api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/'+path
+          h={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}; sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h),timeout=20) as r:sha=json.load(r).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          body={'message':'evidence(P01): publish PHP 8.0 atomic lint probe','content':base64.b64encode((json.dumps(payload,indent=2,sort_keys=True)+'\n').encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:body['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**h,'Content-Type':'application/json'}),timeout=20).read()
+          PY
+      - name: Enforce PHP 8.0 compatibility
+        if: always()
+        shell: bash
+        run: |
+          test "$(cat /tmp/native.rc)" = 0
+          test "$(cat /tmp/php80.rc)" = 0
