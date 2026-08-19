@@ -1,0 +1,195 @@
+name: P04 V2.8.0 Formal Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  p04-v280-formal-candidate:
+    if: contains(github.head_ref, 'p04-v280-formal-candidate')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CANDIDATE_SHA: 7009c10ea1d588ca54d76b0860b9834fc9a8f2c5
+      SOURCE_TAG: v2.7.9
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence-p04-v280-formal
+    steps:
+      - name: Checkout exact V2.8.0 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: 7009c10ea1d588ca54d76b0860b9834fc9a8f2c5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p04-candidate
+
+      - name: Checkout exact V2.7.9 source baseline
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: v2.7.9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p04-v279
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Chromium and test runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04-candidate
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+          sqlite3 --version
+          php -v
+          node -v
+
+      - name: Run exact V2.8.0 UX and manifest gate
+        shell: bash
+        env:
+          VF_V280_TESTED_RUNTIME_COMMIT: 7009c10ea1d588ca54d76b0860b9834fc9a8f2c5
+          VF_V280_EVIDENCE_DIR: ${{ github.workspace }}/evidence-p04-v280-formal/browser
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$VF_V280_EVIDENCE_DIR"
+          cd p04-candidate
+          bash scripts/run-v280-navigation-simplify-gate.sh
+
+      - name: Build deterministic FULL and UPDATE candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CAND="$GITHUB_WORKSPACE/p04-candidate"
+          BASESRC="$GITHUB_WORKSPACE/p04-v279"
+          TARGET1="$RUNNER_TEMP/p04-v280-target-1"
+          TARGET2="$RUNNER_TEMP/p04-v280-target-2"
+          BASE="$RUNNER_TEMP/p04-v279-base"
+          UP1="$RUNNER_TEMP/p04-v280-update-1"
+          UP2="$RUNNER_TEMP/p04-v280-update-2"
+          mkdir -p "$EVIDENCE_DIR"
+
+          python3 "$CAND/scripts/build-release-tree.py" "$TARGET1"
+          python3 "$CAND/scripts/build-release-tree.py" "$TARGET2"
+          python3 "$BASESRC/scripts/build-release-tree.py" "$BASE"
+
+          python3 - "$TARGET1" "$TARGET2" <<'PY'
+          import hashlib,json,pathlib,sys
+          a=pathlib.Path(sys.argv[1]); b=pathlib.Path(sys.argv[2])
+          def tree(root):
+              return [(p.relative_to(root).as_posix(),hashlib.sha256(p.read_bytes()).hexdigest(),p.stat().st_size) for p in sorted(root.rglob('*')) if p.is_file()]
+          assert tree(a)==tree(b), 'release tree is not deterministic'
+          m=json.loads((a/'release-manifest.json').read_text(encoding='utf-8'))
+          assert (a/'VERSION.txt').read_text().strip()=='2.8.0'
+          assert m['version']=='2.8.0' and m['target_schema']==14
+          assert m['release_kind']=='maintenance_release',m['release_kind']
+          assert any('single-owner Settings' in x for x in m['notes']),m['notes']
+          print('V280_RELEASE_TREE_DETERMINISTIC=PASS')
+          print('V280_RELEASE_METADATA_IDENTITY=PASS')
+          PY
+
+          python3 - "$TARGET1" "$RUNNER_TEMP/VF_Infra_V2.8.0_FULL_A.zip" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16); z.writestr(info,p.read_bytes())
+          PY
+          python3 - "$TARGET2" "$RUNNER_TEMP/VF_Infra_V2.8.0_FULL_B.zip" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16); z.writestr(info,p.read_bytes())
+          PY
+          cmp "$RUNNER_TEMP/VF_Infra_V2.8.0_FULL_A.zip" "$RUNNER_TEMP/VF_Infra_V2.8.0_FULL_B.zip"
+
+          python3 "$CAND/scripts/build-v280-update-release.py" --target-runtime "$TARGET1" --output "$UP1"
+          python3 "$CAND/scripts/build-v280-update-release.py" --target-runtime "$TARGET2" --output "$UP2"
+          cmp "$UP1/VF_Infra_V2.8.0_UPDATE.zip" "$UP2/VF_Infra_V2.8.0_UPDATE.zip"
+          cmp "$UP1/VF_Infra_V2.8.0_ATOMIC.zip" "$UP2/VF_Infra_V2.8.0_ATOMIC.zip"
+          php "$UP1/repair-v2.8.0.php" --self-test
+
+          python3 - "$UP1/PACKAGE_MANIFEST.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert m['version']=='2.8.0' and m['schema']==14,m
+          assert m['allowed_source_versions']==['2.7.9'],m
+          assert m['payload_file_count']==6,m
+          assert m['schema_change'] is False and m['business_model_change'] is False and m['provider_write_authority_change'] is False,m
+          assert m['update_and_atomic_bytes_identical'] is True,m
+          assert m['online_handoff_gate']=='PASS',m
+          print('V280_ATOMIC_PACKAGE_CONTRACT=PASS')
+          PY
+
+          cp "$RUNNER_TEMP/VF_Infra_V2.8.0_FULL_A.zip" "$EVIDENCE_DIR/VF_Infra_V2.8.0_FULL.zip"
+          cp "$UP1/VF_Infra_V2.8.0_UPDATE.zip" "$EVIDENCE_DIR/VF_Infra_V2.8.0_UPDATE.zip"
+          cp "$UP1/PACKAGE_MANIFEST.json" "$EVIDENCE_DIR/PACKAGE_MANIFEST.json"
+          cp "$UP1/SHA256SUMS.txt" "$EVIDENCE_DIR/ATOMIC_SHA256SUMS.txt"
+          cp "$TARGET1/release-manifest.json" "$EVIDENCE_DIR/release-manifest.json"
+
+      - name: Run Existing Data Atomic 2.7.9 to 2.8.0 gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CAND="$GITHUB_WORKSPACE/p04-candidate"
+          BASE="$RUNNER_TEMP/p04-v279-base"
+          UP1="$RUNNER_TEMP/p04-v280-update-1"
+          TEST="$RUNNER_TEMP/v280_atomic_e2e.sh"
+          python3 - "$CAND/tests/maintenance/v252_atomic_e2e.sh" "$TEST" <<'PY'
+          import pathlib,sys
+          s=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+          s=s.replace('PORT_BASE=18252','PORT_BASE=18280')
+          s=s.replace('V252','V280').replace('v252','v280')
+          s=s.replace('2.5.2','2.8.0').replace('2.5.1','2.7.9')
+          pathlib.Path(sys.argv[2]).write_text(s,encoding='utf-8')
+          PY
+          chmod +x "$TEST"
+          BASE_RUNTIME="$BASE" RELEASE_DIR="$UP1" bash "$TEST" | tee "$EVIDENCE_DIR/V280_ATOMIC_E2E.log"
+          grep -Fq 'V280_SUCCESS_DATA_PROVIDER_CREDENTIAL_TIMEZONE_PRESERVATION_PASS' "$EVIDENCE_DIR/V280_ATOMIC_E2E.log"
+          grep -Fq 'V280_UNSUPPORTED_SOURCE_FAIL_CLOSED_PASS' "$EVIDENCE_DIR/V280_ATOMIC_E2E.log"
+
+      - name: Seal candidate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVIDENCE_DIR" "$CANDIDATE_SHA" <<'PY'
+          import hashlib,json,pathlib,sys
+          root=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
+          full=root/'VF_Infra_V2.8.0_FULL.zip'; upd=root/'VF_Infra_V2.8.0_UPDATE.zip'
+          pkg=json.loads((root/'PACKAGE_MANIFEST.json').read_text(encoding='utf-8'))
+          rel=json.loads((root/'release-manifest.json').read_text(encoding='utf-8'))
+          report={
+            'status':'PASS','project':'P04','version':'2.8.0','schema':14,'candidate_source':sha,'source_version':'2.7.9',
+            'v280_browser_manifest_gate':'PASS','release_tree_deterministic':'PASS','full_deterministic':'PASS','update_deterministic':'PASS',
+            'atomic_self_test':'PASS','existing_data_atomic_279_to_280':'PASS','unsupported_source_fail_closed':'PASS',
+            'data_provider_credential_timezone_preservation':'PASS','sqlite_integrity_fk':'PASS','provider_write_authority_change':False,
+            'full':{'name':full.name,'bytes':full.stat().st_size,'sha256':hashlib.sha256(full.read_bytes()).hexdigest()},
+            'update':{'name':upd.name,'bytes':upd.stat().st_size,'sha256':hashlib.sha256(upd.read_bytes()).hexdigest()},
+            'release_manifest':{'release_kind':rel['release_kind'],'file_count':rel['file_count'],'source_fingerprint':rel['source_fingerprint']},
+            'atomic_payload_file_count':pkg['payload_file_count'],'production_write':0
+          }
+          (root/'V280_FORMAL_CANDIDATE_REPORT.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          files=sorted(p for p in root.rglob('*') if p.is_file() and p.name!='SHA256SUMS')
+          (root/'SHA256SUMS').write_text(''.join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(root).as_posix()}\n" for p in files),encoding='utf-8')
+          print(json.dumps(report,ensure_ascii=False,sort_keys=True))
+          PY
+          echo P04_V280_FORMAL_CANDIDATE_GATE_PASS
+
+      - name: Upload P04 V2.8.0 candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.0-FORMAL-CANDIDATE-EVIDENCE
+          path: evidence-p04-v280-formal/
+          if-no-files-found: error
+          retention-days: 30
