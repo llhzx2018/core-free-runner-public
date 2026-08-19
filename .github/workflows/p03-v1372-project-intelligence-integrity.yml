@@ -1,0 +1,132 @@
+name: P03 V1.37.2 Project Intelligence Integrity
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1372-project-intelligence-integrity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_BRANCH: maintenance/v1.37.2-project-intelligence-integrity
+
+jobs:
+  integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout private P03 maintenance branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: p03
+
+      - name: Install runtime and browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 unzip zip >/dev/null
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Seal V1.37.2 candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          python3 scripts/finalize_v1372.py
+          test "$(cat VERSION)" = '1.37.2'
+          grep -Fq "define('VFAB_VERSION', '1.37.2');" src/app/bootstrap.php
+          grep -Fq "TARGET_VERSION='1.37.2'" scripts/build_atomic.py
+          grep -Fq "ALLOWED_SOURCES=['1.37.1']" scripts/build_atomic.py
+          git diff --check
+
+      - name: Static and contract regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src public -type f -name '*.php' -print0)
+          node --check public/assets/project-intelligence.js
+          node --check public/assets/project-intelligence-v1372.js
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/unit/project_intelligence_contract_test.py
+          python3 tests/unit/project_intelligence_mcp_contract_test.py
+          python3 tests/unit/project_intelligence_v1372_contract_test.py
+          echo 'P03_V1372_STATIC_CONTRACT=PASS'
+
+      - name: Runtime projection and Atomic build gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          rm -rf "$RUNNER_TEMP/base-wt" "$RUNNER_TEMP/base-runtime" "$RUNNER_TEMP/target-runtime" "$RUNNER_TEMP/atomic"
+          git worktree add --detach "$RUNNER_TEMP/base-wt" v1.37.1 >/dev/null
+          python3 "$RUNNER_TEMP/base-wt/scripts/build_runtime.py" "$RUNNER_TEMP/base-runtime" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/target-runtime" >/dev/null
+          grep -Fq "define('VFAB_VERSION', '1.37.2');" "$RUNNER_TEMP/target-runtime/app/bootstrap.php"
+          test -f "$RUNNER_TEMP/target-runtime/app/ProjectIntelligenceReadModel.php"
+          test -f "$RUNNER_TEMP/target-runtime/assets/project-intelligence-v1372.css"
+          test -f "$RUNNER_TEMP/target-runtime/assets/project-intelligence-v1372.js"
+          python3 scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/base-runtime" --target-runtime "$RUNNER_TEMP/target-runtime" --output "$RUNNER_TEMP/atomic" >/dev/null
+          cd "$RUNNER_TEMP/atomic"
+          sha256sum -c SHA256SUMS.txt
+          test "$(unzip -Z1 VF_Forge_V1.37.2_Atomic_Upgrade.zip)" = 'repair-v1.37.2.php'
+          unzip -p VF_Forge_V1.37.2_Atomic_Upgrade.zip repair-v1.37.2.php > repair.php
+          grep -Fq "const VFF_ATOMIC_TARGET='1.37.2';" repair.php
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=30;' repair.php
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.37.1"];' repair.php
+          echo 'P03_V1372_RUNTIME_ATOMIC_BUILD=PASS'
+
+      - name: Owner UX Chromium gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          cat > owner-v1372.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const css=['public/assets/experience.css','public/assets/project-intelligence.css','public/assets/project-intelligence-shell.css','public/assets/project-intelligence-v1372.css'].map(p=>fs.readFileSync(p,'utf8')).join('\n');
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1319,height:652}});
+          const projects=Array.from({length:12},(_,i)=>`<button class="nav-item project-shortcut"><span>P${i+1} · Project ${i+1}</span><i class="health-dot good"></i></button>`).join('');
+          await page.setContent(`<!doctype html><style>${css}</style><body class="pi-mode"><div class="app-shell"><aside class="sidebar"><button class="brand"><strong>VF Forge</strong></button><nav class="primary-nav"><button class="nav-item active">概览</button><button class="nav-item">项目</button><button class="nav-item">关注</button><button class="nav-item">动态</button><button class="nav-item">关系</button></nav><div class="sidebar-divider"></div><div class="sidebar-label">当前项目</div><div id="projectShortcuts">${projects}</div><div class="sidebar-spacer"></div><button class="nav-item settings-entry">设置</button><div class="runtime-card"><span>Runtime</span><strong>V1.37.2</strong><small>Schema 30 · Storage NONE</small></div><button class="nav-item logout-entry">退出</button></aside><main class="main-shell"><div id="toast" class="toast error show">密码不正确。</div></main></div></body>`);
+          const before=await page.evaluate(()=>{const s=document.querySelector('.sidebar'),p=document.querySelector('#projectShortcuts'),r=document.querySelector('.runtime-card'),t=document.querySelector('#toast');const cs=getComputedStyle(s),cp=getComputedStyle(p),cr=r.getBoundingClientRect(),ct=getComputedStyle(t);return{sidebarClient:s.clientHeight,sidebarScroll:s.scrollHeight,sidebarOverflow:cs.overflowY,projectClient:p.clientHeight,projectScroll:p.scrollHeight,projectOverflow:cp.overflowY,runtimeHeight:cr.height,toastBg:ct.backgroundColor}});
+          if(before.sidebarOverflow!=='auto'||before.sidebarScroll<=before.sidebarClient)throw new Error('whole sidebar is not scrollable '+JSON.stringify(before));
+          if(before.projectOverflow==='auto'||before.projectScroll>before.projectClient+1)throw new Error('nested project scrollbar remains '+JSON.stringify(before));
+          if(before.runtimeHeight>28)throw new Error('runtime block still oversized '+JSON.stringify(before));
+          if(/rgb\(184,\s*75,\s*75\)|rgb\(220,\s*63,\s*63\)/.test(before.toastBg))throw new Error('red toast remains '+before.toastBg);
+          await page.evaluate(()=>{document.querySelector('.sidebar').scrollTop=document.querySelector('.sidebar').scrollHeight});
+          await page.waitForTimeout(30);
+          const after=await page.evaluate(()=>{const s=document.querySelector('.sidebar'),r=document.querySelector('.runtime-card').getBoundingClientRect(),x=document.querySelector('.logout-entry').getBoundingClientRect();return{top:s.scrollTop,runtimeTop:r.top,runtimeBottom:r.bottom,logoutBottom:x.bottom}});
+          if(after.top<=0||after.runtimeTop<0||after.logoutBottom>652.5)throw new Error('sidebar bottom not naturally reachable '+JSON.stringify(after));
+          console.log('P03_V1372_OWNER_UX=PASS',JSON.stringify({before,after}));
+          await browser.close();
+          EOF
+          node owner-v1372.mjs
+
+      - name: Commit tested candidate back to private branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION CHANGELOG.md src/app/bootstrap.php scripts/build_atomic.py public/assets/project-intelligence.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'release(P03): seal V1.37.2 integrity candidate'
+            git push origin HEAD:${P03_BRANCH}
+          fi
+          echo "P03_V1372_TESTED_HEAD=$(git rev-parse HEAD)"
+          echo 'PRODUCTION_WRITE=NO'
