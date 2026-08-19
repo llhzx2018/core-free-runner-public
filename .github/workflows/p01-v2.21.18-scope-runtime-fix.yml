@@ -1,0 +1,92 @@
+name: P01 V2.21.18 Scope Runtime Fix
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['.github/workflows/p01-v2.21.18-scope-runtime-fix.yml']
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      SOURCE_REPO: llhzx2018/vf-start
+      SOURCE_BRANCH: maintenance/prototype-refactor-2.21.18-20260819
+      EXPECTED_SHA: 5af0341bff1014dd1290bc43d6c84057449eafb0
+    steps:
+      - shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          git clone --quiet --depth 1 --branch "$SOURCE_BRANCH" "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${SOURCE_REPO}.git" source
+          cd source
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/index.php');s=p.read_text(encoding='utf-8')
+          old="""function switchSidebarScope(scope) {
+  if(!(state.site&&state.site.auth))return;
+  scope=scope==='private'?'private':'public';
+  if(scope===state.sidebarScope&&!(state.mode==='category'&&state.privacyScope!==scope))return;
+  state.sidebarScope=scope;vfStorage.setItem('vfnav-sidebar-scope-v1',scope);
+  state.expanded.clear();persistSidebarExpansion();
+  if(state.mode==='category'){
+    var currentId=Number(state.selected||0),counts=linkCounts(scope);
+    if(currentId&&(counts.get(currentId)||0)>0){setView('category',currentId,true,{privacyScope:scope});return;}
+    state.mode='home';state.selected=0;state.privacyScope='';history.pushState(null,'','#/');render();return;
+  }
+  renderSidebar();
+}
+"""
+          new="""function switchSidebarScope(scope) {
+  if(!(state.site&&state.site.auth))return;
+  scope=scope==='private'?'private':'public';
+  if(scope===state.sidebarScope&&!(state.mode==='category'&&state.privacyScope!==scope))return;
+  state.sidebarScope=scope;vfStorage.setItem('vfnav-sidebar-scope-v1',scope);
+  state.expanded.clear();persistSidebarExpansion();
+  if(state.mode==='category'){
+    var currentId=Number(state.selected||0);
+    if(currentId){
+      state.privacyScope=scope;state.page=1;state.batchMode=false;state.batchSelected.clear();state.reorderMode=false;
+      var nextHash=hashFor('category',currentId);
+      if(location.hash!==nextHash)history.pushState(null,'',nextHash);
+      render();setMainScrollTop(0);
+      var main=$('#mainContent');if(main)main.focus({preventScroll:true});
+      return;
+    }
+  }
+  renderSidebar();
+}
+"""
+          if s.count(old)!=1: raise SystemExit('expected runtime scope block not found exactly once')
+          p.write_text(s.replace(old,new),encoding='utf-8')
+          PY
+          git diff --check
+          grep -F "state.privacyScope=scope;state.page=1" src/index.php >/dev/null
+          ! grep -F "state.mode='home';state.selected=0;state.privacyScope=''" src/index.php >/dev/null
+          git config user.name 'vf-public-runner';git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add src/index.php;git commit -m 'fix(P01): preserve category on visibility switch';git push origin HEAD:"$SOURCE_BRANCH"
+          git rev-parse HEAD >/tmp/after;git rev-parse HEAD^{tree} >/tmp/tree
+          echo "SCOPE_RUNTIME_FIX=PASS"
+      - name: Publish result
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,urllib.error
+          def r(p):
+            try:return open(p).read().strip()
+            except:return ''
+          p={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','gate':'SCOPE_RUNTIME_FIX','status':os.environ.get('JOB_STATUS','unknown').upper(),'pass':os.environ.get('JOB_STATUS')=='success','after_sha':r('/tmp/after'),'after_tree':r('/tmp/tree')}
+          token=os.environ['VF_RELEASE_WRITE_TOKEN'];content=json.dumps(p,indent=2,sort_keys=True)+'\n';path='vf-agent/results/P01-V2.21.18-SCOPE-RUNTIME-FIX.json';api=f'https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/{path}';h={'Accept':'application/vnd.github+json','Authorization':f'Bearer {token}','X-GitHub-Api-Version':'2022-11-28'};sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h),timeout=20) as x:sha=json.load(x).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          b={'message':'evidence(P01): publish scope runtime fix','content':base64.b64encode(content.encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:b['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(b).encode(),method='PUT',headers={**h,'Content-Type':'application/json'}),timeout=20).read()
+          PY
