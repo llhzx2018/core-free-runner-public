@@ -1,0 +1,108 @@
+name: P02 V2.5.5 Editor Scroll Anchor Final
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v255-editor-scroll-anchor-final.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REF: 4b2a0c9a7bedc82ef92c5d32fa08dbc233f67368
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: '${{ env.PRODUCT_REF }}'
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          path: p02
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare exact candidate
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.5'
+          test -s public/assets/v255-hotfix.js
+          grep -Fq 'assets/v255-hotfix.js' public/index.php
+          node --check public/assets/app.js
+          node --check public/assets/v255-hotfix.js
+          php -l public/index.php >/dev/null
+          python3 scripts/repository-gates.py
+          google-chrome --version
+          npm install --no-save playwright-core@1.55.0 >/dev/null
+
+      - name: Browser regression on system Chrome
+        working-directory: p02
+        env:
+          AUDIT_PASSWORD: 'P02-V255-FINAL-${{ github.run_id }}!'
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p02-v255-final"; SITE="$ROOT/site"; mkdir -p "$SITE"
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S 127.0.0.1:18257 -t "$SITE" >"$ROOT/server.log" 2>&1 & echo $! > "$ROOT/server.pid"
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18257/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$ROOT/cookie" http://127.0.0.1:18257/setup.php > "$ROOT/setup.html"
+          TOKEN=$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/cookie" -c "$ROOT/cookie" -H 'Origin: http://127.0.0.1:18257' --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$AUDIT_PASSWORD" --data-urlencode "password_confirm=$AUDIT_PASSWORD" http://127.0.0.1:18257/setup.php)" = 303
+          cat > .v255-final.mjs <<'JS'
+          import { chromium } from 'playwright-core';
+          const browser=await chromium.launch({channel:'chrome',headless:true});
+          const page=await browser.newPage({viewport:{width:1440,height:900}});
+          const errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+          await page.goto('http://127.0.0.1:18257/',{waitUntil:'networkidle'});
+          let sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());
+          if(!sess?.site?.auth){await page.locator('[data-open-login]').click();await page.locator('#loginForm input[name="password"]').fill(process.env.AUDIT_PASSWORD);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await(await fetch('/api.php?action=session',{cache:'no-store'})).json())?.site?.auth));sess=await page.evaluate(async()=>await(await fetch('/api.php?action=session',{cache:'no-store'})).json());}
+          const csrf=sess.csrf;
+          const post=async(a,b)=>page.evaluate(async({a,b,csrf})=>await(await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)})).json(),{a,b,csrf});
+          const cat=await post('category_save',{name:'V255 Final Scroll Gate',description:'',icon:'folder'}); const cid=Number(cat.id); if(!cid)throw new Error('category create failed');
+          async function typeAtBottom(label,selector,rootSelector,prepare){
+            await prepare(); const ta=page.locator(selector); await ta.waitFor({state:'visible',timeout:10000});
+            const seed=Array.from({length:110},(_,i)=>`第 ${i+1} 行：输入稳定性回归，保持光标和当前滚动位置。`).join('\n');
+            await ta.fill(seed); await page.waitForTimeout(160);
+            await page.evaluate(({selector,rootSelector})=>{const t=document.querySelector(selector),r=document.querySelector(rootSelector);r.scrollTop=Math.max(0,r.scrollHeight-r.clientHeight-24);t.focus({preventScroll:true});t.setSelectionRange(t.value.length,t.value.length);},{selector,rootSelector});
+            await page.waitForTimeout(100);
+            const before=await page.evaluate(({selector,rootSelector})=>{const t=document.querySelector(selector),r=document.querySelector(rootSelector);return{scroll:r.scrollTop,max:r.scrollHeight-r.clientHeight,start:t.selectionStart,end:t.selectionEnd,len:t.value.length};},{selector,rootSelector});
+            if(before.scroll<150)throw new Error(label+' precondition '+JSON.stringify(before));
+            const samples=[];
+            for(const ch of ['A','B','C','1','2','3','上','下','文','字']){await page.keyboard.type(ch,{delay:20});await page.waitForTimeout(65);const s=await page.evaluate(({selector,rootSelector})=>{const t=document.querySelector(selector),r=document.querySelector(rootSelector);return{scroll:r.scrollTop,start:t.selectionStart,end:t.selectionEnd,len:t.value.length};},{selector,rootSelector});samples.push(s);if(s.scroll<before.scroll-80)throw new Error(label+' VIEWPORT_JUMP '+JSON.stringify({before,samples}));if(s.start!==s.len||s.end!==s.len)throw new Error(label+' CARET_JUMP '+JSON.stringify(s));}
+            console.log(label+'=PASS '+JSON.stringify({before,last:samples.at(-1)}));
+          }
+          await typeAtBottom('GENERIC_QUICK_EDITOR','.content-editor','#main',async()=>{await page.evaluate(()=>openEditor(null,{forceContentMode:'quick',forceContentFormat:'markdown'}));});
+          const article=await post('content_save',{category_id:cid,title:'V255 Final Article',description:'',content:'# Start\n\nBody',content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'}); const iid=Number(article.id); if(!iid)throw new Error('article create failed');
+          await typeAtBottom('ARTICLE_EDITOR','#articleSource','#notebookDetailScroll',async()=>{await page.evaluate(async({cid,iid})=>{await setContentView('notebook');await selectCategory(cid);await openReader(iid,true);await state.workspaceController.setMode('edit',true)},{cid,iid});await page.waitForFunction(()=>state.articleMode==='edit');});
+          if(errors.length)throw new Error(errors.join(' | '));
+          console.log('P02_V255_EDITOR_SCROLL_ANCHOR_FINAL=PASS'); await browser.close();
+          JS
+          node .v255-final.mjs
+
+      - name: Final candidate sanity
+        working-directory: p02
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          x=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert x['version']=='2.5.5' and x['schema']==2401 and x['runtime_source_file_count']==68
+          assert any(e['full_path']=='assets/v255-hotfix.js' for e in x['entries'])
+          print('SOURCE_MANIFEST=PASS')
+          PY
+          echo P02_V255_CANDIDATE=PASS
+          echo SCHEMA=2401
+          echo MIGRATION=NONE
+          echo PRODUCTION_WRITE=NO
