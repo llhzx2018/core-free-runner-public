@@ -1,0 +1,299 @@
+name: P01 V2.21.18 Prototype Targeted Regression
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-v2.21.18-targeted-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2.21.18-prototype-targeted-regression
+  cancel-in-progress: false
+
+env:
+  P01_REPOSITORY: llhzx2018/vf-start
+  P01_REF: maintenance/prototype-refactor-2.21.18-20260819
+  P01_SCHEMA: '2026080902'
+
+jobs:
+  targeted-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Require private read credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'VF_PRIVATE_READ_TOKEN_GATE=PASS'
+
+      - name: Checkout private maintenance head into ephemeral workspace
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.P01_REPOSITORY }}
+          ref: ${{ env.P01_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Resolve exact source identity and privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_SHA=$(git -C candidate rev-parse HEAD)
+          SOURCE_TREE=$(git -C candidate rev-parse HEAD^{tree})
+          echo "P01_SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "P01_SOURCE_TREE=$SOURCE_TREE" >> "$GITHUB_ENV"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = '2.21.17'
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = '2.21.17'
+          grep -F "define('VF_VERSION', '2.21.17');" candidate/src/app/bootstrap.php >/dev/null
+          grep -F "assets/navigation-stability.js?v=22118" candidate/src/assets/update.js >/dev/null
+          if git -C candidate config --get remote.origin.url | grep -Eq 'x-access-token|github_pat_|ghp_'; then
+            echo 'credential leaked into git remote url' >&2; exit 1
+          fi
+          if find candidate -path 'candidate/.git' -prune -o -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '.env' \) -print | grep -q .; then
+            echo 'private/runtime binary unexpectedly present in checkout' >&2; exit 1
+          fi
+          if find candidate -path '*/PRIVATE_DATA/*' -o -path '*/private_data/*' | grep -q .; then
+            echo 'PRIVATE_DATA path unexpectedly present in checkout' >&2; exit 1
+          fi
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo "SOURCE_TREE=$SOURCE_TREE"
+          echo 'SOURCE_IDENTITY=PASS'
+          echo 'PUBLIC_RUNNER_PRIVACY_BOUNDARY=PASS'
+
+      - name: Install PHP SQLite and browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-xml php-mbstring sqlite3 jq >/dev/null
+          php -r 'foreach(["pdo_sqlite","sqlite3","curl","zip","SimpleXML","mbstring","openssl"] as $x){if(!extension_loaded($x)&&!class_exists($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION,"\n";'
+          mkdir -p "$RUNNER_TEMP/p01-node"
+          cd "$RUNNER_TEMP/p01-node"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+          echo 'RUNTIME_DEPENDENCIES=PASS'
+
+      - name: PHP and JavaScript syntax regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo 'PHP_JS_SYNTAX=PASS'
+
+      - name: Fresh setup and SQLite baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/vf-p01-v22118-runtime
+          cp -a candidate/src /tmp/vf-p01-v22118-runtime
+          cd /tmp/vf-p01-v22118-runtime
+          php -S 127.0.0.1:18084 -t . > "$RUNNER_TEMP/p01-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/p01-server.pid"
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18084/setup.php -o "$RUNNER_TEMP/p01-setup.html" && break; sleep 1; done
+          curl -fsS -c "$RUNNER_TEMP/p01.cookies" -b "$RUNNER_TEMP/p01.cookies" http://127.0.0.1:18084/setup.php -o "$RUNNER_TEMP/p01-setup.html"
+          CSRF=$(python3 - <<'PY'
+          import re, os
+          text=open(os.path.join(os.environ['RUNNER_TEMP'],'p01-setup.html'),encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c "$RUNNER_TEMP/p01.cookies" -b "$RUNNER_TEMP/p01.cookies" -X POST http://127.0.0.1:18084/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start P01 Runner' \
+            --data-urlencode 'admin_password=PublicRunner-P01-22118!Strong' \
+            --data-urlencode 'admin_password_confirm=PublicRunner-P01-22118!Strong' \
+            -o "$RUNNER_TEMP/p01-setup-post.html"
+          test -f app/.runtime.php
+          php cli/verify.php | tee "$RUNNER_TEMP/p01-cli-verify.txt"
+          grep -q 'VERIFY_PASS=YES' "$RUNNER_TEMP/p01-cli-verify.txt"
+          php -r 'require "app/bootstrap.php";$d=vf_db();$c=(int)$d->query("SELECT COUNT(*) FROM categories")->fetchColumn();$l=(int)$d->query("SELECT COUNT(*) FROM links")->fetchColumn();if($c!==0||$l!==0)exit(1);echo "FRESH_BUSINESS_DATA_ZERO=PASS\n";'
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          echo 'FRESH_SETUP=PASS'
+          echo 'SQLITE_BASELINE=PASS'
+
+      - name: Browser targeted UA regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p01-node/e2e.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18084/';
+          let browser;
+          try {
+            browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            const errors=[];
+            page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.click('#loginButton');
+            await page.fill('[name=password]','PublicRunner-P01-22118!Strong');
+            await page.click('#loginSubmit');
+            await page.waitForFunction(()=>document.documentElement.getAttribute('data-vf-navigation-stability')==='2');
+            await page.waitForFunction(()=>{const b=document.querySelector('#addLinkButton');return b&&!b.classList.contains('hidden')});
+            console.log('FRONT_LOGIN=PASS');
+            console.log('NAVIGATION_STABILITY_LOADER=PASS');
+
+            const stable=await page.evaluate(()=>{
+              const original={links:state.links,recent:state.recent,mode:state.mode,selected:state.selected,privacyScope:state.privacyScope,sidebarScope:state.sidebarScope};
+              try {
+                state.links=[
+                  {id:101,title:'Stable A',url:'https://a.example/',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:30,legacy_position:1,click_count:0,tags:[]},
+                  {id:102,title:'Stable B',url:'https://b.example/',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:20,legacy_position:2,click_count:999,tags:[]},
+                  {id:103,title:'Stable C',url:'https://c.example/',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:10,legacy_position:3,click_count:5000,tags:[]}
+                ];
+                state.recent=[{id:103,at:Date.now()},{id:102,at:Date.now()-10}];
+                const before=topLinks(3).map(x=>x.id);
+                const originalOpen=window.open;
+                window.open=()=>({opener:null});
+                openLink(state.links[2]);
+                window.open=originalOpen;
+                const after=topLinks(3).map(x=>x.id);
+                return {before,after,recentFirst:state.recent[0]&&state.recent[0].id};
+              } finally {
+                state.links=original.links;state.recent=original.recent;state.mode=original.mode;state.selected=original.selected;state.privacyScope=original.privacyScope;state.sidebarScope=original.sidebarScope;
+              }
+            });
+            if(JSON.stringify(stable.before)!=='[101,102,103]') throw new Error('manual order baseline wrong: '+JSON.stringify(stable));
+            if(JSON.stringify(stable.after)!=='[101,102,103]') throw new Error('open/recent history changed default order: '+JSON.stringify(stable));
+            if(stable.recentFirst!==103) throw new Error('recent history was not recorded');
+            console.log('OPEN_DOES_NOT_REORDER_DEFAULT=PASS');
+            console.log('RECENT_HISTORY_STILL_RECORDS=PASS');
+
+            await page.evaluate(()=>{
+              state.categories=[{id:91001,parent_id:null,name:'Runner Category',description:'scope fixture',sort_order:10,legacy_position:1,effective_private:0,is_private:0}];
+              state.links=[{id:92001,title:'Public Only',url:'https://public.example/',category_id:91001,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:10,legacy_position:1,click_count:0,tags:[]}];
+              state.mode='category';state.selected=91001;state.privacyScope='public';state.sidebarScope='public';state.query='';state.page=1;state.loadedOnce=true;
+              render();
+            });
+            const scope=await page.evaluate(()=>{
+              switchSidebarScope('private');
+              return {
+                mode:state.mode,
+                selected:Number(state.selected),
+                privacyScope:state.privacyScope,
+                sidebarScope:state.sidebarScope,
+                hash:location.hash,
+                visibleLinks:filteredAndSortedLinks().length,
+                title:(document.querySelector('.page-title')||{}).textContent||'',
+                home:!!document.querySelector('.home-page')
+              };
+            });
+            if(scope.mode!=='category'||scope.selected!==91001) throw new Error('scope switch lost category context: '+JSON.stringify(scope));
+            if(scope.privacyScope!=='private'||scope.sidebarScope!=='private') throw new Error('scope switch state mismatch: '+JSON.stringify(scope));
+            if(scope.hash!=='#/private/category/91001') throw new Error('scope switch hash mismatch: '+JSON.stringify(scope));
+            if(scope.visibleLinks!==0) throw new Error('private empty-state fixture unexpectedly has links');
+            if(scope.home) throw new Error('scope switch incorrectly returned home');
+            if(!scope.title.includes('Runner Category')) throw new Error('category title not preserved: '+JSON.stringify(scope));
+            console.log('PUBLIC_PRIVATE_CATEGORY_CONTEXT=PASS');
+            console.log('EMPTY_TARGET_SCOPE_STAYS_IN_CATEGORY=PASS');
+
+            await page.evaluate(()=>{state.mode='home';state.selected=0;state.privacyScope='';state.sidebarScope='public';state.links=[{id:101,title:'Stable A',url:'https://a.example/',category_id:1,is_pending:0,is_private:0,effective_private:0,is_favorite:0,sort_order:30,legacy_position:1,click_count:0,tags:[]}];state.recent=[];render();});
+            const home=await page.evaluate(()=>{
+              const quick=(document.querySelector('.home-quick-section .section-head p')||{}).textContent||'';
+              const intro=(document.querySelector('.home-intro .page-subtitle')||{}).textContent||'';
+              const plugin=document.getElementById('pluginHomeSummary');
+              const workspace=document.querySelector('.home-workspace');
+              return {quick,intro,pluginAfterWorkspace:!!(workspace&&plugin&&workspace.nextElementSibling===plugin)};
+            });
+            if(!home.quick.includes('稳定手动顺序')||home.quick.includes('自动推荐')) throw new Error('home quick-order wording regression: '+JSON.stringify(home));
+            if(!home.intro.includes('搜索与分类优先')) throw new Error('home intro wording regression: '+JSON.stringify(home));
+            if(!home.pluginAfterWorkspace) throw new Error('plugin reminder priority/order regression: '+JSON.stringify(home));
+            console.log('HOME_STABLE_ORDER_MENTAL_MODEL=PASS');
+            console.log('PLUGIN_REMINDER_DEPRIORITIZED=PASS');
+
+            for(const width of [390,480,640,768,1024,1280,1440,1920]){
+              await page.setViewportSize({width,height:900});
+              await page.waitForTimeout(60);
+              const overflow=await page.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+              if(overflow>1) throw new Error(`front overflow width=${width} delta=${overflow}`);
+            }
+            console.log('RESPONSIVE_390_480_640_768_1024_1280_1440_1920=PASS');
+            if(errors.length) throw new Error('page errors: '+errors.join(' | '));
+            console.log('PAGE_ERRORS=0');
+            console.log('TARGETED_BROWSER_UA_REGRESSION=PASS');
+          } finally {
+            if(browser) await browser.close();
+          }
+          JS
+          cd "$RUNNER_TEMP/p01-node"
+          node e2e.mjs
+
+      - name: Backup restore and security smoke regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-v22118-runtime
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $db=vf_db();
+          $security=new VfSecurityManager($db);
+          $result=$security->updateSettings(['failWindow'=>-999,'failLimit'=>999,'lockSeconds'=>999999999,'idleSeconds'=>999999999,'maxSeconds'=>1]);
+          if($result['failWindow']!==300||$result['failLimit']!==20||$result['lockSeconds']!==86400||$result['idleSeconds']!==2592000||$result['maxSeconds']!==2592000) throw new RuntimeException('security clamp regression');
+          $repo=new VfRepository($db);
+          $repo->createCategory(['name'=>'Backup Sentinel','description'=>'synthetic runner fixture','is_private'=>1]);
+          $manager=new VfBackupManager($db);
+          $backup=$manager->create('P01 2.21.18 targeted regression','regression',true);
+          $key=(string)$backup['backup_key'];
+          $verified=$manager->verify($key);
+          if(($verified['validation_status']??'')!=='valid') throw new RuntimeException('backup verify failed');
+          $repo->createCategory(['name'=>'Backup Transient','description'=>'must disappear','is_private'=>1]);
+          VfBackupManager::performRestore($key);
+          $db=vf_db();
+          $q=$db->prepare('SELECT COUNT(*) FROM categories WHERE name=?');
+          $q->execute(['Backup Sentinel']); if((int)$q->fetchColumn()!==1) throw new RuntimeException('restore sentinel missing');
+          $q->execute(['Backup Transient']); if((int)$q->fetchColumn()!==0) throw new RuntimeException('restore transient survived');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok') throw new RuntimeException('SQLite integrity failed');
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)) throw new RuntimeException('SQLite foreign key check failed');
+          echo "SECURITY_SMOKE=PASS\nBACKUP_RESTORE=PASS\nSQLITE_REGRESSION=PASS\n";
+          PHP
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # P01 V2.21.18 Prototype Targeted Regression
+
+          - Source Ref: \`$P01_REF\`
+          - Exact Source SHA: \`$P01_SOURCE_SHA\`
+          - Exact Source Tree: \`$P01_SOURCE_TREE\`
+          - Runtime Version before Candidate seal: \`2.21.17\`
+          - Schema: \`$P01_SCHEMA\`
+          - PHP / JS Syntax: PASS
+          - Fresh Setup / SQLite: PASS
+          - Open URL does not reorder default navigation: PASS
+          - Recent history still records: PASS
+          - Public / Private switch preserves category context: PASS
+          - Empty target scope stays in category: PASS
+          - Homepage stable-order mental model: PASS
+          - Plugin reminder deprioritized: PASS
+          - Responsive 390 / 480 / 640 / 768 / 1024 / 1280 / 1440 / 1920: PASS
+          - Security smoke: PASS
+          - Backup / Restore: PASS
+          - PRIVATE_DATA persisted publicly: NONE
+          EOF
+          echo 'P01_V2_21_18_TARGETED_REGRESSION=PASS'
+
+      - name: Cleanup ephemeral private workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate /tmp/vf-p01-v22118-runtime "$RUNNER_TEMP/p01-node" "$RUNNER_TEMP/p01.cookies" "$RUNNER_TEMP/p01-setup.html" "$RUNNER_TEMP/p01-setup-post.html" || true
+          if [ -f "$RUNNER_TEMP/p01-server.pid" ]; then kill "$(cat "$RUNNER_TEMP/p01-server.pid")" 2>/dev/null || true; fi
+          echo 'EPHEMERAL_PRIVATE_WORKSPACE_CLEANUP=PASS'
