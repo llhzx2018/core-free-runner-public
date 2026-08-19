@@ -1,0 +1,76 @@
+name: P04 V2.8.6 Diagnostics R2
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_BRANCH: hotfix/v2.8.6-diagnostics-run
+      EXPECTED_HEAD: 7542c023234d37823d12ea839cbafc476ca57474
+      PUSH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout runner patch
+        uses: actions/checkout@v4
+        with:
+          path: runner
+
+      - name: Checkout exact P04 hotfix
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_BRANCH }}
+          token: ${{ env.PUSH_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: source
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl, zip, sodium, pdo_sqlite, sqlite3
+          ini-file: production
+
+      - name: Patch and verify exact hotfix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PUSH_TOKEN"
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 runner/scripts/p04-v286-patch.py source
+          test "$(cat source/VERSION)" = '2.8.6'
+          php -l source/src/app/SystemDiagnosticsService.php >/dev/null
+          node --check source/public/assets/v284-long-action-feedback.js
+          python3 -m py_compile source/scripts/build-release-tree.py
+          grep -Fq "diagnostics_internal" source/src/app/SystemDiagnosticsService.php
+          grep -Fq "'diagnostics-run': 'diagnostics_run'" source/public/assets/v284-long-action-feedback.js
+          php -r '
+            class Database { public static function connection(){ throw new RuntimeException("forced diagnostic failure"); } }
+            class Support { public static function randomHex($b=8){ return "abc123def456"; } public static function sanitizeError($v){ return "sanitized"; } public static function now(){ return "2026-08-19 11:50:00"; } }
+            require "source/src/app/SystemDiagnosticsService.php";
+            $r=(new SystemDiagnosticsService())->run(true);
+            if(($r["status"]??"")!=="blocked" || ($r["summary"]["blocked"]??0)!==1 || ($r["checks"][0]["key"]??"")!=="diagnostics_internal") exit(2);
+            echo "V286_DIAGNOSTICS_FAIL_PARTIAL_PASS\n";
+          '
+          find source/src source/public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo P04_V286_DIAGNOSTICS_R2_PASS
+          echo PRODUCTION_WRITE=0
+
+      - name: Commit tested P04 hotfix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd source
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION CHANGELOG.md docs/operations/package/RELEASE_NOTES.md src/app/SystemDiagnosticsService.php public/assets/v284-long-action-feedback.js scripts/build-release-tree.py
+          git commit -m 'fix(P04): restore system diagnostics action feedback'
+          git push origin HEAD:"$SOURCE_BRANCH"
+          echo "P04_V286_TESTED_COMMIT=$(git rev-parse HEAD)"
+          echo PRODUCTION_WRITE=0
