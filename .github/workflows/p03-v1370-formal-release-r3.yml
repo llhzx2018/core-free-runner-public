@@ -1,0 +1,251 @@
+name: P03 V1.37.0 Formal Release Bridge R3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ops/p03/release-r3/**'
+      - '.github/workflows/p03-v1370-formal-release-r3.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/p03/release-r3/**'
+      - '.github/workflows/p03-v1370-formal-release-r3.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1370-formal-release-r3
+  cancel-in-progress: false
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  CANDIDATE_COMMIT: 2bb335d346d8fbf7bae80f48fdbe564826215bcd
+  PRODUCT_EXACT_COMMIT: 9506ee1d76cb0782f1053b66536d31f8c5273fdf
+  PRODUCTION_MAIN_BEFORE: 3962a68bbbcfbfc5aece6a338effebcafac759a9
+  SOURCE_VERSION: 1.36.2
+  TARGET_VERSION: 1.37.0
+  TARGET_SCHEMA: '30'
+  RELEASE_TAG: v1.37.0
+  ASSET_NAME: VF_Forge_V1.37.0_UPDATE.zip
+  PHP_TEST_IMAGE: vf-forge-php84-v1370-r3
+  FIXTURE_PASS: VfM-2026-Test-Fixture!
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - name: Require private read and release write credentials
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN" && test -n "$READ_TOKEN"
+          code=$(curl -sS -o "$RUNNER_TEMP/repo.json" -w '%{http_code}' -H "Authorization: Bearer $RELEASE_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$P03_REPOSITORY")
+          test "$code" = 200
+          python3 - "$RUNNER_TEMP/repo.json" <<'PY'
+import json,sys
+p=(json.load(open(sys.argv[1])).get('permissions') or {})
+assert p.get('push') is True,p
+print('P03_RELEASE_WRITE_PERMISSION=PASS')
+PY
+
+      - name: Prepare deterministic test environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-zip sqlite3 unzip zip curl >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.v1370" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev libzip-dev sqlite3 && docker-php-ext-install pdo_sqlite sqlite3 zip && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.v1370" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo "PHP84_RUNTIME=PASS\n";'
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Checkout sealed V1.36.2 Production baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.PRODUCTION_MAIN_BEFORE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: production
+
+      - name: Current Truth and immutable release-source gate
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git -C production rev-parse HEAD)" = "$PRODUCTION_MAIN_BEFORE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < candidate/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
+          test "$(tr -d '\r\n' < production/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
+          repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"
+          main=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')
+          dev=$(git ls-remote "$repo" refs/heads/develop | awk '{print $1}')
+          test "$main" = "$PRODUCTION_MAIN_BEFORE" || { echo "PRODUCTION_MAIN_DRIFT=$main"; exit 73; }
+          test "$dev" = "$CANDIDATE_COMMIT" || { echo "DEVELOP_DRIFT=$dev"; exit 73; }
+          git -C candidate merge-base --is-ancestor "$PRODUCTION_MAIN_BEFORE" "$CANDIDATE_COMMIT"
+          git -C candidate merge-base --is-ancestor "$PRODUCT_EXACT_COMMIT" "$CANDIDATE_COMMIT"
+          bad=$(git -C candidate diff --name-only "$PRODUCT_EXACT_COMMIT" "$CANDIDATE_COMMIT" -- ':(exclude).github/**' ':(exclude)tests/**' || true)
+          test -z "$bad" || { echo "RUNTIME_DRIFT_AFTER_EXACT_CANDIDATE"; echo "$bad"; exit 74; }
+          python3 - <<'PY'
+import json
+p=json.load(open('candidate/VF_PROJECT.json',encoding='utf-8'))
+assert p['production_version']=='1.36.2'
+assert p['candidate_version']=='1.37.0'
+assert p['schema_version']==30 and p['migration']=='NONE'
+assert p['version_semantics']['allowed_source_versions']==['1.36.2']
+assert p['permanent_boundaries']['project_asset_storage']=='NONE'
+assert p['production_write']=='NO'
+print('CURRENT_TRUTH=PASS')
+PY
+
+      - name: Exact source and Project Intelligence contract regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          python3 scripts/repo_health.py .
+          python3 tests/unit/schema_contract_test.py
+          python3 tests/unit/project_intelligence_contract_test.py
+          python3 tests/unit/project_intelligence_mcp_contract_test.py
+          python3 tests/integration/schema_sqlite_test.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$RUNNER_TEMP/php-lint.txt"
+          node --check public/assets/app.js
+          node --check public/assets/experience.js
+          node --check public/assets/project-intelligence.js
+          echo "V1370_EXACT_SOURCE_REGRESSION=PASS php=$(wc -l <"$RUNNER_TEMP/php-lint.txt")"
+
+      - name: Reconstruct base and target runtimes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_RT="$RUNNER_TEMP/v1370-base-runtime"
+          TARGET_RT="$RUNNER_TEMP/v1370-target-runtime"
+          RELEASE_DIR="$RUNNER_TEMP/v1370-release"
+          rm -rf "$BASE_RT" "$TARGET_RT" "$RELEASE_DIR"
+          python3 production/scripts/build_runtime.py "$BASE_RT" >/dev/null
+          python3 candidate/scripts/build_runtime.py "$TARGET_RT" >/dev/null
+          grep -Fq "define('VFAB_VERSION', '1.36.2');" "$BASE_RT/app/bootstrap.php"
+          grep -Fq "define('VFAB_VERSION', '1.37.0');" "$TARGET_RT/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" "$BASE_RT/app/bootstrap.php"
+          grep -Fq "define('VFAB_SCHEMA_VERSION', 30);" "$TARGET_RT/app/bootstrap.php"
+          test -f "$TARGET_RT/intelligence-api.php"
+          test -f "$TARGET_RT/memory-api.php"
+          test -f "$TARGET_RT/app/ProjectIntelligenceService.php"
+          test -f "$TARGET_RT/assets/project-intelligence.js"
+          test ! -e "$TARGET_RT/app/.runtime.php"
+          echo "RUNTIME_RECONSTRUCTION=PASS base=$(find "$BASE_RT" -type f | wc -l) target=$(find "$TARGET_RT" -type f | wc -l)"
+
+      - name: Build formal Atomic with canonical repository builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/v1370-release"
+          python3 candidate/scripts/build_atomic.py --base-runtime "$RUNNER_TEMP/v1370-base-runtime" --target-runtime "$RUNNER_TEMP/v1370-target-runtime" --output "$RELEASE_DIR" | tee "$RUNNER_TEMP/package.json"
+          cd "$RELEASE_DIR"
+          sha256sum -c SHA256SUMS.txt
+          unzip -t VF_Forge_V1.37.0_Atomic_Upgrade.zip >/dev/null
+          test "$(unzip -Z1 VF_Forge_V1.37.0_Atomic_Upgrade.zip)" = 'repair-v1.37.0.php'
+          test "$(unzip -Z1 VF_Forge_V1.37.0_Atomic_Upgrade.zip | wc -l | tr -d ' ')" = 1
+          php -l repair-v1.37.0.php
+          grep -Fq "const VFF_PACKAGE_ID='vf-forge';" repair-v1.37.0.php
+          grep -Fq "const VFF_ATOMIC_TARGET='1.37.0';" repair-v1.37.0.php
+          grep -Fq 'const VFF_ATOMIC_SCHEMA=30;' repair-v1.37.0.php
+          grep -Fq 'const VFF_ATOMIC_ALLOWED=["1.36.2"];' repair-v1.37.0.php
+          python3 - <<'PY'
+import json
+p=json.load(open('PACKAGE_MANIFEST.json',encoding='utf-8'))
+assert p['package_id']=='vf-forge' and p['package_type']=='app'
+assert p['version']=='1.37.0' and p['schema']==30
+assert p['allowed_source_versions']==['1.36.2']
+assert p['source_file_count'] > 0
+m=open('SOURCE_MANIFEST.txt',encoding='utf-8').read()
+for x in ['intelligence-api.php','memory-api.php','app/ProjectIntelligenceService.php','assets/project-intelligence.js']:
+    assert x in m,x
+for bad in ['PRIVATE_DATA','.runtime.php','storage/private','.sqlite','.db']:
+    assert bad.lower() not in m.lower(),bad
+print('CANONICAL_ATOMIC_REVERSE_VERIFY=PASS',p['atomic_sha256'],p['source_manifest_sha256'],p['source_file_count'])
+PY
+          cp VF_Forge_V1.37.0_Atomic_Upgrade.zip "$ASSET_NAME"
+          sha256sum "$ASSET_NAME" | awk '{print $1}' > "$RUNNER_TEMP/update.sha"
+          stat -c%s "$ASSET_NAME" > "$RUNNER_TEMP/update.bytes"
+
+      - name: Atomic success and injected failure rollback E2E
+        shell: bash
+        env:
+          BASE_SHA: ${{ env.PRODUCTION_MAIN_BEFORE }}
+          V1370_RELEASE_DIR: ${{ runner.temp }}/v1370-release
+          V1370_TARGET_RUNTIME: ${{ runner.temp }}/v1370-target-runtime
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          bash tests/maintenance/v1370_atomic_e2e.sh | tee "$RUNNER_TEMP/atomic-e2e.log"
+          grep -q 'V1370_ATOMIC_SUCCESS_PASS' "$RUNNER_TEMP/atomic-e2e.log"
+          grep -q 'V1370_SOURCE_AND_DATABASE_ROLLBACK_PASS' "$RUNNER_TEMP/atomic-e2e.log"
+          grep -q 'V1370_ATOMIC_E2E_PASS' "$RUNNER_TEMP/atomic-e2e.log"
+
+      - name: Publish or exact-verify formal GitHub Release without Production promotion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          RELEASE_DIR="$RUNNER_TEMP/v1370-release"
+          ASSET="$RELEASE_DIR/$ASSET_NAME"
+          UPDATE_SHA=$(cat "$RUNNER_TEMP/update.sha")
+          UPDATE_BYTES=$(cat "$RUNNER_TEMP/update.bytes")
+          cat >"$RUNNER_TEMP/RELEASE_NOTES.md" <<'EOF'
+          # P03 · VF Forge V1.37.0
+
+          Project Intelligence / Engineering Memory 重构正式版本。
+
+          - Upgrade: V1.36.2 → V1.37.0
+          - Schema: 30 → 30 (Migration NONE)
+          - PROJECT-ASSET STORAGE: NONE
+          - Atomic success upgrade: PASS
+          - Injected failure source + SQLite rollback: PASS
+          - Project Intelligence / MCP contracts: PASS
+          - Production write during release publication: NO
+          EOF
+          if gh release view "$RELEASE_TAG" --repo "$P03_REPOSITORY" >/dev/null 2>&1; then
+            rm -rf "$RUNNER_TEMP/existing"; mkdir -p "$RUNNER_TEMP/existing"
+            gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" -p "$ASSET_NAME" -D "$RUNNER_TEMP/existing"
+            test "$(sha256sum "$RUNNER_TEMP/existing/$ASSET_NAME" | awk '{print $1}')" = "$UPDATE_SHA"
+            test "$(stat -c%s "$RUNNER_TEMP/existing/$ASSET_NAME")" = "$UPDATE_BYTES"
+          else
+            gh release create "$RELEASE_TAG" "$ASSET" --repo "$P03_REPOSITORY" --target "$CANDIDATE_COMMIT" --title 'P03 · VF Forge V1.37.0' --notes-file "$RUNNER_TEMP/RELEASE_NOTES.md"
+          fi
+          gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" "$ASSET_NAME" "$UPDATE_BYTES" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); name=sys.argv[2]; size=int(sys.argv[3])
+assert r['tag_name']=='v1.37.0' and not r['draft'] and not r['prerelease']
+a=[x for x in r.get('assets',[]) if x['name']==name]; assert len(a)==1,a
+assert a[0]['size']==size,(a[0]['size'],size)
+print('FORMAL_RELEASE_READBACK=PASS','release_id='+str(r['id']),'asset_id='+str(a[0]['id']),'bytes='+str(size))
+PY
+          repo="https://x-access-token:${GH_TOKEN}@github.com/${P03_REPOSITORY}.git"
+          test "$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')" = "$PRODUCTION_MAIN_BEFORE"
+          test "$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}')" = "$CANDIDATE_COMMIT"
+          echo "V1370_RELEASE_READY asset=$ASSET_NAME sha256=$UPDATE_SHA bytes=$UPDATE_BYTES candidate=$CANDIDATE_COMMIT production_main=$PRODUCTION_MAIN_BEFORE"
