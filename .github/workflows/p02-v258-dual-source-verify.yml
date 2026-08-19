@@ -1,0 +1,76 @@
+name: P02 V2.5.8 Dual Source Verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v258-dual-source-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Require private read
+        env:
+          TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: test -n "$TOKEN"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Download canonical V2.5.8 UPDATE
+        env:
+          GH_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg"
+          gh release download v2.5.8 --repo llhzx2018/vf-library --pattern VF_Library_V2.5.8_UPDATE.zip --dir "$RUNNER_TEMP/pkg"
+          test "$(stat -c%s "$RUNNER_TEMP/pkg/VF_Library_V2.5.8_UPDATE.zip")" = 319074
+          test "$(sha256sum "$RUNNER_TEMP/pkg/VF_Library_V2.5.8_UPDATE.zip"|awk '{print $1}')" = 7975c097eb8af3a4f8e82aadc6109bf6d7774b2ecb32b2ffd917815918daf42c
+          echo RELEASE_ASSET_IDENTITY=PASS
+      - name: Verify existing data upgrade from both supported sources
+        env:
+          READ_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+        run: |
+          set -Eeuo pipefail
+          PKG="$RUNNER_TEMP/pkg/VF_Library_V2.5.8_UPDATE.zip"; BYTES=319074; SHA=7975c097eb8af3a4f8e82aadc6109bf6d7774b2ecb32b2ffd917815918daf42c
+          test_source(){
+            SRCVER="$1"; PORT="$2"; ROOT="$RUNNER_TEMP/up-${SRCVER//./}"; SRC="$ROOT/src"; SITE="$ROOT/site"; PW="P02-V258-${SRCVER//./}-${{ github.run_id }}!"
+            mkdir -p "$ROOT"; git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-library.git" "$SRC"; git -C "$SRC" checkout -q "v$SRCVER"; mkdir -p "$SITE"; bash "$SRC/scripts/build-deploy-tree.sh" "$SITE" >/dev/null
+            test "$(cat "$SITE/VERSION.txt")" = "$SRCVER"
+            php -S 127.0.0.1:$PORT -t "$SITE" >/dev/null 2>&1 & PID=$!
+            for _ in $(seq 1 80); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+            curl -fsS -c "$ROOT/c" "http://127.0.0.1:$PORT/setup.php" > "$ROOT/setup"
+            TOKEN=$(python3 - "$ROOT/setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PY
+            )
+            test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:$PORT/setup.php")" = 303
+            SESSION=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=session"); CSRF=$(jq -r '.csrf' <<<"$SESSION")
+            CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"name\":\"V258 $SRCVER Sentinel\",\"description\":\"keep\",\"icon\":\"folder\"}" "http://127.0.0.1:$PORT/api.php?action=category_save"); CID=$(jq -r '.id' <<<"$CAT"); test "$CID" != null
+            ITEM=$(jq -nc --argjson cid "$CID" --arg t "V258 Existing $SRCVER" '{category_id:$cid,title:$t,description:"survive",content:"## Existing\n\n- [ ] keep",content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')
+            SAVED=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" "http://127.0.0.1:$PORT/api.php?action=content_save"); IID=$(jq -r '.id' <<<"$SAVED"); test "$IID" != null
+            curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" "http://127.0.0.1:$PORT/api.php?action=content_favorite" | jq -e '.ok==true' >/dev/null
+            cat > "$ROOT/up.php" <<'PHP'
+          <?php
+          $site=$argv[1];$pkg=$argv[2];$bytes=(int)$argv[3];$sha=$argv[4];$src=$argv[5];$out=$argv[6];
+          require $site.'/app/bootstrap.php';require_once $site.'/app/CoreUpdates/UpdateAdapter.php';require_once $site.'/app/CoreUpdates/UpdateCore.php';require_once $site.'/app/VfLibraryCoreUpdateAdapter.php';
+          $m=['schema_version'=>'1.0','project_id'=>'P02','component_id'=>'APP','enabled'=>true,'current_version'=>$src,'target_version'=>'2.5.8','update_type'=>'ATOMIC','from_versions'=>['2.5.6','2.5.7'],'schema_from'=>'2401','schema_to'=>'2401','repository'=>'llhzx2018/vf-library','release_tag'=>'v2.5.8','asset_name'=>'VF_Library_V2.5.8_UPDATE.zip','asset_bytes'=>$bytes,'asset_sha256'=>$sha,'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-08-19T04:55:08Z'];
+          $core=new CoreUpdates\UpdateCore('P02','APP');$c=$core->check($src,'2401',$m);if(($c['status']??'')!=='AVAILABLE')exit(2);$v=$core->verifyPackage($pkg,$m);if(($v['status']??'')!=='VERIFIED')exit(3);$r=$core->upgrade($src,'2401',new VfLibraryCoreUpdateAdapter(),$pkg,$m);file_put_contents($out,json_encode($r));if(!in_array($r['status']??'', ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)||empty($r['backup_locator']))exit(4);
+          PHP
+            php "$ROOT/up.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$SRCVER" "$ROOT/result"
+            test "$(cat "$SITE/VERSION.txt")" = 2.5.8; jq -e '.backup_locator|length>0' "$ROOT/result" >/dev/null
+            curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=content_get&id=$IID" | jq -e '(.item.is_favorite|tonumber)==1 and .item.content=="## Existing\n\n- [ ] keep"' >/dev/null
+            SESSION2=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=session"); CSRF2=$(jq -r '.csrf' <<<"$SESSION2"); POST=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V258 Post Write",content:"ok",content_mode:"quick",content_format:"plain",primary_action:"copy",status:"active"}')
+            curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d "$POST" "http://127.0.0.1:$PORT/api.php?action=content_save" | jq -e '.ok==true' >/dev/null
+            php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.8" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+            kill "$PID"; echo "EXISTING_DATA_UPDATE_${SRCVER}_TO_2.5.8=PASS"
+          }
+          test_source 2.5.6 18285
+          test_source 2.5.7 18286
+          echo DUAL_SOURCE_AUTOMATIC_BACKUP_DATA_FAVORITE_POSTWRITE_SQLITE=PASS
+          echo PRODUCTION_WRITE=NO
