@@ -17,6 +17,12 @@ set -Eeuo pipefail
 BASE_RT="$RUNNER_TEMP/v1370-base-runtime"
 TARGET_RT="$RUNNER_TEMP/v1370-target-runtime"
 RELEASE_DIR="$RUNNER_TEMP/v1370-release"
+AUTH=(-H "Authorization: Bearer $RELEASE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+
+branch_sha(){
+  local branch="$1"
+  curl -fsS "${AUTH[@]}" "https://api.github.com/repos/$P03_REPOSITORY/branches/$branch" | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"]["sha"])'
+}
 
 printf '%s\n' '=== CURRENT TRUTH ==='
 test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_COMMIT"
@@ -25,9 +31,8 @@ test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
 test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
 test "$(tr -d '\r\n' < candidate/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
 test "$(tr -d '\r\n' < production/database/schema/SCHEMA_VERSION)" = "$TARGET_SCHEMA"
-repo="https://x-access-token:${RELEASE_TOKEN}@github.com/${P03_REPOSITORY}.git"
-remote_main=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')
-remote_develop=$(git ls-remote "$repo" refs/heads/develop | awk '{print $1}')
+remote_main=$(branch_sha main)
+remote_develop=$(branch_sha develop)
 test "$remote_main" = "$PRODUCTION_MAIN_BEFORE" || { echo "PRODUCTION_MAIN_DRIFT=$remote_main"; exit 73; }
 test "$remote_develop" = "$CANDIDATE_COMMIT" || { echo "DEVELOP_DRIFT=$remote_develop"; exit 73; }
 git -C candidate merge-base --is-ancestor "$PRODUCTION_MAIN_BEFORE" "$CANDIDATE_COMMIT"
@@ -153,9 +158,9 @@ else
   gh release create "$RELEASE_TAG" "$RELEASE_DIR/$ASSET_NAME" --repo "$P03_REPOSITORY" --target "$CANDIDATE_COMMIT" --title 'P03 · VF Forge V1.37.0' --notes-file "$RUNNER_TEMP/V1370_RELEASE_NOTES.md"
 fi
 gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/v1370-release.json"
-python3 - "$RUNNER_TEMP/v1370-release.json" "$ASSET_NAME" "$UPDATE_BYTES" "$CANDIDATE_COMMIT" <<'PY'
+python3 - "$RUNNER_TEMP/v1370-release.json" "$ASSET_NAME" "$UPDATE_BYTES" <<'PY'
 import json,sys
-r=json.load(open(sys.argv[1])); name=sys.argv[2]; size=int(sys.argv[3]); candidate=sys.argv[4]
+r=json.load(open(sys.argv[1])); name=sys.argv[2]; size=int(sys.argv[3])
 assert r['tag_name']=='v1.37.0'
 assert not r['draft'] and not r['prerelease']
 a=[x for x in r.get('assets',[]) if x['name']==name]
@@ -163,8 +168,8 @@ assert len(a)==1,a
 assert a[0]['size']==size,(a[0]['size'],size)
 print('FORMAL_RELEASE_READBACK=PASS','release_id='+str(r['id']),'asset_id='+str(a[0]['id']),'bytes='+str(size),'created_at='+str(r.get('published_at') or r.get('created_at')))
 PY
-remote_main_after=$(git ls-remote "$repo" refs/heads/main | awk '{print $1}')
-tag_sha=$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}')
+remote_main_after=$(branch_sha main)
+tag_sha=$(curl -fsS "${AUTH[@]}" "https://api.github.com/repos/$P03_REPOSITORY/git/ref/tags/$RELEASE_TAG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
 test "$remote_main_after" = "$PRODUCTION_MAIN_BEFORE"
 test "$tag_sha" = "$CANDIDATE_COMMIT"
 echo "PRODUCTION_MAIN_UNTOUCHED=PASS sha=$remote_main_after"
