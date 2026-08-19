@@ -1,0 +1,128 @@
+name: P03 V1.37.1 Null Authority Browser Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1371-null-authority-browser.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  P03_COMMIT: 7d3e2ef209cccae23bf893ef0820b5c3ea5ba995
+
+jobs:
+  null-authority:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact private P03 maintenance source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.P03_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p03
+
+      - name: Static final-source contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          test "$(git rev-parse HEAD)" = "$P03_COMMIT"
+          grep -Fq "function sourceUrl(s){const u=String(s?.canonical_url||'')" public/assets/project-intelligence.js
+          grep -Fq '#projectShortcuts' public/assets/project-intelligence-shell.css
+          grep -Fq 'overflow-y:auto' public/assets/project-intelligence-shell.css
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/p03-runtime" >/dev/null
+          grep -Fq "function sourceUrl(s){const u=String(s?.canonical_url||'')" "$RUNNER_TEMP/p03-runtime/assets/project-intelligence.js"
+          test -f "$RUNNER_TEMP/p03-runtime/assets/project-intelligence-shell.css"
+          node --check public/assets/project-intelligence.js
+          echo 'P03_V1371_FINAL_SOURCE_STATIC=PASS'
+
+      - name: Chromium project detail without Authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p03
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > null-authority.mjs <<'EOF'
+          import { chromium } from 'playwright';
+          import path from 'node:path';
+
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1319,height:652}});
+          const errors=[];
+          page.on('pageerror',e=>errors.push(String(e.message||e)));
+          await page.setContent(`<!doctype html><html><body>
+            <div id="toast"></div>
+            <div id="app">
+              <aside class="sidebar">
+                <button data-route="overview">概览</button>
+                <button data-route="projects">项目 <b id="navProjectCount">—</b></button>
+                <button data-route="attention">关注 <b id="navAttentionCount">—</b></button>
+                <button data-route="activity">动态</button>
+                <button data-route="relations">关系</button>
+                <button data-route="search">搜索</button>
+                <button id="toolsite" data-open-project="7">VF ToolSite</button>
+              </aside>
+              <main><div id="breadcrumb"></div><div id="view" tabindex="-1"></div></main>
+            </div>
+          </body></html>`,{waitUntil:'domcontentloaded'});
+
+          await page.evaluate(()=>{
+            const json=(body,status=200)=>Promise.resolve(new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}}));
+            window.fetch=(url)=>{
+              const u=new URL(String(url),location.href);
+              const action=u.searchParams.get('action');
+              if(action==='portfolio') return json({ok:true,data:{projects:[],attention:[],recent_activity:[]}});
+              if(action==='project') return json({ok:true,data:{
+                context:{project:{id:7,code:'S01',name:'VF ToolSite',description:'测试无 Authority 的项目'},production:null,current_state:'正常项目上下文',requires_user:false,block:'',health_attention:{}},
+                sources:[],
+                truth:{truth:{}},
+                decisions:[],relations:[],activity:[],
+                declaration:{schema_version:30,lifecycle:'STABLE_OPERATIONS'}
+              }});
+              if(action==='activity') return json({ok:true,events:[]});
+              if(action==='relations') return json({ok:true,relations:[]});
+              return json({ok:false,error:'unexpected action '+action},400);
+            };
+          });
+
+          await page.addScriptTag({path:path.resolve('public/assets/project-intelligence.js')});
+          await page.waitForTimeout(850);
+          await page.click('#toolsite');
+          await page.waitForTimeout(150);
+          const state=await page.evaluate(()=>({
+            breadcrumb:document.querySelector('#breadcrumb')?.textContent||'',
+            text:document.querySelector('#view')?.textContent||'',
+            toast:document.querySelector('#toast')?.textContent||'',
+            toastClass:document.querySelector('#toast')?.className||''
+          }));
+          if(errors.length) throw new Error('page errors: '+errors.join(' | '));
+          if(!state.breadcrumb.includes('VF ToolSite')) throw new Error('project breadcrumb missing: '+state.breadcrumb);
+          if(!state.text.includes('VF ToolSite')) throw new Error('project detail did not render');
+          if(state.text.includes('无法恢复项目上下文')) throw new Error('fallback error view rendered');
+          if(state.toast.includes('canonical_url') || state.toastClass.includes('error')) throw new Error('error toast rendered: '+JSON.stringify(state));
+          if(state.text.includes('打开 Production') || state.text.includes('GitHub ↗')) throw new Error('missing Authority links should be omitted');
+          await page.screenshot({path:process.env.RUNNER_TEMP+'/p03-v1371-null-authority-1319x652.png',fullPage:true});
+          console.log('P03_NULL_AUTHORITY_BROWSER_PASS',JSON.stringify(state));
+          await browser.close();
+          EOF
+          node null-authority.mjs
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P03_V1371_NULL_AUTHORITY_GATE=PASS'
+          echo "P03_COMMIT=$P03_COMMIT"
+          echo 'NO_CANONICAL_URL_CRASH=PASS'
+          echo 'PROJECT_DETAIL_RENDER=PASS'
+          echo 'MISSING_AUTHORITY_LINKS_OMITTED=PASS'
+          echo 'PRODUCTION_WRITE=NO'
