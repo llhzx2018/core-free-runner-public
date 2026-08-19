@@ -1,0 +1,304 @@
+name: P01 V2.21.22 Formal Release
+
+on:
+  pull_request:
+    paths:
+      - 'requests/p01-v22122-formal-release-*.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v22122-formal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: startsWith(github.head_ref, 'agent/p01-v22122-formal-release-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      UPDATES_REPO: llhzx2018/core-updates
+      CANDIDATE_BRANCH: maintenance/admin-consolidation-2.21.22-20260820
+      CANDIDATE: 84ed48f5208f23e63e4e92c98695d53af6f278a7
+      CANDIDATE_TREE: 49bc9b9d040f17fdbb370a9167e3e75cf38b8b4f
+      SOURCE_TAG: v2.21.21
+      SOURCE_COMMIT: 0b62c96b787e03b0dda6ef8493d29755b6baf83e
+      SOURCE_TREE: 02b6199ab82f2fb03dd9d8048288421037869e4e
+      VERSION: 2.21.22
+      SOURCE_VERSION: 2.21.21
+      SCHEMA: '2026080902'
+      TAG: v2.21.22
+      OUT: /tmp/p01-v22122-artifact-gate
+    steps:
+      - name: Checkout runner trigger
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source readback
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch "$CANDIDATE_BRANCH" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$VERSION"
+          grep -Fq "define('VF_VERSION', '2.21.22');" candidate/src/app/bootstrap.php
+
+          git clone -q --depth 1 --branch "$SOURCE_TAG" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" production
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(git -C production rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n' < production/VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          echo 'EXACT_SOURCE_READBACK=PASS'
+
+      - name: Prepare proven P01 artifact gate contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch agent/p01-22121-formal-artifact-gate-20260819 https://github.com/llhzx2018/core-free-runner-public.git runner-old
+          mkdir -p runner/scripts
+          cp runner-old/scripts/p01-build-release.py runner/scripts/
+          cp runner-old/scripts/p01-build-release-v2.py runner/scripts/
+          cp runner-old/scripts/p01-build-maintenance-candidate-22121.py runner/scripts/p01-build-maintenance-candidate-22122.py
+          cp runner-old/scripts/p01-v22121-formal-artifact-gate.sh runner/scripts/p01-v22122-formal-artifact-gate.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('runner/scripts/p01-build-maintenance-candidate-22122.py')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace("VERSION = '2.21.21'", "VERSION = '2.21.22'", 1)
+          s=s.replace("SOURCE_VERSION = '2.21.20'", "SOURCE_VERSION = '2.21.21'", 1)
+          replacement="""EXPECTED_ADDED = {
+              'assets/admin-consolidation.css',
+              'assets/admin-consolidation.js',
+              'assets/favorite-affordance.css',
+          }
+          EXPECTED_RUNTIME_DELTA = {
+              'VERSION.txt',
+              'app/AdminShell.php',
+              'app/bootstrap.php',
+              'assets/admin-consolidation.css',
+              'assets/admin-consolidation.js',
+              'assets/favorite-affordance.css',
+              'data-safety.php',
+              'index.php',
+              'links-admin.php',
+              'settings.php',
+          }
+          """
+          s,n=re.subn(r"EXPECTED_ADDED = \{.*?\n\}\nEXPECTED_RUNTIME_DELTA = \{.*?\n\}\n", replacement, s, count=1, flags=re.S)
+          if n!=1: raise SystemExit('builder expected-set anchor mismatch')
+          s=s.replace("p01_base_22121", "p01_base_22122").replace("p01_v2_atomic_22121", "p01_v2_atomic_22122")
+          p.write_text(s,encoding='utf-8',newline='\n')
+
+          g=Path('runner/scripts/p01-v22122-formal-artifact-gate.sh')
+          t=g.read_text(encoding='utf-8')
+          t=t.replace('22121','22122')
+          t=t.replace('2.21.21','2.21.22')
+          t=t.replace('2.21.20','2.21.21')
+          old='.runtime_added==["assets/data-recovery.js","assets/update-reload.js"] and (.runtime_delta|length)==23'
+          new='.runtime_added==["assets/admin-consolidation.css","assets/admin-consolidation.js","assets/favorite-affordance.css"] and (.runtime_delta|length)==10'
+          if old not in t: raise SystemExit('gate delta assertion anchor mismatch')
+          t=t.replace(old,new,1)
+          t=t.replace('(.target_files==(.source_files+2))','(.target_files==(.source_files+3))',1)
+          anchor='test -f "$UPGRADE/assets/update-reload.js"'
+          if anchor not in t: raise SystemExit('upgrade asset anchor mismatch')
+          t=t.replace(anchor,anchor+'\ntest -f "$UPGRADE/assets/admin-consolidation.css"\ntest -f "$UPGRADE/assets/admin-consolidation.js"\ntest -f "$UPGRADE/assets/favorite-affordance.css"',1)
+          full="for required in ['index.php','setup.php','VERSION.txt','app/bootstrap.php','assets/data-recovery.js','assets/update-reload.js']:"
+          full2="for required in ['index.php','setup.php','VERSION.txt','app/bootstrap.php','assets/data-recovery.js','assets/update-reload.js','assets/admin-consolidation.css','assets/admin-consolidation.js','assets/favorite-affordance.css']:"
+          if full not in t: raise SystemExit('FULL required anchor mismatch')
+          t=t.replace(full,full2,1)
+          g.write_text(t,encoding='utf-8',newline='\n')
+          PY
+          chmod +x runner/scripts/p01-v22122-formal-artifact-gate.sh
+          grep -Fq "VERSION = '2.21.22'" runner/scripts/p01-build-maintenance-candidate-22122.py
+          grep -Fq "SOURCE_VERSION = '2.21.21'" runner/scripts/p01-build-maintenance-candidate-22122.py
+          grep -Fq 'assets/favorite-affordance.css' runner/scripts/p01-v22122-formal-artifact-gate.sh
+          echo 'ARTIFACT_GATE_CONTRACT_PREP=PASS'
+
+      - name: Formal artifact gate
+        shell: bash
+        env:
+          CANDIDATE: ${{ env.CANDIDATE }}
+          CANDIDATE_TREE: ${{ env.CANDIDATE_TREE }}
+          PRODUCTION: ${{ env.SOURCE_COMMIT }}
+          VERSION: ${{ env.VERSION }}
+          SOURCE_VERSION: ${{ env.SOURCE_VERSION }}
+          SCHEMA: ${{ env.SCHEMA }}
+        run: |
+          set -Eeuo pipefail
+          bash runner/scripts/p01-v22122-formal-artifact-gate.sh | tee "$RUNNER_TEMP/p01-v22122-formal-gate.log"
+          test -f "$OUT/VF_Start_V2.21.22_UPDATE.zip"
+          test -f "$OUT/VF_Start_V2.21.22_FULL.zip"
+          test -f "$OUT/repair-v2.21.22.php"
+          UPDATE_SHA="$(sha256sum "$OUT/VF_Start_V2.21.22_UPDATE.zip" | awk '{print $1}')"
+          FULL_SHA="$(sha256sum "$OUT/VF_Start_V2.21.22_FULL.zip" | awk '{print $1}')"
+          REPAIR_SHA="$(sha256sum "$OUT/repair-v2.21.22.php" | awk '{print $1}')"
+          UPDATE_BYTES="$(stat -c %s "$OUT/VF_Start_V2.21.22_UPDATE.zip")"
+          FULL_BYTES="$(stat -c %s "$OUT/VF_Start_V2.21.22_FULL.zip")"
+          REPAIR_BYTES="$(stat -c %s "$OUT/repair-v2.21.22.php")"
+          printf 'UPDATE_SHA=%s\nFULL_SHA=%s\nREPAIR_SHA=%s\nUPDATE_BYTES=%s\nFULL_BYTES=%s\nREPAIR_BYTES=%s\n' "$UPDATE_SHA" "$FULL_SHA" "$REPAIR_SHA" "$UPDATE_BYTES" "$FULL_BYTES" "$REPAIR_BYTES" >> "$GITHUB_ENV"
+          echo 'FORMAL_ARTIFACT_GATE=PASS'
+
+      - name: Publish exact GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          remote_tag="$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/tags/${TAG}" | awk '{print $1}')"
+          if [ -z "$remote_tag" ]; then
+            git -C candidate config user.name VictorForge
+            git -C candidate config user.email llhzx2018@gmail.com
+            git -C candidate tag "$TAG" "$CANDIDATE"
+            git -C candidate push "https://x-access-token:${GH_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/tags/${TAG}"
+          else
+            test "$remote_tag" = "$CANDIDATE"
+          fi
+
+          cat > /tmp/p01-v22122-release-notes.md <<'EOF'
+          V2.21.22 是 VF Start 的个人使用体验精修版本。
+
+          - 收藏改为网址旁常驻 ☆ / ★，点击即可收藏或取消。
+          - “我的收藏”、菜单、编辑弹窗与首页常用入口统一使用“收藏”语义。
+          - 网址后台“选择本页”移入表格选择列头，修复工具栏错位。
+          - “备份与恢复”与“设置”减少伪二级菜单，低频入口降噪。
+          - 备份列表补充分页；真实 Chrome 已验证收藏、后台操作与响应式。
+          - Schema 2026080902 不变；Browser Helper 1.6.4 不变。
+          EOF
+
+          if gh release view "$TAG" --repo "$PRODUCT_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "$OUT/VF_Start_V2.21.22_UPDATE.zip" \
+              "$OUT/VF_Start_V2.21.22_FULL.zip" \
+              "$OUT/repair-v2.21.22.php" \
+              --repo "$PRODUCT_REPO" --clobber
+          else
+            gh release create "$TAG" \
+              "$OUT/VF_Start_V2.21.22_UPDATE.zip" \
+              "$OUT/VF_Start_V2.21.22_FULL.zip" \
+              "$OUT/repair-v2.21.22.php" \
+              --repo "$PRODUCT_REPO" --title 'VF Start V2.21.22' \
+              --notes-file /tmp/p01-v22122-release-notes.md --verify-tag
+          fi
+
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${TAG}" > /tmp/release.json
+          RELEASE_ID="$(jq -r '.id' /tmp/release.json)"
+          RELEASED_AT="$(jq -r '.published_at' /tmp/release.json)"
+          UPDATE_ASSET_ID="$(jq -r '.assets[]|select(.name=="VF_Start_V2.21.22_UPDATE.zip")|.id' /tmp/release.json)"
+          UPDATE_REMOTE_BYTES="$(jq -r '.assets[]|select(.name=="VF_Start_V2.21.22_UPDATE.zip")|.size' /tmp/release.json)"
+          test -n "$UPDATE_ASSET_ID" && test "$UPDATE_ASSET_ID" != null
+          test "$UPDATE_REMOTE_BYTES" = "$UPDATE_BYTES"
+          printf 'RELEASE_ID=%s\nRELEASED_AT=%s\nUPDATE_ASSET_ID=%s\n' "$RELEASE_ID" "$RELEASED_AT" "$UPDATE_ASSET_ID" >> "$GITHUB_ENV"
+
+          rm -rf /tmp/p01-v22122-readback && mkdir -p /tmp/p01-v22122-readback
+          gh release download "$TAG" --repo "$PRODUCT_REPO" --dir /tmp/p01-v22122-readback \
+            --pattern 'VF_Start_V2.21.22_UPDATE.zip' \
+            --pattern 'VF_Start_V2.21.22_FULL.zip' \
+            --pattern 'repair-v2.21.22.php'
+          test "$(sha256sum /tmp/p01-v22122-readback/VF_Start_V2.21.22_UPDATE.zip | awk '{print $1}')" = "$UPDATE_SHA"
+          test "$(sha256sum /tmp/p01-v22122-readback/VF_Start_V2.21.22_FULL.zip | awk '{print $1}')" = "$FULL_SHA"
+          test "$(sha256sum /tmp/p01-v22122-readback/repair-v2.21.22.php | awk '{print $1}')" = "$REPAIR_SHA"
+          echo 'GITHUB_RELEASE_REMOTE_READBACK=PASS'
+
+      - name: Publish core-updates P01
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch main "https://x-access-token:${WRITE_TOKEN}@github.com/${UPDATES_REPO}.git" updates
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os
+          p=Path('updates/projects/P01.json')
+          d=json.loads(p.read_text(encoding='utf-8'))
+          current=str(d.get('target_version',''))
+          if current not in {'2.21.21','2.21.22'}:
+              raise SystemExit(f'unexpected current update target {current}')
+          d.update({
+              'target_version':'2.21.22',
+              'update_type':'ATOMIC',
+              'from_versions':['2.21.21'],
+              'schema_from':'2026080902',
+              'schema_to':'2026080902',
+              'repository':'llhzx2018/vf-start',
+              'release_tag':'v2.21.22',
+              'asset_name':'VF_Start_V2.21.22_UPDATE.zip',
+              'asset_bytes':int(os.environ['UPDATE_BYTES']),
+              'asset_sha256':os.environ['UPDATE_SHA'],
+              'release_id':int(os.environ['RELEASE_ID']),
+              'release_identity':'v2.21.22@84ed48f5208f23e63e4e92c98695d53af6f278a7',
+              'backup_required':True,
+              'rollback_supported':True,
+              'released_at':os.environ['RELEASED_AT'],
+              'minimum_php':'8.0.0',
+          })
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          git -C updates config user.name VictorForge
+          git -C updates config user.email llhzx2018@gmail.com
+          git -C updates add projects/P01.json
+          if ! git -C updates diff --cached --quiet; then
+            git -C updates commit -m 'release(P01): publish VF Start V2.21.22 update channel'
+            git -C updates push origin main
+          fi
+          git -C updates pull --ff-only origin main
+          jq -e --arg sha "$UPDATE_SHA" --argjson rid "$RELEASE_ID" '.target_version=="2.21.22" and .from_versions==["2.21.21"] and .schema_from=="2026080902" and .schema_to=="2026080902" and .release_tag=="v2.21.22" and .asset_name=="VF_Start_V2.21.22_UPDATE.zip" and .asset_sha256==$sha and .release_id==$rid' updates/projects/P01.json >/dev/null
+          echo 'CORE_UPDATES_REMOTE_READBACK=PASS'
+
+      - name: Persist formal release evidence
+        if: success()
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n \
+            --arg candidate "$CANDIDATE" --arg tree "$CANDIDATE_TREE" \
+            --arg source "$SOURCE_COMMIT" --arg source_tree "$SOURCE_TREE" \
+            --arg update_sha "$UPDATE_SHA" --arg full_sha "$FULL_SHA" --arg repair_sha "$REPAIR_SHA" \
+            --argjson update_bytes "$UPDATE_BYTES" --argjson full_bytes "$FULL_BYTES" --argjson repair_bytes "$REPAIR_BYTES" \
+            --argjson release_id "$RELEASE_ID" --argjson update_asset_id "$UPDATE_ASSET_ID" \
+            '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.22_FORMAL_RELEASE",status:"SUCCESS",pass:true,version:"2.21.22",source_version:"2.21.21",candidate_source_sha:$candidate,candidate_source_tree:$tree,prior_formal_source_sha:$source,prior_formal_source_tree:$source_tree,schema_version:"2026080902",schema_changed:false,browser_helper:"1.6.4",release_authorized:true,formal_artifact_gate:true,tag:"v2.21.22",release_id:$release_id,assets:{update:{name:"VF_Start_V2.21.22_UPDATE.zip",bytes:$update_bytes,sha256:$update_sha,asset_id:$update_asset_id},full:{name:"VF_Start_V2.21.22_FULL.zip",bytes:$full_bytes,sha256:$full_sha},repair:{name:"repair-v2.21.22.php",bytes:$repair_bytes,sha256:$repair_sha}},core_updates:true,production_changed:false,private_data_used:false,private_source_persisted_publicly:false,workflow_run_id:env.GITHUB_RUN_ID}' > /tmp/p01-v22122-formal-release.json
+
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${WRITE_TOKEN}@github.com/llhzx2018/core-free-runner-public.git" evidence
+          mkdir -p evidence/vf-agent/results
+          cp /tmp/p01-v22122-formal-release.json evidence/vf-agent/results/P01-V2.21.22-FORMAL-RELEASE.json
+          git -C evidence config user.name VictorForge
+          git -C evidence config user.email llhzx2018@gmail.com
+          git -C evidence add vf-agent/results/P01-V2.21.22-FORMAL-RELEASE.json
+          git -C evidence commit -m 'evidence(P01): V2.21.22 formal release PASS'
+          for i in 1 2 3; do
+            if git -C evidence push origin vf-agent-operations-v1; then break; fi
+            git -C evidence pull --rebase origin vf-agent-operations-v1
+            test "$i" -lt 3
+          done
+          echo 'FORMAL_RELEASE_EVIDENCE_PERSISTED=PASS'
+
+      - name: Upload gate evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v22122-formal-release-${{ github.run_id }}
+          path: |
+            /tmp/p01-v22122-artifact-gate/SHA256SUMS.txt
+            /tmp/release.json
+            /tmp/p01-v22122-formal-release.json
+            ${{ runner.temp }}/p01-v22122-formal-gate.log
+          if-no-files-found: warn
