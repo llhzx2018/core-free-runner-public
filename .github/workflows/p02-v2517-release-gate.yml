@@ -1,0 +1,48 @@
+name: P02 V2.5.17 Release Gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v2517-release-gate.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {persist-credentials: false}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: maintenance/v2.5.17-library-model-convergence
+          token: '${{ secrets.VF_RELEASE_WRITE_TOKEN }}'
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source and install
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(cat VERSION)" = 2.5.17; test "$(jq -r .schema SOURCE_MANIFEST.json)" = 2401; test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 74
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          m=json.load(open('SOURCE_MANIFEST.json'));assert m['version']=='2.5.17' and len(m['entries'])==74
+          for e in m['entries']:
+            b=pathlib.Path(e['repo_path']).read_bytes();h=hashlib.sha256(b).hexdigest();assert len(b)==e['bytes'] and h==e['sha256']==e['repo_sha256']
+          assert hashlib.sha256(pathlib.Path('SOURCE_MANIFEST.txt').read_bytes()).hexdigest()==m['repo_sha256']
+          PY
+          SITE="$RUNNER_TEMP/site"; mkdir -p "$SITE"; bash scripts/build-deploy-tree.sh "$SITE" >/dev/null; test "$(cat "$SITE/VERSION.txt")" = 2.5.17
+          php -S 127.0.0.1:18747 -t "$SITE" >"$RUNNER_TEMP/php.log" 2>&1 & echo $! > "$RUNNER_TEMP/pid"; sleep 1
+          curl -fsS -c "$RUNNER_TEMP/c" http://127.0.0.1:18747/setup.php > "$RUNNER_TEMP/s"; CSRF="$(grep -oP 'name="setup_csrf" value="\K[^"]+' "$RUNNER_TEMP/s")"; test -n "$CSRF"
+          curl -sS -D "$RUNNER_TEMP/h" -o /dev/null -b "$RUNNER_TEMP/c" -H 'Origin: http://127.0.0.1:18747' -H 'Referer: http://127.0.0.1:18747/setup.php' --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'password=P02-V2517!' --data-urlencode 'password_confirm=P02-V2517!' http://127.0.0.1:18747/setup.php; grep -Eq '^HTTP/.* 303' "$RUNNER_TEMP/h"
+          echo SOURCE_EXACT=PASS; echo FRESH_INSTALL=PASS
+      - name: Real Chromium
+        working-directory: product
+        run: |
+          set -Eeuo pipefail; PID="$(cat "$RUNNER_TEMP/pid")"; trap 'kill "$PID" || true' EXIT
+          npm -g ls playwright >/dev/null 2>&1 || npm i -g playwright@1.55.0 >/dev/null; playwright install chromium >/dev/null
+          cat > "$RUNNER_TEMP/t.cjs" <<'JS'
+          const{chromium}=require('playwright'),sleep=ms=>new Promise(r=>setTimeout(r,ms)),ok=(x,m)=>{if(!x)throw Error(m)};(async()=>{const b=await chromium.launch({headless:true}),p=await b.newPage({viewport:{width:1440,height:900}}),base='http://127.0.0.1:18747',recent=()=>p.evaluate(()=>fetch('/api.php?action=content_list&mode=recent&status=active&page=1&page_size=20').then(r=>r.json()));await p.goto(base+'/',{waitUntil:'networkidle'});await p.click('[data-open-login]');await p.fill('input[name=password]','P02-V2517!');await p.click('#loginSubmit');await p.waitForFunction(()=>document.querySelector('#accountBtn')?.textContent.includes('退出'));ok(await p.evaluate(()=>['quick','article'].every(v=>getComputedStyle(document.querySelector(`.side-item[data-mode="${v}"]`)).display==='none')),'NAV');for(const v of ['quick','article']){await p.evaluate(x=>localStorage.setItem('vftb-mode',x),v);await p.reload({waitUntil:'networkidle'});await p.waitForFunction(()=>localStorage.getItem('vftb-mode')==='all')}const ids=await p.evaluate(async()=>{const s=await fetch('/api.php?action=session').then(r=>r.json()),csrf=s.csrf,post=(a,z)=>fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(z)}).then(r=>r.json()),c=await post('category_save',{name:'Gate'}),z={category_id:c.id,description:'',tags:'',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]},q=await post('content_save',{...z,title:'普通资料',content:'普通',content_mode:'quick',content_format:'plain',primary_action:'copy'}),a=await post('content_save',{...z,title:'长文资料',content:'# 长文',content_mode:'article',content_format:'markdown',primary_action:'read'});return[q.id,a.id]});await p.reload({waitUntil:'networkidle'});let r=await recent();ok(+r.data.pagination.total===0,'EMPTY');for(const id of ids){await p.locator(`[data-open="${id}"]`).click();await sleep(850);await p.goto(base+'/',{waitUntil:'networkidle'})}r=await recent();ok(+r.data.pagination.total===2,'RECENT');const copy=await p.evaluate(()=>{const m=state.mode,s=state.status;state.mode='recent';state.status='active';const x=modeCopy();state.mode=m;state.status=s;return x});ok(copy[1]==='最近打开、阅读、编辑、复制或调用过的资料','COPY');const m=await b.newPage({viewport:{width:390,height:844}});await m.goto(base+'/',{waitUntil:'networkidle'});ok(await m.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1),'MOBILE');await b.close();console.log('REAL_CHROMIUM_V2517=PASS')})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          NODE_PATH="$(npm root -g)" node "$RUNNER_TEMP/t.cjs"; echo SCHEMA=2401; echo PRODUCTION_WRITE=NO
