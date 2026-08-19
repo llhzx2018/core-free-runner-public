@@ -27,11 +27,10 @@ for (const w of [1920,1440,1280,1024,768,480,430,390,375]) {
 }
 await page.setViewportSize({width:390,height:844}); await page.screenshot({path:process.env.RUNNER_TEMP+'/p01-home-mobile.png',fullPage:true});
 
+const login=await context.request.post(base+'/api.php?action=login',{data:{password:process.env.ADMIN_PASS}});
+if(!login.ok()) throw new Error('LOGIN_HTTP '+login.status()+' '+await login.text());
+const loginJson=await login.json();if(!loginJson.ok)throw new Error('LOGIN_API '+JSON.stringify(loginJson));
 await page.setViewportSize({width:1440,height:1000});
-await page.goto(base+'/login.php',{waitUntil:'domcontentloaded',timeout:15000});
-await page.locator('input[type=password]').fill(process.env.ADMIN_PASS);
-await page.locator('button[type=submit],input[type=submit]').first().click();
-await page.waitForTimeout(500);
 await page.goto(base+'/links-admin.php',{waitUntil:'domcontentloaded',timeout:15000});
 await page.waitForSelector('#linksBody tr',{timeout:12000});
 await page.waitForSelector('html[data-vf-reference-ui="2"]',{timeout:5000});
