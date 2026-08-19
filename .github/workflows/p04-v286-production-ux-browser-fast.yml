@@ -1,0 +1,102 @@
+name: P04 V2.8.6 Production UX Browser Fast
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v286-production-ux-browser-fast.yml'
+      - 'requests/p04-v286-production-ux-browser-fast.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: d98c2bc9281f259b6ba9f90855b01e42b73eabb3
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Use runner preinstalled Chrome
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          npm install --no-save --silent playwright
+          google-chrome --version || google-chrome-stable --version || chromium --version || chromium-browser --version
+
+      - name: Browser regression for owner-reported defects
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node <<'JS'
+          const { chromium } = require('playwright');
+          const path = require('path');
+          const assert = require('assert');
+          (async () => {
+            const browser = await chromium.launch({headless:true, channel:'chrome'});
+            const page = await browser.newPage({viewport:{width:1366,height:768}});
+            await page.route('https://vf.test/**', async route => {
+              const u = new URL(route.request().url());
+              if (u.pathname.endsWith('/api.php') && u.searchParams.get('action') === 'diagnostics_run') {
+                await new Promise(r => setTimeout(r, 350));
+                return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,message:'系统诊断已完成。',diagnostics:{status:'warning',summary:{ok:2,warning:1,blocked:0},checks:[{status:'ok',label:'SQLite 完整性',detail:'ok',next:''},{status:'warning',label:'邮件通知',detail:'未启用',next:'需要邮件提醒时再启用。'},{status:'ok',label:'统一任务调度',detail:'已配置',next:''}]}})});
+              }
+              return route.fulfill({status:200,contentType:'text/html',body:'<!doctype html><html><body></body></html>'});
+            });
+            await page.goto('https://vf.test/');
+            await page.setContent(`<!doctype html><html><head><meta name="csrf-token" content="test-csrf"></head><body>
+              <main>
+                <div class="v271-form-grid">
+                  <div class="v271-field"><label>时区</label><select id="tz"><option>Asia/Shanghai</option></select><small>数据库继续按 UTC 保存。</small></div>
+                  <div class="v271-field"><label>默认币种</label><select id="currency"><option>USD</option></select></div>
+                </div>
+                <section class="v271-panel" id="auto"><div class="v271-panel-head"><div><h2>自动任务</h2><p class="v271-panel-sub">Cron 仍属于系统能力，不再是一级导航。</p></div></div><div class="v271-detail-list"><div class="v271-detail-item"><span>最近运行</span><strong>—</strong></div><div class="v271-detail-item"><span>锁状态</span><strong>无活动锁</strong></div><div class="v271-detail-item"><span>自动任务入口</span><strong>已配置统一命令</strong></div></div></section>
+                <section class="v271-panel" id="diag"><div class="v271-panel-head"><div><h2>诊断</h2><p class="v271-panel-sub">先看是否正常，再看需要 OWNER 做什么。</p></div><span class="v271-status">未知</span></div><div class="v271-settings-summary"><div class="v271-summary-card"><span>正常</span><strong>0</strong></div><div class="v271-summary-card"><span>提醒</span><strong>0</strong></div><div class="v271-summary-card"><span>阻断</span><strong>0</strong></div><div class="v271-summary-card"><span>状态</span><strong><span class="v271-status">未知</span></strong></div></div><div class="v271-form-actions"><button type="button" class="v271-button primary" data-v271-action="diagnostics-run">重新检查系统</button></div><div class="v271-empty">尚未生成诊断结果。</div></section>
+              </main></body></html>`);
+            await page.addStyleTag({path:path.resolve('source/public/assets/v271-unified-shell.css')});
+            await page.addStyleTag({path:path.resolve('source/public/assets/v286-production-maintenance.css')});
+            await page.addScriptTag({path:path.resolve('source/public/assets/v284-long-action-feedback.js')});
+            await page.addScriptTag({path:path.resolve('source/public/assets/v286-production-maintenance.js')});
+            await page.waitForTimeout(80);
+
+            assert.equal(await page.locator('#auto h2').textContent(), '后台自动任务');
+            assert.match(await page.locator('#auto .v271-panel-sub').textContent(), /日常无需手动操作/);
+            assert.equal(await page.locator('#auto .v271-detail-item').nth(1).locator('strong').textContent(), '当前空闲');
+            assert.equal(await page.locator('[data-v271-action="diagnostics-run"]').getAttribute('data-action'), 'diagnostics-run');
+            assert.match(await page.locator('.v271-field').nth(1).locator('small').textContent(), /服务商原币种/);
+
+            const tz = await page.locator('#tz').boundingBox();
+            const cur = await page.locator('#currency').boundingBox();
+            assert(tz && cur);
+            assert(Math.abs(tz.y-cur.y) <= 1, `selects not aligned: ${tz.y} vs ${cur.y}`);
+
+            await page.locator('[data-v271-action="diagnostics-run"]').click();
+            await page.waitForTimeout(80);
+            assert.match(await page.locator('[data-v271-action="diagnostics-run"]').textContent(), /正在检查系统/);
+            await page.waitForSelector('#diag .v271-diagnostic');
+            assert.equal(await page.locator('#diag .v271-summary-card').nth(0).locator('strong').textContent(), '2');
+            assert.equal(await page.locator('#diag .v271-summary-card').nth(1).locator('strong').textContent(), '1');
+            assert.equal(await page.locator('#diag .v271-diagnostic').count(), 3);
+            assert.match(await page.locator('#diag').textContent(), /SQLite 完整性/);
+            assert.equal(await page.locator('#diag > .v271-empty').count(), 0);
+            console.log('P04_V286_BROWSER_OWNER_DEFECTS=PASS');
+            await browser.close();
+          })().catch(e => { console.error(e); process.exit(1); });
+          JS
