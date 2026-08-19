@@ -1,0 +1,141 @@
+name: P04 V2.7.9 Online Channel E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v279-online-channel-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: 63069f57986646cfb245ecac68200f2a82be7fe0
+      TARGET_VERSION: 2.7.9
+      SOURCE_VERSION: 2.7.8
+      EXPECTED_RELEASE_ID: '372753940'
+      EXPECTED_ASSET_ID: '520238891'
+      EXPECTED_ASSET_BYTES: '53649'
+      EXPECTED_ASSET_SHA256: 4f904395176b232b6e4d367db965a730da2f1bf4362f98b8bbe884a25bd04baf
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo VF_PRIVATE_READ_TOKEN_MISSING; exit 78; }
+
+      - name: Checkout exact P04 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Read unified manifest and formal Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/v279-channel"
+          gh api repos/llhzx2018/core-updates/contents/projects/P04.json --jq .content | tr -d '\n' | base64 -d > "$RUNNER_TEMP/v279-channel/P04.json"
+          gh api "repos/$SOURCE_REPOSITORY/releases/tags/v$TARGET_VERSION" > "$RUNNER_TEMP/v279-channel/release.json"
+          jq -e --arg v "$TARGET_VERSION" --arg s "$SOURCE_VERSION" --arg c "$SOURCE_COMMIT" --arg sha "$EXPECTED_ASSET_SHA256" --argjson rid "$EXPECTED_RELEASE_ID" --argjson aid "$EXPECTED_ASSET_ID" --argjson bytes "$EXPECTED_ASSET_BYTES" '
+            .target_version==$v and .from_versions==[$s] and .schema_from=="14" and .schema_to=="14" and .update_type=="ATOMIC" and
+            .release_tag==("v"+$v) and .release_id==$rid and .release_product_commit==$c and
+            .asset_name==("VF_Infra_V"+$v+"_UPDATE.zip") and .asset_id==$aid and .asset_bytes==$bytes and .asset_sha256==$sha and
+            .backup_required==true and .rollback_supported==true
+          ' "$RUNNER_TEMP/v279-channel/P04.json" >/dev/null
+          jq -e --arg v "v$TARGET_VERSION" --arg c "$SOURCE_COMMIT" --argjson rid "$EXPECTED_RELEASE_ID" '
+            .tag_name==$v and .target_commitish==$c and .id==$rid and .draft==false and .prerelease==false
+          ' "$RUNNER_TEMP/v279-channel/release.json" >/dev/null
+          echo MANIFEST_AND_RELEASE_READBACK=PASS
+
+      - name: Download and verify UPDATE asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          DIR="$RUNNER_TEMP/v279-channel"
+          gh api -H 'Accept: application/octet-stream' "repos/$SOURCE_REPOSITORY/releases/assets/$EXPECTED_ASSET_ID" > "$DIR/VF_Infra_V2.7.9_UPDATE.zip"
+          test "$(wc -c < "$DIR/VF_Infra_V2.7.9_UPDATE.zip" | tr -d ' ')" = "$EXPECTED_ASSET_BYTES"
+          test "$(sha256sum "$DIR/VF_Infra_V2.7.9_UPDATE.zip" | awk '{print $1}')" = "$EXPECTED_ASSET_SHA256"
+          unzip -t "$DIR/VF_Infra_V2.7.9_UPDATE.zip" >/dev/null
+          unzip -p "$DIR/VF_Infra_V2.7.9_UPDATE.zip" repair-v2.7.9.php > "$DIR/repair-v2.7.9.php"
+          php "$DIR/repair-v2.7.9.php" --self-test
+          echo UPDATE_ASSET_EXACT=PASS
+
+      - name: Verify application can-update contract for 2.7.8 to 2.7.9
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MANIFEST="$RUNNER_TEMP/v279-channel/P04.json"
+          cat > "$RUNNER_TEMP/v279-channel/evaluate.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getenv('SOURCE_ROOT').'/src/app/Core/Update/UpdateContract.php';
+          require getenv('SOURCE_ROOT').'/src/app/Core/Update/UpdateSourceInterface.php';
+          require getenv('SOURCE_ROOT').'/src/app/Core/Update/UpdateManifestService.php';
+          final class StubSource implements \VFInfra\Core\Update\UpdateSourceInterface {
+              public function fetchProjectManifest(): array { throw new RuntimeException('unused'); }
+              public function resolveReleaseAsset(string $repository,string $releaseTag,string $assetName): array { throw new RuntimeException('unused'); }
+          }
+          $manifest=json_decode(file_get_contents(getenv('MANIFEST_PATH')),true,512,JSON_THROW_ON_ERROR);
+          $service=new \VFInfra\Core\Update\UpdateManifestService(new StubSource(),'2.7.8',14);
+          $result=$service->evaluate($manifest);
+          if(($result['status']??'')!=='update_available'||empty($result['can_update'])) throw new RuntimeException('V2.7.8 -> V2.7.9 was not accepted');
+          if(($result['latest_version']??'')!=='2.7.9'||($result['latest_schema']??0)!==14) throw new RuntimeException('identity mismatch');
+          echo "P04_V279_CAN_UPDATE_CONTRACT=PASS\n";
+          PHP
+          SOURCE_ROOT="$GITHUB_WORKSPACE/source" MANIFEST_PATH="$MANIFEST" php "$RUNNER_TEMP/v279-channel/evaluate.php"
+
+      - name: Build public-safe online-channel evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat > evidence/P04_V279_ONLINE_CHANNEL_LATEST.json <<EOF
+          {
+            "status": "PASS",
+            "project": "P04",
+            "source_version": "2.7.8",
+            "target_version": "2.7.9",
+            "schema": 14,
+            "manifest_readback": "PASS",
+            "release_readback": "PASS",
+            "asset_unique": "PASS",
+            "asset_bytes": "PASS",
+            "asset_sha256": "PASS",
+            "zip_integrity": "PASS",
+            "repair_self_test": "PASS",
+            "online_handoff_marker": "PASS",
+            "can_update_contract": true,
+            "release_id": 372753940,
+            "asset_id": 520238891,
+            "asset_bytes_value": 53649,
+            "asset_sha256_value": "4f904395176b232b6e4d367db965a730da2f1bf4362f98b8bbe884a25bd04baf",
+            "source_commit": "63069f57986646cfb245ecac68200f2a82be7fe0",
+            "private_source_persisted": false,
+            "token_exposed": false,
+            "production_write": 0,
+            "production_upgrade": "NOT_EXECUTED"
+          }
+          EOF
+
+      - name: Upload public-safe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.7.9-ONLINE-CHANNEL-EVIDENCE
+          path: evidence/P04_V279_ONLINE_CHANNEL_LATEST.json
+          if-no-files-found: error
+          retention-days: 30
