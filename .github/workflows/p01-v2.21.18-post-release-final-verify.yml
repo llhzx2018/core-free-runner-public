@@ -1,0 +1,87 @@
+name: P01 V2.21.18 Post Release Final Verify
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths: ['.github/workflows/p01-v2.21.18-post-release-final-verify.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Exact Git and release remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$R";test -n "$W"
+          MAIN=$(git ls-remote "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" refs/heads/main|awk '{print $1}');test "$MAIN" = '24c91ac9d76ac10780403bc2b326793c7c67c2ed'
+          DEV=$(git ls-remote "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" refs/heads/develop|awk '{print $1}');test "$DEV" = 'a501d2394502319b0af9caaf1c171bdf94940a9d'
+          gh release view v2.21.18 --repo llhzx2018/vf-start --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,publishedAt >/tmp/release.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('/tmp/release.json'));assert int(x['databaseId'])==372824355 and x['tagName']=='v2.21.18' and x['targetCommitish']=='a501d2394502319b0af9caaf1c171bdf94940a9d' and not x['isDraft'] and not x['isPrerelease'],x
+          PY
+          rm -rf /tmp/assets;mkdir /tmp/assets;gh release download v2.21.18 --repo llhzx2018/vf-start --dir /tmp/assets --pattern 'VF_Start_V2.21.18_UPDATE.zip' --pattern 'VF_Start_V2.21.18_FULL.zip'
+          test "$(sha256sum /tmp/assets/VF_Start_V2.21.18_UPDATE.zip|awk '{print $1}')" = '7890e1c0dfad88e87e88f572b9f9c7a6076f5b8f109cf1824ff967c387628425';test "$(stat -c '%s' /tmp/assets/VF_Start_V2.21.18_UPDATE.zip)" = 1052694
+          test "$(sha256sum /tmp/assets/VF_Start_V2.21.18_FULL.zip|awk '{print $1}')" = '0096a17f8aa2e11d353e8bb4ccbc4b879d2c450dd434d80c2abef7347109c76c';test "$(stat -c '%s' /tmp/assets/VF_Start_V2.21.18_FULL.zip)" = 482270
+      - name: Authenticated core-updates readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch main "https://x-access-token:${R}@github.com/llhzx2018/core-updates.git" core
+          git -C core rev-parse HEAD >/tmp/core-sha
+          python3 - <<'PY'
+          import json
+          x=json.load(open('core/projects/P01.json'));assert x['target_version']=='2.21.18' and x['from_versions']==['2.21.17'] and x['schema_from']=='2026080902' and x['schema_to']=='2026080902',x
+          assert x['release_tag']=='v2.21.18' and x['release_id']==372824355 and x['release_identity']=='v2.21.18@a501d2394502319b0af9caaf1c171bdf94940a9d',x
+          assert x['asset_name']=='VF_Start_V2.21.18_UPDATE.zip' and x['asset_bytes']==1052694 and x['asset_sha256']=='7890e1c0dfad88e87e88f572b9f9c7a6076f5b8f109cf1824ff967c387628425',x
+          assert x['backup_required'] is True and x['rollback_supported'] is True and x['minimum_php']=='8.0.0',x
+          PY
+      - name: Exact production-source online discovery and prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq;sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 >/dev/null
+          git clone -q --depth 1 --branch main "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" product
+          test "$(git -C product rev-parse HEAD)" = '24c91ac9d76ac10780403bc2b326793c7c67c2ed'
+          rm -rf /tmp/p01;cp -a product/src /tmp/p01
+          php -S 127.0.0.1:18219 -t /tmp/p01 >/tmp/server.log 2>&1 & echo $! >/tmp/pid
+          for i in $(seq 1 30);do curl -fsS -c /tmp/c http://127.0.0.1:18219/setup.php -o /tmp/s&&break||sleep 1;done
+          csrf=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/s').read()).group(1))
+          PY
+          )
+          curl -fsSL -b /tmp/c -c /tmp/c -X POST http://127.0.0.1:18219/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start Final Online Gate' --data-urlencode 'admin_password=Final-P01-22117!Strong' --data-urlencode 'admin_password_confirm=Final-P01-22117!Strong' >/dev/null
+          VF_PRIVATE_READ_TOKEN="$R" php -r 'require "/tmp/p01/app/bootstrap.php";$m=new VfUpdateManager(vf_db());$r=$m->check(true);if(empty($r["ok"])||$r["current_version"]!=="2.21.17"||$r["latest_version"]!=="2.21.18"||empty($r["available"])||empty($r["can_update"]))throw new Exception(json_encode($r));$p=$m->prepare();if(empty($p["ok"])||$p["from_version"]!=="2.21.17"||$p["to_version"]!=="2.21.18"||$p["update_package_sha256"]!=="7890e1c0dfad88e87e88f572b9f9c7a6076f5b8f109cf1824ff967c387628425"||(int)$p["update_package_bytes"]!==1052694||empty($p["recovery_key"]))throw new Exception(json_encode($p));echo json_encode(["check"=>$r,"prepare"=>$p],JSON_UNESCAPED_SLASHES);' >/tmp/e2e.json
+          kill "$(cat /tmp/pid)" 2>/dev/null||true
+      - name: Publish final public-safe verdict
+        if: success()
+        shell: bash
+        env:
+          RID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,urllib.error
+          rel=json.load(open('/tmp/release.json'));e=json.load(open('/tmp/e2e.json'))
+          q={'schema':'vf-public-runner-result/v1','project_id':'P01','target_version':'2.21.18','source_version':'2.21.17','gate':'POST_RELEASE_FINAL_VERIFY','status':'SUCCESS','pass':True,'candidate_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','candidate_tree':'6188bb34ed5f5175b2d96468f8f495ea0bd1b5ca','develop_sha':'a501d2394502319b0af9caaf1c171bdf94940a9d','production_main_sha':'24c91ac9d76ac10780403bc2b326793c7c67c2ed','schema_version':'2026080902','release_id':int(rel['databaseId']),'release_tag':'v2.21.18','release_target':rel['targetCommitish'],'update_asset':{'name':'VF_Start_V2.21.18_UPDATE.zip','bytes':1052694,'sha256':'7890e1c0dfad88e87e88f572b9f9c7a6076f5b8f109cf1824ff967c387628425'},'full_asset':{'name':'VF_Start_V2.21.18_FULL.zip','bytes':482270,'sha256':'0096a17f8aa2e11d353e8bb4ccbc4b879d2c450dd434d80c2abef7347109c76c'},'core_updates_sha':open('/tmp/core-sha').read().strip(),'core_updates_target':'2.21.18','online_discovery':{'current_version':e['check']['current_version'],'latest_version':e['check']['latest_version'],'available':e['check']['available'],'can_update':e['check']['can_update'],'prepare_ok':e['prepare']['ok'],'recovery_point_created':bool(e['prepare'].get('recovery_key'))},'production_upgrade_executed':False,'private_data_persisted_publicly':False,'workflow_run_id':os.environ['RID']}
+          t=os.environ['W'];path='vf-agent/results/P01-V2.21.18-POST-RELEASE-FINAL-VERIFY.json';api='https://api.github.com/repos/llhzx2018/core-free-runner-public/contents/'+path;h={'Authorization':'Bearer '+t,'Accept':'application/vnd.github+json'};sha=None
+          try:
+            with urllib.request.urlopen(urllib.request.Request(api+'?ref=vf-agent-operations-v1',headers=h)) as r:sha=json.load(r).get('sha')
+          except urllib.error.HTTPError as e:
+            if e.code!=404:raise
+          body={'message':'evidence(P01): seal V2.21.18 post-release final verify','content':base64.b64encode((json.dumps(q,indent=2,sort_keys=True)+'\n').encode()).decode(),'branch':'vf-agent-operations-v1'}
+          if sha:body['sha']=sha
+          urllib.request.urlopen(urllib.request.Request(api,data=json.dumps(body).encode(),method='PUT',headers={**h,'Content-Type':'application/json'})).read()
+          PY
+      - name: Cleanup
+        if: always()
+        run: |
+          [ -f /tmp/pid ]&&kill "$(cat /tmp/pid)" 2>/dev/null||true
+          rm -rf core product /tmp/p01 /tmp/assets || true
