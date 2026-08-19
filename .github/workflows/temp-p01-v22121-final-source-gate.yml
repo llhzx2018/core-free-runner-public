@@ -1,0 +1,113 @@
+name: TEMP P01 V2.21.21 Final Source Gate
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-v22121-final-source-gate.yml']
+permissions:
+  contents: write
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: maintenance/navigation-admin-simplify-2.21.21-20260819
+      EXPECTED_HEAD: 2949ce811000ebca1279dd4f40b8dab98f19dc32
+      BASE: http://127.0.0.1:18121/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact source and static gates
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch "$PRODUCT_BRANCH" "https://x-access-token:${R}@github.com/llhzx2018/vf-start.git" p
+          test "$(git -C p rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(cat p/VERSION)" = "2.21.20"
+          find p/src -type f -name '*.php' -print0|xargs -0 -r -n1 php -l >/dev/null
+          find p/src/assets -type f -name '*.js' -print0|xargs -0 -r -n1 node --check >/dev/null
+          git -C p diff --check origin/main...HEAD
+          grep -q "'label'=>'网址'" p/src/app/AdminShell.php
+          grep -q "'label'=>'浏览器助手'" p/src/app/AdminShell.php
+          grep -q "'label'=>'备份与恢复'" p/src/app/AdminShell.php
+          grep -q "'label'=>'设置'" p/src/app/AdminShell.php
+          grep -q "'label'=>'更新'" p/src/app/AdminShell.php
+          grep -q "'href'=>'workbench.php?route=rss','label'=>'RSS 订阅'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'标签'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'推广链接'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'归档与回收站'" p/src/app/AdminShell.php
+          ! grep -q "'label'=>'概览'" p/src/app/AdminShell.php
+          grep -q 'data-recovery.js?v=22121' p/src/data-safety.php
+          ! grep -q 'data-data-panel="history"' p/src/data-safety.php
+          ! grep -q 'data-data-panel="lifecycle"' p/src/data-safety.php
+          ! grep -q 'tag_link_add' p/src/assets/links-admin.js
+          ! grep -q 'tag_link_remove' p/src/assets/links-admin.js
+          grep -q 'links_bulk_restore' p/src/assets/links-admin.js
+          printf '%s' "$(git -C p rev-parse HEAD^{tree})" >/tmp/tree
+      - name: Fresh install, fixture and Chrome
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sqlite3 jq >/dev/null
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+          mkdir -p evidence
+          rm -rf /tmp/vf-p01-22121
+          cp -a p/src /tmp/vf-p01-22121
+          cd /tmp/vf-p01-22121
+          php -S 127.0.0.1:18121 -t . > "$GITHUB_WORKSPACE/evidence/php-server.log" 2>&1 & echo $! >/tmp/php.pid
+          for i in $(seq 1 30);do curl -fsS ${BASE}setup.php -o /tmp/setup.html&&break;sleep 1;done
+          curl -fsS -c /tmp/c -b /tmp/c ${BASE}setup.php -o /tmp/setup.html
+          CSRF=$(python3 -c "import re;t=open('/tmp/setup.html').read();m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',t);assert m;print(m.group(1))")
+          curl -fsS -c /tmp/c -b /tmp/c -X POST ${BASE}setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Gate' --data-urlencode 'admin_password=MaintenanceTest!2026' --data-urlencode 'admin_password_confirm=MaintenanceTest!2026' -o /tmp/post.html
+          test -f app/.runtime.php
+          cp "$GITHUB_WORKSPACE/vf-agent/p01/fixture_22121.php" fixture_22121.php
+          php fixture_22121.php
+          cat > lifecycle_fixture.php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $r=new VfRepository(vf_db());$d=$r->bootstrap(true);$ids=array_map(fn($x)=>(int)$x['id'],$d['links']??[]);
+          if(count($ids)<3)throw new RuntimeException('links missing');
+          $r->bulkLinks([$ids[count($ids)-2]],'archive',null);$r->bulkLinks([$ids[count($ids)-1]],'delete',null);
+          echo "LIFECYCLE_FIXTURE_PASS\n";
+          PHP
+          php lifecycle_fixture.php
+          php cli/verify.php > "$GITHUB_WORKSPACE/evidence/cli-verify.txt"
+          cd "$GITHUB_WORKSPACE"
+          P01_BASE="$BASE" P01_EVIDENCE=evidence node vf-agent/p01/e2e_22121.mjs | tee evidence/browser.txt
+          cat > /tmp/governance.mjs <<'JS'
+          import {chromium} from 'playwright';import fs from 'node:fs';
+          const b=await chromium.launch({headless:true});try{const p=await b.newPage({viewport:{width:1440,height:900}}),base='http://127.0.0.1:18121/';const errs=[];p.on('pageerror',e=>errs.push(String(e)));await p.goto(base);await p.click('#loginButton');await p.fill('[name=password]','MaintenanceTest!2026');await p.click('#loginSubmit');await p.waitForFunction(()=>document.body.classList.contains('is-admin'));
+          await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});const opts=await p.locator('#stateFilter option').allTextContents();if(JSON.stringify(opts)!==JSON.stringify(['正常网址','已归档','回收站']))throw Error('STATE '+JSON.stringify(opts));for(const s of ['archived','trashed']){await p.selectOption('#stateFilter',s);await p.waitForTimeout(120);if(await p.locator('[data-restore]').count()<1)throw Error('RESTORE '+s)}
+          await p.goto(base+'data-safety.php',{waitUntil:'networkidle'});const dt=await p.locator('.vf-admin-page-body').innerText();for(const x of ['操作历史','生命周期记录','归档与回收站'])if(dt.includes(x))throw Error('DATA '+x);for(const x of ['SQLite 备份','完整恢复包'])if(!dt.includes(x))throw Error('MISSING '+x);
+          await p.goto(base+'settings.php',{waitUntil:'networkidle'});const subs=await p.locator('.vf-rail-section.active .vf-rail-subitem').allTextContents();if(!subs.includes('RSS 订阅')||!subs.includes('系统状态'))throw Error('SETTINGS '+JSON.stringify(subs));if(errs.length)throw Error('ERRORS '+errs.join('|'));fs.writeFileSync('evidence/governance.json',JSON.stringify({pass:true,stateOptions:opts,recovery:true,settings:true,pageErrors:0},null,2));console.log('PRODUCT_GOVERNANCE_PASS')}finally{await b.close()}
+          JS
+          node /tmp/governance.mjs | tee evidence/governance.txt
+      - name: SQLite and backup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/vf-p01-22121
+          DB=$(php -r "require 'app/bootstrap.php';echo VF_DB_FILE;")
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          BACKUP=$(php cli/backup.php);test -f "$BACKUP"
+      - name: Publish evidence
+        env:
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$EXPECTED_HEAD" --arg tree "$(cat /tmp/tree)" --slurpfile browser evidence/browser.json --slurpfile gov evidence/governance.json '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.21_FINAL_SOURCE_GATE",status:"SUCCESS",pass:true,working_source_sha:$sha,working_source_tree:$tree,browser:$browser[0],product_governance:$gov[0],fresh_install:true,sqlite_integrity:true,backup:true,schema_changed:false,version_not_bumped:true,production_changed:false,private_data_used:false}' >/tmp/e.json
+          git clone -q --depth 1 --branch vf-agent-operations-v1 "https://x-access-token:${W}@github.com/llhzx2018/core-free-runner-public.git" out
+          mkdir -p out/vf-agent/results;cp /tmp/e.json out/vf-agent/results/P01-V2.21.21-FINAL-SOURCE-GATE.json
+          git -C out config user.name VictorForge;git -C out config user.email llhzx2018@gmail.com;git -C out add vf-agent/results/P01-V2.21.21-FINAL-SOURCE-GATE.json;git -C out commit -q -m 'evidence(P01): V2.21.21 final source gate PASS';git -C out pull -q --rebase origin vf-agent-operations-v1;git -C out push -q origin HEAD:vf-agent-operations-v1
+      - name: Cleanup
+        if: always()
+        run: test ! -f /tmp/php.pid||kill "$(cat /tmp/php.pid)" 2>/dev/null||true
