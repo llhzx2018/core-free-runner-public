@@ -94,7 +94,7 @@ PY
 test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$ROOT/c" -c "$ROOT/c" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:$PORT/setup.php")" = 303
 SESSION=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=session");CSRF=$(jq -r .csrf<<<"$SESSION")
 CAT=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"V2522 Preserve","icon":"folder"}' "http://127.0.0.1:$PORT/api.php?action=category_save");CID=$(jq -r .id<<<"$CAT");test "$CID" -gt 0
-ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V2522 Existing",content:"keep",content_mode:"quick",content_format:"markdown",primary_action:"edit",status:"active"}')
+ITEM=$(jq -nc --argjson cid "$CID" '{category_id:$cid,title:"V2522 Existing",content:"keep",content_mode:"quick",content_format:"markdown",primary_action:"copy",status:"active"}')
 SAVED=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$ITEM" "http://127.0.0.1:$PORT/api.php?action=content_save");IID=$(jq -r .id<<<"$SAVED");test "$IID" -gt 0
 curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "{\"id\":$IID,\"favorite\":true}" "http://127.0.0.1:$PORT/api.php?action=content_favorite" | jq -e .ok >/dev/null
 SNEW=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{}' "http://127.0.0.1:$PORT/scratch-action.php?action=create");SID=$(jq -r .tab.id<<<"$SNEW")
@@ -110,7 +110,7 @@ PHP
 php "$ROOT/up.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$ROOT/result"
 test "$(cat "$SITE/VERSION.txt")" = 2.5.22
 jq -e '.backup_locator|length>0' "$ROOT/result" >/dev/null
-curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=content_get&id=$IID" | jq -e '(.item.is_favorite|tonumber)==1 and .item.content=="keep" and .item.content_mode=="quick" and .item.primary_action=="edit"' >/dev/null
+curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=content_get&id=$IID" | jq -e '(.item.is_favorite|tonumber)==1 and .item.content=="keep" and .item.content_mode=="quick" and .item.primary_action=="copy"' >/dev/null
 SESSION2=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/api.php?action=session");jq -e '.site.auth==true'<<<"$SESSION2" >/dev/null;CSRF2=$(jq -r .csrf<<<"$SESSION2")
 LIST=$(curl -fsS -b "$ROOT/c" "http://127.0.0.1:$PORT/scratch-action.php?action=list");jq -e --argjson id "$SID" '.data.open[]|select(.id==$id)|.content|contains("升级前临时页签")'<<<"$LIST" >/dev/null
 POST=$(curl -fsS -b "$ROOT/c" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2" -d '{}' "http://127.0.0.1:$PORT/scratch-action.php?action=create");POSTSID=$(jq -r .tab.id<<<"$POST")
