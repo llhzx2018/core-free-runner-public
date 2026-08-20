@@ -1,0 +1,161 @@
+name: P02 V2.5.21 Context Continuity UX
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['triggers/p02-v2521-context-ux.txt']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: task/p02-v2521-context-ux
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered capability
+        run: test -n "$RELEASE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_BRANCH }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Reseal and verify source
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.21
+          php -l public/index.php
+          node --check public/assets/app.js
+          node tests/unit/v2521_context_ux_contract.mjs
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('.')
+          mf=json.loads((p/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert mf['version']=='2.5.21'
+          assert len(mf['entries'])==76
+          assert sum(1 for e in mf['entries'] if e['repo_path']=='public/assets/v2521-context-ux.css')==1
+          for e in mf['entries']:
+              data=(p/e['repo_path']).read_bytes()
+              h=hashlib.sha256(data).hexdigest()
+              e['bytes']=len(data);e['sha256']=h;e['repo_sha256']=h
+          mf['runtime_source_file_count']=len(mf['entries'])
+          mf['source_baseline_full_sha256']='PENDING_FORMAL_CANDIDATE_ARTIFACT'
+          (p/'SOURCE_MANIFEST.json').write_text(json.dumps(mf,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          lines=['VF Library V2.5.21 CANDIDATE SOURCE_MANIFEST','FULL_SHA256  PENDING_FORMAL_CANDIDATE_ARTIFACT',f"RUNTIME_SOURCE_FILES  {len(mf['entries'])}",'MAPPING_STATUS  CURRENT_GIT_CANDIDATE','']
+          lines += [f"{e['repo_sha256']}  {e['repo_path']}  <=  {e['full_path']}" for e in mf['entries']]
+          (p/'SOURCE_MANIFEST.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          print('SOURCE_MANIFEST_76_OF_76=PASS')
+          PY
+          bash scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/p02-v2521-site" >/dev/null
+          test "$(cat "$RUNNER_TEMP/p02-v2521-site/VERSION.txt")" = 2.5.21
+          test -f "$RUNNER_TEMP/p02-v2521-site/assets/v2521-context-ux.css"
+          echo STATIC_CONTRACT=PASS
+          echo BUILD_DEPLOY_TREE=PASS
+
+      - name: Real Chromium context continuity UX
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:8121 -t "$RUNNER_TEMP/p02-v2521-site" >"$RUNNER_TEMP/p02-v2521-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          cat > "$RUNNER_TEMP/p02-v2521-test.cjs" <<'NODE'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            await page.goto('http://127.0.0.1:8121/setup.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#password','VF-Test-2521!');
+            await page.fill('#password_confirm','VF-Test-2521!');
+            await Promise.all([page.waitForURL('http://127.0.0.1:8121/'),page.click('button[type=submit]')]);
+            await page.waitForSelector('#viewSettings');
+
+            const before=await page.evaluate(()=>({mode:state.mode,page:state.page,history:history.length,title:document.querySelector('.page-title')?.textContent}));
+            await page.click('#viewSettings');
+            await page.waitForSelector('#displayQuickForm');
+            const opened=await page.evaluate(()=>({mode:state.mode,page:state.page,history:history.length,settingsPage:document.querySelector('#pageRoot').classList.contains('settings-page'),scope:document.querySelector('#displayQuickForm').dataset.displayScope}));
+            if(opened.mode!==before.mode||opened.page!==before.page||opened.history!==before.history||opened.settingsPage)throw new Error('Display control broke list context');
+            await page.selectOption('#displayQuickForm [name=page_size]','15');
+            await page.click('#applyDisplayPreferences');
+            await page.waitForSelector('#displayQuickForm',{state:'detached'});
+            const after=await page.evaluate(()=>({mode:state.mode,page:state.page,history:history.length,title:document.querySelector('.page-title')?.textContent}));
+            if(after.mode!==before.mode||after.page!==before.page||after.history!==before.history||after.title!==before.title)throw new Error('Display save did not preserve the active list');
+
+            await page.click('#settingsBtn');
+            await page.waitForSelector('#settingsBack');
+            if(!await page.locator('#pageRoot.settings-page').count())throw new Error('Settings center did not open');
+            await page.click('#settingsBack');
+            await page.waitForSelector('#viewSettings');
+            if(await page.locator('#pageRoot.settings-page').count())throw new Error('Settings return did not restore the library');
+
+            const articleId=await page.evaluate(async()=>{
+              await api('category_save',{method:'POST',body:{id:null,name:'UX 回归',parent_id:null,description:'',icon:'folder',display_style:'',page_size:null,default_sort:'',preview_lines:null}});
+              await loadBootstrap();
+              const category=state.categories.find(x=>x.name==='UX 回归');
+              if(!category)throw new Error('fixture category missing');
+              const saved=await api('content_save',{method:'POST',body:{id:null,category_id:Number(category.id),title:'阅读编辑原位切换',description:'上下文连续性回归',content:'# 标题\n\n正文',content_mode:'article',content_format:'markdown',primary_action:'read',tags:'UX',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]}});
+              return Number(saved.id||(saved.item&&saved.item.id));
+            });
+            if(!articleId)throw new Error('fixture article missing');
+            await page.evaluate(async id=>{state.contentView='notebook';await openReader(id,true);},articleId);
+            await page.waitForSelector('#articleWorkspace');
+            const initial=await page.evaluate(()=>{window.__v2521Workspace=document.querySelector('#articleWorkspace');return {mode:state.workspaceController.mode(),node:!!window.__v2521Workspace};});
+            if(!initial.node)throw new Error('article workspace missing');
+            await page.evaluate(()=>state.workspaceController.setMode('edit'));
+            const edited=await page.evaluate(()=>({same:window.__v2521Workspace===document.querySelector('#articleWorkspace'),mode:state.workspaceController.mode(),className:document.querySelector('#articleWorkspace').className}));
+            if(!edited.same||edited.mode!=='edit'||!edited.className.includes('mode-edit'))throw new Error('read to edit rebuilt the workspace');
+            await page.evaluate(()=>state.workspaceController.setMode('read'));
+            const read=await page.evaluate(()=>({same:window.__v2521Workspace===document.querySelector('#articleWorkspace'),mode:state.workspaceController.mode(),className:document.querySelector('#articleWorkspace').className}));
+            if(!read.same||read.mode!=='read'||!read.className.includes('mode-read'))throw new Error('edit to read rebuilt the workspace');
+
+            await page.setViewportSize({width:390,height:844});
+            await page.waitForTimeout(100);
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);
+            if(overflow)throw new Error('390px horizontal overflow');
+            console.log('DISPLAY_IN_CONTEXT=PASS');
+            console.log('SETTINGS_RETURN_CONTEXT=PASS');
+            console.log('READER_EDITOR_SHARED_WORKSPACE=PASS');
+            console.log('MOBILE_390_OVERFLOW=NONE');
+            await browser.close();
+          })().catch(err=>{console.error(err);process.exit(1);});
+          NODE
+          node "$RUNNER_TEMP/p02-v2521-test.cjs"
+
+      - name: Commit resealed manifest to product branch
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Runner'
+          git config user.email 'vf-runner@users.noreply.github.com'
+          git add SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          if git diff --cached --quiet; then echo MANIFEST_ALREADY_CURRENT=YES; exit 0; fi
+          git commit -m 'chore(P02): reseal V2.5.21 source manifest'
+          git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/llhzx2018/vf-library.git"
+          git push origin "HEAD:${PRODUCT_BRANCH}"
+          echo PRODUCT_BRANCH_MANIFEST_PUSH=PASS
+          echo PRODUCTION_WRITE=NO
