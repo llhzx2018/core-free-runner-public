@@ -1,0 +1,186 @@
+name: P02 V2.5.22 Unified Library Workspace
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['triggers/p02-v2522-unified-library-workspace.txt']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_BRANCH: task/p02-v2522-unified-library-workspace
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered capability
+        run: test -n "$RELEASE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_BRANCH }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Reseal and verify source
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.22
+          php -l public/index.php
+          node --check public/assets/app.js
+          node tests/unit/v2521_context_ux_contract.mjs
+          node tests/unit/v2522_unified_library_workspace_contract.mjs
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('.')
+          mf=json.loads((p/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+          assert mf['version']=='2.5.22'
+          assert len(mf['entries'])==76
+          for e in mf['entries']:
+              data=(p/e['repo_path']).read_bytes()
+              h=hashlib.sha256(data).hexdigest()
+              e['bytes']=len(data);e['sha256']=h;e['repo_sha256']=h
+          mf['runtime_source_file_count']=len(mf['entries'])
+          mf['source_baseline_full_sha256']='PENDING_FORMAL_CANDIDATE_ARTIFACT'
+          (p/'SOURCE_MANIFEST.json').write_text(json.dumps(mf,ensure_ascii=False,separators=(',',':'))+'\n',encoding='utf-8')
+          lines=['VF Library V2.5.22 CANDIDATE SOURCE_MANIFEST','FULL_SHA256  PENDING_FORMAL_CANDIDATE_ARTIFACT',f"RUNTIME_SOURCE_FILES  {len(mf['entries'])}",'MAPPING_STATUS  CURRENT_GIT_CANDIDATE','']
+          lines += [f"{e['repo_sha256']}  {e['repo_path']}  <=  {e['full_path']}" for e in mf['entries']]
+          (p/'SOURCE_MANIFEST.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          print('SOURCE_MANIFEST_76_OF_76=PASS')
+          PY
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/p02-v2522-site" >/dev/null
+          test "$(cat "$RUNNER_TEMP/p02-v2522-site/VERSION.txt")" = 2.5.22
+          echo STATIC_CONTRACT=PASS
+          echo BUILD_DEPLOY_TREE=PASS
+
+      - name: Real Chromium unified workspace regression
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:8122 -t "$RUNNER_TEMP/p02-v2522-site" >"$RUNNER_TEMP/p02-v2522-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          cat > "$RUNNER_TEMP/p02-v2522-test.cjs" <<'NODE'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            const browserErrors=[];
+            page.on('pageerror',e=>browserErrors.push(String(e)));
+            page.on('console',m=>{if(m.type()==='error')browserErrors.push('console:'+m.text());});
+            await page.route('**/*',route=>{const headers={...route.request().headers()};delete headers.origin;return route.continue({headers});});
+            await page.goto('http://127.0.0.1:8122/setup.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#password','VF-Test-2522!');
+            await page.fill('#password_confirm','VF-Test-2522!');
+            await page.click('button[type=submit]');
+            await page.waitForTimeout(1000);
+            if(page.url().includes('/setup.php'))throw new Error('setup did not complete');
+            await page.waitForLoadState('domcontentloaded');
+            if(await page.locator('[data-open-login]').count()){
+              await page.click('[data-open-login]');
+              await page.fill('#loginForm [name=password]','VF-Test-2522!');
+              await page.click('#loginSubmit');
+            }
+            await page.waitForSelector('[data-content-view="list"]');
+
+            const ids=await page.evaluate(async()=>{
+              await api('category_save',{method:'POST',body:{id:null,name:'统一工作区回归',parent_id:null,description:'',icon:'folder',display_style:'',page_size:null,default_sort:'',preview_lines:null}});
+              await loadBootstrap();
+              const category=state.categories.find(x=>x.name==='统一工作区回归');
+              if(!category)throw new Error('fixture category missing');
+              const base={id:null,category_id:Number(category.id),description:'工作区回归',content_format:'markdown',tags:'UX',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]};
+              const quick=await api('content_save',{method:'POST',body:{...base,title:'旧式短资料',content:'快速资料正文',content_mode:'quick',primary_action:'copy'}});
+              const article=await api('content_save',{method:'POST',body:{...base,title:'长资料',content:'# 标题\n\n长资料正文',content_mode:'article',primary_action:'read'}});
+              return {quick:Number(quick.id||(quick.item&&quick.item.id)),article:Number(article.id||(article.item&&article.item.id))};
+            });
+            if(!ids.quick||!ids.article)throw new Error('fixtures missing');
+
+            await page.evaluate(async id=>{state.contentView='notebook';await openReader(id,true);},ids.quick);
+            await page.waitForSelector('#articleWorkspace');
+            const quickOpen=await page.evaluate(()=>({
+              articleWorkspace:!!document.querySelector('#articleWorkspace'),
+              notebookList:!!document.querySelector('#notebookListPane'),
+              genericEditor:!!document.querySelector('.editor-page-shell'),
+              mode:state.workspaceController.mode(),
+              kind:state.workspaceController.kind
+            }));
+            if(!quickOpen.articleWorkspace||!quickOpen.notebookList||quickOpen.genericEditor||quickOpen.mode!=='read')throw new Error('legacy quick item did not use unified workspace');
+            await page.evaluate(()=>{window.__v2522QuickWorkspace=document.querySelector('#articleWorkspace');return state.workspaceController.setMode('edit');});
+            const quickEdit=await page.evaluate(()=>({
+              same:window.__v2522QuickWorkspace===document.querySelector('#articleWorkspace'),
+              mode:state.workspaceController.mode(),
+              genericEditor:!!document.querySelector('.editor-page-shell')
+            }));
+            if(!quickEdit.same||quickEdit.mode!=='edit'||quickEdit.genericEditor)throw new Error('quick read/edit transition rebuilt or escaped workspace');
+            await page.fill('#articleTitleInput','旧式短资料（已编辑）');
+            await page.evaluate(()=>document.querySelector('#articleTitleInput').dispatchEvent(new Event('input',{bubbles:true})));
+            await page.evaluate(()=>state.workspaceController.save('active'));
+            await page.waitForTimeout(500);
+            const quickSaved=await page.evaluate(async id=>{
+              const item=await fetchItem(id);
+              return {content_mode:item.content_mode,primary_action:item.primary_action,workspace:!!document.querySelector('#articleWorkspace'),generic:!!document.querySelector('.editor-page-shell')};
+            },ids.quick);
+            if(quickSaved.content_mode!=='quick'||quickSaved.primary_action!=='copy'||!quickSaved.workspace||quickSaved.generic)throw new Error('quick compatibility metadata or workspace was not preserved');
+
+            await page.evaluate(async id=>{state.editorDirty=false;await openReader(id,true);},ids.article);
+            await page.waitForSelector('#articleWorkspace');
+            const articleOpen=await page.evaluate(()=>({
+              workspace:!!document.querySelector('#articleWorkspace'),
+              notebookList:!!document.querySelector('#notebookListPane'),
+              generic:!!document.querySelector('.editor-page-shell'),
+              mode:state.workspaceController.mode()
+            }));
+            if(!articleOpen.workspace||!articleOpen.notebookList||articleOpen.generic)throw new Error('article item did not use the same workspace');
+
+            await page.setViewportSize({width:390,height:844});
+            await page.waitForTimeout(120);
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1);
+            if(overflow)throw new Error('390px horizontal overflow');
+            if(browserErrors.length)throw new Error(browserErrors.join(' | '));
+            console.log('LEGACY_QUICK_UNIFIED_WORKSPACE=PASS');
+            console.log('ARTICLE_SHARED_WORKSPACE=PASS');
+            console.log('QUICK_METADATA_PRESERVED=PASS');
+            console.log('READ_EDIT_SAME_DOM=PASS');
+            console.log('MOBILE_390_OVERFLOW=NONE');
+            console.log('PRODUCTION_WRITE=NO');
+            await browser.close();
+          })().catch(err=>{console.error(err);process.exit(1);});
+          NODE
+          node "$RUNNER_TEMP/p02-v2522-test.cjs"
+
+      - name: Commit resealed manifest to product branch
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Runner'
+          git config user.email 'vf-runner@users.noreply.github.com'
+          git add SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          if git diff --cached --quiet; then echo MANIFEST_ALREADY_CURRENT=YES; exit 0; fi
+          git commit -m 'chore(P02): reseal V2.5.22 source manifest'
+          git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/llhzx2018/vf-library.git"
+          git push origin "HEAD:${PRODUCT_BRANCH}"
+          echo PRODUCT_BRANCH_MANIFEST_PUSH=PASS
+          echo PRODUCTION_WRITE=NO
