@@ -16,7 +16,7 @@ test "$(jq -r .schema SOURCE_MANIFEST.json)" = "$SCHEMA"
 test "$(jq -r .runtime_source_file_count SOURCE_MANIFEST.json)" = 76
 node --check public/assets/scratch-tabs.js
 node --check public/assets/v254-common-branding.js
-node tests/unit/v2521_contextual_display_contract.mjs
+node tests/unit/v2521_context_ux_contract.mjs
 node tests/unit/v2522_unified_library_workspace_contract.mjs
 node tests/unit/v2523_unified_content_workspace_contract.mjs
 python3 scripts/repository-gates.py
