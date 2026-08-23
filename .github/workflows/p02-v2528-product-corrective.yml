@@ -1,0 +1,141 @@
+name: P02 V2.5.28 Product Corrective
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v2528-product-corrective.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  correct-develop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      EXPECTED_PRODUCT_HEAD: 54a5faf5c8d96e263e13f9f50502a2270f270863
+    steps:
+      - name: Require registered product-write capability
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"
+          echo PRODUCT_WRITE_CAPABILITY=PASS
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: develop
+          token: ${{ env.RELEASE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: product
+
+      - name: Patch scratch workspace single-open contract
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_PRODUCT_HEAD"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.28'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path('public/assets/scratch-tabs.js')
+          s=p.read_text(encoding='utf-8')
+
+          anchor="  let autoOpened=false;\n  let noticeTimer=null;"
+          replacement="  let autoOpened=false;\n  let openingPromise=null;\n  let noticeTimer=null;"
+          if anchor not in s:
+              raise SystemExit('openingPromise anchor missing')
+          s=s.replace(anchor,replacement,1)
+
+          stale="autoOpened=true;setTimeout(()=>openWorkspace(true).catch(()=>{}),180);"
+          guarded="autoOpened=true;setTimeout(()=>{if(storage.get(LAST_OPEN_KEY)==='1'&&!workspace)openWorkspace(true).catch(()=>{});},180);"
+          if stale not in s:
+              raise SystemExit('stale auto-open timer anchor missing')
+          s=s.replace(stale,guarded,1)
+
+          pattern=r"  async function openWorkspace\(auto,createNew\)\{.*?\n  \}\n\n  function rememberCursor"
+          match=re.search(pattern,s,flags=re.S)
+          if not match:
+              raise SystemExit('openWorkspace function block missing')
+          new_block=r'''  async function openWorkspace(auto,createNew){
+    if(workspace&&!workspace.isConnected)workspace=null;
+    if(workspace){if(createNew)await createTab();return;}
+    if(openingPromise){
+      await openingPromise;
+      if(createNew&&workspace)await createTab();
+      return;
+    }
+    openingPromise=(async()=>{
+      try{await session();await loadSnapshot();}
+      catch(error){if(!auto)alert(error.message||'无法打开临时页签');return;}
+      if(workspace&&workspace.isConnected)return;
+      const existing=document.querySelector('#scratchWorkspaceV259');
+      if(existing){workspace=existing;return;}
+      const main=document.querySelector('#main');if(!main){if(!auto)alert('资料工作区尚未就绪。');return;}main.insertAdjacentHTML('beforeend',workspaceMarkup());workspace=document.querySelector('#scratchWorkspaceV259');
+      document.body.classList.add('scratch-mode-v2510');document.querySelector('#scratchLaunchV259')?.setAttribute('aria-pressed','true');
+      storage.set(LAST_OPEN_KEY,'1');
+      workspace.querySelector('[data-scratch-add]').addEventListener('click',createTab);workspace.querySelector('[data-scratch-empty-add]').addEventListener('click',createTab);
+      workspace.querySelector('[data-scratch-exit]').addEventListener('click',exitWorkspace);workspace.querySelector('[data-scratch-recent]').addEventListener('click',toggleRecent);workspace.querySelector('[data-scratch-organize]').addEventListener('click',openOrganize);
+      const tabsScroll=workspace.querySelector('.scratch-tabs-scroll-v259');if(tabsScroll)tabsScroll.addEventListener('wheel',event=>{if(Math.abs(event.deltaY)<=Math.abs(event.deltaX)||tabsScroll.scrollWidth<=tabsScroll.clientWidth)return;event.preventDefault();tabsScroll.scrollLeft+=event.deltaY;},{passive:false});
+      editor=workspace.querySelector('[data-scratch-editor]');
+      editor.addEventListener('input',onInput);editor.addEventListener('scroll',()=>{const tab=current();if(tab)tab.scroll_top=editor.scrollTop;},{passive:true});editor.addEventListener('keyup',rememberCursor);editor.addEventListener('click',rememberCursor);editor.addEventListener('select',rememberCursor);
+      let desired=Number(storage.get(ACTIVE_KEY)||0);if(!snapshot.open.some(t=>Number(t.id)===desired))desired=Number(snapshot.open[0]?.id||0);activeId=desired;
+      if(createNew||(!activeId&&snapshot.open.length===0))await createTab();else{renderTabs();renderEditor();}
+    })();
+    try{await openingPromise;}finally{openingPromise=null;}
+  }
+
+  function rememberCursor'''
+          s=s[:match.start()]+new_block+s[match.end():]
+          p.write_text(s,encoding='utf-8')
+          print('SCRATCH_SINGLE_OPEN_PATCH=APPLIED')
+          PY
+
+          node --check public/assets/scratch-tabs.js
+          grep -Fq 'let openingPromise=null;' public/assets/scratch-tabs.js
+          grep -Fq "storage.get(LAST_OPEN_KEY)==='1'&&!workspace" public/assets/scratch-tabs.js
+          echo SCRATCH_SINGLE_OPEN_SYNTAX=PASS
+
+      - name: Reseal source manifest and verify repository gates
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/generate-source-manifest.py
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          node --check public/assets/v255-hotfix.js
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          changed=set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          expected={'public/assets/scratch-tabs.js','SOURCE_MANIFEST.json','SOURCE_MANIFEST.txt'}
+          if changed!=expected:
+              raise SystemExit(f'unexpected corrective diff: {sorted(changed)}')
+          print('CORRECTIVE_DIFF_SCOPE=PASS')
+          PY
+
+      - name: Commit corrective fix to develop
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Release Runner'
+          git config user.email 'vf-release-runner@users.noreply.github.com'
+          git add public/assets/scratch-tabs.js SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          git commit -m 'fix(P02): serialize scratch workspace opening'
+          NEW_SHA="$(git rev-parse HEAD)"
+          git push origin HEAD:develop
+          echo "PRODUCT_DEVELOP_SHA=$NEW_SHA"
+          echo PRODUCT_DEVELOP_WRITE=PASS
+
+      - name: Protected boundaries
+        if: always()
+        run: |
+          echo MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo FORMAL_RELEASE=NO
+          echo CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
