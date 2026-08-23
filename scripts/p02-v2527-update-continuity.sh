@@ -21,7 +21,8 @@ node --check public/assets/scratch-tabs.js
 node tests/unit/v2521_context_ux_contract.mjs
 node tests/unit/v2522_unified_library_workspace_contract.mjs
 node tests/unit/v2523_unified_content_workspace_contract.mjs
-node tests/unit/v2527_interaction_refresh_contract.mjs
+node tests/unit/v2526_interaction_refresh_contract.mjs
+node tests/unit/v2527_update_continuity_contract.mjs
 python3 scripts/verify-source-manifest.py
 python3 scripts/repository-gates.py
 git diff --check
@@ -59,7 +60,7 @@ V2.5.27 restores direct upgrade from authenticated Production V2.5.25 and bootst
 s=s[:i]+notes+s[j+len(end):]
 s=s.replace("'candidate_browser':'PASS_RUN_32206056733_PLUS_32146866564'","'candidate_browser':'PENDING_CURRENT_EXACT_CANDIDATE_RUN'")
 s=s.replace("'candidate_backend_data_privacy_transaction':'PASS_RUN_32206056733_PLUS_INHERITED_V2.5.3'","'candidate_backend_data_privacy_transaction':'PENDING_CURRENT_EXACT_CANDIDATE_RUN'")
-s=s.replace("'main_readback':'PRODUCTION_2.5.2_CURRENT_EXPECTED_NOT_PROMOTED'","'main_readback':'FORMAL_2.5.23_CURRENT_NOT_PROMOTED'")
+s=s.replace("'main_readback':'PRODUCTION_2.5.2_CURRENT_EXPECTED_NOT_PROMOTED'","'main_readback':'FORMAL_2.5.26_CURRENT_NOT_PROMOTED'")
 p.write_text(s,encoding='utf-8')
 PY
 python3 -m py_compile "$RUNNER_TEMP/build-v2527.py"
