@@ -69,31 +69,46 @@ jobs:
           print('FULL_ALREADY_PRESENT='+str('VF_Forge_V1.37.3_FULL.zip' in assets).lower())
           PY
 
-      - name: Build deterministic exact FULL and local fresh-install gate
+      - name: Prepare verified PHP runtime
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 unzip >/dev/null
+          php -r 'if(PHP_VERSION_ID<80200) exit(2); foreach(["pdo_sqlite","fileinfo","sodium","zip"] as $e){if(!extension_loaded($e)){fwrite(STDERR,"missing:$e\n");exit(3);}} echo "PHP_RUNTIME_GATE=PASS version=".PHP_VERSION."\n";'
+
+      - name: Build deterministic exact FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           cd p03
           python3 tests/integration/source_integrity_test.py
+          echo 'SOURCE_INTEGRITY_GATE=PASS'
           rm -rf "$RUNNER_TEMP/runtime-a" "$RUNNER_TEMP/runtime-b"
           python3 scripts/build_runtime.py "$RUNNER_TEMP/runtime-a" >/dev/null
           python3 scripts/build_runtime.py "$RUNNER_TEMP/runtime-b" >/dev/null
-          test "$(find "$RUNNER_TEMP/runtime-a" -type f | wc -l)" = "$EXPECTED_RUNTIME_FILES"
-          test "$(find "$RUNNER_TEMP/runtime-b" -type f | wc -l)" = "$EXPECTED_RUNTIME_FILES"
-          test -z "$(find "$RUNNER_TEMP/runtime-a" -type l -print)"
-          test -z "$(find "$RUNNER_TEMP/runtime-b" -type l -print)"
-          ! grep -R -F "$TOKEN" "$RUNNER_TEMP/runtime-a" >/dev/null 2>&1
+          python3 - "$RUNNER_TEMP/runtime-a" "$RUNNER_TEMP/runtime-b" "$EXPECTED_RUNTIME_FILES" "$TOKEN" <<'PY'
+          from pathlib import Path
+          import sys
+          a,b=Path(sys.argv[1]),Path(sys.argv[2]); expected=int(sys.argv[3]); token=sys.argv[4].encode()
+          for label,root in [('A',a),('B',b)]:
+              files=[p for p in root.rglob('*') if p.is_file() and not p.is_symlink()]
+              links=[p for p in root.rglob('*') if p.is_symlink()]
+              print(f'RUNTIME_{label}_FILES={len(files)}')
+              assert len(files)==expected
+              assert not links
+              for p in files:
+                  assert token not in p.read_bytes(), f'credential bytes found in {p.relative_to(root)}'
+          print('RUNTIME_PROJECTION_AND_CREDENTIAL_GATE=PASS')
+          PY
           cat > "$RUNNER_TEMP/package_full.py" <<'PY'
           from pathlib import Path
-          import os,stat,sys,zipfile
+          import stat,sys,zipfile
           src=Path(sys.argv[1]); out=Path(sys.argv[2])
           with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
               for p in sorted(x for x in src.rglob('*') if x.is_file() and not x.is_symlink()):
                   rel=p.relative_to(src).as_posix()
-                  zi=zipfile.ZipInfo(rel,(1980,1,1,0,0,0))
-                  zi.create_system=3
+                  zi=zipfile.ZipInfo(rel,(1980,1,1,0,0,0)); zi.create_system=3
                   mode=stat.S_IMODE(p.stat().st_mode)
                   zi.external_attr=((stat.S_IFREG|mode)&0xFFFF)<<16
                   zi.compress_type=zipfile.ZIP_DEFLATED
@@ -103,16 +118,35 @@ jobs:
           python3 "$RUNNER_TEMP/package_full.py" "$RUNNER_TEMP/runtime-b" "$RUNNER_TEMP/full-b.zip"
           SHA_A=$(sha256sum "$RUNNER_TEMP/full-a.zip" | awk '{print $1}')
           SHA_B=$(sha256sum "$RUNNER_TEMP/full-b.zip" | awk '{print $1}')
+          echo "ZIP_A_SHA256=$SHA_A"
+          echo "ZIP_B_SHA256=$SHA_B"
           test "$SHA_A" = "$SHA_B"
+          echo 'ZIP_DETERMINISM_GATE=PASS'
           cp "$RUNNER_TEMP/full-a.zip" "$RUNNER_TEMP/$FULL_ASSET"
           FULL_BYTES=$(stat -c%s "$RUNNER_TEMP/$FULL_ASSET")
           unzip -t "$RUNNER_TEMP/$FULL_ASSET" >/dev/null
-          test "$(unzip -Z1 "$RUNNER_TEMP/$FULL_ASSET" | wc -l)" = "$EXPECTED_RUNTIME_FILES"
-          ! unzip -Z1 "$RUNNER_TEMP/$FULL_ASSET" | grep -Ei '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+          python3 - "$RUNNER_TEMP/$FULL_ASSET" "$EXPECTED_RUNTIME_FILES" <<'PY'
+          import re,sys,zipfile
+          p=sys.argv[1]; expected=int(sys.argv[2])
+          deny=re.compile(r'(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$',re.I)
+          with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+              print('FULL_ZIP_ENTRIES='+str(len(names)))
+              assert len(names)==expected
+              bad=[n for n in names if deny.search(n)]
+              assert not bad, bad
+          print('FULL_ZIP_STRUCTURE_AND_PRIVACY_GATE=PASS')
+          PY
           {
             echo "FULL_SHA=$SHA_A"
             echo "FULL_BYTES=$FULL_BYTES"
           } >> "$GITHUB_ENV"
+          echo "DETERMINISTIC_FULL_BUILD=PASS sha=$SHA_A bytes=$FULL_BYTES files=$EXPECTED_RUNTIME_FILES"
+
+      - name: Create reusable Fresh Install verifier
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           cat > "$RUNNER_TEMP/fresh_install.sh" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
@@ -121,22 +155,48 @@ jobs:
           rm -rf "$ROOT" "$DATA" "$COOKIE"; mkdir -p "$ROOT" "$DATA"
           unzip -q "$ZIP" -d "$ROOT"
           test -f "$ROOT/setup.php"; test -f "$ROOT/api.php"; test -f "$ROOT/memory-api.php"
-          test "$(find "$ROOT" -type f | wc -l)" = '55'
+          COUNT=$(find "$ROOT" -type f | wc -l | tr -d '[:space:]')
+          echo "${LABEL}_EXTRACTED_FILES=$COUNT"
+          test "$COUNT" = '55'
           test -z "$(find "$ROOT" -type l -print)"
+          echo "${LABEL}_FULL_EXTRACT_GATE=PASS"
           VF_PRIVATE_READ_TOKEN='P03_BACKFILL_DISPOSABLE_FIXTURE' php -S "127.0.0.1:$PORT" -t "$ROOT" >"$RUNNER_TEMP/php-$LABEL.log" 2>&1 &
           PID=$!
           cleanup(){ kill "$PID" >/dev/null 2>&1 || true; wait "$PID" 2>/dev/null || true; }
           trap cleanup EXIT
-          ready=0; for i in $(seq 1 80); do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi; sleep .25; done; test "$ready" = 1
+          ready=0
+          for i in $(seq 1 80); do
+            if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi
+            sleep .25
+          done
+          if [ "$ready" != 1 ]; then echo "${LABEL}_PHP_SERVER_READY=FAIL"; cat "$RUNNER_TEMP/php-$LABEL.log"; exit 41; fi
+          echo "${LABEL}_PHP_SERVER_READY=PASS"
           curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/setup-$LABEL.html"
           CSRF=$(python3 - "$RUNNER_TEMP/setup-$LABEL.html" <<'PY'
           import re,sys
           s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
           PY
           )
+          test -n "$CSRF"
+          echo "${LABEL}_SETUP_CSRF_GATE=PASS"
           PASS='P03-Backfill-Fixture-2026!'
-          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge V1.37.3 FULL Backfill Gate' --data-urlencode "data_root=$DATA" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php" > "$RUNNER_TEMP/setup-post-$LABEL.txt"
-          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post-$LABEL.txt"
+          STATUS=$(curl -sS -D "$RUNNER_TEMP/setup-post-$LABEL.headers" -o "$RUNNER_TEMP/setup-post-$LABEL.body" -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge V1.37.3 FULL Backfill Gate' --data-urlencode "data_root=$DATA" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")
+          echo "${LABEL}_SETUP_HTTP=$STATUS"
+          if [ "$STATUS" != 302 ] && [ "$STATUS" != 303 ]; then
+            echo "${LABEL}_SETUP_POST=FAIL"
+            python3 - "$RUNNER_TEMP/setup-post-$LABEL.body" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8',errors='replace').read()
+          m=re.search(r'<div class="errors">(.*?)</div>',s,re.S)
+          if m:
+              print('SETUP_ERRORS='+re.sub(r'<[^>]+>',' | ',m.group(1)).strip())
+          else:
+              print('SETUP_ERRORS=NO_VISIBLE_ERROR_BLOCK')
+          PY
+            cat "$RUNNER_TEMP/php-$LABEL.log"
+            exit 42
+          fi
+          echo "${LABEL}_SETUP_POST=PASS"
           DB=''
           while IFS= read -r CANDIDATE_DB; do
             HAS_SCHEMA=$(sqlite3 "$CANDIDATE_DB" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations';" 2>/dev/null || true)
@@ -145,23 +205,31 @@ jobs:
               if [ "$CANDIDATE_SCHEMA" = '30' ]; then DB="$CANDIDATE_DB"; break; fi
             fi
           done < <(find "$DATA" -type f \( -name '*.sqlite' -o -name '*.db' \) -print)
-          test -n "$DB"
+          if [ -z "$DB" ]; then echo "${LABEL}_DATABASE_DISCOVERY=FAIL"; find "$DATA" -maxdepth 3 -type f -printf '%P\n'; exit 43; fi
+          echo "${LABEL}_DATABASE_DISCOVERY=PASS"
           test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '30'
           test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
           test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
           test "$(sqlite3 "$DB" 'select count(*) from asset_files;')" = '0'
+          echo "${LABEL}_SQLITE_GATE=PASS schema=30 integrity=ok project_asset_rows=0"
           LOGIN=$(printf '{"password":"%s"}' "$PASS")
           curl -fsS -c "$COOKIE" -b "$COOKIE" -H "Origin: $BASE" -H 'Content-Type: application/json' --data "$LOGIN" "$BASE/api.php?action=login" -o "$RUNNER_TEMP/login-$LABEL.json"
           python3 - "$RUNNER_TEMP/login-$LABEL.json" <<'PY'
           import json,sys
-          d=json.load(open(sys.argv[1],encoding='utf-8'));assert d.get('ok') and d.get('csrf')
+          d=json.load(open(sys.argv[1],encoding='utf-8')); assert d.get('ok') and d.get('csrf')
           PY
-          echo "FRESH_INSTALL_${LABEL}=PASS schema=30 integrity=ok project_asset_rows=0"
+          echo "FRESH_INSTALL_${LABEL}=PASS schema=30 integrity=ok project_asset_rows=0 auth=pass"
           cleanup; trap - EXIT
           SH
           chmod +x "$RUNNER_TEMP/fresh_install.sh"
+          echo 'FRESH_INSTALL_VERIFIER_READY=PASS'
+
+      - name: Fresh Install exact local FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           "$RUNNER_TEMP/fresh_install.sh" "$RUNNER_TEMP/$FULL_ASSET" 18083 LOCAL
-          echo "DETERMINISTIC_FULL_BUILD=PASS sha=$SHA_A bytes=$FULL_BYTES files=$EXPECTED_RUNTIME_FILES"
+          echo 'LOCAL_FULL_FRESH_INSTALL_GATE=PASS'
 
       - name: Backfill FULL into existing V1.37.3 Release
         shell: bash
@@ -171,7 +239,7 @@ jobs:
           gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > release-current.json
           EXISTING=$(python3 - release-current.json <<'PY'
           import json,sys
-          d=json.load(open(sys.argv[1]));print('yes' if any(a['name']=='VF_Forge_V1.37.3_FULL.zip' for a in d.get('assets',[])) else 'no')
+          d=json.load(open(sys.argv[1])); print('yes' if any(a['name']=='VF_Forge_V1.37.3_FULL.zip' for a in d.get('assets',[])) else 'no')
           PY
           )
           if [ "$EXISTING" = yes ]; then
@@ -200,7 +268,7 @@ jobs:
           gh release edit "$RELEASE_TAG" --repo "$P03_REPOSITORY" --notes-file "$RUNNER_TEMP/notes-backfill.md"
           echo 'RELEASE_METADATA_BACKFILL=PASS'
 
-      - name: Remote FULL SHA and fresh-install readback
+      - name: Remote FULL SHA and Fresh Install readback
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -208,12 +276,13 @@ jobs:
           gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$FULL_ASSET" --pattern 'RELEASE_SHA256SUMS.txt' --dir "$RUNNER_TEMP/remote"
           REMOTE_SHA=$(sha256sum "$RUNNER_TEMP/remote/$FULL_ASSET" | awk '{print $1}')
           REMOTE_BYTES=$(stat -c%s "$RUNNER_TEMP/remote/$FULL_ASSET")
+          echo "REMOTE_FULL_SHA256=$REMOTE_SHA"
+          echo "REMOTE_FULL_BYTES=$REMOTE_BYTES"
           test "$REMOTE_SHA" = "$FULL_SHA"
           test "$REMOTE_BYTES" = "$FULL_BYTES"
           grep -Fq "$FULL_SHA  $FULL_ASSET" "$RUNNER_TEMP/remote/RELEASE_SHA256SUMS.txt"
           grep -Fq "$UPDATE_SHA256  $UPDATE_ASSET" "$RUNNER_TEMP/remote/RELEASE_SHA256SUMS.txt"
           unzip -t "$RUNNER_TEMP/remote/$FULL_ASSET" >/dev/null
-          ! unzip -Z1 "$RUNNER_TEMP/remote/$FULL_ASSET" | grep -Ei '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
           "$RUNNER_TEMP/fresh_install.sh" "$RUNNER_TEMP/remote/$FULL_ASSET" 18084 REMOTE
           gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-after.json"
           python3 - "$RUNNER_TEMP/release-after.json" "$FULL_ASSET" "$FULL_BYTES" <<'PY'
@@ -223,7 +292,6 @@ jobs:
           assert 'VF_Forge_V1.37.3_UPDATE.zip' in assets and 'RELEASE_SHA256SUMS.txt' in assets
           print('P03_V1373_FULL_REMOTE_READBACK=PASS release_id='+str(d['id'])+' asset_id='+str(assets[name]['id'])+' bytes='+str(size))
           PY
-          echo "REMOTE_FULL_SHA256=$REMOTE_SHA"
           echo 'PRODUCTION_WRITE=NO'
 
       - name: Record machine evidence
