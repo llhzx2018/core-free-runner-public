@@ -1,0 +1,284 @@
+name: P06 VF Press V0.1.6 Formal Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - requests/p06-v016-release.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-v016-formal-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_REPO: llhzx2018/vf-press
+      SOURCE_SHA: 58a425106946f801d486d0740bbc3465367fa516
+      VERSION: 0.1.6
+      TAG: v0.1.6
+      CORE_REPO: llhzx2018/core-updates
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Require registered release capabilities
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo PRIVATE_READ_CAPABILITY=PASS
+          echo RELEASE_WRITE_CAPABILITY=PASS
+
+      - name: Checkout exact merged main source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Checkout core-updates channel
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.CORE_REPO }}
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: core-updates
+
+      - name: Prepare release runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          php -v
+          composer --version
+          command -v gh
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          echo MACHINE_RUNTIME=PASS
+
+      - name: Exact main identity and authority gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(jq -r .version VF_PROJECT.json)" = "$VERSION"
+          test "$(jq -r .schema VF_PROJECT.json)" = '2'
+          test "$(jq -r .release_gates.owner_formal_release_approval VF_PROJECT.json)" = 'PASS'
+          test "$(jq -r .release_gates.owner_real_use_after_production_update VF_PROJECT.json)" = 'REQUIRED'
+          test "$(jq -r .product_gates.public_asset_delivery VF_PROJECT.json)" = 'CANDIDATE_MACHINE_PASS_OWNER_PRODUCTION_PENDING'
+          test "$(jq -r .next_gate VF_PROJECT.json)" = 'FORMAL_RELEASE'
+          echo EXACT_MAIN_SOURCE=PASS
+          echo AUTHORITY_RELEASE_GATE=PASS
+
+      - name: Exact main regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          composer validate --strict
+          composer dump-autoload --no-dev --optimize --no-interaction
+          find src bin public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          rm -rf storage storage-restore-*
+          php bin/migrate.php | grep -Fq MIGRATION_PASS
+          php bin/self-test.php | grep -Fq FOUNDATION_SELF_TEST_PASS
+          php bin/security-self-test.php | grep -Fq SECURITY_SELF_TEST_PASS
+          php bin/research-self-test.php | grep -Fq RESEARCH_SELF_TEST_PASS
+          php bin/publication-self-test.php | grep -Fq PUBLICATION_MANUSCRIPT_SELF_TEST=PASS
+          php bin/reader-self-test.php | grep -Fq PUBLISHER_READER_SELF_TEST=PASS
+          php bin/edition-self-test.php | grep -Fq EDITION_SELF_TEST=PASS
+          php bin/living-publishing-self-test.php | grep -Fq LIVING_PUBLISHING_SELF_TEST=PASS
+          php bin/operations-self-test.php | grep -Fq OPERATIONS_SELF_TEST=PASS
+          php bin/operations-ui-self-test.php | grep -Fq OPERATIONS_UI_SELF_TEST=PASS
+          php bin/public-asset-self-test.php | tee /tmp/p06-v016-public-assets
+          grep -Fq PUBLIC_ASSET_HTTP_SELF_TEST=PASS /tmp/p06-v016-public-assets
+          grep -Fq OPERATIONS_CSS_HTTP_200=PASS /tmp/p06-v016-public-assets
+          grep -Fq PUBLIC_ASSET_CONTENT_TYPE=PASS /tmp/p06-v016-public-assets
+          php bin/job-self-test.php | grep -Fq JOB_QUEUE_SELF_TEST=PASS
+          php bin/update-self-test.php | grep -Fq UPDATE_SELF_TEST=PASS
+          php -r '$pdo=new PDO("sqlite:storage/app.db"); if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok") exit(1); if((int)$pdo->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn()!==2) exit(2);'
+          rm -rf storage-restore-*
+          test -z "$(git status --short --untracked-files=all)"
+          echo EXACT_MAIN_FULL_REGRESSION=PASS
+          echo PRODUCT_REPOSITORY_CLEAN=PASS
+
+      - name: Build exact formal assets
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/p06-v016-release
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          php bin/build-release.php "$OUT" | tee /tmp/p06-release-build
+          grep -Fq RELEASE_BUILD=PASS /tmp/p06-release-build
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt)
+          FULL="$OUT/VF_Press_V0.1.6_FULL.zip"
+          UPDATE="$OUT/VF_Press_V0.1.6_UPDATE.zip"
+          test -s "$FULL" && test -s "$UPDATE"
+          test "$(jq -r .version "$OUT/RELEASE_INFO.json")" = "$VERSION"
+          unzip -p "$UPDATE" VF_UPDATE.json >/tmp/p06-release-update.json
+          test "$(jq -r .target_version /tmp/p06-release-update.json)" = "$VERSION"
+          unzip -p "$UPDATE" payload/public/index.php | grep -Fq "'/runtime-asset/operations'"
+          unzip -p "$UPDATE" payload/src/Http/Studio/OperationsController.php | grep -Fq 'href="/runtime-asset/operations"'
+          unzip -p "$UPDATE" payload/bin/public-asset-self-test.php | grep -Fq 'OPERATIONS_CSS_HTTP_200=PASS'
+          echo "FULL_BYTES=$(stat -c%s "$FULL")" >> "$GITHUB_ENV"
+          echo "FULL_SHA=$(sha256sum "$FULL" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(stat -c%s "$UPDATE")" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA=$(sha256sum "$UPDATE" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo FORMAL_ASSET_BUILD=PASS
+
+      - name: Publish and remote-readback formal GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/p06-v016-release
+          NOTES=/tmp/p06-v016-notes.md
+          cat > "$NOTES" <<'EOF'
+          ## VF Press V0.1.6 · UI 静态资源交付修复
+
+          - 修复 V0.1.5 生产升级后 Operations Console 退化为浏览器默认样式的问题。
+          - CSS 与 Reader JavaScript 改由 Runtime-owned 无扩展名路由稳定交付。
+          - Operations、登录页、Publisher、Reader、Studio 和内部预览均不再依赖 Web Root assets 符号链接。
+          - 新增真实 HTTP 200、Content-Type 与资源正文完整性回归。
+          - Schema 保持 2，无数据库迁移。
+          - 支持从 V0.1.5 直接 ATOMIC 升级；升级前自动创建恢复点，失败时支持回滚。
+
+          Production 升级与 OWNER 真实使用验收是发布后的独立步骤。
+          EOF
+
+          if gh release view "$TAG" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+            TAG_SHA=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$TAG" --jq .object.sha)
+            test "$TAG_SHA" = "$SOURCE_SHA"
+            gh release upload "$TAG"               "$OUT/VF_Press_V0.1.6_FULL.zip"               "$OUT/VF_Press_V0.1.6_UPDATE.zip"               "$OUT/SHA256SUMS.txt"               "$OUT/RELEASE_INFO.json"               --repo "$SOURCE_REPO" --clobber
+          else
+            gh release create "$TAG"               "$OUT/VF_Press_V0.1.6_FULL.zip"               "$OUT/VF_Press_V0.1.6_UPDATE.zip"               "$OUT/SHA256SUMS.txt"               "$OUT/RELEASE_INFO.json"               --repo "$SOURCE_REPO"               --target "$SOURCE_SHA"               --title "VF Press V0.1.6 · Public Asset Delivery Fix"               --notes-file "$NOTES"
+          fi
+
+          RELEASE_JSON=$(gh api "repos/$SOURCE_REPO/releases/tags/$TAG")
+          test "$(jq -r .draft <<<"$RELEASE_JSON")" = false
+          test "$(jq -r .prerelease <<<"$RELEASE_JSON")" = false
+          test "$(jq -r .tag_name <<<"$RELEASE_JSON")" = "$TAG"
+          TAG_SHA=$(gh api "repos/$SOURCE_REPO/git/ref/tags/$TAG" --jq .object.sha)
+          test "$TAG_SHA" = "$SOURCE_SHA"
+
+          READBACK=/tmp/p06-v016-readback
+          rm -rf "$READBACK"
+          mkdir -p "$READBACK"
+          gh release download "$TAG" --repo "$SOURCE_REPO" --dir "$READBACK"
+          test "$(stat -c%s "$READBACK/VF_Press_V0.1.6_FULL.zip")" = "$FULL_BYTES"
+          test "$(sha256sum "$READBACK/VF_Press_V0.1.6_FULL.zip" | awk '{print $1}')" = "$FULL_SHA"
+          test "$(stat -c%s "$READBACK/VF_Press_V0.1.6_UPDATE.zip")" = "$UPDATE_BYTES"
+          test "$(sha256sum "$READBACK/VF_Press_V0.1.6_UPDATE.zip" | awk '{print $1}')" = "$UPDATE_SHA"
+          (cd "$READBACK" && sha256sum -c SHA256SUMS.txt)
+          echo "RELEASE_URL=$(jq -r .html_url <<<"$RELEASE_JSON")" >> "$GITHUB_ENV"
+          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
+
+      - name: Publish core-updates P06 manifest
+        working-directory: core-updates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RELEASED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n             --arg version "$VERSION"             --arg tag "$TAG"             --arg sha "$UPDATE_SHA"             --arg released_at "$RELEASED_AT"             --arg source_sha "$SOURCE_SHA"             --argjson bytes "$UPDATE_BYTES"             '{
+              schema_version:"1.0",
+              project_id:"P06",
+              component_id:"APP",
+              enabled:true,
+              target_version:$version,
+              update_type:"ATOMIC",
+              from_versions:["0.1.5"],
+              schema_from:"2",
+              schema_to:"2",
+              repository:"llhzx2018/vf-press",
+              release_tag:$tag,
+              asset_name:"VF_Press_V0.1.6_UPDATE.zip",
+              asset_bytes:$bytes,
+              asset_sha256:$sha,
+              backup_required:true,
+              rollback_supported:true,
+              minimum_php:"8.2.0",
+              released_at:$released_at,
+              product_identity:"VF Press / P06",
+              notes:("V0.1.6 restores runtime-owned CSS and JavaScript delivery after the V0.1.5 production UI asset failure. Direct ATOMIC upgrade from V0.1.5 on Schema 2; pre-update recovery and rollback supported. Formal release and remote asset readback bound to exact main SHA " + $source_sha + ".")
+            }' > projects/P06.json
+          jq -e '.project_id=="P06" and .target_version=="0.1.6" and .from_versions==["0.1.5"] and .schema_from=="2" and .schema_to=="2" and .asset_bytes>0 and (.asset_sha256|test("^[a-f0-9]{64}$"))' projects/P06.json >/dev/null
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add projects/P06.json
+          git commit -m "release(P06): publish V0.1.6 update manifest"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          echo "MANIFEST_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo CORE_UPDATES_MANIFEST_PUBLISHED=PASS
+
+      - name: Verify online discovery contract
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$CORE_REPO/contents/projects/P06.json?ref=main" --jq .content | tr -d '\n' | base64 -d >/tmp/P06-online.json
+          jq -e             --arg sha "$UPDATE_SHA"             --argjson bytes "$UPDATE_BYTES"             '.target_version=="0.1.6" and .from_versions==["0.1.5"] and .schema_from=="2" and .schema_to=="2" and .release_tag=="v0.1.6" and .asset_bytes==$bytes and .asset_sha256==$sha'             /tmp/P06-online.json >/dev/null
+          cd source
+          php -r 'require "vendor/autoload.php"; $m=json_decode(file_get_contents("/tmp/P06-online.json"),true,512,JSON_THROW_ON_ERROR); $r=(new CoreUpdates\UpdateCore("P06"))->check("0.1.5","2",$m); if(($r["status"]??"")!=="AVAILABLE"){fwrite(STDERR,json_encode($r));exit(1);} echo "ONLINE_DISCOVERY=AVAILABLE\n";'
+          echo ONLINE_UPDATE_DISCOVERY=PASS
+
+      - name: Persist formal release evidence
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          [ "$JOB_STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          cd runner-control
+          git pull --rebase origin main
+          mkdir -p evidence/p06
+          cat > evidence/p06/P06_V016_RELEASE_LATEST.txt <<EOF
+          P06_V016_FORMAL_RELEASE=$RESULT
+          SOURCE_REPOSITORY=$SOURCE_REPO
+          SOURCE_SHA=$SOURCE_SHA
+          VERSION=$VERSION
+          SCHEMA=2
+          TAG=$TAG
+          RUN_ID=$GITHUB_RUN_ID
+          RELEASE_URL=${RELEASE_URL:-UNKNOWN}
+          FULL_BYTES=${FULL_BYTES:-UNKNOWN}
+          FULL_SHA256=${FULL_SHA:-UNKNOWN}
+          UPDATE_BYTES=${UPDATE_BYTES:-UNKNOWN}
+          UPDATE_SHA256=${UPDATE_SHA:-UNKNOWN}
+          CORE_UPDATES_MANIFEST_SHA=${MANIFEST_SHA:-UNKNOWN}
+          DISCOVERY_FROM=0.1.5
+          DISCOVERY_STATUS=${RESULT}
+          OWNER_REAL_USE_AFTER_PRODUCTION_UPDATE=REQUIRED
+          PRODUCTION_WRITE=NO
+          EOF
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_V016_RELEASE_LATEST.txt
+          git commit -m "evidence(P06): V0.1.6 formal release $RESULT run $GITHUB_RUN_ID" || true
+          git pull --rebase origin main
+          git push origin HEAD:main
+          test "$RESULT" = PASS
