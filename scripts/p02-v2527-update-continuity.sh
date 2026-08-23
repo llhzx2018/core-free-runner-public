@@ -252,7 +252,7 @@ $integrity=$pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN);$f
 if(!$item||(int)$item['is_favorite']!==1||(int)$item['is_pinned']!==0||count($integrity)!==1||strtolower((string)$integrity[0])!=='ok'||count($fk)!==0)exit(27);
 echo json_encode(['v1_bootstrap'=>'PASS','v2_sources'=>['2.5.26','2.5.27'],'forced_failure_rollback'=>'PASS','v2_commit'=>'PASS','data'=>'PRESERVED']);
 PHP
-php "$MS/verify.php" "$UP/site" "$MS/update-a.zip" "$MS_BYTES" "$MS_SHA" "$UP/ids.json" | jq -e '.v1_bootstrap=="PASS" and .forced_failure_rollback=="PASS" and .v2_commit=="PASS" and .data=="PRESERVED"' >/dev/null
+VFTB_TEST_MODE=1 php "$MS/verify.php" "$UP/site" "$MS/update-a.zip" "$MS_BYTES" "$MS_SHA" "$UP/ids.json" | jq -e '.v1_bootstrap=="PASS" and .forced_failure_rollback=="PASS" and .v2_commit=="PASS" and .data=="PRESERVED"' >/dev/null
 kill "$SITE_PID"; wait "$SITE_PID" 2>/dev/null || true
 echo ATOMIC_V2_DETERMINISTIC_BUILD=PASS
 echo ATOMIC_V2_EXPLICIT_SOURCE_SET=PASS
