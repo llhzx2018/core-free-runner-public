@@ -50,7 +50,7 @@ PHP
 php "$RUNNER_TEMP/v2526-seed.php" "$SITE" "$RUNNER_TEMP/v2526-seed.json"
 ITEM_ID=$(jq -r .item_id "$RUNNER_TEMP/v2526-seed.json")
 
-cat >"$RUNNER_TEMP/v2526-browser.mjs" <<'JS'
+cat >"$ROOT/v2526-browser.mjs" <<'JS'
 import {chromium} from 'playwright';
 const base=process.env.BASE_URL,password=process.env.TEST_PASSWORD,id=Number(process.env.ITEM_ID);
 const browser=await chromium.launch({headless:true});
@@ -98,7 +98,7 @@ console.log('FAVORITE_ADD_REMOVE_AUTO_REFRESH=PASS');
 console.log('NEW_IMMEDIATE_SCRATCH_CREATE=PASS');
 await browser.close();
 JS
-BASE_URL="http://127.0.0.1:$PORT/" ITEM_ID="$ITEM_ID" TEST_PASSWORD="$TEST_PASSWORD" node "$RUNNER_TEMP/v2526-browser.mjs"
+BASE_URL="http://127.0.0.1:$PORT/" ITEM_ID="$ITEM_ID" TEST_PASSWORD="$TEST_PASSWORD" node "$ROOT/v2526-browser.mjs"
 php tests/integration/favorite_ordering_regression.php "$SITE" | jq -e '.ok==true and .results.favorite_preserves_category_position=="PASS" and .results.favorite_and_pin_state_independent=="PASS"' >/dev/null
 php "$SITE/cli/verify.php" | jq -e '.ok==true and .version=="2.5.26" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
 echo FAVORITE_ORDERING_REGRESSION=PASS
