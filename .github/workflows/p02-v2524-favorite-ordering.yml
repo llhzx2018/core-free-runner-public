@@ -1,0 +1,95 @@
+name: P02 V2.5.24 Favorite Ordering
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['triggers/p02-v2524-favorite-ordering.txt']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_BRANCH: maintenance/v2.5.24-favorite-ordering-hotfix
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered capability
+        run: test -n "$RELEASE_TOKEN"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_BRANCH }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install runtime dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip curl
+
+      - name: Verify source identity and repository gates
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < VERSION)" = 2.5.24
+          find public src tests/integration -name '*.php' -print0 | xargs -0 -n1 php -l
+          node --check public/assets/app.js
+          node --check public/assets/scratch-tabs.js
+          node tests/unit/v2521_context_ux_contract.mjs
+          node tests/unit/v2522_unified_library_workspace_contract.mjs
+          node tests/unit/v2523_unified_content_workspace_contract.mjs
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          bash scripts/build-deploy-tree.sh "$RUNNER_TEMP/p02-v2524-site" >/dev/null
+          test "$(tr -d '\r\n' < "$RUNNER_TEMP/p02-v2524-site/VERSION.txt")" = 2.5.24
+          echo SOURCE_IDENTITY_AND_REPOSITORY_GATES=PASS
+
+      - name: Verify favorite and pin ordering independence
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/p02-v2524-site"
+          COOKIE="$RUNNER_TEMP/p02-v2524-cookies.txt"
+          BASE_URL="http://127.0.0.1:8124"
+          php -d display_errors=0 -S 127.0.0.1:8124 -t "$SITE" >"$RUNNER_TEMP/p02-v2524-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 60); do
+            if curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1; then break; fi
+            sleep 0.25
+          done
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" >"$RUNNER_TEMP/p02-v2524-setup.html"
+          SETUP_CSRF="$(python3 - "$RUNNER_TEMP/p02-v2524-setup.html" <<'PY'
+          import html,re,sys
+          source=open(sys.argv[1],encoding='utf-8').read()
+          match=re.search(r'name="setup_csrf" value="([^"]+)"',source)
+          if not match:
+              raise SystemExit('setup csrf missing')
+          print(html.unescape(match.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUNNER_TEMP/p02-v2524-setup-post.html" -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode 'password=VF-Test-2524-Favorite!' --data-urlencode 'password_confirm=VF-Test-2524-Favorite!' "$BASE_URL/setup.php")"
+          test "$STATUS" = 303
+          php tests/integration/favorite_ordering_regression.php "$SITE" | tee "$RUNNER_TEMP/p02-v2524-favorite-ordering.json"
+          python3 - "$RUNNER_TEMP/p02-v2524-favorite-ordering.json" <<'PY'
+          import json,sys
+          result=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert result['ok'] is True
+          assert result['results']['favorite_preserves_category_position']=='PASS'
+          assert result['results']['favorite_and_pin_state_independent']=='PASS'
+          assert result['results']['pin_controls_category_top']=='PASS'
+          PY
+          echo FAVORITE_ORDERING_INDEPENDENCE=PASS
+          echo SCHEMA_MIGRATION=NO
+          echo PRODUCTION_WRITE=NO
