@@ -18,7 +18,7 @@ find public src tests/integration -name '*.php' -print0 | xargs -0 -n1 php -l >/
 node --check public/assets/app.js
 node --check public/assets/scratch-tabs.js
 node tests/unit/v2521_context_ux_contract.mjs
-node tests/unit/v2523_unified_library_workspace_contract.mjs
+node tests/unit/v2522_unified_library_workspace_contract.mjs
 node tests/unit/v2523_unified_content_workspace_contract.mjs
 python3 scripts/verify-source-manifest.py
 python3 scripts/repository-gates.py
