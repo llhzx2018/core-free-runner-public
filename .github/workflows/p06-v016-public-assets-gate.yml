@@ -1,0 +1,189 @@
+name: P06 VF Press V0.1.6 Public Asset Candidate Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - requests/p06-v016-public-assets.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p06-v016-public-assets
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 7f5a2cbcc8a8a1df94a3aaa5b5f42f3af308e64a
+      SOURCE_REPO: llhzx2018/vf-press
+      VERSION: 0.1.6
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Require registered private read capability
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo PRIVATE_READ_CAPABILITY=PASS
+
+      - name: Checkout exact private candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Prepare PHP SQLite and browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl sqlite3 composer >/dev/null
+          php -v
+          composer --version
+          command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser
+          echo MACHINE_RUNTIME=PASS
+
+      - name: Source identity and authority gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(jq -r .version VF_PROJECT.json)" = "$VERSION"
+          test "$(jq -r .schema VF_PROJECT.json)" = '2'
+          test "$(jq -r .lifecycle VF_PROJECT.json)" = 'CANDIDATE'
+          test "$(jq -r .release_gates.owner_formal_release_approval VF_PROJECT.json)" = 'REQUIRED'
+          test "$(jq -r .product_gates.public_asset_delivery VF_PROJECT.json)" = 'REOPENED_OWNER_PRODUCTION_FAIL'
+          test "$(jq -r .next_gate VF_PROJECT.json)" = 'LOCAL_REGRESSION_AND_INDEPENDENT_RUNNER'
+          grep -Fq 'historical boundary only' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq '不得参与后续 Candidate、Release 或 Production 判断' docs/authority/SSOT.md
+          echo SOURCE_IDENTITY=PASS
+          echo AUTHORITY_DRIFT_PREFLIGHT=PASS
+
+      - name: Composer and syntax gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          composer validate --strict
+          composer dump-autoload --no-dev --optimize --no-interaction
+          find src bin public -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo COMPOSER_VALIDATE=PASS
+          echo PHP_SYNTAX=PASS
+
+      - name: Fresh migration and full regression
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage storage-restore-*
+          php bin/migrate.php | grep -Fq MIGRATION_PASS
+          php bin/self-test.php | grep -Fq FOUNDATION_SELF_TEST_PASS
+          php bin/security-self-test.php | grep -Fq SECURITY_SELF_TEST_PASS
+          php bin/research-self-test.php | grep -Fq RESEARCH_SELF_TEST_PASS
+          php bin/publication-self-test.php | grep -Fq PUBLICATION_MANUSCRIPT_SELF_TEST=PASS
+          php bin/reader-self-test.php | grep -Fq PUBLISHER_READER_SELF_TEST=PASS
+          php bin/edition-self-test.php | grep -Fq EDITION_SELF_TEST=PASS
+          php bin/living-publishing-self-test.php | grep -Fq LIVING_PUBLISHING_SELF_TEST=PASS
+          php bin/operations-self-test.php | grep -Fq OPERATIONS_SELF_TEST=PASS
+          php bin/operations-ui-self-test.php | grep -Fq OPERATIONS_UI_SELF_TEST=PASS
+          php bin/public-asset-self-test.php | tee /tmp/p06-v016-public-assets
+          grep -Fq PUBLIC_ASSET_HTTP_SELF_TEST=PASS /tmp/p06-v016-public-assets
+          grep -Fq OPERATIONS_CSS_HTTP_200=PASS /tmp/p06-v016-public-assets
+          grep -Fq PUBLIC_ASSET_CONTENT_TYPE=PASS /tmp/p06-v016-public-assets
+          php bin/job-self-test.php | grep -Fq JOB_QUEUE_SELF_TEST=PASS
+          php bin/update-self-test.php | grep -Fq UPDATE_SELF_TEST=PASS
+          php bin/migrate.php | grep -Fq MIGRATION_PASS
+          php -r '$pdo=new PDO("sqlite:storage/app.db"); if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok") exit(1); if((int)$pdo->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn()!==2) exit(2); echo "SQLITE_INTEGRITY=PASS\nSCHEMA=2 PASS\n";'
+          echo FULL_REGRESSION=PASS
+
+      - name: Build and reverse verify V0.1.6 candidates
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT=/tmp/p06-v016-dist
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          php bin/build-release.php "$OUT" | tee /tmp/p06-v016-build
+          grep -Fq RELEASE_BUILD=PASS /tmp/p06-v016-build
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt)
+          FULL="$OUT/VF_Press_V0.1.6_FULL.zip"
+          UPDATE="$OUT/VF_Press_V0.1.6_UPDATE.zip"
+          test -s "$FULL" && test -s "$UPDATE"
+          unzip -p "$UPDATE" VF_UPDATE.json >/tmp/p06-v016-update.json
+          test "$(jq -r .schema /tmp/p06-v016-update.json)" = 'vf-press-update/v1'
+          test "$(jq -r .project_id /tmp/p06-v016-update.json)" = 'P06'
+          test "$(jq -r .target_version /tmp/p06-v016-update.json)" = "$VERSION"
+          unzip -p "$UPDATE" payload/public/index.php | grep -Fq "'/runtime-asset/operations'"
+          unzip -p "$UPDATE" payload/src/Http/Studio/OperationsController.php | grep -Fq 'href="/runtime-asset/operations"'
+          unzip -p "$UPDATE" payload/bin/public-asset-self-test.php | grep -Fq 'OPERATIONS_CSS_HTTP_200=PASS'
+          echo "FULL_BYTES=$(stat -c%s "$FULL")" >> "$GITHUB_ENV"
+          echo "FULL_SHA=$(sha256sum "$FULL" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(stat -c%s "$UPDATE")" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA=$(sha256sum "$UPDATE" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo RELEASE_CANDIDATE_REVERSE_VERIFY=PASS
+
+      - name: Product repository cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf storage-restore-*
+          STATUS="$(git status --short --untracked-files=all)"
+          printf '%s\n' "$STATUS"
+          test -z "$STATUS"
+          echo PRODUCT_REPOSITORY_CLEAN=PASS
+          echo PRIVATE_DATA_PERSISTED=NO
+
+      - name: Persist exact candidate evidence
+        if: always()
+        shell: bash
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -Eeuo pipefail
+          [ "$JOB_STATUS" = success ] && RESULT=PASS || RESULT=FAIL
+          cd runner-control
+          git pull --rebase origin main
+          mkdir -p evidence/p06
+          cat > evidence/p06/P06_V016_PUBLIC_ASSET_CANDIDATE_LATEST.txt <<EOF
+          P06_V016_PUBLIC_ASSET_CANDIDATE=$RESULT
+          SOURCE_REPOSITORY=$SOURCE_REPO
+          SOURCE_SHA=$SOURCE_SHA
+          VERSION=$VERSION
+          SCHEMA=2
+          RUN_ID=$GITHUB_RUN_ID
+          FULL_BYTES=${FULL_BYTES:-UNKNOWN}
+          FULL_SHA256=${FULL_SHA:-UNKNOWN}
+          UPDATE_BYTES=${UPDATE_BYTES:-UNKNOWN}
+          UPDATE_SHA256=${UPDATE_SHA:-UNKNOWN}
+          CHECKS=SOURCE_IDENTITY,AUTHORITY_DRIFT,PHP_SYNTAX,FRESH_MIGRATION,FULL_REGRESSION,LIVING_PUBLISHING,OPERATIONS_UI,PUBLIC_ASSET_HTTP,CSS_CONTENT_TYPE,UPDATE,RELEASE_BUILD,REVERSE_VERIFY,CLEANLINESS
+          OWNER_FORMAL_RELEASE_APPROVAL=REQUIRED
+          PRODUCTION_WRITE=NO
+          PRIVATE_SOURCE_PERSISTED=NO
+          EOF
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add evidence/p06/P06_V016_PUBLIC_ASSET_CANDIDATE_LATEST.txt
+          git commit -m "evidence(P06): V0.1.6 public asset candidate $RESULT run $GITHUB_RUN_ID" || true
+          git pull --rebase origin main
+          git push origin HEAD:main
+          test "$RESULT" = PASS
