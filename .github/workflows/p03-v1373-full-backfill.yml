@@ -1,0 +1,256 @@
+name: P03 V1.37.3 FULL Backfill
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p03-v1373-full-backfill.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p03-v1373-full-backfill
+  cancel-in-progress: false
+
+env:
+  P03_REPOSITORY: llhzx2018/vf-forge
+  RELEASE_SOURCE: 29580b62a0839ee3453ccf0cf8a4902bdf3cd8ec
+  RELEASE_TAG: v1.37.3
+  FULL_ASSET: VF_Forge_V1.37.3_FULL.zip
+  UPDATE_ASSET: VF_Forge_V1.37.3_UPDATE.zip
+  UPDATE_SHA256: d772d12445a52d2c1dd5b7f1b114b112f59045ea9e9b1c74052170cb903eb276
+  EXPECTED_RUNTIME_FILES: '55'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require established release credential
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$TOKEN"
+          echo 'RELEASE_CAPABILITY=PASS'
+
+      - name: Checkout exact V1.37.3 release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.P03_REPOSITORY }}
+          ref: ${{ env.RELEASE_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p03
+
+      - name: Preflight exact Tag and existing Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p03 rev-parse HEAD)" = "$RELEASE_SOURCE"
+          test "$(cat p03/VERSION)" = '1.37.3'
+          test "$(cat p03/database/schema/SCHEMA_VERSION)" = '30'
+          repo="https://x-access-token:${TOKEN}@github.com/${P03_REPOSITORY}.git"
+          test "$(git ls-remote "$repo" "refs/tags/$RELEASE_TAG" | awk '{print $1}')" = "$RELEASE_SOURCE"
+          gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-before.json"
+          python3 - "$RUNNER_TEMP/release-before.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assets={a['name']:a for a in d.get('assets',[])}
+          assert d['tag_name']=='v1.37.3' and not d['draft'] and not d['prerelease']
+          assert 'VF_Forge_V1.37.3_UPDATE.zip' in assets
+          assert 'RELEASE_SHA256SUMS.txt' in assets
+          print('FORMAL_RELEASE_PRECHECK=PASS release_id='+str(d['id']))
+          print('FULL_ALREADY_PRESENT='+str('VF_Forge_V1.37.3_FULL.zip' in assets).lower())
+          PY
+
+      - name: Build deterministic exact FULL and local fresh-install gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip sqlite3 unzip >/dev/null
+          cd p03
+          python3 tests/integration/source_integrity_test.py
+          rm -rf "$RUNNER_TEMP/runtime-a" "$RUNNER_TEMP/runtime-b"
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/runtime-a" >/dev/null
+          python3 scripts/build_runtime.py "$RUNNER_TEMP/runtime-b" >/dev/null
+          test "$(find "$RUNNER_TEMP/runtime-a" -type f | wc -l)" = "$EXPECTED_RUNTIME_FILES"
+          test "$(find "$RUNNER_TEMP/runtime-b" -type f | wc -l)" = "$EXPECTED_RUNTIME_FILES"
+          test -z "$(find "$RUNNER_TEMP/runtime-a" -type l -print)"
+          test -z "$(find "$RUNNER_TEMP/runtime-b" -type l -print)"
+          ! grep -R -F "$TOKEN" "$RUNNER_TEMP/runtime-a" >/dev/null 2>&1
+          cat > "$RUNNER_TEMP/package_full.py" <<'PY'
+          from pathlib import Path
+          import os,stat,sys,zipfile
+          src=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted(x for x in src.rglob('*') if x.is_file() and not x.is_symlink()):
+                  rel=p.relative_to(src).as_posix()
+                  zi=zipfile.ZipInfo(rel,(1980,1,1,0,0,0))
+                  zi.create_system=3
+                  mode=stat.S_IMODE(p.stat().st_mode)
+                  zi.external_attr=((stat.S_IFREG|mode)&0xFFFF)<<16
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  z.writestr(zi,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          PY
+          python3 "$RUNNER_TEMP/package_full.py" "$RUNNER_TEMP/runtime-a" "$RUNNER_TEMP/full-a.zip"
+          python3 "$RUNNER_TEMP/package_full.py" "$RUNNER_TEMP/runtime-b" "$RUNNER_TEMP/full-b.zip"
+          SHA_A=$(sha256sum "$RUNNER_TEMP/full-a.zip" | awk '{print $1}')
+          SHA_B=$(sha256sum "$RUNNER_TEMP/full-b.zip" | awk '{print $1}')
+          test "$SHA_A" = "$SHA_B"
+          cp "$RUNNER_TEMP/full-a.zip" "$RUNNER_TEMP/$FULL_ASSET"
+          FULL_BYTES=$(stat -c%s "$RUNNER_TEMP/$FULL_ASSET")
+          unzip -t "$RUNNER_TEMP/$FULL_ASSET" >/dev/null
+          test "$(unzip -Z1 "$RUNNER_TEMP/$FULL_ASSET" | wc -l)" = "$EXPECTED_RUNTIME_FILES"
+          ! unzip -Z1 "$RUNNER_TEMP/$FULL_ASSET" | grep -Ei '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+          {
+            echo "FULL_SHA=$SHA_A"
+            echo "FULL_BYTES=$FULL_BYTES"
+          } >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/fresh_install.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ZIP="$1"; PORT="$2"; LABEL="$3"
+          ROOT="$RUNNER_TEMP/install-$LABEL"; DATA="$RUNNER_TEMP/private-$LABEL"; COOKIE="$RUNNER_TEMP/cookie-$LABEL"; BASE="http://127.0.0.1:$PORT"
+          rm -rf "$ROOT" "$DATA" "$COOKIE"; mkdir -p "$ROOT" "$DATA"
+          unzip -q "$ZIP" -d "$ROOT"
+          test -f "$ROOT/setup.php"; test -f "$ROOT/api.php"; test -f "$ROOT/memory-api.php"
+          test "$(find "$ROOT" -type f | wc -l)" = '55'
+          test -z "$(find "$ROOT" -type l -print)"
+          VF_PRIVATE_READ_TOKEN='P03_BACKFILL_DISPOSABLE_FIXTURE' php -S "127.0.0.1:$PORT" -t "$ROOT" >"$RUNNER_TEMP/php-$LABEL.log" 2>&1 &
+          PID=$!
+          cleanup(){ kill "$PID" >/dev/null 2>&1 || true; wait "$PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+          ready=0; for i in $(seq 1 80); do if curl -fsS "$BASE/setup.php" >/dev/null 2>&1; then ready=1; break; fi; sleep .25; done; test "$ready" = 1
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" -o "$RUNNER_TEMP/setup-$LABEL.html"
+          CSRF=$(python3 - "$RUNNER_TEMP/setup-$LABEL.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          PASS='P03-Backfill-Fixture-2026!'
+          curl -fsS -i -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Forge V1.37.3 FULL Backfill Gate' --data-urlencode "data_root=$DATA" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup.php" > "$RUNNER_TEMP/setup-post-$LABEL.txt"
+          grep -Eq '^HTTP/.* 302|^HTTP/.* 303' "$RUNNER_TEMP/setup-post-$LABEL.txt"
+          DB=''
+          while IFS= read -r CANDIDATE_DB; do
+            HAS_SCHEMA=$(sqlite3 "$CANDIDATE_DB" "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations';" 2>/dev/null || true)
+            if [ "$HAS_SCHEMA" = '1' ]; then
+              CANDIDATE_SCHEMA=$(sqlite3 "$CANDIDATE_DB" 'select max(version) from schema_migrations;' 2>/dev/null || true)
+              if [ "$CANDIDATE_SCHEMA" = '30' ]; then DB="$CANDIDATE_DB"; break; fi
+            fi
+          done < <(find "$DATA" -type f \( -name '*.sqlite' -o -name '*.db' \) -print)
+          test -n "$DB"
+          test "$(sqlite3 "$DB" 'select max(version) from schema_migrations;')" = '30'
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'pragma foreign_key_check;')"
+          test "$(sqlite3 "$DB" 'select count(*) from asset_files;')" = '0'
+          LOGIN=$(printf '{"password":"%s"}' "$PASS")
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H "Origin: $BASE" -H 'Content-Type: application/json' --data "$LOGIN" "$BASE/api.php?action=login" -o "$RUNNER_TEMP/login-$LABEL.json"
+          python3 - "$RUNNER_TEMP/login-$LABEL.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'));assert d.get('ok') and d.get('csrf')
+          PY
+          echo "FRESH_INSTALL_${LABEL}=PASS schema=30 integrity=ok project_asset_rows=0"
+          cleanup; trap - EXIT
+          SH
+          chmod +x "$RUNNER_TEMP/fresh_install.sh"
+          "$RUNNER_TEMP/fresh_install.sh" "$RUNNER_TEMP/$FULL_ASSET" 18083 LOCAL
+          echo "DETERMINISTIC_FULL_BUILD=PASS sha=$SHA_A bytes=$FULL_BYTES files=$EXPECTED_RUNTIME_FILES"
+
+      - name: Backfill FULL into existing V1.37.3 Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > release-current.json
+          EXISTING=$(python3 - release-current.json <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]));print('yes' if any(a['name']=='VF_Forge_V1.37.3_FULL.zip' for a in d.get('assets',[])) else 'no')
+          PY
+          )
+          if [ "$EXISTING" = yes ]; then
+            rm -rf existing-full; mkdir existing-full
+            gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$FULL_ASSET" --dir existing-full
+            test "$(sha256sum existing-full/$FULL_ASSET | awk '{print $1}')" = "$FULL_SHA" || { echo 'EXISTING_FULL_CONFLICT=BLOCK' >&2; exit 73; }
+            echo 'FULL_ASSET_ALREADY_EXACT=PASS'
+          else
+            gh release upload "$RELEASE_TAG" "$FULL_ASSET" --repo "$P03_REPOSITORY"
+            echo 'FULL_ASSET_BACKFILL_UPLOAD=PASS'
+          fi
+          rm -rf old-sums; mkdir old-sums
+          gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern 'RELEASE_SHA256SUMS.txt' --dir old-sums
+          grep -Fq "$UPDATE_SHA256  $UPDATE_ASSET" old-sums/RELEASE_SHA256SUMS.txt
+          grep -v "  $FULL_ASSET$" old-sums/RELEASE_SHA256SUMS.txt > RELEASE_SHA256SUMS.txt
+          printf '%s  %s\n' "$FULL_SHA" "$FULL_ASSET" >> RELEASE_SHA256SUMS.txt
+          gh release upload "$RELEASE_TAG" RELEASE_SHA256SUMS.txt --repo "$P03_REPOSITORY" --clobber
+          python3 - "$RUNNER_TEMP/release-before.json" "$RUNNER_TEMP/notes-backfill.md" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); body=d.get('body') or ''
+          marker='Packaging Backfill · 2026-08-24'
+          if marker not in body:
+              body=body.rstrip()+f"\n\n## {marker}\n\n- 补齐正式全新安装包 `VF_Forge_V1.37.3_FULL.zip`。\n- FULL 严格从原 `v1.37.3` exact source 重建，不升版本、不修改产品源码。\n- Deterministic build、Fresh Install、Schema 30、SQLite integrity、隐私边界与远端 SHA 回读均必须 PASS。\n- Production Write = 0。\n"
+          open(sys.argv[2],'w',encoding='utf-8').write(body+'\n')
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$P03_REPOSITORY" --notes-file "$RUNNER_TEMP/notes-backfill.md"
+          echo 'RELEASE_METADATA_BACKFILL=PASS'
+
+      - name: Remote FULL SHA and fresh-install readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/remote"; mkdir -p "$RUNNER_TEMP/remote"
+          gh release download "$RELEASE_TAG" --repo "$P03_REPOSITORY" --pattern "$FULL_ASSET" --pattern 'RELEASE_SHA256SUMS.txt' --dir "$RUNNER_TEMP/remote"
+          REMOTE_SHA=$(sha256sum "$RUNNER_TEMP/remote/$FULL_ASSET" | awk '{print $1}')
+          REMOTE_BYTES=$(stat -c%s "$RUNNER_TEMP/remote/$FULL_ASSET")
+          test "$REMOTE_SHA" = "$FULL_SHA"
+          test "$REMOTE_BYTES" = "$FULL_BYTES"
+          grep -Fq "$FULL_SHA  $FULL_ASSET" "$RUNNER_TEMP/remote/RELEASE_SHA256SUMS.txt"
+          grep -Fq "$UPDATE_SHA256  $UPDATE_ASSET" "$RUNNER_TEMP/remote/RELEASE_SHA256SUMS.txt"
+          unzip -t "$RUNNER_TEMP/remote/$FULL_ASSET" >/dev/null
+          ! unzip -Z1 "$RUNNER_TEMP/remote/$FULL_ASSET" | grep -Ei '(^|/)(database|PRIVATE_DATA|storage/private|uploads|backup|backups|cache|session|sessions|logs|tmp)(/|$)|\.sqlite3?$|\.db$|(^|/)\.env$'
+          "$RUNNER_TEMP/fresh_install.sh" "$RUNNER_TEMP/remote/$FULL_ASSET" 18084 REMOTE
+          gh api "repos/$P03_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release-after.json"
+          python3 - "$RUNNER_TEMP/release-after.json" "$FULL_ASSET" "$FULL_BYTES" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); name=sys.argv[2]; size=int(sys.argv[3]); assets={a['name']:a for a in d.get('assets',[])}
+          assert name in assets and assets[name]['size']==size
+          assert 'VF_Forge_V1.37.3_UPDATE.zip' in assets and 'RELEASE_SHA256SUMS.txt' in assets
+          print('P03_V1373_FULL_REMOTE_READBACK=PASS release_id='+str(d['id'])+' asset_id='+str(assets[name]['id'])+' bytes='+str(size))
+          PY
+          echo "REMOTE_FULL_SHA256=$REMOTE_SHA"
+          echo 'PRODUCTION_WRITE=NO'
+
+      - name: Record machine evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/release-after.json" "$RUNNER_TEMP/P03-V1.37.3-FULL-BACKFILL.json" <<'PY'
+          import json,os,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8')); assets={a['name']:a for a in d.get('assets',[])}
+          out={
+            'schema':'vf-public-runner-result/v1','project_id':'P03','gate':'V1.37.3_FULL_BACKFILL','status':'SUCCESS','pass':True,
+            'version':'1.37.3','schema_version':30,'source_commit':'29580b62a0839ee3453ccf0cf8a4902bdf3cd8ec','tag':'v1.37.3','release_id':d['id'],
+            'full':{'name':'VF_Forge_V1.37.3_FULL.zip','asset_id':assets['VF_Forge_V1.37.3_FULL.zip']['id'],'bytes':int(os.environ['FULL_BYTES']),'sha256':os.environ['FULL_SHA']},
+            'update_preserved':{'name':'VF_Forge_V1.37.3_UPDATE.zip','sha256':'d772d12445a52d2c1dd5b7f1b114b112f59045ea9e9b1c74052170cb903eb276'},
+            'deterministic_build':'PASS','local_fresh_install':'PASS','remote_fresh_install':'PASS','sqlite_integrity':'PASS','privacy_gate':'PASS','production_write':0,
+            'workflow_run_id':os.environ.get('GITHUB_RUN_ID')
+          }
+          open(sys.argv[2],'w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          print('P03_V1373_FULL_BACKFILL_GATE=PASS')
+          PY
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p03-v1373-full-backfill-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/P03-V1.37.3-FULL-BACKFILL.json
+            ${{ runner.temp }}/release-after.json
+            ${{ runner.temp }}/remote/RELEASE_SHA256SUMS.txt
+          if-no-files-found: error
