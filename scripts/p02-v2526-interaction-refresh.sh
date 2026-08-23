@@ -60,6 +60,8 @@ await page.goto(base,{waitUntil:'networkidle'});
 await page.locator('#accountBtn').click();
 await page.locator('#loginForm [name=password]').fill(password);
 await page.locator('#loginSubmit').click();
+await page.locator('#addContentSplit').waitFor({state:'visible'});
+await page.locator('[data-mode="all"]').click();
 await page.locator(`[data-item-row="${id}"]`).waitFor({state:'visible'});
 if((await page.locator('#favoriteCount').textContent()).trim()!=='0')throw new Error('favorite count did not start at zero');
 
