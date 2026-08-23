@@ -10,6 +10,7 @@ EXPECTED_UPDATE_SHA="767a52ae1693d80ff27597f67b3b24dd6a79bd495183bc65a2594885ff1
 EXPECTED_ASSETS='["SHA256SUMS.txt","VF_Library_V2.5.28_ATOMIC.zip","VF_Library_V2.5.28_FULL.zip","VF_Library_V2.5.28_RELEASE_MANIFEST.json","VF_Library_V2.5.28_RELEASE_NOTES.md","VF_Library_V2.5.28_SOURCE.zip","VF_Library_V2.5.28_UPDATE.zip","repair-v2.5.28.php"]'
 
 export GH_TOKEN="$RELEASE_TOKEN"
+echo READBACK_MODE=IMMUTABLE_RELEASE_ONLY
 
 gh release view "$TAG" --repo llhzx2018/vf-library \
   --json databaseId,tagName,isDraft,isPrerelease,publishedAt,targetCommitish,assets \
