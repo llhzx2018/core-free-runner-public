@@ -1,0 +1,106 @@
+name: P04 V2.8.8 Maintenance Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v288-maintenance-*.txt'
+      - '.github/workflows/p04-v288-maintenance.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v288-maintenance-candidate
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '07a3b18005903f69f9059e1e29157b7918c0a77e'
+  BASE_COMMIT: '72a5921aab4d2ec089ef72d501f913207cc851d9'
+  TARGET_VERSION: '2.8.8'
+  SCHEMA: '14'
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Registered private source capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact source, version and bounded scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test ! -e candidate/database/migrations/015_
+          jq -e '.project_id=="P04" and .version=="2.8.8" and .schema==14 and .release_source_contract.migration=="NONE" and .release_source_contract.provider_authority_change==false' candidate/VF_PROJECT.json >/dev/null
+          git -C candidate diff --name-only "$BASE_COMMIT"...HEAD | sort | tee "$GITHUB_WORKSPACE/changed-files.txt"
+          test "$(git -C candidate diff --name-only "$BASE_COMMIT"...HEAD | wc -l)" -le 20
+          echo 'P04_V288_BOUNDED_SCOPE=PASS'
+          echo 'MIGRATION=NONE'
+
+      - name: Prepare PHP and Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Repository and migration gates
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo 'P04_V288_REPOSITORY_AND_PHP_SYNTAX=PASS'
+
+      - name: P04 maintenance browser and contract gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V288_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V288_EVIDENCE_DIR: ${{ github.workspace }}/evidence-v288
+        run: bash scripts/run-v288-p04-maintenance-gate.sh
+
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.8-MAINTENANCE-CANDIDATE
+          path: |
+            evidence-v288/
+            changed-files.txt
+          if-no-files-found: error
+          retention-days: 30
