@@ -1,0 +1,152 @@
+name: P04 V2.8.9 Domain Attention and Group Management Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'requests/p04-v289-attention-groups-*.txt'
+      - '.github/workflows/p04-v289-attention-groups.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p04-v289-attention-groups-candidate
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/vf-infra
+  SOURCE_COMMIT: '0c76171dc1e8a3aaf4cadc8df360f7a301293e63'
+  BASE_COMMIT: '9d96793846aaa2ca97b04764a122fd3f5548e861'
+  TARGET_VERSION: '2.8.9'
+  SCHEMA: '14'
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Registered private source capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          echo 'PRIVATE_SOURCE_CREDENTIAL=PASS'
+
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+
+      - name: Exact source, version and bounded scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test ! -e candidate/database/migrations/015_
+          jq -e '.project_id=="P04" and .version=="2.8.9" and .schema==14 and .release_source_contract.migration=="NONE" and .release_source_contract.provider_authority_change==false' candidate/VF_PROJECT.json >/dev/null
+          git -C candidate diff --name-only "$BASE_COMMIT"...HEAD | sort | tee "$GITHUB_WORKSPACE/changed-files.txt"
+          test "$(git -C candidate diff --name-only "$BASE_COMMIT"...HEAD | wc -l)" -le 24
+          echo 'P04_V289_BOUNDED_SCOPE=PASS'
+          echo 'MIGRATION=NONE'
+
+      - name: Prepare PHP and Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install browser runtime
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --silent playwright
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Repository and migration gates
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          find src public tests -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo 'P04_V289_REPOSITORY_AND_PHP_SYNTAX=PASS'
+
+      - name: Deterministic V2.8.9 FULL and Atomic UPDATE gate
+        shell: bash
+        working-directory: candidate
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/evidence-v289"
+          rm -rf "$RUNNER_TEMP/v289-runtime-a" "$RUNNER_TEMP/v289-runtime-b" "$RUNNER_TEMP/v289-update-a" "$RUNNER_TEMP/v289-update-b"
+          python scripts/build-release-tree.py "$RUNNER_TEMP/v289-runtime-a" > "$GITHUB_WORKSPACE/evidence-v289/release-tree-a.json"
+          python scripts/build-release-tree.py "$RUNNER_TEMP/v289-runtime-b" > "$GITHUB_WORKSPACE/evidence-v289/release-tree-b.json"
+          diff -qr "$RUNNER_TEMP/v289-runtime-a" "$RUNNER_TEMP/v289-runtime-b"
+          python scripts/build-v289-update-release.py --target-runtime "$RUNNER_TEMP/v289-runtime-a" --output "$RUNNER_TEMP/v289-update-a" > "$GITHUB_WORKSPACE/evidence-v289/update-a.json"
+          python scripts/build-v289-update-release.py --target-runtime "$RUNNER_TEMP/v289-runtime-b" --output "$RUNNER_TEMP/v289-update-b" > "$GITHUB_WORKSPACE/evidence-v289/update-b.json"
+          cmp "$RUNNER_TEMP/v289-update-a/VF_Infra_V2.8.9_UPDATE.zip" "$RUNNER_TEMP/v289-update-b/VF_Infra_V2.8.9_UPDATE.zip"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,zipfile
+          temp=Path(os.environ['RUNNER_TEMP'])
+          evidence=Path(os.environ['GITHUB_WORKSPACE'])/'evidence-v289'
+          def full(runtime,out):
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+                  for f in sorted(x for x in runtime.rglob('*') if x.is_file()):
+                      rel=f.relative_to(runtime).as_posix()
+                      info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.create_system=3
+                      info.external_attr=(0o100644<<16)
+                      z.writestr(info,f.read_bytes())
+          full(temp/'v289-runtime-a',temp/'v289-full-a.zip')
+          full(temp/'v289-runtime-b',temp/'v289-full-b.zip')
+          assert (temp/'v289-full-a.zip').read_bytes()==(temp/'v289-full-b.zip').read_bytes()
+          assets={
+              'full':temp/'v289-full-a.zip',
+              'update':temp/'v289-update-a'/'VF_Infra_V2.8.9_UPDATE.zip',
+          }
+          identity={}
+          for name,path in assets.items():
+              identity[name]={'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+          (evidence/'formal-asset-identity.json').write_text(json.dumps(identity,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(identity))
+          PY
+          php "$RUNNER_TEMP/v289-update-a/repair-v2.8.9.php" --self-test | tee "$GITHUB_WORKSPACE/evidence-v289/atomic-self-test.txt"
+          grep -Fq 'ATOMIC_SELF_TEST_PASS target=2.8.9 schema=14' "$GITHUB_WORKSPACE/evidence-v289/atomic-self-test.txt"
+          cp "$RUNNER_TEMP/v289-update-a/PACKAGE_MANIFEST.json" "$GITHUB_WORKSPACE/evidence-v289/"
+          cp "$RUNNER_TEMP/v289-update-a/SHA256SUMS.txt" "$GITHUB_WORKSPACE/evidence-v289/"
+          echo 'P04_V289_DETERMINISTIC_FULL_UPDATE_ATOMIC=PASS'
+
+      - name: P04 maintenance browser and contract gate
+        shell: bash
+        working-directory: candidate
+        env:
+          VF_V289_TESTED_RUNTIME_COMMIT: ${{ env.SOURCE_COMMIT }}
+          VF_V289_EVIDENCE_DIR: ${{ github.workspace }}/evidence-v289
+        run: bash scripts/run-v289-domain-attention-group-management-gate.sh
+
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.9-DOMAIN-ATTENTION-GROUPS-CANDIDATE
+          path: |
+            evidence-v289/
+            changed-files.txt
+          if-no-files-found: error
+          retention-days: 30
