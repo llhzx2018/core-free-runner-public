@@ -1,0 +1,84 @@
+name: P04 V2.8.7 Authority Closure
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04-v287-authority-closure.yml'
+      - 'requests/p04-v287-authority-closure-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  authority:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-infra
+      SOURCE_COMMIT: '24217d2133f7db3064cb20f656438af2324090ae'
+      RELEASE_SOURCE: '4bdbad4671a3409a01b4c33cbd41dfd73837b4ae'
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Registered private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+
+      - name: Checkout exact P04 governance closure
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: source
+
+      - name: Checkout governance authority
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: governance
+
+      - name: Exact docs-only scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          mapfile -t changed < <(git -C source diff --name-only "$RELEASE_SOURCE"...HEAD | sort)
+          expected=$(printf '%s\n' README.md docs/README.md docs/architecture/CURRENT_ARCHITECTURE.md docs/handoff/CURRENT_STATE.md docs/operations/RELEASE_AND_RECOVERY.md | sort)
+          actual=$(printf '%s\n' "${changed[@]}")
+          test "$actual" = "$expected"
+          test "$(tr -d '\r\n' < source/VERSION)" = '2.8.7'
+          echo 'P04_V287_GOVERNANCE_ONLY_SCOPE=PASS'
+
+      - name: Authority drift machine lint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python governance/governance/authority/tools/authority_drift_lint.py source             --rules governance/governance/authority/VF_AUTHORITY_DRIFT_LINT_RULES_V1.0.json             --strict --json | tee authority-lint.json
+          jq -e '.result=="PASS_MARKER_SCAN" and .review_required==0' authority-lint.json >/dev/null
+          ! grep -Fq '## 当前正式状态' source/README.md
+          ! grep -Eq 'Production:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' source/docs/handoff/CURRENT_STATE.md
+          ! grep -Eq '当前已验证基线.*V[0-9]+' source/docs/architecture/CURRENT_ARCHITECTURE.md
+          ! grep -Eq '当前正式基线' source/docs/operations/RELEASE_AND_RECOVERY.md
+          echo 'P04_V287_AUTHORITY_DRIFT_PREVENTION=PASS'
+
+      - name: Prove release runtime tree unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/release-source" "$RUNNER_TEMP/runtime-release" "$RUNNER_TEMP/runtime-closure"
+          mkdir -p "$RUNNER_TEMP/release-source"
+          git -C source archive "$RELEASE_SOURCE" | tar -x -C "$RUNNER_TEMP/release-source"
+          python "$RUNNER_TEMP/release-source/scripts/build-release-tree.py" "$RUNNER_TEMP/runtime-release" >/dev/null
+          python source/scripts/build-release-tree.py "$RUNNER_TEMP/runtime-closure" >/dev/null
+          diff -qr "$RUNNER_TEMP/runtime-release" "$RUNNER_TEMP/runtime-closure"
+          echo 'P04_V287_RUNTIME_IDENTITY_UNCHANGED=PASS'
+          echo 'PRODUCTION_WRITE=0'
