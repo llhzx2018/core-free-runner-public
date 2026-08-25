@@ -1,0 +1,148 @@
+name: GOV-DOC Current Skill Pack Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gov-doc-skill-pack-publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_REPO: llhzx2018/gov-doc
+      RELEASE_TAG: skills-pack-2026.08
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require VF registered capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 79; }
+          echo 'REGISTERED_VF_CAPABILITIES=PASS'
+
+      - name: Checkout GOV-DOC main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: gov
+
+      - name: Build Current 10 Skill install packages
+        working-directory: gov
+        run: python3 distribution/skills/build_current_install_packages.py
+
+      - name: Verify local package set
+        working-directory: gov
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, zipfile
+          root = Path('dist/skills-2026.08')
+          manifest = json.loads((root/'INSTALL_BUILD_MANIFEST.json').read_text(encoding='utf-8'))
+          assert len(manifest['skills']) == 10, len(manifest['skills'])
+          skill_zips = sorted(root.glob('skill-*_V*_INSTALL_20260825.zip'))
+          assert len(skill_zips) == 10, len(skill_zips)
+          all_zips = sorted(root.glob('*.zip'))
+          assert len(all_zips) == 11, [p.name for p in all_zips]
+          for p in all_zips:
+              with zipfile.ZipFile(p) as z:
+                  assert z.testzip() is None, p.name
+                  names = z.namelist()
+                  assert len(names) == len(set(names)), p.name
+                  assert not any(n.startswith('/') or '..' in Path(n).parts for n in names), p.name
+          for r in manifest['skills']:
+              p = root/r['artifact']
+              assert p.stat().st_size == r['bytes'], p.name
+              assert hashlib.sha256(p.read_bytes()).hexdigest() == r['sha256'], p.name
+          print('LOCAL_DISTRIBUTION_VERIFY_PASS=11_ZIPS')
+          PY
+
+      - name: Create or update private GOV-DOC Release
+        working-directory: gov
+        env:
+          GH_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DIR='dist/skills-2026.08'
+          SOURCE_SHA=$(git rev-parse HEAD)
+          if gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$DIR"/* --repo "$TARGET_REPO" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$TARGET_REPO" --title 'VF Skills Pack 2026.08' --notes-file "$DIR/RELEASE_NOTES.md"
+          else
+            gh release create "$RELEASE_TAG" "$DIR"/* --repo "$TARGET_REPO" --target "$SOURCE_SHA" --title 'VF Skills Pack 2026.08' --notes-file "$DIR/RELEASE_NOTES.md"
+          fi
+          echo "GOV_DOC_RELEASE_SOURCE_SHA=$SOURCE_SHA"
+
+      - name: Remote Release exact readback
+        working-directory: gov
+        env:
+          GH_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DIR='dist/skills-2026.08'
+          READBACK="$RUNNER_TEMP/gov-doc-skill-pack-readback"
+          rm -rf "$READBACK"
+          mkdir -p "$READBACK"
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPO" --dir "$READBACK"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os
+          local = Path('dist/skills-2026.08')
+          remote = Path(os.environ['RUNNER_TEMP'])/'gov-doc-skill-pack-readback'
+          expected = sorted(p.name for p in local.iterdir() if p.is_file())
+          got = sorted(p.name for p in remote.iterdir() if p.is_file())
+          assert expected == got, {'expected': expected, 'got': got}
+          for name in expected:
+              a, b = local/name, remote/name
+              assert a.stat().st_size == b.stat().st_size, name
+              assert hashlib.sha256(a.read_bytes()).hexdigest() == hashlib.sha256(b.read_bytes()).hexdigest(), name
+          print(f'REMOTE_RELEASE_READBACK_PASS={len(expected)}_ASSETS')
+          PY
+
+      - name: Build verified repository download mirror
+        working-directory: gov
+        run: python3 distribution/skills/publish_current_distribution.py --release-verified
+
+      - name: Commit verified download mirror to GOV-DOC main
+        working-directory: gov
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Public Runner'
+          git config user.email 'vf-public-runner@users.noreply.github.com'
+          git add \
+            distribution/skills/current \
+            distribution/skills/CURRENT_SKILL_DISTRIBUTION.json \
+            distribution/skills/CURRENT_SKILL_DOWNLOAD_INDEX.md \
+            distribution/skills/HISTORICAL_STANDALONE_IDENTITIES_20260820.json
+          if git diff --cached --quiet; then
+            echo 'GOV_DOC_MIRROR_ALREADY_CONVERGED=YES'
+          else
+            git commit -m 'chore(distribution): publish verified Current Skill downloads'
+            git remote set-url origin "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${TARGET_REPO}.git"
+            git push origin HEAD:main
+            echo 'GOV_DOC_MIRROR_PUSH=PASS'
+          fi
+
+      - name: Final private Release visibility check
+        env:
+          GH_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" --json tagName,name,isDraft,isPrerelease,url --jq '.'
+          echo 'GOV_DOC_SKILL_DISTRIBUTION_GATE=PASS'
