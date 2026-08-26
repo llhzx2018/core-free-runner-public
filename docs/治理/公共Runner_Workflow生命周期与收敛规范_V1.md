@@ -59,7 +59,26 @@ P02 族群没有可继续注册的 Current Workflow：
 
 本批完成后：活跃 Workflow 从 377 降至 294；归档清单从 48 增至 131。
 
-## 六、后续批次
+## 六、第三阶段 P03 裁决
+
+P03 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：78；
+- 固定旧 Commit：68 / 78；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：31；
+- 包含 `git push`：21；
+- 包含 `gh release`：16；
+- 使用 `workflow_run` 串联历史流程：3。
+
+P03 Workflow 最高只覆盖 V1.37.0，且所谓通用入口仍固定旧 Commit、执行一次性修复或检查发布令牌；它们不能代表当前运行基线。多个历史入口仍具备推送源码、创建 Tag/Release、写入 `core-updates` 或回写 Runner 的能力，继续注册会留下不必要的写入面。
+
+裁决：78 个 P03 Workflow 全部移出 `.github/workflows/`。P03 处于 `DORMANT / MAINTENANCE` 时默认不注册项目级执行入口；未来明确恢复开发时，应从当时的 Current Source 新建任务级 Candidate Gate，不得复用历史 Release 包装或 `workflow_run` 链。
+
+本批完成后：活跃 Workflow 从 294 降至 216；归档清单从 131 增至 209。
+
+## 七、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 

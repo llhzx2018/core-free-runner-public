@@ -23,8 +23,8 @@ class WorkflowArchiveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
         raw = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(value["entry_count"], 131)
-        self.assertEqual(value["category_counts"]["historical-version"], 92)
+        self.assertEqual(value["entry_count"], 209)
+        self.assertEqual(value["category_counts"]["historical-version"], 170)
         self.assertNotIn("secret", raw.lower())
         self.assertNotIn("private_data", raw.lower())
 
@@ -39,6 +39,12 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(list((root / ".github/workflows").glob("p02*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p02").glob("p02*.yml"))
         self.assertEqual(len(archived), 83)
+
+    def test_p03_historical_workflows_are_not_registered(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(list((root / ".github/workflows").glob("p03*.yml")), [])
+        archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p03").glob("p03*.yml"))
+        self.assertEqual(len(archived), 78)
 
     def test_active_source_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
