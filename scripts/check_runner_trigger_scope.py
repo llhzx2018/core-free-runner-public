@@ -11,11 +11,6 @@ QUARANTINED_WORKFLOWS = (
     ".github/workflows/p01-pr-probe.yml",
     ".github/workflows/p01-22121-browser-gate.yml",
     ".github/workflows/p01-22121-final-source-gate.yml",
-    ".github/workflows/p02-v2516-final-candidate-verify.yml",
-    ".github/workflows/p02-v2517-production-readiness.yml",
-    ".github/workflows/p02-v2516-production-readiness.yml",
-    ".github/workflows/p02-v2516-manifest-reseal.yml",
-    ".github/workflows/p02-v2517-source-manifest-reseal.yml",
 )
 
 
