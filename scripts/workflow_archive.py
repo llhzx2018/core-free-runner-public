@@ -9,7 +9,7 @@ from typing import Any
 
 
 ARCHIVE_BATCH = Path("archive/workflows/2026-08")
-MANIFEST_PATH = Path("archive/workflows/归档清单_V4.json")
+MANIFEST_PATH = Path("archive/workflows/归档清单_V5.json")
 INVALID_NAMES = {
     "p01-22121-browser-reverify.yml",
     "p01-22121-product-final-gate.yml",
@@ -31,6 +31,7 @@ ARCHIVE_SOURCES = (
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "core-agent", "402ff91296b11fe48626ea430bd364125750eb1a"),
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "p02", "43d9770fe09bb0b1c02df6fc1cc9dca99786db03"),
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "p03", "74615999a34563542f800e6810039e9e366f581c"),
+    ("historical-version", ARCHIVE_BATCH / "historical-version" / "p04", "4f71ecb5f0bc7a81da32fd614de925cdcdb7923f"),
 )
 CATEGORIES = ("temporary", "invalid-yaml", "historical-version")
 
@@ -54,7 +55,7 @@ def build_manifest(root: Path) -> dict[str, Any]:
                 "sha256": _sha256(path),
             })
     return {
-        "schema": "core-free-runner-workflow-archive/v4",
+        "schema": "core-free-runner-workflow-archive/v5",
         "batch": "2026-08",
         "policy": "MOVE_ONLY_NO_CONTENT_CHANGE",
         "entry_count": len(entries),
@@ -78,12 +79,12 @@ def verify(root: Path) -> list[str]:
     expected = build_manifest(root)
     if manifest != expected:
         failures.append("MANIFEST_DRIFT")
-    if expected["entry_count"] != 209:
-        failures.append("ENTRY_COUNT_NOT_209")
+    if expected["entry_count"] != 276:
+        failures.append("ENTRY_COUNT_NOT_276")
     if expected["category_counts"] != {
         "temporary": 37,
         "invalid-yaml": 2,
-        "historical-version": 170,
+        "historical-version": 237,
     }:
         failures.append("CATEGORY_COUNT_MISMATCH")
     for entry in expected["entries"]:
@@ -112,6 +113,12 @@ def verify(root: Path) -> list[str]:
     archived_p03 = sorted((root / ARCHIVE_BATCH / "historical-version" / "p03").glob("p03*.yml"))
     if len(archived_p03) != 78:
         failures.append("P03_ARCHIVE_COUNT_NOT_78")
+    active_p04 = sorted((root / ".github/workflows").glob("p04*.yml"))
+    if active_p04:
+        failures.append("ACTIVE_P04_HISTORICAL_WORKFLOW_REMAINS")
+    archived_p04 = sorted((root / ARCHIVE_BATCH / "historical-version" / "p04").glob("p04*.yml"))
+    if len(archived_p04) != 67:
+        failures.append("P04_ARCHIVE_COUNT_NOT_67")
     return failures
 
 

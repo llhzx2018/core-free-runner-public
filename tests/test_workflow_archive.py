@@ -23,9 +23,16 @@ class WorkflowArchiveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
         raw = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(value["entry_count"], 209)
-        self.assertEqual(value["category_counts"]["historical-version"], 170)
-        self.assertNotIn("secret", raw.lower())
+        self.assertEqual(value["entry_count"], 276)
+        self.assertEqual(value["category_counts"]["historical-version"], 237)
+        allowed_keys = {"source_path", "archive_path", "category", "source_commit", "bytes", "sha256"}
+        for entry in value["entries"]:
+            self.assertEqual(set(entry), allowed_keys)
+            self.assertNotIn("\n", entry["source_path"])
+            self.assertNotIn("\n", entry["archive_path"])
+            self.assertEqual(len(entry["source_commit"]), 40)
+            self.assertEqual(len(entry["sha256"]), 64)
+        self.assertNotIn("${{ secrets.", raw.lower())
         self.assertNotIn("private_data", raw.lower())
 
     def test_current_core_agent_harness_remains_active(self):
@@ -45,6 +52,12 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(list((root / ".github/workflows").glob("p03*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p03").glob("p03*.yml"))
         self.assertEqual(len(archived), 78)
+
+    def test_p04_historical_workflows_are_not_registered(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(list((root / ".github/workflows").glob("p04*.yml")), [])
+        archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p04").glob("p04*.yml"))
+        self.assertEqual(len(archived), 67)
 
     def test_active_source_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:

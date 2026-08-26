@@ -78,7 +78,26 @@ P03 Workflow 最高只覆盖 V1.37.0，且所谓通用入口仍固定旧 Commit�
 
 本批完成后：活跃 Workflow 从 294 降至 216；归档清单从 131 增至 209。
 
-## 七、后续批次
+## 七、第三阶段 P04 裁决
+
+P04 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：67；
+- 固定旧 Commit：62 / 67；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：45；
+- 包含 `git push`：18；
+- 包含 `gh release`：17；
+- 涉及 Production 语义：37。
+
+P04 Workflow 最高只覆盖 V2.7.8。名称包含 `current` 或 `harness` 的入口仍固定 V2.7.4、V2.5.8 和旧 Commit；两个无版本名入口也分别锁定 V2.5.2 Release Asset 与一次性 Production Secret Channel 探测，因此均不具备版本无关的复用合同。
+
+裁决：67 个 P04 Workflow 全部移出 `.github/workflows/`。P04 后续开发应在 `vf-infra` Current Source 上建立任务级 Candidate Gate；Release、Rollback、Production Readback 与 Secret Probe 必须由当次明确授权重新生成，不得复用旧版本执行包装。
+
+本批完成后：活跃 Workflow 从 216 降至 149；归档清单从 209 增至 276。
+
+## 八、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
