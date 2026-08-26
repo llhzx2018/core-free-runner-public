@@ -16,4 +16,4 @@
 - `2026-08/invalid-yaml/`：已经无法被 GitHub 正确解析的历史 YAML。
 - `2026-08/historical-version/`：已被唯一 Current 入口替代的旧版本执行包装；可复用逻辑仍由当前源码或 Harness 承担。
 
-当前机器清单：[`归档清单_V7.json`](归档清单_V7.json)。旧清单不并存，避免多份 Current。
+当前机器清单：[`归档清单_V8.json`](归档清单_V8.json)。旧清单不并存，避免多份 Current。
