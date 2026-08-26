@@ -14,8 +14,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RunnerTriggerScopeTests(unittest.TestCase):
-    def test_current_quarantine_is_manual_only(self):
+    def test_no_legacy_quarantine_remains(self):
         root = Path(__file__).resolve().parents[1]
+        self.assertEqual(MODULE.QUARANTINED_WORKFLOWS, ())
         self.assertEqual(MODULE.verify_quarantine(root), [])
 
     def test_unscoped_pull_request_is_classified(self):

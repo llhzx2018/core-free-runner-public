@@ -7,11 +7,7 @@ import json
 from pathlib import Path
 
 
-QUARANTINED_WORKFLOWS = (
-    ".github/workflows/p01-pr-probe.yml",
-    ".github/workflows/p01-22121-browser-gate.yml",
-    ".github/workflows/p01-22121-final-source-gate.yml",
-)
+QUARANTINED_WORKFLOWS: tuple[str, ...] = ()
 
 
 def event_block(path: Path) -> str:

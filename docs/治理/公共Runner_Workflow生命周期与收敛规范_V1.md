@@ -134,7 +134,27 @@ P06 Workflow 覆盖旧 V0.1.2–V0.1.6、RC1 和 `VF Press` 身份。未固定 C
 
 本批完成后：活跃 Workflow 从 132 降至 70；归档清单从 293 增至 355。
 
-## 十、后续批次
+## 十、第三阶段 P01 裁决
+
+P01 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：58；
+- 固定旧 Commit：54 / 58；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：42；
+- 包含 `git push`：20；
+- 包含 `gh release`：10；
+- 涉及 Production 语义：47；
+- 使用 `workflow_run` 串联历史流程：14。
+
+P01 Workflow 覆盖 V2.21.17–V2.21.24 以及已完成的修复、发布、Production Closure 和 Token Probe。原隔离名单中的3个手工入口也固定 V2.21.21 旧分支或只执行 Runner Probe，不再承担当前恢复合同。
+
+裁决：58 个 P01 Workflow 全部移出 `.github/workflows/`，并清空旧隔离名单。后续 P01 开发必须从 `vf-start` Current Source 建立任务级 Gate；已完成版本的 Artifact、Publish 与 Production 包装不得继续注册。
+
+本批完成后：活跃 Workflow 从 70 降至 12；归档清单从 355 增至 413；历史触发隔离名单从3降至0。
+
+## 十一、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
