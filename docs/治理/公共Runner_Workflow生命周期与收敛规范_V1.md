@@ -97,7 +97,25 @@ P04 Workflow 最高只覆盖 V2.7.8。名称包含 `current` 或 `harness` 的�
 
 本批完成后：活跃 Workflow 从 216 降至 149；归档清单从 209 增至 276。
 
-## 八、后续批次
+## 八、第三阶段 P05 裁决
+
+P05 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：17；
+- 固定旧 Commit：14 / 17；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：1；
+- 包含 `gh release`：1；
+- 涉及 Production 语义：11。
+
+P05 的 `database-deploy-current`、`database-deploy-gates` 与 `database-rebaseline` 均固定旧 Commit；First Boot、Production Readback 和 Reference-Locked 流程只在修改自身 YAML 时触发，是一次性诊断或阶段验证，不构成持续 Current Gate。仓内没有其他调用方。
+
+裁决：17 个 P05 Workflow 全部移出 `.github/workflows/`。后续 P05 开发、数据库验证和 Production Readback 应从 `vf-seo` Current Source 建立任务级 Gate；不得把固定旧 Commit 的 `current` 名称视为当前 Authority。
+
+本批完成后：活跃 Workflow 从 149 降至 132；归档清单从 276 增至 293。
+
+## 九、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
