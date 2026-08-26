@@ -23,8 +23,8 @@ class WorkflowArchiveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
         raw = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(value["entry_count"], 419)
-        self.assertEqual(value["category_counts"]["historical-version"], 380)
+        self.assertEqual(value["entry_count"], 421)
+        self.assertEqual(value["category_counts"]["historical-version"], 382)
         allowed_keys = {"source_path", "archive_path", "category", "source_commit", "bytes", "sha256"}
         for entry in value["entries"]:
             self.assertEqual(set(entry), allowed_keys)
@@ -82,6 +82,13 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(list((root / ".github/workflows").glob("s01*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "s01").glob("s01*.yml"))
         self.assertEqual(len(archived), 6)
+
+    def test_active_current_workflow_allowlist_is_exact(self):
+        root = Path(__file__).resolve().parents[1]
+        active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
+        self.assertEqual(active, MODULE.ACTIVE_CURRENT_WORKFLOW_NAMES)
+        archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "public-infrastructure").glob("*.yml"))
+        self.assertEqual(len(archived), 2)
 
     def test_active_source_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
