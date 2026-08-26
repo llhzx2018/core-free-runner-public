@@ -1,6 +1,6 @@
 # 公共 Runner Workflow 生命周期与收敛规范 V1
 
-> 状态：`CURRENT CANDIDATE`  
+> 状态：`CURRENT`
 > 适用仓库：`llhzx2018/core-free-runner-public`  
 > 边界：不授权 Release、Tag 或 Production 写入
 
@@ -41,7 +41,25 @@
 - 可复用能力：由 `core-agent` 当前源码中的验证与 Pilot 脚本承担，不依赖旧 YAML 保持注册；
 - 结果：活跃 Workflow 从 386 降至 377，归档清单从 39 增至 48。
 
-## 五、后续批次
+## 五、第三阶段 P02 裁决
+
+P02 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：83；
+- 固定旧 Commit：81 / 83；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：27；
+- 包含 `git push`：11；
+- 包含 `gh release`：6。
+
+其中包括 V2.4.23、V2.4.24、V2.4.25、V2.5.0、V2.5.10、V2.5.16、V2.5.17、V2.5.18、V2.5.20，以及 7 个表面通用但仍固定在 V2.4.x 的历史入口。
+
+裁决：83 个 P02 Workflow 全部移出 `.github/workflows/`。P02 后续恢复开发时，应从 `vf-library` Current Source 建立新的任务级 Candidate Gate，不得复用历史 Release 包装。
+
+本批完成后：活跃 Workflow 从 377 降至 294；归档清单从 48 增至 131。
+
+## 六、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
