@@ -154,7 +154,26 @@ P01 Workflow 覆盖 V2.21.17–V2.21.24 以及已完成的修复、发布、Prod
 
 本批完成后：活跃 Workflow 从 70 降至 12；归档清单从 355 增至 413；历史触发隔离名单从3降至0。
 
-## 十一、后续批次
+## 十一、第三阶段 S01 裁决
+
+S01 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：6；
+- 固定旧 Commit：6 / 6；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：3；
+- 包含 `git push`：1；
+- 包含 `gh release`：1；
+- 涉及 Production 语义：4。
+
+S01 Workflow 分别绑定 C01、C02、C03 的旧版本发布、Bootstrap 与 WordPress 在线更新候选，仓内没有其他调用方，不构成公共 Runner Current Harness。
+
+裁决：6个 S01 Workflow 全部移出 `.github/workflows/`。各组件后续开发应从对应 Source Repository 建立任务级 Gate，不复用旧发布包装。
+
+本批完成后：活跃 Workflow 从12降至6；归档清单从413增至419。
+
+## 十二、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
