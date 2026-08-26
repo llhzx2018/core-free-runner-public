@@ -115,7 +115,26 @@ P05 的 `database-deploy-current`、`database-deploy-gates` 与 `database-rebase
 
 本批完成后：活跃 Workflow 从 149 降至 132；归档清单从 276 增至 293。
 
-## 九、后续批次
+## 九、第三阶段 P06 裁决
+
+P06 族群没有可继续注册的 Current Workflow：
+
+- Current：0；
+- 可复用且不绑定历史版本的 Harness：0；
+- 历史 Workflow：62；
+- 固定旧 Commit：57 / 62；
+- 使用 `VF_RELEASE_WRITE_TOKEN`：10；
+- 包含 `git push`：33；
+- 包含 `gh release`：12；
+- 涉及 Production 语义：24。
+
+P06 Workflow 覆盖旧 V0.1.2–V0.1.6、RC1 和 `VF Press` 身份。未固定 Commit 的5个入口也只是 Backup、Visual、Studio Auth 的一次性 Dispatch；仓内没有其他调用方，且旧项目身份不能代表当前 P06 Authority。
+
+裁决：62 个 P06 Workflow 全部移出 `.github/workflows/`。当前 P06 后续开发必须从其正式 Source Identity 新建任务级 Gate，不得继承旧 `VF Press` Release、在线升级或私有 Secret 包装。
+
+本批完成后：活跃 Workflow 从 132 降至 70；归档清单从 293 增至 355。
+
+## 十、后续批次
 
 按项目族群逐批处理 P01–P06、S01 和公共基础设施：
 
