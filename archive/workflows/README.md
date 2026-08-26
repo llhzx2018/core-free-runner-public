@@ -14,5 +14,6 @@
 
 - `2026-08/temporary/`：文件身份已明确声明为 `temp-*` 的一次性流程；
 - `2026-08/invalid-yaml/`：已经无法被 GitHub 正确解析的历史 YAML。
+- `2026-08/historical-version/`：已被唯一 Current 入口替代的旧版本执行包装；可复用逻辑仍由当前源码或 Harness 承担。
 
-机器清单：[`归档清单_V1.json`](归档清单_V1.json)。
+当前机器清单：[`归档清单_V2.json`](归档清单_V2.json)。旧清单不并存，避免多份 Current。
