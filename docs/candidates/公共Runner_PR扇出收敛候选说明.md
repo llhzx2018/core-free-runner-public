@@ -29,6 +29,7 @@
 - 8 个 Workflow 均保留 `workflow_dispatch` 恢复入口；
 - 新增机器检查，防止这些触发器重新漂移；
 - Candidate PR 创建后，上述 8 个 Workflow 不再产生 Run/Job；
+- 新增一个不读取私有仓、不使用 Secret、3 分钟硬超时的统一 Trigger Scope Gate；
 - 其余历史 Workflow 只记录聚合数量，不在本批次扩大修改范围。
 
-本批完成后，文本声明 PR 的 Workflow 降为 115 个；仍有 2 个无 Path 的历史文件，但它们本身是无法注册执行的损坏 YAML，且未出现在真实 PR Run 中。本轮不修复并复活它们，后续应作为归档/删除候选单独治理。其余 113 个 PR Workflow 已声明 Path 范围。
+本批完成后，旧的文本声明 PR Workflow 降为 115 个；Candidate 新增 1 个严格 Path 限定的轻量守卫。仍有 2 个无 Path 的历史文件，但它们本身是无法注册执行的损坏 YAML，且未出现在真实 PR Run 中。本轮不修复并复活它们，后续应作为归档/删除候选单独治理。其余 PR Workflow 已声明 Path 范围。
