@@ -25,8 +25,13 @@ create temporary branch / PR
 → close WITHOUT merge
 ```
 
-只有被正式裁决为可复用公共 Harness 的 Workflow 才进入 main。
+只有被正式裁决为可复用公共 Harness 的代码才进入 main；这不等于增加长期注册 Workflow。
+
+## 可复用 Harness
+
+- [`WordPress Phase 3 通用 Harness V2`](harness/wordpress-phase3/README.md)：固定 WordPress/PHP/MariaDB 真实环境、RUN_ID 隔离、Job/Result 合同与安全 Cleanup；从已退役 `core-test-runner` 提炼，不包含历史项目 Payload 或 Workflow。
 
 `develop` / sandbox / request / trigger 文件可以作为历史执行 Provenance，不要求机械合并到 main。
 
 Secret / Token 只通过 Actions Secrets / Runtime 注入，不作为普通文件长期存储，日志必须脱敏。默认不创建第三套长期测试空间。
+
