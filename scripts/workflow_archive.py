@@ -9,10 +9,35 @@ from typing import Any
 
 
 ARCHIVE_BATCH = Path("archive/workflows/2026-08")
-MANIFEST_PATH = Path("archive/workflows/归档清单_V1.json")
+MANIFEST_PATH = Path("archive/workflows/归档清单_V2.json")
 INVALID_NAMES = {
     "p01-22121-browser-reverify.yml",
     "p01-22121-product-final-gate.yml",
+}
+HISTORICAL_CORE_AGENT_NAMES = {
+    "core-agent-v0.4-verify.yml",
+    "core-agent-v0.5-verify.yml",
+    "core-agent-v0.6-write-verify.yml",
+    "core-agent-v0.7-private-write-verify.yml",
+    "core-agent-v0.8-p02-autonomous-engineering.yml",
+    "core-agent-v0.9-portfolio.yml",
+    "core-agent-v0.10-project-plan.yml",
+    "core-agent-v0.11-project-run.yml",
+    "core-agent-v1.0-final-gate.yml",
+}
+CATEGORY_SOURCES = {
+    "temporary": {
+        "directory": ARCHIVE_BATCH / "temporary",
+        "source_commit": "060e65f9adec05e1fe4b3798f86f10513764c97f",
+    },
+    "invalid-yaml": {
+        "directory": ARCHIVE_BATCH / "invalid-yaml",
+        "source_commit": "060e65f9adec05e1fe4b3798f86f10513764c97f",
+    },
+    "historical-version": {
+        "directory": ARCHIVE_BATCH / "historical-version" / "core-agent",
+        "source_commit": "402ff91296b11fe48626ea430bd364125750eb1a",
+    },
 }
 
 
@@ -22,26 +47,26 @@ def _sha256(path: Path) -> str:
 
 def build_manifest(root: Path) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
-    for category in ("temporary", "invalid-yaml"):
-        directory = root / ARCHIVE_BATCH / category
+    for category, source in CATEGORY_SOURCES.items():
+        directory = root / source["directory"]
         for path in sorted(directory.glob("*.yml")):
             relative = path.relative_to(root).as_posix()
             entries.append({
                 "source_path": f".github/workflows/{path.name}",
                 "archive_path": relative,
                 "category": category,
+                "source_commit": source["source_commit"],
                 "bytes": path.stat().st_size,
                 "sha256": _sha256(path),
             })
     return {
-        "schema": "core-free-runner-workflow-archive/v1",
+        "schema": "core-free-runner-workflow-archive/v2",
         "batch": "2026-08",
-        "archive_base_commit": "060e65f9adec05e1fe4b3798f86f10513764c97f",
         "policy": "MOVE_ONLY_NO_CONTENT_CHANGE",
         "entry_count": len(entries),
         "category_counts": {
-            "temporary": sum(item["category"] == "temporary" for item in entries),
-            "invalid-yaml": sum(item["category"] == "invalid-yaml" for item in entries),
+            category: sum(item["category"] == category for item in entries)
+            for category in CATEGORY_SOURCES
         },
         "entries": entries,
     }
@@ -59,9 +84,13 @@ def verify(root: Path) -> list[str]:
     expected = build_manifest(root)
     if manifest != expected:
         failures.append("MANIFEST_DRIFT")
-    if expected["entry_count"] != 39:
-        failures.append("ENTRY_COUNT_NOT_39")
-    if expected["category_counts"] != {"temporary": 37, "invalid-yaml": 2}:
+    if expected["entry_count"] != 48:
+        failures.append("ENTRY_COUNT_NOT_48")
+    if expected["category_counts"] != {
+        "temporary": 37,
+        "invalid-yaml": 2,
+        "historical-version": 9,
+    }:
         failures.append("CATEGORY_COUNT_MISMATCH")
     for entry in expected["entries"]:
         if (root / entry["source_path"]).exists():
@@ -72,6 +101,11 @@ def verify(root: Path) -> list[str]:
     for name in INVALID_NAMES:
         if (root / ".github/workflows" / name).exists():
             failures.append(f"INVALID_WORKFLOW_STILL_ACTIVE:{name}")
+    for name in HISTORICAL_CORE_AGENT_NAMES:
+        if (root / ".github/workflows" / name).exists():
+            failures.append(f"HISTORICAL_WORKFLOW_STILL_ACTIVE:{name}")
+    if not (root / ".github/workflows/core-agent-current-verify.yml").is_file():
+        failures.append("CURRENT_CORE_AGENT_HARNESS_MISSING")
     return failures
 
 

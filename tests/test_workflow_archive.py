@@ -23,9 +23,16 @@ class WorkflowArchiveTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
         raw = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(value["entry_count"], 39)
+        self.assertEqual(value["entry_count"], 48)
+        self.assertEqual(value["category_counts"]["historical-version"], 9)
         self.assertNotIn("secret", raw.lower())
         self.assertNotIn("private_data", raw.lower())
+
+    def test_current_core_agent_harness_remains_active(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertTrue((root / ".github/workflows/core-agent-current-verify.yml").is_file())
+        for name in MODULE.HISTORICAL_CORE_AGENT_NAMES:
+            self.assertFalse((root / ".github/workflows" / name).exists())
 
     def test_active_source_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
