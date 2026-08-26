@@ -1,0 +1,113 @@
+name: core-agent Runtime V1.1 A/B Candidate
+
+on:
+  push:
+    branches: [candidate/core-agent-runtime-v1.1-ab]
+    paths:
+      - '.github/workflows/core-agent-runtime-v1.1-ab-candidate.yml'
+      - 'scripts/core_agent_runtime_ab.py'
+      - 'tests/test_core_agent_runtime_ab.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-agent-runtime-v1.1-ab-candidate
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BASELINE_SHA: 03cddccd1ac713fe408cd797bd8d7473903fa550
+      CANDIDATE_SHA: f4edbec876edc06a5bd422edb496e9ff24186282
+    steps:
+      - name: Build public-safe runner preflight
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p public-evidence
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          payload = {
+              'schema': 'core-agent-runtime-ab-preflight/v1',
+              'runner_started': True,
+              'private_read_capability_available': bool(os.environ.get('PRIVATE_READ_TOKEN')),
+              'secret_value_persisted': False,
+          }
+          canonical = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+          payload['sha256'] = hashlib.sha256(canonical).hexdigest()
+          Path('public-evidence/preflight.json').write_text(
+              json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(f"RUNNER_STARTED={payload['runner_started']}")
+          print(f"PRIVATE_READ_CAPABILITY_AVAILABLE={payload['private_read_capability_available']}")
+          PY
+
+      - name: Require registered private read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || {
+            echo 'RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'
+            exit 78
+          }
+          echo 'PRIVATE_READ_CAPABILITY=AVAILABLE'
+
+      - name: Checkout public-safe harness
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: harness
+
+      - name: Checkout exact baseline source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.BASELINE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify harness tests
+        working-directory: harness
+        run: python -m unittest discover -s tests -v
+
+      - name: Run deterministic A/B gate
+        run: |
+          python harness/scripts/core_agent_runtime_ab.py \
+            --baseline baseline \
+            --candidate candidate \
+            --baseline-sha "$BASELINE_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --output public-evidence/core-agent-runtime-v1.1-ab.json
+
+      - name: Upload public-safe evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-agent-runtime-v1.1-ab-${{ env.CANDIDATE_SHA }}
+          path: public-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
