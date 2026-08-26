@@ -1,6 +1,6 @@
 # 旧测试 Runner 退役迁移说明 V1
 
-> 状态：`MIGRATION CANDIDATE / MACHINE ENVIRONMENT PROOF PENDING`  
+> 状态：`MIGRATION VERIFIED / MAIN PROMOTION PENDING`  
 > Source：`llhzx2018/core-test-runner@2db0a67fa811f2439b6ffb40be33dc3f1b3d19eb`  
 > Target：`llhzx2018/core-free-runner-public/harness/wordpress-phase3`
 
@@ -32,11 +32,12 @@
 旧仓只有同时满足以下条件才允许永久删除：
 
 1. Target Harness 合并进入 Public Runner main；
-2. 静态合同、安全测试与 Manifest Audit PASS；
-3. Hosted Runner 真实启动 WordPress/MariaDB，并输出 V2 Result PASS；
+2. 静态合同、安全测试与 Manifest Audit PASS；✅
+3. Hosted Runner 真实启动 WordPress/MariaDB，并输出 V2 Result PASS；✅
 4. `gov-doc` 将 Legacy Runner 从可回读仓库改为已删除 Tombstone；
 5. 旧仓最终 Commit、迁移 Target Commit 与文件 Digest 已远端回读；
 6. OWNER 另行明确批准永久删除仓库。
 
-当前第3、4、5项尚未完成，因此旧仓仍不可删除。
+Machine Evidence：Run `33002592501`、Job `98287994796`、Artifact `9619207995`，Artifact Digest `sha256:a80d82ebce24d32ed057ec89ca36d8396fe6511081b1eeba36fdb197dc4b3e2f`。
 
+当前第1、4、5项尚未完成，因此旧仓仍不可删除。
