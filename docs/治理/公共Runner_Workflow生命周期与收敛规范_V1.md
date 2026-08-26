@@ -173,13 +173,33 @@ S01 Workflow 分别绑定 C01、C02、C03 的旧版本发布、Bootstrap 与 Wor
 
 本批完成后：活跃 Workflow 从12降至6；归档清单从413增至419。
 
-## 十二、后续批次
+## 十二、公共基础设施最终裁决
 
-按项目族群逐批处理 P01–P06、S01 和公共基础设施：
+最终活跃 Current Workflow 固定为4个：
 
-1. 每批先选出唯一 Current 入口；
-2. 把重复内联逻辑提取为 Harness；
-3. 归档被替代的版本化包装；
-4. 稳定观察后，再删除确认无恢复价值的归档材料。
+| Workflow | Current 职责 |
+| --- | --- |
+| `core-agent-current-verify.yml` | 唯一 core-agent Current Source 验证入口 |
+| `runner-selftest-current.yml` | 公共 Runner 分配与基础运行自检 |
+| `runner-trigger-scope-gate.yml` | PR Trigger 范围约束 |
+| `runner-workflow-archive-gate.yml` | 归档完整性与活跃白名单 Gate |
 
-禁止一次性删除全部 Workflow；禁止把归档目录重新加入自动执行范围。
+归档2个一次性公共基础设施流程：
+
+- `gov-doc-skill-pack-publish.yml`：固定 `skills-pack-2026.08`，属于已完成发布包装；
+- `vf-agent-bootstrap-sync.yml`：用于一次性同步既定 `AGENTS.md` Authority Block，不是持续同步服务。
+
+最终结果：活跃 Workflow 从6降至4；归档清单从419增至421。
+
+## 十三、完成态与防复发合同
+
+第三阶段 Workflow 收敛完成。后续不再周期性执行同规模清仓，改由机器合同阻止历史债务重新积累：
+
+1. `.github/workflows/` 必须精确匹配4文件 Current Allowlist；
+2. 两个治理 Gate 均监听全部 `.github/workflows/*.yml` 变化；
+3. 新增 Current Workflow 必须在同一 Candidate 中更新 Allowlist、用途说明和测试；
+4. 任务级临时 Workflow 完成后必须在同一任务或紧邻清理 PR 中移出注册目录；
+5. 历史恢复通过 Git 与归档清单完成，不以重新注册旧 YAML 作为默认手段；
+6. 只有 Current 职责发生真实变化时才调整白名单，不进行例行全量重整。
+
+禁止把归档目录重新加入自动执行范围；禁止绕过 Allowlist Gate 增加第五个活跃入口。
