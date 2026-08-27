@@ -1,4 +1,4 @@
-name: P01 Upload Cache Runtime Gate V2
+name: P01 Final Baseline Resolver Patch
 
 on:
   push:
@@ -11,101 +11,53 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  patch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       EXPECTED_HEAD: cd3dea5cfe9a21173297ade4312a226113bd808c
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
     steps:
-      - name: Checkout exact P01 source
+      - name: Checkout runner scripts
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: vf-agent-operations-v1
+          path: runner
+      - name: Checkout P01 branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-start
-          ref: ${{ env.EXPECTED_HEAD }}
+          ref: ${{ env.TARGET_BRANCH }}
           token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: false
+          persist-credentials: true
+          fetch-depth: 0
           path: p01
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
           coverage: none
-      - name: Exact source syntax fresh install
+      - name: Apply exact patch
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
-          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
-          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
-          python3 -m json.tool p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
-          rm -rf /tmp/p01-upload-cache-v2
-          cp -a p01/src /tmp/p01-upload-cache-v2
-          cd /tmp/p01-upload-cache-v2
-          php -d upload_max_filesize=200M -d post_max_size=205M -S 127.0.0.1:18093 -t . >/tmp/p01-upload-cache-v2-server.log 2>&1 &
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18093/setup.php -o /tmp/p01-setup-v2.html && break; sleep 1; done
-          curl -fsS -c /tmp/p01-v2.cookies -b /tmp/p01-v2.cookies http://127.0.0.1:18093/setup.php -o /tmp/p01-setup-v2.html
-          CSRF=$(python3 - <<'PY'
-          import re
-          text=open('/tmp/p01-setup-v2.html',encoding='utf-8').read()
-          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
-          assert m
-          print(m.group(1))
-          PY
-          )
-          curl -fsS -c /tmp/p01-v2.cookies -b /tmp/p01-v2.cookies -X POST http://127.0.0.1:18093/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Gate' --data-urlencode 'admin_password=P01BaselineGate!2026' --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' -o /tmp/p01-setup-v2-post.html
-          test -f app/.runtime.php
-          php cli/verify.php
-          echo FRESH_INSTALL_PASS
-      - name: Upload and disaster contracts
+          cd p01
+          python3 ../runner/.github/scripts/p01_final_baseline_patch.py
+          php -l src/app/CommonBaseline.php
+          git diff --check
+          test "$(git status --short | wc -l)" -eq 1
+          git status --short | grep -F 'src/app/CommonBaseline.php' >/dev/null
+          test "$(cat VERSION)" = '2.21.24'
+          test "$(cat src/VERSION.txt)" = '2.21.24'
+      - name: Commit and push
         shell: bash
         run: |
           set -euo pipefail
-          cd /tmp/p01-upload-cache-v2
-          php <<'PHP'
-          <?php
-          require 'app/bootstrap.php';
-          if(VF_UPLOAD_DEFAULT_MAX_BYTES!==20971520)throw new RuntimeException('ordinary upload default mismatch');
-          if(VF_RECOVERY_UPLOAD_MAX_BYTES!==209715200)throw new RuntimeException('recovery exception mismatch');
-          if(VF_ARCHIVE_MAX_UNCOMPRESSED_BYTES!==209715200||VF_ARCHIVE_MAX_FILES!==5000)throw new RuntimeException('archive defaults mismatch');
-          $rc=new ReflectionClass(VfDisasterRecovery::class);
-          foreach(['MAX_PACKAGE'=>209715200,'MAX_UNCOMPRESSED'=>209715200,'MAX_FILES'=>5000] as $name=>$expected){if((int)$rc->getConstant($name)!==$expected)throw new RuntimeException($name.' mismatch');}
-          $m=new VfDisasterRecovery(vf_db());$p=$m->create('gate',true);$v=$m->verify((string)$p['package_key']);if((string)($v['validation_status']??'')!=='valid')throw new RuntimeException('verify failed');
-          echo "UPLOAD_DISASTER_PASS\n";
-          PHP
-          grep -F 'P01-FILE-UPLOAD-RECOVERY-ARTIFACT-001' "$GITHUB_WORKSPACE/p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json" >/dev/null
-      - name: Static asset cache behavior
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/p01-upload-cache-v2
-          php -r "require 'app/bootstrap.php'; \$u=vf_asset_url('assets/frontend.css?v=legacy'); if(\$u!=='asset.php?file=frontend.css&v=2.21.24') throw new RuntimeException(\$u);"
-          curl -fsS -D /tmp/asset-versioned-v2.h 'http://127.0.0.1:18093/asset.php?file=frontend.css&v=2.21.24' -o /tmp/asset-versioned-v2.css
-          tr -d '\r' </tmp/asset-versioned-v2.h | grep -iFx 'Cache-Control: public, max-age=31536000, immutable'
-          tr -d '\r' </tmp/asset-versioned-v2.h | grep -i '^Content-Type: text/css'
-          curl -fsS -D /tmp/asset-unversioned-v2.h 'http://127.0.0.1:18093/asset.php?file=frontend.css' -o /tmp/asset-unversioned-v2.css
-          tr -d '\r' </tmp/asset-unversioned-v2.h | grep -iFx 'Cache-Control: private, max-age=300'
-          curl -fsS -D /tmp/asset-old-v2.h 'http://127.0.0.1:18093/asset.php?file=frontend.css&v=2.21.23' -o /tmp/asset-old-v2.css
-          tr -d '\r' </tmp/asset-old-v2.h | grep -iFx 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
-          cmp /tmp/asset-versioned-v2.css /tmp/asset-unversioned-v2.css
-          if grep -RInF '?v=221' index.php assets/update.js assets/reference-ui.js; then exit 1; fi
-          echo STATIC_ASSET_CACHE_PASS
-      - name: Private cache and resolver
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/p01-upload-cache-v2
-          curl -sS -D /tmp/api-cache-v2.h 'http://127.0.0.1:18093/api.php?action=bootstrap' -o /tmp/api-cache-v2.json || true
-          tr -d '\r' </tmp/api-cache-v2.h | grep -i '^Cache-Control: no-store, no-cache, must-revalidate, max-age=0'
-          php cli/baseline-verify.php | tee "$GITHUB_WORKSPACE/p01-upload-cache-v2-baseline.txt"
-          grep -Fx 'DRIFT_COUNT=0' "$GITHUB_WORKSPACE/p01-upload-cache-v2-baseline.txt"
-          grep -Fx 'UNKNOWN_COUNT=1' "$GITHUB_WORKSPACE/p01-upload-cache-v2-baseline.txt"
-          grep -Fx 'BASELINE_CORE_PASS=YES' "$GITHUB_WORKSPACE/p01-upload-cache-v2-baseline.txt"
-          grep -Fx 'BASELINE_FULL_PASS=NO' "$GITHUB_WORKSPACE/p01-upload-cache-v2-baseline.txt"
-      - name: Scope guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(cat p01/VERSION)" = '2.21.24'
-          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
-          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
-          echo P01_UPLOAD_CACHE_GATE_PASS
+          cd p01
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add src/app/CommonBaseline.php
+          git commit -m 'p01: close baseline exception and update resolver'
+          git push origin HEAD:$TARGET_BRANCH
+          echo NEW_HEAD=$(git rev-parse HEAD)
