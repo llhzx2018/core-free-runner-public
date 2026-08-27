@@ -62,6 +62,11 @@ one(
     "function formatDateTime(value){if(!value)return '尚未检查';try{return new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}catch(e){return String(value);}}",
     "function formatDateTime(value){if(!value)return '尚未检查';var zone=(document.querySelector('meta[name=\"vf-system-timezone\"]')||{}).content||'';var d=new Date(value);if(!zone||isNaN(d.getTime()))return String(value);try{var parts=new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d),out={};parts.forEach(function(part){if(part.type!=='literal')out[part.type]=part.value;});return out.year+'-'+out.month+'-'+out.day+' '+out.hour+':'+out.minute+':'+out.second;}catch(e){return String(value);}}",
 )
+one(
+    'src/index.php',
+    "  try{return new Date(timestamp).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'});}catch(e){return '最近打开';}",
+    "  try{var formatted=formatDateTime(timestamp);return formatted.length>=10?formatted.slice(5,10).replace('-','/'):formatted;}catch(e){return '最近打开';}",
+)
 one('src/index.php', "<span>最后 '+esc(item.lastAttemptAt||'—')+'</span>", "<span>最后 '+formatDateTime(item.lastAttemptAt)+'</span>")
 
 # Resolver reflects the runtime/display contract only after source changes are present.
