@@ -1,0 +1,139 @@
+name: P01 Notification Logging Gate
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-notification-logging-gate.yml'
+      - 'requests/p01-notification-logging-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: c612156c3d5dace070c492ecc1bc80d4491f1366
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+          echo "EXACT_SOURCE=$EXPECTED_HEAD"
+          echo 'SYNTAX_PASS'
+
+      - name: Fresh install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p01-notify-log
+          cp -a p01/src /tmp/p01-notify-log
+          cd /tmp/p01-notify-log
+          php -S 127.0.0.1:18089 -t . >/tmp/p01-notify-log-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18089/setup.php -o /tmp/p01-notify-log-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-notify-log.cookies -b /tmp/p01-notify-log.cookies http://127.0.0.1:18089/setup.php -o /tmp/p01-notify-log-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-notify-log-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-notify-log.cookies -b /tmp/p01-notify-log.cookies -X POST http://127.0.0.1:18089/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Notification Logging Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-notify-log-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          echo 'FRESH_INSTALL_PASS'
+
+      - name: Notification contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          JS=/tmp/p01-notify-log/assets/admin-shell.js
+          grep -F "TOAST_DURATION={success:2500,info:4000,warning:6000,error:6000}" "$JS"
+          grep -F 'TOAST_MAX_VISIBLE=2' "$JS"
+          grep -F "manualDismiss:true" "$JS"
+          grep -F "dedup:'compact_same_event'" "$JS"
+          grep -F "pointerCaptureOutside:false" "$JS"
+          grep -F "data-vf-toast-count" "$JS"
+          grep -F "aria-label','关闭通知" "$JS"
+          grep -F 'pointer-events:none' "$JS"
+          echo 'NOTIFICATION_CONTRACT_PASS'
+
+      - name: Logging runtime behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-notify-log
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $status=VfRuntimeLogger::status();
+          if(($status['maxFileSizeBytes']??0)!==10485760) throw new RuntimeException('max file mismatch');
+          if(($status['maxTotalSizeBytes']??0)!==268435456) throw new RuntimeException('max total mismatch');
+          if(($status['debugPersistent']??true)!==false) throw new RuntimeException('debug persistence mismatch');
+          if(($status['timestampStorage']??'')!=='UTC') throw new RuntimeException('timestamp mismatch');
+          $ret=$status['retentionDays']??[];
+          foreach(['debug'=>3,'app'=>30,'error'=>90,'job'=>30,'integration'=>30,'update_restore'=>365] as $k=>$v){
+              if((int)($ret[$k]??0)!==$v) throw new RuntimeException('retention mismatch '.$k);
+          }
+          $debug=vf_log_event('app','debug','debug-should-not-persist',['token'=>'debug-secret']);
+          if($debug!==false) throw new RuntimeException('debug persisted');
+          if(!vf_log_event('app','info','Bearer top-secret-token https://example.test/?token=query-secret',[
+              'password'=>'password-secret','safe'=>'kept','nested'=>['api_key'=>'api-secret']
+          ])) throw new RuntimeException('app log write failed');
+          $dir=VF_PRIVATE_ROOT.'/logs';$path=$dir.'/app.log';
+          if(!is_file($path)) throw new RuntimeException('app log missing');
+          $text=(string)file_get_contents($path);
+          foreach(['top-secret-token','query-secret','password-secret','api-secret'] as $secret){
+              if(str_contains($text,$secret)) throw new RuntimeException('secret leaked: '.$secret);
+          }
+          if(!str_contains($text,'[REDACTED]')||!str_contains($text,'"safe":"kept"')) throw new RuntimeException('redaction evidence missing');
+          if(str_contains($text,'debug-should-not-persist')) throw new RuntimeException('debug line found');
+          echo "LOGGING_RUNTIME_PASS max_file=10485760 max_total=268435456\n";
+          PHP
+
+      - name: Baseline resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-notify-log
+          php cli/baseline-verify.php | tee "$GITHUB_WORKSPACE/p01-notify-log-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$GITHUB_WORKSPACE/p01-notify-log-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$GITHUB_WORKSPACE/p01-notify-log-baseline.txt"
+          echo 'BASELINE_RESOLVER_PASS'
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          echo 'VERSION_SCHEMA_RELEASE_BOUNDARY_PASS'
