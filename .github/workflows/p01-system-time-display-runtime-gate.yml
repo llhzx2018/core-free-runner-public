@@ -1,0 +1,141 @@
+name: P01 System Time Display Runtime Gate
+
+on:
+  push:
+    branches:
+      - vf-agent-operations-v1
+    paths:
+      - '.github/workflows/p01-system-time-display-runtime-gate.yml'
+      - 'requests/p01-system-time-display-runtime-gate-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: 928f262e89b29e4933a26148c123863b9b5b18d5
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo EXACT_SOURCE=$EXPECTED_HEAD
+          echo SYNTAX_PASS
+
+      - name: Fresh install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p01-system-time
+          cp -a p01/src /tmp/p01-system-time
+          cd /tmp/p01-system-time
+          php -S 127.0.0.1:18091 -t . >/tmp/p01-system-time-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18091/setup.php -o /tmp/p01-system-time-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-system-time.cookies -b /tmp/p01-system-time.cookies http://127.0.0.1:18091/setup.php -o /tmp/p01-system-time-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-system-time-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-system-time.cookies -b /tmp/p01-system-time.cookies -X POST http://127.0.0.1:18091/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 System Time Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-system-time-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          echo FRESH_INSTALL_PASS
+
+      - name: System timezone behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-system-time
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          if(VfCommonBaseline::SYSTEM_TIMEZONE!=='Asia/Shanghai') throw new RuntimeException('system timezone mismatch');
+          $shown=VfCommonBaseline::formatInstant('2026-08-27T16:00:00+00:00');
+          if($shown!=='2026-08-28 00:00:00') throw new RuntimeException('PHP display conversion mismatch: '.$shown);
+          echo "PHP_SYSTEM_TIME_PASS value=$shown\n";
+          PHP
+          node <<'JS'
+          const zone='Asia/Shanghai';
+          const d=new Date('2026-08-27T16:00:00Z');
+          const parts=new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d);
+          const out={};for(const p of parts)if(p.type!=='literal')out[p.type]=p.value;
+          const shown=out.year+'-'+out.month+'-'+out.day+' '+out.hour+':'+out.minute+':'+out.second;
+          if(shown!=='2026-08-28 00:00:00')throw new Error('JS display conversion mismatch: '+shown);
+          console.log('JS_SYSTEM_TIME_PASS value='+shown);
+          JS
+
+      - name: Display source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'meta name="vf-system-timezone"' p01/src/app/AdminShell.php >/dev/null
+          grep -F 'meta name="vf-system-timezone"' p01/src/index.php >/dev/null
+          grep -F "timeZone:SYSTEM_TIMEZONE" p01/src/assets/admin-shell.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/admin-shell.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/system.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/update-core.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/jobs.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/data-recovery.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/security.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/data-safety.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/assets/health.js >/dev/null
+          grep -F 'window.vfSystemTime' p01/src/plugins/rss/assets/workspace.js >/dev/null
+          if grep -RInE --include='*.js' 'toLocale(String|DateString|TimeString)' p01/src/assets p01/src/plugins; then
+            echo browser-local formatter remains in JS >&2
+            exit 1
+          fi
+          if grep -nE 'toLocale(String|DateString|TimeString)' p01/src/index.php; then
+            echo browser-local formatter remains in index.php >&2
+            exit 1
+          fi
+          echo DISPLAY_SOURCE_AUDIT_PASS
+
+      - name: Baseline resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-system-time
+          php cli/baseline-verify.php | tee "$GITHUB_WORKSPACE/p01-system-time-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$GITHUB_WORKSPACE/p01-system-time-baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=3' "$GITHUB_WORKSPACE/p01-system-time-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$GITHUB_WORKSPACE/p01-system-time-baseline.txt"
+          echo BASELINE_SYSTEM_TIME_PASS
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          echo VERSION_SCHEMA_RELEASE_BOUNDARY_PASS
