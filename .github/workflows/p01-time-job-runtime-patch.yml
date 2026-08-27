@@ -1,0 +1,132 @@
+name: P01 Time Job Runtime Patch
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-time-job-runtime-patch.yml'
+      - 'requests/p01-time-job-runtime-patch-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: c612156c3d5dace070c492ecc1bc80d4491f1366
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
+    steps:
+      - name: Checkout exact P01 maintenance source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: p01
+
+      - name: Exact source guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          echo "PATCH_BASE=$EXPECTED_HEAD"
+
+      - name: Apply UTC instant and job timeout contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root=Path('p01')
+
+          def replace_once(path, old, new):
+              p=root/path
+              text=p.read_text(encoding='utf-8')
+              count=text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:120]!r}')
+              p.write_text(text.replace(old,new,1),encoding='utf-8')
+
+          # CommonBaseline: add canonical storage normalizer and resolve audited TIME/JOB rows.
+          replace_once(Path('src/app/CommonBaseline.php'),
+          "    public static function timezone():DateTimeZone{return new DateTimeZone(self::SYSTEM_TIMEZONE);}\n\n    public static function formatInstant(string $value):string\n",
+          "    public static function timezone():DateTimeZone{return new DateTimeZone(self::SYSTEM_TIMEZONE);}\n\n    public static function normalizeInstantForStorage(string $value,bool $allowEmpty=true):string\n    {\n        $value=trim($value);\n        if($value===''){if($allowEmpty)return '';throw new InvalidArgumentException('时间不能为空。');}\n        if(strlen($value)>80)throw new InvalidArgumentException('时间格式无效。');\n        try{$instant=new DateTimeImmutable($value,self::timezone());}\n        catch(Throwable $e){throw new InvalidArgumentException('时间格式无效。');}\n        return $instant->setTimezone(new DateTimeZone('UTC'))->format('c');\n    }\n\n    public static function formatInstant(string $value):string\n")
+
+          replace_once(Path('src/app/CommonBaseline.php'),
+          "        self::row($rows,'TIME','instant_storage_timezone','UTC',null,'CUSTOM_RESOLVER','complete persistence audit pending');\n",
+          "        self::row($rows,'TIME','instant_storage_timezone','UTC','UTC','EXACT','gmdate persistence + CommonBaseline import instant normalization + machine source audit');\n")
+
+          replace_once(Path('src/app/CommonBaseline.php'),
+          "        self::row($rows,'JOB','default_job_timeout_seconds',300,null,'CUSTOM_RESOLVER','job-class execution timeout unresolved');\n",
+          "        $jobTimeouts=class_exists('VfJobManager')?VfJobManager::timeoutContract():[];\n        self::row($rows,'JOB','default_job_timeout_seconds',300,$jobTimeouts['GENERAL']??null,'EXACT','JobManager GENERAL timeout class');\n        self::row($rows,'JOB','sync_job_timeout_seconds',900,$jobTimeouts['SYNC']??null,'EXACT','JobManager SYNC timeout class');\n        self::row($rows,'JOB','maintenance_job_timeout_seconds',1800,$jobTimeouts['MAINTENANCE']??null,'EXACT','JobManager MAINTENANCE timeout class');\n        self::row($rows,'JOB','lock_expiry_seconds',1800,$jobTimeouts['lockExpirySeconds']??null,'AT_LEAST','JobManager lock expiry must outlive longest legal job');\n")
+
+          # Repository: normalize externally supplied instant fields before persistence.
+          replace_once(Path('src/app/Repository.php'),
+          "$importCreatedAt=$source==='import'&&trim((string)($data['created_at']??''))!==''?vf_clean_text((string)$data['created_at'],40):$now;",
+          "$importCreatedAt=$source==='import'&&trim((string)($data['created_at']??''))!==''?VfCommonBaseline::normalizeInstantForStorage((string)$data['created_at']):$now;")
+
+          replace_once(Path('src/app/Repository.php'),
+          "$this->db->prepare('UPDATE categories SET created_at=? WHERE id=?')->execute([vf_clean_text((string)$category['created_at'],40),$target]);",
+          "$this->db->prepare('UPDATE categories SET created_at=? WHERE id=?')->execute([VfCommonBaseline::normalizeInstantForStorage((string)$category['created_at']),$target]);")
+
+          replace_once(Path('src/app/Repository.php'),
+          "$archivedAt = $state === 'archived' ? ((string)($link['archived_at'] ?? '') ?: gmdate('c')) : '';\n                $trashedAt = $state === 'trashed' ? ((string)($link['trashed_at'] ?? '') ?: gmdate('c')) : '';",
+          "$archivedAt = $state === 'archived' ? (trim((string)($link['archived_at'] ?? ''))!=='' ? VfCommonBaseline::normalizeInstantForStorage((string)$link['archived_at']) : gmdate('c')) : '';\n                $trashedAt = $state === 'trashed' ? (trim((string)($link['trashed_at'] ?? ''))!=='' ? VfCommonBaseline::normalizeInstantForStorage((string)$link['trashed_at']) : gmdate('c')) : '';")
+
+          replace_once(Path('src/app/Repository.php'),
+          "$archivedAt = $state === 'archived' ? ((string)($category['archived_at'] ?? '') ?: gmdate('c')) : '';\n                $trashedAt = $state === 'trashed' ? ((string)($category['trashed_at'] ?? '') ?: gmdate('c')) : '';",
+          "$archivedAt = $state === 'archived' ? (trim((string)($category['archived_at'] ?? ''))!=='' ? VfCommonBaseline::normalizeInstantForStorage((string)$category['archived_at']) : gmdate('c')) : '';\n                $trashedAt = $state === 'trashed' ? (trim((string)($category['trashed_at'] ?? ''))!=='' ? VfCommonBaseline::normalizeInstantForStorage((string)$category['trashed_at']) : gmdate('c')) : '';")
+
+          replace_once(Path('src/app/Repository.php'),
+          "if($urlType!=='affiliate'){$this->db->prepare('DELETE FROM affiliate_link_meta WHERE link_id=?')->execute([$id]);return;}$status=",
+          "if($urlType!=='affiliate'){$this->db->prepare('DELETE FROM affiliate_link_meta WHERE link_id=?')->execute([$id]);return;}$lastConfirmed=trim((string)($data['affiliate_last_confirmed_at']??''));if($lastConfirmed!=='')$lastConfirmed=VfCommonBaseline::normalizeInstantForStorage($lastConfirmed);$status=")
+
+          replace_once(Path('src/app/Repository.php'),
+          "vf_clean_text($data['affiliate_last_confirmed_at']??'',40),$status,$backup,1,$now]);",
+          "$lastConfirmed,$status,$backup,1,$now]);")
+
+          # JobManager: class-specific timeouts, wall-time guard and lease window alignment.
+          replace_once(Path('src/app/JobManager.php'),
+          "    private const BACKUP_JITTER_SECONDS=1200;\n    public function __construct(PDO $db){$this->db=$db;}\n",
+          "    private const BACKUP_JITTER_SECONDS=1200;\n    private const JOB_TIMEOUT_GENERAL_SECONDS=300;\n    private const JOB_TIMEOUT_SYNC_SECONDS=900;\n    private const JOB_TIMEOUT_MAINTENANCE_SECONDS=1800;\n    private const JOB_LOCK_EXPIRY_SECONDS=1920;\n    private const SYNC_TYPES=['link_health','affiliate_health','icon_refresh'];\n    private const MAINTENANCE_TYPES=['backup','backup_verify','integrity','seo','maintenance_cleanup'];\n    public function __construct(PDO $db){$this->db=$db;}\n    public static function timeoutContract():array{return ['GENERAL'=>self::JOB_TIMEOUT_GENERAL_SECONDS,'SYNC'=>self::JOB_TIMEOUT_SYNC_SECONDS,'MAINTENANCE'=>self::JOB_TIMEOUT_MAINTENANCE_SECONDS,'lockExpirySeconds'=>self::JOB_LOCK_EXPIRY_SECONDS];}\n    private function timeoutClass(array $job):string{$type=(string)($job['job_type']??'');if(in_array($type,self::SYNC_TYPES,true))return 'SYNC';if(in_array($type,self::MAINTENANCE_TYPES,true))return 'MAINTENANCE';return 'GENERAL';}\n    private function timeoutSeconds(array $job):int{$class=$this->timeoutClass($job);$contract=self::timeoutContract();return (int)$contract[$class];}\n")
+
+          replace_once(Path('src/app/JobManager.php'),
+          "public function releaseExpired(int $seconds=900):int",
+          "public function releaseExpired(int $seconds=self::JOB_LOCK_EXPIRY_SECONDS):int")
+
+          old="private function executeClaimed(array $j,int $batch):array{$lease=VfMaintenanceBarrier::jobExclusive((int)$j['id'],(string)$j['concurrency_family']);try{if(str_starts_with((string)$j['owner'],'plugin:')){$pid=substr((string)$j['owner'],7);if((int)$j['owner_generation']!==$this->pluginGeneration($pid,true)){$this->supersedeJob($j,'generation_changed');return $this->get((int)$j['id']);}}try{$result=$this->dispatch($j,max(1,min(20,$batch)));$this->applyResult($j,$result);return $this->get((int)$j['id']);}catch(Throwable $e){$this->fail($j,$e->getMessage());return $this->get((int)$j['id']);}}finally{$lease->release();}}"
+          new="private function executeClaimed(array $j,int $batch):array{$lease=VfMaintenanceBarrier::jobExclusive((int)$j['id'],(string)$j['concurrency_family']);$timeout=$this->timeoutSeconds($j);$previousLimit=(int)ini_get('max_execution_time');if(function_exists('set_time_limit'))@set_time_limit($timeout);$started=microtime(true);try{if(str_starts_with((string)$j['owner'],'plugin:')){$pid=substr((string)$j['owner'],7);if((int)$j['owner_generation']!==$this->pluginGeneration($pid,true)){$this->supersedeJob($j,'generation_changed');return $this->get((int)$j['id']);}}try{$result=$this->dispatch($j,max(1,min(20,$batch)));$elapsed=microtime(true)-$started;if($elapsed>$timeout)throw new RuntimeException('任务超过允许执行时间（'.$timeout.' 秒）。');$this->applyResult($j,$result);return $this->get((int)$j['id']);}catch(Throwable $e){$this->fail($j,$e->getMessage());return $this->get((int)$j['id']);}}finally{if(function_exists('set_time_limit'))@set_time_limit(max(0,$previousLimit));$lease->release();}}"
+          replace_once(Path('src/app/JobManager.php'),old,new)
+
+          replace_once(Path('src/app/JobManager.php'),
+          "private function format(array $r):array{foreach(['id','priority','cursor','processed','total','success_count','failure_count','attempt_count','max_attempts','stop_requested','owner_generation'] as $k)$r[$k]=(int)($r[$k]??0);$r['owner']=(string)($r['owner']??'core');$r['claim_token']=(string)($r['claim_token']??'');$r['concurrency_family']=(string)($r['concurrency_family']??'');$r['payload']=json_decode((string)$r['payload_json'],true)?:[];unset($r['payload_json']);return $r;}",
+          "private function format(array $r):array{foreach(['id','priority','cursor','processed','total','success_count','failure_count','attempt_count','max_attempts','stop_requested','owner_generation'] as $k)$r[$k]=(int)($r[$k]??0);$r['owner']=(string)($r['owner']??'core');$r['claim_token']=(string)($r['claim_token']??'');$r['concurrency_family']=(string)($r['concurrency_family']??'');$r['payload']=json_decode((string)$r['payload_json'],true)?:[];unset($r['payload_json']);$r['timeout_class']=$this->timeoutClass($r);$r['timeout_seconds']=$this->timeoutSeconds($r);return $r;}")
+
+          print('PATCH_ASSERTIONS_PASS')
+          PY
+
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo 'PATCH_SYNTAX_PASS'
+
+      - name: Commit and push maintenance branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd p01
+          git diff --check
+          git diff --exit-code -- VERSION src/VERSION.txt >/dev/null
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add src/app/CommonBaseline.php src/app/Repository.php src/app/JobManager.php
+          git diff --cached --quiet && { echo 'NO_CHANGES'; exit 1; }
+          git commit -m 'p01: enforce UTC instant storage and job timeout classes'
+          git push origin HEAD:"$TARGET_BRANCH"
+          echo "NEW_EXACT_SOURCE=$(git rev-parse HEAD)"
