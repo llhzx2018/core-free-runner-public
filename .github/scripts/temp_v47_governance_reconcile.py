@@ -1,0 +1,173 @@
+from pathlib import Path
+import os, sys
+
+root = Path(sys.argv[1])
+source_commit = '87ead520d59afafaa80208fc6b874f66f93eeac7'
+sha = '0dc273200d3237a9292ff7a8d5d21275ac4dc39daf9cd144dc9818f12d525896'
+release_id = '377914101'
+asset_id = '532456078'
+sha_asset_id = '532456081'
+run = '33085465247'
+job = '98563788955'
+size = '141495'
+tag = 'skill-book-v4.7-candidate-20260827'
+asset = 'skill-book_V4.7_CANDIDATE_20260827.zip'
+base_url = f'https://github.com/llhzx2018/gov-doc/releases/download/{tag}'
+
+readme = root / 'distribution/skills/candidates/skill-book/V4.7/README.md'
+readme.write_text(f'''# skill-book V4.7 Candidate · Source Distribution
+
+> 状态：`CANDIDATE / NOT CURRENT`  
+> Distribution：`PUBLISHED_REMOTE_VERIFIED`  
+> Source Authority：`skills/skill-book/V4.7/`  
+> Candidate Mother Overlay：`mother-specs/skill-book/V4.7/SKILL_BOOK_V4.7_CANDIDATE_OVERLAY.md`  
+> Source Current保持：`skill-book V3.5`
+
+## Candidate Purpose
+
+V4.7保留V4.6的Adequacy、SEALED与Post-Draft Differential设计，并把真实V4.6 Runtime暴露出的执行层false-green转成强制Runtime Truth Gate：Mandatory Machine Evidence、Practical Asset Self-Sufficiency、Random Open Holdout、严格Real Reader Evidence分类，以及Packaging前`runtime_acceptance_audit.py`。
+
+目标不是增加更多Gate文字，而是确保Gate真正执行、Evidence真正生成、最终Decision不能覆盖未闭合硬门。
+
+## Source Validation
+
+- Source Commit：`{source_commit}`
+- Python unit tests：`31/31 PASS`
+- Python syntax：`PASS`
+- V4.6 private Runtime false-positive replay：`BLOCKED_AS_EXPECTED`
+- Real Reader Forward Evidence：`NOT_RUN`
+- Backend V4.7 Runtime Forward Test：`NOT_RUN`
+- Current Promotion：`NOT_AUTHORIZED`
+
+## Published Candidate ZIP
+
+- Tag：`{tag}`
+- Release ID：`{release_id}`
+- File：`{asset}`
+- Bytes：`{size}`
+- SHA-256：`{sha}`
+- Asset ID：`{asset_id}`
+- SHA Asset ID：`{sha_asset_id}`
+- Runner Run：`{run}`
+- Runner Job：`{job}`
+- Local / Remote ZIP Identity：`MATCH`
+- Remote Download Readback：`PASS`
+- ZIP CRC / Unsafe Path / Duplicate Path / pycache：`PASS`
+- ZIP Container：`ZIP_STORED + fixed timestamp / permissions / path ordering`
+
+直接下载：`{base_url}/{asset}`
+
+SHA 文件：`{base_url}/{asset}.sha256`
+
+原DEFLATED pre-release build `7d9e2bbc70e77949adb8b9bbf52fdfa364053ea79041997f49587c8578f6901d` 因跨Python/zlib环境不能保证字节级复现，已标记 `SUPERSEDED_PRE_RELEASE_BUILD`；正式Candidate Distribution以portable deterministic ZIP `{sha}` 为Authority。
+
+V4.7仍为`CANDIDATE / NOT CURRENT`。Source Current保持V3.5；Installed Runtime Observation为V4.6 Candidate。真人READ / LEARN / TRAIN Evidence与后台V4.7 SEALED Runtime测试尚未执行，因此不得晋升Current。
+''', encoding='utf-8')
+
+mirror = root / 'distribution/skills/candidates/skill-book/V4.7/RUNTIME_ZIP_MIRROR_STATUS.md'
+mirror.write_text(f'''# Runtime ZIP Mirror Status · skill-book V4.7
+
+状态：`PUBLISHED_REMOTE_VERIFIED`
+
+V4.7 Candidate已通过`core-free-runner-public`临时机器Release Gate完成远端Candidate Asset发布；临时Workflow只用于本次发布验证，不进入Public Runner Current。
+
+## Published Distribution Authority
+
+- Release：`skill-book V4.7 Candidate`（prerelease）
+- Tag：`{tag}`
+- Release ID：`{release_id}`
+- File：`{asset}`
+- Remote Asset ID：`{asset_id}`
+- Bytes：`{size}`
+- SHA-256：`{sha}`
+- SHA Asset ID：`{sha_asset_id}`
+- Source Commit：`{source_commit}`
+- Runner Run：`{run}`
+- Runner Job：`{job}`
+- Unit Tests：`31/31 PASS`
+- Local / Remote Identity：`MATCH`
+- Remote download readback：`PASS`
+- ZIP CRC：`PASS`
+- Unsafe Path：`0`
+- Duplicate Path：`0`
+- pycache/pyc：`0`
+- Software Production Write：`0`
+
+下载地址：`{base_url}/{asset}`
+
+SHA 文件：`{base_url}/{asset}.sha256`
+
+## Authority Boundary
+
+- Source：`skills/skill-book/V4.7/`
+- Mother Overlay：`mother-specs/skill-book/V4.7/SKILL_BOOK_V4.7_CANDIDATE_OVERLAY.md`
+- Source Current：`skill-book V3.5`
+- V4.7：`CANDIDATE / NOT CURRENT`
+- Installed Runtime Observation：`skill-book V4.6 Candidate`
+- Real Reader Forward Evidence：`NOT_RUN`
+- Backend V4.7 Runtime Forward Test：`NOT_RUN`
+- Current Promotion：`NOT_AUTHORIZED`
+
+原DEFLATED pre-release build `7d9e2bbc70e77949adb8b9bbf52fdfa364053ea79041997f49587c8578f6901d` 已被portable deterministic ZIP取代；从本状态生效起，远端下载回读并与本地portable build字节一致的`{sha}`为Published Distribution Authority。
+''', encoding='utf-8')
+
+current = root / 'CURRENT.md'
+t = current.read_text(encoding='utf-8')
+old_runtime = '| skill-book | V3.5 | V4.5 CANDIDATE（非 Current） |'
+if old_runtime in t:
+    t = t.replace(old_runtime, '| skill-book | V3.5 | V4.6 CANDIDATE（非 Current） |', 1)
+old = '`skill-book V4.0/V4.1/V4.2/V4.3/V4.4/V4.5` 为保留的历史 Candidate，`V4.6` 为最新 Candidate；七者均未晋升 Source Current。V4.6 已进入 Candidate Distribution，但未进入 Current Distribution。'
+new = '`skill-book V4.0/V4.1/V4.2/V4.3/V4.4/V4.5/V4.6` 为保留的历史 Candidate，`V4.7` 为最新 Candidate；八者均未晋升 Source Current。V4.7 已进入 Candidate Distribution，但未进入 Current Distribution。'
+if old not in t and new not in t:
+    raise SystemExit('CURRENT_CANDIDATE_SENTENCE_UNEXPECTED')
+t = t.replace(old, new, 1)
+current.write_text(t, encoding='utf-8')
+
+idx = root / 'distribution/skills/CURRENT_SKILL_DOWNLOAD_INDEX.md'
+t = idx.read_text(encoding='utf-8')
+marker = '## Candidate（不改变 Current）'
+if marker not in t:
+    raise SystemExit('CANDIDATE_MARKER_MISSING')
+head = t.split(marker, 1)[0]
+tail = f'''{marker}
+
+`skill-book V4.7` 是最新 `CANDIDATE / NOT CURRENT`；Source Current仍为V3.5，且V4.7不包含在Current总包中。Installed Runtime Observation为V4.6 Candidate。
+
+- [直接下载 skill-book V4.7 Candidate ZIP]({base_url}/{asset})
+- [下载 SHA-256 文件]({base_url}/{asset}.sha256)
+- [查看 V4.7 Candidate Release](https://github.com/llhzx2018/gov-doc/releases/tag/{tag})
+- [查看 V4.7 Candidate Source](https://github.com/llhzx2018/gov-doc/tree/main/skills/skill-book/V4.7)
+- [查看 V4.7 Candidate Mother Overlay](https://github.com/llhzx2018/gov-doc/blob/main/mother-specs/skill-book/V4.7/SKILL_BOOK_V4.7_CANDIDATE_OVERLAY.md)
+- [查看 V4.7 Candidate 分发说明](https://github.com/llhzx2018/gov-doc/blob/main/distribution/skills/candidates/skill-book/V4.7/README.md)
+
+Published Distribution Identity：
+
+- Bytes：`{size}`
+- SHA-256：`{sha}`
+- Release ID：`{release_id}`
+- Remote Asset ID：`{asset_id}`
+- SHA Asset ID：`{sha_asset_id}`
+- Exact Source Commit：`{source_commit}`
+- Runner Run：`{run}`
+- Runner Job：`{job}`
+- Unit Tests：`31/31 PASS`
+- Local / Remote ZIP Identity：`MATCH`
+- Remote Download Readback：`PASS`
+- ZIP CRC / Unsafe Path / Duplicate Path / pycache：`PASS`
+- Status：`PUBLISHED_REMOTE_VERIFIED`
+
+原DEFLATED pre-release build `7d9e2bbc70e77949adb8b9bbf52fdfa364053ea79041997f49587c8578f6901d` 仅保留为`SUPERSEDED_PRE_RELEASE_BUILD`证据；正式Candidate Distribution以portable deterministic远端回读SHA `{sha}` 为Authority。
+
+历史 Candidate：
+
+- [skill-book V4.6](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.6)
+- [skill-book V4.5](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.5)
+- [skill-book V4.4](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.4)
+- [skill-book V4.3](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.3)
+- [skill-book V4.2](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.2)
+- [skill-book V4.1](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.1)
+- [skill-book V4.0](https://github.com/llhzx2018/gov-doc/tree/main/distribution/skills/candidates/skill-book/V4.0)
+'''
+idx.write_text(head + tail, encoding='utf-8')
+
+print('V47_GOVERNANCE_FILES_PREPARED=PASS')
