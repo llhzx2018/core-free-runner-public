@@ -1,0 +1,144 @@
+name: P01 Step-up Security Gate
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-stepup-security-gate.yml'
+      - 'requests/p01-stepup-security-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: f93654b8b348b1340e07aff39e4b9cef3d3e90aa
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and fresh install
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          rm -rf /tmp/p01-stepup-gate
+          cp -a p01/src /tmp/p01-stepup-gate
+          cd /tmp/p01-stepup-gate
+          php -S 127.0.0.1:18088 -t . >/tmp/p01-stepup-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18088/setup.php -o /tmp/p01-stepup-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies http://127.0.0.1:18088/setup.php -o /tmp/p01-stepup-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-stepup-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies -X POST http://127.0.0.1:18088/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Step-up Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-stepup-setup-post.html
+          php cli/verify.php
+          echo "EXACT_SOURCE=$EXPECTED_HEAD"
+          echo 'FRESH_INSTALL_PASS'
+
+      - name: Step-up reauthentication behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-stepup-gate
+          LOGIN=$(curl -fsS -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"P01BaselineGate!2026"}' \
+            'http://127.0.0.1:18088/api.php?action=login')
+          ADMIN_CSRF=$(printf '%s' "$LOGIN" | php -r '$j=json_decode(stream_get_contents(STDIN),true); if(empty($j["ok"])||empty($j["csrf"])) exit(2); echo $j["csrf"];')
+          SID=$(awk '$6=="vfnav_session"{print $7}' /tmp/p01-stepup.cookies | tail -1)
+          test -n "$SID"
+          SID="$SID" php <<'PHP'
+          <?php
+          session_name('vfnav_session');
+          session_id((string)getenv('SID'));
+          require 'app/bootstrap.php';
+          vf_start_profiled_session();
+          $_SESSION['vfnav_recent_auth_at']=time()-VfCommonBaseline::STEP_UP_RECENT_AUTH_SECONDS-1;
+          session_write_close();
+          PHP
+          echo 'STEP_UP_FIXTURE_PASS'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-required.json -w '%{http_code}' -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"backup_key":"missing-proof-key"}' \
+            'http://127.0.0.1:18088/api.php?action=backup_restore')
+          test "$HTTP" = 428
+          php -r '$j=json_decode(file_get_contents("/tmp/p01-stepup-required.json"),true); if(empty($j["reauthRequired"])||($j["reauthWindowSeconds"]??0)!==900) exit(2);'
+          echo 'STEP_UP_428_PASS'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-bad.json -w '%{http_code}' -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"password":"wrong-password"}' http://127.0.0.1:18088/reauth.php)
+          test "$HTTP" = 401
+          echo 'STEP_UP_BAD_PASSWORD_PASS'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-ok.json -w '%{http_code}' -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"password":"P01BaselineGate!2026"}' http://127.0.0.1:18088/reauth.php)
+          test "$HTTP" = 200
+          php -r '$j=json_decode(file_get_contents("/tmp/p01-stepup-ok.json"),true); if(empty($j["ok"])||($j["recentAuthSeconds"]??0)!==900) exit(2);'
+          echo 'STEP_UP_GOOD_PASSWORD_PASS'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-retry.json -w '%{http_code}' -c /tmp/p01-stepup.cookies -b /tmp/p01-stepup.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"backup_key":"missing-proof-key"}' \
+            'http://127.0.0.1:18088/api.php?action=backup_restore')
+          test "$HTTP" != 428
+          echo 'STEP_UP_RETRY_PASS'
+
+      - name: Security audit retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-stepup-gate
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $db=vf_db();
+          if(VfSecurityManager::SECURITY_EVENT_RETENTION_DAYS!==180) throw new RuntimeException('security retention constant mismatch');
+          $stmt=$db->prepare("INSERT INTO security_events(event_type,severity,ip_address,session_hash,summary,details_json,created_at) VALUES(?,?,?,?,?,?,?)");
+          $stmt->execute(['retention_100d','info','','','keep','{}',gmdate('c',time()-100*86400)]);
+          $stmt->execute(['retention_181d','info','','','delete','{}',gmdate('c',time()-181*86400)]);
+          (new VfSecurityManager($db))->prune();
+          $keep=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='retention_100d'")->fetchColumn();
+          $drop=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='retention_181d'")->fetchColumn();
+          $success=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='step_up_success'")->fetchColumn();
+          $failure=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='step_up_failure'")->fetchColumn();
+          if($keep!==1||$drop!==0||$success<1||$failure<1) throw new RuntimeException('step-up/security retention evidence mismatch');
+          echo "SECURITY_AUDIT_PASS retention_days=180 step_up_success=$success step_up_failure=$failure\n";
+          PHP
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          test -f p01/src/reauth.php
+          echo 'VERSION_SCHEMA_RELEASE_BOUNDARY_PASS'
