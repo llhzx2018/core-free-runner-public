@@ -1,0 +1,112 @@
+name: P01 V2.21.25 Update Channel Compatibility Publish
+
+on:
+  push:
+    branches: [task/p01-v22125-update-channel-compat-20260828]
+    paths: ['.github/workflows/p01-v22125-update-channel-compat-publish-20260828.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      UPDATES_REPO: llhzx2018/core-updates
+      TAG: v2.21.25
+      RELEASE_ID: '378146285'
+      GATE_RUN: '33121118563'
+      GATE_ARTIFACT: '9666486048'
+      COMPAT_ASSET: VF_Start_V2.21.25_UPDATE.zip
+      COMPAT_BYTES: '1137785'
+      COMPAT_SHA: 5bb077ce646ff1eac3447eb5e933c7317eb2a2d50aa796200d932372d8e170bc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact PASS compatibility artifact
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-compat-publish && mkdir -p /tmp/p01-compat-publish
+          gh api --method GET "repos/llhzx2018/core-free-runner-public/actions/artifacts/${GATE_ARTIFACT}/zip" > /tmp/p01-compat-gate.zip
+          unzip -q /tmp/p01-compat-gate.zip -d /tmp/p01-compat-publish
+          test -f /tmp/p01-compat-publish/$COMPAT_ASSET
+          test "$(stat -c %s /tmp/p01-compat-publish/$COMPAT_ASSET)" = "$COMPAT_BYTES"
+          test "$(sha256sum /tmp/p01-compat-publish/$COMPAT_ASSET|awk '{print $1}')" = "$COMPAT_SHA"
+          jq -e --arg s "$COMPAT_SHA" --argjson b "$COMPAT_BYTES" '.pass==true and .status=="PASS" and .source_version=="2.21.24" and .target_version=="2.21.25" and .compat_asset.name=="VF_Start_V2.21.25_UPDATE.zip" and .compat_asset.bytes==$b and .compat_asset.sha256==$s and .real_old_updater.check=="PASS" and .real_old_updater.prepare=="PASS" and .real_old_updater.install=="PASS" and .drift_count==0 and .production_changed==false' /tmp/p01-compat-publish/result.json >/dev/null
+          echo EXACT_COMPAT_GATE_ARTIFACT=PASS
+      - name: Upload compatibility asset to existing release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${TAG}" > /tmp/p01-release.json
+          test "$(jq -r '.id' /tmp/p01-release.json)" = "$RELEASE_ID"
+          gh release upload "$TAG" /tmp/p01-compat-publish/$COMPAT_ASSET --repo "$PRODUCT_REPO" --clobber
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${TAG}" > /tmp/p01-release-after.json
+          test "$(jq -r --arg n "$COMPAT_ASSET" '.assets[]|select(.name==$n)|.size' /tmp/p01-release-after.json)" = "$COMPAT_BYTES"
+          test "$(jq -r --arg n "$COMPAT_ASSET" '.assets[]|select(.name==$n)|.digest' /tmp/p01-release-after.json)" = "sha256:$COMPAT_SHA"
+          echo RELEASE_COMPAT_ASSET=PASS
+      - name: Remote compatibility asset byte readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-compat-remote && mkdir -p /tmp/p01-compat-remote
+          gh release download "$TAG" --repo "$PRODUCT_REPO" --dir /tmp/p01-compat-remote --pattern "$COMPAT_ASSET"
+          test "$(stat -c %s /tmp/p01-compat-remote/$COMPAT_ASSET)" = "$COMPAT_BYTES"
+          test "$(sha256sum /tmp/p01-compat-remote/$COMPAT_ASSET|awk '{print $1}')" = "$COMPAT_SHA"
+          test "$(unzip -Z1 /tmp/p01-compat-remote/$COMPAT_ASSET)" = 'repair-v2.21.25.php'
+          echo REMOTE_COMPAT_ASSET_READBACK=PASS
+      - name: Switch core-updates P01 to compatibility asset
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch main "https://x-access-token:${WRITE_TOKEN}@github.com/${UPDATES_REPO}.git" updates
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          p=Path('updates/projects/P01.json'); d=json.loads(p.read_text())
+          assert d['target_version']=='2.21.25' and d['from_versions']==['2.21.24'] and d['release_tag']=='v2.21.25' and d['release_id']==378146285
+          assert d['schema_from']=='2026080902' and d['schema_to']=='2026080902' and d['update_type']=='ATOMIC'
+          d['asset_name']=os.environ['COMPAT_ASSET']; d['asset_bytes']=int(os.environ['COMPAT_BYTES']); d['asset_sha256']=os.environ['COMPAT_SHA']
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+          PY
+          git -C updates config user.name VictorForge
+          git -C updates config user.email llhzx2018@gmail.com
+          git -C updates add projects/P01.json
+          git -C updates commit -m 'fix(P01): publish V2.21.25 updater-compatible asset contract'
+          for i in 1 2 3; do
+            if git -C updates push origin main; then break; fi
+            git -C updates pull --rebase origin main
+            test "$i" -lt 3
+          done
+          git -C updates pull --ff-only origin main
+          UPDATE_COMMIT=$(git -C updates rev-parse HEAD)
+          echo "UPDATE_COMMIT=$UPDATE_COMMIT" >> "$GITHUB_ENV"
+          jq -e --arg n "$COMPAT_ASSET" --arg s "$COMPAT_SHA" --argjson b "$COMPAT_BYTES" '.target_version=="2.21.25" and .from_versions==["2.21.24"] and .release_tag=="v2.21.25" and .release_id==378146285 and .asset_name==$n and .asset_bytes==$b and .asset_sha256==$s and .update_type=="ATOMIC" and .backup_required==true and .rollback_supported==true' updates/projects/P01.json >/dev/null
+          echo CORE_UPDATES_COMPAT_READBACK=PASS
+      - name: Persist remediation evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p vf-agent/results
+          jq -n --arg uc "$UPDATE_COMMIT" --arg sha "$COMPAT_SHA" --argjson bytes "$COMPAT_BYTES" '{schema:"vf-public-runner-result/v1",project_id:"P01",gate:"V2.21.25_UPDATE_CHANNEL_COMPAT_REMEDIATION",status:"SUCCESS",pass:true,release_id:378146285,tag:"v2.21.25",source_version:"2.21.24",target_version:"2.21.25",compatibility_gate:{run_id:33121118563,artifact_id:9666486048,status:"PASS"},compat_asset:{name:"VF_Start_V2.21.25_UPDATE.zip",bytes:$bytes,sha256:$sha,inner_name:"repair-v2.21.25.php"},core_updates:{commit:$uc,status:"PASS"},production:{changed:false,status:"UPGRADE_REQUIRED"}}' > vf-agent/results/P01-V2.21.25-UPDATE-CHANNEL-COMPAT-REMEDIATION.json
+          cat vf-agent/results/P01-V2.21.25-UPDATE-CHANNEL-COMPAT-REMEDIATION.json
+      - name: Final publication truth
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${TAG}" --jq '.assets[]|select(.name=="VF_Start_V2.21.25_UPDATE.zip")|[.name,.size,.digest]|@tsv' | grep -F "VF_Start_V2.21.25_UPDATE.zip"
+          echo P01_V2_21_25_UPDATE_CHANNEL_COMPAT_PUBLISH=PASS
+          echo PRODUCTION=NO
