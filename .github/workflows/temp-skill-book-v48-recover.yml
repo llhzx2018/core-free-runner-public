@@ -1,0 +1,102 @@
+name: TEMP skill-book V4.8 Recover Candidate Manifest
+
+on:
+  push:
+    branches:
+      - release/skill-book-v48-candidate-asset-20260827
+    paths:
+      - '.github/workflows/temp-skill-book-v48-recover.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-skill-book-v48-recover
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout temporary runner branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Recover V4.8 manifest from staged ZIP prefix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          git clone -q "https://x-access-token:${PRIVATE_READ_TOKEN}@github.com/llhzx2018/gov-doc.git" gov
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, json, struct
+
+          stage = Path('staging/skill-book-v48')
+          parts = [stage / f'part-{i:02d}' for i in range(3)]
+          for p in parts:
+              if not p.is_file():
+                  raise SystemExit(f'MISSING_STAGE_PART={p}')
+          b64 = ''.join(p.read_text(encoding='utf-8').strip() for p in parts)
+          raw = base64.b64decode(b64, validate=True)
+          print(f'V48_STAGED_PREFIX_B64_CHARS={len(b64)}')
+          print(f'V48_STAGED_PREFIX_BYTES={len(raw)}')
+
+          pos = 0
+          extracted = {}
+          while pos + 30 <= len(raw) and raw[pos:pos+4] == b'PK\x03\x04':
+              hdr = struct.unpack_from('<IHHHHHIIIHH', raw, pos)
+              _, ver, flags, method, mt, md, crc, comp, uncomp, nlen, xlen = hdr
+              name_start = pos + 30
+              data_start = name_start + nlen + xlen
+              data_end = data_start + comp
+              name = raw[name_start:name_start+nlen].decode('utf-8')
+              if data_end > len(raw):
+                  print(f'INCOMPLETE_ENTRY={name}|need={data_end}|have={len(raw)}')
+                  break
+              data = raw[data_start:data_end]
+              if method != 0:
+                  raise SystemExit(f'UNEXPECTED_COMPRESSION={method}:{name}')
+              if len(data) != uncomp:
+                  raise SystemExit(f'UNEXPECTED_SIZE={name}')
+              extracted[name] = data
+              print(f'COMPLETE_PREFIX_ENTRY={name}|bytes={len(data)}')
+              pos = data_end
+
+          manifest_name = 'skill-book_V4.8_CANDIDATE/MANIFEST.json'
+          if manifest_name not in extracted:
+              raise SystemExit('V48_MANIFEST_NOT_RECOVERED')
+          manifest = json.loads(extracted[manifest_name].decode('utf-8'))
+          print(f"V48_MANIFEST_VERSION={manifest.get('version')}")
+          files = manifest.get('files', [])
+          print(f'V48_MANIFEST_PAYLOAD_FILES={len(files)}')
+
+          old = Path('gov/skills/skill-book/V4.7')
+          changed = []
+          unchanged = []
+          for item in files:
+              rel = item['path']
+              expected = item['sha256']
+              expected_bytes = item['bytes']
+              p = old / rel
+              if not p.is_file():
+                  changed.append((rel, expected_bytes, expected, 'MISSING_V47'))
+                  continue
+              data = p.read_bytes()
+              actual = hashlib.sha256(data).hexdigest()
+              if actual == expected and len(data) == expected_bytes:
+                  unchanged.append(rel)
+              else:
+                  changed.append((rel, expected_bytes, expected, f'V47={len(data)}:{actual}'))
+
+          print(f'V48_UNCHANGED_FROM_V47={len(unchanged)}')
+          print(f'V48_CHANGED_FROM_V47={len(changed)}')
+          for rel, size, sha, old_state in changed:
+              print(f'V48_CHANGED|{rel}|bytes={size}|sha256={sha}|{old_state}')
+
+          print('V48_MANIFEST_DIFF_RECOVERY=PASS')
+          PY
