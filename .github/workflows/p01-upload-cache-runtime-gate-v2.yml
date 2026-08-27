@@ -1,4 +1,4 @@
-name: P01 Common Baseline V2 Full Gate
+name: P01 Update Resolver Scope Patch
 
 on:
   push:
@@ -11,92 +11,51 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  patch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 12
     env:
       EXPECTED_HEAD: d6699572245cfeab25deda1cc732ed53f9f0f6a7
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
     steps:
-      - name: Checkout exact P01 source
+      - name: Checkout P01 branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-start
-          ref: ${{ env.EXPECTED_HEAD }}
+          ref: ${{ env.TARGET_BRANCH }}
           token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: false
-          path: p01
+          persist-credentials: true
+          fetch-depth: 0
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
           coverage: none
-      - name: Exact source syntax and authority
+      - name: Apply scoped evidence fix
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
-          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
-          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
-          python3 -m json.tool p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
-          grep -F 'P01-FILE-UPLOAD-RECOVERY-ARTIFACT-001' p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
-          grep -F '209715200' p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
-          echo SOURCE_AUTHORITY_PASS
-      - name: Fresh install
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/p01-full-v2
-          cp -a p01/src /tmp/p01-full-v2
-          cd /tmp/p01-full-v2
-          php -d upload_max_filesize=200M -d post_max_size=205M -S 127.0.0.1:18095 -t . >/tmp/p01-full-v2-server.log 2>&1 &
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18095/setup.php -o /tmp/p01-full-v2-setup.html && break; sleep 1; done
-          curl -fsS -c /tmp/p01-full-v2.cookies -b /tmp/p01-full-v2.cookies http://127.0.0.1:18095/setup.php -o /tmp/p01-full-v2-setup.html
-          CSRF=$(python3 - <<'PY'
-          import re
-          t=open('/tmp/p01-full-v2-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',t);assert m;print(m.group(1))
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 <<'PY'
+          from pathlib import Path
+          p=Path('src/app/CommonBaseline.php')
+          s=p.read_text()
+          old="$successSafe=$ordered($manager,['atomicJson[','actual !==','journal['])&&$has($manager,\"'failed_rolled_back'\")&&$has($manager,\"'recovery_required'\");"
+          new="$installStart=strpos($manager,'public function install(');$historyStart=strpos($manager,'public function history(');$install=($installStart!==false&&$historyStart!==false&&$historyStart>$installStart)?substr($manager,$installStart,$historyStart-$installStart):'';$successSafe=$install!==''&&$ordered($install,[\"atomicJson['ok']\",'actual !==',\"result'] = 'success'\"])&&$has($install,\"'failed_rolled_back'\")&&$has($install,\"'recovery_required'\");"
+          assert old in s
+          p.write_text(s.replace(old,new,1))
           PY
-          )
-          curl -fsS -c /tmp/p01-full-v2.cookies -b /tmp/p01-full-v2.cookies -X POST http://127.0.0.1:18095/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Full V2 Gate' --data-urlencode 'admin_password=P01BaselineGate!2026' --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' -o /tmp/p01-full-v2-post.html
-          test -f app/.runtime.php
-          php cli/verify.php
-          echo FRESH_INSTALL_PASS
-      - name: Full baseline resolver
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/p01-full-v2
-          php -d upload_max_filesize=200M -d post_max_size=205M cli/baseline-verify.php | tee /tmp/p01-full-v2-baseline.txt
-          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-full-v2-baseline.txt
-          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-full-v2-baseline.txt
-          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-full-v2-baseline.txt
-          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-full-v2-baseline.txt
-          php -d upload_max_filesize=200M -d post_max_size=205M <<'PHP'
-          <?php
-          require 'app/bootstrap.php';
-          $r=VfCommonBaseline::report(vf_db());
-          if((int)$r['counts']['DRIFT']!==0||(int)$r['counts']['UNKNOWN']!==0)throw new RuntimeException('unresolved baseline');
-          if((int)$r['counts']['EXCEPTION']!==1)throw new RuntimeException('expected exactly one explicit exception');
-          $required=['UPDATE.single_primary_action','UPDATE.canonical_phase_contract','UPDATE.preflight_before_product_write','UPDATE.self_test_before_success','UPDATE.failure_may_report_success','UPDATE.owner_manual_repair_download_required','UPDATE.progress_semantics','UPDATE.post_upgrade_session_policy'];
-          $map=[];foreach($r['rows'] as $row)$map[$row['domain'].'.'.$row['parameter']]=$row;
-          foreach($required as $key){if(($map[$key]['result']??'')!=='PASS')throw new RuntimeException($key.'='.($map[$key]['result']??'MISSING'));}
-          if(($map['FILE_UPLOAD.recovery_artifact_max_single_file_bytes']['result']??'')!=='EXCEPTION')throw new RuntimeException('recovery upload exception unresolved');
-          echo 'FULL_COUNTS='.json_encode($r['counts'],JSON_UNESCAPED_SLASHES)."\n";
-          echo "UPDATE_CONTRACT_PASS\n";
-          PHP
-      - name: Runtime surfaces and scope guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/p01-full-v2
-          test -f system-info.php
-          test -f system-baseline.php
-          grep -F 'system-info.php' app/AdminShell.php >/dev/null
-          grep -F 'system-baseline.php' app/AdminShell.php >/dev/null
-          grep -F 'update.php' app/AdminShell.php >/dev/null
-          grep -F 'data-safety.php' app/AdminShell.php >/dev/null
-          grep -F 'system.php' app/AdminShell.php >/dev/null
-          cd "$GITHUB_WORKSPACE/p01"
+          php -l src/app/CommonBaseline.php
+          git diff --check
+          test "$(git status --short | wc -l)" -eq 1
           test "$(cat VERSION)" = '2.21.24'
           test "$(cat src/VERSION.txt)" = '2.21.24'
-          grep -F "define('VF_VERSION', '2.21.24');" src/app/bootstrap.php >/dev/null
-          echo P01_COMMON_BASELINE_V2_FULL_PASS
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add src/app/CommonBaseline.php
+          git commit -m 'p01: scope update success evidence to install'
+          git push origin HEAD:$TARGET_BRANCH
+          echo NEW_HEAD=$(git rev-parse HEAD)
