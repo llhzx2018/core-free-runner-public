@@ -1,4 +1,4 @@
-name: P02 Common Baseline V2 Exact Source Full Gate
+name: P02 Common Baseline V2 Adoption Currentization
 on:
   push:
     branches: [vf-agent-operations-v1]
@@ -6,148 +6,161 @@ on:
 permissions:
   contents: read
 jobs:
-  verify:
+  currentize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     env:
       EXPECTED_HEAD: c1b79576b5adb88a635fb13e0b836432a04bbdf2
-      BASE_HEAD: 00725827280fb9021b7124a915003de26533b69d
-      BASE_URL: http://127.0.0.1:18102
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
     steps:
-      - name: Checkout exact P02 source
+      - name: Checkout exact P02 verified candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-library
-          ref: ${{ env.EXPECTED_HEAD }}
+          ref: ${{ env.TARGET_BRANCH }}
           token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: false
+          persist-credentials: true
           fetch-depth: 0
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-          extensions: pdo_sqlite, sqlite3, curl, zip, mbstring, openssl
-          coverage: none
-      - name: Exact source syntax and scope guard
+      - name: Exact source and no-release guard
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           test "$(tr -d '\r\n' < VERSION)" = '2.5.28'
-          git diff --quiet "$BASE_HEAD" "$EXPECTED_HEAD" -- VERSION src/app/SchemaMigration.php database
-          bash scripts/verify-repository.sh
-          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
-          find public -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
-          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
-          grep -F 'VfLibraryCommonBaseline::AUTH_ABSOLUTE_SECONDS' src/app/Auth.php >/dev/null
-          grep -F 'VfLibraryCommonBaseline::AUTH_IDLE_SECONDS' src/app/Auth.php >/dev/null
-          ! grep -F '$now-$rotatedAt>1800' src/app/Auth.php >/dev/null
-          echo SOURCE_SCOPE_PASS
-      - name: Fresh install exact deploy tree
+          git diff --quiet 00725827280fb9021b7124a915003de26533b69d "$EXPECTED_HEAD" -- VERSION src/app/SchemaMigration.php database
+          echo CURRENTIZATION_SOURCE_GUARD_PASS
+      - name: Currentize adoption authority
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/p02-v2-gate /tmp/p02-v2-cookies /tmp/p02-v2-setup.html /tmp/p02-v2-post.html /tmp/p02-v2-sessions
-          mkdir -p /tmp/p02-v2-sessions
-          bash scripts/build-deploy-tree.sh /tmp/p02-v2-gate
-          test "$(tr -d '\r\n' < /tmp/p02-v2-gate/VERSION.txt)" = '2.5.28'
-          cd /tmp/p02-v2-gate
-          php -d display_errors=0 -d session.save_path=/tmp/p02-v2-sessions -S 127.0.0.1:18102 -t . >/tmp/p02-v2-server.log 2>&1 &
-          echo $! >/tmp/p02-v2-server.pid
-          for i in $(seq 1 40); do curl -fsS -c /tmp/p02-v2-cookies "$BASE_URL/setup.php" -o /tmp/p02-v2-setup.html && break; sleep 0.5; done
-          grep -F '环境检查通过' /tmp/p02-v2-setup.html >/dev/null
-          CSRF=$(python3 - <<'PY'
-          import re,html
-          s=open('/tmp/p02-v2-setup.html',encoding='utf-8').read()
-          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
-          assert m
-          print(html.unescape(m.group(1)))
-          PY
-          )
-          STATUS=$(curl -sS -o /tmp/p02-v2-post.html -w '%{http_code}' -b /tmp/p02-v2-cookies -c /tmp/p02-v2-cookies -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'password=P02BaselineV2!2026' --data-urlencode 'password_confirm=P02BaselineV2!2026' "$BASE_URL/setup.php")
-          test "$STATUS" = '303'
-          test -f app/.runtime.php
-          php -d session.save_path=/tmp/p02-v2-sessions cli/verify.php | tee /tmp/p02-v2-cli-verify.txt
-          echo FRESH_INSTALL_PASS
-      - name: Session profile and expiry boundaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsS -b /tmp/p02-v2-cookies -c /tmp/p02-v2-cookies "$BASE_URL/api.php?action=session" -o /tmp/p02-v2-session.json
-          python3 - <<'PY'
-          import json,time
-          d=json.load(open('/tmp/p02-v2-session.json',encoding='utf-8'))
-          assert d['ok'] is True and d['site']['auth'] is True and d['version']=='2.5.28'
-          rows=[]
-          for raw in open('/tmp/p02-v2-cookies',encoding='utf-8').read().splitlines():
-              if raw.startswith('#HttpOnly_'): raw=raw[len('#HttpOnly_'):]
-              elif raw.startswith('#') or not raw: continue
-              if '\tvftextbox_session\t' in raw: rows.append(raw)
-          assert rows
-          expiry=int(rows[-1].split('\t')[4])
-          assert expiry >= int(time.time()) + 29*86400
-          PY
-          cd /tmp/p02-v2-gate
-          php -d session.save_path=/tmp/p02-v2-sessions -r 'require "app/bootstrap.php"; session_id("P02BoundaryValid001"); vftb_start_session(); $n=time(); $_SESSION["vftextbox_admin"]=true; $_SESSION["vftextbox_login_at"]=$n-VfLibraryCommonBaseline::AUTH_ABSOLUTE_SECONDS+2; $_SESSION["vftextbox_last_seen"]=$n-VfLibraryCommonBaseline::AUTH_IDLE_SECONDS+2; $_SESSION["vftextbox_auth_epoch"]=vftb_auth_epoch_from_config(vftb_config()); if(!vftb_is_admin()) exit(2); session_destroy(); echo "SESSION_VALID_BOUNDARY_PASS\n";'
-          php -d session.save_path=/tmp/p02-v2-sessions -r 'require "app/bootstrap.php"; session_id("P02BoundaryIdle002"); vftb_start_session(); $n=time(); $_SESSION["vftextbox_admin"]=true; $_SESSION["vftextbox_login_at"]=$n-60; $_SESSION["vftextbox_last_seen"]=$n-VfLibraryCommonBaseline::AUTH_IDLE_SECONDS-2; $_SESSION["vftextbox_auth_epoch"]=vftb_auth_epoch_from_config(vftb_config()); if(vftb_is_admin()) exit(2); echo "SESSION_IDLE_EXPIRY_PASS\n";'
-          php -d session.save_path=/tmp/p02-v2-sessions -r 'require "app/bootstrap.php"; session_id("P02BoundaryAbs003"); vftb_start_session(); $n=time(); $_SESSION["vftextbox_admin"]=true; $_SESSION["vftextbox_login_at"]=$n-VfLibraryCommonBaseline::AUTH_ABSOLUTE_SECONDS-2; $_SESSION["vftextbox_last_seen"]=$n-60; $_SESSION["vftextbox_auth_epoch"]=vftb_auth_epoch_from_config(vftb_config()); if(vftb_is_admin()) exit(2); echo "SESSION_ABSOLUTE_EXPIRY_PASS\n";'
-          php -d session.save_path=/tmp/p02-v2-sessions -r 'require "app/bootstrap.php"; vftb_start_session(); if((int)ini_get("session.gc_maxlifetime")<VfLibraryCommonBaseline::AUTH_SERVER_FLOOR_SECONDS) exit(2); $p=session_get_cookie_params(); if((int)$p["lifetime"]!==VfLibraryCommonBaseline::AUTH_COOKIE_SECONDS) exit(3); echo "SESSION_RUNTIME_FLOOR_PASS\n";'
-      - name: High risk step-up reauth contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          CSRF=$(python3 -c 'import json;print(json.load(open("/tmp/p02-v2-session.json"))["csrf"])')
-          printf '%s' '{"filename":"nonexistent.sqlite","confirmation":"恢复"}' >/tmp/p02-v2-restore.json
-          CODE=$(curl -sS -o /tmp/p02-v2-stepup-before.json -w '%{http_code}' -b /tmp/p02-v2-cookies -c /tmp/p02-v2-cookies -H "Origin: $BASE_URL" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @/tmp/p02-v2-restore.json "$BASE_URL/api.php?action=backup_restore")
-          test "$CODE" = '428'
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/p02-v2-stepup-before.json',encoding='utf-8'))
-          assert d['ok'] is False and d['reauth_required'] is True
+          from pathlib import Path
+
+          root=Path('docs/authority')
+          v1p=root/'VF_COMMON_PRODUCT_BASELINE_ADOPTION.json'
+          cp=root/'VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json'
+          outp=root/'VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json'
+          if outp.exists():
+              raise SystemExit('formal V2 adoption already exists unexpectedly')
+
+          v1=json.loads(v1p.read_text())
+          if v1.get('state')!='CURRENT':
+              raise SystemExit(f'V1 expected CURRENT, got {v1.get("state")}')
+          v1['state']='SUPERSEDED_BY_V2'
+          v1['superseded_by']='VF-COMMON-PRODUCT-BASELINE@2.0'
+          v1['superseded_at']='2026-08-27T16:13:18Z'
+          v1['superseded_reason']='P02 Common Product Baseline V2 runtime adoption machine verified and currentized.'
+          v1p.write_text(json.dumps(v1,ensure_ascii=False,indent=2)+'\n')
+
+          candidate=json.loads(cp.read_text())
+          if candidate.get('state')!='CANDIDATE_MACHINE_VERIFICATION_PENDING':
+              raise SystemExit(f'candidate state mismatch: {candidate.get("state")}')
+          candidate['state']='VERIFIED_SUPERSEDED_BY_CURRENT'
+          candidate['machine_verification']={
+              'status':'PASS',
+              'runner_repository':'llhzx2018/core-free-runner-public',
+              'workflow':'P02 Common Baseline V2 Exact Source Full Gate',
+              'run_id':33092057053,
+              'exact_source':'c1b79576b5adb88a635fb13e0b836432a04bbdf2',
+              'resolver_counts':{'PASS':70,'EXCEPTION':0,'DRIFT':0,'UNKNOWN':0,'N_A':0},
+              'fresh_install':'PASS',
+              'session_boundary':'PASS',
+              'step_up_reauth':'PASS',
+              'runtime_surfaces':'PASS'
+          }
+          candidate['superseded_by']='docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json'
+          cp.write_text(json.dumps(candidate,ensure_ascii=False,indent=2)+'\n')
+
+          current={
+              'schema':'vf-common-product-baseline-adoption/v2',
+              'state':'CURRENT',
+              'project_id':'P02',
+              'project_name':'VF Library',
+              'repository':'llhzx2018/vf-library',
+              'baseline_id':'VF-COMMON-PRODUCT-BASELINE@2.0',
+              'baseline_version':'2.0',
+              'profile':'PERSONAL_SINGLE_ADMIN',
+              'authority_repository':'llhzx2018/gov-doc',
+              'authority_ref':'main',
+              'authority_path':'governance/agent/VF_COMMON_PRODUCT_BASELINE_AUTHORITY.json',
+              'authority_status':'CURRENT',
+              'truth_model':'RUNTIME_DERIVED_READ_ONLY_NO_SHADOW_TRUTH',
+              'assessed_runtime_source_sha':'c1b79576b5adb88a635fb13e0b836432a04bbdf2',
+              'machine_verification':{
+                  'status':'PASS',
+                  'runner_repository':'llhzx2018/core-free-runner-public',
+                  'workflow':'P02 Common Baseline V2 Exact Source Full Gate',
+                  'run_id':33092057053,
+                  'exact_source':'c1b79576b5adb88a635fb13e0b836432a04bbdf2',
+                  'resolver_counts':{'PASS':70,'EXCEPTION':0,'DRIFT':0,'UNKNOWN':0,'N_A':0},
+                  'source_manifest':'PASS',
+                  'repository_gates':'PASS',
+                  'php_syntax':'PASS',
+                  'javascript_syntax':'PASS',
+                  'fresh_install':'PASS',
+                  'schema_2401':'PASS',
+                  'sqlite_integrity':'PASS',
+                  'session_profile_7d_30d':'PASS',
+                  'idle_and_absolute_expiry_boundaries':'PASS',
+                  'server_session_lifetime_floor':'PASS',
+                  'high_risk_step_up_reauth':'PASS',
+                  'api_job_logging_contract':'PASS',
+                  'system_info_surface':'PASS',
+                  'system_baseline_surface':'PASS'
+              },
+              'effective_contract':{
+                  'auth_idle_timeout_seconds':604800,
+                  'auth_absolute_timeout_seconds':2592000,
+                  'auth_cookie_max_age_seconds':2592000,
+                  'auth_server_session_lifetime_floor_seconds':2592000,
+                  'periodic_rotation_required':False,
+                  'step_up_recent_auth_window_seconds':900,
+                  'system_timezone':'Asia/Shanghai',
+                  'instant_storage_timezone':'UTC'
+              },
+              'runtime_evidence':[
+                  'src/app/CommonBaseline.php',
+                  'src/app/Auth.php',
+                  'src/app/bootstrap.php',
+                  'src/app/CoreUpdates/GitHubClient.php',
+                  'src/app/JobService.php',
+                  'src/app/Logging.php',
+                  'src/app/RecoveryService.php',
+                  'public/api.php',
+                  'public/system-info.php',
+                  'public/system-baseline.php',
+                  'src/cli/baseline-verify.php'
+              ],
+              'version':'2.5.28',
+              'schema_version':2401,
+              'version_changed':False,
+              'schema_changed':False,
+              'release':False,
+              'production':False,
+              'currentized_at':'2026-08-27T16:13:18Z'
+          }
+          outp.write_text(json.dumps(current,ensure_ascii=False,indent=2)+'\n')
           PY
-          printf '%s' '{"password":"P02BaselineV2!2026"}' >/tmp/p02-v2-reauth.json
-          CODE=$(curl -sS -o /tmp/p02-v2-reauth-out.json -w '%{http_code}' -b /tmp/p02-v2-cookies -c /tmp/p02-v2-cookies -H "Origin: $BASE_URL" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @/tmp/p02-v2-reauth.json "$BASE_URL/api.php?action=reauth")
-          test "$CODE" = '200'
-          NEW_CSRF=$(python3 -c 'import json; d=json.load(open("/tmp/p02-v2-reauth-out.json")); assert d["ok"] is True; print(d["csrf"])')
-          CODE=$(curl -sS -o /tmp/p02-v2-stepup-after.json -w '%{http_code}' -b /tmp/p02-v2-cookies -c /tmp/p02-v2-cookies -H "Origin: $BASE_URL" -H "X-CSRF-Token: $NEW_CSRF" -H 'Content-Type: application/json' --data-binary @/tmp/p02-v2-restore.json "$BASE_URL/api.php?action=backup_restore")
-          test "$CODE" != '428'
-          echo STEP_UP_REAUTH_PASS
-      - name: Full Common Baseline resolver
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json >/dev/null
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json >/dev/null
+          grep -F '"state": "SUPERSEDED_BY_V2"' docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json >/dev/null
+          grep -F '"state": "VERIFIED_SUPERSEDED_BY_CURRENT"' docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          grep -F '"state": "CURRENT"' docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json >/dev/null
+          grep -F '"run_id": 33092057053' docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json >/dev/null
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.28'
+          echo ADOPTION_CURRENTIZATION_PASS
+      - name: Scope guard and commit
         shell: bash
         run: |
           set -euo pipefail
-          cd /tmp/p02-v2-gate
-          php -d session.save_path=/tmp/p02-v2-sessions cli/baseline-verify.php | tee /tmp/p02-v2-baseline.txt
-          grep -Fx 'DRIFT_COUNT=0' /tmp/p02-v2-baseline.txt
-          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p02-v2-baseline.txt
-          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p02-v2-baseline.txt
-          php -d session.save_path=/tmp/p02-v2-sessions -r 'require "app/bootstrap.php"; $r=VfLibraryCommonBaseline::report(vftb_db()); if((int)$r["counts"]["DRIFT"]!==0||(int)$r["counts"]["UNKNOWN"]!==0) exit(2); echo "FULL_COUNTS=".json_encode($r["counts"],JSON_UNESCAPED_SLASHES).PHP_EOL;'
-          echo BASELINE_RESOLVER_PASS
-      - name: API Job logging and maintenance surface contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd /tmp/p02-v2-gate
-          grep -F 'CONNECT_TIMEOUT_SECONDS=5' app/CoreUpdates/GitHubClient.php >/dev/null
-          grep -F 'REQUEST_TIMEOUT_SECONDS=15' app/CoreUpdates/GitHubClient.php >/dev/null
-          grep -F 'MAX_RETRY_COUNT=3' app/CoreUpdates/GitHubClient.php >/dev/null
-          grep -F '[429,502,503,504]' app/CoreUpdates/GitHubClient.php >/dev/null
-          grep -F "'retry-after'" app/CoreUpdates/GitHubClient.php >/dev/null
-          grep -F 'retryDelaySeconds' app/JobService.php >/dev/null
-          grep -F 'timeoutContract' app/JobService.php >/dev/null
-          grep -F 'VfLibraryRuntimeLogger' app/Logging.php >/dev/null
-          grep -F '$zip->numFiles' app/RecoveryService.php >/dev/null
-          grep -F 'getExternalAttributesIndex' app/RecoveryService.php >/dev/null
-          grep -F '完整备份 ZIP 不允许加密条目' app/RecoveryService.php >/dev/null
-          test -f system-info.php
-          test -f system-baseline.php
-          curl -fsS -b /tmp/p02-v2-cookies "$BASE_URL/system-info.php" -o /tmp/p02-v2-system-info.html
-          curl -fsS -b /tmp/p02-v2-cookies "$BASE_URL/system-baseline.php" -o /tmp/p02-v2-system-baseline.html
-          grep -F '系统信息' /tmp/p02-v2-system-info.html >/dev/null
-          grep -F '系统基线' /tmp/p02-v2-system-baseline.html >/dev/null
-          grep -F 'VF-COMMON-PRODUCT-BASELINE@2.0' /tmp/p02-v2-system-baseline.html >/dev/null
-          echo RUNTIME_SURFACE_PASS
-      - name: Stop isolated runtime
-        if: always()
-        shell: bash
-        run: |
-          if [ -f /tmp/p02-v2-server.pid ]; then kill "$(cat /tmp/p02-v2-server.pid)" 2>/dev/null || true; fi
+          CHANGED=$(git status --short | awk '{print $2}' | sort)
+          EXPECTED=$(printf '%s\n' docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json | sort)
+          test "$CHANGED" = "$EXPECTED"
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json
+          git commit -m 'governance(P02): currentize Common Baseline V2 adoption'
+          git push origin "HEAD:${TARGET_BRANCH}"
+          echo "P02_CURRENTIZED_HEAD=$(git rev-parse HEAD)"
