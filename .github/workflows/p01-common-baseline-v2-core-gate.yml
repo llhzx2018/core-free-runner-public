@@ -1,0 +1,93 @@
+name: P01 Common Baseline V2 Core Gate
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-common-baseline-v2-core-gate.yml'
+      - 'requests/p01-common-baseline-v2-core-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: 4e0e49b75bddc860c0c7a53c28741822a38502f2
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo "EXACT_SOURCE=$EXPECTED_HEAD"
+          echo 'SYNTAX_PASS'
+
+      - name: Fresh install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p01-baseline-v2
+          cp -a p01/src /tmp/p01-baseline-v2
+          cd /tmp/p01-baseline-v2
+          php -S 127.0.0.1:18087 -t . >/tmp/p01-baseline-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18087/setup.php -o /tmp/p01-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01.cookies -b /tmp/p01.cookies http://127.0.0.1:18087/setup.php -o /tmp/p01-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01.cookies -b /tmp/p01.cookies -X POST http://127.0.0.1:18087/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Baseline Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          echo 'FRESH_INSTALL_PASS'
+
+      - name: Common Baseline V2 runtime resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-baseline-v2
+          php cli/baseline-verify.php | tee /tmp/p01-baseline-result.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-baseline-result.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-baseline-result.txt
+          echo 'P01_COMMON_BASELINE_V2_CORE_PASS'
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          test -f p01/src/system-info.php
+          test -f p01/src/system-baseline.php
+          echo 'VERSION_SCHEMA_RELEASE_BOUNDARY_PASS'
