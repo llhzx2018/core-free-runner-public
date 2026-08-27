@@ -1,0 +1,166 @@
+name: P01 Upload Cache Runtime Gate
+
+on:
+  push:
+    branches:
+      - vf-agent-operations-v1
+    paths:
+      - '.github/workflows/p01-upload-cache-runtime-gate.yml'
+      - 'requests/p01-upload-cache-runtime-gate-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_HEAD: cd3dea5cfe9a21173297ade4312a226113bd808c
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          python3 -m json.tool p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          echo EXACT_SOURCE=$EXPECTED_HEAD
+          echo SYNTAX_PASS
+
+      - name: Fresh install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p01-upload-cache
+          cp -a p01/src /tmp/p01-upload-cache
+          cd /tmp/p01-upload-cache
+          php -d upload_max_filesize=200M -d post_max_size=205M -S 127.0.0.1:18092 -t . >/tmp/p01-upload-cache-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18092/setup.php -o /tmp/p01-upload-cache-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-upload-cache.cookies -b /tmp/p01-upload-cache.cookies http://127.0.0.1:18092/setup.php -o /tmp/p01-upload-cache-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-upload-cache-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-upload-cache.cookies -b /tmp/p01-upload-cache.cookies -X POST http://127.0.0.1:18092/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Upload Cache Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-upload-cache-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          echo FRESH_INSTALL_PASS
+
+      - name: Upload contract behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-upload-cache
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          if(VF_UPLOAD_DEFAULT_MAX_BYTES!==20971520)throw new RuntimeException('ordinary upload default mismatch');
+          if(VF_RECOVERY_UPLOAD_MAX_BYTES!==209715200)throw new RuntimeException('recovery exception mismatch');
+          if(VF_ARCHIVE_MAX_UNCOMPRESSED_BYTES!==209715200||VF_ARCHIVE_MAX_FILES!==5000)throw new RuntimeException('archive defaults mismatch');
+          if(vf_declared_web_upload_limit()!==209715200)throw new RuntimeException('declared web upload limit mismatch: '.vf_declared_web_upload_limit());
+          if(vf_effective_web_upload_limit()!==209715200)throw new RuntimeException('CLI resolver web limit mismatch: '.vf_effective_web_upload_limit());
+          vf_assert_upload_size(20971520,20971520,'普通文件');
+          try{vf_assert_upload_size(20971521,20971520,'普通文件');throw new RuntimeException('ordinary upload oversize accepted');}catch(InvalidArgumentException $expected){}
+          vf_assert_upload_extension('backup.sqlite',['sqlite','sqlite3','db'],'SQLite 备份');
+          vf_assert_upload_extension('recovery.tar.gz',['tar.gz','tgz'],'灾难恢复包');
+          try{vf_assert_upload_extension('../evil.php',['sqlite'],'SQLite 备份');throw new RuntimeException('unsafe extension accepted');}catch(InvalidArgumentException $expected){}
+          $sqlite='/tmp/p01-upload-signature.sqlite';@unlink($sqlite);$db=new PDO('sqlite:'.$sqlite);$db->exec('CREATE TABLE gate(id INTEGER PRIMARY KEY)');$db=null;vf_assert_sqlite_upload_signature($sqlite);
+          $bad='/tmp/p01-upload-bad.sqlite';file_put_contents($bad,'not sqlite');try{vf_assert_sqlite_upload_signature($bad);throw new RuntimeException('bad sqlite accepted');}catch(InvalidArgumentException $expected){}
+          $gz='/tmp/p01-upload-gzip.tgz';file_put_contents($gz,gzencode('gate'));vf_assert_gzip_upload_signature($gz);
+          $badGz='/tmp/p01-upload-bad.tgz';file_put_contents($badGz,'not gzip');try{vf_assert_gzip_upload_signature($badGz);throw new RuntimeException('bad gzip accepted');}catch(InvalidArgumentException $expected){}
+          $rc=new ReflectionClass(VfDisasterRecovery::class);
+          foreach(['MAX_PACKAGE'=>209715200,'MAX_UNCOMPRESSED'=>209715200,'MAX_FILES'=>5000] as $name=>$expected){if((int)$rc->getConstant($name)!==$expected)throw new RuntimeException('DisasterRecovery '.$name.' mismatch');}
+          echo "UPLOAD_CONTRACT_PASS ordinary=".VF_UPLOAD_DEFAULT_MAX_BYTES." recovery=".VF_RECOVERY_UPLOAD_MAX_BYTES." archive=".VF_ARCHIVE_MAX_UNCOMPRESSED_BYTES." files=".VF_ARCHIVE_MAX_FILES."\n";
+          PHP
+          grep -F 'P01-FILE-UPLOAD-RECOVERY-ARTIFACT-001' "$GITHUB_WORKSPACE/p01/docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json" >/dev/null
+          echo EXPLICIT_RECOVERY_EXCEPTION_PASS
+
+      - name: Disaster package preflight behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-upload-cache
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $manager=new VfDisasterRecovery(vf_db());
+          $package=$manager->create('Baseline upload/cache gate',true);
+          if(empty($package['package_key']))throw new RuntimeException('disaster package create failed');
+          $verified=$manager->verify((string)$package['package_key']);
+          if((string)($verified['validation_status']??'')!=='valid')throw new RuntimeException('disaster package verify failed');
+          echo "DISASTER_PREFLIGHT_PASS key=".$package['package_key']."\n";
+          PHP
+
+      - name: Static asset cache behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-upload-cache
+          php -r "require 'app/bootstrap.php'; \$u=vf_asset_url('assets/frontend.css?v=legacy'); if(\$u!=='asset.php?file=frontend.css&v=2.21.24') throw new RuntimeException(\$u); echo 'ASSET_IDENTITY_PASS '.\$u.PHP_EOL;"
+          curl -fsS -D /tmp/asset-versioned.h 'http://127.0.0.1:18092/asset.php?file=frontend.css&v=2.21.24' -o /tmp/asset-versioned.css
+          grep -iFx 'Cache-Control: public, max-age=31536000, immutable' /tmp/asset-versioned.h
+          grep -i '^Content-Type: text/css' /tmp/asset-versioned.h
+          curl -fsS -D /tmp/asset-unversioned.h 'http://127.0.0.1:18092/asset.php?file=frontend.css' -o /tmp/asset-unversioned.css
+          grep -iFx 'Cache-Control: private, max-age=300' /tmp/asset-unversioned.h
+          curl -fsS -D /tmp/asset-old.h 'http://127.0.0.1:18092/asset.php?file=frontend.css&v=2.21.23' -o /tmp/asset-old.css
+          grep -iFx 'Cache-Control: no-store, no-cache, must-revalidate, max-age=0' /tmp/asset-old.h
+          cmp /tmp/asset-versioned.css /tmp/asset-unversioned.css
+          if grep -RInF '?v=221' index.php assets/update.js assets/reference-ui.js; then echo 'frozen asset identity remains' >&2; exit 1; fi
+          echo STATIC_ASSET_CACHE_PASS
+
+      - name: Cache private response behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-upload-cache
+          curl -fsS -D /tmp/api-cache.h 'http://127.0.0.1:18092/api.php?action=bootstrap' -o /tmp/api-cache.json || true
+          grep -i '^Cache-Control: no-store, no-cache, must-revalidate, max-age=0' /tmp/api-cache.h
+          grep -F 'private, max-age=300' plugin-asset.php >/dev/null
+          echo PRIVATE_CACHE_CONTRACT_PASS
+
+      - name: Baseline resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-upload-cache
+          php cli/baseline-verify.php | tee "$GITHUB_WORKSPACE/p01-upload-cache-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$GITHUB_WORKSPACE/p01-upload-cache-baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=1' "$GITHUB_WORKSPACE/p01-upload-cache-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$GITHUB_WORKSPACE/p01-upload-cache-baseline.txt"
+          grep -Fx 'BASELINE_FULL_PASS=NO' "$GITHUB_WORKSPACE/p01-upload-cache-baseline.txt"
+          echo BASELINE_UPLOAD_CACHE_PASS
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          echo VERSION_SCHEMA_RELEASE_BOUNDARY_PASS
