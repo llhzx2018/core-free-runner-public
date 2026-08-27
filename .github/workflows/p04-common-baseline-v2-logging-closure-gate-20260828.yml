@@ -1,0 +1,204 @@
+name: P04 Common Baseline V2 Logging Closure Gate
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p04-common-baseline-v2-logging-closure-gate-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXACT_SOURCE: 151ae17d861af44730735d91bce3cbecc9c53af9
+      ASSESSED_BASE: 25df5df0402b6797158053dff36a367fba6c5f87
+      TARGET_BRANCH: maintenance/common-baseline-v2-logging-closure-20260828
+    steps:
+      - name: Checkout exact P04 remediation source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p04
+      - name: Prepare PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring
+          coverage: none
+      - name: Prepare browser runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+          node -e "import('playwright').then(()=>console.log('PLAYWRIGHT_READY=YES'))"
+      - name: Source fence and narrow remediation scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.9'
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          mapfile -t changed < <(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE")
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'src/app/CommonBaselineV2Closure.php'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'public/system-baseline.php'
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          grep -Fq "'LOGGING'" src/app/CommonBaselineV2Closure.php
+          grep -Fq 'CommonBaselineV2Closure::summary()' public/system-baseline.php
+          echo P04_V2_LOGGING_SOURCE_FENCE=PASS
+      - name: Current V2.8.9 formal regression contract
+        shell: bash
+        env:
+          VF_V289_EVIDENCE_DIR: ${{ runner.temp }}/p04-v289-logging-evidence
+          VF_V289_TESTED_RUNTIME_COMMIT: ${{ env.EXACT_SOURCE }}
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          bash scripts/run-v289-domain-attention-group-management-gate.sh
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path(os.environ['VF_V289_EVIDENCE_DIR'])/'V289_DOMAIN_ATTENTION_GROUPS_REPORT.json'
+          r=json.loads(p.read_text())
+          assert r['status']=='PASS',r
+          assert r['version']=='2.8.9' and r['schema']==14 and r['migration']=='NONE',r
+          assert r['tested_runtime_commit']==os.environ['VF_V289_TESTED_RUNTIME_COMMIT'],r
+          assert r['page_errors']==[] and r['console_errors']==[],r
+          print('P04_V289_REGRESSION_EXACT_SOURCE=PASS')
+          PY
+      - name: Fresh runtime 15-domain resolver and browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          WEB="$RUNNER_TEMP/p04-v2-logging-runtime"
+          EVIDENCE="$RUNNER_TEMP/p04-v2-logging-evidence"
+          PORT=19014
+          mkdir -p "$EVIDENCE"
+          python3 scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          test "$(tr -d '\r\n' < "$WEB/VERSION.txt")" = '2.8.9'
+          test -f "$WEB/app/CommonBaselineV2Closure.php"
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then cat "$EVIDENCE/php-server.log"; exit 31; fi
+            curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break
+            sleep .1
+          done
+          cat > .runner-p04-v2-logging.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19014';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'FAIL',baseline:false,logging:false,coverage:false,system_info:false,atomic_step_up:false,page_errors:[],console_errors:[],bad_responses:[]};
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1318,height:900}});
+          page.on('pageerror',e=>report.page_errors.push({url:page.url(),text:String(e)}));
+          page.on('console',m=>{if(m.type()==='error') report.console_errors.push({url:page.url(),text:m.text()});});
+          page.on('response',r=>{if(r.status()>=400) report.bad_responses.push({url:r.url(),status:r.status()});});
+          try {
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#site_name').fill('VF Infra V2 Logging Closure Gate');
+            await page.locator('#password').fill(password);
+            await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'});
+            const body=await page.locator('body').innerText();
+            const drift=String(await page.locator('.metric').filter({hasText:'DRIFT'}).locator('strong').innerText()).trim();
+            const unknown=String(await page.locator('.metric').filter({hasText:'UNKNOWN'}).locator('strong').innerText()).trim();
+            if(!body.includes('PASS_WITH_EXCEPTIONS')||drift!=='0'||unknown!=='0') throw new Error(`baseline mismatch ${drift}/${unknown}`);
+            report.baseline=true;
+            if(!body.includes('LOGGING')||!body.includes('SecurityLogService.php + RetentionService.php + LogRepository.php')) throw new Error('LOGGING evidence missing');
+            report.logging=true;
+            if(!body.includes('Required Domains：15 / 15')) throw new Error('15/15 coverage missing');
+            report.coverage=true;
+            await page.goto(base+'/system-info.php',{waitUntil:'domcontentloaded'});
+            const info=await page.locator('body').innerText();
+            if(!info.includes('系统信息')||!info.includes('2.8.9')) throw new Error('system info mismatch');
+            report.system_info=true;
+            await page.goto(base+'/maintenance.php',{waitUntil:'domcontentloaded'});
+            if(await page.locator('input[name="admin_password"]').count()!==1) throw new Error('step-up input missing');
+            const atomic=await page.evaluate(async()=>{
+              const csrf=document.querySelector('input[name="csrf"]')?.value||'';
+              const form=new FormData();form.append('csrf',csrf);form.append('admin_password','definitely-wrong-password');form.append('expected_sha256','0'.repeat(64));
+              const response=await fetch('maintenance.php',{method:'POST',credentials:'same-origin',body:form});
+              return await response.text();
+            });
+            if(!atomic.includes('管理员密码不正确')) throw new Error('wrong password did not block Atomic');
+            report.atomic_step_up=true;
+            report.status='PASS';
+          } catch(e) { report.error=String(e?.stack||e); }
+          finally { await browser.close(); fs.writeFileSync(process.env.REPORT,JSON.stringify(report,null,2)); }
+          if(report.status!=='PASS'||report.page_errors.length||report.console_errors.length||report.bad_responses.length) process.exit(2);
+          JS
+          set +e
+          REPORT="$EVIDENCE/browser-report.json" node .runner-p04-v2-logging.mjs
+          RC=$?
+          set -e
+          rm -f .runner-p04-v2-logging.mjs
+          cat "$EVIDENCE/browser-report.json"
+          test "$RC" -eq 0
+          cat > "$WEB/cli/baseline-v2-closure-verify.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require dirname(__DIR__) . '/bootstrap.php';
+          $s=CommonBaselineV2Closure::summary();
+          echo 'BASELINE='.$s['baseline'].PHP_EOL;
+          echo 'PROFILE='.$s['profile'].PHP_EOL;
+          echo 'OVERALL='.$s['overall'].PHP_EOL;
+          echo 'PASS_COUNT='.$s['counts']['PASS'].PHP_EOL;
+          echo 'EXCEPTION_COUNT='.$s['counts']['EXCEPTION'].PHP_EOL;
+          echo 'DRIFT_COUNT='.$s['counts']['DRIFT'].PHP_EOL;
+          echo 'UNKNOWN_COUNT='.$s['counts']['UNKNOWN'].PHP_EOL;
+          echo 'N_A_COUNT='.$s['counts']['N_A'].PHP_EOL;
+          echo 'REQUIRED_DOMAIN_COUNT='.$s['required_domain_count'].PHP_EOL;
+          echo 'COVERED_DOMAIN_COUNT='.$s['covered_domain_count'].PHP_EOL;
+          echo 'MISSING_DOMAINS='.implode(',', $s['missing_domains']).PHP_EOL;
+          foreach($s['rows'] as $row){if(($row['domain']??'')==='LOGGING') echo 'LOGGING_RESULT='.$row['result'].PHP_EOL;}
+          PHP
+          (cd "$WEB" && php cli/baseline-v2-closure-verify.php) | tee "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'BASELINE=VF-COMMON-PRODUCT-BASELINE@2.0' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'PROFILE=PERSONAL_SINGLE_ADMIN' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'OVERALL=PASS_WITH_EXCEPTIONS' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'PASS_COUNT=31' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'EXCEPTION_COUNT=3' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'DRIFT_COUNT=0' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'UNKNOWN_COUNT=0' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'N_A_COUNT=1' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'REQUIRED_DOMAIN_COUNT=15' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'COVERED_DOMAIN_COUNT=15' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'MISSING_DOMAINS=' "$EVIDENCE/baseline-closure.txt"
+          grep -Fxq 'LOGGING_RESULT=PASS' "$EVIDENCE/baseline-closure.txt"
+          kill "$SERVER_PID"; wait "$SERVER_PID" || true; trap - EXIT
+          if grep -Ev 'JIT is incompatible with third party extensions that override zend_execute_ex\(\)\. JIT disabled\.' "$EVIDENCE/php-server.log" | grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)'; then cat "$EVIDENCE/php-server.log"; exit 32; fi
+          echo P04_V2_LOGGING_RUNTIME=PASS
+      - name: Exact-source verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          echo P04_COMMON_BASELINE_V2_LOGGING_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P04_COMMON_BASELINE_V2_VERSION=2.8.9
+          echo P04_COMMON_BASELINE_V2_SCHEMA=14
+          echo P04_COMMON_BASELINE_V2_REQUIRED_DOMAINS=15
+          echo P04_COMMON_BASELINE_V2_LOGGING=PASS
+          echo P04_COMMON_BASELINE_V2_MACHINE=PASS
+          echo P04_COMMON_BASELINE_V2_RELEASE=NO
+          echo P04_COMMON_BASELINE_V2_TAG=NO
+          echo P04_COMMON_BASELINE_V2_PRODUCTION=NO
