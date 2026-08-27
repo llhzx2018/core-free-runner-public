@@ -52,6 +52,11 @@ marker="log 'Browser E2E responsive regression'"
 insert="""log 'Install Browser E2E dependency after source/privacy gates'\nnpm init -y >/dev/null 2>&1\nnpm install --no-save playwright@1.55.0 >/dev/null\nnpx playwright install --with-deps chromium >/dev/null\n\nlog 'Browser E2E responsive regression'"""
 assert s.count(marker)==1
 s=s.replace(marker,insert,1)
+# The formal browser regression script intentionally owns the fixed loopback port 18081.
+# Adapt only the runner's temporary HTTP fixture to that contract; product source remains exact.
+s=s.replace("BASE='http://127.0.0.1:18176'","BASE='http://127.0.0.1:18081'",1)
+s=s.replace('-p 18176:18176','-p 18081:18081',1)
+s=s.replace('php -S 0.0.0.0:18176 -t /app','php -S 0.0.0.0:18081 -t /app',1)
 p.write_text(s,encoding='utf-8')
 PY
 exec bash "$TMP"
