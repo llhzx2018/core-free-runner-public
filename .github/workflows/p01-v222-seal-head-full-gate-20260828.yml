@@ -1,0 +1,195 @@
+name: P01 V2.22.0 Seal Head Full Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-seal-head-full-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      WORKING_BRANCH: feature/p01-multi-surface-v222-20260828
+      EXACT_SOURCE: 23e6575278617ec9f228b070378d0ef6e6e76a9c
+      BASE_MAIN: c8928cc68c41a42d7debc6e9074df7a95f2551ce
+      PROD_SOURCE: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+      PROD_VERSION: 2.21.25
+      PROD_SCHEMA: '2026080902'
+      WORKING_SCHEMA: '2026082801'
+      TARGET_RELEASE: 2.22.0
+    steps:
+      - name: Checkout exact seal head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - name: Checkout V2.21.25 production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PROD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: prod
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact identity and syntax
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/$WORKING_BRANCH" | awk '{print $1}')" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')" = "$BASE_MAIN"
+          test "$(tr -d '\r\n' < VERSION)" = "$PROD_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$PROD_VERSION"
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.25'
+          assert x['target_release_version']=='2.22.0'
+          assert x['current_change']['functional_source_commit']=='edf07687554a456f843f4f6aae34553b81c367e2'
+          assert x['current_change']['machine_result'].startswith('PASS')
+          PY
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V222_SEAL_IDENTITY_SYNTAX=PASS
+      - name: Fresh install and HTTP gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-seal-fresh /tmp/p01-v222-seal-fresh.cookies
+          cp -a p01/src /tmp/p01-v222-seal-fresh
+          cd /tmp/p01-v222-seal-fresh
+          php -S 127.0.0.1:18224 -t . >/tmp/p01-v222-seal-fresh-server.log 2>&1 &
+          echo $! >/tmp/p01-v222-seal-fresh.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18224/setup.php -o /tmp/p01-v222-seal-fresh-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-seal-fresh.cookies -b /tmp/p01-v222-seal-fresh.cookies http://127.0.0.1:18224/setup.php -o /tmp/p01-v222-seal-fresh-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-seal-fresh-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-seal-fresh.cookies -b /tmp/p01-v222-seal-fresh.cookies -X POST http://127.0.0.1:18224/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V222 Seal Fresh' \
+            --data-urlencode 'admin_password=P01V222!SealFresh' \
+            --data-urlencode 'admin_password_confirm=P01V222!SealFresh' \
+            -o /tmp/p01-v222-seal-fresh-post.html
+          php cli/verify.php | tee /tmp/p01-v222-seal-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v222-seal-verify.txt
+          php cli/surface-verify.php | tee /tmp/p01-v222-seal-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-seal-surface.txt
+          grep -Fx "WORKING_SCHEMA=$WORKING_SCHEMA" /tmp/p01-v222-seal-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v222-seal-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-seal-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-seal-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-seal-baseline.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          curl -fsS http://127.0.0.1:18224/surfaces.php -o /tmp/p01-v222-seal-surfaces.html
+          curl -fsS http://127.0.0.1:18224/channels.php -o /tmp/p01-v222-seal-channels.html
+          curl -fsS http://127.0.0.1:18224/watch.php -o /tmp/p01-v222-seal-watch.html
+          grep -F 'ONE DATA · MULTIPLE SURFACES' /tmp/p01-v222-seal-surfaces.html >/dev/null
+          grep -F 'ANTI-ALGORITHM MEMORY' /tmp/p01-v222-seal-channels.html >/dev/null
+          grep -F 'PERSONAL WATCHLIST' /tmp/p01-v222-seal-watch.html >/dev/null
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18224/surface-manager.php)" = 302
+          kill "$(cat /tmp/p01-v222-seal-fresh.pid)" 2>/dev/null || true
+          echo P01_V222_SEAL_FRESH_HTTP=PASS
+      - name: V2.21.25 upgrade and data-preservation gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-seal-upgrade /tmp/p01-v222-seal-upgrade.cookies
+          cp -a prod/src /tmp/p01-v222-seal-upgrade
+          cd /tmp/p01-v222-seal-upgrade
+          php -S 127.0.0.1:18225 -t . >/tmp/p01-v222-seal-upgrade-server.log 2>&1 &
+          echo $! >/tmp/p01-v222-seal-upgrade.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18225/setup.php -o /tmp/p01-v222-seal-upgrade-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-seal-upgrade.cookies -b /tmp/p01-v222-seal-upgrade.cookies http://127.0.0.1:18225/setup.php -o /tmp/p01-v222-seal-upgrade-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-seal-upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-seal-upgrade.cookies -b /tmp/p01-v222-seal-upgrade.cookies -X POST http://127.0.0.1:18225/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V22125 Upgrade' \
+            --data-urlencode 'admin_password=P01V222!SealUpgrade' \
+            --data-urlencode 'admin_password_confirm=P01V222!SealUpgrade' \
+            -o /tmp/p01-v222-seal-upgrade-post.html
+          php cli/verify.php
+          cat >/tmp/p01-v222-seal-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-seal-upgrade/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cid=$repo->createCategory(['name'=>'Seal Gate Category','description'=>'preserve','is_private'=>false]);
+          $saved=$repo->saveLink(null,['category_id'=>$cid,'title'=>'Seal Gate Channel','url'=>'https://www.youtube.com/@v222-seal-gate','description'=>'preserve','is_private'=>false],'manual');
+          file_put_contents('/tmp/p01-v222-seal-link-id',(string)$saved['id']);
+          file_put_contents('/tmp/p01-v222-seal-cat-id',(string)$cid);
+          PHP
+          php /tmp/p01-v222-seal-seed.php
+          cp -a "$GITHUB_WORKSPACE/p01/src/." /tmp/p01-v222-seal-upgrade/
+          cat >/tmp/p01-v222-seal-migrate.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-seal-upgrade/app/bootstrap.php';
+          $pdo=new PDO('sqlite:'.VF_DB_FILE,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false]);
+          $pdo->exec('PRAGMA foreign_keys=ON');$pdo->exec('PRAGMA busy_timeout=5000');
+          (new VfMigrationRunner($pdo))->migrate('2.21.25','2.22.0');
+          PHP
+          php /tmp/p01-v222-seal-migrate.php
+          php cli/verify.php
+          php cli/surface-verify.php | tee /tmp/p01-v222-seal-upgrade-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-seal-upgrade-surface.txt
+          cat >/tmp/p01-v222-seal-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-seal-upgrade/app/bootstrap.php';require_once '/tmp/p01-v222-seal-upgrade/app/SurfaceRepository.php';
+          $db=vf_db();$linkId=(int)trim(file_get_contents('/tmp/p01-v222-seal-link-id'));$catId=(int)trim(file_get_contents('/tmp/p01-v222-seal-cat-id'));
+          if(!$db->query('SELECT id FROM links WHERE id='.$linkId)->fetchColumn()) throw new RuntimeException('link lost');
+          if(!$db->query('SELECT id FROM categories WHERE id='.$catId)->fetchColumn()) throw new RuntimeException('category lost');
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0) throw new RuntimeException('silent profile migration');
+          $s=new VfSurfaceRepository($db);
+          if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('default Start failed');
+          $s->upsertProfile($linkId,['surface'=>'channels','resource_kind'=>'youtube','note'=>'private','background_friendly'=>true]);
+          if(!array_filter($s->collection('channels',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('Channels assign failed');
+          $p=null;foreach($s->allAssets(false) as $row){if((int)$row['id']===$linkId){$p=$row;break;}}
+          if(!$p) throw new RuntimeException('public projection missing');
+          foreach(['surface_note','last_surface_opened_at','media_status'] as $k) if((string)($p[$k]??'')!=='') throw new RuntimeException('private metadata leak '.$k);
+          if((int)($p['background_friendly']??0)!==0) throw new RuntimeException('background leak');
+          if($s->recordOpen($linkId)!=='https://www.youtube.com/@v222-seal-gate') throw new RuntimeException('recordOpen failed');
+          $s->resetToStart($linkId);
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles WHERE link_id='.$linkId)->fetchColumn()!==0) throw new RuntimeException('reset failed');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok') throw new RuntimeException('integrity failed');
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)) throw new RuntimeException('fk failed');
+          echo "P01_V222_SEAL_UPGRADE_DATA=PASS\n";
+          PHP
+          php /tmp/p01-v222-seal-assert.php
+          php cli/baseline-verify.php | tee /tmp/p01-v222-seal-upgrade-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-seal-upgrade-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-seal-upgrade-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-seal-upgrade-baseline.txt
+          kill "$(cat /tmp/p01-v222-seal-upgrade.pid)" 2>/dev/null || true
+          echo P01_V222_SEAL_UPGRADE=PASS
+      - name: Seal head verdict
+        shell: bash
+        run: |
+          echo P01_V222_SEAL_HEAD="$EXACT_SOURCE"
+          echo P01_V222_SEAL_MACHINE=PASS
+          echo TARGET_RELEASE="$TARGET_RELEASE"
+          echo PRODUCTION=NO
