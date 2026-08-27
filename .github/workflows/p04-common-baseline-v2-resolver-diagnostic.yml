@@ -1,0 +1,66 @@
+name: P04 Common Baseline V2 Resolver Diagnostic
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p04-common-baseline-v2-resolver-diagnostic.yml'
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXACT_SOURCE: aaa636fb96c0f2438f434fc8e808ef2b7723f3f5
+    steps:
+      - name: Checkout exact P04
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: p04
+      - name: Prepare PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring
+          coverage: none
+      - name: Fresh install and dump resolver
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          WEB="$RUNNER_TEMP/p04-v2-diagnostic-runtime"
+          python3 scripts/build-release-tree.py "$WEB" >/tmp/p04-v2-diagnostic-build.json
+          php -S 127.0.0.1:19005 -t "$WEB" >"$RUNNER_TEMP/p04-v2-diagnostic-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do curl -fsS -c "$RUNNER_TEMP/cookies" http://127.0.0.1:19005/setup.php -o "$RUNNER_TEMP/setup.html" && break || sleep .1; done
+          CSRF="$(python3 - <<'PY'
+          import re,pathlib
+          s=pathlib.Path('/home/runner/work/_temp/setup.html').read_text(errors='ignore')
+          m=re.search(r'name="csrf" value="([^"]+)"',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          PASS='VfCommonBaselineV2GateAa123456789'
+          curl -fsS -b "$RUNNER_TEMP/cookies" -c "$RUNNER_TEMP/cookies" -o "$RUNNER_TEMP/setup-post.html" -D "$RUNNER_TEMP/setup-post.headers" \
+            --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V2 Diagnostic' \
+            --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" \
+            http://127.0.0.1:19005/setup.php || true
+          test -f "$WEB/config.php"
+          echo '--- BASELINE CLI ---'
+          set +e
+          (cd "$WEB" && php cli/baseline-verify.php) | tee "$RUNNER_TEMP/p04-v2-baseline-cli.txt"
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo BASELINE_CLI_EXIT=$RC
+          echo '--- BASELINE ROWS NOT PASS/EXCEPTION/N_A ---'
+          php -r 'require $argv[1]."/bootstrap.php"; foreach(CommonBaseline::resolve() as $r){if(!in_array($r["result"],["PASS","EXCEPTION","N_A"],true)) echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),PHP_EOL;}' "$WEB"
+          echo '--- BASELINE COUNTS ---'
+          php -r 'require $argv[1]."/bootstrap.php"; echo json_encode(CommonBaseline::summary(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),PHP_EOL;' "$WEB"
+          exit $RC
