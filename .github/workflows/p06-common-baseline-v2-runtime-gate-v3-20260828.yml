@@ -1,0 +1,168 @@
+name: P06 Common Baseline V2 Runtime Gate V3
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/p06-common-baseline-v2-runtime-gate-v3-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      EXACT_SOURCE: df46f65c0b5564cbe7a62e24c343d545177f68cc
+      ASSESSED_BASE: 144b31929a74d079554dc31d1edb5e54a5bb37c4
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260828
+    steps:
+      - name: Checkout exact P06 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-press
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p06
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.6'
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          test ! -e docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json
+          python3 - <<'PY'
+          import json
+          x=json.load(open('docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json'))
+          assert x['state']=='MACHINE_VERIFICATION_PENDING'
+          assert x['machine_verification']['state']=='PENDING'
+          assert x['historical_gap'] is True and x['first_formal_common_product_baseline_adoption'] is True
+          assert x['version']=='0.1.6' and x['schema_version']==2
+          assert x['release_executed'] is False and x['tag_created'] is False and x['production_changed'] is False
+          assert {e['id'] for e in x['explicit_exceptions']}=={'P06-TIME-DISPLAY-CONVERSION-LEGACY-SURFACES','P06-API-RETRY-PROVIDER-SPECIFIC'}
+          assert len(x['reasoned_n_a'])==1 and x['reasoned_n_a'][0]['domain']=='NOTIFICATION'
+          PY
+          echo P06_V2_SOURCE_FENCE=PASS
+      - name: Prepare PHP and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl composer >/dev/null
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+          while IFS= read -r f; do php -l "$f" >/dev/null; done < <(find src public bin deploy -type f -name '*.php' | sort)
+          php -m | grep -Fxq PDO
+          php -m | grep -Fxq pdo_sqlite
+          php -m | grep -Fxq sqlite3
+          php -m | grep -Fxq mbstring
+          php -m | grep -Fxq zip
+          php -m | grep -Fxq curl
+          echo P06_PHP_SYNTAX=PASS
+      - name: Fresh migration and formal regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          ROOT="$RUNNER_TEMP/p06-v2-v3"
+          export APP_ENV=test
+          export VF_PRESS_STORAGE_PATH="$ROOT/storage"
+          export VF_PRESS_DB_PATH="$ROOT/storage/app.db"
+          export VF_PRESS_OWNER_USERNAME=baseline-owner
+          export VF_PRESS_OWNER_PASSWORD='P06-Baseline-V2-Owner-Password-2026!'
+          export VF_PRESS_OWNER_DISPLAY_NAME='Baseline Owner'
+          mkdir -p "$ROOT/storage"
+          php bin/migrate.php
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = 2
+          php bin/create-owner.php
+          php bin/preflight.php
+          composer self-test
+          composer security-self-test
+          php bin/job-self-test.php
+          composer research-self-test
+          composer publication-self-test
+          composer reader-self-test
+          composer edition-self-test
+          composer living-publishing-self-test
+          composer operations-self-test
+          composer operations-ui-self-test
+          composer backoffice-self-test
+          composer backoffice-catalog-self-test
+          composer public-asset-self-test
+          composer update-self-test
+          php bin/common-baseline-v2-self-test.php
+          echo P06_V2_FORMAL_REGRESSION=PASS
+      - name: Real HTTP System surfaces and Step-up
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          ROOT="$RUNNER_TEMP/p06-v2-v3"
+          PORT=19046
+          PASS='P06-Baseline-V2-Owner-Password-2026!'
+          export APP_ENV=test VF_PRESS_STORAGE_PATH="$ROOT/storage" VF_PRESS_DB_PATH="$ROOT/storage/app.db"
+          export VF_PRESS_SESSION_IDLE_SECONDS=604800 VF_PRESS_SESSION_ABSOLUTE_SECONDS=2592000
+          export VF_PRESS_SESSION_COOKIE_SECONDS=2592000 VF_PRESS_SERVER_SESSION_FLOOR_SECONDS=2592000
+          export VF_PRESS_STEP_UP_WINDOW_SECONDS=900 VF_PRESS_DISPLAY_TIMEZONE=Asia/Shanghai VF_PRESS_LOCALE=zh-CN
+          mkdir -p "$ROOT/sessions"
+          php -d session.save_path="$ROOT/sessions" -S 127.0.0.1:$PORT -t public public/index.php >"$ROOT/server.log" 2>&1 &
+          PID=$!; trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$PORT/health" >"$ROOT/health.json" 2>/dev/null && break; sleep .1; done
+          python3 - <<'PY'
+          import json,os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p06-v2-v3','health.json')))
+          assert x['status']=='ok' and x['version']=='0.1.6' and x['schema']==2
+          PY
+          BASE="http://127.0.0.1:$PORT"
+          curl -fsS -c "$ROOT/cookies" "$BASE/login" >"$ROOT/login"
+          csrf(){ python3 - "$1" <<'PY'
+          import re,sys
+          m=re.search(r'name="_csrf" value="([^"]+)"',open(sys.argv[1]).read()); assert m; print(m.group(1))
+          PY
+          }
+          CSRF="$(csrf "$ROOT/login")"
+          curl -sS -D "$ROOT/login.h" -o /dev/null -b "$ROOT/cookies" -c "$ROOT/cookies" -X POST "$BASE/login" --data-urlencode "_csrf=$CSRF" --data-urlencode username=baseline-owner --data-urlencode "password=$PASS"
+          grep -Fqi 'Location: /studio/operations' "$ROOT/login.h"
+          grep -Eqi 'Max-Age=2592000' "$ROOT/login.h"
+          curl -fsS -b "$ROOT/cookies" "$BASE/studio/system" >"$ROOT/system"
+          grep -Fq PERSONAL_SINGLE_ADMIN "$ROOT/system"; grep -Fq Asia/Shanghai "$ROOT/system"
+          curl -fsS -b "$ROOT/cookies" "$BASE/studio/system/baseline" >"$ROOT/baseline"
+          grep -Fq 'VF-COMMON-PRODUCT-BASELINE@2.0' "$ROOT/baseline"
+          grep -Fq '>TIME<' "$ROOT/baseline"; grep -Fq '>API<' "$ROOT/baseline"; grep -Fq '>N_A<' "$ROOT/baseline"
+          curl -fsS -b "$ROOT/cookies" "$BASE/studio/system/health" >"$ROOT/syshealth"
+          grep -Fq '运行健康' "$ROOT/syshealth"
+          CSRF2="$(csrf "$ROOT/system")"
+          SID="$(awk '$6=="vf_press_session"{print $7}' "$ROOT/cookies" | tail -1)"; test -n "$SID"
+          php -d session.save_path="$ROOT/sessions" -r 'session_name("vf_press_session");session_id($argv[1]);session_start();unset($_SESSION["vf_press_recent_auth_at"]);session_write_close();' "$SID"
+          curl -sS -D "$ROOT/guard.h" -o /dev/null -b "$ROOT/cookies" -c "$ROOT/cookies" -X POST "$BASE/studio/updates/install" --data-urlencode "_csrf=$CSRF2"
+          grep -Fqi 'Location: /studio/system?return_to=/studio/updates' "$ROOT/guard.h"
+          curl -fsS -b "$ROOT/cookies" "$BASE/studio/system?return_to=/studio/updates" >"$ROOT/step"
+          CSRF3="$(csrf "$ROOT/step")"
+          curl -sS -o /dev/null -b "$ROOT/cookies" -c "$ROOT/cookies" -X POST "$BASE/studio/system/step-up" --data-urlencode "_csrf=$CSRF3" --data-urlencode return_to=/studio/system --data-urlencode password=wrong-password
+          curl -fsS -b "$ROOT/cookies" "$BASE/studio/system" >"$ROOT/wrong"; grep -Fq '管理员密码验证失败' "$ROOT/wrong"
+          CSRF4="$(csrf "$ROOT/wrong")"
+          curl -sS -D "$ROOT/correct.h" -o /dev/null -b "$ROOT/cookies" -c "$ROOT/cookies" -X POST "$BASE/studio/system/step-up" --data-urlencode "_csrf=$CSRF4" --data-urlencode return_to=/studio/updates --data-urlencode "password=$PASS"
+          grep -Fqi 'Location: /studio/updates' "$ROOT/correct.h"
+          kill "$PID"; wait "$PID" || true; trap - EXIT
+          ! grep -Eqi 'Fatal error|Parse error|Uncaught|EADDRINUSE' "$ROOT/server.log"
+          echo P06_V2_HTTP_SYSTEM_SURFACES=PASS
+          echo P06_V2_STEP_UP_GATE=PASS
+      - name: Verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          echo P06_COMMON_BASELINE_V2_RUNTIME_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P06_COMMON_BASELINE_V2_VERSION=0.1.6
+          echo P06_COMMON_BASELINE_V2_SCHEMA=2
+          echo P06_COMMON_BASELINE_V2_MACHINE=PASS
+          echo P06_COMMON_BASELINE_V2_RELEASE=NO
+          echo P06_COMMON_BASELINE_V2_TAG=NO
+          echo P06_COMMON_BASELINE_V2_PRODUCTION=NO
