@@ -1,47 +1,92 @@
-name: P03 Common Baseline V2 Resolver Truth Fix
+name: P03 Common Baseline V2 Exact Source Full Gate
 on:
   push:
     branches: [vf-agent-operations-v1]
     paths: ['.github/workflows/p01-v2.21.18-scope-runtime-fix.yml']
 permissions:
   contents: read
+  actions: read
 jobs:
-  fix:
+  verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     env:
-      EXPECTED_HEAD: e54f17f7798bd20630eae895b5e042c8f4c7e0ec
-      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
+      EXACT_SOURCE: 3c86809e97970added30aaa65d343d26fe920110
+      BASE_SOURCE: 29580b62a0839ee3453ccf0cf8a4902bdf3cd8ec
+      FIXTURE_PASS: P03BaselineV2-2026!
+      PHP_TEST_IMAGE: vf-forge-v2-php84
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Checkout public gate harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: vf-agent-operations-v1
+          persist-credentials: false
+          path: harness
+      - name: Checkout exact private P03 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-forge
-          ref: ${{ env.TARGET_BRANCH }}
-          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: true
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
           fetch-depth: 0
-      - name: Apply resolver truth fix
+          path: p03
+      - name: Prepare PHP 8.4 verification runtime
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip, fileinfo, sodium, curl, mbstring
+          coverage: none
+      - name: Build isolated PHP 8.4 Docker runtime
         shell: bash
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('src/app/CommonBaseline.php');s=p.read_text(encoding='utf-8')
-          old="    public static function resolve(PDO $db): array\n    {\n        $rows=[];"
-          new="    public static function resolve(PDO $db): array\n    {\n        vfab_start_session();\n        $rows=[];"
-          assert s.count(old)==1,s.count(old)
-          s=s.replace(old,new,1)
-          s=s.replace("'Repository.php',function_exists('vfab_job_timeout_seconds')", "'Foundation.php',function_exists('vfab_job_timeout_seconds')")
-          p.write_text(s,encoding='utf-8',newline='\n')
-          PY
-          php -l src/app/CommonBaseline.php >/dev/null
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y sqlite3 curl >/dev/null
+          cat >"$RUNNER_TEMP/Dockerfile.p03-v2" <<'EOF'
+          FROM php:8.4-cli-bookworm@sha256:5380a7dd17b978cd14fb2c84cd67ddc47adaf079b240f8138224bbadefae46f7
+          ARG HOST_UID=1001
+          ARG HOST_GID=121
+          RUN apt-get update && apt-get install -y --no-install-recommends libzip-dev sqlite3 && docker-php-ext-install pdo_sqlite zip && rm -rf /var/lib/apt/lists/*
+          USER ${HOST_UID}:${HOST_GID}
+          EOF
+          docker build --build-arg "HOST_UID=$(id -u)" --build-arg "HOST_GID=$(id -g)" -t "$PHP_TEST_IMAGE" -f "$RUNNER_TEMP/Dockerfile.p03-v2" "$RUNNER_TEMP" >/dev/null
+          docker run --rm "$PHP_TEST_IMAGE" php -r 'foreach(["pdo_sqlite","sqlite3","zip","fileinfo","sodium"] as $x){if(!extension_loaded($x)){fwrite(STDERR,"missing:$x\n");exit(1);}} echo PHP_VERSION," P03_V2_RUNTIME_PASS\n";'
+      - name: Exact source static and scope gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
           test "$(tr -d '\r\n' < VERSION)" = '1.37.3'
           test "$(tr -d '\r\n' < database/schema/SCHEMA_VERSION)" = '30'
-          git diff --quiet "$EXPECTED_HEAD" -- VERSION database
-          git config user.name VictorForge
-          git config user.email llhzx2018@gmail.com
-          git add src/app/CommonBaseline.php
-          git commit -m 'fix(P03): make baseline resolver CLI runtime-derived [release:no][production:no]'
-          git push origin HEAD:$TARGET_BRANCH
-          echo P03_RESOLVER_FIX_HEAD=$(git rev-parse HEAD)
+          git diff --quiet "$BASE_SOURCE" "$EXACT_SOURCE" -- VERSION database
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          node --check public/assets/experience.js
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          grep -Fq '"state": "MACHINE_VERIFICATION_PENDING"' docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json
+          echo P03_V2_EXACT_SOURCE_STATIC_PASS
+      - name: Execute current regression plus V2 contract gate
+        shell: bash
+        working-directory: p03
+        run: |
+          set -Eeuo pipefail
+          chmod +x ../harness/scripts/p03_common_baseline_v2_full_gate.sh
+          bash ../harness/scripts/p03_common_baseline_v2_full_gate.sh
+      - name: Final machine verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo P03_EXACT_SOURCE=$EXACT_SOURCE
+          echo P03_COMMON_BASELINE_V2_MACHINE_RESULT=PASS
+          echo VERSION_CHANGED=NO
+          echo SCHEMA_CHANGED=NO
+          echo RELEASE=NO
+          echo PRODUCTION=NO
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f vf-forge-current-http vf-forge-v2-gate-http >/dev/null 2>&1 || true
+          rm -rf p03 "$RUNNER_TEMP/p03-v2-runtime" "$RUNNER_TEMP/p03-v2-private" "$RUNNER_TEMP/p03-v2-sessions" "$RUNNER_TEMP/Dockerfile.p03-v2"
