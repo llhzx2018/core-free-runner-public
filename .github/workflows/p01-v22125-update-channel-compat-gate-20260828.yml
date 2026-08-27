@@ -1,0 +1,133 @@
+name: P01 V2.21.25 Update Channel Compatibility Gate
+
+on:
+  push:
+    branches: [task/p01-v22125-update-channel-compat-20260828]
+    paths:
+      - '.github/workflows/p01-v22125-update-channel-compat-gate-20260828.yml'
+      - 'scripts/p01-v22125-compat-updater-gate.php'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      SOURCE_COMMIT: 7363949d18f44652458ec7ef0f7c67c9cae1bbb4
+      TARGET_TAG: v2.21.25
+      ORIGINAL_REPAIR: server-update-v2.21.25-repair.php
+      ORIGINAL_REPAIR_SHA: e35212329c9754c3dcec50d9772613c3db318f8c07227deb9a2f3ae7479af382
+      COMPAT_ASSET: VF_Start_V2.21.25_UPDATE.zip
+      COMPAT_REPAIR: repair-v2.21.25.php
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Checkout exact V2.21.24 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.21.24
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: production
+      - name: Fence old updater contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_COMMIT"
+          grep -Fq "'VF_Start_V' . \$target . '_UPDATE.zip'" production/src/app/UpdateManager.php
+          grep -Fq "'repair-v' . \$targetVersion . '.php'" production/src/app/UpdateManager.php
+          echo OLD_UPDATER_CONTRACT=PASS
+      - name: Build compatibility asset from verified repair
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-compat && mkdir -p /tmp/p01-compat
+          gh release download "$TARGET_TAG" --repo "$PRODUCT_REPO" --dir /tmp/p01-compat --pattern "$ORIGINAL_REPAIR"
+          test "$(sha256sum /tmp/p01-compat/$ORIGINAL_REPAIR|awk '{print $1}')" = "$ORIGINAL_REPAIR_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile, hashlib, os
+          r=Path('/tmp/p01-compat'); data=(r/os.environ['ORIGINAL_REPAIR']).read_bytes(); out=r/os.environ['COMPAT_ASSET']
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              i=zipfile.ZipInfo(os.environ['COMPAT_REPAIR'],(2026,8,28,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=(0o100644&0xffff)<<16; i.create_system=3; z.writestr(i,data)
+          Path('/tmp/p01-compat/meta').write_text('COMPAT_SHA='+hashlib.sha256(out.read_bytes()).hexdigest()+'\nCOMPAT_BYTES='+str(out.stat().st_size)+'\n')
+          PY
+          cat /tmp/p01-compat/meta >> "$GITHUB_ENV"
+          test "$(unzip -Z1 /tmp/p01-compat/$COMPAT_ASSET)" = "$COMPAT_REPAIR"
+          test "$(unzip -p /tmp/p01-compat/$COMPAT_ASSET "$COMPAT_REPAIR"|sha256sum|awk '{print $1}')" = "$ORIGINAL_REPAIR_SHA"
+          echo COMPAT_ASSET_BUILD=PASS
+      - name: Build exact compatibility manifest
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/core-updates/contents/projects/P01.json -f ref=main --jq .content | base64 -d > /tmp/p01-compat/P01.json
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          p=Path('/tmp/p01-compat/P01.json'); d=json.loads(p.read_text());
+          assert d['target_version']=='2.21.25' and d['from_versions']==['2.21.24'] and d['release_id']==378146285
+          d['asset_name']=os.environ['COMPAT_ASSET']; d['asset_bytes']=int(os.environ['COMPAT_BYTES']); d['asset_sha256']=os.environ['COMPAT_SHA']
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n')
+          PY
+          jq -e --arg n "$COMPAT_ASSET" --arg s "$COMPAT_SHA" --argjson b "$COMPAT_BYTES" '.asset_name==$n and .asset_sha256==$s and .asset_bytes==$b and .update_type=="ATOMIC" and .backup_required==true and .rollback_supported==true' /tmp/p01-compat/P01.json >/dev/null
+          echo COMPAT_MANIFEST=PASS
+      - name: Fresh install V2.21.24
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-runtime && cp -a production/src /tmp/p01-runtime && cd /tmp/p01-runtime
+          php -S 127.0.0.1:18261 -t . >/tmp/p01-server.log 2>&1 & PID=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18261/setup.php -o /tmp/p01-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01.cookies -b /tmp/p01.cookies http://127.0.0.1:18261/setup.php -o /tmp/p01-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-setup.html').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01.cookies -b /tmp/p01.cookies -X POST http://127.0.0.1:18261/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Compat Gate' --data-urlencode 'admin_password=P01V22125!CompatGate' --data-urlencode 'admin_password_confirm=P01V22125!CompatGate' -o /tmp/p01-post.html
+          kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true
+          test -f app/.runtime.php
+          test "$(tr -d '\r\n' < VERSION.txt)" = '2.21.24'
+          php cli/verify.php
+      - name: Real old-updater check prepare install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php scripts/p01-v22125-compat-updater-gate.php /tmp/p01-runtime /tmp/p01-compat/P01.json /tmp/p01-compat/$COMPAT_ASSET | tee /tmp/p01-updater.log
+          grep -Fx 'P01_V22124_REAL_CHECK=PASS' /tmp/p01-updater.log
+          grep -Fx 'P01_V22124_REAL_PREPARE=PASS' /tmp/p01-updater.log
+          grep -Fx 'P01_V22124_REAL_INSTALL=PASS' /tmp/p01-updater.log
+          test "$(tr -d '\r\n' < /tmp/p01-runtime/VERSION.txt)" = '2.21.25'
+          php /tmp/p01-runtime/cli/verify.php
+          php /tmp/p01-runtime/cli/baseline-verify.php | tee /tmp/p01-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-baseline.txt
+          echo P01_V22124_TO_V22125_COMPAT_UPGRADE=PASS
+      - name: Verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$COMPAT_SHA" --argjson bytes "$COMPAT_BYTES" '{project_id:"P01",gate:"V2.21.25_UPDATE_CHANNEL_COMPATIBILITY",status:"PASS",pass:true,source_version:"2.21.24",target_version:"2.21.25",compat_asset:{name:"VF_Start_V2.21.25_UPDATE.zip",bytes:$bytes,sha256:$sha,inner_name:"repair-v2.21.25.php",inner_sha256:"e35212329c9754c3dcec50d9772613c3db318f8c07227deb9a2f3ae7479af382"},real_old_updater:{check:"PASS",prepare:"PASS",install:"PASS"},schema:"2026080902",drift_count:0,production_changed:false}' > /tmp/p01-compat/result.json
+          cat /tmp/p01-compat/result.json
+          echo P01_UPDATE_CHANNEL_COMPAT_MACHINE=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-V2.21.25-UPDATE-CHANNEL-COMPAT
+          path: |
+            /tmp/p01-compat/VF_Start_V2.21.25_UPDATE.zip
+            /tmp/p01-compat/P01.json
+            /tmp/p01-compat/result.json
+          if-no-files-found: error
+          retention-days: 30
