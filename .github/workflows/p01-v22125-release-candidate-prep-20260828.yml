@@ -1,0 +1,146 @@
+name: P01 V2.21.25 Release Candidate Prep
+
+on:
+  push:
+    branches:
+      - task/p01-v22125-release-candidate-prep-20260828
+    paths:
+      - '.github/workflows/p01-v22125-release-candidate-prep-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      RELEASE_BRANCH: release/p01-v2.21.25-common-baseline-v2-20260828
+      EXPECTED_BASE: 6b774b6f46c26b94ea83f5de8754f4db556447a5
+      OLD_VERSION: 2.21.24
+      NEW_VERSION: 2.21.25
+      SCHEMA: '2026080902'
+    steps:
+      - name: Clone exact P01 release branch
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --branch "$RELEASE_BRANCH" "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git" p01
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch -q origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = "$OLD_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$OLD_VERSION"
+          test "$(grep -Fxc "if (!defined('VF_VERSION')) define('VF_VERSION', '$OLD_VERSION');" src/app/bootstrap.php)" -eq 1
+          test "$(grep -Fxc "if (!defined('VF_SCHEMA_VERSION')) define('VF_SCHEMA_VERSION', '$SCHEMA');" src/app/bootstrap.php)" -eq 1
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.24',x
+          assert x['working_version']=='2.21.24',x
+          assert x['candidate_version']=='2.21.24',x
+          assert str(x['schema_version'])=='2026080902',x
+          assert x['component_versions']['browser_helper']=='1.6.4',x
+          PY
+          test -z "$(git status --porcelain)"
+          echo P01_RELEASE_BRANCH_FENCE=PASS
+
+      - name: Apply release identity only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          printf '%s\n' "$NEW_VERSION" > VERSION
+          printf '%s\n' "$NEW_VERSION" > src/VERSION.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          boot=Path('src/app/bootstrap.php')
+          s=boot.read_text(encoding='utf-8')
+          old="if (!defined('VF_VERSION')) define('VF_VERSION', '2.21.24');"
+          new="if (!defined('VF_VERSION')) define('VF_VERSION', '2.21.25');"
+          if s.count(old)!=1: raise SystemExit('bootstrap version anchor mismatch')
+          s=s.replace(old,new,1)
+          boot.write_text(s,encoding='utf-8',newline='\n')
+
+          p=Path('VF_PROJECT.json')
+          x=json.loads(p.read_text(encoding='utf-8'))
+          x['status']='V2.21.24 PRODUCTION / V2.21.25 COMMON BASELINE V2 RELEASE CANDIDATE'
+          x['working_version']='2.21.25'
+          x['candidate_version']='2.21.25'
+          x['candidate_state']='RELEASE CANDIDATE / COMMON PRODUCT BASELINE V2 / MACHINE + ARTIFACT GATES REQUIRED'
+          x['current_phase']='V2.21.25 RELEASE CANDIDATE / COMMON PRODUCT BASELINE V2'
+          x['current_authority']='release/p01-v2.21.25-common-baseline-v2-20260828 from main@6b774b6f46c26b94ea83f5de8754f4db556447a5; formal release remains v2.21.24 until publication'
+          x['git_governance']='V2.21.25 release candidate is isolated on release branch; no force; production remains 2.21.24 until formal publication and owner backend upgrade'
+          x.setdefault('gates',{})['static_identity']='PENDING / VERSION + src/VERSION.txt + VF_VERSION = 2.21.25; exact-source machine gate required'
+          x['gates']['release']='PENDING / V2.21.25 FORMAL ARTIFACT + PUBLICATION'
+          x['gates']['production']='UNCHANGED / 2.21.24 / OWNER BACKEND UPGRADE REQUIRED AFTER PUBLICATION'
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8',newline='\n')
+
+          c=Path('CHANGELOG.md')
+          t=c.read_text(encoding='utf-8')
+          anchor='## 当前维护基线\n\n'
+          if t.count(anchor)!=1: raise SystemExit('changelog anchor mismatch')
+          entry=(
+              '### VF Start V2.21.25 — Common Product Baseline V2 Release Candidate\n'
+              '- 将已完成并通过治理闭环的 Common Product Baseline V2 正式纳入可发布运行源码，统一 System Info / System Baseline / Runtime Health / Online Update / Backup-Restore 维护语义。\n'
+              '- PERSONAL_SINGLE_ADMIN 会话基线采用 Idle 7 天、Absolute/Cookie/Server Floor 30 天；高风险操作 Recent Auth / Step-up 窗口 900 秒。\n'
+              '- 保留 P01 已验证的 FILE_UPLOAD 恢复工件显式例外，不创建 Shadow Truth；Required DRIFT=0、UNKNOWN=0。\n'
+              '- Schema 继续 2026080902；Browser Helper 继续 1.6.4；本次不做数据库迁移或 Helper 机械升版。\n'
+              '- 当前为 Release Candidate；正式 Tag / Release / core-updates / Production Upgrade 需通过后续 Machine + Artifact + Publication Gate。\n\n'
+          )
+          t=t.replace(anchor,anchor+entry,1)
+          c.write_text(t,encoding='utf-8',newline='\n')
+          PY
+
+      - name: Candidate diff and syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          mapfile -t changed < <(git diff --name-only)
+          test "${#changed[@]}" -eq 5
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'VERSION'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'src/VERSION.txt'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'src/app/bootstrap.php'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'VF_PROJECT.json'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'CHANGELOG.md'
+          test "$(tr -d '\r\n' < VERSION)" = "$NEW_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$NEW_VERSION"
+          grep -Fq "define('VF_VERSION', '$NEW_VERSION')" src/app/bootstrap.php
+          grep -Fq "define('VF_SCHEMA_VERSION', '$SCHEMA')" src/app/bootstrap.php
+          php -l src/app/bootstrap.php
+          python3 -m json.tool VF_PROJECT.json >/dev/null
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.24',x
+          assert x['working_version']=='2.21.25',x
+          assert x['candidate_version']=='2.21.25',x
+          assert str(x['schema_version'])=='2026080902',x
+          assert x['component_versions']['browser_helper']=='1.6.4',x
+          PY
+          echo P01_V2_21_25_RELEASE_IDENTITY_GATE=PASS
+
+      - name: Commit and push candidate
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION src/VERSION.txt src/app/bootstrap.php VF_PROJECT.json CHANGELOG.md
+          git diff --cached --check
+          git commit -m 'release(P01): prepare V2.21.25 Common Baseline V2'
+          NEW_SHA="$(git rev-parse HEAD)"
+          git push origin "HEAD:$RELEASE_BRANCH"
+          test "$(git ls-remote origin "refs/heads/$RELEASE_BRANCH" | awk '{print $1}')" = "$NEW_SHA"
+          echo P01_RELEASE_CANDIDATE_SHA="$NEW_SHA"
+          echo P01_RELEASE_CANDIDATE_PREP=PASS
