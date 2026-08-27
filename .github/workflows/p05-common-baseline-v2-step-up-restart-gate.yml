@@ -1,0 +1,155 @@
+name: P05 Common Baseline V2 Step-up Restart Gate
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p05-common-baseline-v2-step-up-restart-gate.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXACT_SOURCE: 3c081bdd1444149f4411eabf5f5ee9e57cff505a
+      ASSESSED_BASE: 2e0f3a66a8764d54841f7d7161de7d35e5aacf3f
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260828
+    steps:
+      - name: Checkout exact P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+      - name: Prepare Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Exact source fence and build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = '1.0.1'
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          npm ci
+          npm run build
+      - name: Prove persisted session loses recent-auth across real process restart
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          ROOT="$RUNNER_TEMP/p05-v2-step-up-restart"
+          PORT=19015
+          PASS='P05-V2-Step-Up-Restart-Password-2026!'
+          export NODE_ENV=test
+          export PORT
+          export VF_DATABASE_PROVIDER=sqlite
+          export VF_SQLITE_PATH="$ROOT/vf-seo.sqlite3"
+          export VF_BACKUP_DIR="$ROOT/backups"
+          export VF_ADMIN_USERNAME=admin
+          export VF_ADMIN_PASSWORD="$PASS"
+          export VF_SECURE_COOKIES=false
+          export VF_REQUIRE_HTTPS=false
+          export VF_TRUST_PROXY=false
+          export VF_SESSION_TTL_SECONDS=2592000
+          export VF_SESSION_IDLE_SECONDS=604800
+          export VF_SESSION_ABSOLUTE_SECONDS=2592000
+          export VF_SESSION_COOKIE_SECONDS=2592000
+          export VF_STEP_UP_WINDOW_SECONDS=900
+          export VF_DISPLAY_TIMEZONE=Asia/Shanghai
+          export VF_LOCALE=zh-CN
+          mkdir -p "$ROOT"
+          npm run migrate
+          npm run bootstrap:admin
+
+          start_server() {
+            node dist/src/server/index.js >"$1" 2>&1 &
+            SERVER_PID=$!
+            for _ in $(seq 1 120); do
+              curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && return 0
+              if ! kill -0 "$SERVER_PID" 2>/dev/null; then cat "$1"; return 31; fi
+              sleep .1
+            done
+            cat "$1"
+            return 32
+          }
+          stop_server() {
+            kill "$SERVER_PID"
+            wait "$SERVER_PID" || true
+            for _ in $(seq 1 60); do
+              if ! curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then return 0; fi
+              sleep .1
+            done
+            echo 'SERVER_PORT_DID_NOT_CLOSE'
+            return 33
+          }
+
+          start_server "$ROOT/server-1.log"
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          cat > "$ROOT/login.mjs" <<'JS'
+          import fs from 'node:fs';
+          const base=`http://127.0.0.1:${process.env.PORT}`;
+          const password=process.env.VF_ADMIN_PASSWORD;
+          const login=await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json','origin':base},body:JSON.stringify({username:'admin',password})});
+          if(login.status!==200) throw new Error(`login ${login.status} ${await login.text()}`);
+          const setCookie=login.headers.get('set-cookie')||'';
+          if(!/Max-Age=2592000/i.test(setCookie)) throw new Error(`cookie ${setCookie}`);
+          const cookie=setCookie.split(';')[0];
+          const body=await login.json();
+          if(!cookie||!body.csrfToken) throw new Error('session material missing');
+          fs.writeFileSync(process.env.SESSION_FILE,JSON.stringify({cookie,csrf:body.csrfToken,password}));
+          console.log('P05_V2_LOGIN_BOUNDARY=PASS');
+          JS
+          SESSION_FILE="$ROOT/session.json" node "$ROOT/login.mjs"
+          stop_server
+
+          if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+            echo 'OLD_SERVER_STILL_REACHABLE'
+            exit 34
+          fi
+
+          start_server "$ROOT/server-2.log"
+          cat > "$ROOT/verify.mjs" <<'JS'
+          import fs from 'node:fs';
+          const {cookie,csrf,password}=JSON.parse(fs.readFileSync(process.env.SESSION_FILE,'utf8'));
+          const base=`http://127.0.0.1:${process.env.PORT}`;
+          const post=async(path,body)=>{const r=await fetch(base+path,{method:'POST',headers:{'content-type':'application/json','origin':base,'cookie':cookie,'x-csrf-token':csrf},body:JSON.stringify(body)});let b={};try{b=await r.json()}catch{}return {status:r.status,body:b};};
+          const me=await fetch(base+'/api/auth/me',{headers:{cookie}});
+          if(me.status!==200) throw new Error(`persisted session lost ${me.status}`);
+          const blockedImport=await post('/api/system/import',{});
+          if(blockedImport.status!==403||blockedImport.body.error!=='STEP_UP_REQUIRED') throw new Error(`import guard ${JSON.stringify(blockedImport)}`);
+          const blockedUpdate=await post('/api/system/update/apply',{});
+          if(blockedUpdate.status!==403||blockedUpdate.body.error!=='STEP_UP_REQUIRED') throw new Error(`update guard ${JSON.stringify(blockedUpdate)}`);
+          const wrong=await post('/api/system/step-up',{password:'wrong-password'});
+          if(wrong.status!==403||wrong.body.error!=='STEP_UP_INVALID_PASSWORD') throw new Error(`wrong password ${JSON.stringify(wrong)}`);
+          const accepted=await post('/api/system/step-up',{password});
+          if(accepted.status!==200||accepted.body.recentAuth!==true||accepted.body.windowSeconds!==900) throw new Error(`accepted ${JSON.stringify(accepted)}`);
+          const after=await post('/api/system/import',{});
+          if(after.status!==400||after.body.error!=='IMPORT_PACKAGE_INVALID') throw new Error(`guard did not fall through ${JSON.stringify(after)}`);
+          console.log('P05_V2_STEP_UP_RESTART=PASS');
+          JS
+          SESSION_FILE="$ROOT/session.json" node "$ROOT/verify.mjs"
+          stop_server
+          trap - EXIT
+          if grep -Eqi 'Unhandled|uncaught|fatal|EADDRINUSE' "$ROOT/server-1.log" "$ROOT/server-2.log"; then cat "$ROOT/server-1.log" "$ROOT/server-2.log"; exit 35; fi
+          echo P05_V2_DIRECT_PROCESS_RESTART=PASS
+      - name: Verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          echo P05_COMMON_BASELINE_V2_STEP_UP_MACHINE=PASS
+          echo P05_COMMON_BASELINE_V2_RELEASE=NO
+          echo P05_COMMON_BASELINE_V2_PRODUCTION=NO
