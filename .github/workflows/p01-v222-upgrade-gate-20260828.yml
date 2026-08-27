@@ -1,0 +1,139 @@
+name: P01 V2.22.0 Upgrade Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-upgrade-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXACT_SOURCE: edf07687554a456f843f4f6aae34553b81c367e2
+      PROD_SOURCE: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+      PROD_VERSION: 2.21.25
+      PROD_SCHEMA: '2026080902'
+      WORKING_SCHEMA: '2026082801'
+      TARGET_RELEASE: 2.22.0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: p01
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PROD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: prod
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Install V2.21.25 and seed business data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-upgrade /tmp/p01-v222-upgrade.cookies
+          cp -a prod/src /tmp/p01-v222-upgrade
+          cd /tmp/p01-v222-upgrade
+          php -S 127.0.0.1:18223 -t . >/tmp/p01-v222-upgrade-server.log 2>&1 &
+          echo $! >/tmp/p01-v222-upgrade.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18223/setup.php -o /tmp/p01-v222-upgrade-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-upgrade.cookies -b /tmp/p01-v222-upgrade.cookies http://127.0.0.1:18223/setup.php -o /tmp/p01-v222-upgrade-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-upgrade.cookies -b /tmp/p01-v222-upgrade.cookies -X POST http://127.0.0.1:18223/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V22125 Upgrade Gate' \
+            --data-urlencode 'admin_password=P01V222!UpgradeGate' \
+            --data-urlencode 'admin_password_confirm=P01V222!UpgradeGate' \
+            -o /tmp/p01-v222-upgrade-post.html
+          php cli/verify.php
+          test "$(php -r "require 'app/bootstrap.php'; echo VF_VERSION;")" = "$PROD_VERSION"
+          test "$(php -r "require 'app/bootstrap.php'; echo (string)(new VfMigrationRunner(vf_db()))->schemaState()['expected_head'];")" = "$PROD_SCHEMA"
+          cat >/tmp/p01-v222-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-upgrade/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cid=$repo->createCategory(['name'=>'V222 Gate Category','description'=>'upgrade preserve','is_private'=>false]);
+          $saved=$repo->saveLink(null,['category_id'=>$cid,'title'=>'V222 Gate Channel','url'=>'https://www.youtube.com/@v222-gate','description'=>'must survive upgrade','is_private'=>false],'manual');
+          file_put_contents('/tmp/p01-v222-seed-id.txt',(string)$saved['id']);
+          file_put_contents('/tmp/p01-v222-category-id.txt',(string)$cid);
+          echo "P01_V22125_SEED=PASS\n";
+          PHP
+          php /tmp/p01-v222-seed.php
+      - name: Overlay exact source and migrate through runtime pointer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a "$GITHUB_WORKSPACE/p01/src/." /tmp/p01-v222-upgrade/
+          cd /tmp/p01-v222-upgrade
+          test -f app/.runtime.php
+          cat >/tmp/p01-v222-migrate.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-upgrade/app/bootstrap.php';
+          $pdo=new PDO('sqlite:'.VF_DB_FILE,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false]);
+          $pdo->exec('PRAGMA foreign_keys=ON');
+          $pdo->exec('PRAGMA busy_timeout=5000');
+          $result=(new VfMigrationRunner($pdo))->migrate('2.21.25','2.22.0');
+          echo 'MIGRATION_APPLIED='.implode(',',array_map('strval',$result['applied']??[])).PHP_EOL;
+          echo 'MIGRATION_SCHEMA='.(string)($result['schema_version']??'').PHP_EOL;
+          PHP
+          php /tmp/p01-v222-migrate.php
+          php cli/verify.php
+          php cli/surface-verify.php | tee /tmp/p01-v222-surface-upgrade.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-surface-upgrade.txt
+          grep -Fx "WORKING_SCHEMA=$WORKING_SCHEMA" /tmp/p01-v222-surface-upgrade.txt
+      - name: Verify business-data preservation and Surface contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v222-upgrade-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-upgrade/app/bootstrap.php';
+          require_once '/tmp/p01-v222-upgrade/app/SurfaceRepository.php';
+          $db=vf_db();
+          $linkId=(int)trim(file_get_contents('/tmp/p01-v222-seed-id.txt'));
+          $categoryId=(int)trim(file_get_contents('/tmp/p01-v222-category-id.txt'));
+          if(!$db->query('SELECT id FROM links WHERE id='.$linkId)->fetchColumn()) throw new RuntimeException('seed link lost');
+          if(!$db->query('SELECT id FROM categories WHERE id='.$categoryId)->fetchColumn()) throw new RuntimeException('seed category lost');
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0) throw new RuntimeException('migration silently inserted profiles');
+          $s=new VfSurfaceRepository($db);
+          if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('no-profile asset not in Start');
+          $s->upsertProfile($linkId,['surface'=>'channels','resource_kind'=>'youtube','note'=>'private-memory','background_friendly'=>true]);
+          if(!array_filter($s->collection('channels',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('channel assignment failed');
+          $public=$s->allAssets(false);$p=null;foreach($public as $row){if((int)$row['id']===$linkId){$p=$row;break;}}
+          if(!$p) throw new RuntimeException('public projection missing');
+          foreach(['surface_note','last_surface_opened_at','media_status'] as $key) if((string)($p[$key]??'')!=='') throw new RuntimeException('private metadata leaked '.$key);
+          if((int)($p['background_friendly']??0)!==0) throw new RuntimeException('background preference leaked');
+          if($s->recordOpen($linkId)!=='https://www.youtube.com/@v222-gate') throw new RuntimeException('recordOpen mismatch');
+          $s->resetToStart($linkId);
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles WHERE link_id='.$linkId)->fetchColumn()!==0) throw new RuntimeException('reset failed');
+          if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('reset asset not in Start');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok') throw new RuntimeException('integrity failed');
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)) throw new RuntimeException('foreign key failed');
+          echo "P01_V222_UPGRADE_DATA_PRESERVE=PASS\n";
+          PHP
+          php /tmp/p01-v222-upgrade-assert.php
+          cd /tmp/p01-v222-upgrade
+          php cli/baseline-verify.php | tee /tmp/p01-v222-baseline-upgrade.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-baseline-upgrade.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-baseline-upgrade.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-baseline-upgrade.txt
+          kill "$(cat /tmp/p01-v222-upgrade.pid)" 2>/dev/null || true
+          echo P01_V222_UPGRADE=PASS
