@@ -40,13 +40,11 @@ docker run --rm -v "$TARGET_RUNTIME:/app" -v "$BASELINE_DATA:$BASELINE_DATA" -v 
 grep -Fx 'DRIFT_COUNT=0' "$BASELINE_OUT"
 grep -Fx 'UNKNOWN_COUNT=0' "$BASELINE_OUT"
 grep -Fx 'BASELINE_FULL_PASS=YES' "$BASELINE_OUT"
-# Baseline identity/profile are runtime contracts, not formal CLI output fields.
-# Assert them through the installed runtime constants/defaults used by the passing V2 gate.
 test "$(sqlite3 "$BASELINE_DATA/database/"*.sqlite "select setting_value from settings where setting_key='timezone';")" = 'Asia/Shanghai'
 test "$(sqlite3 "$BASELINE_DATA/database/"*.sqlite "select setting_value from settings where setting_key='session_keep_days';")" = '30'
 test "$(sqlite3 "$BASELINE_DATA/database/"*.sqlite "select setting_value from settings where setting_key='session_timeout_minutes';")" = '10080'
-grep -Fq "BASELINE_ID = 'VF-COMMON-PRODUCT-BASELINE@2.0'" "$TARGET_RUNTIME/app/CommonBaseline.php"
-grep -Fq "PROFILE = 'PERSONAL_SINGLE_ADMIN'" "$TARGET_RUNTIME/app/CommonBaseline.php"
+grep -Fq "public const BASELINE_ID='VF-COMMON-PRODUCT-BASELINE@2.0';" "$TARGET_RUNTIME/app/CommonBaseline.php"
+grep -Fq "public const PROFILE='PERSONAL_SINGLE_ADMIN';" "$TARGET_RUNTIME/app/CommonBaseline.php"
 docker rm -f "$BASELINE_CONTAINER" >/dev/null
 echo P03_V1374_COMMON_BASELINE_V2=PASS'''
 s=s[:start]+installed+s[end:]
