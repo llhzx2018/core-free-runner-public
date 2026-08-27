@@ -9,7 +9,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       EXACT_SOURCE: aaa636fb96c0f2438f434fc8e808ef2b7723f3f5
     steps:
@@ -21,46 +21,103 @@ jobs:
           token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
           persist-credentials: false
           path: p04
-      - name: Prepare PHP 8.4
+      - name: Prepare PHP 8.4 and browser
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
         with:
           php-version: '8.4'
           extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring
           coverage: none
-      - name: Fresh install and dump resolver
+      - name: Install diagnostic browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Fresh browser diagnostic
         shell: bash
         run: |
           set -Eeuo pipefail
           cd p04
           test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
-          WEB="$RUNNER_TEMP/p04-v2-diagnostic-runtime"
-          python3 scripts/build-release-tree.py "$WEB" >/tmp/p04-v2-diagnostic-build.json
-          php -S 127.0.0.1:19005 -t "$WEB" >"$RUNNER_TEMP/p04-v2-diagnostic-server.log" 2>&1 &
+          WEB="$RUNNER_TEMP/p04-v2-browser-diagnostic-runtime"
+          REPORT="$RUNNER_TEMP/p04-v2-browser-report.json"
+          SERVER_LOG="$RUNNER_TEMP/p04-v2-browser-server.log"
+          python3 scripts/build-release-tree.py "$WEB" >/tmp/p04-v2-browser-diagnostic-build.json
+          php -d opcache.jit=0 -S 127.0.0.1:19006 -t "$WEB" >"$SERVER_LOG" 2>&1 &
           PID=$!
           trap 'kill "$PID" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 100); do curl -fsS -c "$RUNNER_TEMP/cookies" http://127.0.0.1:19005/setup.php -o "$RUNNER_TEMP/setup.html" && break || sleep .1; done
-          CSRF="$(python3 - <<'PY'
-          import re,pathlib
-          s=pathlib.Path('/home/runner/work/_temp/setup.html').read_text(errors='ignore')
-          m=re.search(r'name="csrf" value="([^"]+)"',s)
-          print(m.group(1) if m else '')
-          PY
-          )"
-          test -n "$CSRF"
-          PASS='VfCommonBaselineV2GateAa123456789'
-          curl -fsS -b "$RUNNER_TEMP/cookies" -c "$RUNNER_TEMP/cookies" -o "$RUNNER_TEMP/setup-post.html" -D "$RUNNER_TEMP/setup-post.headers" \
-            --data-urlencode "csrf=$CSRF" --data-urlencode 'site_name=VF Infra V2 Diagnostic' \
-            --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" \
-            http://127.0.0.1:19005/setup.php || true
-          test -f "$WEB/config.php"
-          echo '--- BASELINE CLI ---'
+          for _ in $(seq 1 120); do
+            curl -fsS http://127.0.0.1:19006/setup.php >/dev/null 2>&1 && break
+            sleep .1
+          done
+          cat > .runner-p04-v2-browser-diagnostic.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19006';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'START',stage:'init',baseline_page:false,system_info:false,atomic_step_up:false,baseline:{},urls:[],page_errors:[],console_errors:[],responses:[]};
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1318,height:900}});
+          page.on('pageerror',e=>report.page_errors.push({url:page.url(),text:String(e)}));
+          page.on('console',m=>{if(m.type()==='error') report.console_errors.push({url:page.url(),text:m.text()});});
+          page.on('response',r=>{if(r.status()>=400) report.responses.push({url:r.url(),status:r.status()});});
+          try {
+            report.stage='setup';
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'}); report.urls.push(page.url());
+            await page.locator('#site_name').fill('VF Infra V2 Browser Diagnostic');
+            await page.locator('#password').fill(password);
+            await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]); report.urls.push(page.url());
+            report.stage='login';
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]); report.urls.push(page.url());
+            report.stage='baseline';
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'}); report.urls.push(page.url());
+            const baselineText=await page.locator('body').innerText();
+            report.baseline.title=baselineText.includes('系统基线');
+            report.baseline.overall=baselineText.includes('PASS_WITH_EXCEPTIONS');
+            report.baseline.drift=String(await page.locator('.metric').filter({hasText:'DRIFT'}).locator('strong').innerText()).trim();
+            report.baseline.unknown=String(await page.locator('.metric').filter({hasText:'UNKNOWN'}).locator('strong').innerText()).trim();
+            report.baseline_page=report.baseline.title && report.baseline.overall && report.baseline.drift==='0' && report.baseline.unknown==='0';
+            report.stage='system-info';
+            await page.goto(base+'/system-info.php',{waitUntil:'domcontentloaded'}); report.urls.push(page.url());
+            const infoText=await page.locator('body').innerText();
+            report.system_info=infoText.includes('系统信息') && infoText.includes('2.8.9');
+            report.stage='maintenance';
+            await page.goto(base+'/maintenance.php',{waitUntil:'domcontentloaded'}); report.urls.push(page.url());
+            report.atomic_step_up=(await page.locator('input[name="admin_password"]').count())===1;
+            report.stage='atomic-wrong-password';
+            const result=await page.evaluate(async()=>{
+              const csrf=document.querySelector('input[name="csrf"]')?.value||'';
+              const form=new FormData();
+              form.append('csrf',csrf);
+              form.append('admin_password','definitely-wrong-password');
+              form.append('expected_sha256','0'.repeat(64));
+              const response=await fetch('maintenance.php',{method:'POST',credentials:'same-origin',body:form});
+              return {status:response.status,text:await response.text()};
+            });
+            report.atomic_post_status=result.status;
+            report.atomic_wrong_password_block=result.text.includes('管理员密码不正确');
+            report.status=(report.baseline_page&&report.system_info&&report.atomic_step_up&&report.atomic_wrong_password_block)?'FUNCTIONAL_PASS':'FUNCTIONAL_FAIL';
+            report.stage='complete';
+          } catch(e) {
+            report.status='THREW';
+            report.error=String(e?.stack||e);
+          } finally {
+            await browser.close();
+            fs.writeFileSync(process.env.VF_P04_BROWSER_REPORT,JSON.stringify(report,null,2));
+          }
+          JS
           set +e
-          (cd "$WEB" && php cli/baseline-verify.php) | tee "$RUNNER_TEMP/p04-v2-baseline-cli.txt"
-          RC=${PIPESTATUS[0]}
+          VF_P04_BROWSER_REPORT="$REPORT" node .runner-p04-v2-browser-diagnostic.mjs
+          NODE_RC=$?
           set -e
-          echo BASELINE_CLI_EXIT=$RC
-          echo '--- BASELINE ROWS NOT PASS/EXCEPTION/N_A ---'
-          php -r 'require $argv[1]."/bootstrap.php"; foreach(CommonBaseline::resolve() as $r){if(!in_array($r["result"],["PASS","EXCEPTION","N_A"],true)) echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),PHP_EOL;}' "$WEB"
-          echo '--- BASELINE COUNTS ---'
-          php -r 'require $argv[1]."/bootstrap.php"; echo json_encode(CommonBaseline::summary(),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),PHP_EOL;' "$WEB"
-          exit $RC
+          rm -f .runner-p04-v2-browser-diagnostic.mjs
+          echo NODE_RC=$NODE_RC
+          echo '--- BROWSER REPORT ---'
+          cat "$REPORT"
+          echo '--- SERVER LOG FILTERED ---'
+          grep -Ev 'JIT is incompatible with third party extensions that override zend_execute_ex\(\)\. JIT disabled\.' "$SERVER_LOG" || true
+          echo P04_V2_BROWSER_DIAGNOSTIC_COMPLETE
