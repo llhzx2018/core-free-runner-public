@@ -1,0 +1,159 @@
+name: P01 System Time Display Patch
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-system-time-display-patch.yml'
+      - 'requests/p01-system-time-display-patch-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: 0bfa4e4c51d71b6f4c7746ab0b7b3afd57138f03
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260827
+    steps:
+      - name: Checkout exact P01 maintenance source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: p01
+
+      - name: Exact source guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          echo "PATCH_BASE=$EXPECTED_HEAD"
+
+      - name: Apply system timezone display contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('p01')
+
+          def one(path, old, new):
+              p=root/path
+              text=p.read_text(encoding='utf-8')
+              n=text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{path}: expected 1 match, got {n}: {old[:120]!r}')
+              p.write_text(text.replace(old,new,1),encoding='utf-8')
+
+          def replace_all_checked(path, old, new, expected):
+              p=root/path
+              text=p.read_text(encoding='utf-8')
+              n=text.count(old)
+              if n != expected:
+                  raise SystemExit(f'{path}: expected {expected} matches, got {n}: {old[:120]!r}')
+              p.write_text(text.replace(old,new),encoding='utf-8')
+
+          # Admin Shell publishes the PHP authority timezone into the DOM.
+          one(Path('src/app/AdminShell.php'),
+              "    $version = defined('VF_VERSION') ? VF_VERSION : '0';\n    ?><!doctype html>",
+              "    $version = defined('VF_VERSION') ? VF_VERSION : '0';\n    $systemTimezone = class_exists('VfCommonBaseline') ? VfCommonBaseline::SYSTEM_TIMEZONE : 'Asia/Shanghai';\n    ?><!doctype html>")
+          one(Path('src/app/AdminShell.php'),
+              '<meta name="robots" content="noindex,nofollow,noarchive"><meta name="csrf-token" content="<?=htmlspecialchars($csrf,ENT_QUOTES,\'UTF-8\')?>">',
+              '<meta name="robots" content="noindex,nofollow,noarchive"><meta name="csrf-token" content="<?=htmlspecialchars($csrf,ENT_QUOTES,\'UTF-8\')?>"><meta name="vf-system-timezone" content="<?=htmlspecialchars($systemTimezone,ENT_QUOTES,\'UTF-8\')?>">')
+
+          # Shared admin formatter: stable, locale-independent shape and explicit IANA timezone.
+          p=root/Path('src/assets/admin-shell.js')
+          text=p.read_text(encoding='utf-8')
+          needle="  var TOAST_DURATION={success:2500,info:4000,warning:6000,error:6000},TOAST_MAX_VISIBLE=2;\n"
+          if text.count(needle)!=1: raise SystemExit('admin-shell.js insertion anchor mismatch')
+          helper="""  var TOAST_DURATION={success:2500,info:4000,warning:6000,error:6000},TOAST_MAX_VISIBLE=2;
+  var SYSTEM_TIMEZONE=(document.querySelector('meta[name="vf-system-timezone"]')||{}).content||'';
+  function systemTimeParts(value){
+    if(!value||!SYSTEM_TIMEZONE)return null;var d=new Date(value);if(isNaN(d.getTime()))return null;
+    try{var parts=new Intl.DateTimeFormat('zh-CN',{timeZone:SYSTEM_TIMEZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d),out={};parts.forEach(function(part){if(part.type!=='literal')out[part.type]=part.value;});return out;}catch(e){return null;}
+  }
+  function formatSystemInstant(value,compact){var p=systemTimeParts(value);if(!p)return value?String(value):'—';return compact?(p.month+'-'+p.day+' '+p.hour+':'+p.minute):(p.year+'-'+p.month+'-'+p.day+' '+p.hour+':'+p.minute+':'+p.second);}
+  window.vfSystemTime={timeZone:SYSTEM_TIMEZONE,format:function(value){return formatSystemInstant(value,false);},formatCompact:function(value){return formatSystemInstant(value,true);}};
+"""
+          p.write_text(text.replace(needle,helper,1),encoding='utf-8')
+
+          # Admin pages use the shared formatter, never browser-local timezone.
+          one(Path('src/assets/system.js'),
+              "function dt(v){if(!v)return'—';var d=new Date(v);return isNaN(d)?esc(v):d.toLocaleString();}",
+              "function dt(v){if(!v)return'—';return window.vfSystemTime?window.vfSystemTime.format(v):esc(v);}")
+          one(Path('src/assets/update-core.js'),
+              "function fmtTime(value){if(!value)return '尚未检查';var d=new Date(value);return isNaN(d.getTime())?String(value):d.toLocaleString();}",
+              "function fmtTime(value){if(!value)return '尚未检查';return window.vfSystemTime?window.vfSystemTime.format(value):String(value);}")
+          one(Path('src/assets/jobs.js'),
+              "const fmt=x=>x?new Date(x).toLocaleString():'—';",
+              "const fmt=x=>x?(window.vfSystemTime?window.vfSystemTime.format(x):String(x)):'—';")
+          one(Path('src/assets/data-recovery.js'),
+              "const fmt=v=>v?new Date(v).toLocaleString():'—';",
+              "const fmt=v=>v?(window.vfSystemTime?window.vfSystemTime.format(v):String(v)):'—';")
+          one(Path('src/assets/security.js'),
+              "function dt(v){if(!v)return'—';var d=new Date(v);return isNaN(d)?esc(v):d.toLocaleString();}",
+              "function dt(v){if(!v)return'—';return window.vfSystemTime?window.vfSystemTime.format(v):esc(v);}")
+          one(Path('src/assets/data-safety.js'),
+              "const fmt=v=>v?new Date(v).toLocaleString():'—';",
+              "const fmt=v=>v?(window.vfSystemTime?window.vfSystemTime.format(v):String(v)):'—';")
+          one(Path('src/assets/health.js'),
+              "const fmt=x=>x?new Date(x).toLocaleString('zh-CN'):'—';",
+              "const fmt=x=>x?(window.vfSystemTime?window.vfSystemTime.format(x):String(x)):'—';")
+          one(Path('src/plugins/rss/assets/workspace.js'),
+              "function dt(v){if(!v)return '从未';var d=new Date(v);return isNaN(d)?text(v):d.toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}",
+              "function dt(v){if(!v)return '从未';return window.vfSystemTime?window.vfSystemTime.formatCompact(v):text(v);}")
+
+          # Main page does not load AdminShell; publish the same authority meta and use a local pure formatter.
+          one(Path('src/index.php'),
+              '  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">',
+              '  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">\n  <meta name="vf-system-timezone" content="<?=htmlspecialchars(VfCommonBaseline::SYSTEM_TIMEZONE,ENT_QUOTES,\'UTF-8\')?>">')
+          one(Path('src/index.php'),
+              "function formatDateTime(value){if(!value)return '尚未检查';try{return new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}catch(e){return String(value);}}",
+              "function formatDateTime(value){if(!value)return '尚未检查';var zone=(document.querySelector('meta[name=\"vf-system-timezone\"]')||{}).content||'';var d=new Date(value);if(!zone||isNaN(d.getTime()))return String(value);try{var parts=new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d),out={};parts.forEach(function(part){if(part.type!=='literal')out[part.type]=part.value;});return out.year+'-'+out.month+'-'+out.day+' '+out.hour+':'+out.minute+':'+out.second;}catch(e){return String(value);}}")
+          # One raw instant in the icon failure workbench bypassed the old formatter.
+          one(Path('src/index.php'),
+              "<span>最后 '+esc(item.lastAttemptAt||'—')+'</span>",
+              "<span>最后 '+formatDateTime(item.lastAttemptAt)+'</span>")
+
+          # Resolver now reflects a proven runtime/display contract.
+          one(Path('src/app/CommonBaseline.php'),
+              "        self::row($rows,'TIME','user_visible_instant_timezone_source','SYSTEM_TIMEZONE_OR_EXPLICIT_USER_TIMEZONE',null,'CUSTOM_RESOLVER','legacy display audit pending');",
+              "        self::row($rows,'TIME','user_visible_instant_timezone_source','SYSTEM_TIMEZONE_OR_EXPLICIT_USER_TIMEZONE','SYSTEM_TIMEZONE_OR_EXPLICIT_USER_TIMEZONE','EXACT','AdminShell/index System Timezone formatter + machine display audit');")
+
+          # Safety assertions before commit.
+          candidates=list((root/'src/assets').glob('*.js'))+list((root/'src/plugins').rglob('*.js'))+[root/'src/index.php']
+          offenders=[]
+          for f in candidates:
+              t=f.read_text(encoding='utf-8')
+              if 'toLocaleString(' in t or 'toLocaleDateString(' in t or 'toLocaleTimeString(' in t:
+                  offenders.append(str(f))
+          if offenders: raise SystemExit('browser-local display remains: '+', '.join(offenders))
+          print('SYSTEM_TIME_DISPLAY_PATCH_ASSERTIONS_PASS')
+          PY
+
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo 'PATCH_SYNTAX_PASS'
+
+      - name: Commit and push maintenance branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd p01
+          git diff --check
+          git diff --exit-code -- VERSION src/VERSION.txt >/dev/null
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add src/app/AdminShell.php src/app/CommonBaseline.php src/assets/admin-shell.js src/assets/system.js src/assets/update-core.js src/assets/jobs.js src/assets/data-recovery.js src/assets/security.js src/assets/data-safety.js src/assets/health.js src/plugins/rss/assets/workspace.js src/index.php
+          git diff --cached --quiet && { echo 'NO_CHANGES'; exit 1; }
+          git commit -m 'p01: standardize visible time to system timezone'
+          git push origin HEAD:"$TARGET_BRANCH"
+          echo "NEW_EXACT_SOURCE=$(git rev-parse HEAD)"
