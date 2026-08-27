@@ -51,10 +51,10 @@ helper="""    /** @return array<string,mixed> */
         $has=static fn(string $text,string $needle):bool=>str_contains($text,$needle);
         $ordered=static function(string $text,array $needles):bool{$last=-1;foreach($needles as $needle){$pos=strpos($text,$needle);if($pos===false||$pos<=$last)return false;$last=$pos;}return true;};
         $single=$has($page,'id=\"installUpdate\"')&&$has($ui,'function startInstall()')&&$has($ui,"api('update_prepare'")&&$has($ui,"api('update_install'");
-        $canonical=$has($manager,'public function prepare(): array')&&$has($manager,'vf_assert_disk_space')&&$has($manager,'VfBackupManager')&&$has($manager,'VfAtomicPackage::selfTest()')&&$has($manager,'public function install(string $operationId): array')&&$has($manager,'VfAtomicPackage::run($this->root)')&&$has($manager,"$journal['result'] = 'success'")&&$has($manager,'removeTree($stage)');
+        $canonical=$has($manager,'public function prepare(): array')&&$has($manager,'vf_assert_disk_space')&&$has($manager,'VfBackupManager')&&$has($manager,'VfAtomicPackage::selfTest()')&&$has($manager,'public function install(string $operationId): array')&&$has($manager,'VfAtomicPackage::run($this->root)')&&$has($manager,'$journal[\'result\'] = \'success\'')&&$has($manager,'removeTree($stage)');
         $preflight=$ordered($manager,['vf_assert_disk_space','$this->stagePath($operationId)','VfAtomicPackage::run($this->root)']);
-        $selfTest=$has($manager,'VfAtomicPackage::selfTest()')&&$has($manager,"if (empty($selfTestJson['ok']))")&&$has($manager,"if (empty($atomicJson['ok']))")&&$has($manager,"if ($actual !== $target)");
-        $successSafe=$ordered($manager,["if (empty($atomicJson['ok']))","if ($actual !== $target)","$journal['result'] = 'success'"])&&$has($manager,"'failed_rolled_back'")&&$has($manager,"'recovery_required'");
+        $selfTest=$has($manager,'VfAtomicPackage::selfTest()')&&$has($manager,'if (empty($selfTestJson[\'ok\']))')&&$has($manager,'if (empty($atomicJson[\'ok\']))')&&$has($manager,'if ($actual !== $target)');
+        $successSafe=$ordered($manager,['if (empty($atomicJson[\'ok\']))','if ($actual !== $target)','$journal[\'result\'] = \'success\''])&&$has($manager,"'failed_rolled_back'")&&$has($manager,"'recovery_required'");
         $manualRepair=!$has($page,'下载 repair')&&!$has($ui,'下载 repair')&&$has($manager,'extractRepair(');
         $phaseProgress=$has($ui,'function step(label,kind)')&&!preg_match('/\\b(?:percent|percentage)\\b/i',$ui);
         $preserve=!$has($manager,'session_destroy(')&&!$has($manager,'revokeCurrent(')&&!$has($ui,'logout');
