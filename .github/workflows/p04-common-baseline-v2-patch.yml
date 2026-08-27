@@ -1,0 +1,81 @@
+name: P04 Common Baseline V2 Exact Runtime Patch
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p04-common-baseline-v2-patch.yml'
+      - 'scripts/p04_common_baseline_v2_patch.py'
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_HEAD: 1e0c91476982900708151fa420fda6ff90a74071
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260828
+    steps:
+      - name: Checkout patch harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: vf-agent-operations-v1
+          persist-credentials: false
+          path: harness
+      - name: Checkout exact P04 working branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          path: p04
+      - name: Prepare PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring
+          coverage: none
+      - name: Assert source fence and apply exact patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.9'
+          test ! -e database/migrations/015_common_product_baseline_v2.sql
+          cd ..
+          python3 harness/scripts/p04_common_baseline_v2_patch.py p04
+      - name: Static and release-tree verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.9'
+          git diff --quiet "$EXPECTED_HEAD" -- VERSION database
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find public/assets -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          grep -Fq '"state": "MACHINE_VERIFICATION_PENDING"' docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/p04-v2-release-tree" >/tmp/p04-v2-build.json
+          test "$(tr -d '\r\n' < "$RUNNER_TEMP/p04-v2-release-tree/VERSION.txt")" = '2.8.9'
+          test -f "$RUNNER_TEMP/p04-v2-release-tree/app/CommonBaseline.php"
+          test -f "$RUNNER_TEMP/p04-v2-release-tree/cli/baseline-verify.php"
+          test -f "$RUNNER_TEMP/p04-v2-release-tree/system-baseline.php"
+          test -f "$RUNNER_TEMP/p04-v2-release-tree/system-info.php"
+          find "$RUNNER_TEMP/p04-v2-release-tree" -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          echo P04_V2_PATCH_STATIC_PASS
+          git status --short
+      - name: Commit and push P04 working branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add config/config.example.php public/setup.php src/bootstrap.php src/app/Auth.php public/maintenance.php public/assets/v271-unified-shell.js src/app/CommonBaseline.php src/cli/baseline-verify.php public/system-baseline.php public/system-info.php docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json
+          git diff --cached --quiet && { echo P04_PATCH_NO_CHANGES; exit 2; }
+          git commit -m 'feat(P04): adopt Common Product Baseline V2 candidate runtime [release:no][production:no]'
+          git push origin HEAD:$TARGET_BRANCH
+          echo P04_V2_CANDIDATE_HEAD=$(git rev-parse HEAD)
