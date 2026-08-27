@@ -1,0 +1,152 @@
+name: P01 V2.22.0 Develop Exact Source Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-develop-exact-source-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      EXACT_SOURCE: c598f7977a1ec9137b84c2c5359fe07ad7a84baf
+      BASE_MAIN: c8928cc68c41a42d7debc6e9074df7a95f2551ce
+      PROD_SOURCE: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+      PROD_VERSION: 2.21.25
+      PROD_SCHEMA: '2026080902'
+      WORKING_SCHEMA: '2026082801'
+      TARGET_RELEASE: 2.22.0
+    steps:
+      - name: Checkout exact develop commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - name: Checkout V2.21.25 production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PROD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: prod
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Develop identity and syntax
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop | awk '{print $1}')" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')" = "$BASE_MAIN"
+          test "$(tr -d '\r\n' < VERSION)" = "$PROD_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$PROD_VERSION"
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.25'
+          assert x['target_release_version']=='2.22.0'
+          assert x['current_change']['functional_machine_result']=='PASS'
+          assert x['current_change']['authority_seal_machine']=='PASS'
+          PY
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V222_DEVELOP_IDENTITY_SYNTAX=PASS
+      - name: Fresh install and HTTP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-dev-fresh /tmp/p01-v222-dev-fresh.cookies
+          cp -a p01/src /tmp/p01-v222-dev-fresh
+          cd /tmp/p01-v222-dev-fresh
+          php -S 127.0.0.1:18228 -t . >/tmp/p01-v222-dev-fresh-server.log 2>&1 & echo $! >/tmp/p01-v222-dev-fresh.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18228/setup.php -o /tmp/p01-v222-dev-fresh-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-dev-fresh.cookies -b /tmp/p01-v222-dev-fresh.cookies http://127.0.0.1:18228/setup.php -o /tmp/p01-v222-dev-fresh-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-dev-fresh-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-dev-fresh.cookies -b /tmp/p01-v222-dev-fresh.cookies -X POST http://127.0.0.1:18228/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V222 Develop Fresh' --data-urlencode 'admin_password=P01V222!DevelopFresh' --data-urlencode 'admin_password_confirm=P01V222!DevelopFresh' -o /tmp/p01-v222-dev-fresh-post.html
+          php cli/verify.php | tee /tmp/p01-v222-dev-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v222-dev-verify.txt
+          php cli/surface-verify.php | tee /tmp/p01-v222-dev-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-dev-surface.txt
+          grep -Fx "WORKING_SCHEMA=$WORKING_SCHEMA" /tmp/p01-v222-dev-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v222-dev-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-dev-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-dev-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-dev-baseline.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          curl -fsS http://127.0.0.1:18228/surfaces.php | grep -F 'ONE DATA · MULTIPLE SURFACES' >/dev/null
+          curl -fsS http://127.0.0.1:18228/channels.php | grep -F 'ANTI-ALGORITHM MEMORY' >/dev/null
+          curl -fsS http://127.0.0.1:18228/watch.php | grep -F 'PERSONAL WATCHLIST' >/dev/null
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18228/surface-manager.php)" = 302
+          kill "$(cat /tmp/p01-v222-dev-fresh.pid)" 2>/dev/null || true
+          echo P01_V222_DEVELOP_FRESH_HTTP=PASS
+      - name: V2.21.25 upgrade/data preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-dev-upgrade /tmp/p01-v222-dev-upgrade.cookies
+          cp -a prod/src /tmp/p01-v222-dev-upgrade
+          cd /tmp/p01-v222-dev-upgrade
+          php -S 127.0.0.1:18229 -t . >/tmp/p01-v222-dev-upgrade-server.log 2>&1 & echo $! >/tmp/p01-v222-dev-upgrade.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18229/setup.php -o /tmp/p01-v222-dev-upgrade-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-dev-upgrade.cookies -b /tmp/p01-v222-dev-upgrade.cookies http://127.0.0.1:18229/setup.php -o /tmp/p01-v222-dev-upgrade-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-dev-upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-dev-upgrade.cookies -b /tmp/p01-v222-dev-upgrade.cookies -X POST http://127.0.0.1:18229/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V22125 Develop Upgrade' --data-urlencode 'admin_password=P01V222!DevelopUpgrade' --data-urlencode 'admin_password_confirm=P01V222!DevelopUpgrade' -o /tmp/p01-v222-dev-upgrade-post.html
+          php cli/verify.php
+          cat >/tmp/p01-v222-dev-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-dev-upgrade/app/bootstrap.php';$r=new VfRepository(vf_db());$c=$r->createCategory(['name'=>'Develop Gate Category','description'=>'preserve','is_private'=>false]);$l=$r->saveLink(null,['category_id'=>$c,'title'=>'Develop Gate Channel','url'=>'https://www.youtube.com/@v222-develop-gate','description'=>'preserve','is_private'=>false],'manual');file_put_contents('/tmp/p01-v222-dev-link',(string)$l['id']);file_put_contents('/tmp/p01-v222-dev-cat',(string)$c);
+          PHP
+          php /tmp/p01-v222-dev-seed.php
+          cp -a "$GITHUB_WORKSPACE/p01/src/." /tmp/p01-v222-dev-upgrade/
+          cat >/tmp/p01-v222-dev-migrate.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-dev-upgrade/app/bootstrap.php';$p=new PDO('sqlite:'.VF_DB_FILE,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false]);$p->exec('PRAGMA foreign_keys=ON');$p->exec('PRAGMA busy_timeout=5000');(new VfMigrationRunner($p))->migrate('2.21.25','2.22.0');
+          PHP
+          php /tmp/p01-v222-dev-migrate.php
+          php cli/verify.php
+          php cli/surface-verify.php | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          cat >/tmp/p01-v222-dev-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-dev-upgrade/app/bootstrap.php';require_once '/tmp/p01-v222-dev-upgrade/app/SurfaceRepository.php';$db=vf_db();$l=(int)trim(file_get_contents('/tmp/p01-v222-dev-link'));$c=(int)trim(file_get_contents('/tmp/p01-v222-dev-cat'));if(!$db->query('SELECT id FROM links WHERE id='.$l)->fetchColumn()||!$db->query('SELECT id FROM categories WHERE id='.$c)->fetchColumn())throw new RuntimeException('seed lost');if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0)throw new RuntimeException('silent profiles');$s=new VfSurfaceRepository($db);if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$l))throw new RuntimeException('default Start');$s->upsertProfile($l,['surface'=>'channels','resource_kind'=>'youtube','note'=>'private','background_friendly'=>true]);$p=null;foreach($s->allAssets(false) as $x){if((int)$x['id']===$l){$p=$x;break;}}if(!$p||(string)$p['surface_note']!==''||(int)$p['background_friendly']!==0)throw new RuntimeException('privacy');$s->resetToStart($l);if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok'||$db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('sqlite');echo "P01_V222_DEVELOP_DATA=PASS\n";
+          PHP
+          php /tmp/p01-v222-dev-assert.php
+          php cli/baseline-verify.php | tee /tmp/p01-v222-dev-upgrade-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-dev-upgrade-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-dev-upgrade-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-dev-upgrade-baseline.txt
+          kill "$(cat /tmp/p01-v222-dev-upgrade.pid)" 2>/dev/null || true
+          echo P01_V222_DEVELOP_UPGRADE=PASS
+      - name: Develop verdict
+        shell: bash
+        run: |
+          echo P01_V222_DEVELOP_SOURCE="$EXACT_SOURCE"
+          echo P01_V222_DEVELOP_MACHINE=PASS
+          echo TARGET_RELEASE="$TARGET_RELEASE"
+          echo PRODUCTION=NO
