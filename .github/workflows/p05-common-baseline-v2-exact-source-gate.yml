@@ -1,0 +1,228 @@
+name: P05 Common Baseline V2 Exact Source Gate
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p05-common-baseline-v2-exact-source-gate.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo
+          POSTGRES_DB: vfseo_gate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U vfseo -d vfseo_gate"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      EXACT_SOURCE: 63e89243a724a1fb89e43f56fb8cf09759273b5a
+      ASSESSED_BASE: 2e0f3a66a8764d54841f7d7161de7d35e5aacf3f
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260828
+      DATABASE_URL: postgresql://vfseo:vfseo@127.0.0.1:5432/vfseo_gate
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    steps:
+      - name: Checkout exact P05 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+      - name: Prepare Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = '1.0.1'
+          grep -Fq "APP_VERSION = '1.0.1'" src/server/version.ts
+          grep -Fq 'SCHEMA_VERSION = 1' src/server/version.ts
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json >/dev/null
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('.')
+          v1=json.loads((root/'docs/authority/VF_COMMON_PRODUCT_BASELINE_ADOPTION.json').read_text())
+          v2=json.loads((root/'docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json').read_text())
+          assert v1['state']=='CURRENT',v1
+          assert v2['state']=='MACHINE_VERIFICATION_PENDING',v2
+          assert v2['machine_verification']['state']=='PENDING',v2
+          assert v2['version']=='1.0.1' and v2['schema_version']==1,v2
+          assert v2['version_changed'] is False and v2['schema_changed'] is False,v2
+          assert v2['release_executed'] is False and v2['production_changed'] is False,v2
+          assert v2['expected_runtime']['required_drift_count']==0,v2
+          assert v2['expected_runtime']['required_unknown_count']==0,v2
+          print('P05_V2_SOURCE_FENCE=PASS')
+          PY
+          ! grep -R "VF_SESSION_ROTATION_SECONDS" -n src .env.example
+          ! grep -R "'/api/auth/rotate'\|\"/api/auth/rotate\"" -n src
+          grep -Fq 'VF_SESSION_IDLE_SECONDS=604800' .env.example
+          grep -Fq 'VF_SESSION_ABSOLUTE_SECONDS=2592000' .env.example
+          grep -Fq 'VF_SESSION_COOKIE_SECONDS=2592000' .env.example
+          grep -Fq 'VF_STEP_UP_WINDOW_SECONDS=900' .env.example
+      - name: Install exact dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          npm ci
+      - name: Current formal regression contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run test:integration
+          npm run build
+          echo P05_EXISTING_REGRESSION=PASS
+      - name: Fresh SQLite install and schema gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          ROOT="$RUNNER_TEMP/p05-v2-fresh"
+          export VF_DATABASE_PROVIDER=sqlite
+          export VF_SQLITE_PATH="$ROOT/vf-seo.sqlite3"
+          export VF_BACKUP_DIR="$ROOT/backups"
+          export VF_ADMIN_USERNAME=admin
+          export VF_ADMIN_PASSWORD='P05-V2-Fresh-Admin-Password-2026!'
+          mkdir -p "$ROOT"
+          npm run migrate
+          npm run verify:schema
+          npm run bootstrap:admin
+          npm run verify:admin-ready
+          echo P05_V2_FRESH_INSTALL=PASS
+      - name: Runtime baseline, system surfaces and step-up gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          ROOT="$RUNNER_TEMP/p05-v2-runtime"
+          PORT=19005
+          PASS='P05-V2-Runtime-Admin-Password-2026!'
+          export NODE_ENV=test
+          export PORT
+          export VF_DATABASE_PROVIDER=sqlite
+          export VF_SQLITE_PATH="$ROOT/vf-seo.sqlite3"
+          export VF_BACKUP_DIR="$ROOT/backups"
+          export VF_ADMIN_USERNAME=admin
+          export VF_ADMIN_PASSWORD="$PASS"
+          export VF_SECURE_COOKIES=false
+          export VF_REQUIRE_HTTPS=false
+          export VF_TRUST_PROXY=false
+          export VF_SESSION_TTL_SECONDS=2592000
+          export VF_SESSION_IDLE_SECONDS=604800
+          export VF_SESSION_ABSOLUTE_SECONDS=2592000
+          export VF_SESSION_COOKIE_SECONDS=2592000
+          export VF_STEP_UP_WINDOW_SECONDS=900
+          export VF_DISPLAY_TIMEZONE=Asia/Shanghai
+          export VF_LOCALE=zh-CN
+          mkdir -p "$ROOT"
+          npm run migrate
+          npm run bootstrap:admin
+          npm start >"$ROOT/server-1.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do
+            curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then cat "$ROOT/server-1.log"; exit 31; fi
+            sleep .1
+          done
+          cat > "$ROOT/phase1.mjs" <<'JS'
+          import fs from 'node:fs';
+          const port=process.env.PORT;
+          const base=`http://127.0.0.1:${port}`;
+          const password=process.env.VF_ADMIN_PASSWORD;
+          const login=await fetch(base+'/api/auth/login',{method:'POST',headers:{'content-type':'application/json','origin':base},body:JSON.stringify({username:'admin',password})});
+          if(login.status!==200) throw new Error(`login ${login.status} ${await login.text()}`);
+          const setCookie=login.headers.get('set-cookie')||'';
+          if(!/Max-Age=2592000/i.test(setCookie)) throw new Error(`cookie max-age mismatch ${setCookie}`);
+          const cookie=setCookie.split(';')[0];
+          const loginBody=await login.json();
+          const csrf=loginBody.csrfToken;
+          if(!cookie||!csrf) throw new Error('session material missing');
+          const get=async path=>{const r=await fetch(base+path,{headers:{cookie}});const b=await r.json();if(r.status!==200)throw new Error(`${path} ${r.status} ${JSON.stringify(b)}`);return b;};
+          const info=await get('/api/system/info');
+          if(info.version!=='1.0.1'||info.schema!==1||info.profile!=='PERSONAL_SINGLE_ADMIN') throw new Error(`info identity ${JSON.stringify(info)}`);
+          if(info.auth.idleSeconds!==604800||info.auth.absoluteSeconds!==2592000||info.auth.cookieSeconds!==2592000||info.auth.serverSessionFloorSeconds!==2592000||info.auth.periodicRotationRequired!==false||info.auth.stepUpWindowSeconds!==900) throw new Error(`auth mismatch ${JSON.stringify(info.auth)}`);
+          if(info.time.storage!=='UTC'||info.time.displayTimezone!=='Asia/Shanghai'||info.locale!=='zh-CN') throw new Error(`time locale mismatch ${JSON.stringify(info)}`);
+          const baseline=(await get('/api/system/baseline')).report;
+          if(baseline.baseline!=='VF-COMMON-PRODUCT-BASELINE@2.0'||baseline.profile!=='PERSONAL_SINGLE_ADMIN'||baseline.results.length!==15) throw new Error(`baseline identity ${JSON.stringify(baseline)}`);
+          if(baseline.summary.pass!==14||baseline.summary.exception!==0||baseline.summary.drift!==0||baseline.summary.unknown!==0||baseline.summary.nA!==1||baseline.summary.fullPass!==true) throw new Error(`baseline summary ${JSON.stringify(baseline.summary)}`);
+          const notification=baseline.results.find(x=>x.domain==='NOTIFICATION');
+          if(notification?.state!=='N_A'||!notification.reason) throw new Error(`notification N_A ${JSON.stringify(notification)}`);
+          const health=await get('/api/system/health');
+          if(health.database!=='READY'||health.process!=='READY'||health.version!=='1.0.1'||health.schema!==1) throw new Error(`health ${JSON.stringify(health)}`);
+          fs.writeFileSync(process.env.SESSION_FILE,JSON.stringify({cookie,csrf,password}));
+          console.log('P05_V2_RUNTIME_SURFACES=PASS');
+          JS
+          SESSION_FILE="$ROOT/session.json" node "$ROOT/phase1.mjs"
+          kill "$SERVER_PID"
+          wait "$SERVER_PID" || true
+          npm start >"$ROOT/server-2.log" 2>&1 &
+          SERVER_PID=$!
+          for _ in $(seq 1 120); do
+            curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1 && break
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then cat "$ROOT/server-2.log"; exit 32; fi
+            sleep .1
+          done
+          cat > "$ROOT/phase2.mjs" <<'JS'
+          import fs from 'node:fs';
+          const {cookie,csrf,password}=JSON.parse(fs.readFileSync(process.env.SESSION_FILE,'utf8'));
+          const base=`http://127.0.0.1:${process.env.PORT}`;
+          const post=async(path,body)=>{const r=await fetch(base+path,{method:'POST',headers:{'content-type':'application/json','origin':base,'cookie':cookie,'x-csrf-token':csrf},body:JSON.stringify(body)});let b={};try{b=await r.json()}catch{}return {status:r.status,body:b};};
+          const blocked=await post('/api/system/import',{});
+          if(blocked.status!==403||blocked.body.error!=='STEP_UP_REQUIRED') throw new Error(`step-up guard missing ${JSON.stringify(blocked)}`);
+          const wrong=await post('/api/system/step-up',{password:'wrong-password'});
+          if(wrong.status!==403||wrong.body.error!=='STEP_UP_INVALID_PASSWORD') throw new Error(`wrong password boundary ${JSON.stringify(wrong)}`);
+          const accepted=await post('/api/system/step-up',{password});
+          if(accepted.status!==200||accepted.body.recentAuth!==true||accepted.body.windowSeconds!==900) throw new Error(`step-up accept ${JSON.stringify(accepted)}`);
+          const after=await post('/api/system/import',{});
+          if(after.status===403&&after.body.error==='STEP_UP_REQUIRED') throw new Error('recent-auth did not open high-risk window');
+          console.log('P05_V2_STEP_UP=PASS');
+          JS
+          SESSION_FILE="$ROOT/session.json" node "$ROOT/phase2.mjs"
+          kill "$SERVER_PID"
+          wait "$SERVER_PID" || true
+          trap - EXIT
+          if grep -Eqi 'Unhandled|uncaught|fatal' "$ROOT/server-1.log" "$ROOT/server-2.log"; then cat "$ROOT/server-1.log" "$ROOT/server-2.log"; exit 33; fi
+          echo P05_V2_RUNTIME_GATE=PASS
+      - name: Final candidate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          echo P05_COMMON_BASELINE_V2_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P05_COMMON_BASELINE_V2_VERSION=1.0.1
+          echo P05_COMMON_BASELINE_V2_SCHEMA=1
+          echo P05_COMMON_BASELINE_V2_MACHINE=PASS
+          echo P05_COMMON_BASELINE_V2_RELEASE=NO
+          echo P05_COMMON_BASELINE_V2_PRODUCTION=NO
