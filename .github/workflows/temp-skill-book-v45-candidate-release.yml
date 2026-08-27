@@ -1,0 +1,211 @@
+name: TEMP skill-book V4.5 Candidate Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-skill-book-v45-candidate-release.yml'
+      - 'requests/skill-book-v45-candidate-release-20260826.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-skill-book-v45-candidate-release
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: llhzx2018/gov-doc
+  SOURCE_COMMIT: '915a9724f29213380350d90f5281f892a4ee7ea6'
+  SOURCE_PATH: skills/skill-book/V4.5
+  TARGET_VERSION: '4.5'
+  TAG: 'skill-book-v4.5-candidate-20260826'
+  ZIP_NAME: 'skill-book_V4.5_CANDIDATE_20260826.zip'
+  SHA_NAME: 'skill-book_V4.5_CANDIDATE_20260826.zip.sha256'
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Registered release capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'VF_PRIVATE_READ_TOKEN_MISSING' >&2; exit 78; }
+          test -n "$RELEASE_TOKEN" || { echo 'VF_RELEASE_WRITE_TOKEN_MISSING' >&2; exit 78; }
+          echo 'REGISTERED_RELEASE_CAPABILITIES=PASS'
+
+      - name: Checkout exact GOV-DOC source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source and Candidate preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < "source/$SOURCE_PATH/VERSION")" = "$TARGET_VERSION"
+          jq -e '.artifact_id=="SKILL-BOOK-V4.5-CANDIDATE" and .status=="CANDIDATE_NOT_CURRENT" and .source_current_skill=="3.5" and .current_promotion=="NOT_AUTHORIZED" and .validation.python_unit_tests=="17/17 PASS"' "source/$SOURCE_PATH/MANIFEST.json" >/dev/null
+          echo 'EXACT_SOURCE_PREFLIGHT=PASS'
+
+      - name: Run V4.5 source tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "source/$SOURCE_PATH"
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 -m py_compile scripts/book_regression_audit.py scripts/generation_depth_audit.py scripts/reader_outcome_audit.py
+          echo 'V45_SOURCE_TESTS=PASS'
+
+      - name: Build deterministic Candidate ZIP twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/v45-build-a" "$RUNNER_TEMP/v45-build-b" "$RUNNER_TEMP/v45-release"
+          mkdir -p "$RUNNER_TEMP/v45-build-a" "$RUNNER_TEMP/v45-build-b" "$RUNNER_TEMP/v45-release"
+          SOURCE_DIR="$GITHUB_WORKSPACE/source/$SOURCE_PATH" OUT_A="$RUNNER_TEMP/v45-build-a/$ZIP_NAME" OUT_B="$RUNNER_TEMP/v45-build-b/$ZIP_NAME" python3 - <<'PY'
+          from pathlib import Path
+          import os, zipfile
+          source = Path(os.environ['SOURCE_DIR'])
+          outputs = [Path(os.environ['OUT_A']), Path(os.environ['OUT_B'])]
+          files = sorted(p for p in source.rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc')
+          assert len(files) == 26, len(files)
+          for out in outputs:
+              with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, strict_timestamps=True) as z:
+                  for f in files:
+                      rel = 'skill-book_V4.5_CANDIDATE/' + f.relative_to(source).as_posix()
+                      info = zipfile.ZipInfo(rel, date_time=(2026,8,26,22,11,52))
+                      info.compress_type = zipfile.ZIP_DEFLATED
+                      info.create_system = 3
+                      info.external_attr = (0o100644 << 16)
+                      z.writestr(info, f.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+          PY
+          cmp "$RUNNER_TEMP/v45-build-a/$ZIP_NAME" "$RUNNER_TEMP/v45-build-b/$ZIP_NAME"
+          cp "$RUNNER_TEMP/v45-build-a/$ZIP_NAME" "$RUNNER_TEMP/v45-release/$ZIP_NAME"
+          cd "$RUNNER_TEMP/v45-release"
+          sha256sum "$ZIP_NAME" | tee "$SHA_NAME"
+          unzip -t "$ZIP_NAME" >/dev/null
+          ZIP="$ZIP_NAME" python3 - <<'PY'
+          import os, zipfile
+          from pathlib import PurePosixPath
+          with zipfile.ZipFile(os.environ['ZIP']) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names)), 'duplicate paths'
+              assert len(names)==26, len(names)
+              for n in names:
+                  p=PurePosixPath(n)
+                  assert not p.is_absolute()
+                  assert '..' not in p.parts
+                  assert '__pycache__' not in p.parts
+                  assert not n.endswith('.pyc')
+          print('ZIP_SAFETY_AND_CRC=PASS')
+          PY
+          echo "PUBLISHED_BYTES=$(stat -c%s "$ZIP_NAME")" >> "$GITHUB_ENV"
+          echo "PUBLISHED_SHA256=$(sha256sum "$ZIP_NAME" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo 'DETERMINISTIC_BUILD=PASS'
+
+      - name: Create exact Candidate tag and prerelease
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C source config user.name 'VF Release Automation'
+          git -C source config user.email 'release@kewaro.com'
+          if git -C source show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git -C source rev-list -n1 "$TAG")" = "$SOURCE_COMMIT"
+          else
+            git -C source tag -a "$TAG" "$SOURCE_COMMIT" -m "skill-book V4.5 Candidate"
+            git -C source remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${SOURCE_REPOSITORY}.git"
+            git -C source push origin "refs/tags/$TAG"
+          fi
+
+          cat > "$RUNNER_TEMP/v45-release/release-notes.md" <<EOF
+          skill-book V4.5 Candidate / NOT CURRENT.
+
+          Source authority: ${SOURCE_REPOSITORY}@${SOURCE_COMMIT}
+          Source path: ${SOURCE_PATH}
+          Source Current remains: skill-book V3.5
+          Unit tests: 17/17 PASS
+          Reader Outcome Doctrine: READ / LEARN / TRAIN / DO
+          Current Promotion: NOT_AUTHORIZED
+          EOF
+
+          if ! gh release view "$TAG" --repo "$SOURCE_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$SOURCE_REPOSITORY" --title 'skill-book V4.5 Candidate' --notes-file "$RUNNER_TEMP/v45-release/release-notes.md" --verify-tag --prerelease
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP/v45-release/$ZIP_NAME#$ZIP_NAME" "$RUNNER_TEMP/v45-release/$SHA_NAME#$SHA_NAME" --repo "$SOURCE_REPOSITORY" --clobber
+          echo 'V45_CANDIDATE_RELEASE_UPLOAD=PASS'
+
+      - name: Remote Release Asset readback and verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/v45-readback"
+          mkdir -p "$RUNNER_TEMP/v45-readback"
+          gh release download "$TAG" --repo "$SOURCE_REPOSITORY" --pattern "$ZIP_NAME" --pattern "$SHA_NAME" --dir "$RUNNER_TEMP/v45-readback"
+          cd "$RUNNER_TEMP/v45-readback"
+          test "$(stat -c%s "$ZIP_NAME")" = "$PUBLISHED_BYTES"
+          test "$(sha256sum "$ZIP_NAME" | awk '{print $1}')" = "$PUBLISHED_SHA256"
+          grep -Fq "$PUBLISHED_SHA256  $ZIP_NAME" "$SHA_NAME"
+          unzip -t "$ZIP_NAME" >/dev/null
+          ZIP="$ZIP_NAME" python3 - <<'PY'
+          import os, zipfile
+          from pathlib import PurePosixPath
+          with zipfile.ZipFile(os.environ['ZIP']) as z:
+              names=z.namelist()
+              assert len(names)==26
+              assert len(names)==len(set(names))
+              for n in names:
+                  p=PurePosixPath(n)
+                  assert not p.is_absolute() and '..' not in p.parts
+                  assert '__pycache__' not in p.parts and not n.endswith('.pyc')
+          print('REMOTE_ZIP_CRC_AND_SAFETY=PASS')
+          PY
+          release_json="$(gh api "repos/$SOURCE_REPOSITORY/releases/tags/$TAG")"
+          test "$(jq -r '.prerelease' <<<"$release_json")" = 'true'
+          test "$(jq -r --arg n "$ZIP_NAME" '[.assets[]|select(.name==$n)]|length' <<<"$release_json")" = '1'
+          test "$(jq -r --arg n "$SHA_NAME" '[.assets[]|select(.name==$n)]|length' <<<"$release_json")" = '1'
+          echo "REMOTE_RELEASE_ID=$(jq -r '.id' <<<"$release_json")" >> "$GITHUB_ENV"
+          echo 'REMOTE_ASSET_READBACK=PASS'
+
+      - name: Build public-safe release evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p public-evidence
+          {
+            echo 'SKILL=skill-book'
+            echo 'VERSION=4.5'
+            echo 'STATUS=CANDIDATE_NOT_CURRENT'
+            echo "SOURCE_REPOSITORY=$SOURCE_REPOSITORY"
+            echo "SOURCE_COMMIT=$SOURCE_COMMIT"
+            echo "TAG=$TAG"
+            echo "ZIP_NAME=$ZIP_NAME"
+            echo "ZIP_BYTES=${PUBLISHED_BYTES:-UNKNOWN}"
+            echo "ZIP_SHA256=${PUBLISHED_SHA256:-UNKNOWN}"
+            echo "RELEASE_ID=${REMOTE_RELEASE_ID:-UNKNOWN}"
+            echo 'SOURCE_CURRENT=3.5'
+            echo 'CURRENT_PROMOTION=NOT_AUTHORIZED'
+            echo 'PRODUCTION_WRITE=0'
+            echo "JOB_STATUS=${{ job.status }}"
+          } > public-evidence/SKILL_BOOK_V45_CANDIDATE_RELEASE.txt
+
+      - name: Upload public-safe release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SKILL-BOOK-V4.5-CANDIDATE-RELEASE-EVIDENCE
+          path: public-evidence/SKILL_BOOK_V45_CANDIDATE_RELEASE.txt
+          if-no-files-found: error
+          retention-days: 30
