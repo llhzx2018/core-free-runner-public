@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      EXPECTED_HEAD: 9caa4c09837d810364d8dc54af76815be2a0d103
+      EXPECTED_HEAD: f93654b8b348b1340e07aff39e4b9cef3d3e90aa
     steps:
       - name: Checkout exact P01 source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -80,6 +80,63 @@ jobs:
           cd /tmp/p01-baseline-v2
           php cli/baseline-verify.php 2>&1 | tee "$GITHUB_WORKSPACE/p01-baseline-result.txt"
 
+      - name: Step-up reauthentication and audit retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-baseline-v2
+          LOGIN=$(curl -fsS -c /tmp/p01.cookies -b /tmp/p01.cookies \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"P01BaselineGate!2026"}' \
+            'http://127.0.0.1:18087/api.php?action=login')
+          ADMIN_CSRF=$(printf '%s' "$LOGIN" | php -r '$j=json_decode(stream_get_contents(STDIN),true); if(empty($j["ok"])||empty($j["csrf"])) exit(2); echo $j["csrf"];')
+          SID=$(awk '$6=="PHPSESSID"{print $7}' /tmp/p01.cookies | tail -1)
+          test -n "$SID"
+          SID="$SID" php <<'PHP'
+          <?php
+          session_id((string)getenv('SID'));
+          require 'app/bootstrap.php';
+          vf_start_profiled_session();
+          $_SESSION['vfnav_recent_auth_at']=time()-VfCommonBaseline::STEP_UP_RECENT_AUTH_SECONDS-1;
+          session_write_close();
+          PHP
+          HTTP=$(curl -sS -o /tmp/p01-stepup-required.json -w '%{http_code}' -c /tmp/p01.cookies -b /tmp/p01.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"backup_key":"missing-proof-key"}' \
+            'http://127.0.0.1:18087/api.php?action=backup_restore')
+          test "$HTTP" = 428
+          php -r '$j=json_decode(file_get_contents("/tmp/p01-stepup-required.json"),true); if(empty($j["reauthRequired"])||($j["reauthWindowSeconds"]??0)!==900) exit(2);'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-bad.json -w '%{http_code}' -c /tmp/p01.cookies -b /tmp/p01.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"password":"wrong-password"}' http://127.0.0.1:18087/reauth.php)
+          test "$HTTP" = 401
+          HTTP=$(curl -sS -o /tmp/p01-stepup-ok.json -w '%{http_code}' -c /tmp/p01.cookies -b /tmp/p01.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"password":"P01BaselineGate!2026"}' http://127.0.0.1:18087/reauth.php)
+          test "$HTTP" = 200
+          php -r '$j=json_decode(file_get_contents("/tmp/p01-stepup-ok.json"),true); if(empty($j["ok"])||($j["recentAuthSeconds"]??0)!==900) exit(2);'
+          HTTP=$(curl -sS -o /tmp/p01-stepup-retry.json -w '%{http_code}' -c /tmp/p01.cookies -b /tmp/p01.cookies \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $ADMIN_CSRF" \
+            -d '{"backup_key":"missing-proof-key"}' \
+            'http://127.0.0.1:18087/api.php?action=backup_restore')
+          test "$HTTP" != 428
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $db=vf_db();
+          if(VfSecurityManager::SECURITY_EVENT_RETENTION_DAYS!==180) throw new RuntimeException('security retention constant mismatch');
+          $stmt=$db->prepare("INSERT INTO security_events(event_type,severity,ip_address,session_hash,summary,details_json,created_at) VALUES(?,?,?,?,?,?,?)");
+          $stmt->execute(['retention_100d','info','','','keep','{}',gmdate('c',time()-100*86400)]);
+          $stmt->execute(['retention_181d','info','','','delete','{}',gmdate('c',time()-181*86400)]);
+          (new VfSecurityManager($db))->prune();
+          $keep=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='retention_100d'")->fetchColumn();
+          $drop=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='retention_181d'")->fetchColumn();
+          $success=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='step_up_success'")->fetchColumn();
+          $failure=(int)$db->query("SELECT COUNT(*) FROM security_events WHERE event_type='step_up_failure'")->fetchColumn();
+          if($keep!==1||$drop!==0||$success<1||$failure<1) throw new RuntimeException('step-up/security retention evidence mismatch');
+          echo "STEP_UP_PASS window=900 security_retention_days=180\n";
+          PHP
+
       - name: Upload resolver evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -106,4 +163,5 @@ jobs:
           grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
           test -f p01/src/system-info.php
           test -f p01/src/system-baseline.php
+          test -f p01/src/reauth.php
           echo 'VERSION_SCHEMA_RELEASE_BOUNDARY_PASS'
