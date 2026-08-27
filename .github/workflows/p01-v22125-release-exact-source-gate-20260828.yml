@@ -1,0 +1,140 @@
+name: P01 V2.21.25 Release Exact Source Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v22125-release-candidate-prep-20260828
+    paths:
+      - '.github/workflows/p01-v22125-release-exact-source-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      RELEASE_BRANCH: release/p01-v2.21.25-common-baseline-v2-20260828
+      EXACT_SOURCE: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+      BASE_MAIN: 6b774b6f46c26b94ea83f5de8754f4db556447a5
+      VERSION: 2.21.25
+      SOURCE_VERSION: 2.21.24
+      SCHEMA: '2026080902'
+    steps:
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and release identity fence
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          BRANCH_REMOTE="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/$RELEASE_BRANCH" | awk '{print $1}')"
+          MAIN_REMOTE="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')"
+          test "$BRANCH_REMOTE" = "$EXACT_SOURCE"
+          test "$MAIN_REMOTE" = "$BASE_MAIN"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$VERSION"
+          test "$(grep -Fxc "define('VF_VERSION', '$VERSION');" src/app/bootstrap.php)" -eq 1
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.24',x
+          assert x['working_version']=='2.21.25',x
+          assert x['candidate_version']=='2.21.25',x
+          assert str(x['schema_version'])=='2026080902',x
+          assert x['component_versions']['browser_helper']=='1.6.4',x
+          a=json.load(open('docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION.json',encoding='utf-8'))
+          assert a['state']=='CURRENT',a
+          assert a['baseline_id']=='VF-COMMON-PRODUCT-BASELINE@2.0',a
+          assert a['profile']=='PERSONAL_SINGLE_ADMIN',a
+          mv=a['machine_verification']
+          assert (mv.get('state') or mv.get('status'))=='PASS',mv
+          assert a['release'] is False and a['production'] is False,a
+          PY
+          mapfile -t changed < <(git diff --name-only "$BASE_MAIN" "$EXACT_SOURCE")
+          test "${#changed[@]}" -eq 5
+          for f in VERSION src/VERSION.txt src/app/bootstrap.php VF_PROJECT.json CHANGELOG.md; do printf '%s\n' "${changed[@]}" | grep -Fxq "$f"; done
+          echo P01_RELEASE_EXACT_SOURCE_FENCE=PASS
+
+      - name: PHP and JavaScript syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_RELEASE_SYNTAX=PASS
+
+      - name: Fresh install isolated runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v22125-runtime /tmp/p01-v22125.cookies
+          cp -a p01/src /tmp/p01-v22125-runtime
+          cd /tmp/p01-v22125-runtime
+          php -S 127.0.0.1:18125 -t . > /tmp/p01-v22125-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18125/setup.php -o /tmp/p01-v22125-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v22125.cookies -b /tmp/p01-v22125.cookies http://127.0.0.1:18125/setup.php -o /tmp/p01-v22125-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v22125-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v22125.cookies -b /tmp/p01-v22125.cookies -X POST http://127.0.0.1:18125/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start Release Gate' \
+            --data-urlencode 'admin_password=P01V22125!ReleaseGate' \
+            --data-urlencode 'admin_password_confirm=P01V22125!ReleaseGate' \
+            -o /tmp/p01-v22125-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          test "$(php -r "require 'app/bootstrap.php'; echo VF_VERSION;")" = "$VERSION"
+          echo P01_RELEASE_FRESH_INSTALL=PASS
+
+      - name: Common Baseline V2 runtime and maintenance surfaces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-v22125-runtime
+          php cli/baseline-verify.php | tee /tmp/p01-v22125-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v22125-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v22125-baseline.txt
+          if grep -Eq '^UNKNOWN_COUNT=' /tmp/p01-v22125-baseline.txt; then grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v22125-baseline.txt; fi
+          for f in system-info.php system-baseline.php update.php data-safety.php system.php; do test -f "$f"; done
+          grep -F 'Runtime-derived · Read-only · No Shadow Truth' system-baseline.php >/dev/null
+          echo P01_COMMON_BASELINE_V2_RELEASE_RUNTIME=PASS
+
+      - name: Release exact source verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo P01_V2_21_25_RELEASE_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P01_V2_21_25_RELEASE_MACHINE=PASS
+          echo VERSION="$VERSION"
+          echo SCHEMA="$SCHEMA"
+          echo BROWSER_HELPER=1.6.4
+          echo PRODUCTION=NO
