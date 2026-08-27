@@ -1,0 +1,194 @@
+name: P04 Common Baseline V2 Final Exact Source Full Gate
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p04-common-baseline-v2-final-full-gate.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXACT_SOURCE: 0099218fa147c2645adf580958b695db556fa9e4
+      ASSESSED_BASE: 1e0c91476982900708151fa420fda6ff90a74071
+      TARGET_BRANCH: maintenance/common-product-baseline-v2-20260828
+    steps:
+      - name: Checkout exact P04 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p04
+      - name: Prepare PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring
+          coverage: none
+      - name: Prepare browser runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+          node -e "import('playwright').then(()=>console.log('PLAYWRIGHT_READY=YES'))"
+      - name: Exact source and static V2 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.9'
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          test -f public/assets/system-operations.css
+          ! grep -Fq '<style>' public/system-baseline.php
+          ! grep -Fq '<style>' public/system-info.php
+          grep -Fq 'assets/system-operations.css?build=' public/system-baseline.php
+          grep -Fq 'assets/system-operations.css?build=' public/system-info.php
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find public/assets -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          python3 -m json.tool docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json >/dev/null
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('.')
+          a=json.loads((root/'docs/authority/VF_COMMON_PRODUCT_BASELINE_V2_ADOPTION_CANDIDATE.json').read_text())
+          assert a['state']=='MACHINE_VERIFICATION_PENDING',a
+          assert a['machine_verification']['state']=='PENDING',a
+          assert a['version_changed'] is False and a['schema_changed'] is False,a
+          auth=(root/'src/app/Auth.php').read_text()
+          maintenance=(root/'public/maintenance.php').read_text()
+          assert 'ROTATE_INTERVAL' not in auth
+          assert "Config::get('session_idle_timeout', 604800)" in auth
+          assert "Config::get('session_max_lifetime', 2592000)" in auth
+          assert "Auth::verifyPassword((string) ($_POST['admin_password'] ?? ''))" in maintenance
+          print('P04_V2_FINAL_STATIC=PASS')
+          PY
+      - name: Current V2.8.9 regression contract
+        shell: bash
+        env:
+          VF_V289_EVIDENCE_DIR: ${{ runner.temp }}/p04-v289-final-evidence
+          VF_V289_TESTED_RUNTIME_COMMIT: ${{ env.EXACT_SOURCE }}
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          bash scripts/run-v289-domain-attention-group-management-gate.sh
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path(os.environ['VF_V289_EVIDENCE_DIR'])/'V289_DOMAIN_ATTENTION_GROUPS_REPORT.json'
+          r=json.loads(p.read_text())
+          assert r['status']=='PASS',r
+          assert r['version']=='2.8.9' and r['schema']==14 and r['migration']=='NONE',r
+          assert r['tested_runtime_commit']==os.environ['VF_V289_TESTED_RUNTIME_COMMIT'],r
+          assert r['page_errors']==[] and r['console_errors']==[],r
+          print('P04_V289_REGRESSION_EXACT_SOURCE=PASS')
+          PY
+      - name: Fresh V2 runtime browser and resolver gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          WEB="$RUNNER_TEMP/p04-v2-final-runtime"
+          EVIDENCE="$RUNNER_TEMP/p04-v2-final-evidence"
+          PORT=19007
+          mkdir -p "$EVIDENCE"
+          python3 scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          test "$(tr -d '\r\n' < "$WEB/VERSION.txt")" = '2.8.9'
+          test -f "$WEB/assets/system-operations.css"
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then cat "$EVIDENCE/php-server.log"; exit 31; fi
+            curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break
+            sleep .1
+          done
+          cat > .runner-p04-v2-final.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19007';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'FAIL',baseline_page:false,system_info:false,atomic_step_up:false,page_errors:[],console_errors:[],bad_responses:[]};
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1318,height:900}});
+          page.on('pageerror',e=>report.page_errors.push({url:page.url(),text:String(e)}));
+          page.on('console',m=>{if(m.type()==='error') report.console_errors.push({url:page.url(),text:m.text()});});
+          page.on('response',r=>{if(r.status()>=400) report.bad_responses.push({url:r.url(),status:r.status()});});
+          try {
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#site_name').fill('VF Infra V2 Final Gate');
+            await page.locator('#password').fill(password);
+            await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'});
+            const baselineText=await page.locator('body').innerText();
+            const drift=String(await page.locator('.metric').filter({hasText:'DRIFT'}).locator('strong').innerText()).trim();
+            const unknown=String(await page.locator('.metric').filter({hasText:'UNKNOWN'}).locator('strong').innerText()).trim();
+            if(!baselineText.includes('系统基线')||!baselineText.includes('PASS_WITH_EXCEPTIONS')||drift!=='0'||unknown!=='0') throw new Error(`baseline mismatch ${drift}/${unknown}`);
+            report.baseline_page=true;
+            await page.goto(base+'/system-info.php',{waitUntil:'domcontentloaded'});
+            const info=await page.locator('body').innerText();
+            if(!info.includes('系统信息')||!info.includes('2.8.9')) throw new Error('system info mismatch');
+            report.system_info=true;
+            await page.goto(base+'/maintenance.php',{waitUntil:'domcontentloaded'});
+            if(await page.locator('input[name="admin_password"]').count()!==1) throw new Error('step-up input missing');
+            const atomic=await page.evaluate(async()=>{
+              const csrf=document.querySelector('input[name="csrf"]')?.value||'';
+              const form=new FormData();form.append('csrf',csrf);form.append('admin_password','definitely-wrong-password');form.append('expected_sha256','0'.repeat(64));
+              const response=await fetch('maintenance.php',{method:'POST',credentials:'same-origin',body:form});
+              return await response.text();
+            });
+            if(!atomic.includes('管理员密码不正确')) throw new Error('wrong password did not block Atomic');
+            report.atomic_step_up=true;
+            report.status='PASS';
+          } catch(e) {
+            report.error=String(e?.stack||e);
+          } finally {
+            await browser.close();
+            fs.writeFileSync(process.env.VF_P04_V2_FINAL_REPORT,JSON.stringify(report,null,2));
+          }
+          if(report.status!=='PASS'||report.page_errors.length||report.console_errors.length||report.bad_responses.length) process.exit(2);
+          JS
+          set +e
+          VF_P04_V2_FINAL_REPORT="$EVIDENCE/browser-report.json" node .runner-p04-v2-final.mjs
+          BROWSER_RC=$?
+          set -e
+          rm -f .runner-p04-v2-final.mjs
+          cat "$EVIDENCE/browser-report.json"
+          test "$BROWSER_RC" -eq 0
+          (cd "$WEB" && php cli/baseline-verify.php) | tee "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'BASELINE=VF-COMMON-PRODUCT-BASELINE@2.0' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'PROFILE=PERSONAL_SINGLE_ADMIN' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'OVERALL=PASS_WITH_EXCEPTIONS' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'PASS_COUNT=30' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'EXCEPTION_COUNT=3' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'DRIFT_COUNT=0' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'UNKNOWN_COUNT=0' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'N_A_COUNT=1' "$EVIDENCE/baseline-cli.txt"
+          grep -Fxq 'BASELINE_FULL_PASS=YES' "$EVIDENCE/baseline-cli.txt"
+          if grep -Ev 'JIT is incompatible with third party extensions that override zend_execute_ex\(\)\. JIT disabled\.' "$EVIDENCE/php-server.log" | grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)'; then cat "$EVIDENCE/php-server.log"; exit 32; fi
+          echo P04_V2_FINAL_RUNTIME=PASS
+      - name: Final exact-source verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.9'
+          test -z "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE" -- VERSION database)"
+          echo P04_COMMON_BASELINE_V2_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P04_COMMON_BASELINE_V2_VERSION=2.8.9
+          echo P04_COMMON_BASELINE_V2_SCHEMA=14
+          echo P04_COMMON_BASELINE_V2_MACHINE=PASS
+          echo P04_COMMON_BASELINE_V2_RELEASE=NO
+          echo P04_COMMON_BASELINE_V2_PRODUCTION=NO
