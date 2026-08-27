@@ -1,0 +1,165 @@
+name: P01 Time Job Runtime Gate
+
+on:
+  push:
+    branches: [vf-agent-operations-v1]
+    paths:
+      - '.github/workflows/p01-time-job-runtime-gate.yml'
+      - 'requests/p01-time-job-runtime-gate-*.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXPECTED_HEAD: 0bfa4e4c51d71b6f4c7746ab0b7b3afd57138f03
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXPECTED_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p01
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "$EXPECTED_HEAD"
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo "EXACT_SOURCE=$EXPECTED_HEAD"
+          echo 'SYNTAX_PASS'
+
+      - name: Fresh install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p01-time-job
+          cp -a p01/src /tmp/p01-time-job
+          cd /tmp/p01-time-job
+          php -S 127.0.0.1:18090 -t . >/tmp/p01-time-job-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18090/setup.php -o /tmp/p01-time-job-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-time-job.cookies -b /tmp/p01-time-job.cookies http://127.0.0.1:18090/setup.php -o /tmp/p01-time-job-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-time-job-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-time-job.cookies -b /tmp/p01-time-job.cookies -X POST http://127.0.0.1:18090/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Time Job Gate' \
+            --data-urlencode 'admin_password=P01BaselineGate!2026' \
+            --data-urlencode 'admin_password_confirm=P01BaselineGate!2026' \
+            -o /tmp/p01-time-job-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php
+          echo 'FRESH_INSTALL_PASS'
+
+      - name: UTC instant storage behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-time-job
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $naive=VfCommonBaseline::normalizeInstantForStorage('2026-08-27 12:00:00');
+          $offset=VfCommonBaseline::normalizeInstantForStorage('2026-08-27T12:00:00-04:00');
+          if($naive!=='2026-08-27T04:00:00+00:00') throw new RuntimeException('naive system-timezone normalization failed: '.$naive);
+          if($offset!=='2026-08-27T16:00:00+00:00') throw new RuntimeException('offset normalization failed: '.$offset);
+
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $categoryId=(int)($db->query("SELECT id FROM categories WHERE lifecycle_state='active' ORDER BY id LIMIT 1")->fetchColumn()?:0);
+          if($categoryId<=0) throw new RuntimeException('fresh install category missing');
+          $result=$repo->saveLink(null,[
+              'category_id'=>$categoryId,
+              'title'=>'UTC Import Gate',
+              'url'=>'https://time-gate.example/',
+              'created_at'=>'2026-08-27 12:00:00',
+              'affiliate_last_confirmed_at'=>'2026-08-27T12:00:00-04:00',
+              'url_type'=>'affiliate',
+          ],'import');
+          $id=(int)$result['id'];
+          $s=$db->prepare('SELECT created_at FROM links WHERE id=?');$s->execute([$id]);$created=(string)$s->fetchColumn();
+          $s=$db->prepare('SELECT last_confirmed_at FROM affiliate_link_meta WHERE link_id=?');$s->execute([$id]);$confirmed=(string)$s->fetchColumn();
+          if($created!=='2026-08-27T04:00:00+00:00') throw new RuntimeException('import created_at not UTC: '.$created);
+          if($confirmed!=='2026-08-27T16:00:00+00:00') throw new RuntimeException('affiliate confirmation not UTC: '.$confirmed);
+          echo "UTC_STORAGE_PASS naive=$naive offset=$offset created=$created confirmed=$confirmed\n";
+          PHP
+
+      - name: Persistence source audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE --include='*.php' '(^|[^A-Za-z_])date[[:space:]]*\(' p01/src; then
+            echo 'ordinary date() calls found' >&2
+            exit 1
+          fi
+          grep -RInF "normalizeInstantForStorage((string)\$data['created_at'])" p01/src/app/Repository.php
+          grep -RInF "normalizeInstantForStorage((string)\$category['created_at'])" p01/src/app/Repository.php
+          grep -RInF "normalizeInstantForStorage((string)\$link['archived_at'])" p01/src/app/Repository.php
+          grep -RInF "normalizeInstantForStorage((string)\$category['trashed_at'])" p01/src/app/Repository.php
+          echo 'PERSISTENCE_SOURCE_AUDIT_PASS'
+
+      - name: Job timeout class behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-time-job
+          php <<'PHP'
+          <?php
+          require 'app/bootstrap.php';
+          $policy=VfJobManager::timeoutContract();
+          $expected=['GENERAL'=>300,'SYNC'=>900,'MAINTENANCE'=>1800,'lockExpirySeconds'=>1920];
+          foreach($expected as $k=>$v){if((int)($policy[$k]??0)!==$v)throw new RuntimeException('timeout policy mismatch '.$k);}
+          $rm=new ReflectionMethod(VfJobManager::class,'releaseExpired');
+          $default=(int)$rm->getParameters()[0]->getDefaultValue();
+          if($default!==1920)throw new RuntimeException('lock expiry default mismatch');
+          $jobs=new VfJobManager(vf_db());
+          $sync=$jobs->enqueue('link_health','all',['scope'=>'all'],100,3,false);
+          $maintenance=$jobs->enqueue('integrity','all',[],100,3,false);
+          if(($sync['timeout_class']??'')!=='SYNC'||(int)($sync['timeout_seconds']??0)!==900)throw new RuntimeException('sync timeout classification failed');
+          if(($maintenance['timeout_class']??'')!=='MAINTENANCE'||(int)($maintenance['timeout_seconds']??0)!==1800)throw new RuntimeException('maintenance timeout classification failed');
+          echo "JOB_TIMEOUT_PASS general=300 sync={$sync['timeout_seconds']} maintenance={$maintenance['timeout_seconds']} lock=$default\n";
+          PHP
+          grep -F "set_time_limit(\$timeout)" app/JobManager.php >/dev/null
+          grep -F 'microtime(true)-$started' app/JobManager.php >/dev/null
+          grep -F "任务超过允许执行时间" app/JobManager.php >/dev/null
+          echo 'JOB_EXECUTION_GUARD_PASS'
+
+      - name: Baseline resolver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/p01-time-job
+          php cli/baseline-verify.php | tee "$GITHUB_WORKSPACE/p01-time-job-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$GITHUB_WORKSPACE/p01-time-job-baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=4' "$GITHUB_WORKSPACE/p01-time-job-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$GITHUB_WORKSPACE/p01-time-job-baseline.txt"
+          echo 'BASELINE_TIME_JOB_PASS'
+
+      - name: Scope guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat p01/VERSION)" = '2.21.24'
+          test "$(cat p01/src/VERSION.txt)" = '2.21.24'
+          grep -F "define('VF_VERSION', '2.21.24');" p01/src/app/bootstrap.php >/dev/null
+          echo 'VERSION_SCHEMA_RELEASE_BOUNDARY_PASS'
