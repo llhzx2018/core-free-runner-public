@@ -11,7 +11,7 @@ RELEASE_SOURCE='a9300382d3a862fb599b8b928961ead38dee8f31'
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
 
-gh repo clone llhzx2018/vf-press "$REPO" -- --filter=blob:none >/dev/null
+gh repo clone llhzx2018/vf-press "$REPO" >/dev/null
 for spec in \
   '0.1.12:6d4e0e4a5fd02ec625012bca02acc9399b724aa6' \
   '0.1.13:cec5ecd28b3cdc585d1b7cac17a9e2167d520ea1' \
