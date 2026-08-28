@@ -1,0 +1,85 @@
+name: P01 V2.29 Hosted HTTP Sandbox Gate
+on:
+  push:
+    branches: [task/p01-v229-hosted-http-sandbox-gate-20260829]
+permissions:
+  contents: read
+env:
+  SOURCE_SHA: a6b8d47064ce06fa2cf8b8003ba15e25a83666d2
+  ROOT: /tmp/p01-v229-http-sandbox
+  PORT: '18444'
+  ADMIN_PASS: 'P01Sandbox!2026'
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+      - name: Fresh runtime and real hosted uploads
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          rm -rf "$ROOT" /tmp/p01-sandbox-* || true; cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-sandbox-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-sandbox-setup.html && break || sleep 1; done
+          COOKIE=/tmp/p01-sandbox.cookies
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-sandbox-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-sandbox-setup.html',encoding='utf-8').read();print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Sandbox' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/tmp/p01-sandbox-setup-post.html
+          ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";(new VfRepository(vf_db()))->createCategory(["name"=>"兼容归属","is_private"=>false]);'
+          LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}"); CSRF=$(jq -r '.csrf' <<<"$LOGIN"); test "$CSRF" != null
+          cat >/tmp/p01-sandbox-public.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>SANDBOX_PUBLIC</h1><script>document.body.dataset.ran='yes';try{localStorage.setItem('x','1');document.body.dataset.storage='allowed'}catch(e){document.body.dataset.storage='blocked'};fetch('/api.php?action=health').then(()=>document.body.dataset.fetch='allowed').catch(()=>document.body.dataset.fetch='blocked');</script>
+          HTML
+          cat >/tmp/p01-sandbox-private.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>SANDBOX_PRIVATE</h1>
+          HTML
+          create_topic(){ local title="$1" private="$2"; curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=create' --data-urlencode 'surface=topics' --data-urlencode 'source_kind=hosted_html' --data-urlencode 'category_id=1' --data-urlencode "title=$title" --data-urlencode 'resource_kind=研究' --data-urlencode "is_private=$private"; }
+          PUB_JSON=$(create_topic '专题 Sandbox 公开' 0); echo "$PUB_JSON" | jq -e '.ok==true and .id>0' >/dev/null; PUB=$(jq -r '.id' <<<"$PUB_JSON")
+          PRIV_JSON=$(create_topic '专题 Sandbox 私人' 1); echo "$PRIV_JSON" | jq -e '.ok==true and .id>0' >/dev/null; PRIV=$(jq -r '.id' <<<"$PRIV_JSON")
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/resource-media.php" -F "csrf=$CSRF" -F 'action=html_upload' -F "id=$PUB" -F 'html=@/tmp/p01-sandbox-public.html;type=text/html' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/resource-media.php" -F "csrf=$CSRF" -F 'action=html_upload' -F "id=$PRIV" -F 'html=@/tmp/p01-sandbox-private.html;type=text/html' | jq -e '.ok==true' >/dev/null
+          echo "{\"publicId\":$PUB,\"privateId\":$PRIV}" >/tmp/p01-sandbox-ids.json
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_SANDBOX_UPLOAD=PASS
+      - name: Anonymous CSP privacy and browser isolation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PUB=$(jq -r '.publicId' /tmp/p01-sandbox-ids.json); PRIV=$(jq -r '.privateId' /tmp/p01-sandbox-ids.json)
+          CODE=$(curl -sS -D /tmp/p01-sandbox.headers -o /tmp/p01-sandbox.out -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=$PUB"); test "$CODE" = 200
+          grep -Fi 'Content-Security-Policy: sandbox allow-scripts' /tmp/p01-sandbox.headers
+          ! grep -Fi 'allow-same-origin' /tmp/p01-sandbox.headers
+          grep -F SANDBOX_PUBLIC /tmp/p01-sandbox.out
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=$PRIV"); test "$CODE" = 404
+          mkdir -p /tmp/p01-sandbox-browser && cd /tmp/p01-sandbox-browser; npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 --no-save >/dev/null 2>&1; npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';const ids=JSON.parse(fs.readFileSync('/tmp/p01-sandbox-ids.json','utf8'));const b=await chromium.launch({headless:true});const p=await b.newPage();await p.goto('http://127.0.0.1:18444/resource-html.php?id='+ids.publicId,{waitUntil:'load'});await p.getByText('SANDBOX_PUBLIC',{exact:true}).waitFor();await p.waitForTimeout(300);if(await p.locator('body').getAttribute('data-ran')!=='yes')throw new Error('script');if(await p.locator('body').getAttribute('data-storage')!=='blocked')throw new Error('storage');if(await p.locator('body').getAttribute('data-fetch')!=='blocked')throw new Error('fetch');await p.screenshot({path:'/tmp/p01-v229-sandbox.png'});await b.close();console.log('P01_SANDBOX_BROWSER=PASS');
+          JS
+          node gate.mjs | grep -Fx P01_SANDBOX_BROWSER=PASS
+          ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";$d=vf_db();if((string)$d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(1);if($d->query("PRAGMA foreign_key_check")->fetchAll())exit(2);echo "P01_SANDBOX_DB=PASS\n";' | grep -Fx P01_SANDBOX_DB=PASS
+          echo P01_V229_HOSTED_SANDBOX=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-hosted-sandbox
+          path: |
+            /tmp/p01-v229-sandbox.png
+            /tmp/p01-sandbox.headers
+          retention-days: 14
