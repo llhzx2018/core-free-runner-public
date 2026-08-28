@@ -1,0 +1,118 @@
+name: P01 V2.24.0 Formal Artifact Gate V2
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v224-formal-artifact-gate-v2-20260828.yml']
+permissions:
+  contents: read
+env:
+  CANDIDATE: 867e3387b8efb70398287d05fd3652540efa77c8
+  CANDIDATE_TREE: 5985dab8ee071c881fd1e425864ed363e3bdc905
+  SOURCE_TAG: v2.23.0
+  SOURCE_COMMIT: 6e7d30e6ea0c8f5f70076a69b0d1e6fb9be620b2
+  VERSION: 2.24.0
+  SOURCE_VERSION: 2.23.0
+  SCHEMA: '2026082801'
+  EXPECTED_ASSET_SHA: 7a8125cbb52fa7693db39dde686f0ae2250c7eb87d08942e3022c209bec8c3ca
+  EXPECTED_ASSET_BYTES: '1210247'
+  OUT: /tmp/p01-v224-artifacts
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: candidate
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_TAG }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: production
+      - name: Rebuild exact deterministic artifact
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git clone -q --depth 1 --branch task/p01-v222-multi-surface-gate-20260828 https://github.com/llhzx2018/core-free-runner-public.git runner
+          git clone -q --depth 1 --branch agent/p01-22121-formal-artifact-gate-20260819 https://github.com/llhzx2018/core-free-runner-public.git proven
+          python3 runner/scripts/p01-v224-build-artifacts.py | tee /tmp/build.json
+          php -l "$OUT/repair-v2.24.0.php" >/dev/null
+          php "$OUT/repair-v2.24.0.php" --self-test | tee "$OUT/atomic-self-test.json"
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' "$OUT/atomic-self-test.json" >/dev/null
+          ASSET_SHA=$(sha256sum "$OUT/VF_Start_V2.24.0_UPDATE.zip"|awk '{print $1}'); ASSET_BYTES=$(stat -c %s "$OUT/VF_Start_V2.24.0_UPDATE.zip")
+          test "$ASSET_SHA" = "$EXPECTED_ASSET_SHA"
+          test "$ASSET_BYTES" = "$EXPECTED_ASSET_BYTES"
+          printf 'ASSET_SHA=%s\nASSET_BYTES=%s\n' "$ASSET_SHA" "$ASSET_BYTES" >> "$GITHUB_ENV"
+          echo P01_V224_DETERMINISTIC_ARTIFACT=PASS
+      - name: Actual V2.23.0 to V2.24.0 updater with data preservation
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v224-owner; COOKIE=/tmp/p01-v224-owner.cookies
+          rm -rf "$ROOT" "$COOKIE"; cp -a production/src "$ROOT"
+          php -S 127.0.0.1:18254 -t "$ROOT" >/tmp/owner.log 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -sS http://127.0.0.1:18254/setup.php -o /tmp/setup.html && break || sleep 1; done
+          curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18254/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/setup.html').read()).group(1))
+          PY
+          )
+          curl -sS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18254/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V224 Owner' --data-urlencode 'admin_password=P01V224!Owner' --data-urlencode 'admin_password_confirm=P01V224!Owner' -o /tmp/post.html
+          test -f "$ROOT/app/.runtime.php"
+          cat >/tmp/seed.php <<'PHP'
+          <?php require '/tmp/p01-v224-owner/app/bootstrap.php'; require_once '/tmp/p01-v224-owner/app/SurfaceRepository.php'; $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());$c=$r->createCategory(['name'=>'Keep','description'=>'','is_private'=>false]);$a=$r->saveLink(null,['category_id'=>$c,'title'=>'Keep Start','url'=>'https://example.com/start','description'=>'keep','is_private'=>false],'manual');$b=$r->saveLink(null,['category_id'=>$c,'title'=>'Keep Channel','url'=>'https://youtube.com/@keep','description'=>'keep','is_private'=>false],'manual');$s->upsertProfile((int)$b['id'],['surface'=>'channels','resource_kind'=>'youtube','background_friendly'=>true]);file_put_contents('/tmp/start-id',(string)$a['id']);file_put_contents('/tmp/channel-id',(string)$b['id']);
+          PHP
+          php /tmp/seed.php
+          cp "$OUT/repair-v2.24.0.php" "$ROOT/repair-v2.24.0.php"
+          php "$ROOT/repair-v2.24.0.php" --verify-source="$ROOT" | jq -e '.ok==true' >/dev/null
+          php "$ROOT/repair-v2.24.0.php" --run="$ROOT" | tee /tmp/update.json
+          jq -e '.ok==true and .already_current==false and .schema=="2026082801" and .integrity=="ok" and .fk==0' /tmp/update.json >/dev/null
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$VERSION"
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          php "$ROOT/cli/surface-verify.php" | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/base.txt; grep -Fx 'DRIFT_COUNT=0' /tmp/base.txt; grep -Fx 'UNKNOWN_COUNT=0' /tmp/base.txt
+          START=$(cat /tmp/start-id); CHANNEL=$(cat /tmp/channel-id)
+          php -r "require '$ROOT/app/bootstrap.php'; \$p=vf_db(); \$q=\$p->prepare('SELECT title FROM links WHERE id=?'); \$q->execute([(int)'$START']); if((string)\$q->fetchColumn()!=='Keep Start')exit(1); \$q->execute([(int)'$CHANNEL']); if((string)\$q->fetchColumn()!=='Keep Channel')exit(1); \$q=\$p->prepare('SELECT surface FROM resource_surface_profiles WHERE link_id=?'); \$q->execute([(int)'$CHANNEL']); if((string)\$q->fetchColumn()!=='channels')exit(1); echo 'DATA_PRESERVED=YES\n';"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18254/api.php?action=login' --data '{"password":"P01V224!Owner"}' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18254/channels.php | grep -F 'surface-ux-closure.css' >/dev/null
+          echo P01_V224_ACTUAL_UPDATER=PASS
+      - name: Rollback failure injection
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v224-rollback; rm -rf "$ROOT"; cp -a production/src "$ROOT"
+          php -S 127.0.0.1:18255 -t "$ROOT" >/tmp/rb.log 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -sS http://127.0.0.1:18255/setup.php -o /tmp/rb-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/rb-setup.html').read()).group(1))
+          PY
+          )
+          curl -sS -c /tmp/rb.cookies -b /tmp/rb.cookies -X POST http://127.0.0.1:18255/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Rollback' --data-urlencode 'admin_password=P01V224!Rollback' --data-urlencode 'admin_password_confirm=P01V224!Rollback' -o /tmp/rb-post.html
+          cp "$OUT/repair-v2.24.0.php" "$ROOT/repair-v2.24.0.php"
+          set +e; VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$ROOT/repair-v2.24.0.php" --run="$ROOT" >/tmp/rb-result.txt 2>&1; RC=$?; set -e
+          test "$RC" -ne 0
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$SOURCE_VERSION"
+          php "$ROOT/repair-v2.24.0.php" --verify-source="$ROOT" | jq -e '.ok==true' >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_V224_ROLLBACK=PASS
+      - name: Formal metadata
+        run: |
+          printf '{"version":"2.24.0","source_version":"2.23.0","schema":"2026082801","candidate":"%s","candidate_tree":"%s","asset_name":"VF_Start_V2.24.0_UPDATE.zip","asset_bytes":%s,"asset_sha256":"%s","release_source_gate":33155395660,"predecessor_full_gate":33155525709,"status":"PASS"}\n' "$CANDIDATE" "$CANDIDATE_TREE" "$ASSET_BYTES" "$ASSET_SHA" > "$OUT/P01-V2.24.0-FORMAL-METADATA.json"
+          cat "$OUT/P01-V2.24.0-FORMAL-METADATA.json"
+          echo P01_V224_FORMAL_ARTIFACT_GATE=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p01-v224-formal-artifacts-${{ env.CANDIDATE }}
+          path: /tmp/p01-v224-artifacts
+          if-no-files-found: error
+          retention-days: 7
