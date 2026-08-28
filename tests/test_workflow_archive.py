@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +106,28 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(active, MODULE.ACTIVE_CURRENT_WORKFLOW_NAMES)
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "public-infrastructure").glob("*.yml"))
         self.assertEqual(len(archived), 2)
+
+    def test_current_checkout_and_setup_python_use_approved_node24_pins(self):
+        root = Path(__file__).resolve().parents[1]
+        approved = {
+            "actions/checkout": {
+                "d23441a48e516b6c34aea4fa41551a30e30af803",  # releases-v6 Node24
+                "3d3c42e5aac5ba805825da76410c181273ba90b1",  # v7.0.1 Node24
+            },
+            "actions/setup-python": {
+                "5fda3b95a4ea91299a34e894583c3862153e4b97",  # v7.0.0 Node24
+            },
+        }
+        pattern = re.compile(r"^\s*uses:\s*(actions/(?:checkout|setup-python))@([^\s#]+)", re.MULTILINE)
+        found: list[tuple[str, str, str]] = []
+        for path in sorted((root / ".github/workflows").glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            for action, ref in pattern.findall(text):
+                found.append((path.name, action, ref))
+                self.assertRegex(ref, r"^[0-9a-f]{40}$")
+                self.assertIn(ref, approved[action])
+        self.assertTrue(any(action == "actions/checkout" for _, action, _ in found))
+        self.assertTrue(any(action == "actions/setup-python" for _, action, _ in found))
 
     def test_active_source_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as raw:
