@@ -70,6 +70,12 @@ s = replace_once(
 )
 s = replace_once(
     s,
+    "    [$front, \"str_starts_with(\\$path,'/studio/system')\", 'System front route family'],\n",
+    "    [$front, \"\\$systemActive = match (\\$path)\", 'Explicit System V2 route map'],\n",
+    'system front route family',
+)
+s = replace_once(
+    s,
     "if (str_contains($operations, '<!doctype html>')) {\n    throw new RuntimeException('System center still duplicates the full HTML shell.');\n}\n",
     "if (str_contains($operations, 'class=\"ops-sidebar\"')) {\n    throw new RuntimeException('Operations controller duplicates canonical Backoffice chrome.');\n}\n",
     'legacy full-html assertion',
