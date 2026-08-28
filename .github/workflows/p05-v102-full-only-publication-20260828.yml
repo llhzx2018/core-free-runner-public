@@ -1,0 +1,194 @@
+name: P05 V1.0.2 FULL_ONLY Publication
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p05-v102-full-only-publication-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      MAIN_SOURCE: 461259dafd5f002733a402ec073bd8c618383a21
+      VERIFIED_SOURCE: 468041c612ab07b4e65f60c920238bd807c03910
+      EXPECTED_TREE: c5b413f85236dd825895b72bcd0dc6c8300bc510
+      TAG: v1.0.2
+      ASSET: VF_SEO_V1.0.2_FULL.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact P05 main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.MAIN_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Exact main tree and FULL_ONLY fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p05 rev-parse HEAD)" = "$MAIN_SOURCE"
+          test "$(git -C p05 rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git -C p05 diff --quiet "$VERIFIED_SOURCE" "$MAIN_SOURCE"
+          test "$(tr -d '\r\n' < p05/VERSION)" = '1.0.2'
+          node - <<'JS'
+          const p=require('./p05/VF_PROJECT.json');
+          if(p.project_id!=='P05'||p.version!=='1.0.2'||p.schema_version!==1) throw new Error('identity');
+          if(p.production_deployment!=='NOT_DEPLOYED'||p.production_version!==null) throw new Error('production boundary');
+          JS
+          echo P05_V102_MAIN_TREE=PASS
+          echo P05_V102_RELEASE_MODE=FULL_ONLY
+          echo P05_V102_PRODUCTION=NOT_DEPLOYED
+
+      - name: Regression and build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run build
+          echo P05_V102_PUBLICATION_REGRESSION=PASS
+
+      - name: Build deterministic FULL asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p05-v102-publication"
+          STAGE_A="$ROOT/stage-a"; STAGE_B="$ROOT/stage-b"
+          mkdir -p "$ROOT"
+          build_stage() {
+            local stage="$1"
+            rm -rf "$stage"; mkdir -p "$stage"
+            STAGE="$stage" python3 - <<'PY'
+          import os,pathlib,shutil,subprocess
+          root=pathlib.Path('p05').resolve(); stage=pathlib.Path(os.environ['STAGE'])
+          for raw in subprocess.check_output(['git','-C',str(root),'ls-files','-z']).split(b'\0'):
+              if not raw: continue
+              rel=raw.decode()
+              if rel.startswith('.github/'): continue
+              src=root/rel
+              if src.is_file():
+                  dst=stage/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+          shutil.copytree(root/'dist',stage/'dist',dirs_exist_ok=True)
+          PY
+          }
+          zip_stage() {
+            local stage="$1" out="$2"
+            STAGE="$stage" OUT="$out" python3 - <<'PY'
+          import os,pathlib,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT'])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+                  rel=p.relative_to(stage).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=((0o100755 if rel=='install-cloudpanel.sh' or rel.startswith('bin/') else 0o100644)<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          }
+          build_stage "$STAGE_A"; build_stage "$STAGE_B"
+          zip_stage "$STAGE_A" "$ROOT/a.zip"; zip_stage "$STAGE_B" "$ROOT/b.zip"
+          cmp "$ROOT/a.zip" "$ROOT/b.zip"
+          mv "$ROOT/a.zip" "$ROOT/$ASSET"
+          unzip -p "$ROOT/$ASSET" VERSION | tr -d '\r\n' | grep -Fxq '1.0.2'
+          ! unzip -Z1 "$ROOT/$ASSET" | grep -Eq '^\.github/'
+          sha256sum "$ROOT/$ASSET" | tee "$ROOT/SHA256SUMS.txt"
+          stat -c '%s' "$ROOT/$ASSET" | tee "$ROOT/BYTES.txt"
+          echo P05_V102_DETERMINISTIC_FULL=PASS
+
+      - name: Real first install from formal FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p05-v102-install"; APP="$ROOT/app"; HOME_DIR="$ROOT/home"
+          rm -rf "$ROOT"; mkdir -p "$APP" "$HOME_DIR"
+          unzip -q "$RUNNER_TEMP/p05-v102-publication/$ASSET" -d "$APP"
+          if ! command -v crontab >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq cron >/dev/null; fi
+          export HOME="$HOME_DIR" VF_INSTALL_PORT=19058
+          printf '1\n19058\nhttps://seo.example.test\nadmin\nP05-V102-Release-Password-2026!\nP05-V102-Release-Password-2026!\n' | bash "$APP/install-cloudpanel.sh"
+          ENV_FILE="$HOME/.config/vf-seo/runtime.env"; test -f "$ENV_FILE"; set -a; source "$ENV_FILE"; set +a
+          cd "$APP"
+          npm run verify:schema
+          npm run verify:admin-ready
+          curl -fsS -H 'x-forwarded-proto: https' -H 'host: seo.example.test' 'http://127.0.0.1:19058/api/health' > "$ROOT/health.json"
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs'; const h=JSON.parse(readFileSync(process.env.ROOT+'/health.json','utf8'));
+          if(!h.ok||h.version!=='1.0.2'||h.schema!==1||h.databaseProvider!=='sqlite') throw new Error(JSON.stringify(h));
+          JS
+          pm2 delete vf-seo vf-seo-worker >/dev/null 2>&1 || true
+          echo P05_V102_FORMAL_FULL_FIRST_INSTALL=PASS
+
+      - name: Publish GitHub Release v1.0.2
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p05-v102-publication"; ZIP="$ROOT/$ASSET"
+          code=$(curl -sS -o "$ROOT/existing.json" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/llhzx2018/vf-seo/releases/tags/$TAG")
+          if [ "$code" = 404 ]; then
+            BODY='P05 V1.0.2 Human-readable Common Product Baseline UI. FULL_ONLY distribution. Schema 1 unchanged. Production NOT_DEPLOYED. V1.0.1 -> V1.0.2 Atomic update is not claimed.'
+            jq -nc --arg tag "$TAG" --arg target "$MAIN_SOURCE" --arg name 'VF SEO V1.0.2' --arg body "$BODY" \
+              '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:false,prerelease:false}' > "$ROOT/release-request.json"
+            curl -fsS -X POST -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H 'Content-Type: application/json' --data-binary @"$ROOT/release-request.json" \
+              'https://api.github.com/repos/llhzx2018/vf-seo/releases' > "$ROOT/release.json"
+          elif [ "$code" = 200 ]; then
+            cp "$ROOT/existing.json" "$ROOT/release.json"
+          else
+            cat "$ROOT/existing.json"; exit 1
+          fi
+          rid=$(jq -r '.id' "$ROOT/release.json"); test "$rid" -gt 0
+          tag_commit=$(git -C p05 rev-list -n1 "$TAG" 2>/dev/null || true)
+          if [ -n "$tag_commit" ]; then test "$tag_commit" = "$MAIN_SOURCE"; fi
+          assets=$(curl -fsS -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/llhzx2018/vf-seo/releases/$rid/assets")
+          aid=$(printf '%s' "$assets" | jq -r --arg n "$ASSET" '.[]|select(.name==$n)|.id' | head -1)
+          if [ -z "$aid" ]; then
+            curl -fsS -X POST -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H 'Content-Type: application/zip' --data-binary @"$ZIP" \
+              "https://uploads.github.com/repos/llhzx2018/vf-seo/releases/$rid/assets?name=$ASSET" > "$ROOT/asset.json"
+          else
+            printf '%s' "$assets" | jq --arg n "$ASSET" '.[]|select(.name==$n)' > "$ROOT/asset.json"
+          fi
+          jq -e --arg n "$ASSET" '.name==$n and .state=="uploaded"' "$ROOT/asset.json" >/dev/null
+          test "$(jq -r '.size' "$ROOT/asset.json")" = "$(stat -c '%s' "$ZIP")"
+          echo "RELEASE_ID=$rid" | tee "$ROOT/RELEASE_ID.txt"
+          echo "ASSET_ID=$(jq -r '.id' "$ROOT/asset.json")" | tee "$ROOT/ASSET_ID.txt"
+          echo "ASSET_BYTES=$(stat -c '%s' "$ZIP")" | tee -a "$ROOT/ASSET_ID.txt"
+          echo "ASSET_SHA256=$(sha256sum "$ZIP" | awk '{print $1}')" | tee "$ROOT/ASSET_SHA256.txt"
+          echo P05_V102_GITHUB_RELEASE=PASS
+
+      - name: Upload publication evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P05-V1.0.2-FULL-ONLY-PUBLICATION-${{ env.MAIN_SOURCE }}
+          path: |
+            ${{ runner.temp }}/p05-v102-publication/VF_SEO_V1.0.2_FULL.zip
+            ${{ runner.temp }}/p05-v102-publication/SHA256SUMS.txt
+            ${{ runner.temp }}/p05-v102-publication/BYTES.txt
+            ${{ runner.temp }}/p05-v102-publication/RELEASE_ID.txt
+            ${{ runner.temp }}/p05-v102-publication/ASSET_ID.txt
+            ${{ runner.temp }}/p05-v102-publication/ASSET_SHA256.txt
+            ${{ runner.temp }}/p05-v102-install/health.json
+          retention-days: 90
