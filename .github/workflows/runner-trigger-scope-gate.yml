@@ -15,7 +15,11 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 10
+    env:
+      P02_SOURCE_SHA: e0e507660ba3cd6f50fde6d1ff20c9414fde5932
+      P04_SOURCE_SHA: 23d164a0f1b988b097356bde93ddbfc775389572
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,3 +34,89 @@ jobs:
 
       - name: Run trigger scope regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Require private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo PRIVATE_READ_CAPABILITY=PASS
+
+      - name: Checkout exact P02 workflow-convergence source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.P02_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p02
+
+      - name: Checkout exact P04 workflow-convergence source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.P04_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p04
+
+      - name: Prepare lightweight product-gate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 >/dev/null
+          php -v
+          sqlite3 --version
+          python3 --version
+
+      - name: Verify P02 exact workflow convergence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p02
+          test "$(git rev-parse HEAD)" = "$P02_SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.30'
+          mapfile -t active < <(find .github/workflows -maxdepth 1 -type f -name '*.yml' -printf '%f\n' | sort)
+          test "${#active[@]}" = '2'
+          test "${active[0]}" = 'maintenance-reverify.yml'
+          test "${active[1]}" = 'repository-health.yml'
+          test "$(git ls-tree HEAD archive/workflows/v2.4.26-editor-candidate.yml | awk '{print $3}')" = 'd410570b9435e443034b992aba651bdfc43fe57b'
+          test "$(git ls-tree HEAD archive/workflows/release-verify-v2424.yml | awk '{print $3}')" = '6c8071b30829ceb5149568ae06ad0e5c11c09a68'
+          test ! -e .github/workflows/v2.4.26-editor-candidate.yml
+          test ! -e .github/workflows/release-verify.yml
+          bash scripts/verify-repository.sh
+          echo P02_WORKFLOW_CONVERGENCE_MACHINE=PASS
+
+      - name: Verify P04 exact workflow convergence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p04
+          test "$(git rev-parse HEAD)" = "$P04_SOURCE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '2.8.11'
+          mapfile -t active < <(find .github/workflows -maxdepth 1 -type f -name '*.yml' -printf '%f\n' | sort)
+          test "${#active[@]}" = '1'
+          test "${active[0]}" = 'ci.yml'
+          test "$(git ls-tree HEAD archive/workflows/release-gate-v256.yml | awk '{print $3}')" = '4407d7631877b7b7eb1c3f85986d4ad5f84d55c7'
+          test "$(git ls-tree HEAD archive/workflows/v251-maintenance-release.yml | awk '{print $3}')" = '46857307ea824f0858e4e2823321dc1c40e8266a'
+          test "$(git ls-tree HEAD archive/workflows/v280-navigation-review.yml | awk '{print $3}')" = 'b0743375af02b33a0bcecfe041e818b5286cda8c'
+          test ! -e .github/workflows/release-gate.yml
+          test ! -e .github/workflows/v251-maintenance-release.yml
+          test ! -e .github/workflows/v280-navigation-review.yml
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          echo P04_WORKFLOW_CONVERGENCE_MACHINE=PASS
+
+      - name: Emit public-safe convergence receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            "p02=$P02_SOURCE_SHA" \
+            "p04=$P04_SOURCE_SHA" \
+            'gate=estate-workflow-convergence-v1' \
+            | sha256sum \
+            | awk '{print "ESTATE_WORKFLOW_CONVERGENCE_RECEIPT_SHA256="$1}'
