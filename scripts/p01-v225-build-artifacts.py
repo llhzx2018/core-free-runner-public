@@ -2,7 +2,7 @@
 from pathlib import Path
 import hashlib, importlib.util, json
 ROOT=Path.cwd(); VERSION='2.25.0'; SOURCE_VERSION='2.24.0'; SCHEMA='2026082801'
-CANDIDATE='92c68ceae9af9e802017043478d37c5512cb3941'; TREE='5db9ee2c6a7e58d44e40772cd5658fe4b85a87c1'; SOURCE='867e3387b8efb70398287d05fd3652540efa77c8'
+CANDIDATE='894cc9cb647a9b4694b0684d4bba89497e182e66'; TREE='5db9ee2c6a7e58d44e40772cd5658fe4b85a87c1'; SOURCE='867e3387b8efb70398287d05fd3652540efa77c8'
 def load(name,path):
     s=importlib.util.spec_from_file_location(name,path); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
 base=load('base',ROOT/'proven/scripts/p01-build-release.py'); v2=load('v2',ROOT/'proven/scripts/p01-build-release-v2.py')
