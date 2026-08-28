@@ -15,7 +15,10 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 8
+    env:
+      CORE_AGENT_SOURCE_SHA: dc120d831346d66d42359fde20546ec0079e607a
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,3 +33,80 @@ jobs:
 
       - name: Run trigger scope regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Verify private source read capability
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            echo 'RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'
+            exit 78
+          fi
+
+      - name: Checkout exact core-agent PR 5 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-agent
+          ref: ${{ env.CORE_AGENT_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: core-agent-source
+
+      - name: Guard exact source and merged runtime surface
+        working-directory: core-agent-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CORE_AGENT_SOURCE_SHA"
+          PYTHONPATH=src python - <<'PY'
+          import core_agent
+          from core_agent.profiles.vf import (
+              VFRuntimeBootstrap,
+              VFRuntimeEntryDecision,
+              VFRuntimeLevel,
+              detect_runtime_level,
+              runtime_profile,
+          )
+          assert core_agent.__version__ == '1.1.0rc1'
+          assert VFRuntimeBootstrap is not None
+          assert VFRuntimeEntryDecision is not None
+          assert VFRuntimeLevel.L1.value == 'L1'
+          assert detect_runtime_level('VF L1: 修复一个 BUG').value == 'L1'
+          assert runtime_profile('L1').budget.max_steps == 15
+          print('RUNTIME_ABSORPTION_SURFACE=PASS')
+          PY
+
+      - name: Run exact-source core-agent verification
+        working-directory: core-agent-source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        run: python scripts/verify.py
+
+      - name: Emit public-safe exact-source receipt
+        if: always()
+        working-directory: core-agent-source
+        env:
+          VF_SOURCE_SHA: ${{ env.CORE_AGENT_SOURCE_SHA }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          source = Path('.evidence/verification.json')
+          payload = {
+              'schema': 'core-agent-pr5-public-evidence/v1',
+              'source_sha': os.environ['VF_SOURCE_SHA'],
+              'private_source_persisted': False,
+          }
+          if source.exists():
+              raw = source.read_bytes()
+              detail = json.loads(raw.decode('utf-8'))
+              payload['status'] = detail.get('status')
+              payload['check_exit_codes'] = [item.get('exit_code') for item in detail.get('checks', [])]
+              payload['private_evidence_sha256'] = hashlib.sha256(raw).hexdigest()
+          else:
+              payload['status'] = 'BLOCKED_BEFORE_VERIFICATION'
+          canonical = json.dumps(payload, sort_keys=True).encode('utf-8')
+          payload['sha256'] = hashlib.sha256(canonical).hexdigest()
+          print(json.dumps(payload, sort_keys=True))
+          PY
