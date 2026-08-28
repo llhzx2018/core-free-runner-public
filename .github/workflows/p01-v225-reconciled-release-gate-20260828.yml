@@ -1,0 +1,80 @@
+name: P01 V2.25 Reconciled Release Gate
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v225-reconciled-release-gate-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SHA: 894cc9cb647a9b4694b0684d4bba89497e182e66
+      TREE: 5db9ee2c6a7e58d44e40772cd5658fe4b85a87c1
+      OLD_RELEASE: 92c68ceae9af9e802017043478d37c5512cb3941
+      MAIN: 6f1cb9c3606d7ca4c92276852391d55280622d66
+      DEVELOP: 19fc03dca150150e2bdedb34a49e145d8d9d03a0
+      VERSION: 2.25.0
+      SCHEMA: '2026082801'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact reconciled identity
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^1)" = "$OLD_RELEASE"
+          test "$(git rev-parse HEAD^2)" = "$MAIN"
+          git merge-base --is-ancestor "$DEVELOP" "$SHA"
+          git merge-base --is-ancestor "$MAIN" "$SHA"
+          test "$(git rev-parse "$OLD_RELEASE^{tree}")" = "$TREE"
+          test "$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/vf-start.git" refs/heads/release/p01-v2.25.0-20260828|awk '{print $1}')" = "$SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$VERSION"
+          grep -F "define('VF_VERSION', '2.25.0');" src/app/bootstrap.php >/dev/null
+          test -z "$(git diff --name-only "$OLD_RELEASE..$SHA")"
+          echo P01_V225_RECONCILED_IDENTITY=PASS
+      - name: Fresh runtime regression
+        run: |
+          set -Eeuo pipefail
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          rm -rf /tmp/p01-v225-rg /tmp/p01-v225-rg.cookies; cp -a src /tmp/p01-v225-rg; cd /tmp/p01-v225-rg
+          php -S 127.0.0.1:18258 -t . >/tmp/p01-v225-rg.log 2>&1 & echo $! >/tmp/p01-v225-rg.pid
+          trap 'kill "$(cat /tmp/p01-v225-rg.pid)" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -sS http://127.0.0.1:18258/setup.php -o /tmp/setup.html && break || sleep 1; done
+          curl -fsS -c /tmp/p01-v225-rg.cookies -b /tmp/p01-v225-rg.cookies http://127.0.0.1:18258/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/setup.html').read()).group(1))
+          PY
+          )
+          curl -sS -c /tmp/p01-v225-rg.cookies -b /tmp/p01-v225-rg.cookies -X POST http://127.0.0.1:18258/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V225 Reconciled' --data-urlencode 'admin_password=P01V225!Reconcile' --data-urlencode 'admin_password_confirm=P01V225!Reconcile' >/tmp/post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          php cli/baseline-verify.php | tee /tmp/base.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/base.txt; grep -Fx 'UNKNOWN_COUNT=0' /tmp/base.txt
+          test "$(php -r "require 'app/bootstrap.php';echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php';echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          echo P01_V225_RECONCILED_RUNTIME=PASS
+      - name: Verdict
+        run: |
+          echo P01_V225_RECONCILED_RELEASE_SOURCE=$SHA
+          echo P01_V225_RECONCILED_RELEASE_TREE=$TREE
+          echo P01_V225_RECONCILED_RELEASE_MACHINE=PASS
+          echo SCHEMA=$SCHEMA
+          echo PRODUCTION=NO
