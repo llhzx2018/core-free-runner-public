@@ -1,0 +1,140 @@
+name: P06 V0.1.14 Main Release Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p06-v014-main-release-gate-20260828.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      EXACT_SOURCE: d689b79a6f1d98f0bf5bccba438f3c9a74077782
+      TARGET_VERSION: 0.1.14
+      TARGET_TAG: v0.1.14
+      VF_PRESS_STORAGE_PATH: /tmp/p06-v014-main-release-storage
+      VF_PRESS_DB_PATH: /tmp/p06-v014-main-release-storage/app.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Checkout exact P06 main and fence release target
+        run: |
+          set -Eeuo pipefail
+          git clone https://github.com/llhzx2018/vf-press.git p06 >/dev/null 2>&1
+          cd p06
+          test "$(git rev-parse origin/main)" = "$EXACT_SOURCE"
+          git checkout "$EXACT_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(jq -r '.version' VF_PROJECT.json)" = "$TARGET_VERSION"
+          test "$(jq -r '.schema' VF_PROJECT.json)" = '3'
+          if git ls-remote --exit-code --tags origin "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
+            echo "Release tag already exists; refusing duplicate publish."
+            exit 31
+          fi
+          echo P06_MAIN_EXACT_SOURCE_FENCE=PASS
+
+      - name: Install dependencies
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Fresh migration Schema 3
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$VF_PRESS_STORAGE_PATH"
+          mkdir -p "$VF_PRESS_STORAGE_PATH"
+          cd p06
+          php bin/migrate.php
+          test -f "$VF_PRESS_DB_PATH"
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = '3'
+          echo FRESH_MIGRATION_SCHEMA3=PASS
+
+      - name: PHP syntax and complete regression contract
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          find . -path './vendor' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p06-v014-main-lint.log
+          mapfile -t scripts < <(jq -r '.scripts | keys[] | select(test("self-test$"))' composer.json)
+          test "${#scripts[@]}" -eq 21
+          for script in "${scripts[@]}"; do
+            echo "=== composer $script ==="
+            composer run --no-interaction "$script"
+          done
+          echo SELF_TEST_COUNT=21
+          echo COMPLETE_REGRESSION=PASS
+
+      - name: Common Baseline V2 runtime truth
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          php bin/common-baseline-v2-self-test.php
+          echo COMMON_PRODUCT_BASELINE_V2=PASS
+
+      - name: Build and verify formal release assets
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          rm -rf dist
+          mkdir -p dist
+          php bin/build-release.php dist
+          test -s "dist/VF_Press_V${TARGET_VERSION}_FULL.zip"
+          test -s "dist/VF_Press_V${TARGET_VERSION}_UPDATE.zip"
+          test -s dist/SHA256SUMS.txt
+          test -s dist/RELEASE_INFO.json
+          test "$(jq -r '.project_id' dist/RELEASE_INFO.json)" = 'P06'
+          test "$(jq -r '.version' dist/RELEASE_INFO.json)" = "$TARGET_VERSION"
+          test "$(jq -r '.schema' dist/RELEASE_INFO.json)" = '3'
+          grep -Fq "VF_Press_V${TARGET_VERSION}_FULL.zip" dist/SHA256SUMS.txt
+          grep -Fq "VF_Press_V${TARGET_VERSION}_UPDATE.zip" dist/SHA256SUMS.txt
+          unzip -t "dist/VF_Press_V${TARGET_VERSION}_FULL.zip" >/dev/null
+          unzip -t "dist/VF_Press_V${TARGET_VERSION}_UPDATE.zip" >/dev/null
+          unzip -p "dist/VF_Press_V${TARGET_VERSION}_UPDATE.zip" VF_UPDATE.json > /tmp/p06-v014-update-contract.json
+          test "$(jq -r '.project_id' /tmp/p06-v014-update-contract.json)" = 'P06'
+          test "$(jq -r '.target_version' /tmp/p06-v014-update-contract.json)" = "$TARGET_VERSION"
+          sha256sum -c dist/SHA256SUMS.txt
+          echo RELEASE_ASSET_CONTRACT=PASS
+
+      - name: Publish V0.1.14 release only after all gates PASS
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          if gh release view "$TARGET_TAG" --repo llhzx2018/vf-press >/dev/null 2>&1; then
+            echo "Release already exists; refusing duplicate publish."
+            exit 32
+          fi
+          cat > /tmp/p06-v014-release-notes.md <<'EOF'
+          ## VF Press V0.1.14 · Common Baseline V2 + V0.1.13 Release-Line Reconciliation
+
+          - 合并正式 V0.1.13 的 Book / Reader / AI / Demo / Schema 3 能力与当前 Common Product Baseline V2。
+          - 保留专业运维后台作为全局 Backoffice Authority；旧 AdminShell 仅保留于专注书籍工作区。
+          - 修复 Common Baseline Runtime 对 Schema 2 的历史硬编码，改为与现有 VF_PROJECT Authority 动态一致。
+          - Fresh Migration Schema 3、PHP syntax、21/21 self-tests、Common Baseline V2、FULL/UPDATE 发布包合同全部 Machine PASS。
+          - UPDATE 包继续使用 VF_UPDATE.json、逐文件 SHA256、预更新恢复点、Atomic Apply 与失败回滚合同。
+
+          本发布只开放正式更新通道；不执行 Production 升级或 Production 数据写入。
+          EOF
+          gh release create "$TARGET_TAG" \
+            "dist/VF_Press_V${TARGET_VERSION}_FULL.zip" \
+            "dist/VF_Press_V${TARGET_VERSION}_UPDATE.zip" \
+            dist/SHA256SUMS.txt \
+            dist/RELEASE_INFO.json \
+            --repo llhzx2018/vf-press \
+            --target "$EXACT_SOURCE" \
+            --title "VF Press V0.1.14 · Common Baseline V2 Release-Line Reconciliation" \
+            --notes-file /tmp/p06-v014-release-notes.md
+          echo P06_V014_RELEASE_PUBLISHED=PASS
+          echo PRODUCTION_WRITE=NO
