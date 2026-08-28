@@ -1,0 +1,177 @@
+name: P05 V1.0.1 Artifact First Install Gate V2
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-v101-first-install-artifact-gate-v2-20260828.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXACT_SOURCE: 00a724587c041130c0e81e0e45ef876413fb2916
+      ASSESSED_BASE: ec613be42f18bd0456a7e5f5d9c0bbbe25a6e22c
+      TARGET_BRANCH: release/p05-v1.0.1-common-baseline-v2-20260828
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact P05 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+      - name: Prepare Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Exact-source and prior-regression binding
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          test "$(git diff --name-only "$ASSESSED_BASE" "$EXACT_SOURCE")" = 'install-cloudpanel.sh'
+          test "$(tr -d '\r\n' < VERSION)" = '1.0.1'
+          bash -n install-cloudpanel.sh
+          grep -Fq 'VF_SESSION_TTL_SECONDS=2592000' install-cloudpanel.sh
+          grep -Fq 'VF_SESSION_IDLE_SECONDS=604800' install-cloudpanel.sh
+          grep -Fq 'VF_SESSION_ABSOLUTE_SECONDS=2592000' install-cloudpanel.sh
+          grep -Fq 'VF_SESSION_COOKIE_SECONDS=2592000' install-cloudpanel.sh
+          grep -Fq 'VF_STEP_UP_WINDOW_SECONDS=900' install-cloudpanel.sh
+          ! grep -Fq 'VF_SESSION_ROTATION_SECONDS=' install-cloudpanel.sh
+          echo P05_V101_PRIOR_REGRESSION_RUN=33144186906
+          echo P05_V101_PRIOR_REGRESSION_JOB=98761515146
+          echo P05_V101_PRIOR_REGRESSION_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P05_V101_SOURCE_FENCE=PASS
+      - name: Build exact deterministic FULL and UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          npm ci
+          npm run build
+          OUT="$RUNNER_TEMP/p05-v101-release"
+          STAGE="$RUNNER_TEMP/p05-v101-stage"
+          rm -rf "$OUT" "$STAGE"; mkdir -p "$OUT" "$STAGE"
+          python3 - <<'PY'
+          import os,pathlib,shutil,subprocess
+          root=pathlib.Path('.').resolve(); stage=pathlib.Path(os.environ['RUNNER_TEMP'])/'p05-v101-stage'
+          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
+            if not raw: continue
+            rel=raw.decode()
+            if rel.startswith('.github/'): continue
+            src=root/rel
+            if not src.is_file(): continue
+            dst=stage/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+          dist=root/'dist'
+          if not (dist/'src/server/index.js').is_file(): raise SystemExit('DIST_SERVER_MISSING')
+          shutil.copytree(dist,stage/'dist',dirs_exist_ok=True)
+          PY
+          test "$(tr -d '\r\n' < "$STAGE/VERSION")" = '1.0.1'
+          test -f "$STAGE/dist/src/server/index.js"
+          test -f "$STAGE/install-cloudpanel.sh"
+          test ! -d "$STAGE/node_modules"
+          ! find "$STAGE" -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '.env' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .
+          STAGE="$STAGE" OUT="$OUT" python3 - <<'PY'
+          import hashlib,os,pathlib,shutil,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT'])
+          full=out/'VF_SEO_V1.0.1_FULL.zip'
+          with zipfile.ZipFile(full,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+            for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+              rel=p.relative_to(stage).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+              info.external_attr=((0o100755 if rel=='install-cloudpanel.sh' or rel.startswith('bin/') else 0o100644)<<16)
+              z.writestr(info,p.read_bytes())
+          update=out/'VF_SEO_V1.0.1_UPDATE.zip'; shutil.copyfile(full,update)
+          def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+          (out/'SHA256SUMS.txt').write_text(f'{sha(full)}  {full.name}\n{sha(update)}  {update.name}\n',encoding='utf-8')
+          print('FULL_BYTES='+str(full.stat().st_size)); print('FULL_SHA256='+sha(full)); print('UPDATE_BYTES='+str(update.stat().st_size)); print('UPDATE_SHA256='+sha(update))
+          PY
+          (cd "$OUT" && sha256sum -c SHA256SUMS.txt)
+          cmp "$OUT/VF_SEO_V1.0.1_FULL.zip" "$OUT/VF_SEO_V1.0.1_UPDATE.zip"
+          echo P05_V101_ARTIFACT_BUILD=PASS
+      - name: Real first install from FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p05-v101-release"
+          ROOT="$RUNNER_TEMP/p05-v101-first-install"
+          APP="$ROOT/app"; HOME_DIR="$ROOT/home"
+          rm -rf "$ROOT"; mkdir -p "$APP" "$HOME_DIR"
+          unzip -q "$OUT/VF_SEO_V1.0.1_FULL.zip" -d "$APP"
+          if ! command -v crontab >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq cron >/dev/null; fi
+          export HOME="$HOME_DIR"
+          export VF_INSTALL_PORT=19051
+          printf '1\n19051\nhttps://seo.example.test\nadmin\nP05-V101-First-Install-Password-2026!\nP05-V101-First-Install-Password-2026!\n' | bash "$APP/install-cloudpanel.sh"
+          ENV_FILE="$HOME/.config/vf-seo/runtime.env"; DB_FILE="$HOME/.local/share/vf-seo/vf-seo.sqlite3"
+          test -f "$ENV_FILE" && test -f "$DB_FILE"
+          test "$(stat -c '%a' "$ENV_FILE")" = '600'
+          grep -Fxq 'VF_SESSION_TTL_SECONDS=2592000' "$ENV_FILE"
+          grep -Fxq 'VF_SESSION_IDLE_SECONDS=604800' "$ENV_FILE"
+          grep -Fxq 'VF_SESSION_ABSOLUTE_SECONDS=2592000' "$ENV_FILE"
+          grep -Fxq 'VF_SESSION_COOKIE_SECONDS=2592000' "$ENV_FILE"
+          grep -Fxq 'VF_STEP_UP_WINDOW_SECONDS=900' "$ENV_FILE"
+          grep -Fxq 'VF_DISPLAY_TIMEZONE=Asia/Shanghai' "$ENV_FILE"
+          grep -Fxq 'VF_LOCALE=zh-CN' "$ENV_FILE"
+          ! grep -Fq 'VF_SESSION_ROTATION_SECONDS=' "$ENV_FILE"
+          set -a; source "$ENV_FILE"; set +a
+          cd "$APP"
+          npm run verify:schema
+          npm run verify:admin-ready
+          curl -fsS -H 'x-forwarded-proto: https' -H 'host: app' 'http://127.0.0.1:19051/api/health' > "$ROOT/health-before.json"
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs';
+          const h=JSON.parse(readFileSync(process.env.ROOT+'/health-before.json','utf8'));
+          if(!h.ok||h.version!=='1.0.1'||h.schema!==1||h.databaseProvider!=='sqlite') throw new Error(JSON.stringify(h));
+          JS
+          node --input-type=module - <<'JS'
+          import {resolveCommonBaselineV2} from './dist/src/server/common-baseline-v2.js';
+          const n=k=>Number(process.env[k]);
+          const c={sessionTtlSeconds:n('VF_SESSION_TTL_SECONDS'),sessionIdleSeconds:n('VF_SESSION_IDLE_SECONDS'),sessionAbsoluteSeconds:n('VF_SESSION_ABSOLUTE_SECONDS'),sessionCookieSeconds:n('VF_SESSION_COOKIE_SECONDS'),stepUpWindowSeconds:n('VF_STEP_UP_WINDOW_SECONDS'),displayTimezone:process.env.VF_DISPLAY_TIMEZONE,locale:process.env.VF_LOCALE};
+          const r=resolveCommonBaselineV2(c,'sqlite');
+          if(r.results.length!==15||r.summary.pass!==14||r.summary.exception!==0||r.summary.drift!==0||r.summary.unknown!==0||r.summary.nA!==1||!r.summary.fullPass) throw new Error(JSON.stringify(r));
+          console.log('P05_V101_INSTALLED_BASELINE=PASS');
+          JS
+          pm2 restart vf-seo vf-seo-worker >/dev/null
+          for _ in $(seq 1 60); do curl -fsS -H 'x-forwarded-proto: https' -H 'host: app' 'http://127.0.0.1:19051/api/health' >/dev/null 2>&1 && break; sleep .5; done
+          npm run verify:admin-ready
+          pm2 jlist > "$ROOT/pm2.json"
+          ROOT="$ROOT" node - <<'JS'
+          const fs=require('fs'),rows=JSON.parse(fs.readFileSync(process.env.ROOT+'/pm2.json','utf8'));
+          for(const n of ['vf-seo','vf-seo-worker']){const p=rows.find(x=>x.name===n);if(!p||p.pm2_env?.status!=='online')throw new Error(n+' not online')}
+          JS
+          pm2 delete vf-seo vf-seo-worker >/dev/null 2>&1 || true
+          echo P05_V101_FIRST_INSTALL=PASS
+      - name: Exact-source deployment readiness verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p05
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$ASSESSED_BASE"
+          echo P05_V101_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P05_V101_SCHEMA=1
+          echo P05_V101_COMMON_BASELINE_V2=PASS
+          echo P05_V101_FIRST_INSTALL=PASS
+          echo P05_V101_DEPLOYMENT_READINESS=PASS
+          echo P05_V101_PRODUCTION=NOT_DEPLOYED
+          echo P05_V101_MACHINE=PASS
+      - name: Upload verified release set
+        uses: actions/upload-artifact@v4
+        with:
+          name: P05-V1.0.1-FORMAL-RELEASE-SET
+          path: |
+            ${{ runner.temp }}/p05-v101-release/VF_SEO_V1.0.1_FULL.zip
+            ${{ runner.temp }}/p05-v101-release/VF_SEO_V1.0.1_UPDATE.zip
+            ${{ runner.temp }}/p05-v101-release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
