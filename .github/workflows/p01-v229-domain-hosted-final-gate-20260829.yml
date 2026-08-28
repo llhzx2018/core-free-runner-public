@@ -1,0 +1,252 @@
+name: P01 V2.29 Resource Domain Hosted Final Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v229-domain-hosted-final-gate-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 4098fc5c2f0d070e2b1b7dfb28f1c3b01234fcfb
+  ROOT: /tmp/p01-v229-final
+  PORT: '18439'
+  ADMIN_PASS: 'P01Final!2026'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source syntax migration fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = '2.29.0'
+          grep -F "define('VF_VERSION', '2.29.0');" source/src/app/bootstrap.php
+          grep -F "'version' => '2026082901'" source/src/migrations/2026082901_v229_resource_domains.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          node --check source/src/assets/workspace-rebaseline.js
+          echo P01_FINAL_SYNTAX=PASS
+          cat >/tmp/p01-final-migration.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $db=new PDO('sqlite::memory:');$db->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);$db->exec('PRAGMA foreign_keys=ON');
+          $db->exec('CREATE TABLE links(id INTEGER PRIMARY KEY)');
+          $db->exec("CREATE TABLE resource_surface_profiles(link_id INTEGER PRIMARY KEY,surface TEXT NOT NULL,resource_kind TEXT NOT NULL DEFAULT '',note TEXT NOT NULL DEFAULT '',background_friendly INTEGER NOT NULL DEFAULT 0,media_year INTEGER,media_status TEXT NOT NULL DEFAULT '',last_opened_at TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(link_id) REFERENCES links(id) ON DELETE CASCADE)");
+          $db->exec("INSERT INTO links(id) VALUES(9)");
+          $db->exec("INSERT INTO resource_surface_profiles(link_id,surface,resource_kind,note,background_friendly,media_year,media_status,last_opened_at,created_at,updated_at) VALUES(9,'channels','旅行生活','legacy',1,NULL,'','','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')");
+          $m=include getenv('SRC').'/src/migrations/2026082901_v229_resource_domains.php';($m['up'])($db);
+          $r=$db->query('SELECT * FROM resource_domain_profiles WHERE link_id=9')->fetch(PDO::FETCH_ASSOC);
+          if(!$r||$r['domain_key']!=='channels'||$r['resource_kind']!=='旅行生活'||(int)$r['background_friendly']!==1)throw new RuntimeException('legacy migration failed');
+          foreach(['resource_domain_profiles','resource_asset_files'] as $t){$s=$db->prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?");$s->execute([$t]);if((int)$s->fetchColumn()!==1)throw new RuntimeException($t.' missing');}
+          echo "P01_FINAL_LEGACY_MIGRATION=PASS\n";
+          PHP
+          SRC="$PWD/source" php /tmp/p01-final-migration.php | grep -Fx P01_FINAL_LEGACY_MIGRATION=PASS
+          rm -rf "$ROOT" /tmp/p01-final-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-final-server.log 2>&1 &
+          echo $! >/tmp/p01-final-server.pid
+          COOKIE=/tmp/p01-final-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-final-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-final-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Final Domain Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-final-setup-post.html
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-final-verify.txt | grep -Fx VERIFY_PASS=YES
+          echo P01_FINAL_FRESH_RUNTIME=PASS
+
+      - name: Seed taxonomy privacy favicon fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-final-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());$db=vf_db();
+          $pub=$r->createCategory(['name'=>'公开网址','is_private'=>false,'sort_order'=>100]);
+          $priv=$r->createCategory(['name'=>'私人网址','is_private'=>true,'sort_order'=>90]);
+          $save=function(string $title,string $url,int $cat,bool $private=false)use($r):int{return (int)$r->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'final fixture','is_private'=>$private],'manual')['id'];};
+          $startPublic=$save('导航 Favicon','https://nav-final.example.com',$pub,false);
+          $startHidden=$save('导航 私人分类','https://private-start-final.example.com',$priv,false);
+          $channel=$save('频道 旅行生活','https://channel-final.example.com',$priv,false);$s->upsertProfile($channel,['surface'=>'channels','resource_kind'=>'旅行生活','background_friendly'=>true]);
+          $watch=$save('影视 电影','https://watch-final.example.com',$priv,false);$s->upsertProfile($watch,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026','media_status'=>'want']);
+          $remoteTopic=$save('专题 远程研究','https://remote-topic-final.example.com',$priv,false);$s->upsertProfile($remoteTopic,['surface'=>'topics','resource_kind'=>'研究','source_kind'=>'remote_url']);
+          $privateChannel=$save('频道 私人','https://private-channel-final.example.com',$pub,true);$s->upsertProfile($privateChannel,['surface'=>'channels','resource_kind'=>'私人频道']);
+          if(!is_dir(VF_USER_ICON_DIR))mkdir(VF_USER_ICON_DIR,0750,true);$file='final-favicon.png';$png=base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=');file_put_contents(VF_USER_ICON_DIR.'/'.$file,$png);$hash=hash('sha256',$png);$stmt=$db->prepare('INSERT INTO user_link_icons(link_id,file_name,file_hash,mime_type,byte_size,width,height,updated_at) VALUES(?,?,?,?,?,?,?,?)');$stmt->execute([$startPublic,$file,$hash,'image/png',strlen($png),1,1,gmdate('c')]);
+          $admin=$s->allAssets(true);$a=[];foreach($admin as $x)$a[(int)$x['id']]=$x;
+          foreach([$channel,$watch,$remoteTopic] as $id)if((int)($a[$id]['effective_private']??1)!==0)throw new RuntimeException('admin effective privacy leak '.$id);
+          if(($a[$startPublic]['icon_cache_status']??'')!=='user'||empty($a[$startPublic]['icon_cache_url']))throw new RuntimeException('favicon regression');
+          $public=$s->allAssets(false);$p=[];foreach($public as $x)$p[(int)$x['id']]=$x;
+          foreach([$startPublic,$channel,$watch,$remoteTopic] as $id)if(!isset($p[$id]))throw new RuntimeException('public missing '.$id);
+          foreach([$startHidden,$privateChannel] as $id)if(isset($p[$id]))throw new RuntimeException('private leak '.$id);
+          file_put_contents('/tmp/p01-final-fixture.json',json_encode(compact('pub','priv','startPublic','startHidden','channel','watch','remoteTopic','privateChannel'),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
+          echo "P01_FINAL_SEED=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-final-seed.php | grep -Fx P01_FINAL_SEED=PASS
+
+      - name: Taxonomy privacy and remote open HTTP gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-final-admin.cookies
+          LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}")
+          jq -e '.ok==true' <<<"$LOGIN" >/dev/null
+          PRIV=$(jq -r '.priv' /tmp/p01-final-fixture.json);REMOTE=$(jq -r '.remoteTopic' /tmp/p01-final-fixture.json)
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/start.php?category=${PRIV}&scope=public" -o /tmp/final-start.html
+          grep -F '网址分类' /tmp/final-start.html
+          ! grep -Fq '导航 私人分类' /tmp/final-start.html
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/channels.php?category=${PRIV}&scope=public" -o /tmp/final-channels.html
+          grep -F '频道分类' /tmp/final-channels.html;grep -F '频道 旅行生活' /tmp/final-channels.html;! grep -Fq '网址分类导航' /tmp/final-channels.html
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/watch.php?category=${PRIV}&scope=public" -o /tmp/final-watch.html
+          grep -F '内容类型' /tmp/final-watch.html;grep -F '影视 电影' /tmp/final-watch.html;! grep -Fq '网址分类导航' /tmp/final-watch.html
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/topics.php?category=${PRIV}&scope=public" -o /tmp/final-topics.html
+          grep -F '专题分类' /tmp/final-topics.html;grep -F '专题 远程研究' /tmp/final-topics.html;! grep -Fq '网址分类导航' /tmp/final-topics.html
+          curl -fsS "http://127.0.0.1:${PORT}/channels.php" -o /tmp/public-channels.html;grep -F '频道 旅行生活' /tmp/public-channels.html;! grep -Fq '频道 私人' /tmp/public-channels.html
+          curl -fsS "http://127.0.0.1:${PORT}/watch.php" -o /tmp/public-watch.html;grep -F '影视 电影' /tmp/public-watch.html
+          curl -fsS "http://127.0.0.1:${PORT}/topics.php" -o /tmp/public-topics.html;grep -F '专题 远程研究' /tmp/public-topics.html
+          CODE=$(curl -sS -D /tmp/remote-open.headers -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:${PORT}/surface-open.php?id=${REMOTE}");test "$CODE" = 302;grep -Fi 'Location: https://remote-topic-final.example.com' /tmp/remote-open.headers
+          echo P01_FINAL_TAXONOMY_PRIVACY=PASS
+
+      - name: Real browser cover hosted HTML mobile gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os,struct,zlib
+          w,h=1600,1000;raw=bytearray()
+          for _ in range(h):raw.extend(b'\x00'+os.urandom(w*3))
+          def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(bytes(raw),6))+chunk(b'IEND',b'')
+          open('/tmp/p01-final-large.png','wb').write(png);print('LARGE_PNG_BYTES='+str(len(png)))
+          PY
+          cat >/tmp/p01-final-topic.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>Hosted Gate</title><h1>HOSTED_TOPIC_VISIBLE_MARKER</h1><script>document.body.dataset.ran='yes';try{localStorage.setItem('vf','x');document.body.dataset.storage='allowed'}catch(e){document.body.dataset.storage='blocked'};fetch('/api.php?action=health').then(()=>document.body.dataset.fetch='allowed').catch(()=>document.body.dataset.fetch='blocked');</script>
+          HTML
+          cat >/tmp/p01-final-private-topic.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>PRIVATE_HOSTED_TOPIC_MARKER</h1><script>document.body.dataset.ran='yes'</script>
+          HTML
+          mkdir -p /tmp/p01-final-browser && cd /tmp/p01-final-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18439';
+          const browser=await chromium.launch({headless:true});
+          const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+          const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01Final!2026'}});if(!login.ok())throw new Error('login');
+          const p=await ctx.newPage();
+          await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});
+          if(await p.getByText('专题分类',{exact:true}).count()<1)throw new Error('topic taxonomy');
+          if(await p.getByText('专题 远程研究',{exact:true}).count()<1)throw new Error('admin public effective privacy');
+          await p.locator('[data-open-add]').click();
+          let f=p.locator('[data-add-form]');
+          if(await f.locator('select[name="surface"]').inputValue()!=='topics')throw new Error('topic context');
+          await f.locator('select[name="source_kind"]').selectOption('hosted_html');
+          if(await f.locator('[data-url-field]').isVisible())throw new Error('url visible for hosted');
+          if(await f.locator('input[name="url"]').getAttribute('required')!==null)throw new Error('url still required');
+          if(!(await f.locator('[data-html-field]').isVisible()))throw new Error('html field hidden');
+          await f.locator('input[name="title"]').fill('专题 托管公开');
+          await f.locator('input[name="resource_kind"]').fill('AI学习');
+          await f.locator('input[name="tags"]').fill('HTML, 学习');
+          await f.locator('input[name="is_private"]').uncheck();
+          await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-final-large.png');
+          await f.locator('input[name="html"]').setInputFiles('/tmp/p01-final-topic.html');
+          await f.locator('button[type="submit"]:not([data-add-continue])').click();
+          await p.waitForLoadState('networkidle');
+          await p.getByText('专题 托管公开',{exact:true}).waitFor();
+          const card=p.locator('.vf-topic-card').filter({hasText:'专题 托管公开'});if(await card.count()!==1)throw new Error('hosted topic card');
+          if(!String(await card.locator('.vf-topic-cover img').getAttribute('src')).includes('resource-cover.php'))throw new Error('cover missing');
+          await card.locator('[data-edit-id]').first().click();
+          const d=p.locator('[data-detail-form]');
+          if(await d.locator('select[name="source_kind"]').inputValue()!=='hosted_html')throw new Error('detail source');
+          if(await d.locator('[data-url-field]').isVisible())throw new Error('detail url visible');
+          if(!(await d.locator('[data-html-status]').textContent()).includes('p01-final-topic.html'))throw new Error('html status');
+          await p.screenshot({path:'/tmp/p01-v229-final-topics.png',fullPage:true});
+          await p.locator('[data-close-panel]').first().click();
+          await p.goto(base+'/topics.php',{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');await f.locator('input[name="title"]').fill('专题 托管私人');await f.locator('input[name="resource_kind"]').fill('私人研究');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-final-private-topic.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.waitForLoadState('networkidle');
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');if(!(await f.locator('[data-html-field]').isVisible()))throw new Error('mobile html field');if(await f.locator('[data-url-field]').isVisible())throw new Error('mobile url visible');const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error('mobile overflow '+overflow);await p.screenshot({path:'/tmp/p01-v229-final-mobile.png',fullPage:true});
+          await browser.close();console.log('P01_FINAL_BROWSER=PASS');
+          JS
+          node gate.mjs | grep -Fx P01_FINAL_BROWSER=PASS
+
+      - name: Hosted HTML security storage and integrity gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-final-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$db=vf_db();
+          $pub=$db->query("SELECT l.id,p.source_kind,p.source_ref FROM links l JOIN resource_domain_profiles p ON p.link_id=l.id WHERE l.title='专题 托管公开'")->fetch(PDO::FETCH_ASSOC);if(!$pub||$pub['source_kind']!=='hosted_html'||$pub['source_ref']!=='p01-final-topic.html')throw new RuntimeException('public hosted profile');
+          $priv=$db->query("SELECT l.id,p.source_kind FROM links l JOIN resource_domain_profiles p ON p.link_id=l.id WHERE l.title='专题 托管私人'")->fetch(PDO::FETCH_ASSOC);if(!$priv||$priv['source_kind']!=='hosted_html')throw new RuntimeException('private hosted profile');
+          $row=$db->query("SELECT raf.* FROM resource_asset_files raf JOIN links l ON l.id=raf.link_id WHERE l.title='专题 托管公开' AND raf.asset_kind='cover'")->fetch(PDO::FETCH_ASSOC);if(!$row)throw new RuntimeException('cover row');if((int)$row['byte_size']>1200*1024||(int)$row['width']>960||(int)$row['height']>960)throw new RuntimeException('cover compression');if(!in_array($row['mime_type'],['image/webp','image/jpeg'],true))throw new RuntimeException('cover mime');
+          $html=$db->query("SELECT raf.* FROM resource_asset_files raf JOIN links l ON l.id=raf.link_id WHERE l.title='专题 托管公开' AND raf.asset_kind='html'")->fetch(PDO::FETCH_ASSOC);if(!$html||$html['original_name']!=='p01-final-topic.html'||(int)$html['byte_size']<=0||(int)$html['byte_size']>2*1024*1024)throw new RuntimeException('html metadata');
+          $dbPath='';foreach($db->query('PRAGMA database_list')->fetchAll(PDO::FETCH_ASSOC) as $r)if((string)$r['name']==='main')$dbPath=(string)$r['file'];if($dbPath===''||str_contains((string)file_get_contents($dbPath),'HOSTED_TOPIC_VISIBLE_MARKER'))throw new RuntimeException('raw html stored in db');
+          if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');
+          file_put_contents('/tmp/p01-final-hosted.json',json_encode(['public'=>(int)$pub['id'],'private'=>(int)$priv['id']],JSON_UNESCAPED_SLASHES));echo "P01_FINAL_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-final-db.php | grep -Fx P01_FINAL_DB=PASS
+          PUB=$(jq -r '.public' /tmp/p01-final-hosted.json);PRIV=$(jq -r '.private' /tmp/p01-final-hosted.json)
+          CODE=$(curl -sS -D /tmp/hosted-public.headers -o /tmp/hosted-public.html -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PUB}");test "$CODE" = 200
+          grep -F 'HOSTED_TOPIC_VISIBLE_MARKER' /tmp/hosted-public.html
+          grep -Fi 'Content-Type: text/html' /tmp/hosted-public.headers
+          CSP=$(grep -i '^Content-Security-Policy:' /tmp/hosted-public.headers);grep -F 'sandbox allow-scripts' <<<"$CSP";grep -F "connect-src 'none'" <<<"$CSP";grep -F "form-action 'none'" <<<"$CSP";! grep -Fq 'allow-same-origin' <<<"$CSP"
+          CODE=$(curl -sS -o /tmp/hosted-private.html -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PRIV}");test "$CODE" = 404
+          COOKIE=/tmp/p01-final-open.cookies;LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}");jq -e '.ok==true' <<<"$LOGIN" >/dev/null
+          CODE=$(curl -sS -D /tmp/hosted-open.headers -o /dev/null -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:${PORT}/surface-open.php?id=${PUB}");test "$CODE" = 302;grep -Fi "Location: resource-html.php?id=${PUB}" /tmp/hosted-open.headers
+          CSRF=$(jq -r '.csrf' <<<"$LOGIN");python3 - <<'PY'
+          with open('/tmp/p01-final-too-large.html','wb') as f:f.write(b'<html>'+b'x'*(2*1024*1024+64)+b'</html>')
+          PY
+          CODE=$(curl -sS -o /tmp/too-large.json -w '%{http_code}' -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/resource-media.php" -F "csrf=$CSRF" -F 'action=html_upload' -F "id=$PUB" -F 'html=@/tmp/p01-final-too-large.html;type=text/html');test "$CODE" = 422;jq -e '.ok==false and (.error|contains("2 MB"))' /tmp/too-large.json >/dev/null
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-final-verify-end.txt | grep -Fx VERIFY_PASS=YES
+          echo P01_FINAL_HOSTED_SECURITY=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo 'SCHEMA=2026082901'
+          echo 'FAVICON=PASS'
+          echo 'COVER_BROWSER_COMPRESSION=PASS'
+          echo 'DOMAIN_PRIVACY=PASS'
+          echo 'HOSTED_HTML_SANDBOX=PASS'
+          echo 'MOBILE=PASS'
+          echo 'VERIFY_PASS=YES'
+          echo 'PRODUCTION_WRITE=NO'
+          echo 'P01_V229_RESOURCE_DOMAIN_FINAL=PASS'
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-resource-domain-hosted-final
+          path: |
+            /tmp/p01-v229-final-topics.png
+            /tmp/p01-v229-final-mobile.png
+            /tmp/p01-final-verify.txt
+            /tmp/p01-final-verify-end.txt
+            /tmp/hosted-public.headers
+          retention-days: 30
