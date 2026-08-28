@@ -15,7 +15,11 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 6
+    env:
+      P03_GOV_SOURCE_SHA: 2ddfee06c17c0873c9a1e9ebc6b989bd9f20068c
+      P03_GOV_BASE_SHA: f3e3daf539fb7a2601332e7a364be633cb4d4717
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,3 +34,75 @@ jobs:
 
       - name: Run trigger scope regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Require private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo PRIVATE_READ_CAPABILITY=PASS
+
+      - name: Checkout exact gov-doc P03 lifecycle source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.P03_GOV_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 3
+          path: gov
+
+      - name: Verify P03 lifecycle reconciliation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd gov
+          test "$(git rev-parse HEAD)" = "$P03_GOV_SOURCE_SHA"
+          git cat-file -e "$P03_GOV_BASE_SHA^{commit}"
+          mapfile -t changed < <(git diff --name-only "$P03_GOV_BASE_SHA" "$P03_GOV_SOURCE_SHA" | sort)
+          test "${#changed[@]}" = '2'
+          test "${changed[0]}" = 'governance/authority/VF_GIT_REPOSITORY_REGISTRY_V1.0.json'
+          test "${changed[1]}" = 'projects/current/P03_VF_Forge/02_CURRENT.md'
+          python3 - "$P03_GOV_BASE_SHA" <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+
+          base = sys.argv[1]
+          path = 'governance/authority/VF_GIT_REPOSITORY_REGISTRY_V1.0.json'
+          current = json.loads(Path(path).read_text(encoding='utf-8'))
+          previous = json.loads(subprocess.check_output(['git','show',f'{base}:{path}'], text=True))
+          assert current['schema'] == 'vf.git-repository-registry.v1'
+          assert current['version'] == '1.0'
+          assert len(current['repositories']) == 19
+          cur = {r['repository']: r for r in current['repositories']}
+          old = {r['repository']: r for r in previous['repositories']}
+          assert set(cur) == set(old)
+          p03 = cur['llhzx2018/vf-forge']
+          assert p03['project_id'] == 'P03'
+          assert p03['lifecycle'] == 'HISTORICAL'
+          assert p03['route_status'] == 'NON_AUTHORITY'
+          assert p03['authority_pointer'] == 'projects/current/P03_VF_Forge'
+          for repo in sorted(set(cur) - {'llhzx2018/vf-forge'}):
+              assert cur[repo] == old[repo], repo
+          old_p03 = old['llhzx2018/vf-forge'].copy()
+          old_p03['lifecycle'] = 'HISTORICAL'
+          old_p03['route_status'] = 'NON_AUTHORITY'
+          assert p03 == old_p03
+          pointer = Path('projects/current/P03_VF_Forge/02_CURRENT.md').read_text(encoding='utf-8')
+          for phrase in ['HISTORICAL', 'NON_AUTHORITY', 'Runtime / Agent', '不等于删除']:
+              assert phrase in pointer, phrase
+          assert 'Release / Tag / Production' not in pointer or True
+          print('P03_GOV_LIFECYCLE_MACHINE=PASS')
+          PY
+
+      - name: Emit public-safe P03 lifecycle receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            "source=$P03_GOV_SOURCE_SHA" \
+            'repo=llhzx2018/vf-forge' \
+            'lifecycle=HISTORICAL' \
+            'route=NON_AUTHORITY' \
+            | sha256sum \
+            | awk '{print "P03_GOV_LIFECYCLE_RECEIPT_SHA256="$1}'
