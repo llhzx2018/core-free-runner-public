@@ -1,0 +1,145 @@
+name: P01 V2.22.0 Release Candidate Prep
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-release-candidate-prep-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      RELEASE_BRANCH: release/p01-v2.22.0-multi-surface-20260828
+      EXPECTED_BASE: c598f7977a1ec9137b84c2c5359fe07ad7a84baf
+      PROD_VERSION: 2.21.25
+      NEW_VERSION: 2.22.0
+      PROD_SCHEMA: '2026080902'
+      NEW_SCHEMA: '2026082801'
+    steps:
+      - name: Clone exact P01 release branch
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --branch "$RELEASE_BRANCH" "https://x-access-token:${WRITE_TOKEN}@github.com/${PRODUCT_REPO}.git" p01
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch -q origin develop main
+          test "$(git rev-parse origin/develop)" = "$EXPECTED_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = "$PROD_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$PROD_VERSION"
+          test "$(grep -Fxc "define('VF_VERSION', '$PROD_VERSION');" src/app/bootstrap.php)" -eq 1
+          test -f src/migrations/2026082801_v222_multi_surface.php
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.25',x
+          assert x['working_version']=='2.21.25',x
+          assert str(x['schema_version'])=='2026080902',x
+          assert str(x['working_schema_version'])=='2026082801',x
+          assert x['target_release_version']=='2.22.0',x
+          assert x['current_change']['business_data_preserve']=='PASS',x
+          PY
+          test -z "$(git status --porcelain)"
+          echo P01_V222_RELEASE_BASE_FENCE=PASS
+
+      - name: Apply V2.22.0 release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          printf '%s\n' "$NEW_VERSION" > VERSION
+          printf '%s\n' "$NEW_VERSION" > src/VERSION.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          boot=Path('src/app/bootstrap.php')
+          s=boot.read_text(encoding='utf-8')
+          old="define('VF_VERSION', '2.21.25');"
+          new="define('VF_VERSION', '2.22.0');"
+          if s.count(old)!=1: raise SystemExit('bootstrap version anchor mismatch')
+          boot.write_text(s.replace(old,new,1),encoding='utf-8',newline='\n')
+
+          p=Path('VF_PROJECT.json')
+          x=json.loads(p.read_text(encoding='utf-8'))
+          x['status']='V2.21.25 PRODUCTION / V2.22.0 MULTI-SURFACE RELEASE CANDIDATE'
+          x['working_version']='2.22.0'
+          x['candidate_version']='2.22.0'
+          x['candidate_schema_version']='2026082801'
+          x['candidate_state']='RELEASE CANDIDATE / MULTI-SURFACE / EXACT SOURCE + ARTIFACT + PUBLICATION GATES REQUIRED'
+          x['current_phase']='V2.22.0 RELEASE CANDIDATE / MULTI-SURFACE'
+          x['current_working_branch']='release/p01-v2.22.0-multi-surface-20260828'
+          x['current_authority']='release/p01-v2.22.0-multi-surface-20260828 from develop@c598f7977a1ec9137b84c2c5359fe07ad7a84baf; formal release remains v2.21.25 until publication'
+          cc=x.setdefault('current_change',{})
+          cc['develop_merge_commit']='c598f7977a1ec9137b84c2c5359fe07ad7a84baf'
+          cc['develop_exact_source_machine']='PASS'
+          cc['develop_exact_source_machine_run']=33123190086
+          cc['release_candidate']='PENDING EXACT SOURCE GATE'
+          cc['release']='NO'
+          cc['production_write']=False
+          x['next_action']='V2.22.0 RELEASE EXACT SOURCE GATE -> FORMAL ARTIFACT GATE -> MAIN PROMOTION -> TAG/RELEASE -> CORE-UPDATES PUBLICATION'
+          p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8',newline='\n')
+
+          c=Path('CHANGELOG.md')
+          t=c.read_text(encoding='utf-8')
+          old_head='## Unreleased · Target V2.22.0 — Multi-Surface\n'
+          new_head='## VF Start V2.22.0 — Multi-Surface Release Candidate\n'
+          if t.count(old_head)!=1: raise SystemExit('changelog release heading mismatch')
+          t=t.replace(old_head,new_head,1)
+          marker='- PR #9 Favorite Launchpad 保持独立 Draft Trial，本轮不混入。\n'
+          if t.count(marker)!=1: raise SystemExit('changelog marker mismatch')
+          t=t.replace(marker,marker+'- develop Exact Source `c598f7977a1ec9137b84c2c5359fe07ad7a84baf` 已由公共 Runner `33123190086` 完整验证 PASS；当前进入正式 Release / Artifact / Publication Gate。\n',1)
+          c.write_text(t,encoding='utf-8',newline='\n')
+          PY
+
+      - name: Candidate identity and diff gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          mapfile -t changed < <(git diff --name-only)
+          test "${#changed[@]}" -eq 5
+          for f in VERSION src/VERSION.txt src/app/bootstrap.php VF_PROJECT.json CHANGELOG.md; do printf '%s\n' "${changed[@]}" | grep -Fxq "$f"; done
+          test "$(tr -d '\r\n' < VERSION)" = "$NEW_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$NEW_VERSION"
+          grep -Fxq "define('VF_VERSION', '$NEW_VERSION');" src/app/bootstrap.php
+          php -l src/app/bootstrap.php
+          python3 -m json.tool VF_PROJECT.json >/dev/null
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.25',x
+          assert x['working_version']=='2.22.0',x
+          assert x['candidate_version']=='2.22.0',x
+          assert str(x['candidate_schema_version'])=='2026082801',x
+          assert str(x['working_schema_version'])=='2026082801',x
+          assert x['current_change']['develop_exact_source_machine_run']==33123190086,x
+          PY
+          echo P01_V222_RELEASE_IDENTITY=PASS
+
+      - name: Commit and push candidate
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION src/VERSION.txt src/app/bootstrap.php VF_PROJECT.json CHANGELOG.md
+          git diff --cached --check
+          git commit -m 'release(P01): prepare V2.22.0 Multi-Surface'
+          NEW_SHA="$(git rev-parse HEAD)"
+          git push origin "HEAD:$RELEASE_BRANCH"
+          test "$(git ls-remote origin "refs/heads/$RELEASE_BRANCH" | awk '{print $1}')" = "$NEW_SHA"
+          echo P01_V222_RELEASE_CANDIDATE_SHA="$NEW_SHA"
+          echo P01_V222_RELEASE_CANDIDATE_PREP=PASS
