@@ -1,0 +1,109 @@
+name: P01 V2.29 Edit Source Switch Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v229-edit-source-switch-gate-20260829
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_SHA: 6b8476097b273f67650ed7431c5a0e0dc2fdec8d
+      ROOT: /tmp/p01-v229-edit-source-switch
+      PORT: 18454
+      ADMIN_PASS: P01EditSwitchGate!2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace-create-bundle.js
+          rm -rf "$ROOT" /tmp/p01-edit-switch-* || true
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-edit-switch-server.log 2>&1 &
+          COOKIE=/tmp/p01-edit-switch-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-edit-switch-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-edit-switch-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Edit Switch Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-edit-switch-setup-post.html
+          cat >/tmp/p01-edit-switch-seed.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$r=new VfRepository(vf_db());$id=$r->createCategory(['name'=>'Switch兼容归属','is_private'=>false,'sort_order'=>10]);if($id<=0)throw new RuntimeException('category');echo "CATEGORY_ID=$id\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-switch-seed.php | tee /tmp/p01-edit-switch-category.txt
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          python3 - <<'PY'
+          import struct,zlib
+          def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          w,h=800,600;row=b'\x00'+bytes((40,130,170))*w;raw=row*h
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,6))+chunk(b'IEND',b'')
+          open('/tmp/p01-edit-switch-cover.png','wb').write(png)
+          open('/tmp/p01-edit-switch-hosted.html','wb').write(b'<!doctype html><meta charset="utf-8"><h1>EDIT_SWITCH_HOSTED</h1>')
+          PY
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-edit-switch-browser && cd /tmp/p01-edit-switch-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+
+      - name: Create hosted topic and switch to remote URL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-edit-switch-browser
+          cat >switch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18454';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01EditSwitchGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.waitForTimeout(400);await p.locator('[data-open-add]').click();let f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');await f.locator('input[name="title"]').fill('来源切换专题');await f.locator('input[name="resource_kind"]').fill('一致性测试');await f.locator('input[name="is_private"]').uncheck();await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-edit-switch-cover.png');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-edit-switch-hosted.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.locator('.vf-topic-card').filter({hasText:'来源切换专题'}).first().waitFor({timeout:30000});const card=p.locator('.vf-topic-card').filter({hasText:'来源切换专题'}).first();await card.locator('[data-edit-id]').first().click();f=p.locator('[data-detail-form]');await f.locator('select[name="source_kind"]').selectOption('remote_url');const url=f.locator('input[name="url"]');await url.waitFor({state:'visible'});await url.fill('https://example.com/source-switched');const responsePromise=p.waitForResponse(r=>r.url().endsWith('/workspace-save.php')&&r.request().method()==='POST');await f.locator('button[type="submit"]').click();const response=await responsePromise;if(response.status()!==200)throw new Error(`workspace-save status ${response.status()}`);const json=await response.json();if(!json.ok)throw new Error(json.error||'save failed');await p.waitForTimeout(700);await p.screenshot({path:'/tmp/p01-edit-switch-success.png',fullPage:true});await browser.close();console.log('P01_EDIT_SOURCE_SWITCH_BROWSER=PASS');
+          JS
+          node switch.mjs | grep -Fx P01_EDIT_SOURCE_SWITCH_BROWSER=PASS
+
+      - name: Database filesystem and transport truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-edit-switch-verify.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/ResourceAssetStore.php';$db=vf_db();$q=$db->prepare("SELECT id,url FROM links WHERE title='来源切换专题' AND lifecycle_state='active'");$q->execute();$row=$q->fetch(PDO::FETCH_ASSOC);if(!$row)throw new RuntimeException('link');$id=(int)$row['id'];if((string)$row['url']!=='https://example.com/source-switched')throw new RuntimeException('url');$p=$db->prepare('SELECT domain_key,source_kind,source_ref FROM resource_domain_profiles WHERE link_id=?');$p->execute([$id]);$profile=$p->fetch(PDO::FETCH_ASSOC);if(!$profile||(string)$profile['domain_key']!=='topics'||(string)$profile['source_kind']!=='remote_url'||(string)$profile['source_ref']!=='')throw new RuntimeException('profile');$store=new VfResourceAssetStore($db);if($store->htmlRecord($id)!==null)throw new RuntimeException('html row');$cover=$store->coverRecord($id);if(!$cover)throw new RuntimeException('cover lost');$rootDir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets';if(glob($rootDir.'/html/topic-'.$id.'-*')?:[])throw new RuntimeException('html file survived');if(glob($rootDir.'/covers/*.txn-*')?:[]||glob($rootDir.'/html/*.txn-*')?:[])throw new RuntimeException('txn orphan');if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');echo "P01_EDIT_SOURCE_SWITCH_TRUTH=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-switch-verify.php | grep -Fx P01_EDIT_SOURCE_SWITCH_TRUTH=PASS
+          grep -F '200]: POST /workspace-save.php' /tmp/p01-edit-switch-server.log
+          if grep -F 'POST /resource-media.php' /tmp/p01-edit-switch-server.log; then echo 'unexpected split media call'; exit 1; fi
+          if grep -F 'POST /workspace-action.php' /tmp/p01-edit-switch-server.log; then echo 'unexpected legacy detail save'; exit 1; fi
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_V229_EDIT_SOURCE_SWITCH_GATE=PASS
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-edit-source-switch
+          path: |
+            /tmp/p01-edit-switch-success.png
+            /tmp/p01-edit-switch-server.log
+          retention-days: 14
