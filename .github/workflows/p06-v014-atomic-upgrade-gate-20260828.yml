@@ -1,0 +1,180 @@
+name: P06 V0.1.13 to V0.1.14 Atomic Upgrade Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p06-v014-atomic-upgrade-gate-20260828.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    env:
+      FROM_VERSION: 0.1.13
+      FROM_SOURCE: cec5ecd28b3cdc585d1b7cac17a9e2167d520ea1
+      TARGET_VERSION: 0.1.14
+      TARGET_SOURCE: d689b79a6f1d98f0bf5bccba438f3c9a74077782
+      TARGET_TAG: v0.1.14
+      UPDATE_ASSET: VF_Press_V0.1.14_UPDATE.zip
+      UPDATE_BYTES: '273201'
+      UPDATE_SHA256: 0c9cbfa2e21865f5306eeeac83cef89a155d4e6539bba8cb54c6b3b0b37e9769
+      VF_PRESS_STORAGE_PATH: /tmp/p06-v014-upgrade-storage
+      VF_PRESS_DB_PATH: /tmp/p06-v014-upgrade-storage/app.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip, curl, mbstring
+          tools: composer:v2
+
+      - name: Checkout exact formal V0.1.13 source
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-press.git" p06 >/dev/null 2>&1
+          cd p06
+          test "$(git rev-parse v0.1.13)" = "$FROM_SOURCE"
+          git checkout --detach "$FROM_SOURCE"
+          test "$(git rev-parse HEAD)" = "$FROM_SOURCE"
+          test "$(tr -d '\r\n' < VERSION)" = "$FROM_VERSION"
+          test "$(jq -r '.schema' VF_PROJECT.json)" = '3'
+          echo FROM_SOURCE_FENCE=PASS
+
+      - name: Install V0.1.13 and create isolated Schema 3 data
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$VF_PRESS_STORAGE_PATH"
+          mkdir -p "$VF_PRESS_STORAGE_PATH"
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+          php bin/migrate.php
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = '3'
+          sqlite3 "$VF_PRESS_DB_PATH" <<'SQL'
+          INSERT INTO research_projects(id,title,core_question,interest_reason,status,summary,findings,next_step,created_at,updated_at)
+          VALUES('upgrade-sentinel-p06-v014','升级保留性哨兵','V0.1.13 → V0.1.14 是否保留真实资料？','Remote isolated upgrade gate','RESEARCH','sentinel-summary','sentinel-findings','sentinel-next','2026-08-28T07:00:00Z','2026-08-28T07:00:00Z');
+          SQL
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" "SELECT title FROM research_projects WHERE id='upgrade-sentinel-p06-v014';")" = '升级保留性哨兵'
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'PRAGMA integrity_check;')" = 'ok'
+          echo V013_ISOLATED_RUNTIME=PASS
+
+      - name: Download and fence formal V0.1.14 UPDATE asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p06-v014-release
+          gh release download "$TARGET_TAG" --repo llhzx2018/vf-press --pattern "$UPDATE_ASSET" --dir /tmp/p06-v014-release
+          test -s "/tmp/p06-v014-release/$UPDATE_ASSET"
+          test "$(stat -c%s "/tmp/p06-v014-release/$UPDATE_ASSET")" = "$UPDATE_BYTES"
+          test "$(sha256sum "/tmp/p06-v014-release/$UPDATE_ASSET" | awk '{print $1}')" = "$UPDATE_SHA256"
+          echo V014_RELEASE_ASSET_FENCE=PASS
+
+      - name: Apply real V0.1.13 to V0.1.14 atomic update
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p06-v014-real-upgrade.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+
+          use CoreUpdates\UpdateCore;
+          use VF\Press\Infrastructure\Config\AppConfig;
+          use VF\Press\Infrastructure\Database\ConnectionFactory;
+          use VF\Press\Infrastructure\Recovery\RecoveryService;
+          use VF\Press\Infrastructure\Security\AuditLogger;
+          use VF\Press\Infrastructure\Update\VFPressUpdateAdapter;
+
+          $base = $argv[1] ?? '';
+          $package = $argv[2] ?? '';
+          if ($base === '' || $package === '' || !is_file($package)) {
+              throw new RuntimeException('Upgrade gate arguments missing.');
+          }
+          require $base . '/vendor/autoload.php';
+          $config = AppConfig::fromEnvironment($base);
+          $config->ensureRuntimeDirectories();
+          $pdo = ConnectionFactory::create($config);
+          $audit = new AuditLogger($pdo);
+          $recovery = new RecoveryService($pdo, $audit, $config->storagePath, $config->databasePath);
+          $adapter = new VFPressUpdateAdapter($pdo, $config, $audit, $recovery);
+          $core = new UpdateCore('P06');
+          $manifest = [
+              'schema_version'=>'1.0',
+              'project_id'=>'P06',
+              'component_id'=>'APP',
+              'enabled'=>true,
+              'target_version'=>'0.1.14',
+              'update_type'=>'ATOMIC',
+              'from_versions'=>['0.1.13'],
+              'schema_from'=>'3',
+              'schema_to'=>'3',
+              'repository'=>'llhzx2018/vf-press',
+              'release_tag'=>'v0.1.14',
+              'asset_name'=>'VF_Press_V0.1.14_UPDATE.zip',
+              'asset_bytes'=>273201,
+              'asset_sha256'=>'0c9cbfa2e21865f5306eeeac83cef89a155d4e6539bba8cb54c6b3b0b37e9769',
+              'backup_required'=>true,
+              'rollback_supported'=>true,
+              'minimum_php'=>'8.2.0',
+              'released_at'=>'2026-08-28T07:10:49Z',
+          ];
+          $result = $core->upgrade('0.1.13', '3', $adapter, $package, $manifest);
+          $status = (string)($result['status'] ?? '');
+          if (!in_array($status, ['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'], true)) {
+              throw new RuntimeException('Real upgrade did not commit: ' . json_encode($result, JSON_UNESCAPED_SLASHES));
+          }
+          if (trim((string)file_get_contents($base . '/VERSION')) !== '0.1.14') {
+              throw new RuntimeException('Post-upgrade VERSION readback failed.');
+          }
+          $schema = (string)(int)$pdo->query('SELECT MAX(version) FROM schema_migrations')->fetchColumn();
+          if ($schema !== '3') {
+              throw new RuntimeException('Post-upgrade Schema readback failed.');
+          }
+          if ($pdo->query('PRAGMA integrity_check')->fetchColumn() !== 'ok') {
+              throw new RuntimeException('Post-upgrade SQLite integrity failed.');
+          }
+          $q = $pdo->prepare('SELECT title FROM research_projects WHERE id=:id');
+          $q->execute(['id'=>'upgrade-sentinel-p06-v014']);
+          if ($q->fetchColumn() !== '升级保留性哨兵') {
+              throw new RuntimeException('User-data sentinel was not preserved.');
+          }
+          echo "REAL_ATOMIC_UPGRADE_STATUS={$status}\n";
+          echo "REAL_ATOMIC_UPGRADE=PASS\n";
+          echo "USER_DATA_PRESERVED=PASS\n";
+          echo "SQLITE_INTEGRITY=PASS\n";
+          PHP
+          php /tmp/p06-v014-real-upgrade.php "$GITHUB_WORKSPACE/p06" "/tmp/p06-v014-release/$UPDATE_ASSET"
+
+      - name: Post-upgrade runtime readback and regression
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(jq -r '.version' VF_PROJECT.json)" = "$TARGET_VERSION"
+          test "$(jq -r '.schema' VF_PROJECT.json)" = '3'
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = '3'
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" "SELECT title FROM research_projects WHERE id='upgrade-sentinel-p06-v014';")" = '升级保留性哨兵'
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'PRAGMA integrity_check;')" = 'ok'
+          php bin/self-test.php
+          php bin/security-self-test.php
+          php bin/common-baseline-v2-self-test.php
+          php bin/operations-ui-self-test.php
+          php bin/public-asset-self-test.php
+          php bin/update-self-test.php
+          test "$(find "$VF_PRESS_STORAGE_PATH/backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)" -ge 1
+          test "$(find "$VF_PRESS_STORAGE_PATH/update-source-backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)" -ge 1
+          echo POST_UPGRADE_RUNTIME=PASS
+          echo RECOVERY_POINT_CREATED=PASS
+          echo SOURCE_BACKUP_CREATED=PASS
+
+      - name: Verdict
+        run: |
+          echo P06_V013_TO_V014_ATOMIC_UPGRADE_GATE=PASS
+          echo FROM_VERSION=0.1.13
+          echo TARGET_VERSION=0.1.14
+          echo SCHEMA_3_TO_3=PASS
+          echo PRODUCTION_WRITE=NO
