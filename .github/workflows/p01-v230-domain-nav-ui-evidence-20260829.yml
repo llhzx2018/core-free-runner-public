@@ -1,0 +1,133 @@
+name: P01 V2.30 Domain Nav UI Evidence
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-domain-nav-ui-evidence-20260829.yml
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: 804528996e351c2cee2870050a4e9b400cba00c1
+      PORT: '18574'
+      ROOT: /tmp/p01-v230-ui
+      ADMIN_PASS: 'P01V230!Ui'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: source
+      - name: Exact source and fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          rm -rf "$ROOT" /tmp/p01-v230-ui.cookies evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-ui-server.log 2>&1 &
+          COOKIE=/tmp/p01-v230-ui.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-v230-ui-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v230-ui-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 UI' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-v230-ui-setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/p01-v230-ui-setup-post.html >/dev/null
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-v230-ui-verify.txt | grep -Fx VERIFY_PASS=YES
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/p01-v230-ui-login.json
+          jq -e '.ok==true' /tmp/p01-v230-ui-login.json >/dev/null
+          CSRF=$(jq -r '.csrf' /tmp/p01-v230-ui-login.json)
+          printf '%s' "$CSRF" >/tmp/p01-v230-ui-csrf
+          echo P01_V230_UI_FRESH=PASS
+      - name: Seed representative domain content
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-v230-ui.cookies
+          CSRF=$(cat /tmp/p01-v230-ui-csrf)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"开发工具","description":"日常开发与 AI 工具","is_private":false,"sort_order":100}' "http://127.0.0.1:${PORT}/api.php?action=category_save" -o /tmp/cat.json
+          CAT=$(jq -r '.id' /tmp/cat.json); test "$CAT" -gt 0
+          create(){
+            curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" \
+              -F "csrf=$CSRF" -F "category_id=$CAT" -F "surface=$1" -F "title=$2" -F "url=$3" \
+              -F "resource_kind=$4" -F "tags=$5" -F 'is_private=0' -F 'source_kind=remote_url' >/tmp/create.json
+            jq -e '.ok==true' /tmp/create.json >/dev/null
+          }
+          create start 'ChatGPT' 'https://chatgpt.com/' '' 'AI,常用'
+          create start 'GitHub' 'https://github.com/' '' '开发,代码'
+          create start 'Cloudflare' 'https://cloudflare.com/' '' '建站,云服务'
+          create channels '科技漫谈' 'https://example.com/channel/tech' '科技' 'AI,科技,后台听'
+          create channels '旅行故事' 'https://example.com/channel/travel' '旅行' '旅行,生活'
+          create watch '样例电影' 'https://example.com/movie/1' '电影' '剧情,科幻'
+          create watch '样例纪录片' 'https://example.com/movie/2' '纪录片' '纪录片,科技'
+          create topics 'AI 编程工具怎么选' 'https://example.com/topic/ai-code' 'AI' 'AI,编程,专题'
+          create topics '一个人做网站成本账本' 'https://example.com/topic/cost' '建站' '建站,成本,专题'
+          echo P01_V230_UI_SEED=PASS
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Desktop and mobile visual gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat >/tmp/p01-playwright/gate.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18574';
+            const password='P01V230!Ui';
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:960},deviceScaleFactor:1});
+            let r=await context.request.post(base+'/api.php?action=login',{data:{password}}); if(!r.ok()) throw new Error('login '+r.status());
+            const pages=[['surfaces.php','首页','desktop-home.png'],['start.php','导航','desktop-start.png'],['channels.php','频道','desktop-channels.png'],['watch.php','影视','desktop-watch.png'],['topics.php','专题','desktop-topics.png']];
+            for(const [path,label,file] of pages){
+              const page=await context.newPage();
+              await page.goto(base+'/'+path,{waitUntil:'networkidle'});
+              const nav=page.locator('.vf-global-domain-nav'); await nav.waitFor({state:'visible'});
+              const labels=await nav.locator('a').allTextContents();
+              if(JSON.stringify(labels)!==JSON.stringify(['首页','导航','频道','影视','专题'])) throw new Error(path+' labels '+JSON.stringify(labels));
+              const active=(await nav.locator('a.active').textContent()||'').trim(); if(active!==label) throw new Error(path+' active '+active);
+              const sidebarPrimary=page.locator('.vf-main-nav'); if(await sidebarPrimary.count()){const display=await sidebarPrimary.evaluate(el=>getComputedStyle(el).display);if(display!=='none') throw new Error(path+' duplicate domain sidebar visible');}
+              const navBox=await nav.boundingBox(); const topbarBox=await page.locator('.vf-domain-subbar').boundingBox();
+              if(!navBox||!topbarBox||topbarBox.y+1<navBox.y+navBox.height) throw new Error(path+' sticky stack overlap');
+              await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/'+file,fullPage:true});
+              await page.close();
+            }
+            await context.close();
+            const mobile=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});
+            r=await mobile.request.post(base+'/api.php?action=login',{data:{password}}); if(!r.ok()) throw new Error('mobile login');
+            const page=await mobile.newPage(); await page.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            await page.locator('.vf-global-domain-nav').waitFor({state:'visible'});
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth); if(overflow>1) throw new Error('mobile overflow '+overflow);
+            if((await page.locator('.vf-global-domain-nav a.active').textContent()||'').trim()!=='频道') throw new Error('mobile active');
+            await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-channels.png',fullPage:true});
+            await browser.close();
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_DOMAIN_NAV_UI=PASS\nSOURCE=804528996e351c2cee2870050a4e9b400cba00c1\n');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node gate.js
+          echo P01_V230_DOMAIN_NAV_UI=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-domain-nav-ui-evidence
+          path: evidence
+          retention-days: 7
