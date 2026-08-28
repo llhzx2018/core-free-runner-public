@@ -1,0 +1,218 @@
+name: P05 V1.0.2 Updater Atomic Exact Source Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-v102-updater-atomic-exact-source-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      EXACT_SOURCE: dc53739eea20ccc79d6ea57cbd8c0fbadfcd46d7
+      BASE_MAIN: 91b1ebfd8255054ba3e80c1a681aca9257b352ab
+      OLD_SOURCE: 00a724587c041130c0e81e0e45ef876413fb2916
+      TARGET_BRANCH: fix/p05-updater-version-identity-v102-20260828
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact P05 fix source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+      - name: Checkout V1.0.1 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.OLD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: old
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: candidate/package-lock.json
+
+      - name: Exact-source and two-file fix fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git -C candidate rev-parse origin/main)" = "$BASE_MAIN"
+          test "$(git -C candidate rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git -C old rev-parse HEAD)" = "$OLD_SOURCE"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = '1.0.2'
+          test "$(tr -d '\r\n' < old/VERSION)" = '1.0.1'
+          mapfile -t changed < <(git -C candidate diff --name-only "$BASE_MAIN" "$EXACT_SOURCE")
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'bin/vf-seo-updater.mjs'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'tests/contract/updater-version-identity.test.ts'
+          grep -Fq "const CURRENT_VERSION = readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim();" candidate/bin/vf-seo-updater.mjs
+          ! grep -Eq "const CURRENT_VERSION = ['\"][0-9]+\.[0-9]+\.[0-9]+['\"]" candidate/bin/vf-seo-updater.mjs
+          git -C candidate diff --check "$BASE_MAIN" "$EXACT_SOURCE"
+          echo P05_V102_UPDATER_FIX_SCOPE=PASS
+
+      - name: Candidate regression and build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run build
+          echo P05_V102_UPDATER_FIX_REGRESSION=PASS
+
+      - name: Build candidate V1.0.2 atomic package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          OUT="$RUNNER_TEMP/p05-v102-updater-gate"; STAGE="$RUNNER_TEMP/p05-v102-updater-stage"
+          rm -rf "$OUT" "$STAGE"; mkdir -p "$OUT" "$STAGE"
+          STAGE="$STAGE" python3 - <<'PY'
+          import os,pathlib,shutil,subprocess
+          root=pathlib.Path('.').resolve(); stage=pathlib.Path(os.environ['STAGE'])
+          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
+              if not raw: continue
+              rel=raw.decode()
+              if rel.startswith('.github/'): continue
+              src=root/rel
+              if src.is_file():
+                  dst=stage/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+          shutil.copytree(root/'dist',stage/'dist',dirs_exist_ok=True)
+          PY
+          STAGE="$STAGE" OUT="$OUT" python3 - <<'PY'
+          import hashlib,os,pathlib,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT'])/'VF_SEO_V1.0.2_UPDATE.zip'
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+                  rel=p.relative_to(stage).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=((0o100755 if rel=='install-cloudpanel.sh' or rel.startswith('bin/') else 0o100644)<<16); z.writestr(info,p.read_bytes())
+          digest=hashlib.sha256(out.read_bytes()).hexdigest(); print(f'UPDATE_BYTES={out.stat().st_size}'); print(f'UPDATE_SHA256={digest}')
+          PY
+          unzip -p "$OUT/VF_SEO_V1.0.2_UPDATE.zip" VERSION | tr -d '\r\n' | grep -Fxq '1.0.2'
+          echo P05_V102_ATOMIC_PACKAGE=PASS
+
+      - name: Build and install exact V1.0.1 baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd old
+          npm ci
+          npm run build
+          OUT="$RUNNER_TEMP/p05-v101-baseline"; STAGE="$RUNNER_TEMP/p05-v101-stage"
+          rm -rf "$OUT" "$STAGE"; mkdir -p "$OUT" "$STAGE"
+          STAGE="$STAGE" python3 - <<'PY'
+          import os,pathlib,shutil,subprocess
+          root=pathlib.Path('.').resolve(); stage=pathlib.Path(os.environ['STAGE'])
+          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
+              if not raw: continue
+              rel=raw.decode()
+              if rel.startswith('.github/'): continue
+              src=root/rel
+              if src.is_file():
+                  dst=stage/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+          shutil.copytree(root/'dist',stage/'dist',dirs_exist_ok=True)
+          PY
+          STAGE="$STAGE" OUT="$OUT" python3 - <<'PY'
+          import os,pathlib,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT'])/'VF_SEO_V1.0.1_FULL.zip'
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+                  rel=p.relative_to(stage).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=((0o100755 if rel=='install-cloudpanel.sh' or rel.startswith('bin/') else 0o100644)<<16); z.writestr(info,p.read_bytes())
+          PY
+          ROOT="$RUNNER_TEMP/p05-atomic-runtime"; APP="$ROOT/app"; HOME_DIR="$ROOT/home"
+          rm -rf "$ROOT"; mkdir -p "$APP" "$HOME_DIR"
+          unzip -q "$OUT/VF_SEO_V1.0.1_FULL.zip" -d "$APP"
+          if ! command -v crontab >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y -qq cron >/dev/null; fi
+          export HOME="$HOME_DIR" VF_INSTALL_PORT=19056
+          printf '1\n19056\nhttps://seo.example.test\nadmin\nP05-Atomic-V101-Password-2026!\nP05-Atomic-V101-Password-2026!\n' | bash "$APP/install-cloudpanel.sh"
+          ENV_FILE="$HOME/.config/vf-seo/runtime.env"; test -f "$ENV_FILE"
+          set -a; source "$ENV_FILE"; set +a
+          cd "$APP"
+          npm run verify:schema
+          npm run verify:admin-ready
+          curl -fsS -H 'x-forwarded-proto: https' -H 'host: seo.example.test' 'http://127.0.0.1:19056/api/health' > "$ROOT/health-v101.json"
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs'; const h=JSON.parse(readFileSync(process.env.ROOT+'/health-v101.json','utf8'));
+          if(!h.ok||h.version!=='1.0.1'||h.schema!==1||h.databaseProvider!=='sqlite') throw new Error(JSON.stringify(h));
+          JS
+          echo P05_V101_ATOMIC_BASELINE=PASS
+
+      - name: Execute real V1.0.1 to V1.0.2 atomic update
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p05-atomic-runtime"; APP="$ROOT/app"; HOME_DIR="$ROOT/home"
+          UPDATE_ZIP="$RUNNER_TEMP/p05-v102-updater-gate/VF_SEO_V1.0.2_UPDATE.zip"
+          MOCK="$RUNNER_TEMP/p05-update-fetch-mock.mjs"
+          export HOME="$HOME_DIR"
+          ENV_FILE="$HOME/.config/vf-seo/runtime.env"; set -a; source "$ENV_FILE"; set +a
+          export VF_PRIVATE_READ_TOKEN='runner-mock-token'
+          export VF_STATE_DIR="$ROOT/state"
+          export P05_CANDIDATE_ZIP="$UPDATE_ZIP"
+          export PORT=19056
+          cat > "$MOCK" <<'JS'
+          import {readFileSync} from 'node:fs'; import {createHash} from 'node:crypto';
+          const originalFetch=globalThis.fetch;
+          const asset=readFileSync(process.env.P05_CANDIDATE_ZIP);
+          const digest=createHash('sha256').update(asset).digest('hex');
+          const manifest={schema_version:'1.0',project_id:'P05',component_id:'APP',enabled:true,target_version:'1.0.2',update_type:'ATOMIC',from_versions:['1.0.1'],schema_from:'1',schema_to:'1',repository:'llhzx2018/vf-seo',release_tag:'v1.0.2',release_name:'VF SEO V1.0.2',release_id:1,release_product_commit:'runner',release_product_tree:'runner',asset_name:'VF_SEO_V1.0.2_UPDATE.zip',asset_id:1,asset_bytes:asset.length,asset_sha256:digest,backup_required:true,rollback_supported:true,minimum_node:'24.0.0'};
+          globalThis.fetch=async (input,init={})=>{
+            const url=String(input instanceof Request?input.url:input);
+            if(url.includes('/repos/llhzx2018/core-updates/contents/projects/P05.json')) return new Response(JSON.stringify({encoding:'base64',content:Buffer.from(JSON.stringify(manifest)).toString('base64')}),{status:200,headers:{'content-type':'application/json'}});
+            if(url.includes('/repos/llhzx2018/vf-seo/releases/1/assets')) return new Response(JSON.stringify([{id:1,name:manifest.asset_name,url:'https://runner.invalid/p05-v102-asset'}]),{status:200,headers:{'content-type':'application/json'}});
+            if(url==='https://runner.invalid/p05-v102-asset') return new Response(asset,{status:200,headers:{'content-type':'application/octet-stream'}});
+            return originalFetch(input,init);
+          };
+          JS
+          node --import "$MOCK" "$APP/bin/vf-seo-updater.mjs" check | tee "$ROOT/check-before.json"
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs'; const r=JSON.parse(readFileSync(process.env.ROOT+'/check-before.json','utf8').trim().split('\n').at(-1));
+          if(!r.ok||!r.available||r.currentVersion!=='1.0.1'||r.targetVersion!=='1.0.2'||r.updateType!=='ATOMIC') throw new Error(JSON.stringify(r));
+          JS
+          node --import "$MOCK" "$APP/bin/vf-seo-updater.mjs" apply | tee "$ROOT/apply.json"
+          test "$(tr -d '\r\n' < "$APP/VERSION")" = '1.0.2'
+          for _ in $(seq 1 60); do curl -fsS -H 'x-forwarded-proto: https' -H 'host: seo.example.test' 'http://127.0.0.1:19056/api/health' > "$ROOT/health-v102.json" 2>/dev/null && break; sleep .5; done
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs'; const h=JSON.parse(readFileSync(process.env.ROOT+'/health-v102.json','utf8'));
+          if(!h.ok||h.version!=='1.0.2'||h.schema!==1||h.databaseProvider!=='sqlite') throw new Error(JSON.stringify(h));
+          const s=JSON.parse(readFileSync(process.env.ROOT+'/state/update-state.json','utf8')); if(s.phase!=='PASS'||s.currentVersion!=='1.0.1'||s.targetVersion!=='1.0.2'||!s.recoveryPoint) throw new Error(JSON.stringify(s));
+          JS
+          node --import "$MOCK" "$APP/bin/vf-seo-updater.mjs" check | tee "$ROOT/check-after.json"
+          ROOT="$ROOT" node --input-type=module - <<'JS'
+          import {readFileSync} from 'node:fs'; const r=JSON.parse(readFileSync(process.env.ROOT+'/check-after.json','utf8').trim().split('\n').at(-1));
+          if(!r.ok||r.available||r.currentVersion!=='1.0.2'||r.targetVersion!=='1.0.2') throw new Error(JSON.stringify(r));
+          JS
+          pm2 delete vf-seo vf-seo-worker >/dev/null 2>&1 || true
+          echo P05_V101_TO_V102_ATOMIC=PASS
+          echo P05_V102_POST_UPDATE_IDENTITY=PASS
+
+      - name: Final updater verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git -C candidate rev-parse origin/$TARGET_BRANCH)" = "$EXACT_SOURCE"
+          test "$(git -C candidate rev-parse origin/main)" = "$BASE_MAIN"
+          echo P05_V102_UPDATER_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P05_V102_SCHEMA=1
+          echo P05_V102_ATOMIC_FROM=1.0.1
+          echo P05_V102_ATOMIC_TO=1.0.2
+          echo P05_V102_PRODUCTION=NOT_DEPLOYED
+          echo P05_V102_UPDATER_MACHINE=PASS
