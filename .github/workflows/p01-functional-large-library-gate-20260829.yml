@@ -1,0 +1,145 @@
+name: P01 Functional Large Library Gate
+
+on:
+  push:
+    branches:
+      - task/p01-functional-large-library-gate-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: cb11ad7e65d74bd28eec22e9517271cc237d7df9
+  ROOT: /tmp/p01-functional-large
+  PORT: '18422'
+  ADMIN_PASS: 'P01Large!2026'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source syntax fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          node --check source/src/assets/workspace-rebaseline.js
+          rm -rf "$ROOT" /tmp/p01-large-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-large-server.log 2>&1 &
+          echo $! >/tmp/p01-large-server.pid
+          COOKIE=/tmp/p01-large-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-large-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-large-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Large Functional Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-large-setup-post.html
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-large-verify.txt | grep -Fx VERIFY_PASS=YES
+
+      - name: Seed 450 links and hierarchical truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-large-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());$roots=[];$children=[];
+          for($ri=1;$ri<=12;$ri++){
+            $private=$ri%4===0;$rootId=$r->createCategory(['name'=>sprintf('Root %02d',$ri),'description'=>'large root','is_private'=>$private,'sort_order'=>1000-$ri*10]);$roots[$ri]=$rootId;$children[$ri]=[];
+            for($ci=1;$ci<=3;$ci++)$children[$ri][$ci]=$r->createCategory(['name'=>sprintf('Root %02d Child %d',$ri,$ci),'description'=>'large child','parent_id'=>$rootId,'is_private'=>false,'sort_order'=>100-$ci]);
+          }
+          $ids=[];$privateInherited=0;$directPrivate=0;$firstRootCount=0;
+          for($i=1;$i<=450;$i++){
+            $ri=(($i-1)%12)+1;$ci=(intdiv($i-1,12)%3)+1;$cat=$children[$ri][$ci];$ownPrivate=($ri%4!==0 && $i%37===0);$title=sprintf('Asset %03d',$i);$x=$r->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>sprintf('https://asset-%03d.example.com',$i),'description'=>'large fixture','is_private'=>$ownPrivate,'is_favorite'=>$i%29===0],'manual');$id=(int)$x['id'];$ids[$i]=$id;if($ri===1)$firstRootCount++;if($ri%4===0&&$privateInherited===0)$privateInherited=$id;if($ownPrivate&&$directPrivate===0)$directPrivate=$id;
+            if($i%15===0)$s->upsertProfile($id,['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>$i%30===0]);
+            elseif($i%17===0)$s->upsertProfile($id,['surface'=>'watch','resource_kind'=>'movie','media_year'=>2000+($i%27),'media_status'=>($i%2===0?'want':'watched')]);
+          }
+          file_put_contents('/tmp/p01-large-fixture.json',json_encode(['roots'=>$roots,'children'=>$children,'ids'=>$ids,'first_root_count'=>$firstRootCount,'private_inherited'=>$privateInherited,'direct_private'=>$directPrivate],JSON_UNESCAPED_SLASHES));
+          $base=$r->bootstrap(true);if(count($base['links'])!==450)throw new RuntimeException('link count');if(count($base['categories'])!==48)throw new RuntimeException('category count');echo "P01_LARGE_SEED=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-large-seed.php | grep -Fx P01_LARGE_SEED=PASS
+
+      - name: Large library functional HTTP gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-large-admin.cookies
+          LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}")
+          jq -e '.ok==true' <<<"$LOGIN" >/dev/null; CSRF=$(jq -r '.csrf' <<<"$LOGIN")
+          ROOT1=$(jq -r '.roots["1"]' /tmp/p01-large-fixture.json); ROOT4=$(jq -r '.roots["4"]' /tmp/p01-large-fixture.json); EXPECT=$(jq -r '.first_root_count' /tmp/p01-large-fixture.json); INHERITED=$(jq -r '.private_inherited' /tmp/p01-large-fixture.json)
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php" -o /tmp/p01-large-all.html
+          grep -F '450 项' /tmp/p01-large-all.html; grep -F 'Root 01' /tmp/p01-large-all.html; grep -F 'Root 12' /tmp/p01-large-all.html; grep -F '可见范围' /tmp/p01-large-all.html
+          python3 - <<'PY'
+          s=open('/tmp/p01-large-all.html',encoding='utf-8').read();assert s.index('Root 01')<s.index('Root 02')<s.index('Root 03')
+          PY
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?category=${ROOT1}&per=100" -o /tmp/p01-large-root1.html
+          grep -F "${EXPECT} 项" /tmp/p01-large-root1.html
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=private&category=${ROOT4}&per=100" -o /tmp/p01-large-private.html
+          grep -F 'Root 04 Child' /tmp/p01-large-private.html; ! grep -Fq 'Root 01 Child' /tmp/p01-large-private.html
+          CODE=$(curl -sS -o /tmp/p01-large-block.json -w '%{http_code}' -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-visibility-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode "ids=[$INHERITED]" --data-urlencode 'visibility=public'); test "$CODE" = 422
+          jq -e '.ok==false and (.error|contains("私人分类"))' /tmp/p01-large-block.json >/dev/null
+          curl -fsS "http://127.0.0.1:${PORT}/start.php" -o /tmp/p01-large-public-start.html
+          grep -F 'categoryNavSection' /tmp/p01-large-public-start.html
+          ! grep -Fq 'vf-sidebar-scope' /tmp/p01-large-public-start.html
+          cat >/tmp/p01-large-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$db=vf_db();if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');$public=(new VfRepository($db))->bootstrap(false);foreach($public['links'] as $x)if((int)($x['effective_private']??0)!==0)throw new RuntimeException('private leak');echo "P01_LARGE_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-large-db.php | grep -Fx P01_LARGE_DB=PASS
+          echo 'P01_LARGE_HTTP=PASS'
+
+      - name: Real browser large tree context mobile gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-large-browser && cd /tmp/p01-large-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 --no-save >/dev/null 2>&1; npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';
+          const base='http://127.0.0.1:18422',f=JSON.parse(fs.readFileSync('/tmp/p01-large-fixture.json','utf8'));const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01Large!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();
+          await p.goto(base+'/surfaces.php',{waitUntil:'networkidle'});await p.locator('.vf-category-tree').waitFor();if(await p.locator('[data-category-node]').count()<40)throw new Error('large category tree incomplete');const search=p.locator('[data-category-search]');await search.fill('Root 12 Child 3');await p.waitForTimeout(80);const visible=await p.locator('[data-category-node]:visible').allTextContents();if(!visible.some(x=>x.includes('Root 12 Child 3')))throw new Error('category search target missing');if(visible.some(x=>x.includes('Root 01 Child')))throw new Error('category search not filtering');
+          await p.goto(base+`/start.php?scope=private&category=${f.children['4']['2']}`,{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();const add=p.locator('[data-add-form]');if(await add.locator('select[name="category_id"]').inputValue()!==String(f.children['4']['2']))throw new Error('add did not inherit numeric category');if(!(await add.locator('input[name="is_private"]').isChecked()))throw new Error('private scope add default');await p.locator('[data-close-panel]').first().click();
+          const ch=p.locator('.vf-main-nav a').filter({hasText:'Channels'}).first();await ch.click();await p.waitForLoadState('networkidle');if(!p.url().includes('scope=private')||!p.url().includes(`category=${f.children['4']['2']}`))throw new Error('surface context lost');await p.screenshot({path:'/tmp/p01-large-desktop.png',fullPage:true});
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'/surfaces.php?scope=private',{waitUntil:'networkidle'});if(!(await p.locator('.vf-mobile-functional-filters').isVisible()))throw new Error('mobile controls missing');const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error('mobile horizontal overflow '+overflow);await p.screenshot({path:'/tmp/p01-large-mobile.png',fullPage:true});await browser.close();console.log('P01_LARGE_BROWSER=PASS');
+          JS
+          node gate.mjs | grep -Fx P01_LARGE_BROWSER=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo 'P01_FUNCTIONAL_LARGE_LIBRARY_GATE=PASS'
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-functional-large-library-evidence
+          path: |
+            /tmp/p01-large-desktop.png
+            /tmp/p01-large-mobile.png
+            /tmp/p01-large-verify.txt
+            /tmp/p01-large-fixture.json
+          if-no-files-found: error
