@@ -1,0 +1,158 @@
+name: TEMP skill-book V5.4 source gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout runner payload
+        uses: actions/checkout@v4
+
+      - name: Reconstruct V5.3 to V5.4 delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat temp/skill-book-v54/gitpart_*.txt | base64 -d > /tmp/v53_to_v54_git.patch.xz
+          echo "14099a84ffc79dbd60348e5bed70138c4d4b5da9248b77772fe10efa745d1dc1  /tmp/v53_to_v54_git.patch.xz" | sha256sum -c -
+          xz -dc /tmp/v53_to_v54_git.patch.xz > /tmp/v53_to_v54_git.patch
+
+      - name: Checkout exact live gov-doc base
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 158a0d4c505983c81dfad457ad1b071cea6cbbd6
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: gov
+          fetch-depth: 0
+
+      - name: Verify live main has not drifted
+        shell: bash
+        working-directory: gov
+        run: |
+          set -euo pipefail
+          EXPECTED=158a0d4c505983c81dfad457ad1b071cea6cbbd6
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          LIVE=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$LIVE" = "$EXPECTED"
+          test ! -e skills/skill-book/V5.4
+          test -d skills/skill-book/V5.3
+
+      - name: Reconstruct exact V5.4 source
+        shell: bash
+        working-directory: gov
+        run: |
+          set -euo pipefail
+          cp -a skills/skill-book/V5.3 skills/skill-book/V5.4
+          cd skills/skill-book/V5.4
+          patch -p1 < /tmp/v53_to_v54_git.patch
+          test "$(cat VERSION)" = "5.4"
+          grep -q 'SB54-RUNTIME-CONTRACT-C91D4E72' SOURCE_PACKAGE_IDENTITY.md
+          sha256sum -c SHA256SUMS.txt
+          test "$(find . -type f | wc -l)" -eq 93
+          test "$(find . -type f \( -name '*.pyc' -o -name '*.pyo' \) | wc -l)" -eq 0
+          test "$(find . -type d \( -name '__pycache__' -o -name '.pytest_cache' \) | wc -l)" -eq 0
+
+      - name: Python syntax 37/37
+        shell: bash
+        working-directory: gov/skills/skill-book/V5.4
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import py_compile
+          from pathlib import Path
+          fs=sorted(list(Path('scripts').glob('*.py'))+list(Path('tests').glob('*.py')))
+          assert len(fs)==37, len(fs)
+          for p in fs: py_compile.compile(str(p),doraise=True)
+          print('PYTHON_SYNTAX_PASS 37/37')
+          PY
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+      - name: Reconstructed source regression 96/96
+        shell: bash
+        working-directory: gov/skills/skill-book/V5.4
+        run: |
+          set -euo pipefail
+          python -m pytest -q
+          rm -rf .pytest_cache
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+      - name: Rebuild exact Candidate ZIP identity
+        shell: bash
+        working-directory: gov/skills/skill-book/V5.4
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_STORED
+          import hashlib,stat
+          root=Path('.'); out=Path('/tmp/skill-book_V5.4_CANDIDATE_20260828.zip'); base='skill-book_V5.4_CANDIDATE'
+          fs=sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and '.pytest_cache' not in p.parts and p.suffix not in {'.pyc','.pyo'})
+          assert len(fs)==93, len(fs)
+          with ZipFile(out,'w',compression=ZIP_STORED) as z:
+              for p in fs:
+                  zi=ZipInfo(f'{base}/{p.as_posix()}',(2026,8,28,0,0,0)); zi.compress_type=ZIP_STORED; zi.create_system=3; zi.external_attr=(stat.S_IFREG|0o644)<<16; z.writestr(zi,p.read_bytes())
+          b=out.read_bytes(); sha=hashlib.sha256(b).hexdigest()
+          assert len(b)==398654, len(b)
+          assert sha=='3182c1914c8d5d9a1dc129af856982bf1bea7eb05193989d968c36630aa3d58c', sha
+          print('ZIP_IDENTITY_PASS',len(b),sha)
+          PY
+
+      - name: Write isolated gov-doc staging branch
+        shell: bash
+        working-directory: gov
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          EXPECTED=158a0d4c505983c81dfad457ad1b071cea6cbbd6
+          LIVE=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$LIVE" = "$EXPECTED"
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git checkout -b staging/skill-book-v54-candidate-20260828
+          git add skills/skill-book/V5.4
+          git commit -m 'skill-book: stage V5.4 candidate exact source'
+          git remote set-url origin "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/llhzx2018/gov-doc.git"
+          git push origin HEAD:refs/heads/staging/skill-book-v54-candidate-20260828
+          echo "STAGING_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Exact staging source regression 96/96
+        shell: bash
+        working-directory: gov/skills/skill-book/V5.4
+        run: |
+          set -euo pipefail
+          python -m pytest -q
+          rm -rf .pytest_cache
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          cd ../../..
+          test "$(git rev-parse HEAD)" = "$STAGING_COMMIT"
+          test "$(git rev-parse HEAD^)" = "158a0d4c505983c81dfad457ad1b071cea6cbbd6"
+
+      - name: Exact staging ZIP identity readback
+        shell: bash
+        working-directory: gov/skills/skill-book/V5.4
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile,ZipInfo,ZIP_STORED
+          import hashlib,stat
+          root=Path('.'); out=Path('/tmp/staging-v54.zip'); base='skill-book_V5.4_CANDIDATE'
+          fs=sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and '.pytest_cache' not in p.parts and p.suffix not in {'.pyc','.pyo'})
+          assert len(fs)==93
+          with ZipFile(out,'w',compression=ZIP_STORED) as z:
+              for p in fs:
+                  zi=ZipInfo(f'{base}/{p.as_posix()}',(2026,8,28,0,0,0)); zi.compress_type=ZIP_STORED;zi.create_system=3;zi.external_attr=(stat.S_IFREG|0o644)<<16;z.writestr(zi,p.read_bytes())
+          b=out.read_bytes(); assert len(b)==398654; assert hashlib.sha256(b).hexdigest()=='3182c1914c8d5d9a1dc129af856982bf1bea7eb05193989d968c36630aa3d58c'
+          print('STAGING_ZIP_IDENTITY_PASS')
+          PY
