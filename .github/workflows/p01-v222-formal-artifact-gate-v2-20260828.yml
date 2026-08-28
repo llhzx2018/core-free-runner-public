@@ -1,0 +1,190 @@
+name: P01 V2.22.0 Formal Artifact Gate V2
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-formal-artifact-gate-v2-20260828.yml'
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE: 2c159b4b7ecfc03e79eff2e6103f7e2c768ded08
+  CANDIDATE_TREE: 9116fe6cfc24d9a5a0a7070fb6af3f31bb079392
+  SOURCE_TAG: v2.21.25
+  SOURCE_COMMIT: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+  VERSION: 2.22.0
+  SOURCE_VERSION: 2.21.25
+  SCHEMA: '2026082801'
+  SOURCE_SCHEMA: '2026080902'
+  OUT: /tmp/p01-v222-artifacts
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: candidate
+      - name: Checkout exact production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_TAG }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: production
+      - name: Load schema-aware and proven builders
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch task/p01-v222-multi-surface-gate-20260828 https://github.com/llhzx2018/core-free-runner-public.git runner
+          git clone -q --depth 1 --branch agent/p01-22121-formal-artifact-gate-20260819 https://github.com/llhzx2018/core-free-runner-public.git proven
+          test -f runner/scripts/p01-build-v222-schema-release.py
+          test -f proven/scripts/p01-build-release.py
+          test -f proven/scripts/p01-build-release-v2.py
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_COMMIT"
+          echo P01_V222_BUILDERS=PASS
+      - name: Build schema-aware deterministic artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          python3 runner/scripts/p01-build-v222-schema-release.py | tee /tmp/p01-v222-build-v2.log
+          php -l "$OUT/server-update-v2.22.0-repair.php"
+          php "$OUT/server-update-v2.22.0-repair.php" --self-test | tee /tmp/p01-v222-selftest-v2.json
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' /tmp/p01-v222-selftest-v2.json >/dev/null
+          grep -Fq "public const SOURCE_SCHEMA='2026080902';" "$OUT/server-update-v2.22.0-repair.php"
+          grep -Fq "public const TARGET_SCHEMA='2026082801';" "$OUT/server-update-v2.22.0-repair.php"
+          grep -Fq 'VF_ATOMIC_TEST_FAIL_AFTER_MIGRATION' "$OUT/server-update-v2.22.0-repair.php"
+          for f in VF-Start-V2.22.0-FULL.zip VF-Start-V2.22.0-UPDATE.zip VF_Start_V2.22.0_UPDATE.zip server-update-v2.22.0-repair.php P01-V2.22.0-ARTIFACT-GATE.json SHA256SUMS.txt; do test -s "$OUT/$f"; done
+          echo P01_V222_SCHEMA_AWARE_BUILD=PASS
+      - name: Package safety and FULL clean install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$OUT/VF-Start-V2.22.0-FULL.zip"; UPDATE="$OUT/VF-Start-V2.22.0-UPDATE.zip"; LEGACY="$OUT/VF_Start_V2.22.0_UPDATE.zip"
+          unzip -t "$FULL" >/dev/null; unzip -t "$UPDATE" >/dev/null; unzip -t "$LEGACY" >/dev/null
+          unzip -Z1 "$FULL" >/tmp/p01-v222-v2-full-files.txt
+          ! grep -E '(^|/)(\.git|node_modules|private_data|PRIVATE_DATA)(/|$)|\.(sqlite|sqlite3|db|log|env)$|app/\.runtime\.php$|app/\.setup-key\.php$|app/\.setup\.lock$' /tmp/p01-v222-v2-full-files.txt
+          for f in VERSION.txt app/SurfaceRepository.php cli/surface-verify.php migrations/2026082801_v222_multi_surface.php surfaces.php channels.php watch.php surface-manager.php release-manifest.json; do grep -Fxq "$f" /tmp/p01-v222-v2-full-files.txt; done
+          test "$(unzip -p "$FULL" VERSION.txt | tr -d '\r\n')" = "$VERSION"
+          unzip -p "$FULL" release-manifest.json | jq -e '.version=="2.22.0" and .source_version=="2.21.25" and .schema_version=="2026082801" and .source_schema_version=="2026080902" and .schema_change==true' >/dev/null
+          test "$(sha256sum "$UPDATE" | awk '{print $1}')" = "$(sha256sum "$LEGACY" | awk '{print $1}')"
+          rm -rf /tmp/p01-v222-v2-full; mkdir -p /tmp/p01-v222-v2-full; unzip -q "$FULL" -d /tmp/p01-v222-v2-full
+          cd /tmp/p01-v222-v2-full
+          php -S 127.0.0.1:18270 -t . >/tmp/p01-v222-v2-full-server.log 2>&1 & PID=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18270/setup.php -o /tmp/p01-v222-v2-full-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-v2-full.cookies -b /tmp/p01-v222-v2-full.cookies http://127.0.0.1:18270/setup.php -o /tmp/p01-v222-v2-full-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-v2-full-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-v2-full.cookies -b /tmp/p01-v222-v2-full.cookies -X POST http://127.0.0.1:18270/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V222 Full V2' --data-urlencode 'admin_password=P01V222!FullV2' --data-urlencode 'admin_password_confirm=P01V222!FullV2' -o /tmp/p01-v222-v2-full-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | tee /tmp/p01-v222-v2-full-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-v2-full-surface.txt
+          grep -Fx 'WORKING_SCHEMA=2026082801' /tmp/p01-v222-v2-full-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v222-v2-full-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-v2-full-baseline.txt; grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-v2-full-baseline.txt; grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-v2-full-baseline.txt
+          kill "$PID" 2>/dev/null || true
+          echo P01_V222_V2_FULL=PASS
+      - name: Atomic schema upgrade with business data preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v222-v2-upgrade; PORT=18271; rm -rf "$ROOT"; cp -a production/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-v222-v2-upgrade-server.log 2>&1 & PID=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-v2-upgrade-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-v2-upgrade.cookies -b /tmp/p01-v222-v2-upgrade.cookies http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-v2-upgrade-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-v2-upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-v2-upgrade.cookies -b /tmp/p01-v222-v2-upgrade.cookies -X POST http://127.0.0.1:$PORT/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V222 Upgrade V2' --data-urlencode 'admin_password=P01V222!UpgradeV2' --data-urlencode 'admin_password_confirm=P01V222!UpgradeV2' -o /tmp/p01-v222-v2-upgrade-post.html
+          kill "$PID" 2>/dev/null || true
+          cat >/tmp/p01-v222-v2-seed.php <<'PHP'
+          <?php require '/tmp/p01-v222-v2-upgrade/app/bootstrap.php';$r=new VfRepository(vf_db());$c=$r->createCategory(['name'=>'V222 V2 Seed','description'=>'keep','is_private'=>false]);$x=$r->saveLink(null,['category_id'=>$c,'title'=>'V222 V2 Channel','url'=>'https://www.youtube.com/@v222-v2','description'=>'keep','is_private'=>false],'manual');file_put_contents('/tmp/p01-v222-v2-link',(string)$x['id']);file_put_contents('/tmp/p01-v222-v2-cat',(string)$c);
+          PHP
+          php /tmp/p01-v222-v2-seed.php
+          REPAIR="$OUT/server-update-v2.22.0-repair.php"
+          php "$REPAIR" --verify-source="$ROOT" | jq -e '.ok==true' >/dev/null
+          php "$REPAIR" --run="$ROOT" | tee /tmp/p01-v222-v2-upgrade-result.json
+          jq -e '.ok==true and .already_current==false and .schema=="2026082801" and .integrity=="ok" and .fk==0' /tmp/p01-v222-v2-upgrade-result.json >/dev/null
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$VERSION"
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          php "$ROOT/cli/surface-verify.php" | tee /tmp/p01-v222-v2-upgrade-surface.txt; grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-v2-upgrade-surface.txt
+          cat >/tmp/p01-v222-v2-assert.php <<'PHP'
+          <?php require '/tmp/p01-v222-v2-upgrade/app/bootstrap.php';require_once '/tmp/p01-v222-v2-upgrade/app/SurfaceRepository.php';$db=vf_db();$l=(int)trim(file_get_contents('/tmp/p01-v222-v2-link'));$c=(int)trim(file_get_contents('/tmp/p01-v222-v2-cat'));if(!$db->query('SELECT id FROM links WHERE id='.$l)->fetchColumn()||!$db->query('SELECT id FROM categories WHERE id='.$c)->fetchColumn())throw new RuntimeException('business data lost');if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0)throw new RuntimeException('silent profile');$s=new VfSurfaceRepository($db);if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$l))throw new RuntimeException('default Start failed');echo "P01_V222_V2_DATA=PASS\n";
+          PHP
+          php /tmp/p01-v222-v2-assert.php
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-v222-v2-upgrade-baseline.txt; grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-v2-upgrade-baseline.txt; grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-v2-upgrade-baseline.txt; grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-v2-upgrade-baseline.txt
+          php "$REPAIR" --run="$ROOT" | jq -e '.ok==true and .already_current==true and .schema=="2026082801"' >/dev/null
+          echo P01_V222_V2_ATOMIC_UPGRADE=PASS
+      - name: Post-migration rollback injection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v222-v2-rollback; PORT=18272; rm -rf "$ROOT"; cp -a production/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-v222-v2-rollback-server.log 2>&1 & PID=$!
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-v2-rollback-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-v2-rollback.cookies -b /tmp/p01-v222-v2-rollback.cookies http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-v2-rollback-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-v2-rollback-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-v2-rollback.cookies -b /tmp/p01-v222-v2-rollback.cookies -X POST http://127.0.0.1:$PORT/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V222 Rollback V2' --data-urlencode 'admin_password=P01V222!RollbackV2' --data-urlencode 'admin_password_confirm=P01V222!RollbackV2' -o /tmp/p01-v222-v2-rollback-post.html
+          kill "$PID" 2>/dev/null || true
+          REPAIR="$OUT/server-update-v2.22.0-repair.php"
+          set +e; VF_ATOMIC_TEST_FAIL_AFTER_MIGRATION=1 php "$REPAIR" --run="$ROOT" >/tmp/p01-v222-v2-rollback.out 2>&1; RC=$?; set -e
+          test "$RC" -ne 0
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$SOURCE_VERSION"
+          php "$REPAIR" --verify-source="$ROOT" | jq -e '.ok==true' >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          php -r '$r=include "/tmp/p01-v222-v2-rollback/app/.runtime.php";$p=new PDO("sqlite:".$r["db_file"]);echo (string)$p->query("SELECT COALESCE(MAX(version),\"\") FROM schema_migrations WHERE status=\"success\"")->fetchColumn();' | grep -Fx "$SOURCE_SCHEMA"
+          test ! -f "$ROOT/app/SurfaceRepository.php"
+          echo P01_V222_V2_SCHEMA_ROLLBACK=PASS
+      - name: Final artifact verdict and hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$OUT"
+          sha256sum VF-Start-V2.22.0-FULL.zip VF-Start-V2.22.0-UPDATE.zip VF_Start_V2.22.0_UPDATE.zip server-update-v2.22.0-repair.php | tee /tmp/p01-v222-v2-final-sha.txt
+          echo P01_V2_22_0_FORMAL_ARTIFACT_GATE=PASS
+          echo CANDIDATE="$CANDIDATE"
+          echo VERSION="$VERSION"
+          echo SCHEMA="$SCHEMA"
+          echo PRODUCTION=NO
+      - name: Upload formal release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-V2.22.0-FORMAL-ARTIFACTS
+          path: |
+            /tmp/p01-v222-artifacts/VF-Start-V2.22.0-FULL.zip
+            /tmp/p01-v222-artifacts/VF-Start-V2.22.0-UPDATE.zip
+            /tmp/p01-v222-artifacts/VF_Start_V2.22.0_UPDATE.zip
+            /tmp/p01-v222-artifacts/server-update-v2.22.0-repair.php
+            /tmp/p01-v222-artifacts/P01-V2.22.0-ARTIFACT-GATE.json
+            /tmp/p01-v222-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
