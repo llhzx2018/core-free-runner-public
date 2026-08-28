@@ -1,0 +1,259 @@
+name: P01 V2.22.1 Online Hotfix Candidate Gate V2
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v221-online-hotfix-candidate-gate-v2-20260828.yml'
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  CANDIDATE: a31bafac5efc97efa537b645f03bc99ed0ea5b43
+  CANDIDATE_TREE: 76aa42eb2e9abd0e0d543a7eba1241a3ff26eb59
+  SOURCE_TAG: v2.21.25
+  SOURCE_COMMIT: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+  TARGET_VERSION: 2.22.1
+  TARGET_SCHEMA: '2026082801'
+  OUT: /tmp/p01-v221-hotfix-v2
+  BUILD_OUT: /tmp/p01-v222-artifacts
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact sources
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: candidate
+
+      - name: Checkout exact V2.21.25 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.SOURCE_TAG }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: production
+
+      - name: Build exact V2.22.1 artifacts and legacy-compatible alias
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fxq "define('VF_VERSION', '2.22.1');" candidate/src/app/bootstrap.php
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+
+          rm -rf runner proven "$OUT" "$BUILD_OUT"
+          git clone -q --depth 1 --branch task/p01-v222-multi-surface-gate-20260828 https://github.com/llhzx2018/core-free-runner-public.git runner
+          git clone -q --depth 1 --branch agent/p01-22121-formal-artifact-gate-20260819 https://github.com/llhzx2018/core-free-runner-public.git proven
+          cp runner/scripts/p01-build-v222-schema-release.py /tmp/p01-v221-builder-v2.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/p01-v221-builder-v2.py')
+          s=p.read_text(encoding='utf-8')
+          for old,new in {
+            '2.22.0':'2.22.1',
+            '2c159b4b7ecfc03e79eff2e6103f7e2c768ded08':'a31bafac5efc97efa537b645f03bc99ed0ea5b43',
+            '9116fe6cfc24d9a5a0a7070fb6af3f31bb079392':'76aa42eb2e9abd0e0d543a7eba1241a3ff26eb59',
+          }.items():
+              if old not in s: raise SystemExit(f'missing builder anchor {old}')
+              s=s.replace(old,new)
+          p.write_text(s,encoding='utf-8',newline='\n')
+          PY
+          python3 /tmp/p01-v221-builder-v2.py | tee /tmp/p01-v221-build-v2.log
+          mkdir -p "$OUT"
+          cp "$BUILD_OUT"/VF-Start-V2.22.1-FULL.zip "$OUT"/
+          cp "$BUILD_OUT"/VF-Start-V2.22.1-UPDATE.zip "$OUT"/
+          cp "$BUILD_OUT"/server-update-v2.22.1-repair.php "$OUT"/
+          cp "$BUILD_OUT"/P01-V2.22.1-ARTIFACT-GATE.json "$OUT"/
+          php -l "$OUT/server-update-v2.22.1-repair.php"
+          php "$OUT/server-update-v2.22.1-repair.php" --self-test | tee "$OUT/atomic-self-test.json"
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' "$OUT/atomic-self-test.json" >/dev/null
+
+          # V2.21.25 updater contract: formal alias name outside, repair-vX.Y.Z.php inside.
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          src=Path('/tmp/p01-v221-hotfix-v2/server-update-v2.22.1-repair.php')
+          out=Path('/tmp/p01-v221-hotfix-v2/VF_Start_V2.22.1_UPDATE.zip')
+          info=ZipInfo('repair-v2.22.1.php',(1980,1,1,0,0,0))
+          info.compress_type=ZIP_DEFLATED
+          info.create_system=3
+          info.external_attr=(0o100640 << 16)
+          with ZipFile(out,'w',compression=ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr(info,src.read_bytes())
+          PY
+          unzip -t "$OUT/VF_Start_V2.22.1_UPDATE.zip" >/dev/null
+          test "$(unzip -Z1 "$OUT/VF_Start_V2.22.1_UPDATE.zip" | wc -l)" -eq 1
+          unzip -Z1 "$OUT/VF_Start_V2.22.1_UPDATE.zip" | grep -Fxq 'repair-v2.22.1.php'
+          test "$(unzip -p "$OUT/VF_Start_V2.22.1_UPDATE.zip" repair-v2.22.1.php | sha256sum | awk '{print $1}')" = "$(sha256sum "$OUT/server-update-v2.22.1-repair.php" | awk '{print $1}')"
+          ASSET_SHA="$(sha256sum "$OUT/VF_Start_V2.22.1_UPDATE.zip" | awk '{print $1}')"
+          ASSET_BYTES="$(stat -c %s "$OUT/VF_Start_V2.22.1_UPDATE.zip")"
+          printf 'ASSET_SHA=%s\nASSET_BYTES=%s\n' "$ASSET_SHA" "$ASSET_BYTES" >> "$GITHUB_ENV"
+          echo P01_V221_V2_BUILD=PASS
+
+      - name: Fresh install V2.22.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v221-v2-fresh
+          COOKIE=/tmp/p01-v221-v2-fresh.cookies
+          rm -rf "$ROOT" "$COOKIE"; mkdir -p "$ROOT"
+          unzip -q "$OUT/VF-Start-V2.22.1-FULL.zip" -d "$ROOT"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$TARGET_VERSION"
+          php -S 127.0.0.1:18283 -t "$ROOT" >/tmp/p01-v221-v2-fresh-server.log 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18283/setup.php -o /tmp/p01-v221-v2-fresh-setup.html && break; sleep 1; done
+          curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18283/setup.php -o /tmp/p01-v221-v2-fresh-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v221-v2-fresh-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18283/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V221 V2 Fresh' --data-urlencode 'admin_password=P01V221!FreshV2' --data-urlencode 'admin_password_confirm=P01V221!FreshV2' >/tmp/p01-v221-v2-fresh-post.html
+          kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; trap - EXIT
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          php "$ROOT/cli/surface-verify.php" | tee "$OUT/fresh-surface.txt"
+          grep -Fx 'MULTI_SURFACE_PASS=YES' "$OUT/fresh-surface.txt"
+          grep -Fx 'WORKING_SCHEMA=2026082801' "$OUT/fresh-surface.txt"
+          php "$ROOT/cli/baseline-verify.php" | tee "$OUT/fresh-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$OUT/fresh-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$OUT/fresh-baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=0' "$OUT/fresh-baseline.txt"
+          echo P01_V221_V2_FRESH=PASS
+
+      - name: V2.21.25 updater with remembered V2.22.0 manifest to V2.22.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v221-v2-owner
+          COOKIE=/tmp/p01-v221-v2-owner.cookies
+          rm -rf "$ROOT" "$COOKIE"; cp -a production/src "$ROOT"
+          php -S 127.0.0.1:18284 -t "$ROOT" >/tmp/p01-v221-v2-owner-server.log 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18284/setup.php -o /tmp/p01-v221-v2-owner-setup.html && break; sleep 1; done
+          curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18284/setup.php -o /tmp/p01-v221-v2-owner-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v221-v2-owner-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18284/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V221 V2 Owner' --data-urlencode 'admin_password=P01V221!OwnerV2' --data-urlencode 'admin_password_confirm=P01V221!OwnerV2' >/tmp/p01-v221-v2-owner-post.html
+          kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; trap - EXIT
+          test -f "$ROOT/app/.runtime.php"
+
+          cat >/tmp/p01-v221-v2-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v221-v2-owner/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $cid=$repo->createCategory(['name'=>'V221 V2 Preserve','description'=>'keep','is_private'=>false]);
+          $saved=$repo->saveLink(null,['category_id'=>$cid,'title'=>'V221 V2 Preserve','url'=>'https://www.youtube.com/@p01-v221-v2-preserve','description'=>'keep','is_private'=>false],'manual');
+          file_put_contents('/tmp/p01-v221-v2-link',(string)$saved['id']);file_put_contents('/tmp/p01-v221-v2-cat',(string)$cid);
+          $stmt=$db->prepare('INSERT INTO update_state(state_key,state_value,updated_at) VALUES(?,?,?) ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value,updated_at=excluded.updated_at');$now=gmdate('c');
+          foreach ([['highest_verified_release_version','2.22.0'],['highest_verified_release_manifest_sha256',str_repeat('a',64)],['highest_verified_release_at','2026-08-28T04:50:28Z']] as $r)$stmt->execute([$r[0],$r[1],$now]);
+          echo "P01_V221_V2_MEMORY=PASS\n";
+          PHP
+          php /tmp/p01-v221-v2-seed.php
+
+          cat > "$OUT/manifest.json" <<JSON
+          {
+            "schema_version":"1.0","project_id":"P01","component_id":"APP","enabled":true,
+            "target_version":"2.22.1","update_type":"ATOMIC","from_versions":["2.21.25"],
+            "schema_from":"2026080902","schema_to":"2026082801","repository":"llhzx2018/vf-start",
+            "release_tag":"v2.22.1","asset_name":"VF_Start_V2.22.1_UPDATE.zip",
+            "asset_bytes":${ASSET_BYTES},"asset_sha256":"${ASSET_SHA}","release_id":378266367,
+            "release_identity":"v2.22.1@a31bafac5efc97efa537b645f03bc99ed0ea5b43",
+            "backup_required":true,"rollback_supported":true,"released_at":"2026-08-28T05:15:00Z","minimum_php":"8.0.0"
+          }
+          JSON
+
+          cat >/tmp/p01-v221-v2-run.php <<'PHP'
+          <?php
+          require '/tmp/p01-v221-v2-owner/app/bootstrap.php';
+          $manifest=json_decode(file_get_contents('/tmp/p01-v221-hotfix-v2/manifest.json'),true,512,JSON_THROW_ON_ERROR);
+          $asset='/tmp/p01-v221-hotfix-v2/VF_Start_V2.22.1_UPDATE.zip';
+          $manager=new VfUpdateManager(vf_db(),[
+            'manifest_fetcher'=>fn()=> $manifest,
+            'asset_downloader'=>function(array $m,string $dest) use($asset){if(!copy($asset,$dest))throw new RuntimeException('copy failed');return ['size'=>filesize($dest)];},
+            'backup_creator'=>fn(string $from,string $to)=>['backup_key'=>'v221-v2-'.$from.'-'.$to],
+          ]);
+          $checked=$manager->check(true);
+          if(empty($checked['ok'])||($checked['latest_version']??'')!=='2.22.1'||empty($checked['can_update']))throw new RuntimeException('freshness advance failed');
+          echo "P01_V221_V2_FRESHNESS=PASS\n";
+          $prepared=$manager->prepare();if(empty($prepared['ok'])||($prepared['to_version']??'')!=='2.22.1')throw new RuntimeException('prepare failed');
+          echo "P01_V221_V2_PREPARE=PASS\n";
+          $installed=$manager->install((string)$prepared['operation_id']);if(empty($installed['ok']))throw new RuntimeException('install failed');
+          echo "P01_V221_V2_INSTALL=PASS\n";
+          PHP
+          php /tmp/p01-v221-v2-run.php | tee "$OUT/owner-result.txt"
+          grep -Fx 'P01_V221_V2_FRESHNESS=PASS' "$OUT/owner-result.txt"
+          grep -Fx 'P01_V221_V2_PREPARE=PASS' "$OUT/owner-result.txt"
+          grep -Fx 'P01_V221_V2_INSTALL=PASS' "$OUT/owner-result.txt"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$TARGET_VERSION"
+          echo P01_V221_V2_REAL_UPDATER=PASS
+
+      - name: Post install evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v221-v2-owner
+          php "$ROOT/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          php "$ROOT/cli/surface-verify.php" | tee "$OUT/owner-surface.txt"
+          grep -Fx 'MULTI_SURFACE_PASS=YES' "$OUT/owner-surface.txt"
+          grep -Fx 'WORKING_SCHEMA=2026082801' "$OUT/owner-surface.txt"
+          cat >/tmp/p01-v221-v2-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v221-v2-owner/app/bootstrap.php';require_once '/tmp/p01-v221-v2-owner/app/SurfaceRepository.php';$db=vf_db();
+          $l=(int)trim(file_get_contents('/tmp/p01-v221-v2-link'));$c=(int)trim(file_get_contents('/tmp/p01-v221-v2-cat'));
+          if(!$db->query('SELECT id FROM links WHERE id='.$l)->fetchColumn()||!$db->query('SELECT id FROM categories WHERE id='.$c)->fetchColumn())throw new RuntimeException('business data lost');
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0)throw new RuntimeException('silent profile');
+          $s=new VfSurfaceRepository($db);if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$l))throw new RuntimeException('default Start failed');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok'||$db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('sqlite verification failed');
+          echo "P01_V221_V2_DATA=PASS\n";
+          PHP
+          php /tmp/p01-v221-v2-assert.php
+          php "$ROOT/cli/baseline-verify.php" | tee "$OUT/owner-baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$OUT/owner-baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$OUT/owner-baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=0' "$OUT/owner-baseline.txt"
+          cat > "$OUT/P01-V2.22.1-ONLINE-HOTFIX-CANDIDATE-V2.json" <<JSON
+          {"schema":"vf-public-runner-result/v1","project_id":"P01","gate":"V2.22.1_ONLINE_HOTFIX_CANDIDATE_V2","status":"PASS","candidate":"${CANDIDATE}","candidate_tree":"${CANDIDATE_TREE}","source_version":"2.21.25","target_version":"2.22.1","target_schema":"2026082801","seeded_highest_verified_release":"2.22.0","freshness_advance":"PASS","legacy_inner_repair":"repair-v2.22.1.php","owner_updater_prepare":"PASS","owner_updater_install":"PASS","data_preserve":"PASS","common_baseline":"PASS","asset_bytes":${ASSET_BYTES},"asset_sha256":"${ASSET_SHA}","production_write":false}
+          JSON
+          jq -e '.status=="PASS" and .freshness_advance=="PASS" and .legacy_inner_repair=="repair-v2.22.1.php" and .owner_updater_install=="PASS"' "$OUT/P01-V2.22.1-ONLINE-HOTFIX-CANDIDATE-V2.json" >/dev/null
+          echo P01_V221_ONLINE_HOTFIX_CANDIDATE_V2=PASS
+
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-V2.22.1-ONLINE-HOTFIX-CANDIDATE-V2
+          path: |
+            /tmp/p01-v221-hotfix-v2/VF-Start-V2.22.1-FULL.zip
+            /tmp/p01-v221-hotfix-v2/VF-Start-V2.22.1-UPDATE.zip
+            /tmp/p01-v221-hotfix-v2/VF_Start_V2.22.1_UPDATE.zip
+            /tmp/p01-v221-hotfix-v2/server-update-v2.22.1-repair.php
+            /tmp/p01-v221-hotfix-v2/P01-V2.22.1-ONLINE-HOTFIX-CANDIDATE-V2.json
+          if-no-files-found: error
+          retention-days: 30
