@@ -1,0 +1,83 @@
+name: P01 V2.29 Domain Privacy Fix
+
+on:
+  push:
+    branches:
+      - task/p01-v229-domain-privacy-fix-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 27d23aeff91fe0a5be9485f978220d1842e57851
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact P01 domain candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: feature/p01-domain-taxonomy-20260829
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch domain-aware privacy projection only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/app/Repository.php')
+          s=p.read_text(encoding='utf-8')
+          old='''        $linkVisibility = $admin ? "WHERE l.lifecycle_state=\'active\'" : "WHERE l.lifecycle_state=\'active\' AND tree.effective_private = 0 AND l.is_private = 0 AND l.is_pending = 0 AND l.sensitive_detected=0 AND l.url_protected=0";
+          $sql = $this->categoryTreeSql() . "\\n" . <<<'SQL'
+SELECT l.*, tree.effective_private AS category_private,
+       CASE WHEN tree.effective_private = 1 OR l.is_private = 1 THEN 1 ELSE 0 END AS effective_private
+FROM links l
+JOIN tree ON tree.id = l.category_id
+SQL;
+        $sql .= "\\n" . $linkVisibility;
+'''
+          new='''        $hasDomainProfiles = (int)$this->db->query("SELECT COUNT(*) FROM sqlite_master WHERE type=\'table\' AND name=\'resource_domain_profiles\'")->fetchColumn() > 0;
+        $domainExpr = $hasDomainProfiles ? "COALESCE(rdp.domain_key,\'start\')" : "\'start\'";
+        $profileJoin = $hasDomainProfiles ? "LEFT JOIN resource_domain_profiles rdp ON rdp.link_id=l.id" : "";
+        $linkVisibility = $admin
+            ? "WHERE l.lifecycle_state=\'active\'"
+            : "WHERE l.lifecycle_state=\'active\' AND l.is_private = 0 AND (" . $domainExpr . " <> \'start\' OR tree.effective_private = 0) AND l.is_pending = 0 AND l.sensitive_detected=0 AND l.url_protected=0";
+        $sql = $this->categoryTreeSql() . "\\nSELECT l.*, " . $domainExpr . " AS resource_domain, "
+            . "CASE WHEN " . $domainExpr . " = \'start\' THEN tree.effective_private ELSE 0 END AS category_private, "
+            . "CASE WHEN l.is_private = 1 OR (" . $domainExpr . " = \'start\' AND tree.effective_private = 1) THEN 1 ELSE 0 END AS effective_private "
+            . "FROM links l JOIN tree ON tree.id = l.category_id " . $profileJoin;
+        $sql .= "\\n" . $linkVisibility;
+'''
+          assert s.count(old)==1, 'privacy query block drifted'
+          s=s.replace(old,new,1)
+          old_map="                    'category_id' => (int)$link['category_id'],"
+          new_map="                    'category_id' => (string)($link['resource_domain'] ?? 'start') === 'start' ? (int)$link['category_id'] : 0,"
+          assert s.count(old_map)==1, 'public category projection drifted'
+          s=s.replace(old_map,new_map,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          php -l src/app/Repository.php >/dev/null
+          git diff --check
+          test "$(git diff --name-only | wc -l | tr -d ' ')" = "1"
+          test "$(git diff --name-only)" = "src/app/Repository.php"
+          grep -F "resource_domain_profiles rdp" src/app/Repository.php
+          grep -F "resource_domain'] ?? 'start'" src/app/Repository.php
+          echo P01_V229_DOMAIN_PRIVACY_PATCH=PASS
+
+      - name: Commit and push exact patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add src/app/Repository.php
+          git commit -m 'P01 V2.29 · Decouple non-navigation privacy from URL categories'
+          git push origin HEAD:feature/p01-domain-taxonomy-20260829
+          echo "PATCH_SHA=$(git rev-parse HEAD)"
