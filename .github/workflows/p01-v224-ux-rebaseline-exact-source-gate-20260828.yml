@@ -1,0 +1,191 @@
+name: P01 V2.24 UX Rebaseline Exact Source Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v224-ux-rebaseline-exact-source-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      FEATURE_BRANCH: feature/p01-ux-rebaseline-v224-20260828
+      EXACT_SOURCE: 872adc2c5cdbec915be196215b032ee37af1647f
+      BASE_MAIN: f00a7d5dfe61d429a845bb1931065653e7750337
+      VERSION: 2.23.0
+      SCHEMA: '2026082801'
+      TARGET_RELEASE: 2.24.0
+    steps:
+      - name: Checkout exact UX source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact identity and UX scope boundary
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${FEATURE_BRANCH}" | awk '{print $1}')" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')" = "$BASE_MAIN"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$VERSION"
+          mapfile -t files < <(git diff --name-only "$BASE_MAIN...$EXACT_SOURCE")
+          printf '%s\n' "${files[@]}"
+          for f in "${files[@]}"; do
+            case "$f" in
+              src/app/SurfaceShell.php|src/assets/surface-home.css|src/surface-manager.php|src/surface.php|src/surfaces.php) ;;
+              *) echo "unexpected V2.24 UX scope file: $f" >&2; exit 1;;
+            esac
+          done
+          test "${#files[@]}" -eq 5
+          echo P01_V224_UX_IDENTITY_BOUNDARY=PASS
+      - name: PHP and JavaScript syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V224_UX_SYNTAX=PASS
+      - name: Fresh install seed and baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v224-ux /tmp/p01-v224*.cookies
+          cp -a p01/src /tmp/p01-v224-ux
+          cd /tmp/p01-v224-ux
+          php -S 127.0.0.1:18234 -t . >/tmp/p01-v224-server.log 2>&1 & echo $! >/tmp/p01-v224.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18234/setup.php -o /tmp/p01-v224-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v224.cookies -b /tmp/p01-v224.cookies http://127.0.0.1:18234/setup.php -o /tmp/p01-v224-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v224-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v224.cookies -b /tmp/p01-v224.cookies -X POST http://127.0.0.1:18234/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V224 UX Gate' --data-urlencode 'admin_password=P01V224!UnifiedUX' --data-urlencode 'admin_password_confirm=P01V224!UnifiedUX' -o /tmp/p01-v224-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v224-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v224-verify.txt
+          php cli/surface-verify.php | tee /tmp/p01-v224-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v224-surface.txt
+          grep -Fx "WORKING_SCHEMA=$SCHEMA" /tmp/p01-v224-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v224-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v224-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v224-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v224-baseline.txt
+          cat >/tmp/p01-v224-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v224-ux/app/bootstrap.php';
+          require_once '/tmp/p01-v224-ux/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());
+          $s=new VfSurfaceRepository(vf_db());
+          $tools=$r->createCategory(['name'=>'工具','description'=>'','is_private'=>false]);
+          $r->saveLink(null,['category_id'=>$tools,'title'=>'Cloudflare Dashboard','url'=>'https://dash.cloudflare.com/','description'=>'Cloudflare','is_private'=>false],'manual');
+          $tech=$r->createCategory(['name'=>'科技','description'=>'','is_private'=>false]);
+          $channel=$r->saveLink(null,['category_id'=>$tech,'title'=>'硅谷101','url'=>'https://www.youtube.com/@TheValley101','description'=>'AI 与科技商业故事','is_private'=>false],'manual');
+          $s->upsertProfile((int)$channel['id'],['surface'=>'channels','resource_kind'=>'youtube','note'=>'频道','background_friendly'=>true]);
+          $movieCat=$r->createCategory(['name'=>'电影','description'=>'','is_private'=>false]);
+          $movie=$r->saveLink(null,['category_id'=>$movieCat,'title'=>'测试电影','url'=>'https://example.com/movie','description'=>'测试电影','is_private'=>false],'manual');
+          $s->upsertProfile((int)$movie['id'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>'2024','media_status'=>'want']);
+          // Keep these unprofiled to exercise the organizer suggestions and empty/onboarding path.
+          $r->saveLink(null,['category_id'=>$tech,'title'=>'待整理 YouTube 创作者','url'=>'https://www.youtube.com/@PendingCreator','description'=>'等待归入 Channels','is_private'=>false],'manual');
+          $r->saveLink(null,['category_id'=>$movieCat,'title'=>'待整理电影入口','url'=>'https://example.com/pending-film','description'=>'等待归入 Watch','is_private'=>false],'manual');
+          echo "P01_V224_UX_SEED=PASS\n";
+          PHP
+          php /tmp/p01-v224-seed.php
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          echo P01_V224_UX_FRESH_BASELINE=PASS
+      - name: Unified UX route and search contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Public root stays public and does not expose owner shell.
+          code=$(curl -sS -o /tmp/p01-v224-public-root.html -w '%{http_code}' http://127.0.0.1:18234/)
+          test "$code" = 200
+          ! grep -F 'PERSONAL INTERNET HOME' /tmp/p01-v224-public-root.html >/dev/null
+          # Authenticate through the real P01 API.
+          curl -fsS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18234/api.php?action=login' --data '{"password":"P01V224!UnifiedUX"}' | jq -e '.ok==true and (.csrf|length)>10' >/dev/null
+          root_code=$(curl -sS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies -D /tmp/p01-v224-root.headers -o /tmp/p01-v224-root-auth.html -w '%{http_code}' http://127.0.0.1:18234/)
+          test "$root_code" = 302
+          grep -iE '^location: *surfaces\.php' /tmp/p01-v224-root.headers >/dev/null
+          # Home is one unified IA, not three mini-app columns.
+          curl -fsS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies http://127.0.0.1:18234/surfaces.php -o /tmp/p01-v224-home.html
+          grep -F 'PERSONAL INTERNET HOME' /tmp/p01-v224-home.html >/dev/null
+          grep -F '你的互联网，从这里继续。' /tmp/p01-v224-home.html >/dev/null
+          grep -F 'vf-space-switcher' /tmp/p01-v224-home.html >/dev/null
+          grep -F '内容待整理' /tmp/p01-v224-home.html >/dev/null
+          grep -F 'Cloudflare Dashboard' /tmp/p01-v224-home.html >/dev/null
+          ! grep -F 'vf-dashboard-columns' /tmp/p01-v224-home.html >/dev/null
+          # Global search is a real cross-Surface search and stays out of the admin manager.
+          curl -fsS -G -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies --data-urlencode 'q=硅谷101' http://127.0.0.1:18234/surfaces.php -o /tmp/p01-v224-search-channel.html
+          grep -F 'GLOBAL SEARCH' /tmp/p01-v224-search-channel.html >/dev/null
+          grep -F '硅谷101' /tmp/p01-v224-search-channel.html >/dev/null
+          grep -F 'Channels' /tmp/p01-v224-search-channel.html >/dev/null
+          curl -fsS -G -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies --data-urlencode 'q=测试电影' http://127.0.0.1:18234/surfaces.php -o /tmp/p01-v224-search-watch.html
+          grep -F '测试电影' /tmp/p01-v224-search-watch.html >/dev/null
+          grep -F 'Watch' /tmp/p01-v224-search-watch.html >/dev/null
+          # Channels and Watch share the same shell and neutral/teal IA.
+          curl -fsS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies http://127.0.0.1:18234/channels.php -o /tmp/p01-v224-channels.html
+          grep -F 'CONTENT MEMORY' /tmp/p01-v224-channels.html >/dev/null
+          grep -F 'vf-app-sidebar' /tmp/p01-v224-channels.html >/dev/null
+          grep -F '硅谷101' /tmp/p01-v224-channels.html >/dev/null
+          curl -fsS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies http://127.0.0.1:18234/watch.php -o /tmp/p01-v224-watch.html
+          grep -F 'PERSONAL WATCHLIST' /tmp/p01-v224-watch.html >/dev/null
+          grep -F 'vf-app-sidebar' /tmp/p01-v224-watch.html >/dev/null
+          grep -F '测试电影' /tmp/p01-v224-watch.html >/dev/null
+          # Organizer is now part of the same private shell, not the legacy AdminShell.
+          curl -fsS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies http://127.0.0.1:18234/surface-manager.php -o /tmp/p01-v224-manager.html
+          grep -F 'RESOURCE INBOX' /tmp/p01-v224-manager.html >/dev/null
+          grep -F 'vf-app-sidebar' /tmp/p01-v224-manager.html >/dev/null
+          grep -F '待整理 YouTube 创作者' /tmp/p01-v224-manager.html >/dev/null
+          grep -F '待整理电影入口' /tmp/p01-v224-manager.html >/dev/null
+          grep -F '确认采用' /tmp/p01-v224-manager.html >/dev/null
+          # Classic Start remains available as its dedicated working surface.
+          start_code=$(curl -sS -c /tmp/p01-v224-admin.cookies -b /tmp/p01-v224-admin.cookies -o /tmp/p01-v224-start.html -w '%{http_code}' http://127.0.0.1:18234/start.php)
+          test "$start_code" = 200
+          ! grep -F 'PERSONAL INTERNET HOME' /tmp/p01-v224-start.html >/dev/null
+          # New shared-shell CSS is actually served.
+          curl -fsS http://127.0.0.1:18234/assets/surface-home.css | grep -F '.vf-space-switcher' >/dev/null
+          curl -fsS http://127.0.0.1:18234/assets/surface-home.css | grep -F '.vf-organizer-summary' >/dev/null
+          echo P01_V224_UNIFIED_UX_ROUTE_SEARCH=PASS
+      - name: Final database and baseline regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-v224-ux
+          php cli/surface-verify.php | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          php cli/baseline-verify.php | tee /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v224-final-baseline.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          kill "$(cat /tmp/p01-v224.pid)" 2>/dev/null || true
+          echo P01_V224_UX_REGRESSION=PASS
+      - name: Verdict
+        shell: bash
+        run: |
+          echo P01_V224_UX_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P01_V224_UX_MACHINE=PASS
+          echo TARGET_RELEASE="$TARGET_RELEASE"
+          echo SCHEMA="$SCHEMA"
+          echo PRODUCTION=NO
