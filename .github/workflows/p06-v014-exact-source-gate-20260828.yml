@@ -1,0 +1,144 @@
+name: P06 V0.1.14 Exact Source Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p06-v014-exact-source-gate-20260828.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    env:
+      EXACT_SOURCE: 7bc9ab739b48117c18e16200b4e89e81b71200a9
+      EXPECTED_MAIN: 44def40930019b1c597e404fa49c98d4ceb2ac42
+      RELEASE_PARENT: cec5ecd28b3cdc585d1b7cac17a9e2167d520ea1
+      CANDIDATE_BRANCH: release/p06-v0.1.14-reconcile-20260828
+      VF_PRESS_STORAGE_PATH: /tmp/p06-v014-exact-storage
+      VF_PRESS_DB_PATH: /tmp/p06-v014-exact-storage/app.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Checkout exact P06 source and fence authority
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-press.git" p06 >/dev/null 2>&1
+          cd p06
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse origin/$CANDIDATE_BRANCH)" = "$EXACT_SOURCE"
+          git checkout "$EXACT_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse HEAD^1)" = "$EXPECTED_MAIN"
+          test "$(git rev-parse HEAD^2)" = "$RELEASE_PARENT"
+          test "$(tr -d '\r\n' < VERSION)" = '0.1.14'
+          test "$(jq -r '.version' VF_PROJECT.json)" = '0.1.14'
+          test "$(jq -r '.schema' VF_PROJECT.json)" = '3'
+          test "$(jq -r '.lifecycle' VF_PROJECT.json)" = 'CANDIDATE'
+          echo EXACT_SOURCE_FENCE=PASS
+
+      - name: Install dependencies
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Fresh migration Schema 3
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$VF_PRESS_STORAGE_PATH"
+          mkdir -p "$VF_PRESS_STORAGE_PATH"
+          cd p06
+          php bin/migrate.php
+          test -f "$VF_PRESS_DB_PATH"
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = '3'
+          test "$(sqlite3 "$VF_PRESS_DB_PATH" 'PRAGMA integrity_check;')" = 'ok'
+          echo FRESH_MIGRATION_SCHEMA3=PASS
+
+      - name: PHP syntax and complete regression contract
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          find . -path './vendor' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          mapfile -t scripts < <(jq -r '.scripts | keys[] | select(test("self-test$"))' composer.json)
+          test "${#scripts[@]}" -eq 21
+          for script in "${scripts[@]}"; do
+            echo "=== composer $script ==="
+            composer run --no-interaction "$script"
+          done
+          echo SELF_TEST_COUNT=21
+          echo COMPLETE_REGRESSION=PASS
+
+      - name: Runtime Common Baseline V2 truth
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require 'vendor/autoload.php';
+          $base = getcwd();
+          $config = VF\Press\Infrastructure\Config\AppConfig::fromEnvironment($base);
+          $config->ensureRuntimeDirectories();
+          $pdo = VF\Press\Infrastructure\Database\ConnectionFactory::create($config);
+          $version = trim((string)file_get_contents($base . '/VERSION'));
+          $report = (new VF\Press\Application\Operations\CommonBaselineV2($pdo, $config, $version))->resolve();
+          $summary = $report['summary'] ?? [];
+          printf("BASELINE=%s\n", (string)($report['baseline'] ?? ''));
+          printf("DOMAIN_COUNT=%d\n", (int)($report['domain_count'] ?? -1));
+          printf("PASS_COUNT=%d\n", (int)($summary['pass'] ?? -1));
+          printf("EXCEPTION_COUNT=%d\n", (int)($summary['exception'] ?? -1));
+          printf("DRIFT_COUNT=%d\n", (int)($summary['drift'] ?? -1));
+          printf("UNKNOWN_COUNT=%d\n", (int)($summary['unknown'] ?? -1));
+          printf("N_A_COUNT=%d\n", (int)($summary['n_a'] ?? -1));
+          if (($report['baseline'] ?? '') !== 'VF-COMMON-PRODUCT-BASELINE@2.0'
+              || ($report['domain_count'] ?? 0) !== 15
+              || ($summary['pass'] ?? -1) !== 12
+              || ($summary['exception'] ?? -1) !== 2
+              || ($summary['drift'] ?? -1) !== 0
+              || ($summary['unknown'] ?? -1) !== 0
+              || ($summary['n_a'] ?? -1) !== 1
+              || ($summary['full_pass'] ?? false) !== true) {
+              exit(1);
+          }
+          echo "COMMON_BASELINE_V2_RUNTIME=PASS\n";
+          PHP
+
+      - name: Release package contract
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          rm -rf /tmp/p06-v014-dist
+          php bin/build-release.php /tmp/p06-v014-dist
+          test -f /tmp/p06-v014-dist/VF_Press_V0.1.14_FULL.zip
+          test -f /tmp/p06-v014-dist/VF_Press_V0.1.14_UPDATE.zip
+          test -f /tmp/p06-v014-dist/SHA256SUMS.txt
+          (cd /tmp/p06-v014-dist && sha256sum -c SHA256SUMS.txt)
+          unzip -p /tmp/p06-v014-dist/VF_Press_V0.1.14_UPDATE.zip VF_UPDATE.json >/tmp/VF_UPDATE.json
+          test "$(jq -r '.project_id' /tmp/VF_UPDATE.json)" = 'P06'
+          test "$(jq -r '.target_version' /tmp/VF_UPDATE.json)" = '0.1.14'
+          unzip -p /tmp/p06-v014-dist/VF_Press_V0.1.14_UPDATE.zip payload/VERSION | grep -Fxq '0.1.14'
+          unzip -p /tmp/p06-v014-dist/VF_Press_V0.1.14_UPDATE.zip payload/VF_PROJECT.json | jq -e '.version == "0.1.14" and .schema == 3' >/dev/null
+          echo RELEASE_PACKAGE_CONTRACT=PASS
+
+      - name: Verdict
+        run: |
+          set -Eeuo pipefail
+          echo P06_V014_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P06_V014_MACHINE=PASS
+          echo SCHEMA=3
+          echo COMMON_BASELINE_V2=PASS
+          echo RELEASE_PACKAGE=PASS
+          echo RELEASE=NO
+          echo TAG=NO
+          echo PRODUCTION=NO
