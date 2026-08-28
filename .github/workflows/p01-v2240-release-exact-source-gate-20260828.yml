@@ -1,0 +1,83 @@
+name: P01 V2.24.0 Release Exact Source Gate
+on:
+  push:
+    paths: ['.github/workflows/p01-v2240-release-exact-source-gate-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SHA: 867e3499048bf896546f0fa10e97b8184f2c0e22
+      TREE: e4d0007685c164f2ba6eca79f330d06edff15d13
+      DEVELOP: 4cb7000309601e4722c12906f9896a45b4e4f238
+      VERSION: 2.24.0
+      SCHEMA: '2026082801'
+      RELEASE_BRANCH: release/p01-v2.24.0-20260828
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Release identity fence
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$DEVELOP"
+          test "$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/vf-start.git" "refs/heads/$RELEASE_BRANCH"|awk '{print $1}')" = "$SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$VERSION"
+          grep -F "define('VF_VERSION', '2.24.0');" src/app/bootstrap.php >/dev/null
+          grep -F '## VF Start V2.24.0 — UX Rebaseline · Formal Release' CHANGELOG.md >/dev/null
+          mapfile -t ids < <(git diff --name-only "$DEVELOP..$SHA")
+          test "${#ids[@]}" -eq 4
+          for f in "${ids[@]}"; do case "$f" in CHANGELOG.md|VERSION|src/VERSION.txt|src/app/bootstrap.php) ;; *) exit 1;; esac; done
+          echo P01_V2240_RELEASE_IDENTITY=PASS
+      - name: Fresh runtime and owner-readable baseline contract
+        run: |
+          set -Eeuo pipefail
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -n1 node --check >/dev/null
+          php tests/unit/system_baseline_human_ui_contract.php
+          rm -rf /tmp/p01-v2240-release /tmp/p01-v2240.cookies /tmp/p01-v2240-admin.cookies
+          cp -a src /tmp/p01-v2240-release; cd /tmp/p01-v2240-release
+          php -S 127.0.0.1:18246 -t . >/tmp/p01-v2240.log 2>&1 & echo $! >/tmp/p01-v2240.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18246/setup.php -o /tmp/setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v2240.cookies -b /tmp/p01-v2240.cookies http://127.0.0.1:18246/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v2240.cookies -b /tmp/p01-v2240.cookies -X POST http://127.0.0.1:18246/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V2240 Release' --data-urlencode 'admin_password=P01V2240!Release' --data-urlencode 'admin_password_confirm=P01V2240!Release' >/tmp/setup-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | tee /tmp/surface.txt; grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/surface.txt; grep -Fx "WORKING_SCHEMA=$SCHEMA" /tmp/surface.txt
+          php cli/baseline-verify.php | tee /tmp/base.txt; grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/base.txt; grep -Fx 'DRIFT_COUNT=0' /tmp/base.txt; grep -Fx 'UNKNOWN_COUNT=0' /tmp/base.txt
+          curl -fsS -c /tmp/p01-v2240-admin.cookies -b /tmp/p01-v2240-admin.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18246/api.php?action=login' --data '{"password":"P01V2240!Release"}' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c /tmp/p01-v2240-admin.cookies -b /tmp/p01-v2240-admin.cookies http://127.0.0.1:18246/system-baseline.php -o /tmp/baseline-ui.html
+          grep -F '系统关键规则正常' /tmp/baseline-ui.html >/dev/null
+          grep -F '你需要关注' /tmp/baseline-ui.html >/dev/null
+          grep -F '技术详情（给开发 / 排障使用）' /tmp/baseline-ui.html >/dev/null
+          grep -F '个人单管理员模式' /tmp/baseline-ui.html >/dev/null
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          kill "$(cat /tmp/p01-v2240.pid)" 2>/dev/null || true
+          echo P01_V2240_RELEASE_RUNTIME=PASS
+      - name: Verdict
+        run: |
+          echo P01_V2240_RELEASE_SOURCE=$SHA
+          echo P01_V2240_RELEASE_TREE=$TREE
+          echo P01_V2240_RELEASE_MACHINE=PASS
+          echo PRODUCTION=NO
