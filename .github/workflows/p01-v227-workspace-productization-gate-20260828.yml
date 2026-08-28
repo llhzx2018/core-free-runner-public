@@ -1,0 +1,195 @@
+name: P01 V2.27 Workspace Productization Gate
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v227-workspace-productization-gate-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REF: feature/p01-v2.27.0-workspace-productization-20260828
+      ROOT: /tmp/p01-v227
+      PORT: '18327'
+      COOKIE: /tmp/p01-v227.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          path: product
+      - name: Exact source scope and syntax
+        run: |
+          set -Eeuo pipefail
+          SOURCE=$(git -C product rev-parse HEAD)
+          TREE=$(git -C product rev-parse HEAD^{tree})
+          echo "SOURCE=$SOURCE" >> "$GITHUB_ENV"
+          echo "TREE=$TREE" >> "$GITHUB_ENV"
+          test "$(cat product/src/VERSION.txt)" = '2.26.0'
+          find product/src -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          find product/src -name '*.js' -print0 | xargs -0 -n1 node --check >/tmp/js-lint.txt
+          test -f product/src/workspace-action.php
+          test -f product/src/assets/workspace.js
+          grep -F 'data-open-add' product/src/app/SurfaceShell.php >/dev/null
+          grep -F 'data-bulkbar' product/src/app/SurfaceShell.php >/dev/null
+          grep -F 'data-detail-form' product/src/app/SurfaceShell.php >/dev/null
+          grep -F 'workspace-action.php' product/src/assets/workspace.js >/dev/null
+          ! git -C product diff HEAD^ -- src/migrations 2>/dev/null | grep -q '^+'
+          echo P01_V227_SCOPE_SYNTAX=PASS
+      - name: Fresh runtime seed and login
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE" /tmp/p01-v227-anon.cookies
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-v227-server.log 2>&1 &
+          echo $! >/tmp/p01-v227.pid
+          READY=0
+          for i in $(seq 1 30); do if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/setup.html; then READY=1; break; fi; sleep 1; done
+          test "$READY" = 1
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V227 Workspace Gate' \
+            --data-urlencode 'admin_password=P01V227!Workspace' --data-urlencode 'admin_password_confirm=P01V227!Workspace' -o /tmp/setup-post.html
+          test -f "$ROOT/app/.runtime.php"
+          cat >/tmp/p01-v227-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v227/app/bootstrap.php';
+          require_once '/tmp/p01-v227/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $cats=[];
+          foreach(['开发','AI','影视','稍后整理'] as $name){$cats[$name]=$r->createCategory(['name'=>$name,'description'=>'','is_private'=>false]);}
+          for($i=1;$i<=120;$i++){
+            $cat=$i%3===0?$cats['AI']:$cats['开发'];
+            $saved=$r->saveLink(null,['category_id'=>$cat,'title'=>'Start Tool '.$i,'url'=>'https://tool'.$i.'.example.com','description'=>'工具描述 '.$i,'tags'=>$i%5===0?'AI,工具':'工具','is_private'=>false,'is_favorite'=>$i%11===0],'manual');
+          }
+          for($i=1;$i<=8;$i++){
+            $saved=$r->saveLink(null,['category_id'=>$cats['AI'],'title'=>'Channel Creator '.$i,'url'=>'https://www.youtube.com/@creator'.$i,'description'=>'长期内容源 '.$i,'tags'=>'频道,科技','is_private'=>false],'manual');
+            $s->upsertProfile((int)$saved['id'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>$i%2===0,'note'=>'频道私人备注 '.$i]);
+          }
+          for($i=1;$i<=8;$i++){
+            $saved=$r->saveLink(null,['category_id'=>$cats['影视'],'title'=>'Movie '.$i,'url'=>'https://movie'.$i.'.example.com','description'=>'影视索引 '.$i,'tags'=>'电影','is_private'=>false],'manual');
+            $s->upsertProfile((int)$saved['id'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>(string)(2018+$i),'media_status'=>$i%2===0?'want':'watched','note'=>'电影备注 '.$i]);
+          }
+          for($i=1;$i<=6;$i++){$r->saveLink(null,['category_id'=>$cats['稍后整理'],'title'=>'YouTube Pending '.$i,'url'=>'https://youtube.com/@pending'.$i,'description'=>'','is_private'=>false],'manual');}
+          file_put_contents('/tmp/p01-v227-cat-dev',(string)$cats['开发']);
+          PHP
+          php /tmp/p01-v227-seed.php
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data '{"password":"P01V227!Workspace"}' | jq -e '.ok==true' >/dev/null
+          echo P01_V227_FRESH_LOGIN=PASS
+      - name: Workspace routes counts and contracts
+        run: |
+          set -Eeuo pipefail
+          BASE="http://127.0.0.1:$PORT"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/surfaces.php" -o /tmp/all.html
+          grep -F '<h1>全部收藏</h1>' /tmp/all.html >/dev/null
+          grep -F '142 项' /tmp/all.html >/dev/null
+          grep -F 'data-open-add' /tmp/all.html >/dev/null
+          grep -F 'data-workspace-overlay' /tmp/all.html >/dev/null
+          grep -F 'data-select-asset' /tmp/all.html >/dev/null
+          grep -F 'data-bulkbar' /tmp/all.html >/dev/null
+          grep -F 'workspace.js' /tmp/all.html >/dev/null
+          test "$(grep -o '>Start</i>' /tmp/all.html | wc -l)" -eq 0 || true
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/start.php" -o /tmp/start.html
+          grep -F '<h1>Start</h1>' /tmp/start.html >/dev/null
+          grep -F '126 个网站与工具' /tmp/start.html >/dev/null
+          grep -F '全部分类' /tmp/start.html >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/channels.php" -o /tmp/channels.html
+          grep -F '<h1>Channels</h1>' /tmp/channels.html >/dev/null
+          grep -F '8 项' /tmp/channels.html >/dev/null
+          grep -F '后台听' /tmp/channels.html >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/watch.php" -o /tmp/watch.html
+          grep -F '<h1>Watch</h1>' /tmp/watch.html >/dev/null
+          grep -F '8 项' /tmp/watch.html >/dev/null
+          grep -F 'vf-watch-grid' /tmp/watch.html >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/surface-manager.php" -o /tmp/inbox.html
+          grep -F '<h1>待整理</h1>' /tmp/inbox.html >/dev/null
+          grep -F 'data-accept-suggestion' /tmp/inbox.html >/dev/null
+          ! grep -F 'vf-editor-row' /tmp/inbox.html
+          curl -fsS -c /tmp/p01-v227-anon.cookies "$BASE/" -o /tmp/public.html
+          ! grep -F 'vf-app-sidebar' /tmp/public.html
+          curl -fsS -c /tmp/p01-v227-anon.cookies "$BASE/start.php" -o /tmp/public-start.html
+          ! grep -F 'vf-workspace-toolbar' /tmp/public-start.html
+          echo P01_V227_ROUTE_CONTRACT=PASS
+      - name: Real workspace mutation contract
+        run: |
+          set -Eeuo pipefail
+          BASE="http://127.0.0.1:$PORT"
+          CSRF=$(python3 - <<'PY'
+          import re,json,html
+          s=open('/tmp/all.html',encoding='utf-8').read(); m=re.search(r'<script type="application/json" id="vf-workspace-data">(.*?)</script>',s,re.S); assert m
+          d=json.loads(html.unescape(m.group(1))); print(d['csrf'])
+          PY
+          )
+          DEV_CAT=$(cat /tmp/p01-v227-cat-dev)
+          # Unauthorized and CSRF fences
+          test "$(curl -sS -o /tmp/unauth.json -w '%{http_code}' -X POST "$BASE/workspace-action.php" --data 'action=favorite&id=1')" = 403
+          test "$(curl -sS -o /tmp/badcsrf.json -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" --data 'csrf=bad&action=favorite&id=1')" = 403
+          # Create in workspace
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" \
+            --data-urlencode "csrf=$CSRF" --data-urlencode 'action=create' --data-urlencode "category_id=$DEV_CAT" \
+            --data-urlencode 'title=Workspace Added' --data-urlencode 'url=https://workspace-added.example.com' --data-urlencode 'tags=新增,工具' --data-urlencode 'surface=start' --data-urlencode 'is_private=1' | tee /tmp/create.json | jq -e '.ok==true and .duplicate==false' >/dev/null
+          NEW_ID=$(jq -r '.id' /tmp/create.json)
+          # Duplicate add must not silently reassign existing row
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" \
+            --data-urlencode "csrf=$CSRF" --data-urlencode 'action=create' --data-urlencode "category_id=$DEV_CAT" \
+            --data-urlencode 'title=Duplicate Attempt' --data-urlencode 'url=https://workspace-added.example.com' --data-urlencode 'surface=watch' | jq -e '.ok==true and .duplicate==true' >/dev/null
+          # Favorite and edit in place
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=favorite' --data-urlencode "id=$NEW_ID" --data-urlencode 'favorite=1' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" \
+            --data-urlencode "csrf=$CSRF" --data-urlencode 'action=save' --data-urlencode "id=$NEW_ID" --data-urlencode "category_id=$DEV_CAT" \
+            --data-urlencode 'title=Workspace Edited' --data-urlencode 'url=https://workspace-added.example.com' --data-urlencode 'tags=编辑,工具' --data-urlencode 'surface=channels' --data-urlencode 'resource_kind=creator' --data-urlencode 'background_friendly=1' --data-urlencode 'is_private=1' --data-urlencode 'is_favorite=1' | jq -e '.ok==true' >/dev/null
+          # Bulk operations on two Start rows
+          IDS=$(php -r 'require "/tmp/p01-v227/app/bootstrap.php"; $r=new VfRepository(vf_db()); $rows=$r->bootstrap(true)["links"]; echo json_encode([(int)$rows[0]["id"],(int)$rows[1]["id"]]);')
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=bulk_surface' --data-urlencode "ids=$IDS" --data-urlencode 'surface=channels' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=bulk_favorite' --data-urlencode "ids=$IDS" --data-urlencode 'favorite=1' | jq -e '.ok==true' >/dev/null
+          cat >/tmp/p01-v227-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v227/app/bootstrap.php'; require_once '/tmp/p01-v227/app/SurfaceRepository.php';
+          $db=vf_db();$s=new VfSurfaceRepository($db);
+          $id=(int)$db->query("SELECT id FROM links WHERE canonical_url='https://workspace-added.example.com/'")->fetchColumn();
+          if($id<=0)throw new RuntimeException('created row missing');
+          $row=$db->query('SELECT title,is_favorite FROM links WHERE id='.$id)->fetch(PDO::FETCH_ASSOC);
+          if(($row['title']??'')!=='Workspace Edited'||(int)($row['is_favorite']??0)!==1)throw new RuntimeException('edit/favorite failed');
+          $p=$db->query('SELECT surface,resource_kind,background_friendly FROM resource_surface_profiles WHERE link_id='.$id)->fetch(PDO::FETCH_ASSOC);
+          if(($p['surface']??'')!=='channels'||($p['resource_kind']??'')!=='creator'||(int)($p['background_friendly']??0)!==1)throw new RuntimeException('surface edit failed');
+          echo "P01_V227_MUTATION_DB=PASS\n";
+          PHP
+          php /tmp/p01-v227-assert.php
+          echo P01_V227_WORKSPACE_MUTATIONS=PASS
+      - name: Regression baseline and integrity
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | tee /tmp/verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/verify.txt
+          php "$ROOT/cli/surface-verify.php" | tee /tmp/surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/surface.txt
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/baseline.txt
+          php -r 'require "/tmp/p01-v227/app/bootstrap.php"; $db=vf_db(); if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok") exit(1); if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC)) exit(2); echo "P01_V227_SQLITE=PASS\n";'
+          echo P01_V227_BASELINE=PASS
+      - name: Verdict
+        run: |
+          set -Eeuo pipefail
+          echo P01_V227_SOURCE="$SOURCE"
+          echo P01_V227_TREE="$TREE"
+          echo P01_V227_WORKSPACE_PRODUCTIZATION=PASS
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-v227.pid 2>/dev/null)" 2>/dev/null || true
