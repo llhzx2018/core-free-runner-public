@@ -1,0 +1,166 @@
+name: P01 Functional Contract Gate V2
+
+on:
+  push:
+    branches:
+      - task/p01-functional-contract-gate-v2-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 8eee7941a882dd7b29bd67cd134b55569dcb6e22
+  ROOT: /tmp/p01-functional-contract-v2
+  PORT: '18421'
+  ADMIN_PASS: 'P01Functional!2026'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source syntax and fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          node --check source/src/assets/workspace-rebaseline.js
+          grep -F 'CURRENT FUNCTIONAL AUTHORITY / PRESENTATION-FLEXIBLE' source/docs/authority/P01_FUNCTIONAL_CONTRACT_20260829.md
+          rm -rf "$ROOT" /tmp/p01-fcv2-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-fcv2-server.log 2>&1 &
+          echo $! >/tmp/p01-fcv2-server.pid
+          COOKIE=/tmp/p01-fcv2-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-fcv2-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-fcv2-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Functional Gate V2' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-fcv2-setup-post.html
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-fcv2-verify.txt | grep -Fx VERIFY_PASS=YES
+          echo 'P01_FUNCTIONAL_V2_RUNTIME=PASS'
+
+      - name: Seed functional truth fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-fcv2-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());
+          $pubRoot=$r->createCategory(['name'=>'Public Hub','description'=>'root','is_private'=>false]);
+          $pubChild=$r->createCategory(['name'=>'Public Child','description'=>'child','parent_id'=>$pubRoot,'is_private'=>false]);
+          $privRoot=$r->createCategory(['name'=>'Private Hub','description'=>'root','is_private'=>true]);
+          $privChild=$r->createCategory(['name'=>'Private Child','description'=>'child','parent_id'=>$privRoot,'is_private'=>false]);
+          $save=function(int $cat,string $title,string $url,bool $private=false,bool $favorite=false)use($r):int{$x=$r->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'functional gate','is_private'=>$private,'is_favorite'=>$favorite],'manual');return(int)$x['id'];};
+          $ids=[];$ids['public_root']=$save($pubRoot,'Public Root Link','https://public-root.example.com');$ids['public_child']=$save($pubChild,'Public Child Link','https://public-child.example.com',false,true);$ids['direct_private']=$save($pubChild,'Direct Private Link','https://direct-private.example.com',true);$ids['inherited_private']=$save($privChild,'Inherited Private Link','https://inherited-private.example.com');$ids['public_channel']=$save($pubChild,'Public Channel','https://youtube.com/@functional-public');$ids['private_channel']=$save($privChild,'Private Channel','https://youtube.com/@functional-private');$ids['public_watch']=$save($pubChild,'Public Watch','https://public-watch.example.com');$ids['private_watch']=$save($privChild,'Private Watch','https://private-watch.example.com');
+          $s->upsertProfile($ids['public_channel'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true]);$s->upsertProfile($ids['private_channel'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true]);$s->upsertProfile($ids['public_watch'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want']);$s->upsertProfile($ids['private_watch'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2025,'media_status'=>'watched']);
+          file_put_contents('/tmp/p01-fcv2-fixture.json',json_encode(['pub_root'=>$pubRoot,'pub_child'=>$pubChild,'priv_root'=>$privRoot,'priv_child'=>$privChild,'ids'=>$ids],JSON_UNESCAPED_SLASHES));echo "P01_FUNCTIONAL_V2_FIXTURE=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-fcv2-seed.php | grep -Fx P01_FUNCTIONAL_V2_FIXTURE=PASS
+
+      - name: Classification privacy Surface mutation contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-fcv2-admin.cookies
+          LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}")
+          jq -e '.ok==true and (.csrf|length>20)' <<<"$LOGIN" >/dev/null
+          CSRF=$(jq -r '.csrf' <<<"$LOGIN")
+          PUB_ROOT=$(jq -r '.pub_root' /tmp/p01-fcv2-fixture.json); PRIV_ROOT=$(jq -r '.priv_root' /tmp/p01-fcv2-fixture.json)
+          DIRECT=$(jq -r '.ids.direct_private' /tmp/p01-fcv2-fixture.json); INHERITED=$(jq -r '.ids.inherited_private' /tmp/p01-fcv2-fixture.json)
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php" -o /tmp/p01-fcv2-all.html
+          grep -F '网址分类' /tmp/p01-fcv2-all.html; grep -F '可见范围' /tmp/p01-fcv2-all.html; grep -F 'Inherited Private Link' /tmp/p01-fcv2-all.html; grep -F '>私人<' /tmp/p01-fcv2-all.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public" -o /tmp/p01-fcv2-public.html
+          grep -F 'Public Root Link' /tmp/p01-fcv2-public.html; grep -F 'Public Child Link' /tmp/p01-fcv2-public.html; ! grep -Fq 'Direct Private Link' /tmp/p01-fcv2-public.html; ! grep -Fq 'Inherited Private Link' /tmp/p01-fcv2-public.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=private" -o /tmp/p01-fcv2-private.html
+          grep -F 'Direct Private Link' /tmp/p01-fcv2-private.html; grep -F 'Inherited Private Link' /tmp/p01-fcv2-private.html; ! grep -Fq 'Public Root Link' /tmp/p01-fcv2-private.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public&category=${PUB_ROOT}" -o /tmp/p01-fcv2-parent.html
+          grep -F 'Public Root Link' /tmp/p01-fcv2-parent.html; grep -F 'Public Child Link' /tmp/p01-fcv2-parent.html; grep -F 'Public Channel' /tmp/p01-fcv2-parent.html; grep -F 'Public Watch' /tmp/p01-fcv2-parent.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/channels.php?scope=private&category=${PRIV_ROOT}" -o /tmp/p01-fcv2-channels.html
+          grep -F 'Private Channel' /tmp/p01-fcv2-channels.html; ! grep -Fq 'Public Channel' /tmp/p01-fcv2-channels.html; grep -F "watch.php?scope=private&amp;category=${PRIV_ROOT}" /tmp/p01-fcv2-channels.html
+
+          CODE=$(curl -sS -o /tmp/p01-fcv2-blocked.json -w '%{http_code}' -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-visibility-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode "ids=[$INHERITED]" --data-urlencode 'visibility=public')
+          test "$CODE" = 422; jq -e '.ok==false and (.error|contains("私人分类"))' /tmp/p01-fcv2-blocked.json >/dev/null
+          curl -fsS -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-visibility-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode "ids=[$DIRECT]" --data-urlencode 'visibility=public' | jq -e '.ok==true and .visibility=="public"' >/dev/null
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public" | grep -F 'Direct Private Link'
+          echo 'P01_FUNCTIONAL_V2_MUTATION=PASS'
+
+      - name: Anonymous projection integrity by identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "http://127.0.0.1:${PORT}/surfaces.php" -o /tmp/p01-fcv2-anon.html
+          grep -F 'Public Root Link' /tmp/p01-fcv2-anon.html; grep -F 'Public Child Link' /tmp/p01-fcv2-anon.html; grep -F 'Direct Private Link' /tmp/p01-fcv2-anon.html
+          ! grep -Fq 'Inherited Private Link' /tmp/p01-fcv2-anon.html; ! grep -Fq 'Private Channel' /tmp/p01-fcv2-anon.html; ! grep -Fq 'Private Watch' /tmp/p01-fcv2-anon.html; ! grep -Fq '可见范围' /tmp/p01-fcv2-anon.html
+          cat >/tmp/p01-fcv2-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';$fixture=json_decode(file_get_contents('/tmp/p01-fcv2-fixture.json'),true,512,JSON_THROW_ON_ERROR);$db=vf_db();
+          if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');
+          $public=(new VfRepository($db))->bootstrap(false);$ids=array_fill_keys(array_map(static fn(array $x):int=>(int)$x['id'],(array)$public['links']),true);foreach((array)$public['links'] as $link)if((int)($link['effective_private']??0)!==0)throw new RuntimeException('effective private leak');
+          foreach(['inherited_private','private_channel','private_watch'] as $key)if(isset($ids[(int)$fixture['ids'][$key]]))throw new RuntimeException('private id leak '.$key);if(!isset($ids[(int)$fixture['ids']['direct_private']]))throw new RuntimeException('legitimately published id missing');echo "P01_FUNCTIONAL_V2_ANON=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-fcv2-db.php | grep -Fx P01_FUNCTIONAL_V2_ANON=PASS
+
+      - name: Browser UX evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-fcv2-browser && cd /tmp/p01-fcv2-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 --no-save >/dev/null 2>&1; npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';
+          const base='http://127.0.0.1:18421',fixture=JSON.parse(fs.readFileSync('/tmp/p01-fcv2-fixture.json','utf8'));const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01Functional!2026'}});if(!login.ok())throw new Error('login');const page=await ctx.newPage();
+          await page.goto(base+'/surfaces.php',{waitUntil:'networkidle'});await page.locator('.vf-sidebar-scope').waitFor();if(await page.locator('.vf-sidebar-scope a').count()!==3)throw new Error('scope segments');if(await page.getByText('网址分类',{exact:true}).count()!==1)throw new Error('category nav');await page.screenshot({path:'/tmp/p01-fcv2-desktop.png',fullPage:true});
+          await page.locator('.vf-sidebar-scope a').filter({hasText:'私人'}).click();await page.waitForLoadState('networkidle');if(!page.url().includes('scope=private'))throw new Error('scope');if(await page.getByText('Inherited Private Link',{exact:true}).count()!==1)throw new Error('private inherited');if(await page.getByText('Public Root Link',{exact:true}).count()!==0)throw new Error('private scope leak');
+          await page.goto(base+`/surfaces.php?scope=public&category=${fixture.pub_root}`,{waitUntil:'networkidle'});if(await page.getByText('Public Child Link',{exact:true}).count()!==1)throw new Error('descendant');const channelLink=page.locator('.vf-main-nav a').filter({hasText:'Channels'}).first();await channelLink.click();await page.waitForLoadState('networkidle');if(!page.url().includes('scope=public')||!page.url().includes(`category=${fixture.pub_root}`))throw new Error('context');
+          await page.goto(base+'/surfaces.php?scope=public',{waitUntil:'networkidle'});await page.locator('[data-open-add]').click();if(await page.locator('[data-add-form] input[name="is_private"]').isChecked())throw new Error('public add default');await page.locator('[data-close-panel]').first().click();
+          await page.goto(base+'/surfaces.php?scope=private',{waitUntil:'networkidle'});await page.locator('[data-open-add]').click();if(!(await page.locator('[data-add-form] input[name="is_private"]').isChecked()))throw new Error('private add default');await page.locator('[data-close-panel]').first().click();
+          await page.setViewportSize({width:390,height:844});await page.goto(base+'/surfaces.php?scope=private',{waitUntil:'networkidle'});if(!(await page.locator('.vf-mobile-functional-filters').isVisible()))throw new Error('mobile controls');await page.screenshot({path:'/tmp/p01-fcv2-mobile.png',fullPage:true});await browser.close();console.log('P01_FUNCTIONAL_V2_BROWSER=PASS');
+          JS
+          node gate.mjs | grep -Fx P01_FUNCTIONAL_V2_BROWSER=PASS
+
+      - name: Final functional verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo 'P01_FUNCTIONAL_CONTRACT_GATE_V2=PASS'
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-functional-contract-v2-evidence
+          path: |
+            /tmp/p01-fcv2-desktop.png
+            /tmp/p01-fcv2-mobile.png
+            /tmp/p01-fcv2-verify.txt
+            /tmp/p01-fcv2-fixture.json
+          if-no-files-found: error
