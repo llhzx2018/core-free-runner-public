@@ -1,0 +1,110 @@
+name: P04 V2.8.10 Candidate Prep
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v2810-candidate-prep-20260828.yml'
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare exact P04 release identity
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-infra.git" p04 >/dev/null 2>&1
+          cd p04
+          git checkout release/p04-v2.8.10-common-baseline-v2-20260828
+          test "$(git rev-parse HEAD)" = "45f35274284071649f6a3103d3a9e4383da90083"
+          test "$(cat VERSION)" = "2.8.9"
+          printf '2.8.10\n' > VERSION
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/build-release-tree.py')
+          s=p.read_text(encoding='utf-8')
+          old="'2.8.7','2.8.8','2.8.9'}"
+          new="'2.8.7','2.8.8','2.8.9','2.8.10'}"
+          assert s.count(old)==1
+          s=s.replace(old,new,1)
+          marker="if version=='2.8.9':\n    version_note='V2.8.9 uses canonical renewal policy for domain attention, immediately removes confirmed no-renew domains from the daily scope, and completes domain group create/rename/delete management while preserving domains, Schema 14 and read-only-first Provider authority.'"
+          replacement="if version=='2.8.10':\n    version_note='V2.8.10 publishes Common Product Baseline V2 as the current VF Infra runtime, including the complete 15-domain resolver with LOGGING closure, unified maintenance surfaces, PERSONAL_SINGLE_ADMIN security defaults, Schema 14 unchanged, and read-only-first Provider authority.'\nel"+marker[1:]
+          assert s.count(marker)==1
+          s=s.replace(marker,replacement,1)
+          p.write_text(s,encoding='utf-8')
+          notes=Path('docs/operations/package/RELEASE_NOTES.md')
+          old=notes.read_text(encoding='utf-8')
+          head='''# VF Infra V2.8.10\n\n- Common Product Baseline V2 正式进入 VF Infra 发布运行态，15 个必需 Domain 全部由 Runtime Resolver 覆盖。\n- 补齐 LOGGING Domain 的运行态闭环；Common Baseline V2 保持 DRIFT=0 / UNKNOWN=0。\n- 系统运维语义统一为 System Info / System Baseline / Online Update / Backup-Restore / Runtime Health。\n- PERSONAL_SINGLE_ADMIN 会话、安全与 Step-up 基线保持当前已验证实现；Provider Authority 继续 READ_ONLY_FIRST。\n- Schema 继续为 14，无 Migration。\n- Atomic UPDATE 仅支持 V2.8.9 → V2.8.10，并要求 Backup + Rollback。\n\n'''
+          assert old.startswith('# VF Infra V2.8.9\n')
+          notes.write_text(head+old,encoding='utf-8')
+          PY
+          cat > scripts/build-v2810-update-release.py <<'PY'
+          #!/usr/bin/env python3
+          from __future__ import annotations
+          from pathlib import Path
+          import argparse, hashlib, json, shutil, sys, zipfile
+
+          TARGET='2.8.10'
+          SCHEMA=14
+          ALLOWED_SOURCES=['2.8.9']
+          parser=argparse.ArgumentParser()
+          parser.add_argument('--target-runtime', required=True)
+          parser.add_argument('--output', required=True)
+          args=parser.parse_args()
+          root=Path(__file__).resolve().parents[1]
+          out=Path(args.output).resolve()
+          parent_builder=root/'scripts/build-v288-update-release.py'
+          if not parent_builder.is_file(): raise SystemExit('V2810_PARENT_BUILDER_MISSING')
+
+          # Reuse the mature V2.8.x Atomic transaction/recovery implementation but
+          # narrow source eligibility to the immediately preceding Production.
+          source=parent_builder.read_text(encoding='utf-8')
+          source=source.replace('2.8.8','2.8.10').replace('V288','V2810').replace('v288','v2810')
+          generated_builder=root/'scripts/build-v2810-generated.py'
+          old_argv=sys.argv[:]
+          try:
+              sys.argv=[str(generated_builder),'--target-runtime',str(Path(args.target_runtime).resolve()),'--output',str(out)]
+              code=compile(source,str(generated_builder),'exec')
+              scope={'__name__':'__main__','__file__':str(generated_builder)}
+              exec(code,scope,scope)
+          finally:
+              sys.argv=old_argv
+
+          repair=out/'repair-v2.8.10.php'
+          atomic=out/'VF_Infra_V2.8.10_ATOMIC.zip'
+          update=out/'VF_Infra_V2.8.10_UPDATE.zip'
+          manifest_path=out/'PACKAGE_MANIFEST.json'
+          if not all(x.is_file() for x in [repair,atomic,update,manifest_path]): raise SystemExit('V2810_PARENT_OUTPUT_INCOMPLETE')
+          repair_text=repair.read_text(encoding='utf-8')
+          old_allowed="const VF_INFRA_ATOMIC_ALLOWED_SOURCES_JSON='[\"2.7.9\",\"2.8.0\",\"2.8.1\",\"2.8.2\",\"2.8.3\",\"2.8.4\",\"2.8.5\",\"2.8.6\",\"2.8.7\"]';"
+          new_allowed="const VF_INFRA_ATOMIC_ALLOWED_SOURCES_JSON='[\"2.8.9\"]';"
+          if repair_text.count(old_allowed)!=1: raise SystemExit('V2810_REPAIR_ALLOWED_SOURCES_SENTINEL_DRIFT')
+          repair_text=repair_text.replace(old_allowed,new_allowed,1)
+          if "ReleaseManifestIntegrityVerifier::verify(__DIR__,VF_INFRA_ATOMIC_TARGET)" not in repair_text: raise SystemExit('V2810_RUNTIME_SAFE_VERIFY_MISSING')
+          if '2.8.9' not in repair_text: raise SystemExit('V2810_ALLOWED_SOURCE_REPAIR_MISSING')
+          repair.write_text(repair_text,encoding='utf-8')
+
+          def sha(path:Path)->str: return hashlib.sha256(path.read_bytes()).hexdigest()
+          info=zipfile.ZipInfo(repair.name,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+          with zipfile.ZipFile(atomic,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as archive: archive.writestr(info,repair.read_bytes())
+          shutil.copyfile(atomic,update)
+          m=json.loads(manifest_path.read_text(encoding='utf-8'))
+          m.update({'version':TARGET,'schema':SCHEMA,'allowed_source_versions':ALLOWED_SOURCES,'release_kind':'common_product_baseline_v2_maintenance_release','repair_sha256':sha(repair),'atomic_sha256':sha(atomic),'atomic_bytes':atomic.stat().st_size,'update_sha256':sha(update),'update_bytes':update.stat().st_size,'update_and_atomic_bytes_identical':atomic.read_bytes()==update.read_bytes(),'post_repair_integrity_verifier':'ReleaseManifestIntegrityVerifier@target-version-explicit','common_product_baseline':'VF-COMMON-PRODUCT-BASELINE@2.0','required_domain_count':15,'logging_closure':True,'provider_authority':'READ_ONLY_FIRST','migration':'NONE'})
+          manifest_path.write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          sum_files=[atomic,update,repair,manifest_path]
+          for optional in ['README_INSTALL.txt','PRODUCTION_SOURCE_MANIFEST_EXPECTED.txt']:
+              q=out/optional
+              if q.is_file(): sum_files.append(q)
+          (out/'SHA256SUMS.txt').write_text(''.join(f'{sha(x)}  {x.name}\n' for x in sum_files),encoding='utf-8')
+          print(json.dumps({'target':TARGET,'allowed_sources':ALLOWED_SOURCES,'schema':SCHEMA,'asset_bytes':update.stat().st_size,'asset_sha256':sha(update),'repair_sha256':sha(repair),'common_product_baseline':'VF-COMMON-PRODUCT-BASELINE@2.0','required_domain_count':15,'logging_closure':True,'runtime_safe_post_integrity_verify':True,'update_atomic_identical':sha(update)==sha(atomic)},ensure_ascii=False))
+          PY
+          chmod +x scripts/build-v2810-update-release.py
+          python3 -m py_compile scripts/build-release-tree.py scripts/build-v2810-update-release.py
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = "VERSION docs/operations/package/RELEASE_NOTES.md scripts/build-release-tree.py scripts/build-v2810-update-release.py "
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION docs/operations/package/RELEASE_NOTES.md scripts/build-release-tree.py scripts/build-v2810-update-release.py
+          git commit -m "release(P04): prepare V2.8.10 Common Baseline V2 source"
+          git push origin HEAD:release/p04-v2.8.10-common-baseline-v2-20260828
+          echo P04_V2810_CANDIDATE_PREP=PASS
