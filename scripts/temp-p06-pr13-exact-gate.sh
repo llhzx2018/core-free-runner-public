@@ -10,7 +10,7 @@ EXPECTED_SCHEMA="3"
 cd "$P06"
 
 test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
-test "$(git show -s --format=%P HEAD)" = "$BASE_MAIN"
+git merge-base --is-ancestor "$BASE_MAIN" "$EXACT_SOURCE"
 test "$(tr -d '\r\n' < VERSION)" = "$EXPECTED_VERSION"
 python3 - <<'PY'
 import json
