@@ -19,6 +19,7 @@ jobs:
       RELEASE_TAG: skills-pack-2026.08.29
       EXPECTED_GOV_DOC_SHA: cb28884f5b4996d50a7463f8ae4044b9b98cb4ae
       DIST_DIR: dist/skills-2026.08.29
+      MIRROR_BRANCH: release/skill-pack-20260829-mirror
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
       VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
@@ -130,7 +131,6 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          DIR="$DIST_DIR"
           READBACK="$RUNNER_TEMP/gov-doc-skill-pack-readback"
           rm -rf "$READBACK" && mkdir -p "$READBACK"
           gh release download "$RELEASE_TAG" --repo "$TARGET_REPO" --dir "$READBACK"
@@ -153,28 +153,125 @@ jobs:
         working-directory: gov
         run: python3 distribution/skills/publish_current_distribution.py --release-verified
 
-      - name: Commit verified download mirror to GOV-DOC main
+      - name: Stage verified mirror on GOV-DOC release branch through GitHub API
         working-directory: gov
         shell: bash
         run: |
           set -Eeuo pipefail
-          REMOTE_MAIN="$(git ls-remote "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${TARGET_REPO}.git" refs/heads/main | awk '{print $1}')"
-          test "$REMOTE_MAIN" = "$EXPECTED_GOV_DOC_SHA" || { echo "GOV_DOC_MAIN_MOVED=$REMOTE_MAIN"; exit 80; }
-          git config user.name 'VF Public Runner'
-          git config user.email 'vf-public-runner@users.noreply.github.com'
-          git add \
-            distribution/skills/current \
-            distribution/skills/CURRENT_SKILL_DISTRIBUTION.json \
-            distribution/skills/CURRENT_SKILL_DOWNLOAD_INDEX.md \
-            distribution/skills/HISTORICAL_STANDALONE_IDENTITIES_20260820.json
-          if git diff --cached --quiet; then
-            echo 'GOV_DOC_MIRROR_ALREADY_CONVERGED=YES'
-          else
-            git commit -m 'chore(distribution): publish verified Current Skill downloads 2026.08.29'
-            git remote set-url origin "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${TARGET_REPO}.git"
-            git push origin HEAD:main
-            echo 'GOV_DOC_MIRROR_PUSH=PASS'
-          fi
+          python3 - <<'PY'
+          from __future__ import annotations
+          import base64, hashlib, json, os, urllib.error, urllib.parse, urllib.request
+          from pathlib import Path
+
+          repo = os.environ['TARGET_REPO']
+          expected_main = os.environ['EXPECTED_GOV_DOC_SHA']
+          branch = os.environ['MIRROR_BRANCH']
+          token = os.environ['VF_RELEASE_WRITE_TOKEN']
+          api_root = 'https://api.github.com'
+          local_root = Path('.')
+
+          def call(method: str, path: str, payload=None):
+              data = None if payload is None else json.dumps(payload).encode('utf-8')
+              req = urllib.request.Request(
+                  api_root + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      'Accept': 'application/vnd.github+json',
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json',
+                      'User-Agent': 'vf-skill-pack-publisher',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as res:
+                      raw = res.read()
+                      return None if not raw else json.loads(raw.decode('utf-8'))
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode('utf-8', errors='replace')
+                  raise RuntimeError(f'GitHub API {method} {path} -> {exc.code}: {body[:400]}') from exc
+
+          def q(path: str) -> str:
+              return urllib.parse.quote(path, safe='/')
+
+          main_ref = call('GET', f'/repos/{repo}/git/ref/heads/main')
+          actual_main = main_ref['object']['sha']
+          assert actual_main == expected_main, {'expected_main': expected_main, 'actual_main': actual_main}
+
+          ref_path = f'/repos/{repo}/git/refs/heads/{q(branch)}'
+          try:
+              call('DELETE', ref_path)
+          except RuntimeError as exc:
+              if '-> 404:' not in str(exc):
+                  raise
+          call('POST', f'/repos/{repo}/git/refs', {'ref': f'refs/heads/{branch}', 'sha': expected_main})
+
+          def get_content(path: str):
+              encoded = q(path)
+              try:
+                  return call('GET', f'/repos/{repo}/contents/{encoded}?ref={urllib.parse.quote(branch, safe="")}')
+              except RuntimeError as exc:
+                  if '-> 404:' in str(exc):
+                      return None
+                  raise
+
+          current_dir = get_content('distribution/skills/current') or []
+          for item in current_dir:
+              if item.get('type') == 'file':
+                  call('DELETE', f'/repos/{repo}/contents/{q(item["path"])}', {
+                      'message': f'chore(distribution): replace verified Skill mirror {os.environ["RELEASE_TAG"]}',
+                      'sha': item['sha'],
+                      'branch': branch,
+                  })
+
+          files = [p for p in sorted((local_root/'distribution/skills/current').iterdir()) if p.is_file()]
+          files += [
+              local_root/'distribution/skills/CURRENT_SKILL_DISTRIBUTION.json',
+              local_root/'distribution/skills/CURRENT_SKILL_DOWNLOAD_INDEX.md',
+              local_root/'distribution/skills/HISTORICAL_STANDALONE_IDENTITIES_20260820.json',
+          ]
+
+          for path in files:
+              rel = path.as_posix()
+              prior = get_content(rel)
+              payload = {
+                  'message': f'chore(distribution): publish verified Skill downloads {os.environ["RELEASE_TAG"]}',
+                  'content': base64.b64encode(path.read_bytes()).decode('ascii'),
+                  'branch': branch,
+              }
+              if isinstance(prior, dict) and prior.get('sha'):
+                  payload['sha'] = prior['sha']
+              call('PUT', f'/repos/{repo}/contents/{q(rel)}', payload)
+
+          for path in files:
+              rel = path.as_posix()
+              remote = get_content(rel)
+              assert isinstance(remote, dict) and remote.get('content'), rel
+              actual = base64.b64decode(remote['content'])
+              assert len(actual) == path.stat().st_size, rel
+              assert hashlib.sha256(actual).hexdigest() == hashlib.sha256(path.read_bytes()).hexdigest(), rel
+
+          pulls = call('GET', f'/repos/{repo}/pulls?state=open&head=llhzx2018:{urllib.parse.quote(branch, safe="")}')
+          if pulls:
+              pr = pulls[0]
+          else:
+              pr = call('POST', f'/repos/{repo}/pulls', {
+                  'title': 'chore(distribution): publish verified Current Skill downloads 2026.08.29',
+                  'head': branch,
+                  'base': 'main',
+                  'body': (
+                      'Machine-generated verified distribution mirror after GitHub Release exact readback.\n\n'
+                      f'Exact Source: `{expected_main}`\n'
+                      f'Release: `{os.environ["RELEASE_TAG"]}`\n'
+                      'Expected Current Skills: `11`\n'
+                      'Production: `NO CHANGE`\n'
+                  ),
+              })
+          print(f'GOV_DOC_DISTRIBUTION_PR={pr["number"]}')
+          print(f'GOV_DOC_DISTRIBUTION_PR_URL={pr["html_url"]}')
+          print('GOV_DOC_MIRROR_REMOTE_READBACK=PASS')
+          PY
 
       - name: Final private Release visibility check
         env:
@@ -183,4 +280,5 @@ jobs:
         run: |
           set -Eeuo pipefail
           gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" --json tagName,name,isDraft,isPrerelease,url --jq '.'
-          echo 'GOV_DOC_SKILL_DISTRIBUTION_GATE=PASS'
+          echo 'GOV_DOC_RELEASE_GATE=PASS'
+          echo 'GOV_DOC_DISTRIBUTION_MERGE_GATE=PENDING_PR'
