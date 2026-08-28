@@ -1,6 +1,6 @@
 from pathlib import Path
 import runpy, json
-runpy.run_path('scripts/p01_v224_candidate_docs.py', run_name='__main__')
+runpy.run_path('../runner/scripts/p01_v224_candidate_docs.py', run_name='__main__')
 root=Path('.')
 old='4a064d7ea34998b4f8103d23e96b2e10be46267c'
 new='bc1cc0e3640de4547a1453c1b15fa740f8fae9f3'
