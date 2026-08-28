@@ -1,0 +1,62 @@
+name: P01 V2.24 Runtime Route Diagnostic
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v224-runtime-route-diagnostic-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXACT: 4cb7000309601e4722c12906f9896a45b4e4f238
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT }}
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Fresh install and inspect routes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cleanup(){ test -f /tmp/p01diag.pid && kill "$(cat /tmp/p01diag.pid)" 2>/dev/null || true; }
+          trap cleanup EXIT
+          rm -rf /tmp/p01diag /tmp/p01diag.cookies
+          cp -a p01/src /tmp/p01diag
+          cd /tmp/p01diag
+          php -S 127.0.0.1:18248 -t . >/tmp/p01diag-server.log 2>&1 & echo $! >/tmp/p01diag.pid
+          for i in $(seq 1 30); do curl -sS http://127.0.0.1:18248/setup.php -o /tmp/probe.html && break || sleep 1; done
+          curl -sS -c /tmp/p01diag.cookies -b /tmp/p01diag.cookies http://127.0.0.1:18248/setup.php -o /tmp/setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html').read(); print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -sS -c /tmp/p01diag.cookies -b /tmp/p01diag.cookies -X POST http://127.0.0.1:18248/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V224' --data-urlencode 'admin_password=P01V224!ReleaseCandidate' --data-urlencode 'admin_password_confirm=P01V224!ReleaseCandidate' -o /tmp/setup-post.html
+          test -f app/.runtime.php
+          curl -sS -c /tmp/p01diag.cookies -b /tmp/p01diag.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18248/api.php?action=login' --data '{"password":"P01V224!ReleaseCandidate"}' -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+          fail=0
+          for route in surfaces.php start.php channels.php watch.php surface-manager.php; do
+            code=$(curl -sS -o "/tmp/${route%.php}.html" -w '%{http_code}' -c /tmp/p01diag.cookies -b /tmp/p01diag.cookies "http://127.0.0.1:18248/$route")
+            side=NO; css=NO
+            grep -F 'vf-app-sidebar' "/tmp/${route%.php}.html" >/dev/null && side=YES || true
+            grep -F 'surface-ux-closure.css' "/tmp/${route%.php}.html" >/dev/null && css=YES || true
+            echo "ROUTE=$route HTTP=$code SIDEBAR=$side UX_CSS=$css BYTES=$(wc -c < /tmp/${route%.php}.html)"
+            if test "$code" != 200 || test "$side" != YES || test "$css" != YES; then
+              echo "--- $route HEAD ---"; head -c 600 "/tmp/${route%.php}.html"; echo
+              fail=1
+            fi
+          done
+          php cli/verify.php | tail -n 20
+          php cli/surface-verify.php | tail -n 30
+          php cli/baseline-verify.php | tail -n 30
+          test "$fail" = 0
+          echo P01_V224_ROUTE_DIAGNOSTIC=PASS
