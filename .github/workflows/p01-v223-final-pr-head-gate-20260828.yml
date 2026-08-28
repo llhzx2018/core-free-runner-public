@@ -1,0 +1,97 @@
+name: P01 V2.23 Final PR Head Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v223-final-pr-head-gate-20260828.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REPO: llhzx2018/vf-start
+      BRANCH: feature/p01-unified-surface-ui-v223-20260828
+      HEAD: 2d1eb3a9ace4424c135605baaefa9c490f2fce98
+      FUNCTIONAL: 35926810f1f59738b3b47f7dff690253f4da0e1b
+      BASE: 45503b3a6483ea89a6b076822b3661a9b32bcbf4
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Identity and docs-only seal
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "refs/heads/${BRANCH}"|awk '{print $1}')" = "$HEAD"
+          test "$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" refs/heads/develop|awk '{print $1}')" = "$BASE"
+          test "$(git rev-parse HEAD^)" = "$FUNCTIONAL"
+          mapfile -t seal < <(git diff --name-only "$FUNCTIONAL..$HEAD")
+          printf '%s\n' "${seal[@]}"
+          for f in "${seal[@]}"; do case "$f" in README.md|CHANGELOG.md|VF_PROJECT.json|docs/*|src/README.md) ;; *) echo "non-doc seal drift: $f" >&2; exit 1;; esac; done
+          git diff --quiet "$FUNCTIONAL..$HEAD" -- src/index.php src/start.php src/surface.php src/surfaces.php src/assets/surface-home.css src/assets/surface-home.js
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.22.1'
+          assert x['working_version']=='2.23.0'
+          assert x['candidate_version']=='2.23.0'
+          assert x['current_change']['functional_source_commit']=='35926810f1f59738b3b47f7dff690253f4da0e1b'
+          assert x['current_change']['functional_machine_run']==33146698728
+          assert x['current_change']['functional_machine_result']=='PASS'
+          assert x['current_change']['schema_change'] is False
+          PY
+          echo P01_V223_FINAL_HEAD_IDENTITY=PASS
+      - name: Syntax and current regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          rm -rf /tmp/p01-v223-final /tmp/p01-v223-final.cookies /tmp/p01-v223-admin.cookies
+          cp -a src /tmp/p01-v223-final
+          cd /tmp/p01-v223-final
+          php -S 127.0.0.1:18234 -t . >/tmp/p01-v223-final-server.log 2>&1 & echo $! >/tmp/p01-v223-final.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18234/setup.php -o /tmp/p01-v223-final-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v223-final.cookies -b /tmp/p01-v223-final.cookies http://127.0.0.1:18234/setup.php -o /tmp/p01-v223-final-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v223-final-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v223-final.cookies -b /tmp/p01-v223-final.cookies -X POST http://127.0.0.1:18234/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V223 Final' --data-urlencode 'admin_password=P01V223!FinalHead' --data-urlencode 'admin_password_confirm=P01V223!FinalHead' -o /tmp/p01-v223-final-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          php cli/baseline-verify.php | tee /tmp/p01-v223-final-base.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v223-final-base.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v223-final-base.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v223-final-base.txt
+          curl -fsS http://127.0.0.1:18234/surfaces.php | grep -F 'vf-dashboard-columns' >/dev/null
+          curl -fsS -c /tmp/p01-v223-admin.cookies -b /tmp/p01-v223-admin.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18234/api.php?action=login' --data '{"password":"P01V223!FinalHead"}' | jq -e '.ok==true' >/dev/null
+          test "$(curl -sS -c /tmp/p01-v223-admin.cookies -b /tmp/p01-v223-admin.cookies -o /dev/null -w '%{http_code}' http://127.0.0.1:18234/)" = 302
+          test "$(curl -sS -c /tmp/p01-v223-admin.cookies -b /tmp/p01-v223-admin.cookies -o /tmp/p01-v223-final-start.html -w '%{http_code}' http://127.0.0.1:18234/start.php)" = 200
+          curl -fsS -c /tmp/p01-v223-admin.cookies -b /tmp/p01-v223-admin.cookies http://127.0.0.1:18234/channels.php | grep -F 'vf-app-sidebar' >/dev/null
+          curl -fsS -c /tmp/p01-v223-admin.cookies -b /tmp/p01-v223-admin.cookies http://127.0.0.1:18234/watch.php | grep -F 'vf-app-sidebar' >/dev/null
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          kill "$(cat /tmp/p01-v223-final.pid)" 2>/dev/null || true
+          echo P01_V223_FINAL_HEAD_REGRESSION=PASS
+      - name: Verdict
+        run: |
+          echo P01_V223_FINAL_PR_HEAD=2d1eb3a9ace4424c135605baaefa9c490f2fce98
+          echo P01_V223_FINAL_PR_HEAD_MACHINE=PASS
+          echo PRODUCTION=NO
