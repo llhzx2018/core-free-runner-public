@@ -1,0 +1,60 @@
+name: P01 V2.24 System Baseline Runtime Diagnostic
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v224-system-baseline-runtime-diagnostic-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXACT: 4cb7000309601e4722c12906f9896a45b4e4f238
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Diagnose system baseline route
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cleanup(){ test -f /tmp/p01base.pid && kill "$(cat /tmp/p01base.pid)" 2>/dev/null || true; }
+          trap cleanup EXIT
+          rm -rf /tmp/p01base /tmp/p01base.cookies
+          cp -a p01/src /tmp/p01base
+          cd /tmp/p01base
+          php -S 127.0.0.1:18249 -t . >/tmp/p01base-server.log 2>&1 & echo $! >/tmp/p01base.pid
+          for i in $(seq 1 30); do curl -sS http://127.0.0.1:18249/setup.php -o /tmp/p01base-probe.html && break || sleep 1; done
+          curl -sS -c /tmp/p01base.cookies -b /tmp/p01base.cookies http://127.0.0.1:18249/setup.php -o /tmp/p01base-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01base-setup.html').read(); print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -sS -c /tmp/p01base.cookies -b /tmp/p01base.cookies -X POST http://127.0.0.1:18249/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V224' --data-urlencode 'admin_password=P01V224!ReleaseCandidate' --data-urlencode 'admin_password_confirm=P01V224!ReleaseCandidate' -o /tmp/p01base-setup-post.html
+          test -f app/.runtime.php
+          curl -sS -c /tmp/p01base.cookies -b /tmp/p01base.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18249/api.php?action=login' --data '{"password":"P01V224!ReleaseCandidate"}' -o /tmp/p01base-login.json
+          jq -e '.ok==true' /tmp/p01base-login.json >/dev/null
+          code=$(curl -sS -D /tmp/p01base-headers.txt -o /tmp/p01base-system.html -w '%{http_code}' -c /tmp/p01base.cookies -b /tmp/p01base.cookies http://127.0.0.1:18249/system-baseline.php)
+          echo SYSTEM_BASELINE_HTTP="$code"
+          echo SYSTEM_BASELINE_BYTES="$(wc -c < /tmp/p01base-system.html)"
+          echo '--- HEADERS ---'; cat /tmp/p01base-headers.txt
+          for needle in '系统关键规则正常' '技术详情（给开发 / 排障使用）' '<details class="vf-baseline-tech">'; do
+            if grep -F "$needle" /tmp/p01base-system.html >/dev/null; then echo "FOUND=$needle"; else echo "MISSING=$needle"; fi
+          done
+          echo '--- BODY PREFIX ---'; head -c 1500 /tmp/p01base-system.html; echo
+          echo '--- SERVER LOG TAIL ---'; tail -n 80 /tmp/p01base-server.log
+          test "$code" = 200
+          grep -F '系统关键规则正常' /tmp/p01base-system.html >/dev/null
+          grep -F '技术详情（给开发 / 排障使用）' /tmp/p01base-system.html >/dev/null
+          grep -F '<details class="vf-baseline-tech">' /tmp/p01base-system.html >/dev/null
+          echo P01_V224_SYSTEM_BASELINE_RUNTIME=PASS
