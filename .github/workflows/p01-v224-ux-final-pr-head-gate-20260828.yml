@@ -1,0 +1,108 @@
+name: P01 V2.24 UX Final PR Head Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v224-ux-final-pr-head-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      FEATURE_BRANCH: feature/p01-ux-rebaseline-v224-20260828
+      EXACT_HEAD: 21b2a7ac8ff7b11013f57c176407f773c288738c
+      FUNCTIONAL_SOURCE: c96178b1112dca20af0b15b557a54abcb4211bed
+      FUNCTIONAL_GATE: '33151873413'
+      BASE_MAIN: f00a7d5dfe61d429a845bb1931065653e7750337
+      SCHEMA: '2026082801'
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_HEAD }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Identity, parent and docs-only seal
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_HEAD"
+          test "$(git rev-parse HEAD^)" = "$FUNCTIONAL_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${FEATURE_BRANCH}" | awk '{print $1}')" = "$EXACT_HEAD"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')" = "$BASE_MAIN"
+          mapfile -t seal < <(git diff --name-only "$FUNCTIONAL_SOURCE..$EXACT_HEAD")
+          for f in "${seal[@]}"; do
+            case "$f" in
+              README.md|CHANGELOG.md|VF_PROJECT.json|docs/README.md|docs/architecture/P01_MULTI_SURFACE_ARCHITECTURE.md|docs/authority/ACCEPTANCE_MATRIX.md|docs/authority/CURRENT.md|docs/authority/RPD.md|docs/authority/SSOT.md|docs/evidence/P01_V2.24.0_UX_REBASELINE_MACHINE_20260828.md) ;;
+              *) echo "non-doc authority seal file: $f" >&2; exit 1;;
+            esac
+          done
+          test "${#seal[@]}" -eq 10
+          test "$(git rev-parse "$FUNCTIONAL_SOURCE:src/surfaces.php")" = "$(git rev-parse "$EXACT_HEAD:src/surfaces.php")"
+          test "$(git rev-parse "$FUNCTIONAL_SOURCE:src/start.php")" = "$(git rev-parse "$EXACT_HEAD:src/start.php")"
+          test "$(git rev-parse "$FUNCTIONAL_SOURCE:src/app/SurfaceShell.php")" = "$(git rev-parse "$EXACT_HEAD:src/app/SurfaceShell.php")"
+          echo P01_V224_DOCS_ONLY_SEAL=PASS
+      - name: Syntax and current authority sanity
+        run: |
+          set -Eeuo pipefail
+          find p01/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find p01/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          python3 -m json.tool p01/VF_PROJECT.json >/dev/null
+          grep -F 'V2.24.0 UX Rebaseline' p01/docs/authority/CURRENT.md >/dev/null
+          grep -F 'c96178b1112dca20af0b15b557a54abcb4211bed' p01/VF_PROJECT.json >/dev/null
+          grep -F '33151873413' p01/docs/evidence/P01_V2.24.0_UX_REBASELINE_MACHINE_20260828.md >/dev/null
+          echo P01_V224_FINAL_HEAD_STATIC=PASS
+      - name: Fresh runtime regression
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v224-pr
+          cp -a p01/src /tmp/p01-v224-pr
+          cd /tmp/p01-v224-pr
+          php -S 127.0.0.1:18236 -t . >/tmp/p01-v224-pr-server.log 2>&1 & echo $! >/tmp/p01-v224-pr.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18236/setup.php -o /tmp/p01-v224-pr-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v224-pr.cookies -b /tmp/p01-v224-pr.cookies http://127.0.0.1:18236/setup.php -o /tmp/p01-v224-pr-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v224-pr-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v224-pr.cookies -b /tmp/p01-v224-pr.cookies -X POST http://127.0.0.1:18236/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V224 PR' --data-urlencode 'admin_password=P01V224!PRHead' --data-urlencode 'admin_password_confirm=P01V224!PRHead' -o /tmp/p01-v224-pr-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | tee /tmp/p01-v224-pr-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v224-pr-surface.txt
+          grep -Fx "WORKING_SCHEMA=$SCHEMA" /tmp/p01-v224-pr-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v224-pr-base.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v224-pr-base.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v224-pr-base.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v224-pr-base.txt
+          curl -fsS -c /tmp/p01-v224-pr-admin.cookies -b /tmp/p01-v224-pr-admin.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18236/api.php?action=login' --data '{"password":"P01V224!PRHead"}' | jq -e '.ok==true' >/dev/null
+          curl -fsS -c /tmp/p01-v224-pr-admin.cookies -b /tmp/p01-v224-pr-admin.cookies http://127.0.0.1:18236/surfaces.php | grep -F 'PERSONAL INTERNET HOME' >/dev/null
+          curl -fsS -c /tmp/p01-v224-pr-admin.cookies -b /tmp/p01-v224-pr-admin.cookies http://127.0.0.1:18236/start.php | grep -F 'WEB START' >/dev/null
+          curl -fsS -c /tmp/p01-v224-pr-admin.cookies -b /tmp/p01-v224-pr-admin.cookies http://127.0.0.1:18236/surface-manager.php | grep -F 'RESOURCE INBOX' >/dev/null
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          kill "$(cat /tmp/p01-v224-pr.pid)" 2>/dev/null || true
+          echo P01_V224_FINAL_PR_HEAD=PASS
+      - name: Verdict
+        run: |
+          echo P01_V224_PR_HEAD="$EXACT_HEAD"
+          echo P01_V224_MACHINE=PASS
+          echo RELEASE=NO
+          echo PRODUCTION=NO
