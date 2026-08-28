@@ -44,12 +44,13 @@ V10_ARCHIVE_SOURCES = (
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "p05", "2f6f56cd8b4631e075f10b0df3b353bc5928eb07"),
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "p06", "e5a65712df80899ada28f43b668f1463d0c0320f"),
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "p01", "4bf561f5d70d1194995e34ea43480c9a2ea0209c"),
-    ("historical-version", ARCHIVE_BATCH / "historical-version" / "s01", "3cb891c0c0d49526cbd36e85b38da3780575fdc4"),
+    ("historical-version", ARCHIVE_BATCH / "historical-version" / "s01", "3cb891c0c0d49526cbd36e85b38da3780575fdc"),
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "public-infrastructure", "0a109a88a46997ef91145d80a452545d78a77208"),
 )
 V10_CATEGORIES = ("temporary", "invalid-yaml", "historical-version")
 ACTIVE_CURRENT_WORKFLOW_NAMES = {
     "core-agent-current-verify.yml",
+    "gov-doc-skill-pack-publish.yml",
     "runner-selftest-current.yml",
     "runner-trigger-scope-gate.yml",
     "runner-workflow-archive-gate.yml",
