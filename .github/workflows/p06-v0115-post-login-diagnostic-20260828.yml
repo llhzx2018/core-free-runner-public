@@ -1,0 +1,88 @@
+name: P06 V0.1.15 Post Login Diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p06-v0115-post-login-diagnostic-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-press
+          ref: 561e59a82f035e2622c4567710bec06a1c50dab3
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p06
+      - name: Diagnose routes after full regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-sqlite3 php-mbstring php-zip php-curl composer sqlite3 >/dev/null
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+          ROOT="$RUNNER_TEMP/p06-v0115-post-login"
+          export APP_ENV=test VF_PRESS_STORAGE_PATH="$ROOT/storage" VF_PRESS_DB_PATH="$ROOT/storage/app.db"
+          export VF_PRESS_OWNER_USERNAME=human-owner VF_PRESS_OWNER_PASSWORD='P06-Human-Baseline-Owner-Password-2026!' VF_PRESS_OWNER_DISPLAY_NAME='Human Baseline Owner'
+          mkdir -p "$ROOT/storage" "$ROOT/sessions"
+          php bin/migrate.php
+          php bin/create-owner.php
+          composer self-test >/dev/null
+          composer security-self-test >/dev/null
+          php bin/job-self-test.php >/dev/null
+          composer research-self-test >/dev/null
+          composer publication-self-test >/dev/null
+          composer reader-self-test >/dev/null
+          composer edition-self-test >/dev/null
+          composer living-publishing-self-test >/dev/null
+          composer operations-self-test >/dev/null
+          composer operations-ui-self-test >/dev/null
+          composer backoffice-self-test >/dev/null
+          composer backoffice-catalog-self-test >/dev/null
+          composer public-asset-self-test >/dev/null
+          composer update-self-test >/dev/null
+          php bin/common-baseline-v2-self-test.php >/dev/null
+          php bin/common-baseline-human-ui-self-test.php >/dev/null
+          export VF_PRESS_SESSION_IDLE_SECONDS=604800 VF_PRESS_SESSION_ABSOLUTE_SECONDS=2592000 VF_PRESS_SESSION_COOKIE_SECONDS=2592000 VF_PRESS_SERVER_SESSION_FLOOR_SECONDS=2592000 VF_PRESS_STEP_UP_WINDOW_SECONDS=900 VF_PRESS_DISPLAY_TIMEZONE=Asia/Shanghai VF_PRESS_LOCALE=zh-CN
+          PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+          php -d session.save_path="$ROOT/sessions" -S 127.0.0.1:$PORT -t public public/index.php >"$ROOT/server.log" 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          BASE="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 100); do curl -fsS "$BASE/health" >/dev/null 2>&1 && break; sleep .1; done
+          curl -fsS -c "$ROOT/cookies" "$BASE/login" >"$ROOT/login"
+          CSRF="$(python3 - "$ROOT/login" <<'PY'
+          import re,sys
+          m=re.search(r'name="_csrf" value="([^"]+)"',open(sys.argv[1]).read()); assert m; print(m.group(1))
+          PY
+          )"
+          curl -sS -D "$ROOT/login.h" -o /dev/null -b "$ROOT/cookies" -c "$ROOT/cookies" -X POST "$BASE/login" --data-urlencode "_csrf=$CSRF" --data-urlencode username=human-owner --data-urlencode "password=$VF_PRESS_OWNER_PASSWORD"
+          echo 'LOGIN_STATUS:'; head -1 "$ROOT/login.h"
+          for pair in 'system:/studio/system' 'baseline:/studio/system/baseline' 'health:/studio/system/health'; do
+            name="${pair%%:*}"; path="${pair#*:}"
+            curl -sS -D "$ROOT/$name.h" -o "$ROOT/$name.html" -b "$ROOT/cookies" "$BASE$path"
+            echo "$name STATUS:"; head -1 "$ROOT/$name.h"
+          done
+          python3 - "$ROOT" <<'PY'
+          import pathlib,sys
+          r=pathlib.Path(sys.argv[1])
+          checks={
+            'system':['管理员结论','系统运行配置已就绪','空闲多久需要重新登录','7 天','30 天','15 分钟内有效','技术详情（开发 / 排障使用）','PERSONAL_SINGLE_ADMIN','Asia/Shanghai'],
+            'baseline':['管理员结论','系统基线正常','你需要关注','当前没有必须处理的基线异常','已知限制 2 项','时间规则','外部接口保护','旧后台时间显示尚未全部','尚未统一成一个全局 Retry Wrapper','VF-COMMON-PRODUCT-BASELINE@2.0'],
+            'health':['管理员结论','当前运行健康','当前没有运行异常','技术详情（开发 / 排障使用）'],
+          }
+          for page,needles in checks.items():
+            text=(r/f'{page}.html').read_text(errors='replace')
+            print(page.upper()+'_BYTES='+str(len(text.encode())))
+            for n in needles: print(f'{page}:{n}={n in text}')
+          PY
+          echo 'SERVER_LOG:'
+          cat "$ROOT/server.log"
