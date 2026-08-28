@@ -1,0 +1,234 @@
+name: P01 V2.22.0 Online Updater Compatibility Gate V2
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-online-updater-compat-gate-v2-20260828.yml'
+
+permissions:
+  contents: read
+
+env:
+  PRODUCT_REPO: llhzx2018/vf-start
+  RUNNER_REPO: llhzx2018/core-free-runner-public
+  FORMAL_ARTIFACT_ID: '9674573277'
+  FORMAL_REPAIR_SHA: bba23e58ef9012fdbaec0692f1bd1991e41456aa934b1319f74227a05a8c0e93
+  SOURCE_VERSION: 2.21.25
+  TARGET_VERSION: 2.22.0
+  TARGET_SCHEMA: '2026082801'
+  RELEASE_ID: '378266367'
+  RELEASE_SOURCE: 2c159b4b7ecfc03e79eff2e6103f7e2c768ded08
+  ONLINE_ASSET: VF_Start_V2.22.0_UPDATE.zip
+  OUT: /tmp/p01-v222-online-compat-v2
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact V2.21.25 production updater source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.21.25
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: source
+
+      - name: Repackage exact formal repair under V2.21.25 updater contract
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$OUT" /tmp/p01-v222-formal-artifact-v2.zip
+          mkdir -p "$OUT/formal" "$OUT/compat"
+          gh api --method GET "repos/${RUNNER_REPO}/actions/artifacts/${FORMAL_ARTIFACT_ID}/zip" > /tmp/p01-v222-formal-artifact-v2.zip
+          unzip -q /tmp/p01-v222-formal-artifact-v2.zip -d "$OUT/formal"
+          REPAIR="$(find "$OUT/formal" -type f -name 'server-update-v2.22.0-repair.php' -print -quit)"
+          test -f "$REPAIR"
+          test "$(sha256sum "$REPAIR" | awk '{print $1}')" = "$FORMAL_REPAIR_SHA"
+          cp "$REPAIR" "$OUT/compat/repair-v2.22.0.php"
+          php -l "$OUT/compat/repair-v2.22.0.php"
+          php "$OUT/compat/repair-v2.22.0.php" --self-test | tee "$OUT/atomic-self-test.json"
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' "$OUT/atomic-self-test.json" >/dev/null
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          src=Path('/tmp/p01-v222-online-compat-v2/compat/repair-v2.22.0.php')
+          out=Path('/tmp/p01-v222-online-compat-v2/VF_Start_V2.22.0_UPDATE.zip')
+          info=ZipInfo('repair-v2.22.0.php',(1980,1,1,0,0,0))
+          info.compress_type=ZIP_DEFLATED
+          info.create_system=3
+          info.external_attr=(0o100640 << 16)
+          with ZipFile(out,'w',compression=ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr(info,src.read_bytes())
+          PY
+          unzip -t "$OUT/$ONLINE_ASSET" >/dev/null
+          test "$(unzip -Z1 "$OUT/$ONLINE_ASSET" | wc -l)" -eq 1
+          unzip -Z1 "$OUT/$ONLINE_ASSET" | grep -Fxq 'repair-v2.22.0.php'
+          test "$(unzip -p "$OUT/$ONLINE_ASSET" repair-v2.22.0.php | sha256sum | awk '{print $1}')" = "$FORMAL_REPAIR_SHA"
+          ONLINE_SHA="$(sha256sum "$OUT/$ONLINE_ASSET" | awk '{print $1}')"
+          ONLINE_BYTES="$(stat -c %s "$OUT/$ONLINE_ASSET")"
+          printf 'ONLINE_SHA=%s\nONLINE_BYTES=%s\n' "$ONLINE_SHA" "$ONLINE_BYTES" >> "$GITHUB_ENV"
+          echo P01_V222_ONLINE_ASSET_BUILD=PASS
+
+      - name: Real V2.21.25 prepare and install through current online updater
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v222-online-root-v2
+          PORT=18271
+          rm -rf "$ROOT"; cp -a source/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-v222-online-v2-server.log 2>&1 & PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-online-v2-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-online-v2.cookies -b /tmp/p01-v222-online-v2.cookies http://127.0.0.1:$PORT/setup.php -o /tmp/p01-v222-online-v2-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-online-v2-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-online-v2.cookies -b /tmp/p01-v222-online-v2.cookies -X POST http://127.0.0.1:$PORT/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Online Compat V2' --data-urlencode 'admin_password=P01V222!CompatV2' --data-urlencode 'admin_password_confirm=P01V222!CompatV2' -o /tmp/p01-v222-online-v2-post.html
+          kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          test -f "$ROOT/app/.runtime.php"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$SOURCE_VERSION"
+
+          cat >/tmp/p01-v222-online-v2-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-online-root-v2/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cid=$repo->createCategory(['name'=>'Online Compat Seed V2','description'=>'preserve','is_private'=>false]);
+          $saved=$repo->saveLink(null,['category_id'=>$cid,'title'=>'Online Compat Channel V2','url'=>'https://www.youtube.com/@p01-online-compat-v2','description'=>'preserve','is_private'=>false],'manual');
+          file_put_contents('/tmp/p01-v222-online-v2-link',(string)$saved['id']);
+          file_put_contents('/tmp/p01-v222-online-v2-cat',(string)$cid);
+          PHP
+          php /tmp/p01-v222-online-v2-seed.php
+
+          cat > "$OUT/manifest.json" <<JSON
+          {
+            "schema_version":"1.0",
+            "project_id":"P01",
+            "component_id":"APP",
+            "enabled":true,
+            "target_version":"2.22.0",
+            "update_type":"ATOMIC",
+            "from_versions":["2.21.25"],
+            "schema_from":"2026080902",
+            "schema_to":"2026082801",
+            "repository":"llhzx2018/vf-start",
+            "release_tag":"v2.22.0",
+            "asset_name":"VF_Start_V2.22.0_UPDATE.zip",
+            "asset_bytes":${ONLINE_BYTES},
+            "asset_sha256":"${ONLINE_SHA}",
+            "release_id":378266367,
+            "release_identity":"v2.22.0@2c159b4b7ecfc03e79eff2e6103f7e2c768ded08",
+            "backup_required":true,
+            "rollback_supported":true,
+            "released_at":"2026-08-28T04:50:28Z",
+            "minimum_php":"8.0.0"
+          }
+          JSON
+
+          cat >/tmp/p01-v222-online-v2-run.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-online-root-v2/app/bootstrap.php';
+          $manifest=json_decode(file_get_contents('/tmp/p01-v222-online-compat-v2/manifest.json'),true,512,JSON_THROW_ON_ERROR);
+          $asset='/tmp/p01-v222-online-compat-v2/VF_Start_V2.22.0_UPDATE.zip';
+          $manager=new VfUpdateManager(vf_db(),[
+            'manifest_fetcher'=>fn()=> $manifest,
+            'asset_downloader'=>function(array $m,string $dest) use($asset){if(!copy($asset,$dest))throw new RuntimeException('copy failed');return ['size'=>filesize($dest)];},
+            'backup_creator'=>fn(string $from,string $to)=>['backup_key'=>'compat-v2-'.$from.'-'.$to],
+          ]);
+          $prepared=$manager->prepare();
+          if(empty($prepared['ok'])||($prepared['to_version']??'')!=='2.22.0')throw new RuntimeException('prepare failed');
+          echo 'P01_V22125_PREPARE=PASS'.PHP_EOL;
+          $installed=$manager->install((string)$prepared['operation_id']);
+          if(empty($installed['ok']))throw new RuntimeException('install failed');
+          echo 'P01_V22125_INSTALL=PASS'.PHP_EOL;
+          PHP
+          php /tmp/p01-v222-online-v2-run.php | tee "$OUT/online-result.txt"
+          grep -Fx 'P01_V22125_PREPARE=PASS' "$OUT/online-result.txt"
+          grep -Fx 'P01_V22125_INSTALL=PASS' "$OUT/online-result.txt"
+          echo P01_V22125_REAL_ONLINE_UPDATER=PASS
+
+      - name: Post-install schema data privacy and baseline verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v222-online-root-v2
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$TARGET_VERSION"
+          php "$ROOT/cli/verify.php"
+          php "$ROOT/cli/surface-verify.php" | tee "$OUT/surface.txt"
+          grep -Fx 'MULTI_SURFACE_PASS=YES' "$OUT/surface.txt"
+          grep -Fx 'WORKING_SCHEMA=2026082801' "$OUT/surface.txt"
+          cat >/tmp/p01-v222-online-v2-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-online-root-v2/app/bootstrap.php';
+          require_once '/tmp/p01-v222-online-root-v2/app/SurfaceRepository.php';
+          $db=vf_db();
+          $link=(int)trim(file_get_contents('/tmp/p01-v222-online-v2-link'));
+          $cat=(int)trim(file_get_contents('/tmp/p01-v222-online-v2-cat'));
+          if(!$db->query('SELECT id FROM links WHERE id='.$link)->fetchColumn())throw new RuntimeException('seed link lost');
+          if(!$db->query('SELECT id FROM categories WHERE id='.$cat)->fetchColumn())throw new RuntimeException('seed category lost');
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0)throw new RuntimeException('automatic profiles inserted');
+          $s=new VfSurfaceRepository($db);
+          if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$link))throw new RuntimeException('default Start failed');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')throw new RuntimeException('integrity failed');
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk failed');
+          echo 'P01_V222_DATA_PRESERVE=PASS'.PHP_EOL;
+          PHP
+          php /tmp/p01-v222-online-v2-assert.php
+          php "$ROOT/cli/baseline-verify.php" | tee "$OUT/baseline.txt"
+          grep -Fx 'BASELINE_CORE_PASS=YES' "$OUT/baseline.txt"
+          grep -Fx 'DRIFT_COUNT=0' "$OUT/baseline.txt"
+          grep -Fx 'UNKNOWN_COUNT=0' "$OUT/baseline.txt"
+          echo P01_V222_POST_INSTALL=PASS
+
+      - name: Final compatibility verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$OUT/P01-V2.22.0-ONLINE-UPDATER-COMPAT-V2.json" <<JSON
+          {
+            "schema":"vf-public-runner-result/v1",
+            "project_id":"P01",
+            "gate":"V2.22.0_ONLINE_UPDATER_COMPAT_V2",
+            "status":"PASS",
+            "source_version":"2.21.25",
+            "target_version":"2.22.0",
+            "target_schema":"2026082801",
+            "formal_repair_sha256":"${FORMAL_REPAIR_SHA}",
+            "asset_name":"${ONLINE_ASSET}",
+            "asset_bytes":${ONLINE_BYTES},
+            "asset_sha256":"${ONLINE_SHA}",
+            "inner_repair_name":"repair-v2.22.0.php",
+            "release_id":378266367,
+            "release_source":"2c159b4b7ecfc03e79eff2e6103f7e2c768ded08",
+            "production_write":false
+          }
+          JSON
+          jq -e '.status=="PASS" and .asset_name=="VF_Start_V2.22.0_UPDATE.zip" and .inner_repair_name=="repair-v2.22.0.php"' "$OUT/P01-V2.22.0-ONLINE-UPDATER-COMPAT-V2.json" >/dev/null
+          echo P01_V222_ONLINE_UPDATER_COMPAT_V2=PASS
+          echo ONLINE_SHA="$ONLINE_SHA"
+          echo ONLINE_BYTES="$ONLINE_BYTES"
+
+      - name: Upload verified online updater asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-V2.22.0-ONLINE-UPDATER-COMPAT-V2
+          path: |
+            /tmp/p01-v222-online-compat-v2/VF_Start_V2.22.0_UPDATE.zip
+            /tmp/p01-v222-online-compat-v2/P01-V2.22.0-ONLINE-UPDATER-COMPAT-V2.json
+          if-no-files-found: error
+          retention-days: 30
