@@ -1,0 +1,114 @@
+name: P01 V2.24 UI Audit Fixes Gate
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v224-ui-audit-fixes-gate-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      FEATURE_BRANCH: feature/p01-v224-ui-audit-fixes-20260828
+      EXACT_SOURCE: f0882eceec27796da5a43e0169f7c8e980fb1814
+      BASE_DEVELOP: 5b6f8c63b0040deaa60e69f08a7cec33e31a052b
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact source boundary and syntax
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${FEATURE_BRANCH}" | awk '{print $1}')" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop | awk '{print $1}')" = "$BASE_DEVELOP"
+          mapfile -t f < <(git diff --name-only "$BASE_DEVELOP...$EXACT_SOURCE")
+          test "${#f[@]}" -eq 2
+          printf '%s\n' "${f[@]}" | grep -Fx 'src/app/SurfaceShell.php'
+          printf '%s\n' "${f[@]}" | grep -Fx 'src/assets/surface-ux-closure.css'
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V224_UI_FIX_SCOPE=PASS
+      - name: Fresh runtime and representative data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v224-fix /tmp/p01-v224-fix.cookies
+          cp -a p01/src /tmp/p01-v224-fix
+          cd /tmp/p01-v224-fix
+          php -S 127.0.0.1:18245 -t . >/tmp/p01-v224-fix-server.log 2>&1 & echo $! >/tmp/p01-v224-fix.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18245/setup.php -o /tmp/p01-v224-fix-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v224-fix.cookies -b /tmp/p01-v224-fix.cookies http://127.0.0.1:18245/setup.php -o /tmp/p01-v224-fix-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v224-fix-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -sS -c /tmp/p01-v224-fix.cookies -b /tmp/p01-v224-fix.cookies -X POST http://127.0.0.1:18245/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start UI Fix Gate' --data-urlencode 'admin_password=P01V223!UnifiedUI' --data-urlencode 'admin_password_confirm=P01V223!UnifiedUI' -o /tmp/p01-v224-fix-setup-post.html
+          curl -fsS -c /tmp/p01-v224-fix.cookies -b /tmp/p01-v224-fix.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18245/api.php?action=login' --data '{"password":"P01V223!UnifiedUI"}' | jq -e '.ok==true' >/dev/null
+          cat >/tmp/p01-v224-fix-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v224-fix/app/bootstrap.php'; require_once '/tmp/p01-v224-fix/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());$c=$r->createCategory(['name'=>'内容收藏','description'=>'','is_private'=>true]);
+          foreach([['硅谷101','https://www.youtube.com/@TheValley101','科技与商业长内容'],['42章经','https://www.youtube.com/@42zhangjing','创业与投资访谈'],['蜉蝣天地 Meanders','https://www.youtube.com/@meanders','人物与社会长谈'],['疯投圈','https://www.youtube.com/@Crazy.Capital','商业与消费行业']] as $x){$z=$r->saveLink(null,['category_id'=>$c,'title'=>$x[0],'url'=>$x[1],'description'=>$x[2],'is_private'=>true],'manual');$s->upsertProfile((int)$z['id'],['surface'=>'channels','resource_kind'=>'youtube','note'=>'适合工作时听','background_friendly'=>true]);}
+          PHP
+          php /tmp/p01-v224-fix-seed.php
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | grep -Fx 'MULTI_SURFACE_PASS=YES'
+          php cli/baseline-verify.php | tee /tmp/p01-v224-fix-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v224-fix-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v224-fix-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v224-fix-baseline.txt
+      - name: UI contract and screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-v224-fix
+          curl -fsS -c /tmp/p01-v224-fix.cookies -b /tmp/p01-v224-fix.cookies http://127.0.0.1:18245/surfaces.php -o audit-home.html
+          curl -fsS -c /tmp/p01-v224-fix.cookies -b /tmp/p01-v224-fix.cookies http://127.0.0.1:18245/channels.php -o audit-channels.html
+          grep -F 'surface-ux-closure.css' audit-home.html >/dev/null
+          grep -F '>首页<' audit-home.html >/dev/null
+          grep -F '>Start<' audit-home.html >/dev/null
+          grep -F '>Channels<' audit-home.html >/dev/null
+          grep -F '>Watch<' audit-home.html >/dev/null
+          grep -F 'channel-cards' audit-channels.html >/dev/null
+          grep -F '硅谷101' audit-channels.html >/dev/null
+          BROWSER=$(command -v google-chrome || command -v chromium || command -v chromium-browser); test -n "$BROWSER"
+          mkdir -p /tmp/p01-v224-fix-shots
+          "$BROWSER" --headless=new --no-sandbox --disable-dev-shm-usage --hide-scrollbars --window-size=1440,900 --screenshot=/tmp/p01-v224-fix-shots/channels-desktop.png http://127.0.0.1:18245/audit-channels.html
+          "$BROWSER" --headless=new --no-sandbox --disable-dev-shm-usage --hide-scrollbars --window-size=390,844 --screenshot=/tmp/p01-v224-fix-shots/home-mobile.png http://127.0.0.1:18245/audit-home.html
+          "$BROWSER" --headless=new --no-sandbox --disable-dev-shm-usage --hide-scrollbars --window-size=390,844 --screenshot=/tmp/p01-v224-fix-shots/channels-mobile.png http://127.0.0.1:18245/audit-channels.html
+          test "$(find /tmp/p01-v224-fix-shots -name '*.png' -size +10k | wc -l)" -eq 3
+          echo P01_V224_UI_FIX_SCREENSHOTS=PASS
+      - name: Database and verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-v224-fix
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          kill "$(cat /tmp/p01-v224-fix.pid)" 2>/dev/null || true
+          echo P01_V224_UI_FIX_MACHINE=PASS
+          echo RELEASE=NO
+          echo PRODUCTION=NO
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p01-v224-ui-audit-fixes-${{ env.EXACT_SOURCE }}
+          path: /tmp/p01-v224-fix-shots
+          retention-days: 7
