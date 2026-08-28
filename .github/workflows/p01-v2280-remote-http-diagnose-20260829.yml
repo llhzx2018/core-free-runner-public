@@ -1,0 +1,115 @@
+name: P01 V2.28 Remote HTTP Diagnose
+on:
+  push:
+    branches: [task/p01-v2280-remote-online-update-gate-20260829]
+    paths:
+      - .github/workflows/p01-v2280-remote-http-diagnose-20260829.yml
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      ROOT: /tmp/p01-v228-http-diag
+      PORT: '18360'
+      ADMIN_PASS: 'P01V228!HttpDiag'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.27.0
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - name: Install V2.27 owner-like runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" /tmp/p01-v228-http-diag-*
+          cp -a production/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v228-http-diag-pre.log 2>&1 &
+          echo $! >/tmp/p01-v228-http-diag.pid
+          COOKIE=/tmp/p01-v228-http-diag.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-v228-http-diag-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v228-http-diag-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V228 HTTP Diagnose' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-v228-http-diag-setup-post.html
+          test -f "$ROOT/app/.runtime.php"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.27.0
+      - name: Seed representative surfaces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v228-http-diag-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());
+          $a=$r->createCategory(['name'=>'Diag Start','description'=>'','is_private'=>false]);
+          $b=$r->createCategory(['name'=>'Diag Channels','description'=>'','is_private'=>false]);
+          $c=$r->createCategory(['name'=>'Diag Watch','description'=>'','is_private'=>false]);
+          for($i=1;$i<=3;$i++){$r->saveLink(null,['category_id'=>$a,'title'=>'Diag Start '.$i,'url'=>'https://diag-start-'.$i.'.example.com','description'=>'keep','is_private'=>false,'is_favorite'=>$i===1],'manual');}
+          for($i=1;$i<=3;$i++){$x=$r->saveLink(null,['category_id'=>$b,'title'=>'Diag Channel '.$i,'url'=>'https://youtube.com/@diag-v228-'.$i,'description'=>'keep','is_private'=>true],'manual');$s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true,'note'=>'diag']);}
+          for($i=1;$i<=3;$i++){$x=$r->saveLink(null,['category_id'=>$c,'title'=>'Diag Watch '.$i,'url'=>'https://diag-watch-'.$i.'.example.com','description'=>'keep','is_private'=>true],'manual');$s->upsertProfile((int)$x['id'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want','note'=>'diag']);}
+          echo "DIAG_SEED=PASS\n";
+          PHP
+          php /tmp/p01-v228-http-diag-seed.php | grep -Fx DIAG_SEED=PASS
+      - name: Real online update through VfUpdateManager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v228-http-diag-update.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/UpdateManager.php';
+          $m=new VfUpdateManager(vf_db(),['root'=>$root,'private_root'=>VF_PRIVATE_ROOT,'current_version'=>'2.27.0']);
+          $c=$m->check(true);if(($c['latest_version']??'')!=='2.28.0'||($c['can_update']??false)!==true)throw new RuntimeException('check '.json_encode($c));
+          $p=$m->prepare();if(($p['ok']??false)!==true)throw new RuntimeException('prepare '.json_encode($p));
+          $i=$m->install((string)$p['operation_id']);if(($i['ok']??false)!==true||($i['to_version']??'')!=='2.28.0')throw new RuntimeException('install '.json_encode($i));
+          echo "DIAG_REAL_UPDATE=PASS\n";
+          PHP
+          php /tmp/p01-v228-http-diag-update.php | grep -Fx DIAG_REAL_UPDATE=PASS
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.28.0
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+      - name: Restart and capture upgraded HTTP diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OLD=$(cat /tmp/p01-v228-http-diag.pid); kill "$OLD" 2>/dev/null || true
+          for i in $(seq 1 30); do kill -0 "$OLD" 2>/dev/null || break; sleep .2; done
+          php -d display_errors=1 -d display_startup_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v228-http-diag-upgraded.log 2>&1 &
+          echo $! >/tmp/p01-v228-http-diag.pid
+          for i in $(seq 1 30); do curl -sS -o /dev/null "http://127.0.0.1:${PORT}/" && break || sleep 1; done
+          COOKIE=/tmp/p01-v228-http-diag-upgraded.cookies
+          LOGIN=$(curl -sS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}")
+          printf 'LOGIN=%s\n' "$LOGIN"
+          jq -e '.ok==true' <<<"$LOGIN" >/dev/null
+          failed=0
+          for item in 'all|surface.php?surface=all' 'start|start.php' 'channels|channels.php' 'watch|watch.php'; do
+            label=${item%%|*}; path=${item#*|}
+            code=$(curl -sS -D "/tmp/p01-v228-http-diag-${label}.headers" -o "/tmp/p01-v228-http-diag-${label}.body" -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:${PORT}/$path")
+            echo "HTTP_${label^^}=$code"
+            if [ "$code" != 200 ]; then failed=1; fi
+          done
+          echo '--- upgraded server log ---'
+          cat /tmp/p01-v228-http-diag-upgraded.log || true
+          for label in all start channels watch; do
+            echo "--- $label headers ---"; cat "/tmp/p01-v228-http-diag-${label}.headers" || true
+            echo "--- $label body ---"; sed -n '1,160p' "/tmp/p01-v228-http-diag-${label}.body" || true
+          done
+          echo '--- runtime/update files ---'
+          printf 'VERSION='; cat "$ROOT/VERSION.txt"
+          ls -l "$ROOT/app/.runtime.php" "$ROOT/assets/workspace-v228.css" || true
+          exit "$failed"
