@@ -1,0 +1,141 @@
+name: P06 V0.1.14 Reconciliation Candidate Gate V2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p06-v014-reconciliation-candidate-gate-v2-20260828.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    env:
+      MAIN_SOURCE: 44def40930019b1c597e404fa49c98d4ceb2ac42
+      RELEASE_SOURCE: cec5ecd28b3cdc585d1b7cac17a9e2167d520ea1
+      TARGET_VERSION: 0.1.14
+      TARGET_BRANCH: release/p06-v0.1.14-reconcile-20260828
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Build semantic merge candidate
+        env:
+          TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone "https://x-access-token:${TOKEN}@github.com/llhzx2018/vf-press.git" p06 >/dev/null 2>&1
+          cd p06
+          test "$(git rev-parse origin/main)" = "$MAIN_SOURCE"
+          test "$(git rev-parse v0.1.13)" = "$RELEASE_SOURCE"
+          if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null 2>&1; then
+            echo "Target reconciliation branch already exists; refusing history rewrite."
+            exit 31
+          fi
+          git checkout "$MAIN_SOURCE"
+          git switch -c "$TARGET_BRANCH"
+          git config user.name 'VictorForge Runtime'
+          git config user.email 'llhzx2018@gmail.com'
+          git config merge.conflictstyle diff3
+
+          set +e
+          git merge --no-commit --no-ff "$RELEASE_SOURCE" >/tmp/p06-merge.out 2>&1
+          MERGE_RC=$?
+          set -e
+          cat /tmp/p06-merge.out
+          test "$MERGE_RC" -ne 0
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          printf 'CONFLICT=%s\n' "${conflicts[@]}"
+          test "${#conflicts[@]}" -eq 8
+
+          git show :3:src/Http/Studio/QualityController.php \
+            | sed 's/final class QualityController/final class QualityQueueController/' \
+            > src/Http/Studio/QualityQueueController.php
+
+          git checkout --ours bin/operations-ui-self-test.php
+          git checkout --ours docs/authority/ACCEPTANCE_MATRIX.md
+          git checkout --ours docs/authority/RPD.md
+          git checkout --ours docs/authority/SSOT.md
+          git checkout --ours public/index.php
+          git checkout --ours src/Http/Studio/OperationsController.php
+          git checkout --ours src/Http/Studio/QualityController.php
+
+          git show :2:composer.json >/tmp/composer-main.json
+          git show :3:composer.json >/tmp/composer-release.json
+          jq -s '.[0] as $a | .[1] as $b | ($a * $b) | .scripts = ($a.scripts + $b.scripts)' \
+            /tmp/composer-main.json /tmp/composer-release.json > composer.json
+
+          python3 ../scripts/p06-v014-reconcile.py
+          python3 ../scripts/p06-v014-reconcile-tests.py
+
+          printf '%s\n' "$TARGET_VERSION" > VERSION
+          jq --arg v "$TARGET_VERSION" '.version=$v | .lifecycle="CANDIDATE" | .current_phase="V0_1_14_RELEASE_LINE_RECONCILIATION_CANDIDATE" | .next_gate="EXACT_SOURCE_MACHINE_GATE_V0_1_14"' VF_PROJECT.json >/tmp/VF_PROJECT.json
+          mv /tmp/VF_PROJECT.json VF_PROJECT.json
+          git add -A
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+
+      - name: Install dependencies
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          composer install --no-interaction --prefer-dist --no-progress
+
+      - name: PHP syntax and full self-test regression
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          find . -path './vendor' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          tail -n 20 /tmp/php-lint.log
+          mapfile -t scripts < <(jq -r '.scripts | keys[] | select(test("self-test$"))' composer.json)
+          printf 'SELF_TEST_COUNT=%s\n' "${#scripts[@]}"
+          for script in "${scripts[@]}"; do
+            echo "=== composer $script ==="
+            composer run --no-interaction "$script"
+          done
+
+      - name: Reconciliation invariants
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          test "$(jq -r '.schema' VF_PROJECT.json)" = '3'
+          test "$(jq -r '.version' VF_PROJECT.json)" = "$TARGET_VERSION"
+          test -f database/schema/0003_ai_book_brief_outline.sql
+          test -f src/Application/Operations/CommonBaselineV2.php
+          test -f src/Http/Studio/SystemBaselineController.php
+          test -f src/Application/Publication/BookGenerationService.php
+          test -f src/Application/Demo/DemoDataService.php
+          test -f src/Http/Studio/BookController.php
+          test -f src/Http/Studio/QualityQueueController.php
+          grep -Fq 'sessionIdleSeconds' public/index.php
+          grep -Fq '/studio/system/baseline' public/index.php
+          grep -Fq '/studio/system/health' public/index.php
+          grep -Fq '/studio/books' public/index.php
+          php bin/common-baseline-v2-self-test.php
+          echo P06_V014_RELEASE_LINE_RECONCILIATION=PASS
+          echo RELEASE=NO
+          echo TAG=NO
+          echo PRODUCTION=NO
+
+      - name: Commit and push candidate only after PASS
+        run: |
+          set -Eeuo pipefail
+          cd p06
+          rm -f composer.lock
+          git add -A
+          git diff --check
+          git commit -m 'release: reconcile V0.1.13 line with Common Baseline V2 for V0.1.14'
+          CANDIDATE="$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD^1)" = "$MAIN_SOURCE"
+          test "$(git rev-parse HEAD^2)" = "$RELEASE_SOURCE"
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          echo P06_V014_CANDIDATE_SOURCE="$CANDIDATE"
+          echo P06_V014_CANDIDATE_PUSH=PASS
