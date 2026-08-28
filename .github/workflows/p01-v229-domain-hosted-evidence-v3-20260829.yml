@@ -1,0 +1,155 @@
+name: P01 V2.29 Hosted Evidence V3
+
+on:
+  push:
+    branches:
+      - task/p01-v229-domain-hosted-evidence-v3-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: a6b8d47064ce06fa2cf8b8003ba15e25a83666d2
+  ROOT: /tmp/p01-v229-hosted-v3
+  PORT: '18441'
+  ADMIN_PASS: 'P01HostedV3!2026'
+
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          rm -rf "$ROOT" /tmp/p01-hosted-v3-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-hosted-v3-server.log 2>&1 &
+          echo $! >/tmp/p01-hosted-v3-server.pid
+          COOKIE=/tmp/p01-hosted-v3-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-hosted-v3-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-hosted-v3-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Hosted V3' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-hosted-v3-setup-post.html
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_HOSTED_V3_FRESH=PASS
+
+      - name: Browser hosted HTML cover privacy mobile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import os,struct,zlib
+          w,h=1600,1000;raw=bytearray()
+          for _ in range(h):raw.extend(b'\x00'+os.urandom(w*3))
+          def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(bytes(raw),6))+chunk(b'IEND',b'')
+          open('/tmp/p01-hosted-v3-large.png','wb').write(png)
+          PY
+          cat >/tmp/p01-hosted-v3-public.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>HOSTED_V3_PUBLIC</h1><script>document.body.dataset.ran='yes';try{localStorage.setItem('x','1');document.body.dataset.storage='allowed'}catch(e){document.body.dataset.storage='blocked'};fetch('/api.php?action=health').then(()=>document.body.dataset.fetch='allowed').catch(()=>document.body.dataset.fetch='blocked');</script>
+          HTML
+          cat >/tmp/p01-hosted-v3-private.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>HOSTED_V3_PRIVATE</h1>
+          HTML
+          mkdir -p /tmp/p01-hosted-v3-browser && cd /tmp/p01-hosted-v3-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 --no-save >/dev/null 2>&1; npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18441';
+          const browser=await chromium.launch({headless:true});
+          const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+          const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01HostedV3!2026'}});if(!login.ok())throw new Error('login');
+          const p=await ctx.newPage();
+          await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});
+          await p.locator('[data-open-add]').click();
+          let f=p.locator('[data-add-form]');
+          await f.locator('select[name="source_kind"]').selectOption('hosted_html');
+          if(await f.locator('[data-url-field]').isVisible())throw new Error('url visible for hosted');
+          if(!(await f.locator('[data-html-field]').isVisible()))throw new Error('html field hidden');
+          await f.locator('input[name="title"]').fill('专题 V3 托管公开');
+          await f.locator('input[name="resource_kind"]').fill('AI研究');
+          await f.locator('input[name="is_private"]').uncheck();
+          await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-hosted-v3-large.png');
+          await f.locator('input[name="html"]').setInputFiles('/tmp/p01-hosted-v3-public.html');
+          await f.locator('button[type="submit"]:not([data-add-continue])').click();
+          await p.getByText('专题 V3 托管公开',{exact:true}).waitFor({timeout:15000});
+          const card=p.locator('.vf-topic-card').filter({hasText:'专题 V3 托管公开'});const id=await card.getAttribute('data-asset-row');if(!id)throw new Error('public id');
+          if(!String(await card.locator('.vf-topic-cover img').getAttribute('src')).includes('resource-cover.php'))throw new Error('cover missing');
+          await card.locator('[data-edit-id]').first().click();
+          const d=p.locator('[data-detail-form]');if(await d.locator('select[name="source_kind"]').inputValue()!=='hosted_html')throw new Error('detail source');
+          if(!(await d.locator('[data-html-status]').textContent()).includes('p01-hosted-v3-public.html'))throw new Error('html status');
+          await p.screenshot({path:'/tmp/p01-hosted-v3-topics.png',fullPage:true});
+          await p.locator('[data-panel="detail"] [data-close-panel]:visible').click();
+
+          const hosted=await ctx.newPage();
+          await hosted.goto(base+'/resource-html.php?id='+id,{waitUntil:'load'});
+          await hosted.getByText('HOSTED_V3_PUBLIC',{exact:true}).waitFor();
+          await hosted.waitForTimeout(250);
+          if(await hosted.locator('body').getAttribute('data-ran')!=='yes')throw new Error('script blocked');
+          if(await hosted.locator('body').getAttribute('data-storage')!=='blocked')throw new Error('storage not isolated');
+          if(await hosted.locator('body').getAttribute('data-fetch')!=='blocked')throw new Error('fetch not isolated');
+          await hosted.close();
+
+          await p.goto(base+'/topics.php',{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');await f.locator('input[name="title"]').fill('专题 V3 托管私人');await f.locator('input[name="resource_kind"]').fill('私人研究');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-hosted-v3-private.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.getByText('专题 V3 托管私人',{exact:true}).waitFor({timeout:15000});const privateCard=p.locator('.vf-topic-card').filter({hasText:'专题 V3 托管私人'});const privateId=await privateCard.getAttribute('data-asset-row');if(!privateId)throw new Error('private id');
+
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});if(await p.getByText('专题 V3 托管私人',{exact:true}).count())throw new Error('private visible in public scope');await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');if(await f.locator('[data-url-field]').isVisible()||!(await f.locator('[data-html-field]').isVisible()))throw new Error('mobile source UI');const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error('mobile overflow '+overflow);await p.screenshot({path:'/tmp/p01-hosted-v3-mobile.png',fullPage:true});
+          await browser.close();
+          console.log(JSON.stringify({publicId:Number(id),privateId:Number(privateId)}));
+          JS
+          node gate.mjs | tee /tmp/p01-hosted-v3-browser.json
+          tail -n1 /tmp/p01-hosted-v3-browser.json | jq -e '.publicId>0 and .privateId>0' >/dev/null
+          echo P01_HOSTED_V3_BROWSER=PASS
+
+      - name: Storage CSP anonymous privacy integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IDS=$(tail -n1 /tmp/p01-hosted-v3-browser.json);PUB=$(jq -r '.publicId' <<<"$IDS");PRIV=$(jq -r '.privateId' <<<"$IDS")
+          cat >/tmp/p01-hosted-v3-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$db=vf_db();$r=$db->query("SELECT raf.* FROM resource_asset_files raf JOIN links l ON l.id=raf.link_id WHERE l.title='专题 V3 托管公开' AND raf.asset_kind='cover'")->fetch(PDO::FETCH_ASSOC);if(!$r)throw new RuntimeException('cover row');if((int)$r['byte_size']>1200*1024)throw new RuntimeException('cover bytes');if((int)$r['width']>960||(int)$r['height']>960)throw new RuntimeException('cover dimensions');if(!in_array((string)$r['mime_type'],['image/webp','image/jpeg'],true))throw new RuntimeException('cover mime');$h=$db->query("SELECT raf.* FROM resource_asset_files raf JOIN links l ON l.id=raf.link_id WHERE l.title='专题 V3 托管公开' AND raf.asset_kind='html'")->fetch(PDO::FETCH_ASSOC);if(!$h||(int)$h['byte_size']<=0||(int)$h['byte_size']>2*1024*1024)throw new RuntimeException('html row');if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');echo "P01_HOSTED_V3_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-hosted-v3-db.php | grep -Fx P01_HOSTED_V3_DB=PASS
+          CODE=$(curl -sS -D /tmp/p01-hosted-v3-public.headers -o /tmp/p01-hosted-v3-public.out -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PUB}");test "$CODE" = 200;grep -Fi "Content-Security-Policy: sandbox allow-scripts" /tmp/p01-hosted-v3-public.headers;! grep -Fi "allow-same-origin" /tmp/p01-hosted-v3-public.headers;grep -F 'HOSTED_V3_PUBLIC' /tmp/p01-hosted-v3-public.out
+          CODE=$(curl -sS -o /tmp/p01-hosted-v3-private.out -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PRIV}");test "$CODE" = 404
+          echo P01_HOSTED_V3_SECURITY=PASS
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-hosted-evidence-v3
+          path: |
+            /tmp/p01-hosted-v3-topics.png
+            /tmp/p01-hosted-v3-mobile.png
+            /tmp/p01-hosted-v3-public.headers
+          retention-days: 14
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo P01_V229_HOSTED_EVIDENCE_V3=PASS
