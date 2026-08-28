@@ -81,3 +81,33 @@ s = replace_once(
     'legacy full-html assertion',
 )
 p.write_text(s)
+
+
+# V0.1.11's Whole-Site Refoundation introduced Library/Book continuity. The
+# later CURRENT backoffice authority supersedes only the global login-home shape:
+# Operations is now a professional operational overview, not a Library Continue
+# hero. Keep Book Workspace, Reader continuity, publishing demotion, and the
+# cross-book quality queue capability under their current owners.
+p = Path('bin/whole-site-refoundation-self-test.php')
+s = p.read_text()
+s = replace_once(
+    s,
+    "$home = (string)file_get_contents($basePath . '/src/Http/Studio/OperationsController.php');\n",
+    "$home = (string)file_get_contents($basePath . '/src/Http/Studio/OperationsController.php');\n"
+    "$backoffice = (string)file_get_contents($basePath . '/src/Http/Studio/BackofficeShell.php');\n",
+    'whole-site backoffice source',
+)
+s = replace_once(
+    s,
+    "$quality = (string)file_get_contents($basePath . '/src/Http/Studio/QualityController.php');\n",
+    "$quality = (string)file_get_contents($basePath . '/src/Http/Studio/QualityQueueController.php');\n",
+    'whole-site quality queue source',
+)
+s = replace_once(
+    s,
+    "    [$home, 'class=\"library-continue\"', 'Continue latest book surface'],\n",
+    "    [$backoffice, \"'operations' => ['运维总览'\", 'Professional Operations default surface'],\n"
+    "    [$home, '今日待处理', 'Operations action-first overview'],\n",
+    'whole-site superseded Continue hero',
+)
+p.write_text(s)
