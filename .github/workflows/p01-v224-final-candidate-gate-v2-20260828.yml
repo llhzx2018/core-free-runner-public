@@ -1,0 +1,117 @@
+name: P01 V2.24 Final Candidate Gate V2
+on:
+  push:
+    branches: [task/p01-v222-multi-surface-gate-20260828]
+    paths: ['.github/workflows/p01-v224-final-candidate-gate-v2-20260828.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      EXACT_DEVELOP: 4cb7000309601e4722c12906f9896a45b4e4f238
+      RUNTIME_PARENT: bc1cc0e3640de4547a1453c1b15fa740f8fae9f3
+      SCHEMA: '2026082801'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_DEVELOP }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Exact source and candidate contracts
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_DEVELOP"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop | awk '{print $1}')" = "$EXACT_DEVELOP"
+          test "$(tr -d '\r\n' < VERSION)" = '2.23.0'
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = '2.23.0'
+          mapfile -t docs < <(git diff --name-only "$RUNTIME_PARENT...$EXACT_DEVELOP")
+          test "${#docs[@]}" -eq 10
+          for f in "${docs[@]}"; do case "$f" in CHANGELOG.md|README.md|VF_PROJECT.json|docs/README.md|docs/architecture/P01_MULTI_SURFACE_ARCHITECTURE.md|docs/authority/ACCEPTANCE_MATRIX.md|docs/authority/CURRENT.md|docs/authority/RPD.md|docs/authority/SSOT.md|docs/evidence/P01_V2.24.0_UX_UI_CANDIDATE_20260828.md) ;; *) echo "unexpected closure file: $f" >&2; exit 1;; esac; done
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php tests/unit/system_baseline_human_ui_contract.php | grep -Fx 'SYSTEM_BASELINE_HUMAN_UI_CONTRACT=PASS'
+          python3 -m json.tool VF_PROJECT.json >/dev/null
+          grep -F 'Owner Production Runtime: V2.23.0' docs/authority/CURRENT.md
+          grep -F 'UI Audit Fix Machine + Screenshots: 33153514954 / PASS' docs/authority/CURRENT.md
+          grep -F 'Human-readable System Baseline' docs/authority/CURRENT.md docs/authority/SSOT.md docs/authority/ACCEPTANCE_MATRIX.md
+          echo P01_V224_FINAL_STATIC=PASS
+      - name: Fresh runtime exact-source regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cleanup(){ if test -f /tmp/p01-v224-final.pid; then kill "$(cat /tmp/p01-v224-final.pid)" 2>/dev/null || true; fi; }
+          trap cleanup EXIT
+          rm -rf /tmp/p01-v224-final /tmp/p01-v224-final.cookies /tmp/p01-v224-final-*.html /tmp/p01-v224-final-*.json
+          cp -a p01/src /tmp/p01-v224-final
+          cd /tmp/p01-v224-final
+          php -S 127.0.0.1:18247 -t . >/tmp/p01-v224-final-server.log 2>&1 & echo $! >/tmp/p01-v224-final.pid
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -sS http://127.0.0.1:18247/setup.php -o /tmp/p01-v224-final-probe.html; then ready=1; break; fi
+            sleep 1
+          done
+          if test "$ready" != 1; then cat /tmp/p01-v224-final-server.log >&2; exit 1; fi
+          curl -sS -c /tmp/p01-v224-final.cookies -b /tmp/p01-v224-final.cookies http://127.0.0.1:18247/setup.php -o /tmp/p01-v224-final-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v224-final-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          SETUP_CODE=$(curl -sS -o /tmp/p01-v224-final-setup-post.html -w '%{http_code}' -c /tmp/p01-v224-final.cookies -b /tmp/p01-v224-final.cookies -X POST http://127.0.0.1:18247/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V224 Final Candidate' --data-urlencode 'admin_password=P01V224!ReleaseCandidate' --data-urlencode 'admin_password_confirm=P01V224!ReleaseCandidate')
+          echo SETUP_HTTP="$SETUP_CODE"
+          if ! test -f app/.runtime.php; then
+            echo 'SETUP_RUNTIME_FILE=MISSING' >&2
+            grep -o '安装失败：[^<]*\|程序初始化失败：[^<]*\|class="error"[^>]*>[^<]*' /tmp/p01-v224-final-setup-post.html || true
+            cat /tmp/p01-v224-final-server.log >&2
+            exit 1
+          fi
+          LOGIN_CODE=$(curl -sS -o /tmp/p01-v224-final-login.json -w '%{http_code}' -c /tmp/p01-v224-final.cookies -b /tmp/p01-v224-final.cookies -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18247/api.php?action=login' --data '{"password":"P01V224!ReleaseCandidate"}')
+          echo LOGIN_HTTP="$LOGIN_CODE"
+          cat /tmp/p01-v224-final-login.json
+          jq -e '.ok==true' /tmp/p01-v224-final-login.json >/dev/null
+          for route in surfaces.php start.php channels.php watch.php surface-manager.php; do
+            curl -fsS -c /tmp/p01-v224-final.cookies -b /tmp/p01-v224-final.cookies "http://127.0.0.1:18247/$route" -o "/tmp/p01-v224-final-${route%.php}.html"
+            grep -F 'vf-app-sidebar' "/tmp/p01-v224-final-${route%.php}.html" >/dev/null
+            grep -F 'surface-ux-closure.css' "/tmp/p01-v224-final-${route%.php}.html" >/dev/null
+          done
+          curl -fsS -c /tmp/p01-v224-final.cookies -b /tmp/p01-v224-final.cookies http://127.0.0.1:18247/system-baseline.php -o /tmp/p01-v224-final-system-baseline.html
+          grep -F '系统关键规则正常' /tmp/p01-v224-final-system-baseline.html >/dev/null
+          grep -F '技术详情（给开发 / 排障使用）' /tmp/p01-v224-final-system-baseline.html >/dev/null
+          grep -F '<details class="vf-baseline-tech">' /tmp/p01-v224-final-system-baseline.html >/dev/null
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php cli/surface-verify.php | tee /tmp/p01-v224-final-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v224-final-surface.txt
+          grep -Fx "WORKING_SCHEMA=$SCHEMA" /tmp/p01-v224-final-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v224-final-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v224-final-baseline.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          echo P01_V224_FINAL_RUNTIME=PASS
+      - name: Verdict
+        run: |
+          echo P01_V224_FINAL_EXACT_DEVELOP="$EXACT_DEVELOP"
+          echo P01_V224_FINAL_CANDIDATE=PASS
+          echo TARGET_RELEASE=2.24.0
+          echo SCHEMA="$SCHEMA"
+          echo RELEASE=NO
+          echo PRODUCTION=NO
