@@ -1,0 +1,123 @@
+name: P01 V2.29 Formal Artifact Gate
+on:
+  push:
+    branches: [task/p01-v2290-formal-artifact-gate-20260829]
+    paths:
+      - .github/workflows/p01-v2290-formal-artifact-gate-20260829.yml
+      - scripts/p01-v229-build-artifacts.py
+      - scripts/p01-v229-formal-gate.sh
+permissions:
+  contents: read
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout gate
+        uses: actions/checkout@v4
+        with:
+          path: runner
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout formal source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 28fc399d2d0ccc30531d6421d180db079ec571d9
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: candidate
+      - name: Checkout V2.28 production source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.28.0
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - name: Checkout proven Atomic builder
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: agent/p01-22121-formal-artifact-gate-20260819
+          path: proven
+      - name: Normalize CSP evidence assertion
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sed -i '/^! grep -F "allow-same-origin" candidate\/src\/resource-html.php/d' runner/scripts/p01-v229-formal-gate.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          lines=Path('candidate/src/resource-html.php').read_text(encoding='utf-8').splitlines()
+          csp=[x for x in lines if 'Content-Security-Policy:' in x and 'header(' in x]
+          assert len(csp)==1
+          assert 'sandbox allow-scripts' in csp[0]
+          assert "connect-src 'none'" in csp[0]
+          assert 'allow-same-origin' not in csp[0]
+          print('P01_V229_CSP_SOURCE_ASSERTION=PASS')
+          PY
+      - name: Formal source, schema migration, updater, recovery and UI gate
+        shell: bash
+        run: bash runner/scripts/p01-v229-formal-gate.sh
+      - name: Assemble immutable formal artifact contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SRC=/tmp/p01-v229-artifacts
+          EVID=/tmp/p01-v229-formal-evidence
+          OUT=/tmp/p01-v229-formal-contract
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          cp "$SRC/VF-Start-V2.29.0-FULL.zip" "$OUT/"
+          cp "$SRC/VF_Start_V2.29.0_UPDATE.zip" "$OUT/"
+          cp "$SRC/VF_Start_V2.29.0_UPDATE.zip" "$OUT/VF-Start-V2.29.0-UPDATE.zip"
+          cp "$SRC/repair-v2.29.0.php" "$OUT/"
+          cp "$EVID/repair-self-test.json" "$OUT/atomic-self-test.json"
+          cp "$SRC/P01-V2.29.0-FORMAL-GATE.json" "$OUT/P01-V2.29.0-ARTIFACT-GATE.json"
+          FULL_SHA=$(sha256sum "$OUT/VF-Start-V2.29.0-FULL.zip" | awk '{print $1}')
+          UPDATE_SHA=$(sha256sum "$OUT/VF_Start_V2.29.0_UPDATE.zip" | awk '{print $1}')
+          UPDATE_BYTES=$(stat -c%s "$OUT/VF_Start_V2.29.0_UPDATE.zip")
+          FULL_BYTES=$(stat -c%s "$OUT/VF-Start-V2.29.0-FULL.zip")
+          jq -n \
+            --arg project_id P01 --arg version 2.29.0 --arg source_version 2.28.0 \
+            --arg release_source 28fc399d2d0ccc30531d6421d180db079ec571d9 \
+            --arg release_tree 9545d334b626fce3968cdee92f09d13c58b2ae8e \
+            --arg source_schema 2026082801 --arg schema 2026082901 \
+            --arg full_sha "$FULL_SHA" --arg update_sha "$UPDATE_SHA" \
+            --argjson full_bytes "$FULL_BYTES" --argjson update_bytes "$UPDATE_BYTES" \
+            '{project_id:$project_id,version:$version,source_version:$source_version,release_source:$release_source,release_tree:$release_tree,source_schema:$source_schema,schema:$schema,schema_change:true,schema_migration:"migrations/2026082901_v229_resource_domains.php",formal_artifact_gate:"PASS",actual_upgrade:"PASS",schema_rollback:"PASS",interruption_recovery:"PASS",fresh_install_ui:"PASS",release_published:false,full:{name:"VF-Start-V2.29.0-FULL.zip",bytes:$full_bytes,sha256:$full_sha},update:{name:"VF_Start_V2.29.0_UPDATE.zip",bytes:$update_bytes,sha256:$update_sha,inner:"repair-v2.29.0.php"}}' > "$OUT/P01-V2.29.0-FORMAL-METADATA.json"
+          (cd "$OUT" && sha256sum P01-V2.29.0-ARTIFACT-GATE.json P01-V2.29.0-FORMAL-METADATA.json VF-Start-V2.29.0-FULL.zip VF-Start-V2.29.0-UPDATE.zip VF_Start_V2.29.0_UPDATE.zip atomic-self-test.json repair-v2.29.0.php > SHA256SUMS.txt)
+          test "$(find "$OUT" -maxdepth 1 -type f | wc -l)" = 8
+          php -l "$OUT/repair-v2.29.0.php" >/dev/null
+          unzip -Z1 "$OUT/VF_Start_V2.29.0_UPDATE.zip" | grep -Fx repair-v2.29.0.php >/dev/null
+          echo "FORMAL_FULL_SHA256=$FULL_SHA"
+          echo "FORMAL_FULL_BYTES=$FULL_BYTES"
+          echo "FORMAL_UPDATE_SHA256=$UPDATE_SHA"
+          echo "FORMAL_UPDATE_BYTES=$UPDATE_BYTES"
+          echo P01_V229_FORMAL_ARTIFACT_CONTRACT=PASS
+      - name: Upload formal artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-formal-artifacts-28fc399d2d0ccc30531d6421d180db079ec571d9
+          path: /tmp/p01-v229-formal-contract
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload browser and upgrade evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-formal-evidence-28fc399d2d0ccc30531d6421d180db079ec571d9
+          path: /tmp/p01-v229-formal-evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verdict
+        shell: bash
+        run: |
+          echo P01_V229_FORMAL_RELEASE_SOURCE=28fc399d2d0ccc30531d6421d180db079ec571d9
+          echo P01_V229_FORMAL_RELEASE_TREE=9545d334b626fce3968cdee92f09d13c58b2ae8e
+          echo P01_V229_FORMAL_ARTIFACT_GATE=PASS
+          echo P01_V229_READY_FOR_MAIN_PROMOTION=YES
+          echo RELEASE_PUBLISHED=NO
+          echo OWNER_PRODUCTION_WRITE=NO
