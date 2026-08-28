@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 : "${GH_TOKEN:?GH_TOKEN required}"
 
-CORE_SOURCE='91a854fd8ffa4c497d37c7a043e78d05ada07647'
+CORE_SOURCE='0e834d734a0a1ed6b2173feee3435eb8f6015d96'
 RELEASE_SOURCE='a9300382d3a862fb599b8b928961ead38dee8f31'
 RELEASE_ID='378572142'
 UPDATE_ASSET_ID='533972862'
@@ -20,7 +20,7 @@ import json,sys
 m=json.load(open(sys.argv[1]))
 expected={
  'schema_version':'1.0','project_id':'P06','component_id':'APP','enabled':True,
- 'target_version':'0.1.15','update_type':'ATOMIC','from_versions':['0.1.14'],
+ 'target_version':'0.1.15','update_type':'ATOMIC','from_versions':['0.1.12','0.1.13','0.1.14'],
  'schema_from':'3','schema_to':'3','repository':'llhzx2018/vf-press','release_tag':'v0.1.15',
  'release_id':378572142,'product_identity':'a9300382d3a862fb599b8b928961ead38dee8f31',
  'asset_name':'VF_Press_V0.1.15_UPDATE.zip','asset_bytes':278578,
@@ -52,4 +52,5 @@ test "$(stat -c %s "$ROOT/VF_Press_V0.1.15_UPDATE.zip")" = "$UPDATE_BYTES"
 test "$(sha256sum "$ROOT/VF_Press_V0.1.15_UPDATE.zip" | awk '{print $1}')" = "$UPDATE_SHA"
 echo P06_V0115_DOWNLOADED_UPDATE_SHA=PASS
 echo P06_V0115_CORE_UPDATES_SOURCE="$CORE_SOURCE"
+echo P06_V0115_SUPPORTED_FROM='0.1.12,0.1.13,0.1.14'
 echo P06_V0115_DISTRIBUTION_MANIFEST_GATE=PASS
