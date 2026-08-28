@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 P06="${1:-source}"
-EXACT_SOURCE="d3b8526f5783508b65bc86c637149457935553f7"
+EXACT_SOURCE="644e43538bf18a72195d1235ba97e38b33d98756"
 BASE_MAIN="cadd08903c0835af2cccbcbbec82a92e4e9ea4e8"
 EXPECTED_VERSION="0.1.15"
 EXPECTED_SCHEMA="3"
@@ -22,8 +22,9 @@ assert p['lifecycle']=='PRODUCTION_CURRENT'
 PY
 
 mapfile -t changed < <(git diff --name-only "$BASE_MAIN" "$EXACT_SOURCE")
-test "${#changed[@]}" -eq 3
+test "${#changed[@]}" -eq 4
 for file in \
+  bin/backoffice-self-test.php \
   bin/operations-ui-self-test.php \
   public/assets/backoffice.css \
   src/Http/Studio/BackofficeShell.php; do
@@ -70,8 +71,6 @@ php bin/common-baseline-v2-self-test.php
 php bin/common-baseline-human-ui-self-test.php
 echo P06_PR13_FORMAL_REGRESSION=PASS
 
-# Explicit absorption guards: the new operations-first chrome and all later-main
-# System/Baseline/Health capabilities must coexist in the exact source.
 php -r '
 $s=file_get_contents("src/Http/Studio/BackofficeShell.php");
 foreach (["P06 Operations","出版运维控制台","<p>内容运营</p>","<p>系统维护</p>","vf-admin-nav-indicator","/studio/system","/studio/system/baseline","/studio/system/health"] as $x) {
@@ -166,11 +165,9 @@ echo P06_PR13_HTTP_SYSTEM_BASELINE_HEALTH=PASS
 echo P06_PR13_STEP_UP_GUARD=PASS
 
 php bin/migrate.php >/tmp/p06-pr13-final-migrate
- grep -Fq MIGRATION_PASS /tmp/p06-pr13-final-migrate
+grep -Fq MIGRATION_PASS /tmp/p06-pr13-final-migrate
 php -r '$pdo=new PDO("sqlite:" . getenv("VF_PRESS_DB_PATH")); if($pdo->query("PRAGMA integrity_check")->fetchColumn()!=="ok") exit(1); if((int)$pdo->query("SELECT MAX(version) FROM schema_migrations")->fetchColumn()!==3) exit(2); echo "P06_PR13_SQLITE_INTEGRITY=PASS\n";'
 
-# composer install may create an untracked lock because this repository has no
-# committed lock. Remove only that generated file before the cleanliness gate.
 if ! git ls-files --error-unmatch composer.lock >/dev/null 2>&1; then rm -f composer.lock; fi
 test -z "$(git status --short --untracked-files=all)"
 
