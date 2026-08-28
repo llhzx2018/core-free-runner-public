@@ -22,11 +22,19 @@ class WorkflowArchiveTests(unittest.TestCase):
     def test_manifest_contains_only_public_safe_metadata(self):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
-        raw = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(value["entry_count"], 421)
+        self.assertEqual(value["schema"], "core-free-runner-workflow-archive/v11")
+        self.assertEqual(value["entry_count"], 507)
         self.assertEqual(value["category_counts"]["historical-version"], 382)
+        self.assertEqual(value["category_counts"]["late-active"], 86)
+        self.assertEqual(value["delta"]["git_tree_sha"], MODULE.LATE_BATCH_TREE_SHA)
+        self.assertEqual(value["delta"]["source_commit"], MODULE.LATE_BATCH_SOURCE_COMMIT)
+        self.assertEqual(value["active_current_workflows"], sorted(MODULE.ACTIVE_CURRENT_WORKFLOW_NAMES))
+
+        v10 = MODULE.build_v10_manifest(root)
+        raw = json.dumps(v10, ensure_ascii=False)
+        self.assertEqual(v10["entry_count"], 421)
         allowed_keys = {"source_path", "archive_path", "category", "source_commit", "bytes", "sha256"}
-        for entry in value["entries"]:
+        for entry in v10["entries"]:
             self.assertEqual(set(entry), allowed_keys)
             self.assertNotIn("\n", entry["source_path"])
             self.assertNotIn("\n", entry["archive_path"])
@@ -34,6 +42,14 @@ class WorkflowArchiveTests(unittest.TestCase):
             self.assertEqual(len(entry["sha256"]), 64)
         self.assertNotIn("${{ secrets.", raw.lower())
         self.assertNotIn("private_data", raw.lower())
+
+    def test_late_active_batch_is_tree_locked(self):
+        root = Path(__file__).resolve().parents[1]
+        archived = list((root / MODULE.LATE_BATCH).glob("*.yml"))
+        self.assertEqual(len(archived), 86)
+        self.assertEqual(MODULE._git_tree_sha(root, MODULE.LATE_BATCH), MODULE.LATE_BATCH_TREE_SHA)
+        active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
+        self.assertTrue(active.isdisjoint({path.name for path in archived}))
 
     def test_current_core_agent_harness_remains_active(self):
         root = Path(__file__).resolve().parents[1]
@@ -96,10 +112,6 @@ class WorkflowArchiveTests(unittest.TestCase):
             destination = root / MODULE.ARCHIVE_BATCH / "temporary" / "temp-example.yml"
             destination.parent.mkdir(parents=True)
             destination.write_text("name: archived\n", encoding="utf-8")
-            manifest = MODULE.build_manifest(root)
-            target = root / MODULE.MANIFEST_PATH
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(manifest), encoding="utf-8")
             active = root / ".github/workflows/temp-example.yml"
             active.parent.mkdir(parents=True)
             active.write_text("name: active\n", encoding="utf-8")
