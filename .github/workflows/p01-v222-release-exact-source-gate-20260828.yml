@@ -1,0 +1,203 @@
+name: P01 V2.22.0 Release Exact Source Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v222-multi-surface-gate-20260828
+    paths:
+      - '.github/workflows/p01-v222-release-exact-source-gate-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      RELEASE_BRANCH: release/p01-v2.22.0-multi-surface-20260828
+      EXACT_SOURCE: 2c159b4b7ecfc03e79eff2e6103f7e2c768ded08
+      DEVELOP_SOURCE: c598f7977a1ec9137b84c2c5359fe07ad7a84baf
+      BASE_MAIN: c8928cc68c41a42d7debc6e9074df7a95f2551ce
+      PROD_SOURCE: 6bc09cd152210183972dcb3f2c361eb65a4cadab
+      PROD_VERSION: 2.21.25
+      RELEASE_VERSION: 2.22.0
+      PROD_SCHEMA: '2026080902'
+      RELEASE_SCHEMA: '2026082801'
+    steps:
+      - name: Checkout exact release candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p01
+      - name: Checkout V2.21.25 production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PROD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: false
+          path: prod
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - name: Release identity and syntax
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p01
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/$RELEASE_BRANCH" | awk '{print $1}')" = "$EXACT_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/develop | awk '{print $1}')" = "$DEVELOP_SOURCE"
+          test "$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')" = "$BASE_MAIN"
+          test "$(tr -d '\r\n' < VERSION)" = "$RELEASE_VERSION"
+          test "$(tr -d '\r\n' < src/VERSION.txt)" = "$RELEASE_VERSION"
+          grep -Fxq "define('VF_VERSION', '$RELEASE_VERSION');" src/app/bootstrap.php
+          python3 - <<'PY'
+          import json
+          x=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert x['production_version']=='2.21.25',x
+          assert x['working_version']=='2.22.0',x
+          assert x['candidate_version']=='2.22.0',x
+          assert str(x['schema_version'])=='2026080902',x
+          assert str(x['working_schema_version'])=='2026082801',x
+          assert str(x['candidate_schema_version'])=='2026082801',x
+          assert x['current_change']['develop_exact_source_machine']=='PASS',x
+          assert x['current_change']['develop_exact_source_machine_run']==33123190086,x
+          PY
+          mapfile -t changed < <(git diff --name-only "$DEVELOP_SOURCE" "$EXACT_SOURCE")
+          test "${#changed[@]}" -eq 5
+          for f in VERSION src/VERSION.txt src/app/bootstrap.php VF_PROJECT.json CHANGELOG.md; do printf '%s\n' "${changed[@]}" | grep -Fxq "$f"; done
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V222_RELEASE_IDENTITY_SYNTAX=PASS
+      - name: Fresh install and Surface HTTP gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-release-fresh /tmp/p01-v222-release-fresh.cookies
+          cp -a p01/src /tmp/p01-v222-release-fresh
+          cd /tmp/p01-v222-release-fresh
+          php -S 127.0.0.1:18230 -t . >/tmp/p01-v222-release-fresh-server.log 2>&1 &
+          echo $! >/tmp/p01-v222-release-fresh.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18230/setup.php -o /tmp/p01-v222-release-fresh-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-release-fresh.cookies -b /tmp/p01-v222-release-fresh.cookies http://127.0.0.1:18230/setup.php -o /tmp/p01-v222-release-fresh-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-release-fresh-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-release-fresh.cookies -b /tmp/p01-v222-release-fresh.cookies -X POST http://127.0.0.1:18230/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V222 Release Fresh' \
+            --data-urlencode 'admin_password=P01V222!ReleaseFresh' \
+            --data-urlencode 'admin_password_confirm=P01V222!ReleaseFresh' \
+            -o /tmp/p01-v222-release-fresh-post.html
+          php cli/verify.php | tee /tmp/p01-v222-release-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v222-release-verify.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo VF_VERSION;")" = "$RELEASE_VERSION"
+          php cli/surface-verify.php | tee /tmp/p01-v222-release-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-release-surface.txt
+          grep -Fx "WORKING_SCHEMA=$RELEASE_SCHEMA" /tmp/p01-v222-release-surface.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v222-release-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-release-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-release-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-release-baseline.txt
+          test "$(php -r "require 'app/bootstrap.php'; echo strtolower((string)vf_db()->query('PRAGMA integrity_check')->fetchColumn());")" = ok
+          test "$(php -r "require 'app/bootstrap.php'; echo count(vf_db()->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));")" = 0
+          curl -fsS http://127.0.0.1:18230/surfaces.php -o /tmp/p01-v222-release-surfaces.html
+          curl -fsS http://127.0.0.1:18230/channels.php -o /tmp/p01-v222-release-channels.html
+          curl -fsS http://127.0.0.1:18230/watch.php -o /tmp/p01-v222-release-watch.html
+          grep -F 'ONE DATA · MULTIPLE SURFACES' /tmp/p01-v222-release-surfaces.html >/dev/null
+          grep -F 'ANTI-ALGORITHM MEMORY' /tmp/p01-v222-release-channels.html >/dev/null
+          grep -F 'PERSONAL WATCHLIST' /tmp/p01-v222-release-watch.html >/dev/null
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18230/surface-manager.php)" = 302
+          kill "$(cat /tmp/p01-v222-release-fresh.pid)" 2>/dev/null || true
+          echo P01_V222_RELEASE_FRESH_HTTP=PASS
+      - name: V2.21.25 to V2.22.0 upgrade and data preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v222-release-upgrade /tmp/p01-v222-release-upgrade.cookies
+          cp -a prod/src /tmp/p01-v222-release-upgrade
+          cd /tmp/p01-v222-release-upgrade
+          php -S 127.0.0.1:18231 -t . >/tmp/p01-v222-release-upgrade-server.log 2>&1 &
+          echo $! >/tmp/p01-v222-release-upgrade.pid
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18231/setup.php -o /tmp/p01-v222-release-upgrade-setup.html && break; sleep 1; done
+          curl -fsS -c /tmp/p01-v222-release-upgrade.cookies -b /tmp/p01-v222-release-upgrade.cookies http://127.0.0.1:18231/setup.php -o /tmp/p01-v222-release-upgrade-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v222-release-upgrade-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v222-release-upgrade.cookies -b /tmp/p01-v222-release-upgrade.cookies -X POST http://127.0.0.1:18231/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V22125 Release Upgrade' \
+            --data-urlencode 'admin_password=P01V222!ReleaseUpgrade' \
+            --data-urlencode 'admin_password_confirm=P01V222!ReleaseUpgrade' \
+            -o /tmp/p01-v222-release-upgrade-post.html
+          php cli/verify.php
+          cat >/tmp/p01-v222-release-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-release-upgrade/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cid=$repo->createCategory(['name'=>'Release Gate Category','description'=>'preserve','is_private'=>false]);
+          $saved=$repo->saveLink(null,['category_id'=>$cid,'title'=>'Release Gate Channel','url'=>'https://www.youtube.com/@v222-release-gate','description'=>'preserve','is_private'=>false],'manual');
+          file_put_contents('/tmp/p01-v222-release-link-id',(string)$saved['id']);file_put_contents('/tmp/p01-v222-release-cat-id',(string)$cid);
+          PHP
+          php /tmp/p01-v222-release-seed.php
+          cp -a "$GITHUB_WORKSPACE/p01/src/." /tmp/p01-v222-release-upgrade/
+          cat >/tmp/p01-v222-release-migrate.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-release-upgrade/app/bootstrap.php';
+          $pdo=new PDO('sqlite:'.VF_DB_FILE,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC,PDO::ATTR_EMULATE_PREPARES=>false]);
+          $pdo->exec('PRAGMA foreign_keys=ON');$pdo->exec('PRAGMA busy_timeout=5000');(new VfMigrationRunner($pdo))->migrate('2.21.25','2.22.0');
+          PHP
+          php /tmp/p01-v222-release-migrate.php
+          test "$(php -r "require 'app/bootstrap.php'; echo VF_VERSION;")" = "$RELEASE_VERSION"
+          php cli/verify.php
+          php cli/surface-verify.php | tee /tmp/p01-v222-release-upgrade-surface.txt
+          grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-v222-release-upgrade-surface.txt
+          cat >/tmp/p01-v222-release-assert.php <<'PHP'
+          <?php
+          require '/tmp/p01-v222-release-upgrade/app/bootstrap.php';require_once '/tmp/p01-v222-release-upgrade/app/SurfaceRepository.php';
+          $db=vf_db();$linkId=(int)trim(file_get_contents('/tmp/p01-v222-release-link-id'));$catId=(int)trim(file_get_contents('/tmp/p01-v222-release-cat-id'));
+          if(!$db->query('SELECT id FROM links WHERE id='.$linkId)->fetchColumn()) throw new RuntimeException('link lost');
+          if(!$db->query('SELECT id FROM categories WHERE id='.$catId)->fetchColumn()) throw new RuntimeException('category lost');
+          if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==0) throw new RuntimeException('silent profiles');
+          $s=new VfSurfaceRepository($db);if(!array_filter($s->collection('start',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('default Start failed');
+          $s->upsertProfile($linkId,['surface'=>'channels','resource_kind'=>'youtube','note'=>'private','background_friendly'=>true]);
+          if(!array_filter($s->collection('channels',true)['links'],fn($x)=>(int)$x['id']===$linkId)) throw new RuntimeException('Channels assign failed');
+          $p=null;foreach($s->allAssets(false) as $r){if((int)$r['id']===$linkId){$p=$r;break;}}if(!$p) throw new RuntimeException('public missing');
+          foreach(['surface_note','last_surface_opened_at','media_status'] as $k) if((string)($p[$k]??'')!=='') throw new RuntimeException('privacy leak '.$k);
+          if((int)($p['background_friendly']??0)!==0) throw new RuntimeException('background leak');
+          if($s->recordOpen($linkId)!=='https://www.youtube.com/@v222-release-gate') throw new RuntimeException('recordOpen failed');
+          $s->resetToStart($linkId);if((int)$db->query('SELECT COUNT(*) FROM resource_surface_profiles WHERE link_id='.$linkId)->fetchColumn()!==0) throw new RuntimeException('reset failed');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok') throw new RuntimeException('integrity failed');
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)) throw new RuntimeException('fk failed');
+          echo "P01_V222_RELEASE_UPGRADE_DATA=PASS\n";
+          PHP
+          php /tmp/p01-v222-release-assert.php
+          php cli/baseline-verify.php | tee /tmp/p01-v222-release-upgrade-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v222-release-upgrade-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v222-release-upgrade-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-v222-release-upgrade-baseline.txt
+          kill "$(cat /tmp/p01-v222-release-upgrade.pid)" 2>/dev/null || true
+          echo P01_V222_RELEASE_UPGRADE=PASS
+      - name: Release exact source verdict
+        shell: bash
+        run: |
+          echo P01_V222_RELEASE_EXACT_SOURCE="$EXACT_SOURCE"
+          echo P01_V222_RELEASE_MACHINE=PASS
+          echo VERSION="$RELEASE_VERSION"
+          echo SCHEMA="$RELEASE_SCHEMA"
+          echo PRODUCTION=NO
