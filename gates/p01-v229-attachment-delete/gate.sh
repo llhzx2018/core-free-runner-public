@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${SOURCE_SHA:?}"
+: "${ROOT:?}"
+: "${PORT:?}"
+: "${ADMIN_PASS:?}"
+
+BASE="http://127.0.0.1:${PORT}"
+ART=/tmp/p01-attachment-delete
+rm -rf "$ROOT" "$ART" /tmp/p01-attachment-delete-browser
+mkdir -p "$ART"
+
+test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+node --check source/src/assets/workspace.js
+node --check source/src/assets/workspace-create-bundle.js
+node --check source/src/assets/workspace-rebaseline.js
+cp -a source/src "$ROOT"
+php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >"$ART/server.log" 2>&1 &
+SERVER_PID=$!
+trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+COOKIE="$ART/setup.cookies"
+for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/setup.php" -o "$ART/setup.html" && break || sleep 1; done
+CSRF=$(python3 -c 'import re; s=open("/tmp/p01-attachment-delete/setup.html",encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))')
+curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/setup.php" \
+  --data-urlencode "setup_csrf=$CSRF" \
+  --data-urlencode 'site_title=P01 Attachment Delete Gate' \
+  --data-urlencode "admin_password=$ADMIN_PASS" \
+  --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+  -o "$ART/setup-post.html"
+
+cat >"$ART/seed.php" <<'PHP'
+<?php
+declare(strict_types=1);
+$root=getenv('ROOT');
+require $root.'/app/bootstrap.php';
+$r=new VfRepository(vf_db());
+$id=$r->createCategory(['name'=>'附件一致性兼容归属','is_private'=>false,'sort_order'=>10]);
+if($id<=0) throw new RuntimeException('category');
+echo "CATEGORY_ID=$id\n";
+PHP
+ROOT="$ROOT" php "$ART/seed.php" | tee "$ART/category.txt"
+php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+
+python3 - <<'PY'
+import struct,zlib
+
+def chunk(t,d):
+    return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+
+def png(path,rgb,w=1200,h=800):
+    row=b'\x00'+bytes(rgb)*w
+    raw=row*h
+    data=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,6))+chunk(b'IEND',b'')
+    open(path,'wb').write(data)
+
+png('/tmp/p01-attachment-delete/a.png',(24,112,168))
+png('/tmp/p01-attachment-delete/b.png',(184,70,42))
+png('/tmp/p01-attachment-delete/c.png',(38,142,92))
+open('/tmp/p01-attachment-delete/valid.html','wb').write(b'<!doctype html><meta charset="utf-8"><h1>ATTACHMENT_DELETE_VALID</h1>')
+open('/tmp/p01-attachment-delete/invalid.html','wb').write(b'<!doctype html><h1>INVALID</h1>\x00<script>1</script>')
+PY
+
+echo P01_ATTACHMENT_DELETE_FRESH=PASS
+
+mkdir -p /tmp/p01-attachment-delete-browser
+cd /tmp/p01-attachment-delete-browser
+npm init -y >/dev/null 2>&1
+npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+npx playwright install chromium >/dev/null 2>&1
+
+cat >seed.mjs <<'JS'
+import { chromium } from 'playwright';
+const base='http://127.0.0.1:18457';
+const browser=await chromium.launch({headless:true});
+const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01AttachmentDeleteGate!2026'}});
+if(!login.ok()) throw new Error('login');
+const p=await ctx.newPage();
+const waitBundle=async()=>{await p.locator('script[src*="workspace-create-bundle.js"]').waitFor({state:'attached',timeout:10000});await p.waitForTimeout(250)};
+const openAdd=async()=>{await p.locator('[data-open-add]').first().click();return p.locator('[data-add-form]')};
+const addTopic=async(title,cover)=>{
+  await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await waitBundle();const f=await openAdd();
+  await f.locator('select[name="source_kind"]').selectOption('hosted_html');
+  await f.locator('input[name="title"]').fill(title);
+  await f.locator('input[name="resource_kind"]').fill('附件一致性');
+  await f.locator('input[name="is_private"]').uncheck();
+  await f.locator('input[name="cover"]').setInputFiles(cover);
+  await f.locator('input[name="html"]').setInputFiles('/tmp/p01-attachment-delete/valid.html');
+  const response=p.waitForResponse(r=>r.url().endsWith('/workspace-create.php')&&r.request().method()==='POST');
+  await f.locator('button[type="submit"]:not([data-add-continue])').click();
+  const r=await response;const j=await r.json();if(!r.ok()||!j.ok) throw new Error('topic create '+JSON.stringify(j));
+  await p.waitForTimeout(700);
+};
+const addChannel=async()=>{
+  await p.goto(base+'/channels.php?scope=public',{waitUntil:'networkidle'});await waitBundle();const f=await openAdd();
+  await f.locator('input[name="url"]').fill('https://example.com/attachment-delete-channel');
+  await f.locator('input[name="title"]').fill('切换导航封面资源');
+  await f.locator('input[name="resource_kind"]').fill('测试频道');
+  await f.locator('input[name="is_private"]').uncheck();
+  await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-attachment-delete/a.png');
+  const response=p.waitForResponse(r=>r.url().endsWith('/workspace-create.php')&&r.request().method()==='POST');
+  await f.locator('button[type="submit"]:not([data-add-continue])').click();
+  const r=await response;const j=await r.json();if(!r.ok()||!j.ok) throw new Error('channel create '+JSON.stringify(j));
+  await p.waitForTimeout(700);
+};
+await addTopic('封面删除取消专题','/tmp/p01-attachment-delete/a.png');
+await addTopic('封面删除回滚专题','/tmp/p01-attachment-delete/a.png');
+await addChannel();
+await p.screenshot({path:'/tmp/p01-attachment-delete/seed.png',fullPage:true});
+await browser.close();
+console.log('P01_ATTACHMENT_DELETE_SEED=PASS');
+JS
+node seed.mjs | grep -Fx P01_ATTACHMENT_DELETE_SEED=PASS
+
+cat >"$ART/snapshot.php" <<'PHP'
+<?php
+declare(strict_types=1);
+$root=getenv('ROOT');
+require $root.'/app/bootstrap.php';
+require_once $root.'/app/ResourceAssetStore.php';
+$db=vf_db();$store=new VfResourceAssetStore($db);$out=[];
+foreach(['封面删除取消专题','封面删除回滚专题','切换导航封面资源'] as $title){
+    $q=$db->prepare("SELECT id FROM links WHERE title=? AND lifecycle_state='active'");$q->execute([$title]);$id=(int)$q->fetchColumn();
+    if($id<=0) throw new RuntimeException('missing '.$title);
+    $cover=$store->coverRecord($id);if(!$cover) throw new RuntimeException('cover '.$title);
+    $html=$store->htmlRecord($id);
+    $out[$title]=['id'=>$id,'cover_hash'=>$cover['file_hash'],'cover_path'=>$cover['path'],'html_hash'=>$html['file_hash']??'','html_path'=>$html['path']??''];
+}
+file_put_contents('/tmp/p01-attachment-delete/original.json',json_encode($out,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+echo "P01_ATTACHMENT_DELETE_SNAPSHOT=PASS\n";
+PHP
+ROOT="$ROOT" php "$ART/snapshot.php" | grep -Fx P01_ATTACHMENT_DELETE_SNAPSHOT=PASS
+
+cat >flows.mjs <<'JS'
+import { chromium } from 'playwright';
+const base='http://127.0.0.1:18457';
+const browser=await chromium.launch({headless:true});
+const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01AttachmentDeleteGate!2026'}});if(!login.ok())throw new Error('login');
+const p=await ctx.newPage();
+const waitBundle=async()=>{await p.locator('script[src*="workspace-create-bundle.js"]').waitFor({state:'attached',timeout:10000});await p.waitForTimeout(250)};
+const openTopic=async(title)=>{await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await waitBundle();const card=p.locator('.vf-topic-card').filter({hasText:title});await card.locator('[data-edit-id]').first().click();return p.locator('[data-detail-form]')};
+let legacyCalls=0;
+p.on('request',r=>{if(r.method()==='POST'&&(r.url().endsWith('/resource-media.php')||r.url().endsWith('/workspace-action.php'))) legacyCalls++});
+let f=await openTopic('封面删除取消专题');
+await f.locator('[data-cover-delete]').click();
+await p.waitForTimeout(350);
+if(legacyCalls!==0) throw new Error('staged delete called legacy endpoint');
+if(await f.locator('input[name="remove_cover"]').inputValue()!=='1') throw new Error('remove flag');
+await f.locator('footer [data-close-panel]').click();
+await p.waitForTimeout(250);
+await p.reload({waitUntil:'networkidle'});await waitBundle();
+let card=p.locator('.vf-topic-card').filter({hasText:'封面删除取消专题'});await card.locator('[data-edit-id]').first().click();f=p.locator('[data-detail-form]');
+if(!(await f.locator('[data-cover-preview] img').isVisible())) throw new Error('cover lost after cancel');
+await f.locator('[data-cover-delete]').click();
+let response=p.waitForResponse(r=>r.url().endsWith('/workspace-save.php')&&r.request().method()==='POST');
+await f.locator('button[type="submit"]').click();
+let r=await response;let j=await r.json();if(!r.ok()||!j.ok||!j.cover_removed) throw new Error('saved delete '+JSON.stringify(j));
+await p.waitForTimeout(700);
+
+f=await openTopic('封面删除回滚专题');
+await f.locator('[data-cover-delete]').click();
+await f.locator('input[name="html"]').setInputFiles('/tmp/p01-attachment-delete/invalid.html');
+response=p.waitForResponse(x=>x.url().endsWith('/workspace-save.php')&&x.request().method()==='POST');
+await f.locator('button[type="submit"]').click();
+r=await response;j=await r.json();if(r.status()!==422||j.ok) throw new Error('rollback unexpectedly succeeded');
+await p.getByText(/原资源与附件保持不变/).waitFor({timeout:10000});
+await p.screenshot({path:'/tmp/p01-attachment-delete/rollback.png',fullPage:true});
+await p.reload({waitUntil:'networkidle'});await waitBundle();
+card=p.locator('.vf-topic-card').filter({hasText:'封面删除回滚专题'});await card.locator('[data-edit-id]').first().click();f=p.locator('[data-detail-form]');
+await f.locator('[data-cover-delete]').click();
+await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-attachment-delete/b.png');
+await p.waitForTimeout(100);
+if(await f.locator('input[name="remove_cover"]').inputValue()!=='0') throw new Error('new cover did not cancel removal');
+response=p.waitForResponse(x=>x.url().endsWith('/workspace-save.php')&&x.request().method()==='POST');
+await f.locator('button[type="submit"]').click();
+r=await response;j=await r.json();if(!r.ok()||!j.ok) throw new Error('replacement failed '+JSON.stringify(j));
+await p.waitForTimeout(700);
+
+await p.goto(base+'/channels.php?scope=public',{waitUntil:'networkidle'});await waitBundle();
+card=p.locator('[data-asset-row]').filter({hasText:'切换导航封面资源'});await card.locator('[data-edit-id]').first().click();f=p.locator('[data-detail-form]');
+await f.locator('select[name="surface"]').selectOption('start');
+response=p.waitForResponse(x=>x.url().endsWith('/workspace-save.php')&&x.request().method()==='POST');
+await f.locator('button[type="submit"]').click();
+r=await response;j=await r.json();if(!r.ok()||!j.ok||!j.cover_removed) throw new Error('start switch cover cleanup failed '+JSON.stringify(j));
+await p.waitForTimeout(700);
+await p.screenshot({path:'/tmp/p01-attachment-delete/final.png',fullPage:true});
+await browser.close();
+console.log('P01_ATTACHMENT_DELETE_BROWSER=PASS');
+JS
+node flows.mjs | grep -Fx P01_ATTACHMENT_DELETE_BROWSER=PASS
+
+cat >"$ART/verify-state.php" <<'PHP'
+<?php
+declare(strict_types=1);
+$root=getenv('ROOT');
+require $root.'/app/bootstrap.php';
+require_once $root.'/app/ResourceAssetStore.php';
+$db=vf_db();$store=new VfResourceAssetStore($db);$old=json_decode(file_get_contents('/tmp/p01-attachment-delete/original.json'),true);
+$get=function(string $title)use($db){$q=$db->prepare("SELECT id FROM links WHERE title=? AND lifecycle_state='active'");$q->execute([$title]);return (int)$q->fetchColumn();};
+$idA=$get('封面删除取消专题');
+if($store->coverRecord($idA)!==null) throw new RuntimeException('saved cover delete did not remove row');
+if(is_file((string)$old['封面删除取消专题']['cover_path'])) throw new RuntimeException('saved cover delete left file');
+if(!$store->htmlRecord($idA)) throw new RuntimeException('cover delete damaged html');
+$idB=$get('封面删除回滚专题');$coverB=$store->coverRecord($idB);$htmlB=$store->htmlRecord($idB);
+if(!$coverB||!$htmlB) throw new RuntimeException('rollback/replacement asset missing');
+if((string)$coverB['file_hash']===(string)$old['封面删除回滚专题']['cover_hash']) throw new RuntimeException('new cover not committed');
+if((string)$htmlB['file_hash']!==(string)$old['封面删除回滚专题']['html_hash']) throw new RuntimeException('html changed');
+$idC=$get('切换导航封面资源');
+if($store->coverRecord($idC)!==null) throw new RuntimeException('start switch cover survived');
+if(is_file((string)$old['切换导航封面资源']['cover_path'])) throw new RuntimeException('start switch file survived');
+$p=$db->prepare('SELECT domain_key FROM resource_domain_profiles WHERE link_id=?');$p->execute([$idC]);if($p->fetchColumn()!==false) throw new RuntimeException('start profile survived');
+$assetRoot=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets';
+if(glob($assetRoot.'/covers/*.txn-*')?:[]) throw new RuntimeException('cover txn orphan');
+if(glob($assetRoot.'/html/*.txn-*')?:[]) throw new RuntimeException('html txn orphan');
+if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok') throw new RuntimeException('integrity');
+if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)) throw new RuntimeException('fk');
+echo "P01_ATTACHMENT_DELETE_DB_FS=PASS\n";
+PHP
+ROOT="$ROOT" php "$ART/verify-state.php" | grep -Fx P01_ATTACHMENT_DELETE_DB_FS=PASS
+
+ADMIN_COOKIE="$ART/admin.cookies"
+curl -fsS -c "$ADMIN_COOKIE" -b "$ADMIN_COOKIE" -H 'Content-Type: application/json' -X POST "$BASE/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" >"$ART/login.json"
+curl -fsS -c "$ADMIN_COOKIE" -b "$ADMIN_COOKIE" "$BASE/topics.php?scope=public" -o "$ART/topics.html"
+CSRF=$(python3 -c 'import re,json,html; s=open("/tmp/p01-attachment-delete/topics.html",encoding="utf-8").read(); m=re.search(r"<script type=\"application/json\" id=\"vf-workspace-data\">(.*?)</script>",s,re.S); assert m; print(json.loads(html.unescape(m.group(1)))["csrf"])')
+BEFORE=$(ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";echo (int)vf_db()->query("SELECT COUNT(*) FROM links WHERE lifecycle_state=\"active\"")->fetchColumn();')
+HTTP=$(curl -sS -o "$ART/legacy-create.json" -w '%{http_code}' -c "$ADMIN_COOKIE" -b "$ADMIN_COOKIE" -X POST "$BASE/workspace-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=create' --data-urlencode 'category_id=1' --data-urlencode 'title=LEGACY_SHOULD_NOT_CREATE' --data-urlencode 'url=https://example.com/legacy-should-not-create')
+test "$HTTP" = 422
+grep -F '原子保存链' "$ART/legacy-create.json"
+AFTER=$(ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";echo (int)vf_db()->query("SELECT COUNT(*) FROM links WHERE lifecycle_state=\"active\"")->fetchColumn();')
+test "$BEFORE" = "$AFTER"
+ID=$(ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";$q=vf_db()->query("SELECT id FROM links WHERE title=\"封面删除回滚专题\"");echo (int)$q->fetchColumn();')
+HASH_BEFORE=$(ROOT="$ROOT" ID="$ID" php -r 'require getenv("ROOT")."/app/bootstrap.php";$q=vf_db()->prepare("SELECT file_hash FROM resource_asset_files WHERE link_id=? AND asset_kind=\"cover\"");$q->execute([(int)getenv("ID")]);echo (string)$q->fetchColumn();')
+HTTP=$(curl -sS -o "$ART/legacy-media.json" -w '%{http_code}' -c "$ADMIN_COOKIE" -b "$ADMIN_COOKIE" -X POST "$BASE/resource-media.php" --data-urlencode "csrf=$CSRF" --data-urlencode 'action=cover_delete' --data-urlencode "id=$ID")
+test "$HTTP" = 422
+grep -F 'ATOMIC_WORKSPACE_REQUIRED' "$ART/legacy-media.json"
+HASH_AFTER=$(ROOT="$ROOT" ID="$ID" php -r 'require getenv("ROOT")."/app/bootstrap.php";$q=vf_db()->prepare("SELECT file_hash FROM resource_asset_files WHERE link_id=? AND asset_kind=\"cover\"");$q->execute([(int)getenv("ID")]);echo (string)$q->fetchColumn();')
+test -n "$HASH_BEFORE" && test "$HASH_BEFORE" = "$HASH_AFTER"
+echo P01_ATTACHMENT_DELETE_LEGACY_FAIL_CLOSED=PASS
+
+php "$ROOT/cli/verify.php" | tee "$ART/verify.txt" | grep -Fx VERIFY_PASS=YES
+ROOT="$ROOT" php -r 'require getenv("ROOT")."/app/bootstrap.php";$db=vf_db();if((string)$db->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(2);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(3);echo "P01_ATTACHMENT_DELETE_SQLITE=PASS\n";' | tee "$ART/sqlite.txt"
+grep -Fx P01_ATTACHMENT_DELETE_SQLITE=PASS "$ART/sqlite.txt"
+{
+  echo "SOURCE_SHA=$SOURCE_SHA"
+  echo "SOURCE_TREE=$(git -C source rev-parse HEAD^{tree})"
+  echo 'P01_ATTACHMENT_DELETE_CONSISTENCY_GATE=PASS'
+} >"$ART/evidence.txt"
+echo P01_ATTACHMENT_DELETE_GATE=PASS
