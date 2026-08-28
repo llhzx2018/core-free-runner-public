@@ -1,0 +1,297 @@
+name: P01 V2.27 to V2.28 Remote Online Update Gate
+on:
+  push:
+    branches: [task/p01-v2280-remote-online-update-gate-20260829]
+    paths:
+      - .github/workflows/p01-v2280-remote-online-update-gate-20260829.yml
+permissions:
+  contents: read
+jobs:
+  online-update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      SOURCE_VERSION: '2.27.0'
+      TARGET_VERSION: '2.28.0'
+      SOURCE_SHA: 8c3d18e1243d4b6ddc40bc7922746131a5d0d9c3
+      FORMAL_SOURCE: e010d484c8879737503a02612d0ba8cff1d2fd7d
+      FORMAL_TREE: abb37ea592231a0076b96a5222fbd2e3d34a74cf
+      CORE_UPDATES_MAIN: b9169523a9c7c7584fc77f982d872676d8eb3712
+      RELEASE_ID: '378625381'
+      UPDATE_BYTES: '1255387'
+      UPDATE_SHA: 7a8f8ad9417edd6305494f1228b7953791b91afd539b31d9bac16490f089581f
+      SCHEMA: '2026082801'
+      ROOT: /tmp/p01-v228-remote-owner
+      PORT: '18358'
+      ADMIN_PASS: 'P01V228!RemoteOwner'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.27.0
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: updates
+      - name: Remote publication truth fence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < production/src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -Fx "define('VF_VERSION', '2.27.0');" production/src/app/bootstrap.php >/dev/null
+          test "$(git -C updates rev-parse HEAD)" = "$CORE_UPDATES_MAIN"
+          M=updates/projects/P01.json
+          jq -e --arg rid "$RELEASE_ID" --arg bytes "$UPDATE_BYTES" '
+            .project_id=="P01" and .component_id=="APP" and .enabled==true and
+            .target_version=="2.28.0" and .from_versions==["2.27.0"] and
+            .update_type=="ATOMIC" and .schema_from=="2026082801" and .schema_to=="2026082801" and
+            .repository=="llhzx2018/vf-start" and .release_tag=="v2.28.0" and
+            .asset_name=="VF_Start_V2.28.0_UPDATE.zip" and
+            (.asset_bytes|tostring)==$bytes and
+            .asset_sha256=="7a8f8ad9417edd6305494f1228b7953791b91afd539b31d9bac16490f089581f" and
+            (.release_id|tostring)==$rid and
+            .release_identity=="v2.28.0@e010d484c8879737503a02612d0ba8cff1d2fd7d" and
+            .backup_required==true and .rollback_supported==true
+          ' "$M" >/dev/null
+          test "$(git -C production ls-remote --tags origin refs/tags/v2.28.0 | awk '{print $1}')" = "$FORMAL_SOURCE"
+          R=$(gh api repos/llhzx2018/vf-start/releases/tags/v2.28.0)
+          test "$(jq -r .id <<<"$R")" = "$RELEASE_ID"
+          test "$(jq -r .draft <<<"$R")" = false
+          test "$(jq -r .prerelease <<<"$R")" = false
+          A=$(jq -c '.assets[]|select(.name=="VF_Start_V2.28.0_UPDATE.zip")' <<<"$R")
+          test -n "$A"
+          test "$(jq -r .size <<<"$A")" = "$UPDATE_BYTES"
+          test "$(jq -r .digest <<<"$A")" = "sha256:$UPDATE_SHA"
+          echo P01_V228_REMOTE_MANIFEST=PASS
+          echo P01_V228_REMOTE_RELEASE_METADATA=PASS
+      - name: Build isolated Owner-like V2.27 installation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "/tmp/p01-v228-${PORT}.cookies" /tmp/p01-v228-remote-evidence
+          mkdir -p /tmp/p01-v228-remote-evidence
+          cp -a production/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >"/tmp/p01-v228-${PORT}.log" 2>&1 &
+          echo $! >"/tmp/p01-v228-${PORT}.pid"
+          COOKIE="/tmp/p01-v228-${PORT}.cookies"
+          for i in $(seq 1 30); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o "/tmp/p01-v228-${PORT}-setup.html"; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re, os
+          p=os.environ['PORT']
+          s=open(f'/tmp/p01-v228-{p}-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=V228 Remote Online Gate" \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "/tmp/p01-v228-${PORT}-post.html"
+          test -f "$ROOT/app/.runtime.php"
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$SOURCE_VERSION"
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-v228-remote-evidence/pre-verify.txt | grep -Fx VERIFY_PASS=YES
+          echo P01_V227_OWNERLIKE_INSTALL=PASS
+      - name: Seed representative Owner data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v228-remote-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root = getenv('ROOT');
+          require $root . '/app/bootstrap.php';
+          require_once $root . '/app/SurfaceRepository.php';
+          $r = new VfRepository(vf_db());
+          $s = new VfSurfaceRepository(vf_db());
+          $start = $r->createCategory(['name'=>'Remote Keep Start','description'=>'','is_private'=>false]);
+          $channels = $r->createCategory(['name'=>'Remote Keep Channels','description'=>'','is_private'=>false]);
+          $watch = $r->createCategory(['name'=>'Remote Keep Watch','description'=>'','is_private'=>false]);
+          $ids = ['start_cat'=>$start,'channels_cat'=>$channels,'watch_cat'=>$watch,'favorite'=>0,'channel'=>0,'watch'=>0];
+          for ($i=1;$i<=15;$i++) {
+              $x=$r->saveLink(null,['category_id'=>$start,'title'=>'Remote Start '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://remote-start-'.$i.'.example.com','description'=>'preserve','tags'=>'remote','is_private'=>false,'is_favorite'=>$i===1],'manual');
+              if($i===1)$ids['favorite']=(int)$x['id'];
+          }
+          for ($i=1;$i<=65;$i++) {
+              $x=$r->saveLink(null,['category_id'=>$channels,'title'=>'Remote Channel '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://youtube.com/@remote-v228-'.$i,'description'=>'preserve','tags'=>'remote,频道','is_private'=>true],'manual');
+              $s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>$i%2===0,'note'=>$i===1?'remote channel note':'']);
+              if($i===1)$ids['channel']=(int)$x['id'];
+          }
+          $statuses=['want','watching','watched','favorite'];
+          for ($i=1;$i<=45;$i++) {
+              $x=$r->saveLink(null,['category_id'=>$watch,'title'=>'Remote Watch '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://remote-watch-'.$i.'.example.com','description'=>'preserve','tags'=>'remote,影视','is_private'=>true],'manual');
+              $s->upsertProfile((int)$x['id'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2000+$i%24,'media_status'=>$statuses[($i-1)%4],'note'=>$i===1?'remote watch note':'']);
+              if($i===1)$ids['watch']=(int)$x['id'];
+          }
+          file_put_contents('/tmp/p01-v228-remote-ids.json', json_encode($ids, JSON_THROW_ON_ERROR));
+          $p=vf_db();
+          if((int)$p->query('SELECT COUNT(*) FROM links')->fetchColumn()!==125) throw new RuntimeException('seed links mismatch');
+          if((int)$p->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==110) throw new RuntimeException('seed profiles mismatch');
+          echo "P01_V228_REMOTE_OWNER_SEED=PASS\n";
+          PHP
+          php /tmp/p01-v228-remote-seed.php | tee /tmp/p01-v228-remote-evidence/seed.txt | grep -Fx P01_V228_REMOTE_OWNER_SEED=PASS
+      - name: Execute real VfUpdateManager check prepare install against remote truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v228-real-online-update.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root = getenv('ROOT');
+          if (!is_string(getenv('VF_PRIVATE_READ_TOKEN')) || trim((string)getenv('VF_PRIVATE_READ_TOKEN'))==='') throw new RuntimeException('VF_PRIVATE_READ_TOKEN missing');
+          require $root . '/app/bootstrap.php';
+          require_once $root . '/app/UpdateManager.php';
+          $m = new VfUpdateManager(vf_db(), ['root'=>$root,'private_root'=>VF_PRIVATE_ROOT,'current_version'=>'2.27.0']);
+          $check = $m->check(true);
+          if (($check['ok']??false)!==true || ($check['current_version']??'')!=='2.27.0' || ($check['latest_version']??'')!=='2.28.0' || ($check['available']??false)!==true || ($check['can_update']??false)!==true) {
+              throw new RuntimeException('real online check did not offer V2.28.0: '.json_encode($check,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          }
+          $prepare = $m->prepare();
+          if (($prepare['ok']??false)!==true || ($prepare['from_version']??'')!=='2.27.0' || ($prepare['to_version']??'')!=='2.28.0' || ($prepare['release_tag']??'')!=='v2.28.0' || ($prepare['asset_name']??'')!=='VF_Start_V2.28.0_UPDATE.zip' || (int)($prepare['update_package_bytes']??0)!==1255387 || ($prepare['update_package_sha256']??'')!=='7a8f8ad9417edd6305494f1228b7953791b91afd539b31d9bac16490f089581f') {
+              throw new RuntimeException('real online prepare mismatch: '.json_encode($prepare,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          }
+          foreach (['manifest_identity','release_tag','release_asset','bytes','sha256','atomic_self_test','recovery_point'] as $k) {
+              if (($prepare['checks'][$k]??'')!=='pass') throw new RuntimeException('prepare check failed: '.$k);
+          }
+          file_put_contents('/tmp/p01-v228-remote-evidence/check.json',json_encode($check,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          file_put_contents('/tmp/p01-v228-remote-evidence/prepare.json',json_encode($prepare,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          $install = $m->install((string)$prepare['operation_id']);
+          if (($install['ok']??false)!==true || ($install['updated']??false)!==true || ($install['from_version']??'')!=='2.27.0' || ($install['to_version']??'')!=='2.28.0') {
+              throw new RuntimeException('real online install failed: '.json_encode($install,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          }
+          foreach (['release_identity','atomic_handoff','activation','cleanup'] as $k) {
+              if (($install['checks'][$k]??'')!=='pass') throw new RuntimeException('install check failed: '.$k);
+          }
+          file_put_contents('/tmp/p01-v228-remote-evidence/install.json',json_encode($install,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          echo "P01_V228_REAL_UPDATE_MANAGER_CHECK=PASS\n";
+          echo "P01_V228_REAL_UPDATE_MANAGER_PREPARE=PASS\n";
+          echo "P01_V228_REAL_UPDATE_MANAGER_INSTALL=PASS\n";
+          PHP
+          php /tmp/p01-v228-real-online-update.php | tee /tmp/p01-v228-remote-evidence/update-manager.txt
+          grep -Fx P01_V228_REAL_UPDATE_MANAGER_CHECK=PASS /tmp/p01-v228-remote-evidence/update-manager.txt
+          grep -Fx P01_V228_REAL_UPDATE_MANAGER_PREPARE=PASS /tmp/p01-v228-remote-evidence/update-manager.txt
+          grep -Fx P01_V228_REAL_UPDATE_MANAGER_INSTALL=PASS /tmp/p01-v228-remote-evidence/update-manager.txt
+      - name: Verify upgraded runtime data integrity and post-upgrade functionality
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "$TARGET_VERSION"
+          grep -Fx "define('VF_VERSION', '2.28.0');" "$ROOT/app/bootstrap.php" >/dev/null
+          test -f "$ROOT/assets/workspace-v228.css"
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-v228-remote-evidence/post-verify.txt | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee /tmp/p01-v228-remote-evidence/post-surface.txt
+          grep -Fx MULTI_SURFACE_PASS=YES /tmp/p01-v228-remote-evidence/post-surface.txt
+          grep -Fx WORKING_SCHEMA=2026082801 /tmp/p01-v228-remote-evidence/post-surface.txt
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-v228-remote-evidence/post-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-v228-remote-evidence/post-baseline.txt
+          grep -Fx BASELINE_FULL_PASS=YES /tmp/p01-v228-remote-evidence/post-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-v228-remote-evidence/post-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-v228-remote-evidence/post-baseline.txt
+          cat >/tmp/p01-v228-remote-post.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');
+          $ids=json_decode((string)file_get_contents('/tmp/p01-v228-remote-ids.json'),true,512,JSON_THROW_ON_ERROR);
+          require $root.'/app/bootstrap.php';
+          require_once $root.'/app/SurfaceRepository.php';
+          $p=vf_db();
+          if((int)$p->query('SELECT COUNT(*) FROM links')->fetchColumn()!==125) throw new RuntimeException('links not preserved');
+          if((int)$p->query('SELECT COUNT(*) FROM resource_surface_profiles')->fetchColumn()!==110) throw new RuntimeException('profiles not preserved');
+          $q=$p->prepare('SELECT is_favorite FROM links WHERE id=?');$q->execute([(int)$ids['favorite']]);if((int)$q->fetchColumn()!==1) throw new RuntimeException('favorite not preserved');
+          $q=$p->prepare('SELECT surface,note FROM resource_surface_profiles WHERE link_id=?');$q->execute([(int)$ids['channel']]);$x=$q->fetch(PDO::FETCH_ASSOC);if(($x['surface']??'')!=='channels'||($x['note']??'')!=='remote channel note') throw new RuntimeException('channel profile not preserved');
+          $q->execute([(int)$ids['watch']]);$x=$q->fetch(PDO::FETCH_ASSOC);if(($x['surface']??'')!=='watch'||($x['note']??'')!=='remote watch note') throw new RuntimeException('watch profile not preserved');
+          $r=new VfRepository($p);$s=new VfSurfaceRepository($p);
+          $new=$r->saveLink(null,['category_id'=>(int)$ids['channels_cat'],'title'=>'Remote Post Upgrade','url'=>'https://remote-post-upgrade.example.com','description'=>'after update','tags'=>'remote','is_private'=>true,'is_favorite'=>true],'manual');
+          $s->upsertProfile((int)$new['id'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true,'note'=>'post upgrade']);
+          $q=$p->prepare('SELECT l.is_favorite,p.surface,p.note FROM links l JOIN resource_surface_profiles p ON p.link_id=l.id WHERE l.id=?');$q->execute([(int)$new['id']]);$x=$q->fetch(PDO::FETCH_ASSOC);
+          if((int)($x['is_favorite']??0)!==1||($x['surface']??'')!=='channels'||($x['note']??'')!=='post upgrade') throw new RuntimeException('post-upgrade mutation failed');
+          $integrity=strtolower((string)$p->query('PRAGMA integrity_check')->fetchColumn());
+          $fk=$p->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC);
+          if($integrity!=='ok'||count($fk)!==0) throw new RuntimeException('sqlite integrity/fk failed');
+          $schema=(string)$p->query("SELECT COALESCE(MAX(version),'') FROM schema_migrations WHERE status='success'")->fetchColumn();
+          if($schema!=='2026082801') throw new RuntimeException('schema mismatch '.$schema);
+          echo "P01_V228_REMOTE_DATA_PRESERVED=PASS\nP01_V228_REMOTE_POST_UPGRADE_MUTATION=PASS\nP01_V228_REMOTE_SQLITE=PASS\n";
+          PHP
+          php /tmp/p01-v228-remote-post.php | tee /tmp/p01-v228-remote-evidence/post-data.txt
+          grep -Fx P01_V228_REMOTE_DATA_PRESERVED=PASS /tmp/p01-v228-remote-evidence/post-data.txt
+          grep -Fx P01_V228_REMOTE_POST_UPGRADE_MUTATION=PASS /tmp/p01-v228-remote-evidence/post-data.txt
+          grep -Fx P01_V228_REMOTE_SQLITE=PASS /tmp/p01-v228-remote-evidence/post-data.txt
+      - name: Re-check online channel from upgraded V2.28 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v228-remote-recheck.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');
+          require $root.'/app/bootstrap.php';
+          require_once $root.'/app/UpdateManager.php';
+          $m=new VfUpdateManager(vf_db(),['root'=>$root,'private_root'=>VF_PRIVATE_ROOT,'current_version'=>'2.28.0']);
+          $check=$m->check(true);
+          $status=$m->status();
+          if(($check['ok']??false)!==true || ($check['current_version']??'')!=='2.28.0' || ($check['latest_version']??'')!=='2.28.0' || ($check['available']??true)!==false || ($check['can_update']??true)!==false) throw new RuntimeException('upgraded channel not current: '.json_encode($check,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          if(($status['current_version']??'')!=='2.28.0' || ($status['latest_version']??'')!=='2.28.0' || ($status['available']??true)!==false) throw new RuntimeException('upgraded status mismatch');
+          $h=$status['history'][0]??null;
+          if(!is_array($h)||($h['from_version']??'')!=='2.27.0'||($h['to_version']??'')!=='2.28.0'||($h['result']??'')!=='success') throw new RuntimeException('update history not reconciled: '.json_encode($status['history']??[],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          file_put_contents('/tmp/p01-v228-remote-evidence/recheck.json',json_encode(['check'=>$check,'status'=>$status],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          echo "P01_V228_REMOTE_ALREADY_CURRENT=PASS\nP01_V228_REMOTE_HISTORY=PASS\n";
+          PHP
+          php /tmp/p01-v228-remote-recheck.php | tee /tmp/p01-v228-remote-evidence/recheck.txt
+          grep -Fx P01_V228_REMOTE_ALREADY_CURRENT=PASS /tmp/p01-v228-remote-evidence/recheck.txt
+          grep -Fx P01_V228_REMOTE_HISTORY=PASS /tmp/p01-v228-remote-evidence/recheck.txt
+      - name: HTTP smoke after real online update
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE="/tmp/p01-v228-${PORT}.cookies"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | jq -e '.ok==true' >/dev/null
+          for path in 'surface.php?surface=all' 'start.php' 'channels.php' 'watch.php'; do
+            code=$(curl -sS -o /tmp/p01-v228-http.html -w '%{http_code}' -b "$COOKIE" "http://127.0.0.1:${PORT}/$path")
+            test "$code" = 200
+          done
+          echo P01_V228_REMOTE_HTTP_SMOKE=PASS
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          kill "$(cat /tmp/p01-v228-${PORT}.pid)" 2>/dev/null || true
+          cat > /tmp/p01-v228-remote-evidence/VERDICT.txt <<'EOF'
+          P01_V227_TO_V228_REMOTE_ONLINE_UPDATE_GATE=PASS
+          P01_V228_REMOTE_MANIFEST=PASS
+          P01_V228_REMOTE_ASSET=PASS
+          P01_V228_REAL_UPDATE_MANAGER=PASS
+          P01_V228_REMOTE_DATA_PRESERVED=PASS
+          P01_V228_REMOTE_POST_UPGRADE_MUTATION=PASS
+          P01_V228_REMOTE_SQLITE=PASS
+          P01_V228_REMOTE_ALREADY_CURRENT=PASS
+          P01_V228_REMOTE_HISTORY=PASS
+          P01_V228_REMOTE_HTTP_SMOKE=PASS
+          OWNER_PRODUCTION_WRITE=NO
+          EOF
+          cat /tmp/p01-v228-remote-evidence/VERDICT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v2.28.0-remote-online-update-evidence
+          path: /tmp/p01-v228-remote-evidence
+          if-no-files-found: error
+          retention-days: 90
