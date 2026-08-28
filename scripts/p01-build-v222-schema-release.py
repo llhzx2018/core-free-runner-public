@@ -75,13 +75,12 @@ one("$s=self::verifySource($root);if(!$s['ok'])throw new RuntimeException('Inter
     "$s=self::verifySource($root);if(!$s['ok'])throw new RuntimeException('Interrupted Atomic source recovery verification failed.');self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);@unlink($journal);",'interrupted rollback schema')
 
 one("$cfg['version']=self::TARGET_VERSION;$j=json_encode($cfg,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if($j===false)throw new RuntimeException('Config serialize failed.');self::writeExact($config,$j.\"\\n\",0600);$target=self::verifyTarget($root);",
-    "$cfg['version']=self::TARGET_VERSION;$j=json_encode($cfg,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if($j===false)throw new RuntimeException('Config serialize failed.');self::writeExact($config,$j.\"\\n\",0600);self::migrateDb($root,$rt,$db);self::jsonWrite($journal,['target_version'=>self::TARGET_VERSION,'source_version'=>self::SOURCE_VERSION,'stage'=>$stage,'phase'=>'database_migrated','created_at'=>gmdate('c')]);$target=self::verifyTarget($root);",'migration call')
+    "$cfg['version']=self::TARGET_VERSION;$j=json_encode($cfg,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if($j===false)throw new RuntimeException('Config serialize failed.');self::writeExact($config,$j.\"\\n\",0600);self::migrateDb($root,$rt,$db);self::jsonWrite($journal,['target_version'=>self::TARGET_VERSION,'source_version'=>self::SOURCE_VERSION,'stage'=>$stage,'phase'=>'database_migrated','created_at'=>gmdate('c')]);if(getenv('VF_ATOMIC_TEST_FAIL_AFTER_MIGRATION')==='1')throw new RuntimeException('Injected failure after database migration.');$target=self::verifyTarget($root);",'migration call')
 
 one("if($configBytes!=='')self::writeExact((string)$rt['config_file'],$configBytes,0600);$after=self::verifySource($root);if(!$after['ok'])throw new RuntimeException('Rollback source verification failed.');self::dbVerify((string)$rt['db_file']);if($journal!=='')@unlink($journal);",
     "if($configBytes!=='')self::writeExact((string)$rt['config_file'],$configBytes,0600);$after=self::verifySource($root);if(!$after['ok'])throw new RuntimeException('Rollback source verification failed.');self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);if($journal!=='')@unlink($journal);",'catch rollback schema')
 
-# Ensure the schema-aware repair contains exactly the intended migration hooks.
-for needle in ["public const SOURCE_SCHEMA='2026080902';","public const TARGET_SCHEMA='2026082801';","self::migrateDb($root,$rt,$db);","phase'=>'database_migrated'","self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA)"]:
+for needle in ["public const SOURCE_SCHEMA='2026080902';","public const TARGET_SCHEMA='2026082801';","self::migrateDb($root,$rt,$db);","phase'=>'database_migrated'","VF_ATOMIC_TEST_FAIL_AFTER_MIGRATION","self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA)"]:
     if needle not in repair: raise SystemExit(f'missing schema-aware repair marker: {needle}')
 if repair.count("self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA)")!=2:
     raise SystemExit('source-schema rollback verification count mismatch')
@@ -91,7 +90,7 @@ rp=out/f'server-update-v{VERSION}-repair.php'; rp.write_text(repair,encoding='ut
 base.deterministic_zip(out/f'VF-Start-V{VERSION}-FULL.zip',full)
 base.deterministic_zip(out/f'VF-Start-V{VERSION}-UPDATE.zip',{rp.name:rp.read_bytes()})
 base.deterministic_zip(out/f'VF_Start_V{VERSION}_UPDATE.zip',{rp.name:rp.read_bytes()})
-result={'project_id':'P01','version':VERSION,'source_version':SOURCE_VERSION,'candidate':CANDIDATE,'candidate_tree':CANDIDATE_TREE,'source_commit':SOURCE,'source_schema':SOURCE_SCHEMA,'schema':SCHEMA,'schema_migration':'2026082801_v222_multi_surface.php','runtime_source_files':len(source),'runtime_target_files':len(target),'runtime_added':added,'runtime_removed':removed,'runtime_delta':changed,'runtime_delta_count':len(changed),'schema_aware_atomic_update':True,'status':'BUILD_PASS'}
+result={'project_id':'P01','version':VERSION,'source_version':SOURCE_VERSION,'candidate':CANDIDATE,'candidate_tree':CANDIDATE_TREE,'source_commit':SOURCE,'source_schema':SOURCE_SCHEMA,'schema':SCHEMA,'schema_migration':'2026082801_v222_multi_surface.php','runtime_source_files':len(source),'runtime_target_files':len(target),'runtime_added':added,'runtime_removed':removed,'runtime_delta':changed,'runtime_delta_count':len(changed),'schema_aware_atomic_update':True,'post_migration_rollback_injection':True,'status':'BUILD_PASS'}
 (out/'P01-V2.22.0-ARTIFACT-GATE.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
 arts=[p for p in sorted(out.iterdir()) if p.is_file()]
 (out/'SHA256SUMS.txt').write_text(''.join(f'{base.sha256_file(p)}  {p.name}\n' for p in arts),encoding='utf-8')
