@@ -1,0 +1,145 @@
+name: P04 V2.8.11 Browser Diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v2811-browser-diagnostic-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE: 3cd3d62327d4ff78419563d9698976d6ff993f23
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: product
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+      - name: Install browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Run browser diagnostic and always expose report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          WEB="$RUNNER_TEMP/p04-v2811-browser-runtime"
+          EVIDENCE="$RUNNER_TEMP/p04-v2811-browser-evidence"
+          PORT=19032
+          mkdir -p "$EVIDENCE"
+          python3 scripts/build-v2811-release-tree.py "$WEB" >/dev/null
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          cat > .runner-p04-v2811-diagnostic.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19032';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'FAIL',stage:'start',baseline_api:false,standalone_human:false,five_entries:false,routes:{},mobile:false,page_errors:[],console_errors:[],bad_responses:[]};
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1365,height:900}});
+          const page=await context.newPage();
+          page.on('pageerror',e=>report.page_errors.push(String(e)));
+          page.on('console',m=>{if(m.type()==='error')report.console_errors.push(m.text())});
+          page.on('response',r=>{if(r.status()>=400)report.bad_responses.push({url:r.url(),status:r.status()})});
+          async function route(label, expected, forbidden='') {
+            report.stage=`route:${label}`;
+            const nav=page.locator('.v271-settings-nav');
+            await nav.getByRole('button',{name:label,exact:true}).click();
+            await page.locator('.v271-settings-content h2',{hasText:expected}).first().waitFor({state:'visible',timeout:8000});
+            const titles=await page.locator('.v271-settings-content h2').allInnerTexts();
+            if(!titles.some(t=>t.trim()===expected)) throw new Error(`${label} missing ${expected}; titles=${JSON.stringify(titles)}`);
+            if(forbidden && titles.some(t=>t.trim()===forbidden)) throw new Error(`${label} still merged with ${forbidden}; titles=${JSON.stringify(titles)}`);
+            report.routes[label]=titles;
+          }
+          try {
+            report.stage='setup';
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#site_name').fill('VF Infra V2.8.11 Gate');
+            await page.locator('#password').fill(password); await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            report.stage='login';
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
+            report.stage='baseline-api';
+            const api=await context.request.get(base+'/baseline-summary.php');
+            if(!api.ok()) throw new Error(`baseline API HTTP ${api.status()}`);
+            const baseline=(await api.json()).baseline;
+            if(Number(baseline?.counts?.DRIFT)!==0||Number(baseline?.counts?.UNKNOWN)!==0) throw new Error(`baseline drift/unknown ${JSON.stringify(baseline?.counts)}`);
+            if(Number(baseline?.required_domain_count)!==15||Number(baseline?.covered_domain_count)!==15) throw new Error(`baseline coverage ${baseline?.covered_domain_count}/${baseline?.required_domain_count}`);
+            if(!Array.isArray(baseline?.rows)||!baseline.rows.some(r=>r.domain==='LOGGING'&&r.result==='PASS')) throw new Error('logging baseline missing');
+            report.baseline_api=true;
+            report.stage='standalone';
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'});
+            const standaloneConclusion=await page.locator('.conclusion strong').innerText();
+            if(!standaloneConclusion.includes('系统正常')) throw new Error(`standalone conclusion=${standaloneConclusion}`);
+            const standaloneAttention=await page.locator('.attention').innerText();
+            if(!standaloneAttention.includes('当前没有需要你处理')) throw new Error(`standalone attention=${standaloneAttention}`);
+            if(await page.locator('.group-row').count()!==5) throw new Error(`standalone groups=${await page.locator('.group-row').count()}`);
+            if(await page.locator('.tech-details').getAttribute('open')!==null) throw new Error('standalone technical details should be closed');
+            report.standalone_human=true;
+            report.stage='shell-baseline';
+            await page.goto(base+'/index.php#settings/baseline',{waitUntil:'domcontentloaded'});
+            await page.locator('.v2811-baseline-hero h2').waitFor({state:'visible',timeout:10000});
+            const nav=page.locator('.v271-settings-nav');
+            for(const label of ['系统信息','系统基线','在线升级','备份与恢复','运行健康']) {
+              const count=await nav.getByRole('button',{name:label,exact:true}).count();
+              if(count!==1) throw new Error(`maintenance entry ${label} count=${count}; nav=${JSON.stringify(await nav.innerText())}`);
+            }
+            const shellAttention=await page.locator('.v2811-attention').innerText();
+            if(!shellAttention.includes('当前没有需要你处理')) throw new Error(`shell attention=${shellAttention}`);
+            if(await page.locator('.v2811-baseline-group').count()!==5) throw new Error(`shell groups=${await page.locator('.v2811-baseline-group').count()}`);
+            if(await page.locator('.v2811-tech-details').getAttribute('open')!==null) throw new Error('shell technical details should be closed');
+            report.five_entries=true;
+            await route('系统信息','系统信息','运行健康');
+            await route('在线升级','在线升级');
+            await route('备份与恢复','备份与恢复','导入导出');
+            await route('运行健康','运行健康','系统信息');
+            report.stage='mobile';
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(base+'/index.php#settings/baseline',{waitUntil:'domcontentloaded'});
+            await page.locator('.v2811-baseline-hero h2').waitFor({state:'visible',timeout:10000});
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-window.innerWidth);
+            report.mobile_overflow=overflow;
+            if(overflow>2) throw new Error(`mobile horizontal overflow ${overflow}`);
+            report.mobile=true;
+            report.stage='complete';
+            report.status='PASS';
+          } catch(e) {
+            report.error=String(e?.stack||e);
+            try { report.url=page.url(); report.body=(await page.locator('body').innerText()).slice(0,5000); } catch (_) {}
+          } finally {
+            await browser.close();
+            fs.writeFileSync(process.env.REPORT,JSON.stringify(report,null,2));
+          }
+          JS
+          REPORT="$EVIDENCE/browser-report.json" node .runner-p04-v2811-diagnostic.mjs
+          cat "$EVIDENCE/browser-report.json"
+          echo '--- PHP SERVER TAIL ---'
+          tail -n 80 "$EVIDENCE/php-server.log" || true
+          test "$(jq -r '.status' "$EVIDENCE/browser-report.json")" = PASS
+          test "$(jq '.page_errors|length' "$EVIDENCE/browser-report.json")" = 0
+          test "$(jq '.console_errors|length' "$EVIDENCE/browser-report.json")" = 0
+          test "$(jq '.bad_responses|length' "$EVIDENCE/browser-report.json")" = 0
+          kill "$SERVER_PID"; wait "$SERVER_PID" || true; trap - EXIT
