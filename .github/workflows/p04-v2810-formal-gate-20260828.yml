@@ -1,0 +1,208 @@
+name: P04 V2.8.10 Formal Gate
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v2810-formal-gate-20260828.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE: 8f91cc4c7bd9fadf6398eda60bcd2c2283a02d98
+      BASE_MAIN: 45f35274284071649f6a3103d3a9e4383da90083
+      OLD_SOURCE: f8c6770afba4fa079d6ec43ad32d79aa1e6c5d77
+      TARGET_BRANCH: release/p04-v2.8.10-common-baseline-v2-20260828
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+      - name: Checkout exact P04 V2.8.9 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.OLD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: old
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+      - name: Exact source fence and repository contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C old rev-parse HEAD)" = "$OLD_SOURCE"
+          test "$(git -C product rev-parse origin/main)" = "$BASE_MAIN"
+          test "$(git -C product rev-parse origin/$TARGET_BRANCH)" = "$CANDIDATE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.10'
+          test "$(tr -d '\r\n' < old/VERSION)" = '2.8.9'
+          mapfile -t changed < <(git -C product diff --name-only "$BASE_MAIN" "$CANDIDATE")
+          test "${#changed[@]}" -eq 3
+          printf '%s\n' "${changed[@]}" | grep -Fxq VERSION
+          printf '%s\n' "${changed[@]}" | grep -Fxq scripts/build-v2810-release-tree.py
+          printf '%s\n' "${changed[@]}" | grep -Fxq scripts/build-v2810-update-release.py
+          test -z "$(git -C product diff --name-only "$BASE_MAIN" "$CANDIDATE" -- src public database config)"
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          python3 -m py_compile scripts/build-v2810-release-tree.py scripts/build-v2810-update-release.py scripts/validate-online-atomic-package.py scripts/full-runtime-vs-update-result-source-exact-gate.py
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          test -f src/app/CommonBaselineV2Closure.php
+          grep -Fq "'LOGGING'" src/app/CommonBaselineV2Closure.php
+          echo P04_V2810_SOURCE_FENCE=PASS
+      - name: Clean FULL install on Schema 14
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          VF_INFRA_TEST_PORT=19020 bash scripts/run-clean-full-install-gate.sh
+          echo P04_V2810_CLEAN_FULL=PASS
+      - name: Deterministic FULL and UPDATE build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p04-v2810"
+          cd product
+          python3 scripts/build-v2810-release-tree.py "$RUNNER_TEMP/p04-v2810/tree-a" | tee "$RUNNER_TEMP/p04-v2810/tree-a.json"
+          python3 scripts/build-v2810-release-tree.py "$RUNNER_TEMP/p04-v2810/tree-b" | tee "$RUNNER_TEMP/p04-v2810/tree-b.json"
+          diff -qr "$RUNNER_TEMP/p04-v2810/tree-a" "$RUNNER_TEMP/p04-v2810/tree-b"
+          python3 - "$RUNNER_TEMP/p04-v2810/tree-a" "$RUNNER_TEMP/p04-v2810/VF_Infra_V2.8.10_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.create_system=3;info.external_attr=(0o100644<<16);z.writestr(info,p.read_bytes())
+          PY
+          python3 scripts/build-v2810-update-release.py --target-runtime "$RUNNER_TEMP/p04-v2810/tree-a" --output "$RUNNER_TEMP/p04-v2810/update-a" | tee "$RUNNER_TEMP/p04-v2810/update-a.json"
+          python3 scripts/build-v2810-update-release.py --target-runtime "$RUNNER_TEMP/p04-v2810/tree-b" --output "$RUNNER_TEMP/p04-v2810/update-b" | tee "$RUNNER_TEMP/p04-v2810/update-b.json"
+          cmp "$RUNNER_TEMP/p04-v2810/update-a/VF_Infra_V2.8.10_UPDATE.zip" "$RUNNER_TEMP/p04-v2810/update-b/VF_Infra_V2.8.10_UPDATE.zip"
+          test "$(jq -r '.version' "$RUNNER_TEMP/p04-v2810/tree-a/release-manifest.json")" = '2.8.10'
+          test "$(jq -r '.target_schema' "$RUNNER_TEMP/p04-v2810/tree-a/release-manifest.json")" = '14'
+          test "$(jq -r '.required_domain_count' "$RUNNER_TEMP/p04-v2810/tree-a/release-manifest.json")" = '15'
+          test "$(jq -r '.logging_closure' "$RUNNER_TEMP/p04-v2810/tree-a/release-manifest.json")" = 'true'
+          test "$(jq -c '.allowed_source_versions' "$RUNNER_TEMP/p04-v2810/update-a/PACKAGE_MANIFEST.json")" = '["2.8.9"]'
+          python3 scripts/validate-online-atomic-package.py --runtime "$RUNNER_TEMP/p04-v2810/tree-a" --zip "$RUNNER_TEMP/p04-v2810/update-a/VF_Infra_V2.8.10_UPDATE.zip" --version 2.8.10
+          echo P04_V2810_DETERMINISTIC_ARTIFACTS=PASS
+      - name: V2.8.9 to V2.8.10 Source Exact Atomic payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd old
+          python3 scripts/build-release-tree.py "$RUNNER_TEMP/p04-v2810/old-tree" >/dev/null
+          python3 - "$RUNNER_TEMP/p04-v2810/old-tree" "$RUNNER_TEMP/p04-v2810/VF_Infra_V2.8.9_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]);out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix();info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.create_system=3;info.external_attr=(0o100644<<16);z.writestr(info,p.read_bytes())
+          PY
+          cd ../product
+          python3 scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$RUNNER_TEMP/p04-v2810/VF_Infra_V2.8.9_FULL.zip" \
+            --candidate-full "$RUNNER_TEMP/p04-v2810/VF_Infra_V2.8.10_FULL.zip" \
+            --candidate-update "$RUNNER_TEMP/p04-v2810/update-a/VF_Infra_V2.8.10_UPDATE.zip" \
+            --expected-source-version 2.8.9 --expected-target-version 2.8.10
+          echo P04_V2810_ATOMIC_SOURCE_EXACT=PASS
+      - name: Install browser dependency after source/privacy gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Fresh runtime Common Baseline V2 and maintenance browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          WEB="$RUNNER_TEMP/p04-v2810/browser-runtime"
+          EVIDENCE="$RUNNER_TEMP/p04-v2810/browser-evidence"
+          PORT=19021
+          mkdir -p "$EVIDENCE"
+          python3 scripts/build-v2810-release-tree.py "$WEB" >/dev/null
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          cat > .runner-p04-v2810.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19021';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'FAIL',baseline:false,logging:false,coverage:false,system_info:false,maintenance:false,page_errors:[],console_errors:[],bad_responses:[]};
+          const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:1365,height:900}});
+          page.on('pageerror',e=>report.page_errors.push(String(e))); page.on('console',m=>{if(m.type()==='error')report.console_errors.push(m.text())}); page.on('response',r=>{if(r.status()>=400)report.bad_responses.push({url:r.url(),status:r.status()})});
+          try {
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'}); await page.locator('#site_name').fill('VF Infra V2.8.10 Gate'); await page.locator('#password').fill(password); await page.locator('#password_confirm').fill(password); await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            await page.locator('#admin-password').fill(password); await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'}); const body=await page.locator('body').innerText(); const drift=(await page.locator('.metric').filter({hasText:'DRIFT'}).locator('strong').innerText()).trim(); const unknown=(await page.locator('.metric').filter({hasText:'UNKNOWN'}).locator('strong').innerText()).trim(); if(drift!=='0'||unknown!=='0')throw new Error(`baseline ${drift}/${unknown}`); report.baseline=true; if(!body.includes('LOGGING')||!body.includes('SecurityLogService.php + RetentionService.php + LogRepository.php'))throw new Error('logging missing'); report.logging=true; if(!body.includes('Required Domains：15 / 15'))throw new Error('coverage missing'); report.coverage=true;
+            await page.goto(base+'/system-info.php',{waitUntil:'domcontentloaded'}); const info=await page.locator('body').innerText(); if(!info.includes('2.8.10'))throw new Error('version missing'); report.system_info=true;
+            await page.goto(base+'/maintenance.php',{waitUntil:'domcontentloaded'}); if(await page.locator('input[name="admin_password"]').count()!==1)throw new Error('step-up missing'); report.maintenance=true; report.status='PASS';
+          } catch(e){report.error=String(e?.stack||e)} finally {await browser.close();fs.writeFileSync(process.env.REPORT,JSON.stringify(report,null,2))}
+          if(report.status!=='PASS'||report.page_errors.length||report.console_errors.length||report.bad_responses.length)process.exit(2);
+          JS
+          REPORT="$EVIDENCE/browser-report.json" node .runner-p04-v2810.mjs
+          rm -f .runner-p04-v2810.mjs
+          cat "$EVIDENCE/browser-report.json"
+          cat > "$WEB/cli/baseline-v2810-verify.php" <<'PHP'
+          <?php
+          declare(strict_types=1); require dirname(__DIR__).'/bootstrap.php'; $s=CommonBaselineV2Closure::summary(); echo 'BASELINE='.$s['baseline'].PHP_EOL; echo 'PROFILE='.$s['profile'].PHP_EOL; echo 'DRIFT_COUNT='.$s['counts']['DRIFT'].PHP_EOL; echo 'UNKNOWN_COUNT='.$s['counts']['UNKNOWN'].PHP_EOL; echo 'REQUIRED_DOMAIN_COUNT='.$s['required_domain_count'].PHP_EOL; echo 'COVERED_DOMAIN_COUNT='.$s['covered_domain_count'].PHP_EOL; echo 'MISSING_DOMAINS='.implode(',',$s['missing_domains']).PHP_EOL; foreach($s['rows'] as $r){if(($r['domain']??'')==='LOGGING')echo 'LOGGING_RESULT='.$r['result'].PHP_EOL;}
+          PHP
+          (cd "$WEB" && php cli/baseline-v2810-verify.php) | tee "$EVIDENCE/baseline.txt"
+          grep -Fxq 'BASELINE=VF-COMMON-PRODUCT-BASELINE@2.0' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'PROFILE=PERSONAL_SINGLE_ADMIN' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'DRIFT_COUNT=0' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'UNKNOWN_COUNT=0' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'REQUIRED_DOMAIN_COUNT=15' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'COVERED_DOMAIN_COUNT=15' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'MISSING_DOMAINS=' "$EVIDENCE/baseline.txt"
+          grep -Fxq 'LOGGING_RESULT=PASS' "$EVIDENCE/baseline.txt"
+          kill "$SERVER_PID"; wait "$SERVER_PID" || true; trap - EXIT
+          echo P04_V2810_COMMON_BASELINE_BROWSER=PASS
+      - name: Final formal verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/main)" = "$BASE_MAIN"
+          echo P04_V2810_EXACT_SOURCE="$CANDIDATE"
+          echo P04_V2810_VERSION=2.8.10
+          echo P04_V2810_SCHEMA=14
+          echo P04_V2810_MIGRATION=NONE
+          echo P04_V2810_COMMON_BASELINE_V2=PASS
+          echo P04_V2810_LOGGING=PASS
+          echo P04_V2810_REQUIRED_DOMAINS=15
+          echo P04_V2810_ATOMIC_289_TO_2810=PASS
+          echo P04_V2810_MACHINE=PASS
+          echo P04_V2810_PRODUCTION=NO
+      - name: Upload verified formal release set
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.10-FORMAL-RELEASE-SET
+          path: |
+            ${{ runner.temp }}/p04-v2810/VF_Infra_V2.8.10_FULL.zip
+            ${{ runner.temp }}/p04-v2810/update-a/VF_Infra_V2.8.10_UPDATE.zip
+            ${{ runner.temp }}/p04-v2810/update-a/VF_Infra_V2.8.10_ATOMIC.zip
+            ${{ runner.temp }}/p04-v2810/update-a/repair-v2.8.10.php
+            ${{ runner.temp }}/p04-v2810/update-a/PACKAGE_MANIFEST.json
+            ${{ runner.temp }}/p04-v2810/update-a/SHA256SUMS.txt
+            ${{ runner.temp }}/p04-v2810/tree-a/release-manifest.json
+            ${{ runner.temp }}/p04-v2810/browser-evidence/browser-report.json
+            ${{ runner.temp }}/p04-v2810/browser-evidence/baseline.txt
+          if-no-files-found: error
