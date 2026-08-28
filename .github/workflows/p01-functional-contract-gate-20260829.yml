@@ -1,0 +1,262 @@
+name: P01 Functional Contract Gate
+
+on:
+  push:
+    branches:
+      - task/p01-functional-contract-gate-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 8eee7941a882dd7b29bd67cd134b55569dcb6e22
+  ROOT: /tmp/p01-functional-contract
+  PORT: '18420'
+  ADMIN_PASS: 'P01Functional!2026'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Exact source and syntax fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' file; do php -l "$file" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          node --check source/src/assets/workspace-rebaseline.js
+          grep -F 'CURRENT FUNCTIONAL AUTHORITY / PRESENTATION-FLEXIBLE' source/docs/authority/P01_FUNCTIONAL_CONTRACT_20260829.md
+          echo 'P01_FUNCTIONAL_SOURCE_FENCE=PASS'
+
+      - name: Build fresh owner runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" /tmp/p01-functional-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-functional-server.log 2>&1 &
+          echo $! >/tmp/p01-functional-server.pid
+          COOKIE=/tmp/p01-functional-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-functional-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-functional-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Functional Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o /tmp/p01-functional-setup-post.html
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" | tee /tmp/p01-functional-verify.txt | grep -Fx VERIFY_PASS=YES
+
+      - name: Seed nested public private and Surface fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-functional-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');
+          require $root.'/app/bootstrap.php';
+          require_once $root.'/app/SurfaceRepository.php';
+          $repo=new VfRepository(vf_db());$surface=new VfSurfaceRepository(vf_db());
+          $pubRoot=$repo->createCategory(['name'=>'Public Hub','description'=>'public root','is_private'=>false]);
+          $pubChild=$repo->createCategory(['name'=>'Public Child','description'=>'public child','parent_id'=>$pubRoot,'is_private'=>false]);
+          $privRoot=$repo->createCategory(['name'=>'Private Hub','description'=>'private root','is_private'=>true]);
+          $privChild=$repo->createCategory(['name'=>'Private Child','description'=>'inherited private','parent_id'=>$privRoot,'is_private'=>false]);
+          $save=function(int $category,string $title,string $url,bool $private=false,bool $favorite=false)use($repo):int{
+              $r=$repo->saveLink(null,['category_id'=>$category,'title'=>$title,'url'=>$url,'description'=>'functional gate','is_private'=>$private,'is_favorite'=>$favorite],'manual');return (int)$r['id'];
+          };
+          $ids=[];
+          $ids['public_root']=$save($pubRoot,'Public Root Link','https://public-root.example.com');
+          $ids['public_child']=$save($pubChild,'Public Child Link','https://public-child.example.com',false,true);
+          $ids['direct_private']=$save($pubChild,'Direct Private Link','https://direct-private.example.com',true);
+          $ids['inherited_private']=$save($privChild,'Inherited Private Link','https://inherited-private.example.com',false);
+          $ids['public_channel']=$save($pubChild,'Public Channel','https://youtube.com/@functional-public');
+          $ids['private_channel']=$save($privChild,'Private Channel','https://youtube.com/@functional-private');
+          $ids['public_watch']=$save($pubChild,'Public Watch','https://public-watch.example.com');
+          $ids['private_watch']=$save($privChild,'Private Watch','https://private-watch.example.com');
+          $surface->upsertProfile($ids['public_channel'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true]);
+          $surface->upsertProfile($ids['private_channel'],['surface'=>'channels','resource_kind'=>'creator','background_friendly'=>true]);
+          $surface->upsertProfile($ids['public_watch'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want']);
+          $surface->upsertProfile($ids['private_watch'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2025,'media_status'=>'watched']);
+          file_put_contents('/tmp/p01-functional-fixture.json',json_encode(['pub_root'=>$pubRoot,'pub_child'=>$pubChild,'priv_root'=>$privRoot,'priv_child'=>$privChild,'ids'=>$ids],JSON_UNESCAPED_SLASHES));
+          echo "P01_FUNCTIONAL_FIXTURE=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-functional-seed.php | grep -Fx P01_FUNCTIONAL_FIXTURE=PASS
+
+      - name: Functional privacy classification HTTP contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-functional-admin.cookies
+          LOGIN=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -X POST "http://127.0.0.1:${PORT}/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}")
+          jq -e '.ok==true and (.csrf|length>20)' <<<"$LOGIN" >/dev/null
+          CSRF=$(jq -r '.csrf' <<<"$LOGIN")
+          echo "$CSRF" >/tmp/p01-functional-csrf.txt
+          PUB_ROOT=$(jq -r '.pub_root' /tmp/p01-functional-fixture.json)
+          PRIV_ROOT=$(jq -r '.priv_root' /tmp/p01-functional-fixture.json)
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php" -o /tmp/all.html
+          grep -F '网址分类' /tmp/all.html
+          grep -F '可见范围' /tmp/all.html
+          grep -F 'Public Root Link' /tmp/all.html
+          grep -F 'Direct Private Link' /tmp/all.html
+          grep -F 'Inherited Private Link' /tmp/all.html
+          grep -F '>私人<' /tmp/all.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public" -o /tmp/public.html
+          grep -F 'Public Root Link' /tmp/public.html
+          grep -F 'Public Child Link' /tmp/public.html
+          grep -F 'Public Channel' /tmp/public.html
+          grep -F 'Public Watch' /tmp/public.html
+          ! grep -Fq 'Direct Private Link' /tmp/public.html
+          ! grep -Fq 'Inherited Private Link' /tmp/public.html
+          ! grep -Fq 'Private Channel' /tmp/public.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=private" -o /tmp/private.html
+          grep -F 'Direct Private Link' /tmp/private.html
+          grep -F 'Inherited Private Link' /tmp/private.html
+          grep -F 'Private Channel' /tmp/private.html
+          grep -F 'Private Watch' /tmp/private.html
+          ! grep -Fq 'Public Root Link' /tmp/private.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public&category=${PUB_ROOT}" -o /tmp/public-parent.html
+          grep -F 'Public Root Link' /tmp/public-parent.html
+          grep -F 'Public Child Link' /tmp/public-parent.html
+          grep -F 'Public Channel' /tmp/public-parent.html
+          grep -F 'Public Watch' /tmp/public-parent.html
+          ! grep -Fq 'Direct Private Link' /tmp/public-parent.html
+
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/channels.php?scope=private&category=${PRIV_ROOT}" -o /tmp/private-channels.html
+          grep -F 'Private Channel' /tmp/private-channels.html
+          ! grep -Fq 'Public Channel' /tmp/private-channels.html
+          grep -F "watch.php?scope=private&amp;category=${PRIV_ROOT}" /tmp/private-channels.html
+
+          DIRECT=$(jq -r '.ids.direct_private' /tmp/p01-functional-fixture.json)
+          INHERITED=$(jq -r '.ids.inherited_private' /tmp/p01-functional-fixture.json)
+          CODE=$(curl -sS -o /tmp/public-inherited.json -w '%{http_code}' -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-visibility-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode "ids=[$INHERITED]" --data-urlencode 'visibility=public')
+          test "$CODE" = 422
+          jq -e '.ok==false and (.error|contains("私人分类"))' /tmp/public-inherited.json >/dev/null
+          curl -fsS -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-visibility-action.php" --data-urlencode "csrf=$CSRF" --data-urlencode "ids=[$DIRECT]" --data-urlencode 'visibility=public' | jq -e '.ok==true and .visibility=="public"' >/dev/null
+          curl -fsS -b "$COOKIE" "http://127.0.0.1:${PORT}/surfaces.php?scope=public" | grep -F 'Direct Private Link'
+          echo 'P01_FUNCTIONAL_HTTP_CONTRACT=PASS'
+
+      - name: Anonymous projection and database integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "http://127.0.0.1:${PORT}/surfaces.php" -o /tmp/anon.html
+          grep -F 'Public Root Link' /tmp/anon.html
+          grep -F 'Public Child Link' /tmp/anon.html
+          ! grep -Fq 'Inherited Private Link' /tmp/anon.html
+          ! grep -Fq 'Private Channel' /tmp/anon.html
+          ! grep -Fq 'Private Watch' /tmp/anon.html
+          ! grep -Fq '可见范围' /tmp/anon.html
+          cat >/tmp/p01-functional-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';
+          $db=vf_db();
+          $integrity=(string)$db->query('PRAGMA integrity_check')->fetchColumn();if($integrity!=='ok')throw new RuntimeException($integrity);
+          $fk=$db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC);if($fk)throw new RuntimeException(json_encode($fk));
+          $repo=new VfRepository($db);$public=$repo->bootstrap(false);
+          foreach((array)$public['links'] as $link)if((int)($link['effective_private']??0)!==0||str_contains((string)$link['title'],'Private'))throw new RuntimeException('private projection leak');
+          echo "P01_FUNCTIONAL_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-functional-db.php | grep -Fx P01_FUNCTIONAL_DB=PASS
+
+      - name: Browser UX evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-browser && cd /tmp/p01-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18420';
+          const fixture=JSON.parse(fs.readFileSync('/tmp/p01-functional-fixture.json','utf8'));
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Functional!2026'}});
+          if(!login.ok())throw new Error('browser login failed');
+          const page=await context.newPage();
+          await page.goto(base+'/surfaces.php',{waitUntil:'networkidle'});
+          await page.locator('.vf-sidebar-scope').waitFor();
+          if(await page.getByText('网址分类',{exact:true}).count()!==1)throw new Error('category navigation missing');
+          if(await page.locator('.vf-sidebar-scope a').count()!==3)throw new Error('scope switch incomplete');
+          await page.screenshot({path:'/tmp/p01-functional-desktop.png',fullPage:true});
+
+          await page.locator('.vf-sidebar-scope a').filter({hasText:'私人'}).click();
+          await page.waitForLoadState('networkidle');
+          if(!page.url().includes('scope=private'))throw new Error('private scope did not navigate');
+          if(await page.getByText('Inherited Private Link',{exact:true}).count()!==1)throw new Error('inherited private missing');
+          if(await page.getByText('Public Root Link',{exact:true}).count()!==0)throw new Error('public leaked into private scope');
+
+          await page.goto(base+`/surfaces.php?scope=public&category=${fixture.pub_root}`,{waitUntil:'networkidle'});
+          if(await page.getByText('Public Child Link',{exact:true}).count()!==1)throw new Error('parent category did not include descendant');
+          await page.getByRole('link',{name:/Channels/}).first().click();
+          await page.waitForLoadState('networkidle');
+          if(!page.url().includes('scope=public')||!page.url().includes(`category=${fixture.pub_root}`))throw new Error('surface switch lost scope/category context');
+
+          await page.goto(base+'/surfaces.php?scope=public',{waitUntil:'networkidle'});
+          await page.locator('[data-open-add]').click();
+          const add=page.locator('[data-add-form]');
+          if(await add.locator('input[name="is_private"]').isChecked())throw new Error('public scope add default is private');
+          await page.locator('[data-close-panel]').first().click();
+          await page.goto(base+'/surfaces.php?scope=private',{waitUntil:'networkidle'});
+          await page.locator('[data-open-add]').click();
+          if(!(await page.locator('[data-add-form] input[name="is_private"]').isChecked()))throw new Error('private scope add default is public');
+          await page.locator('[data-close-panel]').first().click();
+
+          await page.setViewportSize({width:390,height:844});
+          await page.goto(base+'/surfaces.php?scope=private',{waitUntil:'networkidle'});
+          if(!(await page.locator('.vf-mobile-functional-filters').isVisible()))throw new Error('mobile scope/category controls missing');
+          await page.screenshot({path:'/tmp/p01-functional-mobile.png',fullPage:true});
+          await browser.close();
+          console.log('P01_FUNCTIONAL_BROWSER=PASS');
+          JS
+          node gate.mjs | grep -Fx P01_FUNCTIONAL_BROWSER=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo 'P01_FUNCTIONAL_CONTRACT_GATE=PASS'
+
+      - name: Upload UI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-functional-contract-ui-evidence
+          path: |
+            /tmp/p01-functional-desktop.png
+            /tmp/p01-functional-mobile.png
+            /tmp/p01-functional-verify.txt
+            /tmp/p01-functional-fixture.json
+          if-no-files-found: error
