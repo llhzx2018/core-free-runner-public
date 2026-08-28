@@ -1,0 +1,279 @@
+name: P01 V2.29 Hosted Topic HTML Integration
+
+on:
+  push:
+    branches:
+      - task/p01-v229-hosted-html-integration-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: dc5e649a04ef739e7f8df9b6f73c3aaeedd7f779
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact P01 feature
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: feature/p01-domain-taxonomy-20260829
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch hosted HTML integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              assert s.count(old)==1, f'{label}: expected once, got {s.count(old)}'
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+
+          # SurfaceRepository: hosted_html is Topic-only; local open target is resource-html.php.
+          replace_once('src/app/SurfaceRepository.php',
+          """        $sourceKind = trim((string)($data['source_kind'] ?? 'remote_url'));
+        if (!in_array($sourceKind, ['remote_url','hosted_html'], true)) throw new InvalidArgumentException('资源来源无效。');
+        $sourceRef = vf_clean_text((string)($data['source_ref'] ?? ''), 240);
+        if ($surface !== 'watch') { $mediaYear = null; $mediaStatus = ''; }
+        if ($surface !== 'channels') $backgroundFriendly = 0;""",
+          """        $sourceKind = trim((string)($data['source_kind'] ?? 'remote_url'));
+        if (!in_array($sourceKind, ['remote_url','hosted_html'], true)) throw new InvalidArgumentException('资源来源无效。');
+        if ($sourceKind === 'hosted_html' && $surface !== 'topics') throw new InvalidArgumentException('上传 HTML 只适用于专题资源。');
+        $sourceRef = vf_clean_text((string)($data['source_ref'] ?? ''), 240);
+        if ($surface !== 'topics') { $sourceKind = 'remote_url'; $sourceRef = ''; }
+        if ($surface !== 'watch') { $mediaYear = null; $mediaStatus = ''; }
+        if ($surface !== 'channels') $backgroundFriendly = 0;""",
+          'source kind restriction')
+
+          p=Path('src/app/SurfaceRepository.php'); s=p.read_text(encoding='utf-8')
+          start=s.index('    public function recordOpen(int $linkId): string')
+          end=s.index('\n    }\n}', start)+6
+          old=s[start:end]
+          new="""    public function recordOpen(int $linkId): string
+    {
+        $linkId = max(1, $linkId);
+        $stmt = $this->db->prepare("SELECT l.url,p.domain_key,p.source_kind FROM links l LEFT JOIN resource_domain_profiles p ON p.link_id=l.id WHERE l.id=? AND l.lifecycle_state='active'");
+        $stmt->execute([$linkId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) throw new RuntimeException('资源不存在。');
+        $target = (string)($row['url'] ?? '');
+        if ((string)($row['domain_key'] ?? '') === 'topics' && (string)($row['source_kind'] ?? '') === 'hosted_html') {
+            if (!(new VfResourceAssetStore($this->db))->htmlRecord($linkId)) throw new RuntimeException('专题 HTML 文件不存在，请重新上传。');
+            $target = 'resource-html.php?id=' . $linkId;
+        } elseif ($target === '' || preg_match('/[\\r\\n]/', $target) || !preg_match('#^https?://#i', $target)) {
+            throw new RuntimeException('网址不存在或跳转目标无效。');
+        }
+        $now = gmdate('c');
+        if ($this->tableExists('resource_domain_profiles')) {
+            $update = $this->db->prepare('UPDATE resource_domain_profiles SET last_opened_at=?,updated_at=? WHERE link_id=?');
+            $update->execute([$now, $now, $linkId]);
+        }
+        return $target;
+    }"""
+          s=s[:start]+new+s[end:]
+          p.write_text(s,encoding='utf-8')
+
+          # workspace-action: source semantics and synthetic backing URL for HTML-only Topics.
+          replace_once('src/workspace-action.php',
+          """        $existing = $id !== null ? ($assetMap[$id] ?? null) : null;
+        if ($id !== null && !$existing) throw new RuntimeException('收藏不存在。');
+
+        $categoryId = max(1, (int)($_POST['category_id'] ?? ($existing['category_id'] ?? 0)));""",
+          """        $existing = $id !== null ? ($assetMap[$id] ?? null) : null;
+        if ($id !== null && !$existing) throw new RuntimeException('收藏不存在。');
+        $surface = VfSurfaceRepository::normalizeSurface((string)($_POST['surface'] ?? ($existing['surface'] ?? 'start')));
+        $sourceKind = trim((string)($_POST['source_kind'] ?? ($existing['source_kind'] ?? 'remote_url')));
+        if (!in_array($sourceKind, ['remote_url','hosted_html'], true)) throw new InvalidArgumentException('资源来源无效。');
+        if ($sourceKind === 'hosted_html' && $surface !== 'topics') throw new InvalidArgumentException('上传 HTML 只适用于专题资源。');
+        if ($surface !== 'topics') $sourceKind = 'remote_url';
+
+        $categoryId = max(1, (int)($_POST['category_id'] ?? ($existing['category_id'] ?? 0)));""",
+          'workspace source prelude')
+
+          replace_once('src/workspace-action.php',
+          """        $url = trim((string)($_POST['url'] ?? ($existing['url'] ?? '')));
+        $description = (string)($_POST['description'] ?? ($existing['description'] ?? ''));""",
+          """        $url = trim((string)($_POST['url'] ?? ($existing['url'] ?? '')));
+        if ($surface === 'topics' && $sourceKind === 'hosted_html' && $url === '') {
+            $existingUrl = trim((string)($existing['url'] ?? ''));
+            $url = $existingUrl !== '' ? $existingUrl : 'https://local.vf.invalid/topic/' . bin2hex(random_bytes(12));
+        }
+        $description = (string)($_POST['description'] ?? ($existing['description'] ?? ''));""",
+          'synthetic hosted url')
+
+          replace_once('src/workspace-action.php',
+          """        $surface = VfSurfaceRepository::normalizeSurface((string)($_POST['surface'] ?? ($existing['surface'] ?? 'start')));
+        if ($surface === 'start') $surfaceRepo->resetToStart($linkId);
+        else $surfaceRepo->upsertProfile($linkId, [
+            'surface'=>$surface,'resource_kind'=>(string)($_POST['resource_kind'] ?? ($existing['resource_kind'] ?? '')),
+            'note'=>(string)($_POST['surface_note'] ?? ($existing['surface_note'] ?? '')),
+            'background_friendly'=>(string)($_POST['background_friendly'] ?? (!empty($existing['background_friendly'])?'1':'0')) === '1',
+            'media_year'=>(string)($_POST['media_year'] ?? ($existing['media_year'] ?? '')),
+            'media_status'=>(string)($_POST['media_status'] ?? ($existing['media_status'] ?? '')),
+        ]);
+        vf_workspace_reply(['ok'=>true,'id'=>$linkId,'duplicate'=>false,'message'=>$action==='create'?'已添加收藏':'修改已保存']);""",
+          """        if ($surface === 'start') {
+            $surfaceRepo->resetToStart($linkId);
+            (new VfResourceAssetStore($db))->deleteHtml($linkId);
+        } else {
+            $surfaceRepo->upsertProfile($linkId, [
+                'surface'=>$surface,'resource_kind'=>(string)($_POST['resource_kind'] ?? ($existing['resource_kind'] ?? '')),
+                'note'=>(string)($_POST['surface_note'] ?? ($existing['surface_note'] ?? '')),
+                'background_friendly'=>(string)($_POST['background_friendly'] ?? (!empty($existing['background_friendly'])?'1':'0')) === '1',
+                'media_year'=>(string)($_POST['media_year'] ?? ($existing['media_year'] ?? '')),
+                'media_status'=>(string)($_POST['media_status'] ?? ($existing['media_status'] ?? '')),
+                'source_kind'=>$sourceKind,
+                'source_ref'=>$sourceKind === 'hosted_html' ? (string)($existing['source_ref'] ?? '') : '',
+            ]);
+            if ($surface !== 'topics' || $sourceKind !== 'hosted_html') (new VfResourceAssetStore($db))->deleteHtml($linkId);
+        }
+        vf_workspace_reply(['ok'=>true,'id'=>$linkId,'duplicate'=>false,'message'=>$action==='create'?'已添加资源':'修改已保存']);""",
+          'workspace profile save')
+
+          # SurfaceShell payload + Topic source/file controls.
+          replace_once('src/app/SurfaceShell.php',
+          """            'source_kind'=>(string)($asset['source_kind'] ?? 'remote_url'),
+            'media_year'=>$asset['media_year'] ?? null,""",
+          """            'source_kind'=>(string)($asset['source_kind'] ?? 'remote_url'),
+            'source_ref'=>(string)($asset['source_ref'] ?? ''),
+            'html_url'=>(string)($asset['html_url'] ?? ''),
+            'html_name'=>(string)($asset['html_name'] ?? ''),
+            'html_bytes'=>(int)($asset['html_bytes'] ?? 0),
+            'media_year'=>$asset['media_year'] ?? null,""",
+          'payload html fields')
+
+          replace_once('src/app/SurfaceShell.php',
+          '<label class="vf-field vf-field-wide"><span>网址</span><input type="url" name="url" required placeholder="https://"></label>',
+          '<label class="vf-field vf-field-wide" data-url-field><span>网址</span><input type="url" name="url" required placeholder="https://"></label>',
+          'add url field')
+          replace_once('src/app/SurfaceShell.php',
+          '<label class="vf-field"><span>资源类型</span><select name="surface"><option value="start">导航</option><option value="channels">频道</option><option value="watch">影视</option><option value="topics">专题</option></select></label>',
+          '<label class="vf-field"><span>资源类型</span><select name="surface"><option value="start">导航</option><option value="channels">频道</option><option value="watch">影视</option><option value="topics">专题</option></select></label>\n      <label class="vf-field" data-surface-field="topics"><span>专题来源</span><select name="source_kind" data-source-kind><option value="remote_url">远程网址</option><option value="hosted_html">上传 HTML</option></select></label>\n      <label class="vf-field vf-field-wide" data-html-field hidden><span>HTML 文件 <small>最大 2 MB · 原样保存并隔离运行</small></span><input type="file" name="html" accept=".html,.htm,text/html" data-html-input><small data-html-status></small></label>',
+          'add topic source controls')
+
+          # detail URL and resource-type controls: second occurrences.
+          p=Path('src/app/SurfaceShell.php'); s=p.read_text(encoding='utf-8')
+          old='<label class="vf-field vf-field-wide"><span>网址</span><input type="url" name="url" required></label>'
+          assert s.count(old)==1
+          s=s.replace(old,'<label class="vf-field vf-field-wide" data-url-field><span>网址</span><input type="url" name="url" required></label>',1)
+          old='<label class="vf-field"><span>资源类型</span><select name="surface"><option value="start">导航</option><option value="channels">频道</option><option value="watch">影视</option><option value="topics">专题</option></select></label>'
+          assert s.count(old)==1, f'detail resource type expected once after add replacement: {s.count(old)}'
+          s=s.replace(old,old+'\n      <label class="vf-field" data-surface-field="topics"><span>专题来源</span><select name="source_kind" data-source-kind><option value="remote_url">远程网址</option><option value="hosted_html">上传 HTML</option></select></label>\n      <label class="vf-field vf-field-wide" data-html-field hidden><span>HTML 文件 <small>最大 2 MB · 可上传新文件替换</small></span><input type="file" name="html" accept=".html,.htm,text/html" data-html-input><small data-html-status></small></label>',1)
+          p.write_text(s,encoding='utf-8')
+
+          # Public hosted Topics open sandboxed local file.
+          replace_once('src/app/FunctionalWorkspaceCore.php',
+          """function vf_fw_open_href(array $asset, bool $admin): string
+{
+    return $admin ? 'surface-open.php?id=' . (int)$asset['id'] : vf_fw_h((string)$asset['url']);
+}""",
+          """function vf_fw_open_href(array $asset, bool $admin): string
+{
+    $hosted = (string)($asset['surface'] ?? '') === 'topics'
+        && (string)($asset['source_kind'] ?? '') === 'hosted_html'
+        && trim((string)($asset['html_url'] ?? '')) !== '';
+    if ($hosted) return $admin ? 'surface-open.php?id=' . (int)$asset['id'] : vf_fw_h((string)$asset['html_url']);
+    return $admin ? 'surface-open.php?id=' . (int)$asset['id'] : vf_fw_h((string)$asset['url']);
+}""",
+          'public hosted open')
+
+          # workspace.js: source UI + HTML upload.
+          p=Path('src/assets/workspace.js'); s=p.read_text(encoding='utf-8')
+          s=s.replace("封面服务返回了无效响应。","资源附件服务返回了无效响应。",1).replace("封面操作失败。","资源附件操作失败。",1)
+          needle="""  const kindConfig=(surface)=>({channels:['频道分类','例如：旅行生活 / 科技 / 音乐'],watch:['内容类型','例如：电影 / 剧集 / 纪录片 / 综艺 / 动漫'],topics:['专题分类','例如：学习 / 赚钱 / AI / 工具']}[surface]||['主分类','输入主分类']);
+  const fillSurfaceFields=(form,surface)=>{
+    if(!form)return;
+    $$('[data-surface-field]',form).forEach(el=>{const need=(el.dataset.surfaceField||'').split(',');el.hidden=need.length&&!need.includes(surface)});
+    const kind=form.elements.namedItem('resource_kind');const label=$('[data-kind-label]',form);const cfg=kindConfig(surface);if(label)label.textContent=cfg[0];if(kind)kind.placeholder=cfg[1];
+  };"""
+          repl="""  const kindConfig=(surface)=>({channels:['频道分类','例如：旅行生活 / 科技 / 音乐'],watch:['内容类型','例如：电影 / 剧集 / 纪录片 / 综艺 / 动漫'],topics:['专题分类','例如：学习 / 赚钱 / AI / 工具']}[surface]||['主分类','输入主分类']);
+  const syncSourceFields=(form,surface)=>{
+    if(!form)return;
+    const source=form.elements.namedItem('source_kind');if(source&&surface!=='topics')source.value='remote_url';
+    const hosted=surface==='topics'&&source?.value==='hosted_html';
+    const urlField=$('[data-url-field]',form);const url=form.elements.namedItem('url');if(urlField)urlField.hidden=hosted;if(url)url.required=!hosted;
+    const htmlField=$('[data-html-field]',form);if(htmlField)htmlField.hidden=!hosted;
+  };
+  const fillSurfaceFields=(form,surface)=>{
+    if(!form)return;
+    $$('[data-surface-field]',form).forEach(el=>{const need=(el.dataset.surfaceField||'').split(',');el.hidden=need.length&&!need.includes(surface)});
+    const kind=form.elements.namedItem('resource_kind');const label=$('[data-kind-label]',form);const cfg=kindConfig(surface);if(label)label.textContent=cfg[0];if(kind)kind.placeholder=cfg[1];syncSourceFields(form,surface);
+  };"""
+          assert s.count(needle)==1, 'workspace source helper insertion'
+          s=s.replace(needle,repl,1)
+
+          needle="""  const uploadCover=async(id,file)=>{if(!file)return null;const compressed=await compressCover(file);const body=new FormData();body.set('action','cover_upload');body.set('id',String(id));body.set('cover',compressed,compressed.name);return await postMedia(body)};
+  const removeCover=async(id)=>{const body=new FormData();body.set('action','cover_delete');body.set('id',String(id));return await postMedia(body)};"""
+          repl=needle+"\n  const uploadHtml=async(id,file)=>{if(!file)return null;if(file.size>2*1024*1024)throw new Error('HTML 文件需小于 2 MB。');if(!/\\.html?$/i.test(file.name||''))throw new Error('专题文件仅支持 .html 或 .htm。');const body=new FormData();body.set('action','html_upload');body.set('id',String(id));body.set('html',file,file.name);return await postMedia(body)};"
+          assert s.count(needle)==1, 'html upload helper insertion'
+          s=s.replace(needle,repl,1)
+
+          needle="""    const defaults=contextDefaults();addDirty=false;addForm.reset();clearCoverPreview(addForm);setField(addForm,'category_id',defaults.categoryId);setField(addForm,'surface',defaults.surface);setField(addForm,'is_private',1);fillSurfaceFields(addForm,defaults.surface);openPanel(addPanel);setTimeout(()=>addForm.elements.namedItem('url')?.focus(),30);"""
+          repl="""    const defaults=contextDefaults();addDirty=false;addForm.reset();clearCoverPreview(addForm);setField(addForm,'category_id',defaults.categoryId);setField(addForm,'surface',defaults.surface);setField(addForm,'source_kind','remote_url');setField(addForm,'is_private',1);fillSurfaceFields(addForm,defaults.surface);openPanel(addPanel);setTimeout(()=>{const target=defaults.surface==='topics'?addForm.elements.namedItem('title'):addForm.elements.namedItem('url');target?.focus()},30);"""
+          assert s.count(needle)==1, 'showAdd source defaults'
+          s=s.replace(needle,repl,1)
+
+          needle="""    setField(detailForm,'surface',a.surface||'start');setField(detailForm,'resource_kind',a.resource_kind||'');setField(detailForm,'surface_note',a.surface_note||'');setField(detailForm,'background_friendly',!!a.background_friendly);setField(detailForm,'media_year',a.media_year||'');setField(detailForm,'media_status',a.media_status||'');setField(detailForm,'is_private',!!a.is_private);setField(detailForm,'is_favorite',!!a.is_favorite);
+    const title=$('[data-detail-title]',drawer);if(title)title.textContent=a.title||'资源详情';const domain=$('[data-detail-domain]',drawer);if(domain)domain.textContent=a.domain||'';"""
+          repl="""    setField(detailForm,'surface',a.surface||'start');setField(detailForm,'source_kind',a.source_kind||'remote_url');setField(detailForm,'resource_kind',a.resource_kind||'');setField(detailForm,'surface_note',a.surface_note||'');setField(detailForm,'background_friendly',!!a.background_friendly);setField(detailForm,'media_year',a.media_year||'');setField(detailForm,'media_status',a.media_status||'');setField(detailForm,'is_private',!!a.is_private);setField(detailForm,'is_favorite',!!a.is_favorite);
+    const htmlStatus=$('[data-html-status]',detailForm);if(htmlStatus)htmlStatus.textContent=a.html_name?`当前：${a.html_name} · ${Math.max(1,Math.round(Number(a.html_bytes||0)/1024))} KB`:'';
+    const title=$('[data-detail-title]',drawer);if(title)title.textContent=a.title||'资源详情';const domain=$('[data-detail-domain]',drawer);if(domain)domain.textContent=a.source_kind==='hosted_html'?'托管 HTML':(a.domain||'');"""
+          assert s.count(needle)==1, 'detail hosted fields'
+          s=s.replace(needle,repl,1)
+
+          needle="""  addForm?.elements.namedItem('surface')?.addEventListener('change',e=>fillSurfaceFields(addForm,e.target.value));
+  detailForm?.elements.namedItem('surface')?.addEventListener('change',e=>fillSurfaceFields(detailForm,e.target.value));"""
+          repl=needle+"\n  addForm?.elements.namedItem('source_kind')?.addEventListener('change',()=>syncSourceFields(addForm,addForm.elements.namedItem('surface')?.value||'start'));\n  detailForm?.elements.namedItem('source_kind')?.addEventListener('change',()=>syncSourceFields(detailForm,detailForm.elements.namedItem('surface')?.value||'start'));"
+          assert s.count(needle)==1, 'source change listeners'
+          s=s.replace(needle,repl,1)
+
+          old="""      const coverFile=addForm.elements.namedItem('cover')?.files?.[0]||null;const fd=new FormData(addForm);const payload=Object.fromEntries(fd.entries());delete payload.cover;payload.action='create';payload.is_private=addForm.elements.namedItem('is_private')?.checked?'1':'0';payload.is_favorite=addForm.elements.namedItem('is_favorite')?.checked?'1':'0';payload.background_friendly=addForm.elements.namedItem('background_friendly')?.checked?'1':'0';const res=await post(payload);
+      if(coverFile&&!res.duplicate){try{await uploadCover(res.id,coverFile)}catch(err){toast(`资源已创建，但封面未保存：${err.message}`,'error')}}
+      else toast(res.duplicate?'已有相同资源，未重复添加。':res.message);"""
+          new="""      const coverFile=addForm.elements.namedItem('cover')?.files?.[0]||null;const htmlFile=addForm.elements.namedItem('html')?.files?.[0]||null;const requestedSource=addForm.elements.namedItem('source_kind')?.value||'remote_url';if(requestedSource==='hosted_html'&&!htmlFile)throw new Error('请选择要上传的 HTML 文件。');const fd=new FormData(addForm);const payload=Object.fromEntries(fd.entries());delete payload.cover;delete payload.html;payload.action='create';payload.is_private=addForm.elements.namedItem('is_private')?.checked?'1':'0';payload.is_favorite=addForm.elements.namedItem('is_favorite')?.checked?'1':'0';payload.background_friendly=addForm.elements.namedItem('background_friendly')?.checked?'1':'0';const res=await post(payload);
+      let attachmentError='';if(coverFile&&!res.duplicate){try{await uploadCover(res.id,coverFile)}catch(err){attachmentError=`封面未保存：${err.message}`}}if(htmlFile&&!res.duplicate){try{await uploadHtml(res.id,htmlFile)}catch(err){attachmentError=`${attachmentError?attachmentError+'；':''}HTML 未保存：${err.message}`}}if(attachmentError)toast(`资源已创建，但${attachmentError}`,'error');else toast(res.duplicate?'已有相同资源，未重复添加。':res.message);"""
+          assert s.count(old)==1, 'add hosted submit'
+          s=s.replace(old,new,1)
+
+          old="""const keep={category_id:addForm.elements.namedItem('category_id')?.value||'',surface:addForm.elements.namedItem('surface')?.value||'start',tags:addForm.elements.namedItem('tags')?.value||'',resource_kind:addForm.elements.namedItem('resource_kind')?.value||'',media_status:addForm.elements.namedItem('media_status')?.value||'',is_private:!!addForm.elements.namedItem('is_private')?.checked,is_favorite:!!addForm.elements.namedItem('is_favorite')?.checked,background_friendly:!!addForm.elements.namedItem('background_friendly')?.checked};"""
+          new="""const keep={category_id:addForm.elements.namedItem('category_id')?.value||'',surface:addForm.elements.namedItem('surface')?.value||'start',source_kind:addForm.elements.namedItem('source_kind')?.value||'remote_url',tags:addForm.elements.namedItem('tags')?.value||'',resource_kind:addForm.elements.namedItem('resource_kind')?.value||'',media_status:addForm.elements.namedItem('media_status')?.value||'',is_private:!!addForm.elements.namedItem('is_private')?.checked,is_favorite:!!addForm.elements.namedItem('is_favorite')?.checked,background_friendly:!!addForm.elements.namedItem('background_friendly')?.checked};"""
+          assert s.count(old)==1, 'continue hosted source'
+          s=s.replace(old,new,1)
+
+          old="""  detailForm?.addEventListener('submit',async e=>{e.preventDefault();const btn=$('button[type=\"submit\"]',detailForm);btn.disabled=true;try{const coverFile=detailForm.elements.namedItem('cover')?.files?.[0]||null;const fd=new FormData(detailForm);const payload=Object.fromEntries(fd.entries());delete payload.cover;payload.action='save';payload.is_private=detailForm.elements.namedItem('is_private')?.checked?'1':'0';payload.is_favorite=detailForm.elements.namedItem('is_favorite')?.checked?'1':'0';payload.background_friendly=detailForm.elements.namedItem('background_friendly')?.checked?'1':'0';const res=await post(payload);if(coverFile){try{await uploadCover(payload.id,coverFile)}catch(err){toast(`修改已保存，但封面未保存：${err.message}`,'error')}}else toast(res.message);reloadSoon(520)}catch(err){toast(err.message,'error');btn.disabled=false}});"""
+          new="""  detailForm?.addEventListener('submit',async e=>{e.preventDefault();const btn=$('button[type=\"submit\"]',detailForm);btn.disabled=true;try{const coverFile=detailForm.elements.namedItem('cover')?.files?.[0]||null;const htmlFile=detailForm.elements.namedItem('html')?.files?.[0]||null;const fd=new FormData(detailForm);const payload=Object.fromEntries(fd.entries());delete payload.cover;delete payload.html;const existing=state.assets[String(payload.id)]||{};if(payload.source_kind==='hosted_html'&&!htmlFile&&!existing.html_url)throw new Error('请选择要上传的 HTML 文件。');payload.action='save';payload.is_private=detailForm.elements.namedItem('is_private')?.checked?'1':'0';payload.is_favorite=detailForm.elements.namedItem('is_favorite')?.checked?'1':'0';payload.background_friendly=detailForm.elements.namedItem('background_friendly')?.checked?'1':'0';const res=await post(payload);let attachmentError='';if(coverFile){try{await uploadCover(payload.id,coverFile)}catch(err){attachmentError=`封面未保存：${err.message}`}}if(htmlFile&&payload.source_kind==='hosted_html'){try{await uploadHtml(payload.id,htmlFile)}catch(err){attachmentError=`${attachmentError?attachmentError+'；':''}HTML 未保存：${err.message}`}}if(attachmentError)toast(`修改已保存，但${attachmentError}`,'error');else toast(res.message);reloadSoon(520)}catch(err){toast(err.message,'error');btn.disabled=false}});"""
+          assert s.count(old)==1, 'detail hosted submit'
+          s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+          PY
+
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src -type f -name '*.php' -print0)
+          node --check src/assets/workspace.js
+          git diff --check
+          printf '%s\n' "$(git diff --name-only)"
+          test "$(git diff --name-only | wc -l | tr -d ' ')" = "4"
+          git diff --name-only | grep -Fx 'src/app/FunctionalWorkspaceCore.php'
+          git diff --name-only | grep -Fx 'src/app/SurfaceRepository.php'
+          git diff --name-only | grep -Fx 'src/app/SurfaceShell.php'
+          git diff --name-only | grep -Fx 'src/assets/workspace.js'
+          echo P01_HOSTED_HTML_INTEGRATION_PATCH=PASS
+
+      - name: Commit and push exact integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add src/app/FunctionalWorkspaceCore.php src/app/SurfaceRepository.php src/app/SurfaceShell.php src/assets/workspace.js
+          git commit -m 'P01 V2.29 · Integrate hosted HTML Topics'
+          git push origin HEAD:feature/p01-domain-taxonomy-20260829
+          echo "P01_HOSTED_HTML_SOURCE=$(git rev-parse HEAD)"
