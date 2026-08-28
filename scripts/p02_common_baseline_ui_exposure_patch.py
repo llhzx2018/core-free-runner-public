@@ -6,17 +6,19 @@ root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('.')
 app = root / 'public/assets/app.js'
 text = app.read_text(encoding='utf-8')
 
-old_nav = "function settingsNav(){return [{id:'basic',group:'日常偏好',label:'基础设置',desc:'品牌、主题与常用偏好'},{id:'content',group:'日常偏好',label:'内容与分类',desc:'目录和内容规则'},{id:'display',group:'日常偏好',label:'显示与排序',desc:'密度、排序与阅读呈现'},{id:'search',group:'日常偏好',label:'搜索与使用',desc:'搜索范围与使用行为'},{id:'transfer',group:'系统维护',label:'导入与导出',desc:'迁入、治理与搬出'},{id:'backup',group:'系统维护',label:'SQLite 备份恢复',desc:'自动备份、快照与恢复'},{id:'updates',group:'系统维护',label:'系统更新',desc:'检查并安装正式版本'},{id:'security',group:'系统维护',label:'安全与隐私',desc:'隐私合同和安全维护'}];}"
-new_nav = "function settingsNav(){return [{id:'basic',group:'日常偏好',label:'基础设置',desc:'品牌、主题与常用偏好'},{id:'content',group:'日常偏好',label:'内容与分类',desc:'目录和内容规则'},{id:'display',group:'日常偏好',label:'显示与排序',desc:'密度、排序与阅读呈现'},{id:'search',group:'日常偏好',label:'搜索与使用',desc:'搜索范围与使用行为'},{id:'transfer',group:'数据与迁移',label:'导入与导出',desc:'迁入、治理与搬出'},{id:'system-info',group:'系统维护',label:'系统信息',desc:'查看当前运行事实',href:'/system-info.php'},{id:'system-baseline',group:'系统维护',label:'系统基线',desc:'查看 Common Product Baseline V2 运行结果',href:'/system-baseline.php'},{id:'updates',group:'系统维护',label:'在线升级',desc:'检查并安装正式版本'},{id:'backup',group:'系统维护',label:'备份与恢复',desc:'自动备份、快照与恢复'},{id:'runtime-health',group:'系统维护',label:'运行健康',desc:'查看环境、数据库与存储健康',href:'/diagnose.php'},{id:'security',group:'系统维护',label:'安全与隐私',desc:'隐私合同和安全维护'}];}"
-if text.count(old_nav) != 1:
-    raise SystemExit(f'settingsNav anchor mismatch: {text.count(old_nav)}')
-text = text.replace(old_nav, new_nav, 1)
+new_nav = "function settingsNav(){return [{id:'basic',group:'日常偏好',label:'基础设置',desc:'品牌、主题与常用偏好'},{id:'content',group:'日常偏好',label:'内容与分类',desc:'目录和内容规则'},{id:'display',group:'日常偏好',label:'显示与排序',desc:'密度、排序与阅读呈现'},{id:'search',group:'日常偏好',label:'搜索与使用',desc:'搜索范围与使用行为'},{id:'transfer',group:'数据与迁移',label:'导入与导出',desc:'迁入、治理与搬出'},{id:'system-info',group:'系统维护',label:'系统信息',desc:'查看当前运行事实',href:'/system-info.php'},{id:'system-baseline',group:'系统维护',label:'系统基线',desc:'查看 Common Product Baseline V2 运行结果',href:'/system-baseline.php'},{id:'updates',group:'系统维护',label:'在线升级',desc:'检查并安装正式版本'},{id:'backup',group:'系统维护',label:'备份与恢复',desc:'自动备份、快照与恢复'},{id:'runtime-health',group:'系统维护',label:'运行健康',desc:'查看环境、数据库与存储健康',href:'/diagnose.php'},{id:'security',group:'系统维护',label:'安全与隐私',desc:'隐私合同和维护'}];}"
+nav_start = text.find('function settingsNav(){')
+nav_end = text.find('\nfunction settingsNavMarkup(nav){', nav_start)
+if nav_start < 0 or nav_end < 0 or text.find('function settingsNav(){', nav_start + 1) >= 0:
+    raise SystemExit('settingsNav function boundary mismatch')
+text = text[:nav_start] + new_nav + text[nav_end:]
 
-old_markup = "function settingsNavMarkup(nav){let group='';return nav.map(x=>{const label=x.group!==group?'<div class=\"settings-nav-label\">'+esc(x.group)+'</div>':'';group=x.group;return label+'<button data-settings-section=\"'+x.id+'\" class=\"'+(state.settingsSection===x.id?'active':'')+'\"><span>'+esc(x.label)+'</span></button>';}).join('');}"
 new_markup = "function settingsNavMarkup(nav){let group='';return nav.map(x=>{const label=x.group!==group?'<div class=\"settings-nav-label\">'+esc(x.group)+'</div>':'';group=x.group;const action=x.href?' data-settings-href=\"'+x.href+'\"':' data-settings-section=\"'+x.id+'\"';return label+'<button'+action+' class=\"'+(!x.href&&state.settingsSection===x.id?'active':'')+'\"><span>'+esc(x.label)+'</span></button>';}).join('');}"
-if text.count(old_markup) != 1:
-    raise SystemExit(f'settingsNavMarkup anchor mismatch: {text.count(old_markup)}')
-text = text.replace(old_markup, new_markup, 1)
+markup_start = text.find('function settingsNavMarkup(nav){')
+markup_end = text.find('\nfunction selectOptions', markup_start)
+if markup_start < 0 or markup_end < 0 or text.find('function settingsNavMarkup(nav){', markup_start + 1) >= 0:
+    raise SystemExit('settingsNavMarkup function boundary mismatch')
+text = text[:markup_start] + new_markup + text[markup_end:]
 
 old_wire = "$$('[data-settings-section]').forEach(button=>button.onclick=()=>{state.settingsSection=button.dataset.settingsSection;renderSettings({scrollTop:0});});const back=$('#settingsBack');"
 new_wire = "$$('[data-settings-section]').forEach(button=>button.onclick=()=>{state.settingsSection=button.dataset.settingsSection;renderSettings({scrollTop:0});});$$('[data-settings-href]').forEach(button=>button.onclick=()=>window.location.assign(button.dataset.settingsHref));const back=$('#settingsBack');"
