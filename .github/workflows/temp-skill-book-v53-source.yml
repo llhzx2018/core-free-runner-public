@@ -1,0 +1,207 @@
+name: TEMP skill-book V5.3 exact-source gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  v53-exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOV_BASE_SHA: f3e3daf539fb7a2601332e7a364be633cb4d4717
+      DELTA_SHA256: 2f578990549084cd56d5b4ff71dc34f71bd99fd534fbe08938856211864543c9
+      ZIP_SHA256: fefb93eaab47255b33e1c4cd21800daab3bcfb4d70b9b92043b1a0a1c11767d8
+      ZIP_BYTES: '346582'
+      RUNTIME_CONTRACT_ID: SB53-RUNTIME-CONTRACT-A73E19C4
+      STAGING_BRANCH: staging/skill-book-v53-candidate-20260828
+    steps:
+      - name: Checkout temporary runner branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify V5.3 delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .temp/v53/part_*.b64 > /tmp/v53.b64
+          test "$(wc -c < /tmp/v53.b64)" = "82344"
+          base64 -d /tmp/v53.b64 > /tmp/v53_delta.tar.xz
+          test "$(stat -c%s /tmp/v53_delta.tar.xz)" = "61756"
+          echo "$DELTA_SHA256  /tmp/v53_delta.tar.xz" | sha256sum -c -
+
+      - name: Checkout live GOV-DOC main read-only
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: gov
+          fetch-depth: 0
+
+      - name: Guard live GOV-DOC and reconstruct V5.3 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL="$(git -C gov rev-parse HEAD)"
+          test "$ACTUAL" = "$GOV_BASE_SHA"
+          test -d gov/skills/skill-book/V5.2
+          test ! -e gov/skills/skill-book/V5.3
+          rm -rf /tmp/v53
+          mkdir -p /tmp/v53
+          cp -a gov/skills/skill-book/V5.2 /tmp/v53/skill-book_V5.3_CANDIDATE
+          tar -xJf /tmp/v53_delta.tar.xz -C /tmp/v53/skill-book_V5.3_CANDIDATE
+          ROOT=/tmp/v53/skill-book_V5.3_CANDIDATE
+          test "$(cat "$ROOT/VERSION" | tr -d '\r\n')" = "5.3"
+          python - <<'PY'
+          import json, pathlib
+          r=pathlib.Path('/tmp/v53/skill-book_V5.3_CANDIDATE')
+          m=json.loads((r/'MANIFEST.json').read_text())
+          assert m['version']=='5.3'
+          assert m['runtime_contract_id']=='SB53-RUNTIME-CONTRACT-A73E19C4'
+          files=[p for p in r.rglob('*') if p.is_file()]
+          assert len(files)==86, len(files)
+          bad=[str(p) for p in r.rglob('*') if p.name in {'.pytest_cache','__pycache__'} or p.suffix=='.pyc']
+          assert not bad, bad
+          PY
+          cd "$ROOT"
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Python syntax 35 of 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/v53/skill-book_V5.3_CANDIDATE
+          mapfile -t PYFILES < <(find "$ROOT" -type f -name '*.py' | sort)
+          test "${#PYFILES[@]}" = "35"
+          python - <<'PY'
+          import pathlib, py_compile
+          r=pathlib.Path('/tmp/v53/skill-book_V5.3_CANDIDATE')
+          fs=sorted(r.rglob('*.py'))
+          assert len(fs)==35
+          for p in fs: py_compile.compile(str(p), doraise=True)
+          print('PYTHON_SYNTAX_PASS=35/35')
+          PY
+          find "$ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find "$ROOT" -type f -name '*.pyc' -delete
+
+      - name: Exact reconstructed source regression 86 of 86
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v53/skill-book_V5.3_CANDIDATE
+          python -m pip install -q pytest
+          python -m pytest --collect-only -q > /tmp/v53_collect.txt
+          grep -Eq '86 tests collected' /tmp/v53_collect.txt
+          python -m pytest -q
+          rm -rf .pytest_cache
+          find . -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+      - name: Rebuild deterministic ZIP and require sealed identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, pathlib, zipfile
+          root=pathlib.Path('/tmp/v53/skill-book_V5.3_CANDIDATE')
+          out=pathlib.Path('/tmp/skill-book_V5.3_CANDIDATE_20260828.zip')
+          prefix='skill-book_V5.3_CANDIDATE'
+          files=sorted((p for p in root.rglob('*') if p.is_file()), key=lambda p:p.relative_to(root).as_posix())
+          assert len(files)==86
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED,allowZip64=True) as z:
+              for p in files:
+                  rel=p.relative_to(root).as_posix()
+                  zi=zipfile.ZipInfo(f'{prefix}/{rel}', (1980,1,1,0,0,0))
+                  zi.compress_type=zipfile.ZIP_STORED
+                  zi.create_system=3
+                  zi.external_attr=(0o100644 & 0xFFFF) << 16
+                  z.writestr(zi,p.read_bytes())
+          data=out.read_bytes()
+          h=hashlib.sha256(data).hexdigest()
+          print('ZIP_BYTES=',len(data))
+          print('ZIP_SHA256=',h)
+          assert len(data)==346582, len(data)
+          assert h=='fefb93eaab47255b33e1c4cd21800daab3bcfb4d70b9b92043b1a0a1c11767d8', h
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              infos=z.infolist()
+              assert len(infos)==86
+              assert len({i.filename for i in infos})==86
+              assert all(i.compress_type==zipfile.ZIP_STORED for i in infos)
+              assert all(i.date_time==(1980,1,1,0,0,0) for i in infos)
+              assert all((i.external_attr>>16)==0o100644 for i in infos)
+          PY
+
+      - name: Checkout GOV-DOC for isolated staging write
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: gov-write
+          fetch-depth: 0
+
+      - name: Create exact V5.3 staging branch only
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C gov-write fetch origin main
+          LIVE="$(git -C gov-write rev-parse origin/main)"
+          test "$LIVE" = "$GOV_BASE_SHA"
+          test -z "$(git -C gov-write ls-remote --heads origin "refs/heads/$STAGING_BRANCH")"
+          git -C gov-write checkout -b "$STAGING_BRANCH" "$GOV_BASE_SHA"
+          test ! -e gov-write/skills/skill-book/V5.3
+          mkdir -p gov-write/skills/skill-book/V5.3
+          cp -a /tmp/v53/skill-book_V5.3_CANDIDATE/. gov-write/skills/skill-book/V5.3/
+          test ! -e gov-write/skills/skill-book/V5.3/.pytest_cache
+          test -z "$(find gov-write/skills/skill-book/V5.3 -type d -name '__pycache__' -print -quit)"
+          test -z "$(find gov-write/skills/skill-book/V5.3 -type f -name '*.pyc' -print -quit)"
+          git -C gov-write config user.name VictorForge
+          git -C gov-write config user.email llhzx2018@gmail.com
+          git -C gov-write add skills/skill-book/V5.3
+          git -C gov-write commit -m 'skill-book: stage V5.3 candidate source'
+          STAGING_COMMIT="$(git -C gov-write rev-parse HEAD)"
+          git -C gov-write push origin "HEAD:refs/heads/$STAGING_BRANCH"
+          echo "staging_commit=$STAGING_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "STAGING_COMMIT=$STAGING_COMMIT"
+
+      - name: Checkout exact remote staging source read-only
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: staging/skill-book-v53-candidate-20260828
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: gov-stage
+          fetch-depth: 1
+
+      - name: Exact remote staging regression and identity readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C gov-stage rev-parse HEAD)" = "${{ steps.stage.outputs.staging_commit }}"
+          ROOT="$GITHUB_WORKSPACE/gov-stage/skills/skill-book/V5.3"
+          cd "$ROOT"
+          sha256sum -c SHA256SUMS.txt
+          test "$(find . -type f -name '*.py' | wc -l)" = "35"
+          python -m pytest --collect-only -q > /tmp/stage_collect.txt
+          grep -Eq '86 tests collected' /tmp/stage_collect.txt
+          python -m pytest -q
+          rm -rf .pytest_cache
+          find . -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+          python - <<'PY'
+          import hashlib, pathlib, zipfile
+          root=pathlib.Path.cwd(); out=pathlib.Path('/tmp/stage-v53.zip'); prefix='skill-book_V5.3_CANDIDATE'
+          files=sorted((p for p in root.rglob('*') if p.is_file()), key=lambda p:p.relative_to(root).as_posix())
+          assert len(files)==86
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              for p in files:
+                  zi=zipfile.ZipInfo(f'{prefix}/{p.relative_to(root).as_posix()}',(1980,1,1,0,0,0)); zi.compress_type=0; zi.create_system=3; zi.external_attr=(0o100644&0xffff)<<16; z.writestr(zi,p.read_bytes())
+          b=out.read_bytes(); assert len(b)==346582; assert hashlib.sha256(b).hexdigest()=='fefb93eaab47255b33e1c4cd21800daab3bcfb4d70b9b92043b1a0a1c11767d8'
+          print('REMOTE_STAGING_EXACT_IDENTITY=PASS')
+          PY
+          echo 'V53_SOURCE_GATE=PASS'
