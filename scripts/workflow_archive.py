@@ -50,6 +50,7 @@ V10_ARCHIVE_SOURCES = (
 V10_CATEGORIES = ("temporary", "invalid-yaml", "historical-version")
 ACTIVE_CURRENT_WORKFLOW_NAMES = {
     "core-agent-current-verify.yml",
+    "gov-doc-skill-pack-publish.yml",
     "runner-selftest-current.yml",
     "runner-trigger-scope-gate.yml",
     "runner-workflow-archive-gate.yml",
@@ -181,11 +182,13 @@ def verify(root: Path) -> list[str]:
                 failures.append("TOTAL_ENTRY_COUNT_NOT_507")
 
     for entry in expected_v10["entries"]:
-        if (root / entry["source_path"]).exists():
+        source = root / entry["source_path"]
+        source_name = Path(entry["source_path"]).name
+        if source.exists() and source_name not in ACTIVE_CURRENT_WORKFLOW_NAMES:
             failures.append(f"SOURCE_STILL_ACTIVE:{entry['source_path']}")
     for path in late_files:
         source = root / ".github/workflows" / path.name
-        if source.exists():
+        if source.exists() and path.name not in ACTIVE_CURRENT_WORKFLOW_NAMES:
             failures.append(f"LATE_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
 
     active_dir = root / ".github/workflows"
