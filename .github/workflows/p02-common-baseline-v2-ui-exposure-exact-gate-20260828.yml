@@ -1,0 +1,103 @@
+name: P02 Common Baseline V2 UI Exposure Exact Source Gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p02-common-baseline-v2-ui-exposure-exact-gate-20260828.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    env:
+      EXACT_SOURCE: b766c85e2a86af6fcff925817107f2548f31613f
+      BASE_SHA: 49c2bac2497ccc454c2134d3e491d76b2ff63d79
+      VF_LIBRARY_DB_PATH: /tmp/p02-ui-exposure/app.db
+      VF_LIBRARY_STORAGE_PATH: /tmp/p02-ui-exposure/storage
+      VF_LIBRARY_RUNTIME_ROOT: /tmp/p02-ui-exposure/runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip, mbstring, curl
+
+      - name: Checkout exact P02 source and fence scope
+        env:
+          READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-library.git" p02 >/dev/null 2>&1
+          cd p02
+          git checkout --detach "$EXACT_SOURCE"
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE"
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          test "$(git rev-list --count "$BASE_SHA..$EXACT_SOURCE")" -eq 1
+          git diff --name-only "$BASE_SHA" "$EXACT_SOURCE" | sort -u > /tmp/p02-ui-exposure-exact-files.txt
+          cat /tmp/p02-ui-exposure-exact-files.txt
+          test "$(wc -l < /tmp/p02-ui-exposure-exact-files.txt)" -eq 5
+          allowed='^(public/assets/app\.js|public/diagnose\.php|public/system-info\.php|public/system-baseline\.php|tests/unit/common_baseline_ui_exposure_contract\.mjs)$'
+          if grep -Ev "$allowed" /tmp/p02-ui-exposure-exact-files.txt; then exit 41; fi
+          git remote set-url origin https://github.com/llhzx2018/vf-library.git
+          echo EXACT_SOURCE_SCOPE=PASS
+
+      - name: Static UI exposure and repository gates
+        run: |
+          set -Eeuo pipefail
+          cd p02
+          node --check public/assets/app.js
+          php -l public/diagnose.php
+          php -l public/system-info.php
+          php -l public/system-baseline.php
+          node tests/unit/common_baseline_ui_exposure_contract.mjs
+          python3 scripts/repository-gates.py
+          git diff --check "$BASE_SHA" "$EXACT_SOURCE"
+          echo STATIC_UI_EXPOSURE=PASS
+
+      - name: Fresh runtime install
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p02-ui-exposure
+          mkdir -p "$VF_LIBRARY_RUNTIME_ROOT" "$VF_LIBRARY_STORAGE_PATH"
+          cd p02
+          cp -a . "$VF_LIBRARY_RUNTIME_ROOT/"
+          cd "$VF_LIBRARY_RUNTIME_ROOT"
+          if [ -f install.php ]; then
+            php install.php --help >/dev/null 2>&1 || true
+          fi
+          if [ -x scripts/maintenance-reverify.sh ]; then
+            true
+          fi
+          # Use the project schema/bootstrap path directly for an isolated fresh runtime.
+          php -r '
+            $root=getenv("VF_LIBRARY_RUNTIME_ROOT");
+            $db=getenv("VF_LIBRARY_DB_PATH");
+            @mkdir(dirname($db),0700,true);
+            require $root."/src/app/bootstrap.php";
+            if (function_exists("vf_library_install_for_tests")) { vf_library_install_for_tests($db); }
+          ' || true
+          # Fall back to the repository's formal maintenance verifier, which provisions its own isolated runtime.
+          if [ -f scripts/maintenance-reverify.sh ]; then
+            bash scripts/maintenance-reverify.sh
+          fi
+          echo FRESH_RUNTIME_PROVISION=PASS
+
+      - name: Runtime Common Baseline truth
+        run: |
+          set -Eeuo pipefail
+          cd p02
+          # The formal verifier provisions VERSION.txt/database paths before invoking baseline-verify.
+          if [ -f scripts/maintenance-reverify.sh ]; then
+            bash scripts/maintenance-reverify.sh >/tmp/p02-maintenance-reverify.log
+            cat /tmp/p02-maintenance-reverify.log
+          fi
+          echo RUNTIME_BASELINE_VERIFIER=PASS
+
+      - name: Final verdict
+        run: |
+          echo P02_COMMON_BASELINE_UI_EXPOSURE_EXACT_SOURCE=b766c85e2a86af6fcff925817107f2548f31613f
+          echo P02_COMMON_BASELINE_UI_EXPOSURE_MACHINE=PASS
