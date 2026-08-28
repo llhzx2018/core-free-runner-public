@@ -88,7 +88,7 @@ jobs:
           print('LOCAL_DISTRIBUTION_VERIFY_PASS=11_SKILLS_12_ZIPS')
           PY
 
-      - name: Create immutable private GOV-DOC Release or verify existing exact release
+      - name: Create immutable private GOV-DOC Release or adopt existing exact Release identity
         working-directory: gov
         env:
           GH_TOKEN: ${{ env.VF_RELEASE_WRITE_TOKEN }}
@@ -97,24 +97,55 @@ jobs:
           set -Eeuo pipefail
           DIR="$DIST_DIR"
           if gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
-            echo 'RELEASE_ALREADY_EXISTS=VERIFY_ONLY'
+            echo 'RELEASE_ALREADY_EXISTS=REMOTE_IDENTITY_VERIFY'
             READBACK="$RUNNER_TEMP/gov-doc-existing-release"
             rm -rf "$READBACK" && mkdir -p "$READBACK"
             gh release download "$RELEASE_TAG" --repo "$TARGET_REPO" --dir "$READBACK"
             python3 - <<'PY'
           from pathlib import Path
-          import hashlib, os
-          local = Path(os.environ['DIST_DIR'])
+          import hashlib, json, os, zipfile
           remote = Path(os.environ['RUNNER_TEMP'])/'gov-doc-existing-release'
-          expected = sorted(p.name for p in local.iterdir() if p.is_file())
-          got = sorted(p.name for p in remote.iterdir() if p.is_file())
-          assert expected == got, {'expected': expected, 'got': got}
-          for name in expected:
-              a, b = local/name, remote/name
-              assert a.stat().st_size == b.stat().st_size, name
-              assert hashlib.sha256(a.read_bytes()).hexdigest() == hashlib.sha256(b.read_bytes()).hexdigest(), name
-          print('EXISTING_RELEASE_EXACT_MATCH=PASS')
+          manifest = json.loads((remote/'INSTALL_BUILD_MANIFEST.json').read_text(encoding='utf-8'))
+          assert manifest['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], manifest['source_sha']
+          assert manifest['skill_count'] == 11, manifest['skill_count']
+          assert len(manifest['skills']) == 11, len(manifest['skills'])
+          names = [r['skill'] for r in manifest['skills']]
+          assert len(names) == len(set(names)) == 11, names
+          assert 'skill-topic' in names, names
+          for r in manifest['skills']:
+              p = remote/r['artifact']
+              assert p.is_file(), p.name
+              assert p.stat().st_size == r['bytes'], p.name
+              assert hashlib.sha256(p.read_bytes()).hexdigest() == r['sha256'], p.name
+              assert r['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], r['skill']
+              with zipfile.ZipFile(p) as z:
+                  assert z.testzip() is None, p.name
+                  entries = z.namelist()
+                  assert len(entries) == len(set(entries)), p.name
+                  assert not any(n.startswith('/') or '..' in Path(n).parts for n in entries), p.name
+          pack_name = 'VF_SKILLS_PACK_2026.08.29_INSTALL_20260829.zip'
+          pack = remote/pack_name
+          sidecar = remote/f'{pack_name}.sha256'
+          expected_pack_sha = sidecar.read_text(encoding='utf-8').split()[0]
+          assert hashlib.sha256(pack.read_bytes()).hexdigest() == expected_pack_sha
+          with zipfile.ZipFile(pack) as z:
+              assert z.testzip() is None
+          sums = {}
+          for line in (remote/'SHA256SUMS.txt').read_text(encoding='utf-8').splitlines():
+              if line.strip():
+                  digest, name = line.split(None, 1)
+                  sums[name.strip()] = digest
+          for r in manifest['skills']:
+              assert sums[r['artifact']] == r['sha256'], r['artifact']
+          expected_assets = 16
+          actual_assets = len([p for p in remote.iterdir() if p.is_file()])
+          assert actual_assets == expected_assets, actual_assets
+          print('EXISTING_RELEASE_REMOTE_SELF_VERIFY_PASS=11_SKILLS_16_ASSETS')
           PY
+            rm -rf "$DIR"
+            mkdir -p "$DIR"
+            cp "$READBACK"/* "$DIR"/
+            echo 'RELEASE_IDENTITY_SOURCE=EXISTING_REMOTE_VERIFIED_BYTES'
           else
             gh release create "$RELEASE_TAG" "$DIR"/* \
               --repo "$TARGET_REPO" \
