@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 P06="${1:-source}"
-EXACT_SOURCE="644e43538bf18a72195d1235ba97e38b33d98756"
+EXACT_SOURCE="36e5568c2bc2d81a71bdf216c07ff19c971ac5e2"
 BASE_MAIN="cadd08903c0835af2cccbcbbec82a92e4e9ea4e8"
 EXPECTED_VERSION="0.1.15"
 EXPECTED_SCHEMA="3"
@@ -22,9 +22,10 @@ assert p['lifecycle']=='PRODUCTION_CURRENT'
 PY
 
 mapfile -t changed < <(git diff --name-only "$BASE_MAIN" "$EXACT_SOURCE")
-test "${#changed[@]}" -eq 4
+test "${#changed[@]}" -eq 5
 for file in \
   bin/backoffice-self-test.php \
+  bin/common-baseline-human-ui-self-test.php \
   bin/operations-ui-self-test.php \
   public/assets/backoffice.css \
   src/Http/Studio/BackofficeShell.php; do
