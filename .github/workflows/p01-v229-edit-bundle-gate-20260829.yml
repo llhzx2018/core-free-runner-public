@@ -1,0 +1,184 @@
+name: P01 V2.29 Atomic Edit Bundle Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v229-edit-bundle-gate-20260829
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_SHA: 6b8476097b273f67650ed7431c5a0e0dc2fdec8d
+      ROOT: /tmp/p01-v229-edit-bundle
+      PORT: 18453
+      ADMIN_PASS: P01EditBundleGate!2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Fresh runtime fixture and test files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          node --check source/src/assets/workspace-create-bundle.js
+          node --check source/src/assets/workspace-rebaseline.js
+          rm -rf "$ROOT" /tmp/p01-edit-bundle-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-edit-bundle-server.log 2>&1 &
+          echo $! >/tmp/p01-edit-bundle-server.pid
+          COOKIE=/tmp/p01-edit-bundle-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-edit-bundle-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-edit-bundle-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Edit Bundle Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-edit-bundle-setup-post.html
+          cat >/tmp/p01-edit-bundle-seed.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$r=new VfRepository(vf_db());$id=$r->createCategory(['name'=>'Edit Bundle 兼容归属','is_private'=>false,'sort_order'=>10]);if($id<=0)throw new RuntimeException('category');echo "CATEGORY_ID=$id\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-bundle-seed.php | tee /tmp/p01-edit-bundle-category.txt
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          python3 - <<'PY'
+          import struct,zlib
+          def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+          def png(path,rgb,w=1200,h=800):
+              row=b'\x00'+bytes(rgb)*w
+              raw=row*h
+              data=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,6))+chunk(b'IEND',b'')
+              open(path,'wb').write(data)
+          png('/tmp/p01-edit-bundle-old.png',(24,112,168))
+          png('/tmp/p01-edit-bundle-new.png',(184,70,42))
+          open('/tmp/p01-edit-bundle-old.html','wb').write(b'<!doctype html><meta charset="utf-8"><h1>EDIT_BUNDLE_OLD_HTML</h1>')
+          open('/tmp/p01-edit-bundle-invalid.html','wb').write(b'<!doctype html><h1>INVALID</h1>\x00<script>1</script>')
+          open('/tmp/p01-edit-bundle-new.html','wb').write(b'<!doctype html><meta charset="utf-8"><h1>EDIT_BUNDLE_NEW_HTML</h1>')
+          PY
+          echo P01_EDIT_BUNDLE_FRESH=PASS
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-edit-bundle-browser && cd /tmp/p01-edit-bundle-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+
+      - name: Seed existing hosted topic through Add UI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-edit-bundle-browser
+          cat >seed.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18453';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01EditBundleGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.locator('script[src*="workspace-create-bundle.js"]').waitFor({state:'attached',timeout:10000});await p.waitForTimeout(400);await p.locator('[data-open-add]').click();const f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');await f.locator('input[name="title"]').fill('编辑原始专题');await f.locator('input[name="resource_kind"]').fill('一致性测试');await f.locator('input[name="is_private"]').uncheck();await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-edit-bundle-old.png');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-edit-bundle-old.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.getByText('编辑原始专题',{exact:true}).waitFor({timeout:30000});await p.screenshot({path:'/tmp/p01-edit-bundle-seed.png',fullPage:true});await browser.close();console.log('P01_EDIT_BUNDLE_SEED_UI=PASS');
+          JS
+          node seed.mjs | grep -Fx P01_EDIT_BUNDLE_SEED_UI=PASS
+          cat >/tmp/p01-edit-bundle-snapshot.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/ResourceAssetStore.php';$db=vf_db();$q=$db->prepare("SELECT id,title FROM links WHERE title='编辑原始专题' AND lifecycle_state='active'");$q->execute();$row=$q->fetch(PDO::FETCH_ASSOC);if(!$row)throw new RuntimeException('seed link');$id=(int)$row['id'];$store=new VfResourceAssetStore($db);$cover=$store->coverRecord($id);$html=$store->htmlRecord($id);if(!$cover||!$html)throw new RuntimeException('seed assets');$profile=$db->query('SELECT * FROM resource_domain_profiles WHERE link_id='.$id)->fetch(PDO::FETCH_ASSOC);if(!$profile||(string)$profile['source_kind']!=='hosted_html')throw new RuntimeException('seed profile');$data=['id'=>$id,'title'=>(string)$row['title'],'cover_hash'=>(string)$cover['file_hash'],'cover_path'=>(string)$cover['path'],'html_hash'=>(string)$html['file_hash'],'html_path'=>(string)$html['path'],'source_ref'=>(string)$profile['source_ref']];file_put_contents('/tmp/p01-edit-bundle-original.json',json_encode($data,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));echo "P01_EDIT_BUNDLE_SEED_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-bundle-snapshot.php | grep -Fx P01_EDIT_BUNDLE_SEED_DB=PASS
+
+      - name: Browser failure injection after cover replacement
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-edit-bundle-browser
+          cat >failure.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18453';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01EditBundleGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.locator('script[src*="workspace-create-bundle.js"]').waitFor({state:'attached',timeout:10000});await p.waitForTimeout(400);const card=p.locator('.vf-topic-card').filter({hasText:'编辑原始专题'});await card.locator('[data-edit-id]').first().click();const f=p.locator('[data-detail-form]');await f.locator('input[name="title"]').fill('编辑失败不应保存');await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-edit-bundle-new.png');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-edit-bundle-invalid.html');await f.locator('button[type="submit"]').click();await p.getByText(/修改失败，原资源与附件保持不变/).waitFor({timeout:30000});if(!(await f.isVisible()))throw new Error('drawer closed');if(await f.locator('button[type="submit"]').isDisabled())throw new Error('submit disabled');await p.screenshot({path:'/tmp/p01-edit-bundle-rollback.png',fullPage:true});await browser.close();console.log('P01_EDIT_BUNDLE_BROWSER_ROLLBACK=PASS');
+          JS
+          node failure.mjs | grep -Fx P01_EDIT_BUNDLE_BROWSER_ROLLBACK=PASS
+
+      - name: Verify rollback preserves old attachment truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-edit-bundle-rollback.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/ResourceAssetStore.php';$old=json_decode(file_get_contents('/tmp/p01-edit-bundle-original.json'),true);$db=vf_db();$id=(int)$old['id'];$q=$db->prepare('SELECT title FROM links WHERE id=?');$q->execute([$id]);if((string)$q->fetchColumn()!=='编辑原始专题')throw new RuntimeException('title changed');$p=$db->prepare('SELECT source_kind,source_ref FROM resource_domain_profiles WHERE link_id=?');$p->execute([$id]);$profile=$p->fetch(PDO::FETCH_ASSOC);if(!$profile||(string)$profile['source_kind']!=='hosted_html'||(string)$profile['source_ref']!==(string)$old['source_ref'])throw new RuntimeException('profile changed');$store=new VfResourceAssetStore($db);$cover=$store->coverRecord($id);$html=$store->htmlRecord($id);if(!$cover||!$html)throw new RuntimeException('asset missing');if((string)$cover['file_hash']!==(string)$old['cover_hash']||(string)$html['file_hash']!==(string)$old['html_hash'])throw new RuntimeException('asset hash changed');if(!is_file((string)$old['cover_path'])||!is_file((string)$old['html_path']))throw new RuntimeException('old file missing');$rootDir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets';if(glob($rootDir.'/covers/*.txn-*')?:[])throw new RuntimeException('cover txn orphan');if(glob($rootDir.'/html/*.txn-*')?:[])throw new RuntimeException('html txn orphan');if(count(glob($rootDir.'/covers/cover-'.$id.'-*')?:[])!==1)throw new RuntimeException('cover orphan');if(count(glob($rootDir.'/html/topic-'.$id.'-*')?:[])!==1)throw new RuntimeException('html orphan');if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');echo "P01_EDIT_BUNDLE_ROLLBACK_TRUTH=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-bundle-rollback.php | grep -Fx P01_EDIT_BUNDLE_ROLLBACK_TRUTH=PASS
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/p01-edit-bundle-original.json'))['id'])")
+          curl -fsS "http://127.0.0.1:${PORT}/resource-html.php?id=${ID}" | grep -F EDIT_BUNDLE_OLD_HTML
+
+      - name: Browser successful atomic replacement
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-edit-bundle-browser
+          cat >success.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18453';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01EditBundleGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.locator('script[src*="workspace-create-bundle.js"]').waitFor({state:'attached',timeout:10000});await p.waitForTimeout(400);const card=p.locator('.vf-topic-card').filter({hasText:'编辑原始专题'});await card.locator('[data-edit-id]').first().click();const f=p.locator('[data-detail-form]');await f.locator('input[name="title"]').fill('编辑成功专题');await f.locator('input[name="cover"]').setInputFiles('/tmp/p01-edit-bundle-new.png');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-edit-bundle-new.html');await f.locator('button[type="submit"]').click();await p.getByText('编辑成功专题',{exact:true}).waitFor({timeout:30000});await p.screenshot({path:'/tmp/p01-edit-bundle-success.png',fullPage:true});await browser.close();console.log('P01_EDIT_BUNDLE_BROWSER_SUCCESS=PASS');
+          JS
+          node success.mjs | grep -Fx P01_EDIT_BUNDLE_BROWSER_SUCCESS=PASS
+
+      - name: Verify commit cleans old files and keeps new truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-edit-bundle-success.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/ResourceAssetStore.php';$old=json_decode(file_get_contents('/tmp/p01-edit-bundle-original.json'),true);$db=vf_db();$id=(int)$old['id'];$q=$db->prepare('SELECT title FROM links WHERE id=?');$q->execute([$id]);if((string)$q->fetchColumn()!=='编辑成功专题')throw new RuntimeException('title');$store=new VfResourceAssetStore($db);$cover=$store->coverRecord($id);$html=$store->htmlRecord($id);if(!$cover||!$html)throw new RuntimeException('new assets');if((string)$cover['file_hash']===(string)$old['cover_hash']||(string)$html['file_hash']===(string)$old['html_hash'])throw new RuntimeException('hash not replaced');if((string)$cover['path']!==(string)$old['cover_path']&&is_file((string)$old['cover_path']))throw new RuntimeException('old cover survived');if((string)$html['path']!==(string)$old['html_path']&&is_file((string)$old['html_path']))throw new RuntimeException('old html survived');$rootDir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets';if(glob($rootDir.'/covers/*.txn-*')?:[])throw new RuntimeException('cover txn');if(glob($rootDir.'/html/*.txn-*')?:[])throw new RuntimeException('html txn');file_put_contents('/tmp/p01-edit-bundle-new.json',json_encode(['id'=>$id,'cover_path'=>$cover['path'],'html_path'=>$html['path'],'cover_hash'=>$cover['file_hash'],'html_hash'=>$html['file_hash']],JSON_UNESCAPED_SLASHES));echo "P01_EDIT_BUNDLE_COMMIT_TRUTH=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-bundle-success.php | grep -Fx P01_EDIT_BUNDLE_COMMIT_TRUTH=PASS
+          ID=$(python3 -c "import json;print(json.load(open('/tmp/p01-edit-bundle-new.json'))['id'])")
+          curl -fsS "http://127.0.0.1:${PORT}/resource-html.php?id=${ID}" | grep -F EDIT_BUNDLE_NEW_HTML
+
+      - name: Browser source switch removes HTML only after commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-edit-bundle-browser
+          cat >switch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18453';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01EditBundleGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.waitForTimeout(400);const card=p.locator('.vf-topic-card').filter({hasText:'编辑成功专题'});await card.locator('[data-edit-id]').first().click();const f=p.locator('[data-detail-form]');await f.locator('select[name="source_kind"]').selectOption('remote_url');const url=f.locator('input[name="url"]');await url.waitFor({state:'visible'});await url.fill('https://example.com/edited-topic');await f.locator('button[type="submit"]').click();await p.getByText('编辑成功专题',{exact:true}).waitFor({timeout:30000});await browser.close();console.log('P01_EDIT_BUNDLE_SOURCE_SWITCH=PASS');
+          JS
+          node switch.mjs | grep -Fx P01_EDIT_BUNDLE_SOURCE_SWITCH=PASS
+          cat >/tmp/p01-edit-bundle-switch.php <<'PHP'
+          <?php declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';require_once $root.'/app/ResourceAssetStore.php';$new=json_decode(file_get_contents('/tmp/p01-edit-bundle-new.json'),true);$db=vf_db();$id=(int)$new['id'];$p=$db->prepare('SELECT domain_key,source_kind,source_ref FROM resource_domain_profiles WHERE link_id=?');$p->execute([$id]);$profile=$p->fetch(PDO::FETCH_ASSOC);if(!$profile||(string)$profile['domain_key']!=='topics'||(string)$profile['source_kind']!=='remote_url'||(string)$profile['source_ref']!=='')throw new RuntimeException('profile switch');$store=new VfResourceAssetStore($db);if($store->htmlRecord($id)!==null)throw new RuntimeException('html db survived');if(is_file((string)$new['html_path']))throw new RuntimeException('html file survived');$cover=$store->coverRecord($id);if(!$cover||(string)$cover['file_hash']!==(string)$new['cover_hash'])throw new RuntimeException('cover changed');$rootDir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets';if(glob($rootDir.'/covers/*.txn-*')?:[]||glob($rootDir.'/html/*.txn-*')?:[])throw new RuntimeException('txn orphan');if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');echo "P01_EDIT_BUNDLE_SOURCE_SWITCH_TRUTH=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-edit-bundle-switch.php | grep -Fx P01_EDIT_BUNDLE_SOURCE_SWITCH_TRUTH=PASS
+
+      - name: Final regression and transport truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -F 'POST /workspace-save.php' /tmp/p01-edit-bundle-server.log
+          test "$(grep -c 'POST /workspace-save.php' /tmp/p01-edit-bundle-server.log)" -ge 3
+          grep -F '422]: POST /workspace-save.php' /tmp/p01-edit-bundle-server.log
+          grep -F '200]: POST /workspace-save.php' /tmp/p01-edit-bundle-server.log
+          if grep -F 'POST /resource-media.php' /tmp/p01-edit-bundle-server.log; then echo 'unexpected split edit media call'; exit 1; fi
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_V229_ATOMIC_EDIT_BUNDLE=PASS
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-atomic-edit-bundle
+          path: |
+            /tmp/p01-edit-bundle-seed.png
+            /tmp/p01-edit-bundle-rollback.png
+            /tmp/p01-edit-bundle-success.png
+            /tmp/p01-edit-bundle-server.log
+            /tmp/p01-edit-bundle-original.json
+            /tmp/p01-edit-bundle-new.json
+          retention-days: 14
