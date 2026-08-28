@@ -58,14 +58,14 @@ composer install --no-interaction --prefer-dist --no-progress
 while IFS= read -r f; do php -l "$f" >/dev/null; done < <(find src public bin deploy -type f -name '*.php' | sort)
 echo P06_V0115_PHP_SYNTAX=PASS
 
-ROOT="$RUNNER_TEMP/p06-v0115-exact"
+REG_ROOT="$RUNNER_TEMP/p06-v0115-exact"
 export APP_ENV=test
-export VF_PRESS_STORAGE_PATH="$ROOT/storage"
-export VF_PRESS_DB_PATH="$ROOT/storage/app.db"
+export VF_PRESS_STORAGE_PATH="$REG_ROOT/storage"
+export VF_PRESS_DB_PATH="$REG_ROOT/storage/app.db"
 export VF_PRESS_OWNER_USERNAME=human-owner
 export VF_PRESS_OWNER_PASSWORD='P06-Human-Baseline-Owner-Password-2026!'
 export VF_PRESS_OWNER_DISPLAY_NAME='Human Baseline Owner'
-mkdir -p "$ROOT/storage"
+mkdir -p "$REG_ROOT/storage"
 php bin/migrate.php
 test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = 3
 php bin/create-owner.php
@@ -88,7 +88,16 @@ php bin/common-baseline-v2-self-test.php
 php bin/common-baseline-human-ui-self-test.php
 echo P06_V0115_REGRESSION=PASS
 
-PORT=19059
+HTTP_ROOT="$RUNNER_TEMP/p06-v0115-http-clean"
+export VF_PRESS_STORAGE_PATH="$HTTP_ROOT/storage"
+export VF_PRESS_DB_PATH="$HTTP_ROOT/storage/app.db"
+rm -rf "$HTTP_ROOT"
+mkdir -p "$HTTP_ROOT/storage" "$HTTP_ROOT/sessions"
+php bin/migrate.php
+test "$(sqlite3 "$VF_PRESS_DB_PATH" 'SELECT MAX(version) FROM schema_migrations;')" = 3
+php bin/create-owner.php
+ROOT="$HTTP_ROOT"
+PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 PASS="$VF_PRESS_OWNER_PASSWORD"
 export VF_PRESS_SESSION_IDLE_SECONDS=604800
 export VF_PRESS_SESSION_ABSOLUTE_SECONDS=2592000
@@ -97,14 +106,18 @@ export VF_PRESS_SERVER_SESSION_FLOOR_SECONDS=2592000
 export VF_PRESS_STEP_UP_WINDOW_SECONDS=900
 export VF_PRESS_DISPLAY_TIMEZONE=Asia/Shanghai
 export VF_PRESS_LOCALE=zh-CN
-mkdir -p "$ROOT/sessions"
 php -d session.save_path="$ROOT/sessions" -S 127.0.0.1:$PORT -t public public/index.php >"$ROOT/server.log" 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
-for _ in $(seq 1 100); do curl -fsS "http://127.0.0.1:$PORT/health" >"$ROOT/health.json" 2>/dev/null && break; sleep .1; done
-python3 - <<'PY'
-import json,os
-x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'p06-v0115-exact','health.json')))
+READY=0
+for _ in $(seq 1 100); do
+  if curl -fsS "http://127.0.0.1:$PORT/health" >"$ROOT/health.json" 2>/dev/null; then READY=1; break; fi
+  sleep .1
+done
+test "$READY" = 1
+python3 - "$ROOT/health.json" <<'PY'
+import json,sys
+x=json.load(open(sys.argv[1]))
 assert x['status']=='ok' and x['version']=='0.1.15' and x['schema']==3,x
 PY
 
@@ -147,7 +160,7 @@ for label in \
   '文件上传' '运行健康' '版本身份' '缓存策略' '界面语言'; do
   grep -Fq "$label" "$ROOT/baseline"
 done
-grep -Fq '旧后台时间显示尚未全部' "$ROOT/baseline"
+grep -Fq '少量旧后台时间仍直接显示 UTC' "$ROOT/baseline"
 grep -Fq '尚未统一成一个全局 Retry Wrapper' "$ROOT/baseline"
 grep -Fq 'VF-COMMON-PRODUCT-BASELINE@2.0' "$ROOT/baseline"
 grep -Fq '技术详情（开发 / 排障使用）' "$ROOT/baseline"
