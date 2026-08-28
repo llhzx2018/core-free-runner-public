@@ -1,0 +1,111 @@
+name: P01 V2.29 Hosted HTML Security Gate
+
+on:
+  push:
+    branches:
+      - task/p01-v229-hosted-html-security-gate-20260829
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: a6b8d47064ce06fa2cf8b8003ba15e25a83666d2
+  ROOT: /tmp/p01-v229-html
+  PORT: '18442'
+  ADMIN_PASS: 'P01HtmlGate!2026'
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find source/src -type f -name '*.php' -print0)
+          node --check source/src/assets/workspace.js
+          rm -rf "$ROOT" /tmp/p01-html-* || true
+          cp -a source/src "$ROOT"
+          php -d display_errors=1 -d log_errors=1 -d error_reporting=E_ALL -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-html-server.log 2>&1 &
+          echo $! >/tmp/p01-html-server.pid
+          COOKIE=/tmp/p01-html-setup.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-html-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-html-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 HTML Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/p01-html-setup-post.html
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_HTML_FRESH=PASS
+
+      - name: Browser hosted HTML flow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-html-public.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>HOSTED_HTML_PUBLIC</h1><script>document.body.dataset.ran='yes';try{localStorage.setItem('x','1');document.body.dataset.storage='allowed'}catch(e){document.body.dataset.storage='blocked'};fetch('/api.php?action=health').then(()=>document.body.dataset.fetch='allowed').catch(()=>document.body.dataset.fetch='blocked');</script>
+          HTML
+          cat >/tmp/p01-html-private.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><h1>HOSTED_HTML_PRIVATE</h1>
+          HTML
+          mkdir -p /tmp/p01-html-browser && cd /tmp/p01-html-browser
+          npm init -y >/dev/null 2>&1; npm install playwright@1.55.0 --no-save >/dev/null 2>&1; npx playwright install chromium >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base='http://127.0.0.1:18442';const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const login=await ctx.request.post(base+'/api.php?action=login',{data:{password:'P01HtmlGate!2026'}});if(!login.ok())throw new Error('login');const p=await ctx.newPage();
+          await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();let f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');if(await f.locator('[data-url-field]').isVisible())throw new Error('url visible');if(!(await f.locator('[data-html-field]').isVisible()))throw new Error('html hidden');await f.locator('input[name="title"]').fill('专题 HTML 公开');await f.locator('input[name="resource_kind"]').fill('AI研究');await f.locator('input[name="is_private"]').uncheck();await f.locator('input[name="html"]').setInputFiles('/tmp/p01-html-public.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.getByText('专题 HTML 公开',{exact:true}).waitFor({timeout:30000});const card=p.locator('.vf-topic-card').filter({hasText:'专题 HTML 公开'});const publicId=await card.getAttribute('data-asset-row');if(!publicId)throw new Error('public id');await card.locator('[data-edit-id]').first().click();const d=p.locator('[data-detail-form]');if(await d.locator('select[name="source_kind"]').inputValue()!=='hosted_html')throw new Error('source detail');if(!(await d.locator('[data-html-status]').textContent()).includes('p01-html-public.html'))throw new Error('html status');await p.locator('[data-panel="detail"] [data-close-panel]:visible').click();
+          const h=await ctx.newPage();await h.goto(base+'/resource-html.php?id='+publicId,{waitUntil:'load'});await h.getByText('HOSTED_HTML_PUBLIC',{exact:true}).waitFor();await h.waitForTimeout(250);if(await h.locator('body').getAttribute('data-ran')!=='yes')throw new Error('script');if(await h.locator('body').getAttribute('data-storage')!=='blocked')throw new Error('storage');if(await h.locator('body').getAttribute('data-fetch')!=='blocked')throw new Error('fetch');await h.screenshot({path:'/tmp/p01-v229-hosted-html.png'});await h.close();
+          await p.goto(base+'/topics.php',{waitUntil:'networkidle'});await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');await f.locator('input[name="title"]').fill('专题 HTML 私人');await f.locator('input[name="resource_kind"]').fill('私人');await f.locator('input[name="html"]').setInputFiles('/tmp/p01-html-private.html');await f.locator('button[type="submit"]:not([data-add-continue])').click();await p.getByText('专题 HTML 私人',{exact:true}).waitFor({timeout:30000});const privateId=await p.locator('.vf-topic-card').filter({hasText:'专题 HTML 私人'}).getAttribute('data-asset-row');if(!privateId)throw new Error('private id');
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'/topics.php?scope=public',{waitUntil:'networkidle'});if(await p.getByText('专题 HTML 私人',{exact:true}).count())throw new Error('private leak');await p.locator('[data-open-add]').click();f=p.locator('[data-add-form]');await f.locator('select[name="source_kind"]').selectOption('hosted_html');if(await f.locator('[data-url-field]').isVisible()||!(await f.locator('[data-html-field]').isVisible()))throw new Error('mobile source');const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error('overflow');await p.screenshot({path:'/tmp/p01-v229-hosted-html-mobile.png',fullPage:true});await browser.close();console.log(JSON.stringify({publicId:Number(publicId),privateId:Number(privateId)}));
+          JS
+          node gate.mjs | tee /tmp/p01-html-ids.json
+          tail -n1 /tmp/p01-html-ids.json | jq -e '.publicId>0 and .privateId>0' >/dev/null
+          echo P01_HTML_BROWSER=PASS
+
+      - name: CSP anonymous privacy and integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IDS=$(tail -n1 /tmp/p01-html-ids.json);PUB=$(jq -r '.publicId' <<<"$IDS");PRIV=$(jq -r '.privateId' <<<"$IDS")
+          CODE=$(curl -sS -D /tmp/p01-html-public.headers -o /tmp/p01-html-public.out -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PUB}");test "$CODE" = 200;grep -Fi 'Content-Security-Policy: sandbox allow-scripts' /tmp/p01-html-public.headers;! grep -Fi 'allow-same-origin' /tmp/p01-html-public.headers;grep -F HOSTED_HTML_PUBLIC /tmp/p01-html-public.out
+          CODE=$(curl -sS -o /tmp/p01-html-private.out -w '%{http_code}' "http://127.0.0.1:${PORT}/resource-html.php?id=${PRIV}");test "$CODE" = 404
+          cat >/tmp/p01-html-db.php <<'PHP'
+          <?php
+          declare(strict_types=1);$root=getenv('ROOT');require $root.'/app/bootstrap.php';$db=vf_db();if((int)$db->query("SELECT COUNT(*) FROM resource_asset_files WHERE asset_kind='html'")->fetchColumn()!==2)throw new RuntimeException('html rows');if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')throw new RuntimeException('integrity');if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))throw new RuntimeException('fk');echo "P01_HTML_DB=PASS\n";
+          PHP
+          ROOT="$ROOT" php /tmp/p01-html-db.php | grep -Fx P01_HTML_DB=PASS
+          echo P01_HTML_SECURITY=PASS
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v229-hosted-html-security
+          path: |
+            /tmp/p01-v229-hosted-html.png
+            /tmp/p01-v229-hosted-html-mobile.png
+            /tmp/p01-html-public.headers
+          retention-days: 14
+
+      - name: Final verdict
+        run: |
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo P01_V229_HOSTED_HTML_SECURITY=PASS
