@@ -1,0 +1,295 @@
+name: P04 V2.8.11 Final Exact Source Gate R2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/p04-v2811-final-exact-source-gate-r2-20260828.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE: cab41a436126ccfb050ba37642ffc7a7c87953e6
+      BASE_MAIN: d52acf3f200652c9806e51dd08e9207da4a1170b
+      OLD_SOURCE: 8f91cc4c7bd9fadf6398eda60bcd2c2283a02d98
+      TARGET_BRANCH: ui/p04-human-baseline-v2811-20260828
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+
+      - name: Checkout exact P04 V2.8.10 release source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.OLD_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: old
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+
+      - name: Exact source and 12-file scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/main)" = "$BASE_MAIN"
+          test "$(git -C product rev-parse origin/$TARGET_BRANCH)" = "$CANDIDATE"
+          test "$(git -C old rev-parse HEAD)" = "$OLD_SOURCE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          test "$(tr -d '\r\n' < old/VERSION)" = '2.8.10'
+          mapfile -t changed < <(git -C product diff --name-only "$BASE_MAIN" "$CANDIDATE")
+          test "${#changed[@]}" -eq 12
+          for file in \
+            VERSION VF_PROJECT.json \
+            public/assets/system-operations.css \
+            public/assets/v280-navigation-simplify.js \
+            public/assets/v2811-human-baseline.css \
+            public/assets/v2811-human-baseline.js \
+            public/baseline-summary.php public/index.php \
+            public/system-baseline.php public/system-info.php \
+            scripts/build-v2811-release-tree.py scripts/build-v2811-update-release.py; do
+            printf '%s\n' "${changed[@]}" | grep -Fxq "$file"
+          done
+          git -C product diff --quiet "$BASE_MAIN" "$CANDIDATE" -- src/app/CommonBaselineV2Closure.php database config
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          python3 -m py_compile scripts/build-v2811-release-tree.py scripts/build-v2811-update-release.py scripts/validate-online-atomic-package.py scripts/full-runtime-vs-update-result-source-exact-gate.py
+          node --check public/assets/v280-navigation-simplify.js
+          node --check public/assets/v2811-human-baseline.js
+          find src public -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json'))
+          assert p['project_id']=='P04'
+          assert p['version']=='2.8.11' and p['production_version']=='2.8.10'
+          assert p['schema']==14
+          c=p['release_source_contract']
+          assert c['runtime_resolver_change'] is False
+          assert c['baseline_authority']=='CommonBaselineV2Closure::summary()'
+          assert c['allowed_source_versions']==['2.8.10']
+          PY
+          grep -Fq 'v2811-human-baseline.css' public/index.php
+          grep -Fq 'v2811-human-baseline.js' public/index.php
+          grep -Fq 'CommonBaselineV2Closure::summary()' public/baseline-summary.php
+          echo P04_V2811_FINAL_R2_SOURCE_SCOPE=PASS
+
+      - name: Fresh install Schema 14
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          VF_INFRA_TEST_PORT=19044 bash scripts/run-clean-full-install-gate.sh
+          echo P04_V2811_FINAL_R2_FRESH_INSTALL=PASS
+
+      - name: Deterministic FULL UPDATE and Source Exact Atomic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p04-v2811-final-r2"
+          mkdir -p "$ROOT"
+          cd product
+          python3 scripts/build-v2811-release-tree.py "$ROOT/tree-a" >/dev/null
+          python3 scripts/build-v2811-release-tree.py "$ROOT/tree-b" >/dev/null
+          diff -qr "$ROOT/tree-a" "$ROOT/tree-b"
+          python3 - "$ROOT/tree-a" "$ROOT/VF_Infra_V2.8.11_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          python3 scripts/build-v2811-update-release.py --target-runtime "$ROOT/tree-a" --output "$ROOT/update-a" >/dev/null
+          python3 scripts/build-v2811-update-release.py --target-runtime "$ROOT/tree-b" --output "$ROOT/update-b" >/dev/null
+          cmp "$ROOT/update-a/VF_Infra_V2.8.11_UPDATE.zip" "$ROOT/update-b/VF_Infra_V2.8.11_UPDATE.zip"
+          test "$(jq -r '.version' "$ROOT/tree-a/release-manifest.json")" = '2.8.11'
+          test "$(jq -r '.target_schema' "$ROOT/tree-a/release-manifest.json")" = '14'
+          test "$(jq -r '.maintenance_entry_count' "$ROOT/tree-a/release-manifest.json")" = '5'
+          test "$(jq -r '.human_readable_baseline_ui' "$ROOT/tree-a/release-manifest.json")" = 'true'
+          test "$(jq -r '.runtime_resolver_change' "$ROOT/tree-a/release-manifest.json")" = 'false'
+          test "$(jq -c '.allowed_source_versions' "$ROOT/update-a/PACKAGE_MANIFEST.json")" = '["2.8.10"]'
+          python3 scripts/validate-online-atomic-package.py --runtime "$ROOT/tree-a" --zip "$ROOT/update-a/VF_Infra_V2.8.11_UPDATE.zip" --version 2.8.11
+          cd ../old
+          python3 scripts/build-release-tree.py "$ROOT/old-tree" >/dev/null
+          python3 - "$ROOT/old-tree" "$ROOT/VF_Infra_V2.8.10_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          cd ../product
+          python3 scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$ROOT/VF_Infra_V2.8.10_FULL.zip" \
+            --candidate-full "$ROOT/VF_Infra_V2.8.11_FULL.zip" \
+            --candidate-update "$ROOT/update-a/VF_Infra_V2.8.11_UPDATE.zip" \
+            --expected-source-version 2.8.10 \
+            --expected-target-version 2.8.11
+          sha256sum "$ROOT/VF_Infra_V2.8.11_FULL.zip" "$ROOT/update-a/VF_Infra_V2.8.11_UPDATE.zip" | tee "$ROOT/SHA256SUMS.txt"
+          stat -c '%n %s' "$ROOT/VF_Infra_V2.8.11_FULL.zip" "$ROOT/update-a/VF_Infra_V2.8.11_UPDATE.zip" | tee "$ROOT/BYTES.txt"
+          echo P04_V2811_FINAL_R2_ATOMIC=PASS
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Baseline human UI five-entry and mobile browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          ROOT="$RUNNER_TEMP/p04-v2811-final-r2"
+          WEB="$ROOT/browser-runtime"
+          REPORT="$ROOT/browser-report.json"
+          PORT=19045
+          python3 scripts/build-v2811-release-tree.py "$WEB" >/dev/null
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$ROOT/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          cat > .runner-p04-v2811-final-r2.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:19045';
+          const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
+          const report={status:'FAIL',stage:'start',routes:{},page_errors:[],console_errors:[],bad_responses:[]};
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1365,height:900}});
+          const page=await context.newPage();
+          page.on('pageerror',e=>report.page_errors.push(String(e)));
+          page.on('console',m=>{if(m.type()==='error')report.console_errors.push(m.text())});
+          page.on('response',r=>{if(r.status()>=400)report.bad_responses.push({url:r.url(),status:r.status()})});
+          async function route(label, expected, forbidden='') {
+            report.stage=`route:${label}`;
+            const nav=page.locator('.v271-settings-nav');
+            const btn=nav.getByRole('button',{name:label,exact:true});
+            await btn.waitFor({state:'visible',timeout:8000});
+            await btn.click({timeout:8000});
+            await page.locator('.v271-settings-content h2',{hasText:expected}).first().waitFor({state:'visible',timeout:8000});
+            const titles=await page.locator('.v271-settings-content h2').allInnerTexts();
+            if(!titles.some(t=>t.trim()===expected)) throw new Error(`${label} missing ${expected}`);
+            if(forbidden && titles.some(t=>t.trim()===forbidden)) throw new Error(`${label} merged with ${forbidden}`);
+            report.routes[label]=titles;
+          }
+          try {
+            report.stage='setup';
+            await page.goto(base+'/setup.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#site_name').fill('VF Infra V2.8.11 Final R2');
+            await page.locator('#password').fill(password);
+            await page.locator('#password_confirm').fill(password);
+            await Promise.all([page.waitForURL(/login\.php\?installed=1/),page.getByRole('button',{name:'安装并进入系统'}).click()]);
+            await page.locator('#admin-password').fill(password);
+            await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
+
+            report.stage='baseline-api';
+            const api=await context.request.get(base+'/baseline-summary.php');
+            if(!api.ok()) throw new Error(`baseline HTTP ${api.status()}`);
+            const baseline=(await api.json()).baseline;
+            if(Number(baseline?.counts?.DRIFT)!==0||Number(baseline?.counts?.UNKNOWN)!==0) throw new Error('baseline drift/unknown');
+            if(Number(baseline?.required_domain_count)!==15||Number(baseline?.covered_domain_count)!==15) throw new Error('baseline coverage');
+            if(!baseline.rows?.some(r=>r.domain==='LOGGING'&&r.result==='PASS')) throw new Error('LOGGING missing');
+
+            report.stage='standalone';
+            await page.goto(base+'/system-baseline.php',{waitUntil:'domcontentloaded'});
+            if(!(await page.locator('.conclusion strong').innerText()).includes('系统正常')) throw new Error('standalone conclusion');
+            if(!(await page.locator('.attention').innerText()).includes('当前没有需要你处理')) throw new Error('standalone attention');
+            if(await page.locator('.group-row').count()!==5) throw new Error('standalone groups');
+            if(await page.locator('.tech-details').getAttribute('open')!==null) throw new Error('standalone details open');
+
+            report.stage='shell';
+            await page.goto(base+'/index.php#settings/baseline',{waitUntil:'domcontentloaded'});
+            await page.locator('.v2811-baseline-hero h2').waitFor({state:'visible',timeout:10000});
+            await page.waitForTimeout(250);
+            const nav=page.locator('.v271-settings-nav');
+            const expected=['系统信息','系统基线','在线升级','备份与恢复','运行健康'];
+            for(const label of expected){
+              if(await nav.getByRole('button',{name:label,exact:true}).count()!==1) throw new Error(`entry missing ${label}`);
+            }
+            const navBefore=await nav.innerText();
+            await page.waitForTimeout(250);
+            if(navBefore!==await nav.innerText()) throw new Error('nav unstable');
+            if(!(await page.locator('.v2811-attention').innerText()).includes('当前没有需要你处理')) throw new Error('human attention missing');
+            if(await page.locator('.v2811-baseline-group').count()!==5) throw new Error('shell groups');
+            if(await page.locator('.v2811-tech-details').getAttribute('open')!==null) throw new Error('shell details open');
+            await route('系统信息','系统信息','运行健康');
+            await route('在线升级','在线升级');
+            await route('备份与恢复','备份与恢复','导入导出');
+            await route('运行健康','运行健康','系统信息');
+
+            report.stage='mobile';
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(base+'/index.php#settings/baseline',{waitUntil:'domcontentloaded'});
+            await page.locator('.v2811-baseline-hero h2').waitFor({state:'visible',timeout:10000});
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-window.innerWidth);
+            report.mobile_overflow=overflow;
+            if(overflow>2) throw new Error(`mobile overflow ${overflow}`);
+            report.stage='complete'; report.status='PASS';
+          } catch(e) {
+            report.error=String(e?.stack||e);
+            try { report.url=page.url(); report.body=(await page.locator('body').innerText()).slice(0,5000); } catch(_) {}
+          } finally {
+            await browser.close();
+            fs.writeFileSync(process.env.REPORT_PATH,JSON.stringify(report,null,2));
+          }
+          JS
+          REPORT_PATH="$REPORT" node .runner-p04-v2811-final-r2.mjs
+          cat "$REPORT"
+          test "$(jq -r '.status' "$REPORT")" = PASS
+          test "$(jq '.page_errors|length' "$REPORT")" = 0
+          test "$(jq '.console_errors|length' "$REPORT")" = 0
+          test "$(jq '.bad_responses|length' "$REPORT")" = 0
+          kill "$SERVER_PID"; wait "$SERVER_PID" || true; trap - EXIT
+          echo P04_V2811_FINAL_R2_BROWSER=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo P04_V2811_FINAL_EXACT_SOURCE_R2=PASS
+          echo EXACT_SOURCE="$CANDIDATE"
+
+      - name: Upload formal release set
+        uses: actions/upload-artifact@v4
+        with:
+          name: P04-V2.8.11-FINAL-R2-${{ env.CANDIDATE }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/p04-v2811-final-r2/VF_Infra_V2.8.11_FULL.zip
+            ${{ runner.temp }}/p04-v2811-final-r2/update-a/VF_Infra_V2.8.11_UPDATE.zip
+            ${{ runner.temp }}/p04-v2811-final-r2/SHA256SUMS.txt
+            ${{ runner.temp }}/p04-v2811-final-r2/BYTES.txt
+            ${{ runner.temp }}/p04-v2811-final-r2/browser-report.json
