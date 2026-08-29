@@ -1,0 +1,145 @@
+name: P01 V2.31.0 Final Candidate Readiness Gate V2
+on:
+  push:
+    branches: [task/p01-v2310-final-candidate-gate-20260829]
+    paths: [.github/workflows/p01-v2310-final-candidate-gate-v2-20260829.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT: ${{ github.workspace }}/product
+      ROOT: ${{ github.workspace }}/product/src
+      PORT: '18635'
+      ADMIN_PASS: 'P01V231!CandidateV2'
+      EVID: /tmp/p01-v2310-candidate-v2-evidence
+      CANDIDATE: d541b7bb18d40705ec03f951fad3ed661aa11991
+      CANDIDATE_TREE: 7e5eaed15187f48686ae3eb67ff91a63085ca003
+      V230_SOURCE: 40b2d5239c557ab6c7b9aaaa092acffa9fb926f9
+      FORM_SOURCE: 08a24118fc660f5c9b937866d4b58aeba36c15c3
+      PRIVATE_SOURCE: f0afdff4df69c872831a35516eed58e03c688ccf
+      COPY_SOURCE: b8d1ed568aef8191278c0197a6c51673242d360e
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: d541b7bb18d40705ec03f951fad3ed661aa11991
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source, seven-file delta and version identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C "$PRODUCT" rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C "$PRODUCT" rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < "$PRODUCT/VERSION")" = 2.31.0
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.31.0
+          grep -Fx "define('VF_VERSION', '2.31.0');" "$ROOT/app/bootstrap.php" >/dev/null
+          git -C "$PRODUCT" diff --name-only "$V230_SOURCE"...HEAD | sort >"$EVID/actual-diff.txt"
+          cat >"$EVID/expected-diff.txt" <<'EOF'
+          VERSION
+          src/VERSION.txt
+          src/app/bootstrap.php
+          src/assets/workspace-create-bundle.js
+          src/assets/workspace-domain-nav.css
+          src/workspace-create.php
+          src/workspace-save.php
+          EOF
+          sort -o "$EVID/expected-diff.txt" "$EVID/expected-diff.txt"
+          diff -u "$EVID/expected-diff.txt" "$EVID/actual-diff.txt"
+          if grep -q '^src/migrations/' "$EVID/actual-diff.txt"; then echo UNEXPECTED_MIGRATION; exit 1; fi
+          php -l "$ROOT/app/bootstrap.php" >/dev/null
+          php -l "$ROOT/workspace-create.php" >/dev/null
+          php -l "$ROOT/workspace-save.php" >/dev/null
+          node --check "$ROOT/assets/workspace-create-bundle.js"
+          printf '%s\n' 'P01_V2310_EXACT_SOURCE=PASS' 'P01_V2310_SEVEN_FILE_DELTA=PASS' 'P01_V2310_VERSION_TRIPLE_BINDING=PASS' 'P01_V2310_NO_MIGRATION=PASS' | tee "$EVID/source-fence.txt"
+      - name: Bind prior PASS evidence to unchanged product bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PRODUCT"
+          git cat-file -e "$FORM_SOURCE^{commit}"
+          git cat-file -e "$PRIVATE_SOURCE^{commit}"
+          git cat-file -e "$COPY_SOURCE^{commit}"
+          cmp <(git show "$FORM_SOURCE:src/workspace-create.php") src/workspace-create.php
+          cmp <(git show "$FORM_SOURCE:src/workspace-save.php") src/workspace-save.php
+          cmp <(git show "$PRIVATE_SOURCE:src/assets/workspace-domain-nav.css") src/assets/workspace-domain-nav.css
+          cmp <(git show "$COPY_SOURCE:src/assets/workspace-create-bundle.js") src/assets/workspace-create-bundle.js
+          cat >"$EVID/evidence-binding.txt" <<'EOF'
+          CONTEXTUAL_FORM_RUN=33238841830 PASS
+          CONTEXTUAL_FORM_SOURCE=08a24118fc660f5c9b937866d4b58aeba36c15c3
+          PRIVATE_SEMANTIC_RUN=33239081728 PASS
+          PRIVATE_SEMANTIC_SOURCE=f0afdff4df69c872831a35516eed58e03c688ccf
+          ACTION_COPY_RUN=33239249456 PASS
+          ACTION_COPY_SOURCE=b8d1ed568aef8191278c0197a6c51673242d360e
+          CANDIDATE_PRODUCT_BYTES_MATCH_PROVEN_SOURCES=PASS
+          EOF
+          cat "$EVID/evidence-binding.txt"
+      - name: Fresh install, runtime version, schema and baseline verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-v2310-candidate-v2.cookies
+          rm -f "$COOKIE"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-v2310-candidate-v2.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-v2310-v2-setup.html; then break; fi
+            sleep .25
+          done
+          test -s /tmp/p01-v2310-v2-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v2310-v2-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 V231 Candidate V2' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" | tee "$EVID/fresh-verify.txt" | grep -Fx VERIFY_PASS=YES
+          php -r 'require getenv("ROOT")."/app/bootstrap.php"; echo "VF_VERSION=".VF_VERSION.PHP_EOL; $db=vf_db(); echo "SCHEMA=".(string)$db->query("SELECT MAX(version) FROM schema_migrations WHERE status=\"success\"")->fetchColumn().PHP_EOL; echo "SQLITE=".strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn()).PHP_EOL; echo "FK=".count($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC)).PHP_EOL;' | tee "$EVID/runtime-truth.txt"
+          grep -Fx VF_VERSION=2.31.0 "$EVID/runtime-truth.txt"
+          grep -Fx SCHEMA=2026082901 "$EVID/runtime-truth.txt"
+          grep -Fx SQLITE=ok "$EVID/runtime-truth.txt"
+          grep -Fx FK=0 "$EVID/runtime-truth.txt"
+          printf '%s\n' 'P01_V2310_FRESH_INSTALL=PASS' 'P01_V2310_RUNTIME_VERSION=PASS' 'P01_V2310_SCHEMA_UNCHANGED=PASS' 'P01_V2310_SQLITE_FK=PASS' | tee "$EVID/fresh-runtime.txt"
+      - name: Final verdict
+        shell: bash
+        run: |
+          cat >"$EVID/verdict.txt" <<'EOF'
+          P01_V2310_CANDIDATE_SOURCE=d541b7bb18d40705ec03f951fad3ed661aa11991
+          P01_V2310_CANDIDATE_TREE=7e5eaed15187f48686ae3eb67ff91a63085ca003
+          P01_V2310_SOURCE_VERSION=2.30.0
+          P01_V2310_TARGET_VERSION=2.31.0
+          P01_V2310_SCHEMA=2026082901
+          P01_V2310_SEVEN_FILE_DELTA=PASS
+          P01_V2310_PROVEN_PRODUCT_BYTE_BINDING=PASS
+          P01_V2310_FRESH_RUNTIME=PASS
+          P01_V2310_READY_FOR_DOCS_CLOSURE=YES
+          FORMAL_RELEASE=NOT_STARTED
+          OWNER_PRODUCTION_WRITE=NO
+          EOF
+          cat "$EVID/verdict.txt"
+      - name: Upload candidate V2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v2310-candidate-readiness-v2-evidence-${{ github.run_id }}
+          path: /tmp/p01-v2310-candidate-v2-evidence
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Cleanup server
+        if: always()
+        shell: bash
+        run: if test -f /tmp/p01-v2310-candidate-v2.pid; then kill "$(cat /tmp/p01-v2310-candidate-v2.pid)" >/dev/null 2>&1 || true; fi
