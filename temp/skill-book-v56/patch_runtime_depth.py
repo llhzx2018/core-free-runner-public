@@ -58,7 +58,7 @@ s = repl(s, old, new, 'fixture-depth-lists', 2)
 
 depth_append_source = (
     "DEPTH_TOOL_APPEND='\\n## V5.6 Evidence Trace\\nRecord ID: ____ Source / actor: ____ Date: ____ Action / observation: ____ Result: ____ Interpretation: ____ Linked decision/change: ____"
-    "\\n## V5.6 Decision Review\\nOptions: A / B. Criteria / threshold: ____ Evidence source: ____ Selected option: ____ Rationale / tradeoff: ____ Uncertainty: ____ Revisit trigger: ____"
+    "\\n## V5.6 Decision Review\\nOptions: A / B. Rule / criteria / threshold: ____ Evidence source: ____ Selected decision: ____ Rationale / tradeoff: ____ Uncertainty: ____ Revisit trigger: ____ Execution step / next action: ____"
     "\\n## V5.6 Change Control\\nBaseline version: ____ Proposed change: ____ Change reason / evidence: ____ Owner / authority: ____ Impact: ____ Revalidation: ____ Accept / Reject / Defer: ____ Superseded version / rollback target: ____"
     "\\n## V5.6 Recovery Loop\\nFailure trigger: ____ Diagnosis / likely cause: ____ Recovery action: ____ Retry condition: ____ Post-retry evidence: ____ Escalate or pause when: ____"
     "\\n## V5.6 Acceptance\\nExpected: ____ Actual: ____ Verification method: ____ PASS / FAIL / PARTIAL: ____ Defect / rework: ____"
