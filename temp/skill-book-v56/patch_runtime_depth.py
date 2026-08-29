@@ -55,34 +55,18 @@ s = repl(
 old = "'evidence/adequacy_contract.json','evidence/adequacy_audit.json','evidence/prefreeze_random_open.json'"
 new = "'evidence/adequacy_contract.json','evidence/adequacy_audit.json','evidence/practical_asset_depth_contract.json','evidence/practical_asset_depth_audit.json','evidence/prefreeze_random_open.json'"
 s = repl(s, old, new, 'fixture-depth-lists', 2)
-old = "\n".join([
-    '## 验证与验收',
-    '预期输出 实际 验证 验收 PASS FAIL。',
-    '## 错误类型与恢复',
-    '错误类型 为什么错 失败 恢复 纠错 回滚 重试。',
-    '## 参考判断',
-    '参考判断：证据满足阈值才继续。',
-    '## 完成条件',
-    '完成条件：独立复核后进入下一步。',
-]) + '\n'
-new = "\n".join([
-    '## 验证与验收',
-    'Expected: ____ Actual: ____ Verification method: ____ PASS / FAIL / PARTIAL: ____ Defect / rework: ____',
-    '## 证据追踪',
-    'Record ID: ____ Source / actor: ____ Date: ____ Action / observation: ____ Result: ____ Interpretation: ____ Linked decision/change: ____',
-    '## 决策复核',
-    'Options: A / B. Criteria / threshold: ____ Evidence source: ____ Selected option: ____ Rationale / tradeoff: ____ Uncertainty: ____ Revisit trigger: ____',
-    '## 变更控制',
-    'Baseline version: ____ Proposed change: ____ Change reason / evidence: ____ Owner / authority: ____ Impact: ____ Revalidation: ____ Accept / Reject / Defer: ____ Superseded version / rollback target: ____',
-    '## 错误类型与恢复',
-    'Failure trigger: ____ Diagnosis / likely cause: ____ Recovery action: ____ Retry condition: ____ Post-retry evidence: ____ Escalate or pause when: ____',
-    '错误类型 为什么错 失败 恢复 纠错 回滚 重试。',
-    '## 参考判断',
-    '参考判断：证据满足阈值才继续。',
-    '## 完成条件',
-    '完成条件：独立复核后进入下一步。',
-]) + '\n'
-s = repl(s, old, new, 'fixture-rich-tool')
+
+depth_append_source = (
+    "DEPTH_TOOL_APPEND='\\n## V5.6 Evidence Trace\\nRecord ID: ____ Source / actor: ____ Date: ____ Action / observation: ____ Result: ____ Interpretation: ____ Linked decision/change: ____"
+    "\\n## V5.6 Decision Review\\nOptions: A / B. Criteria / threshold: ____ Evidence source: ____ Selected option: ____ Rationale / tradeoff: ____ Uncertainty: ____ Revisit trigger: ____"
+    "\\n## V5.6 Change Control\\nBaseline version: ____ Proposed change: ____ Change reason / evidence: ____ Owner / authority: ____ Impact: ____ Revalidation: ____ Accept / Reject / Defer: ____ Superseded version / rollback target: ____"
+    "\\n## V5.6 Recovery Loop\\nFailure trigger: ____ Diagnosis / likely cause: ____ Recovery action: ____ Retry condition: ____ Post-retry evidence: ____ Escalate or pause when: ____"
+    "\\n## V5.6 Acceptance\\nExpected: ____ Actual: ____ Verification method: ____ PASS / FAIL / PARTIAL: ____ Defect / rework: ____"
+    "\\n## V5.6 Completion\\nCompletion: close only when required evidence is attached and blockers are handed off.\\n'\n"
+)
+s = repl(s, "def rich_tool(i):\n", depth_append_source + "def rich_tool(i):\n", 'fixture-depth-append-definition')
+s = repl(s, "w(new/rel,rich_tool(i))", "w(new/rel,rich_tool(i)+DEPTH_TOOL_APPEND)", 'fixture-depth-append-use')
+
 old = "  w(new/'evidence'/'adequacy_contract.json',json.dumps({'chapters':chapters,'assets':assets},ensure_ascii=False))\n  rtc="
 new = (
     "  w(new/'evidence'/'adequacy_contract.json',json.dumps({'chapters':chapters,'assets':assets},ensure_ascii=False))\n"
