@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 SRC="$(dirname "$0")/p01-v232-home-command-center-v8.sh"
-TMP="$(mktemp /tmp/p01-v232-home-v9.XXXXXX.sh)"
+TMP="$(mktemp "$(dirname "$SRC")/.p01-v232-home-v9.XXXXXX.sh")"
 trap 'rm -f "$TMP"' EXIT
 python3 - "$SRC" "$TMP" <<'PY'
 import pathlib, sys
