@@ -1,0 +1,84 @@
+name: P01 V2.30 Mobile Command Row Overlay Diagnostic
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-mobile-commandrow-overlay-diagnostic-20260829.yml
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: c2f73c503fc61f62bbff8f8444a108fc243301d4
+      PORT: '18582'
+      ROOT: /tmp/p01-v230-overlay-diag
+      ADMIN_PASS: 'P01V230!Overlay'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: source
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          rm -rf "$ROOT" /tmp/p01-overlay.cookies evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-overlay-server.log 2>&1 &
+          COOKIE=/tmp/p01-overlay.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start Overlay Diag' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/setup-post.html
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+      - name: Install Playwright
+        shell: bash
+        run: |
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Detect covering layer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat >/tmp/p01-playwright/overlay.js <<'JS'
+          const { chromium }=require('playwright');const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18582',password='P01V230!Overlay';
+            const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:390,height:844}});
+            let r=await ctx.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('login');
+            const p=await ctx.newPage();await p.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            const truth=await p.evaluate(()=>{
+              const points=[[30,60],[100,70],[260,70],[330,70],[100,100]];
+              const item=e=>{if(!e)return null;const s=getComputedStyle(e),r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id,cls:e.className,rect:[r.x,r.y,r.width,r.height],pos:s.position,z:s.zIndex,display:s.display,bg:s.backgroundColor,opacity:s.opacity,pointer:s.pointerEvents};};
+              const stacks={};for(const [x,y] of points)stacks[`${x},${y}`]=document.elementsFromPoint(x,y).slice(0,12).map(item);
+              const intersect=[...document.querySelectorAll('body *')].map(item).filter(x=>x&&x.display!=='none'&&x.rect[2]>0&&x.rect[3]>0&&x.rect[1]<92&&x.rect[1]+x.rect[3]>54).filter(x=>x.pos==='fixed'||x.pos==='sticky'||x.z!=='auto').slice(0,80);
+              return {stacks,intersect};
+            });
+            console.log(JSON.stringify(truth,null,2));fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/overlay.json',JSON.stringify(truth,null,2));
+            await p.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/page.png',fullPage:true});await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node overlay.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-mobile-commandrow-overlay-diagnostic
+          path: evidence
+          retention-days: 7
