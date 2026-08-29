@@ -1,0 +1,65 @@
+name: P05 Source Gate Diagnostic
+
+on:
+  push:
+    branches:
+      - verify/p05-php-runtime-487c337d-20260830
+    paths:
+      - '.github/workflows/p05-source-gate-diagnostic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [src, database, scripts, tests, public, php, install]
+    env:
+      P05_SOURCE_SHA: 788998c5cedb5b184cdcfa0a3faf551033241fe3
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout exact P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - name: Verify exact source
+        working-directory: source
+        run: test "$(git rev-parse HEAD)" = "$P05_SOURCE_SHA"
+      - name: Scan ${{ matrix.root }}
+        working-directory: source
+        env:
+          SCAN_ROOT: ${{ matrix.root }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readdir, readFile } from 'node:fs/promises';
+          import { join, relative } from 'node:path';
+          const root = process.env.SCAN_ROOT;
+          const files=[];
+          async function walk(dir){for(const e of await readdir(dir,{withFileTypes:true})){const p=join(dir,e.name);if(e.isDirectory())await walk(p);else files.push(p)}}
+          if(root==='install') files.push('install-cloudpanel-php.sh'); else await walk(root);
+          const patterns=[
+            ['PRIVATE_KEY',/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
+            ['GOOGLE_KEY',/AIza[0-9A-Za-z_-]{30,}/],
+            ['GITHUB_TOKEN',/gh[pousr]_[A-Za-z0-9]{30,}/],
+            ['POSTGRES_CREDENTIAL_URL',/postgres(?:ql)?:\/\/[^\s:]+:[^\s@]+@/i],
+          ];
+          const problems=[];
+          for(const file of files){
+            const rel=relative('.',file).replaceAll('\\','/');
+            const buf=await readFile(file); if(buf.includes(0)) continue;
+            const text=buf.toString('utf8');
+            for(const [name,re] of patterns) if(re.test(text)&&!rel.endsWith('.example')) problems.push(`${rel}:${name}`);
+            if(/PRIVATE_DATA\s*[:=]\s*(?!NONE|NO|false)/i.test(text)) problems.push(`${rel}:PRIVATE_DATA_MARKER`);
+          }
+          if(problems.length){console.error(problems.join('\n'));process.exit(1)}
+          console.log(`diagnostic PASS root=${root} files=${files.length}`);
+          NODE
