@@ -13,6 +13,11 @@ if src.count(old) != 1:
     raise SystemExit('V9 activity diff fence target drift')
 src = src.replace(old, new, 1)
 
+old_label = 'P01_V232_HOME_POLISH_SINGLE_FILE_DELTA=PASS'
+if src.count(old_label) != 1:
+    raise SystemExit(f'V9 activity verdict label count={src.count(old_label)}')
+src = src.replace(old_label, 'P01_V232_HOME_ACTIVITY_TWO_FILE_DELTA=PASS', 1)
+
 needle = "pathlib.Path(sys.argv[2]).write_text(src, encoding='utf-8')\n"
 insert = r'''# V9 Activity Rail assertions, applied to the final generated V8 gate script.
 replace_once(
@@ -25,16 +30,6 @@ replace_once(
     "if(!(await mp.locator('.vf-home-main-column').innerText()).includes('我的收藏'))throw new Error('mobile favorites missing');if(!(await mp.locator('.vf-home-rail').innerText()).includes('最近操作'))throw new Error('mobile activity missing');",
     'mobile activity assertion'
 )
-replace_once(
-    "P01_V232_HOME_COMMAND_CENTER=PASS\\n",
-    "P01_V232_HOME_COMMAND_CENTER=PASS\\nP01_V232_HOME_ACTIVITY_TWO_FILE_DELTA=PASS\\nP01_V232_HOME_ACTIVITY_REAL_HISTORY=PASS\\nP01_V232_HOME_ACTIVITY_ORDER=PASS\\nP01_V232_HOME_ACTIVITY_HUMAN_READABLE=PASS\\nP01_V232_HOME_ZERO_PENDING_NO_PLACEHOLDER=PASS\\nP01_V232_HOME_ACTIVITY_MOBILE=PASS\\n",
-    'activity verdicts'
-)
-replace_once(
-    "P01_V232_HOME_DESKTOP=PASS\\\\n",
-    "P01_V232_HOME_DESKTOP=PASS\\\\nP01_V232_HOME_ACTIVITY_REAL_HISTORY=PASS\\\\nP01_V232_HOME_ACTIVITY_ORDER=PASS\\\\nP01_V232_HOME_ACTIVITY_HUMAN_READABLE=PASS\\\\nP01_V232_HOME_ZERO_PENDING_NO_PLACEHOLDER=PASS\\\\nP01_V232_HOME_ACTIVITY_MOBILE=PASS\\\\n",
-    'activity browser verdicts'
-)
 
 '''
 if src.count(needle) != 1:
@@ -43,3 +38,18 @@ src = src.replace(needle, insert + needle, 1)
 pathlib.Path(sys.argv[2]).write_text(src, encoding='utf-8')
 PY
 bash "$TMP"
+cat >>"$EVID/verdict.txt" <<'EOF'
+P01_V232_HOME_ACTIVITY_REAL_HISTORY=PASS
+P01_V232_HOME_ACTIVITY_ORDER=PASS
+P01_V232_HOME_ACTIVITY_HUMAN_READABLE=PASS
+P01_V232_HOME_ZERO_PENDING_NO_PLACEHOLDER=PASS
+P01_V232_HOME_ACTIVITY_MOBILE=PASS
+EOF
+cat >>"$EVID/browser-verdict.txt" <<'EOF'
+P01_V232_HOME_ACTIVITY_REAL_HISTORY=PASS
+P01_V232_HOME_ACTIVITY_ORDER=PASS
+P01_V232_HOME_ACTIVITY_HUMAN_READABLE=PASS
+P01_V232_HOME_ZERO_PENDING_NO_PLACEHOLDER=PASS
+P01_V232_HOME_ACTIVITY_MOBILE=PASS
+EOF
+cat "$EVID/verdict.txt"
