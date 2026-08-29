@@ -1,0 +1,115 @@
+name: P01 V2.30 Mobile Command Row Final Gate
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-mobile-commandrow-final-gate-20260829.yml
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: 5fed25739caf5e55f7f822db2f638ccb39566490
+      PORT: '18583'
+      ROOT: /tmp/p01-v230-commandrow-final
+      ADMIN_PASS: 'P01V230!Final'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: source
+      - name: Exact source and fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          grep -F '.vf-functional-workspace .vf-app-sidebar{display:none!important' source/src/assets/workspace-domain-nav.css >/dev/null
+          php -l source/src/app/FunctionalWorkspace.php >/dev/null
+          php -l source/src/app/FunctionalWorkspaceShell.php >/dev/null
+          rm -rf "$ROOT" /tmp/p01-v230-final.cookies evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-final-server.log 2>&1 &
+          COOKIE=/tmp/p01-v230-final.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 Final' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/setup-post.html >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+          jq -r '.csrf' /tmp/login.json >/tmp/csrf
+          CSRF=$(cat /tmp/csrf)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"开发工具","description":"最终移动端验证","is_private":false,"sort_order":100}' "http://127.0.0.1:${PORT}/api.php?action=category_save" -o /tmp/cat.json
+          CAT=$(jq -r '.id' /tmp/cat.json)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$CAT" -F 'surface=channels' -F 'title=科技漫谈' -F 'url=https://example.com/channel/tech' -F 'resource_kind=科技' -F 'tags=AI,科技' -F 'is_private=0' -F 'source_kind=remote_url' -o /tmp/create.json
+          jq -e '.ok==true' /tmp/create.json >/dev/null
+          echo P01_V230_MOBILE_FINAL_RUNTIME=PASS
+      - name: Install Playwright
+        shell: bash
+        run: |
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Exact browser and overlay gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat >/tmp/p01-playwright/final.js <<'JS'
+          const { chromium }=require('playwright');const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18583',password='P01V230!Final';
+            const browser=await chromium.launch({headless:true});
+            const mobile=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});
+            let r=await mobile.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('mobile login');
+            const page=await mobile.newPage();await page.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            const labels=await page.locator('.vf-global-domain-nav a').allTextContents();if(JSON.stringify(labels)!==JSON.stringify(['首页','导航','频道','影视','专题']))throw new Error('global labels');
+            const row=page.locator('.vf-mobile-command-row');await row.waitFor({state:'visible'});
+            const input=row.locator('input[name="q"]');const add=row.locator('[data-open-add]');await input.waitFor({state:'visible'});await add.waitFor({state:'visible'});
+            if(await page.locator('.vf-app-sidebar:visible').count())throw new Error('legacy mobile sidebar still visible');
+            const truth=await page.evaluate(()=>{
+              const r=document.querySelector('.vf-mobile-command-row').getBoundingClientRect();
+              const p=[r.x+15,r.y+15];
+              const top=document.elementFromPoint(p[0],p[1]);
+              return {row:[r.x,r.y,r.width,r.height],topTag:top?.tagName,topClass:top?.className,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,paddingBottom:getComputedStyle(document.body).paddingBottom};
+            });
+            if(String(truth.topClass).includes('vf-app-sidebar'))throw new Error('row covered by legacy sidebar');
+            if(truth.overflow>1)throw new Error('overflow '+truth.overflow);
+            if(parseFloat(truth.paddingBottom)>1)throw new Error('legacy bottom padding '+truth.paddingBottom);
+            await input.fill('科技');await input.press('Enter');await page.waitForLoadState('networkidle');if(!page.url().includes('q='))throw new Error('search submit');
+            await page.goto(base+'/channels.php',{waitUntil:'networkidle'});await page.locator('.vf-mobile-command-row').waitFor({state:'visible'});
+            await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-channels.png',fullPage:true});
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-truth.json',JSON.stringify(truth,null,2));
+            await mobile.close();
+            const desktop=await browser.newContext({viewport:{width:1440,height:960},deviceScaleFactor:1});r=await desktop.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('desktop login');
+            const dp=await desktop.newPage();await dp.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            if(await dp.locator('.vf-mobile-command-row:visible').count())throw new Error('mobile row visible desktop');
+            await dp.locator('.vf-app-sidebar').waitFor({state:'visible'});await dp.locator('.vf-domain-subbar .vf-global-search').waitFor({state:'visible'});await dp.locator('.vf-domain-subbar [data-open-add]').waitFor({state:'visible'});
+            await dp.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/desktop-channels.png',fullPage:true});
+            await browser.close();
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_MOBILE_COMMANDROW_FINAL=PASS\nSOURCE=5fed25739caf5e55f7f822db2f638ccb39566490\n');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node final.js
+          echo P01_V230_MOBILE_COMMANDROW_FINAL=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-mobile-commandrow-final-evidence
+          path: evidence
+          retention-days: 7
