@@ -1,0 +1,202 @@
+name: P05 V1.1.0 Release Source Exact Gate R2
+
+on:
+  push:
+    branches:
+      - verify/p05-v1.1.0-release-source-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.0-release-source-exact-r2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_SOURCE_SHA: 214f4af10511882537ebb8590e0d0d8e66ee35d0
+      P05_EXPECTED_LOCK_BLOB: 588d32252b33ae7e6ea5a29fddb3ce122a235d59
+      P05_EXPECTED_DEPENDENCY_LOCK_SHA256: 7fa2ac9a193a1ea80577b9e8240cddf3f99a605b6ac11246ce803a544a8038d1
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+
+    steps:
+      - name: Verify private read capability
+        shell: bash
+        run: |
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+
+      - name: Checkout exact P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Verify exact source and dependency authority
+        working-directory: source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$P05_SOURCE_SHA"
+          test "$(git rev-parse HEAD:package-lock.json)" = "$P05_EXPECTED_LOCK_BLOB"
+          test "$(tr -d '\r\n' < VERSION)" = '1.1.0'
+          node -e "const p=require('./package.json'); if(p.version!=='1.1.0'||p.private!==true) process.exit(1)"
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Install exact dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Release source identity gate
+        working-directory: source
+        shell: bash
+        run: |
+          npm run release:source:gate | tee /tmp/release-source-gate.txt
+          grep -F "P05_DEPENDENCY_LOCK_SHA256=$P05_EXPECTED_DEPENDENCY_LOCK_SHA256" /tmp/release-source-gate.txt
+          test -z "$(git status --porcelain)"
+
+      - name: Lint and typecheck
+        working-directory: source
+        run: |
+          npm run lint
+          npm run typecheck
+
+      - name: Database and schema
+        working-directory: source
+        run: |
+          npm run migrate
+          npm run verify:schema
+
+      - name: Node regression
+        working-directory: source
+        run: npm run test
+
+      - name: Build Node and React
+        working-directory: source
+        run: npm run build
+
+      - name: PHP runtime compatibility
+        working-directory: source
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-php-v110-r2.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-php-v110-r2-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        shell: bash
+        run: |
+          php -r 'if (PHP_VERSION_ID < 80200 || !extension_loaded("pdo_sqlite")) exit(1);'
+          bash -n install-cloudpanel-php.sh
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          bash php/tests/http-smoke.sh
+
+      - name: Build and verify PHP release staging
+        working-directory: source
+        env:
+          VF_RELEASE_SOURCE_SHA: ${{ env.P05_SOURCE_SHA }}
+        shell: bash
+        run: |
+          npm run build:php-release
+          npm run php:release:gate
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const m=JSON.parse(fs.readFileSync('build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json','utf8'));
+          if(m.version!=='1.1.0'||m.sourceCommit!==process.env.P05_SOURCE_SHA||m.distribution!=='FULL_ONLY'||m.fromVersions.length!==0||m.productionDeployment!=='NOT_DEPLOYED'||m.runtime!=='php'||m.phpMinimum!=='8.2'||!m.requiredExtensions.includes('pdo_sqlite')||m.databaseProvider!=='sqlite'||m.serverNodeRequired!==false||m.clientPrebuilt!==true) process.exit(1);
+          console.log('P05_V110_RELEASE_MANIFEST=PASS');
+          NODE
+
+      - name: Build formal FULL artifact and receipt
+        working-directory: source
+        shell: bash
+        run: |
+          rm -f "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_FULL.zip"
+          (cd build/vf-seo-php-release && find . -type f -print0 | sort -z | xargs -0 zip -X -q "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_FULL.zip")
+          test -s "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_FULL.zip"
+          FILES="$(find build/vf-seo-php-release -type f | wc -l | tr -d ' ')"
+          BYTES="$(stat -c %s "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_FULL.zip")"
+          SHA256="$(sha256sum "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_FULL.zip" | awk '{print $1}')"
+          cat > "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_RELEASE_RECEIPT.txt" <<EOF
+          P05_RELEASE_CANDIDATE=v1.1.0
+          P05_EXACT_SOURCE=$P05_SOURCE_SHA
+          P05_DEPENDENCY_LOCK_BLOB=$P05_EXPECTED_LOCK_BLOB
+          P05_DEPENDENCY_LOCK_SHA256=$P05_EXPECTED_DEPENDENCY_LOCK_SHA256
+          P05_FORMAL_ARTIFACT=VF_SEO_V1.1.0_FULL.zip
+          P05_FORMAL_FULL_FILES=$FILES
+          P05_FORMAL_FULL_BYTES=$BYTES
+          P05_FORMAL_FULL_SHA256=$SHA256
+          P05_DISTRIBUTION=FULL_ONLY
+          P05_FROM_VERSIONS=[]
+          P05_PRODUCTION=NOT_DEPLOYED
+          EOF
+          cat "$GITHUB_WORKSPACE/VF_SEO_V1.1.0_RELEASE_RECEIPT.txt"
+
+      - name: Source scope and security gates
+        working-directory: source
+        shell: bash
+        run: |
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+
+      - name: Repository cleanliness
+        working-directory: source
+        shell: bash
+        run: test -z "$(git status --porcelain)"
+
+      - name: Exact Source receipt
+        working-directory: source
+        shell: bash
+        run: |
+          echo 'P05_V110_RELEASE_SOURCE_MACHINE=PASS'
+          echo "P05_EXACT_SOURCE=$P05_SOURCE_SHA"
+          echo 'P05_PRODUCT_VERSION=1.1.0'
+          echo 'P05_FORMAL_RELEASE_CURRENT=v1.0.2'
+          echo 'P05_TAG_CREATED=NO'
+          echo 'P05_GITHUB_RELEASE_CREATED=NO'
+          echo 'P05_PRODUCTION=NOT_DEPLOYED'
+
+      - name: Upload formal candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: P05_V1.1.0_FORMAL_CANDIDATE_R2
+          path: |
+            VF_SEO_V1.1.0_FULL.zip
+            VF_SEO_V1.1.0_RELEASE_RECEIPT.txt
+          if-no-files-found: error
+          retention-days: 14
