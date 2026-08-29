@@ -1,0 +1,128 @@
+name: P01 V2.30 Mobile Commandbar Evidence
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-mobile-commandbar-evidence-20260829.yml
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: d6bbbbe618cd87bf5dc405514a71729d6d72d02c
+      PORT: '18579'
+      ROOT: /tmp/p01-v230-mobile-commandbar
+      ADMIN_PASS: 'P01V230!Mobile'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: source
+      - name: Exact source and fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          grep -F -- '--ws-mobile-commandbar:48px' source/src/assets/workspace-domain-nav.css >/dev/null
+          grep -F '.vf-domain-subbar .vf-global-search{display:flex!important' source/src/assets/workspace-domain-nav.css >/dev/null
+          rm -rf "$ROOT" /tmp/p01-v230-mobile.cookies evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-mobile-server.log 2>&1 &
+          COOKIE=/tmp/p01-v230-mobile.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 Mobile' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/setup-post.html >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+          jq -r '.csrf' /tmp/login.json >/tmp/csrf
+          echo P01_V230_MOBILE_COMMANDBAR_FRESH=PASS
+      - name: Seed representative child-domain content
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-v230-mobile.cookies
+          CSRF=$(cat /tmp/csrf)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"开发工具","description":"移动端测试","is_private":false,"sort_order":100}' "http://127.0.0.1:${PORT}/api.php?action=category_save" -o /tmp/cat.json
+          CAT=$(jq -r '.id' /tmp/cat.json); test "$CAT" -gt 0
+          create(){ curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$CAT" -F "surface=$1" -F "title=$2" -F "url=$3" -F "resource_kind=$4" -F "tags=$5" -F 'is_private=0' -F 'source_kind=remote_url' >/tmp/create.json; jq -e '.ok==true' /tmp/create.json >/dev/null; }
+          create channels '科技漫谈' 'https://example.com/channel/tech' '科技' 'AI,科技'
+          create watch '样例电影' 'https://example.com/watch/movie' '电影' '科幻'
+          create topics 'AI 编程专题' 'https://example.com/topic/ai' 'AI' 'AI,编程'
+          echo P01_V230_MOBILE_COMMANDBAR_SEED=PASS
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Browser gate and screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat >/tmp/p01-playwright/gate.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18579', password='P01V230!Mobile';
+            const browser=await chromium.launch({headless:true});
+            const mobile=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});
+            let r=await mobile.request.post(base+'/api.php?action=login',{data:{password}}); if(!r.ok()) throw new Error('mobile login '+r.status());
+            for(const [path,label,file] of [['channels.php','频道','mobile-channels.png'],['watch.php','影视','mobile-watch.png'],['topics.php','专题','mobile-topics.png']]){
+              const page=await mobile.newPage();
+              await page.goto(base+'/'+path,{waitUntil:'networkidle'});
+              const nav=page.locator('.vf-global-domain-nav'); await nav.waitFor({state:'visible'});
+              if((await nav.locator('a.active').textContent()||'').trim()!==label) throw new Error(path+' active domain');
+              const subbar=page.locator('.vf-domain-subbar'); await subbar.waitFor({state:'visible'});
+              const search=subbar.locator('.vf-global-search'); await search.waitFor({state:'visible'});
+              const input=search.locator('input[type="search"]'); await input.waitFor({state:'visible'});
+              const add=subbar.locator('[data-open-add]'); await add.waitFor({state:'visible'});
+              if(await page.locator('.vf-mobile-add-action:visible').count()) throw new Error(path+' duplicate mobile add');
+              const navBox=await nav.boundingBox(), barBox=await subbar.boundingBox();
+              if(!navBox||!barBox||Math.abs(barBox.y-(navBox.y+navBox.height))>2) throw new Error(path+' commandbar stack');
+              const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth); if(overflow>1) throw new Error(path+' overflow '+overflow);
+              await input.fill('科技'); await input.press('Enter'); await page.waitForLoadState('networkidle');
+              if(!page.url().includes('q=')) throw new Error(path+' search submit');
+              await page.goto(base+'/'+path,{waitUntil:'networkidle'});
+              await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/'+file,fullPage:true});
+              await page.close();
+            }
+            await mobile.close();
+            const desktop=await browser.newContext({viewport:{width:1440,height:960},deviceScaleFactor:1});
+            r=await desktop.request.post(base+'/api.php?action=login',{data:{password}}); if(!r.ok()) throw new Error('desktop login');
+            const page=await desktop.newPage(); await page.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            const top=page.locator('.vf-domain-subbar'); await top.waitFor({state:'visible'});
+            if(await page.locator('.vf-mobile-add-action:visible').count()) throw new Error('desktop mobile add visible');
+            if(!(await top.locator('.vf-global-search').isVisible())) throw new Error('desktop search hidden');
+            if(!(await top.locator('[data-open-add]').isVisible())) throw new Error('desktop add hidden');
+            await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/desktop-channels.png',fullPage:true});
+            await browser.close();
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_MOBILE_COMMANDBAR_UI=PASS\nSOURCE=d6bbbbe618cd87bf5dc405514a71729d6d72d02c\n');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node gate.js
+          echo P01_V230_MOBILE_COMMANDBAR_UI=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-mobile-commandbar-evidence
+          path: evidence
+          retention-days: 7
