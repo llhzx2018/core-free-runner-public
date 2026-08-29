@@ -1,0 +1,102 @@
+name: P01 V2.30 Mobile Command Row Diagnostic
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-mobile-commandrow-diagnostic-20260829.yml
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: c2f73c503fc61f62bbff8f8444a108fc243301d4
+      PORT: '18581'
+      ROOT: /tmp/p01-v230-row-diagnostic
+      ADMIN_PASS: 'P01V230!Diag'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: source
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          rm -rf "$ROOT" /tmp/p01-v230-diag.cookies evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-diag-server.log 2>&1 &
+          COOKIE=/tmp/p01-v230-diag.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 Diag' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/setup-post.html >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+          jq -r '.csrf' /tmp/login.json >/tmp/csrf
+          CSRF=$(cat /tmp/csrf)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"开发工具","description":"诊断","is_private":false,"sort_order":100}' "http://127.0.0.1:${PORT}/api.php?action=category_save" -o /tmp/cat.json
+          CAT=$(jq -r '.id' /tmp/cat.json)
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$CAT" -F 'surface=channels' -F 'title=科技漫谈' -F 'url=https://example.com/channel/tech' -F 'resource_kind=科技' -F 'tags=AI,科技' -F 'is_private=0' -F 'source_kind=remote_url' -o /tmp/create.json
+          jq -e '.ok==true' /tmp/create.json >/dev/null
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Capture computed rendering truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          cat >/tmp/p01-playwright/diag.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18581',password='P01V230!Diag';
+            const browser=await chromium.launch({headless:true});
+            const ctx=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});
+            let r=await ctx.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('login');
+            const page=await ctx.newPage();
+            await page.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            const row=page.locator('.vf-mobile-command-row');await row.waitFor({state:'attached'});
+            const truth=await page.evaluate(()=>{
+              const el=document.querySelector('.vf-mobile-command-row');
+              const form=document.querySelector('.vf-mobile-command-search');
+              const input=form?.querySelector('input[type="search"]');
+              const submit=form?.querySelector('button[type="submit"]');
+              const add=document.querySelector('.vf-mobile-command-add');
+              const top=document.querySelector('.vf-domain-subbar');
+              const pack=(x)=>{if(!x)return null;const s=getComputedStyle(x),r=x.getBoundingClientRect();return {tag:x.tagName,cls:x.className,text:x.textContent?.trim(),rect:{x:r.x,y:r.y,width:r.width,height:r.height},display:s.display,visibility:s.visibility,opacity:s.opacity,color:s.color,background:s.backgroundColor,border:s.borderColor,position:s.position,zIndex:s.zIndex,overflow:s.overflow};};
+              return {href:location.href,htmlClass:document.documentElement.className,bodyClass:document.body.className,row:pack(el),form:pack(form),input:pack(input),submit:pack(submit),add:pack(add),topbar:pack(top),scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth,outerHTML:el?.outerHTML};
+            });
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/render-truth.json',JSON.stringify(truth,null,2));
+            await page.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/page.png',fullPage:true});
+            if(await row.isVisible()) await row.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/row.png'});
+            console.log(JSON.stringify(truth,null,2));
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node diag.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-mobile-commandrow-diagnostic
+          path: evidence
+          retention-days: 7
