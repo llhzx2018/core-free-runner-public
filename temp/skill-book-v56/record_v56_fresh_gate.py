@@ -106,11 +106,12 @@ for p in sorted(x for x in skill.rglob('*') if x.is_file() and x.name != 'SHA256
 sums_path.write_text('\n'.join(rows) + '\n', encoding='utf-8')
 
 # The source tree excluding MANIFEST/SHA is unchanged by this evidence-only reconciliation.
+# The identity reconciler defines each tree line as: sha256 + two spaces + path + LF.
 h = hashlib.sha256()
 for p in sorted(x for x in skill.rglob('*') if x.is_file() and x.name not in {'MANIFEST.json', 'SHA256SUMS.txt'}):
     rel = p.relative_to(skill).as_posix()
     digest = hashlib.sha256(p.read_bytes()).hexdigest()
-    h.update(f'{rel}  {digest}\n'.encode())
+    h.update(f'{digest}  {rel}\n'.encode())
 assert h.hexdigest() == manifest['validation']['source_non_manifest_tree_sha256']
 
 print('V56_FRESH_GATE_EVIDENCE_RECORDED')
