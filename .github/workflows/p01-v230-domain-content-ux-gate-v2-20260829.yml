@@ -1,0 +1,137 @@
+name: P01 V2.30 Domain Content UX Gate V2
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-domain-content-ux-gate-v2-20260829.yml
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 426740ee3e36d207581dddf9b3fe5d62fd8d1808
+      PORT: '18586'
+      ROOT: /tmp/p01-v230-domain-content-v2
+      ADMIN_PASS: 'P01V230!DomainUX'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+      - name: Exact source and fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          php -l source/src/app/FunctionalWorkspaceShell.php >/dev/null
+          node --check source/src/assets/workspace-rebaseline.js
+          rm -rf "$ROOT" /tmp/p01-v230-domain-v2.cookies evidence
+          mkdir -p evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-domain-v2-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS -c /tmp/p01-v230-domain-v2.cookies -b /tmp/p01-v230-domain-v2.cookies "http://127.0.0.1:${PORT}/setup.php" -o /tmp/domain-v2-setup.html && break || sleep 1; done
+          CSRF=$(python3 -c "import re; s=open('/tmp/domain-v2-setup.html',encoding='utf-8').read(); m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',s); assert m; print(m.group(1))")
+          curl -fsS -c /tmp/p01-v230-domain-v2.cookies -b /tmp/p01-v230-domain-v2.cookies -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 Domain UX' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/domain-v2-setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/domain-v2-setup-post.html >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          curl -fsS -c /tmp/p01-v230-domain-v2.cookies -b /tmp/p01-v230-domain-v2.cookies -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/domain-v2-login.json
+          jq -e '.ok==true' /tmp/domain-v2-login.json >/dev/null
+          jq -r '.csrf' /tmp/domain-v2-login.json >/tmp/domain-v2-csrf
+          echo P01_V230_DOMAIN_V2_RUNTIME=PASS
+      - name: Seed representative domain data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CSRF=$(cat /tmp/domain-v2-csrf); COOKIE=/tmp/p01-v230-domain-v2.cookies; BASE="http://127.0.0.1:${PORT}"
+          python3 - <<'PY'
+          import json, subprocess
+          csrf=open('/tmp/domain-v2-csrf').read().strip(); cookie='/tmp/p01-v230-domain-v2.cookies'; base='http://127.0.0.1:18586'
+          def post(action,payload):
+              out=subprocess.check_output(['curl','-fsS','-c',cookie,'-b',cookie,'-H','Content-Type: application/json','-H',f'X-CSRF-Token: {csrf}','-d',json.dumps(payload,ensure_ascii=False),f'{base}/api.php?action={action}'])
+              data=json.loads(out); assert data.get('ok') is True, data; return data
+          root=post('category_save',{'name':'互联网','description':'根分类','is_private':False,'sort_order':100})['id']
+          dev=post('category_save',{'name':'开发工具','description':'开发','parent_id':root,'is_private':False,'sort_order':90})['id']
+          design=post('category_save',{'name':'设计灵感','description':'设计','parent_id':root,'is_private':False,'sort_order':80})['id']
+          private=post('category_save',{'name':'私人收藏','description':'私人','parent_id':root,'is_private':True,'sort_order':70})['id']
+          open('/tmp/domain-v2-cat','w').write(f'{root} {dev} {design} {private}')
+          PY
+          read ROOT_ID DEV_ID DESIGN_ID PRIVATE_ID </tmp/domain-v2-cat
+          create(){
+            local surface="$1" category="$2" title="$3" url="$4" kind="$5" tags="$6" private_flag="$7" background="${8:-0}" year="${9:-}" status="${10:-}"
+            local body
+            body=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$category" -F "surface=$surface" -F "title=$title" -F "url=$url" -F "resource_kind=$kind" -F "tags=$tags" -F "is_private=$private_flag" -F "background_friendly=$background" -F "media_year=$year" -F "media_status=$status" -F 'source_kind=remote_url')
+            echo "$body" | jq -e '.ok==true' >/dev/null || { echo "$body"; return 1; }
+          }
+          for i in $(seq 1 10); do create start "$DEV_ID" "开发网址 $i" "https://example.com/dev-$i" '' '开发,工具' 0; done
+          for i in $(seq 1 6); do create start "$DESIGN_ID" "设计网址 $i" "https://example.com/design-$i" '' '设计,灵感' 0; done
+          create start "$PRIVATE_ID" '私人控制台' 'https://example.com/private' '' '私人' 0
+          for i in $(seq 1 4); do create channels "$ROOT_ID" "科技频道 $i" "https://example.com/channel-tech-$i" '科技' '科技,AI' 0 1; done
+          for i in $(seq 1 3); do create channels "$ROOT_ID" "长时播客 $i" "https://example.com/channel-podcast-$i" '播客' '播客,后台听' 0 1; done
+          create channels "$ROOT_ID" '旅行频道' 'https://example.com/channel-travel' '旅行' '旅行' 0 0
+          for i in $(seq 1 6); do create watch "$ROOT_ID" "电影作品 $i" "https://example.com/movie-$i" '电影' '电影' 0 0 "$((2018+i))" want; done
+          for i in $(seq 1 4); do create watch "$ROOT_ID" "电视剧 $i" "https://example.com/tv-$i" '电视剧' '电视剧' 0 0 "$((2020+i))" watching; done
+          for i in $(seq 1 2); do create watch "$ROOT_ID" "纪录片 $i" "https://example.com/doc-$i" '纪录片' '纪录片' 0 0 2026 watched; done
+          for i in $(seq 1 4); do create topics "$ROOT_ID" "AI 专题 $i" "https://example.com/topic-ai-$i" 'AI' 'AI,专题' 0; done
+          for i in $(seq 1 3); do create topics "$ROOT_ID" "建站专题 $i" "https://example.com/topic-web-$i" '建站' '建站,专题' 0; done
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_V230_DOMAIN_V2_SEED=PASS
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Desktop and mobile domain UX gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-playwright/gate.js <<'JS'
+          const { chromium }=require('playwright');const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18586',password='P01V230!DomainUX';const browser=await chromium.launch({headless:true});
+            async function login(c){const r=await c.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('login')}
+            const pages=[['start.php','start'],['channels.php','channels'],['watch.php','watch'],['topics.php','topics']];
+            const desktop=await browser.newContext({viewport:{width:1440,height:960},deviceScaleFactor:1});await login(desktop);const dp=await desktop.newPage();
+            for(const [route,mode] of pages){await dp.goto(base+'/'+route,{waitUntil:'networkidle'});const nav=dp.locator('.vf-global-domain-nav');await nav.waitFor({state:'visible'});if(await nav.locator('a').count()!==5)throw new Error(mode+' global nav');if(await nav.locator('a.active').count()!==1)throw new Error(mode+' active');if(await dp.locator('.vf-workspace-toolbar').count()!==1)throw new Error(mode+' toolbar');const overflow=await dp.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error(mode+' desktop overflow '+overflow);
+              if(mode==='start'){const rows=dp.locator('.vf-asset-row');if(await rows.count()<12)throw new Error('start rows');const box=await rows.first().boundingBox();if(box.height>62)throw new Error('start density '+box.height);if(await dp.locator('.vf-category-tree').count()!==1)throw new Error('taxonomy')}
+              if(mode==='channels'){const rows=dp.locator('.vf-asset-row');if(await rows.count()<8)throw new Error('channel rows');const a=await rows.nth(0).boundingBox(),b=await rows.nth(1).boundingBox();if(Math.abs(a.y-b.y)>2||b.x<=a.x)throw new Error('channel grid');const icon=await rows.first().locator('.vf-asset-icon').boundingBox();if(icon.width<48)throw new Error('channel visual')}
+              if(mode==='watch'){const cols=await dp.locator('.vf-watch-grid').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);if(cols<5)throw new Error('watch cols '+cols)}
+              if(mode==='topics'){const cols=await dp.locator('.vf-topic-grid').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);if(cols<3)throw new Error('topic cols '+cols)}
+              await dp.screenshot({path:`/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/desktop-${mode}.png`,fullPage:true});}
+            await desktop.close();
+            const mobile=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1});await login(mobile);const mp=await mobile.newPage();
+            for(const [route,mode] of pages){await mp.goto(base+'/'+route,{waitUntil:'networkidle'});await mp.locator('.vf-global-domain-nav').waitFor({state:'visible'});await mp.locator('.vf-mobile-command-row').waitFor({state:'visible'});if(await mp.locator('.vf-app-sidebar:visible').count())throw new Error(mode+' sidebar');const overflow=await mp.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error(mode+' mobile overflow '+overflow);
+              if(mode==='channels'){const rows=mp.locator('.vf-asset-row');const a=await rows.nth(0).boundingBox(),b=await rows.nth(1).boundingBox();if(b.y<=a.y+20)throw new Error('channel mobile grid')}
+              if(mode==='watch'){const cols=await mp.locator('.vf-watch-grid').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);if(cols!==2)throw new Error('watch mobile cols '+cols)}
+              if(mode==='topics'){const cols=await mp.locator('.vf-topic-grid').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);if(cols!==2)throw new Error('topic mobile cols '+cols)}
+              await mp.screenshot({path:`/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-${mode}.png`,fullPage:true});}
+            await mobile.close();await browser.close();fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_DOMAIN_CONTENT_UX_V2=PASS\n');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node gate.js
+          echo P01_V230_DOMAIN_V2_BROWSER=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-domain-content-ux-v2-evidence
+          path: evidence
+          retention-days: 7
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "P01_V230_DOMAIN_V2_SOURCE=$SOURCE_SHA"
+          echo "P01_V230_DOMAIN_V2_TREE=$(git -C source rev-parse HEAD^{tree})"
+          echo P01_V230_DOMAIN_CONTENT_UX_V2_GATE=PASS
