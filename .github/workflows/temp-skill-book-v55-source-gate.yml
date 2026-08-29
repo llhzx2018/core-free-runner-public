@@ -1,0 +1,161 @@
+name: TEMP skill-book V5.5 exact-source gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-skill-book-v55-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  GOV_REPO: llhzx2018/gov-doc
+  GOV_BASE: 77ce579b0b62920175cec6aae1ab6b73b64c3687
+  SOURCE_BRANCH: staging/skill-book-v55-candidate-20260828
+  PAYLOAD_SHA: fb0c90cf6cd913c5b6a76c204efd55689c6c4de664231267b96e5c9003fbb182
+  ZIP_NAME: skill-book_V5.5_CANDIDATE_20260828.zip
+  ZIP_SHA: 2626dcc5eaa4c8c5d8e44e0ab44284a57fc1883e76c414f9552152fdd5d62f86
+  ZIP_BYTES: '431228'
+
+jobs:
+  full-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact V5.5 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat temp/skill-book-v55/payload_*.b64 | base64 -d > /tmp/source.tar.xz
+          test "$(sha256sum /tmp/source.tar.xz | awk '{print $1}')" = "$PAYLOAD_SHA"
+          mkdir -p /tmp/src
+          tar -xJf /tmp/source.tar.xz -C /tmp/src
+          test "$(find /tmp/src/skill-book_V5.5_FINAL_SOURCE -type f | wc -l)" -eq 95
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          sha256sum -c SHA256SUMS.txt >/tmp/internal-sha.txt
+          test "$(wc -l < SHA256SUMS.txt)" -eq 94
+          test "$(find . -type d \( -name __pycache__ -o -name .pytest_cache \) | wc -l)" -eq 0
+      - name: Python syntax 37/37
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          python - <<'PY'
+          import py_compile
+          from pathlib import Path
+          fs=sorted(list(Path('scripts').glob('*.py'))+list(Path('tests').glob('*.py')))
+          assert len(fs)==37, len(fs)
+          for p in fs: py_compile.compile(str(p),doraise=True)
+          print('PYTHON_SYNTAX_PASS 37/37')
+          PY
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+      - name: Install pinned pytest
+        run: python -m pip install --disable-pip-version-check pytest==9.0.2
+      - name: Full regression 108/108
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          python -m pytest -q
+          rm -rf .pytest_cache
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          sha256sum -c SHA256SUMS.txt >/dev/null
+          echo FULL_REGRESSION_108_PASS
+
+  runtime-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact V5.5 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat temp/skill-book-v55/payload_*.b64 | base64 -d > /tmp/source.tar.xz
+          test "$(sha256sum /tmp/source.tar.xz | awk '{print $1}')" = "$PAYLOAD_SHA"
+          mkdir -p /tmp/src
+          tar -xJf /tmp/source.tar.xz -C /tmp/src
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          sha256sum -c SHA256SUMS.txt >/dev/null
+      - name: Install pinned pytest
+        run: python -m pip install --disable-pip-version-check pytest==9.0.2
+      - name: Independent Runtime Acceptance 16/16
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          python -m pytest -q tests/test_runtime_acceptance_audit.py
+          echo RUNTIME_ACCEPTANCE_16_PASS
+
+  stage-exact-source:
+    needs: [full-regression, runtime-acceptance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct and seal exact Candidate bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat temp/skill-book-v55/payload_*.b64 | base64 -d > /tmp/source.tar.xz
+          test "$(sha256sum /tmp/source.tar.xz | awk '{print $1}')" = "$PAYLOAD_SHA"
+          mkdir -p /tmp/src
+          tar -xJf /tmp/source.tar.xz -C /tmp/src
+          cd /tmp/src/skill-book_V5.5_FINAL_SOURCE
+          sha256sum -c SHA256SUMS.txt >/dev/null
+          test "$(find . -type f | wc -l)" -eq 95
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_STORED
+          import hashlib, stat, os
+          root=Path('.')
+          out=Path('/tmp')/os.environ['ZIP_NAME']
+          fs=sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and '.pytest_cache' not in p.parts and p.suffix not in {'.pyc','.pyo'})
+          assert len(fs)==95, len(fs)
+          with ZipFile(out,'w',compression=ZIP_STORED) as z:
+              for p in fs:
+                  zi=ZipInfo(f'skill-book_V5.5_CANDIDATE/{p.as_posix()}',(2026,8,28,0,0,0))
+                  zi.compress_type=ZIP_STORED
+                  zi.create_system=3
+                  zi.external_attr=(stat.S_IFREG|0o644)<<16
+                  z.writestr(zi,p.read_bytes())
+          b=out.read_bytes(); sha=hashlib.sha256(b).hexdigest()
+          assert len(b)==int(os.environ['ZIP_BYTES']), len(b)
+          assert sha==os.environ['ZIP_SHA'], sha
+          print('CANDIDATE_ZIP_IDENTITY_PASS',len(b),sha)
+          PY
+          unzip -t "/tmp/$ZIP_NAME" >/tmp/unzip-test.txt
+          tail -n 2 /tmp/unzip-test.txt
+      - name: Stage exact V5.5 source to isolated gov-doc branch
+        shell: bash
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${GOV_REPO}.git" /tmp/gov
+          cd /tmp/gov
+          git fetch origin "$GOV_BASE"
+          test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$GOV_BASE"
+          git checkout --detach "$GOV_BASE"
+          test ! -e skills/skill-book/V5.5
+          if git ls-remote --exit-code origin "refs/heads/$SOURCE_BRANCH" >/dev/null 2>&1; then
+            echo BLOCK_SOURCE_BRANCH_ALREADY_EXISTS
+            exit 1
+          fi
+          mkdir -p skills/skill-book/V5.5
+          cp -a /tmp/src/skill-book_V5.5_FINAL_SOURCE/. skills/skill-book/V5.5/
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add skills/skill-book/V5.5
+          test "$(git diff --cached --name-only | wc -l)" -eq 95
+          git commit -m 'skill-book: stage V5.5 candidate exact source'
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/$SOURCE_BRANCH"
+          echo "SOURCE_COMMIT=$SOURCE_COMMIT"
+          echo "SOURCE_BRANCH=$SOURCE_BRANCH"
