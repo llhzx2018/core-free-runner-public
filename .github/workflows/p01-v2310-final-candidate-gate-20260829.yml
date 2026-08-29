@@ -1,0 +1,199 @@
+name: P01 V2.31.0 Final Candidate Readiness Gate
+on:
+  push:
+    branches: [task/p01-v2310-final-candidate-gate-20260829]
+    paths: [.github/workflows/p01-v2310-final-candidate-gate-20260829.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PRODUCT: ${{ github.workspace }}/product
+      ROOT: ${{ github.workspace }}/product/src
+      PORT: '18634'
+      ADMIN_PASS: 'P01V231!Candidate'
+      EVID: /tmp/p01-v2310-candidate-evidence
+      CANDIDATE: be006e19bab6e51e5d31f3db69a44b1a159f73ed
+      CANDIDATE_TREE: e5e1a36a8fed34459a0e8b1a7e60510a20422eba
+      V230_SOURCE: 40b2d5239c557ab6c7b9aaaa092acffa9fb926f9
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: be006e19bab6e51e5d31f3db69a44b1a159f73ed
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source, diff, version and syntax fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C "$PRODUCT" rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C "$PRODUCT" rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < "$PRODUCT/VERSION")" = 2.31.0
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.31.0
+          git -C "$PRODUCT" diff --name-only "$V230_SOURCE"...HEAD | sort >"$EVID/actual-diff.txt"
+          cat >"$EVID/expected-diff.txt" <<'EOF'
+          VERSION
+          src/VERSION.txt
+          src/assets/workspace-create-bundle.js
+          src/assets/workspace-domain-nav.css
+          src/workspace-create.php
+          src/workspace-save.php
+          EOF
+          sort -o "$EVID/expected-diff.txt" "$EVID/expected-diff.txt"
+          diff -u "$EVID/expected-diff.txt" "$EVID/actual-diff.txt"
+          if grep -q '^src/migrations/' "$EVID/actual-diff.txt"; then echo UNEXPECTED_MIGRATION; exit 1; fi
+          php -l "$ROOT/workspace-create.php" >/dev/null
+          php -l "$ROOT/workspace-save.php" >/dev/null
+          node --check "$ROOT/assets/workspace-create-bundle.js"
+          grep -F '[data-surface-field][hidden]' "$ROOT/assets/workspace-domain-nav.css" >/dev/null
+          grep -F '.vf-workspace-form .vf-privacy-hint.private{background:var(--ws-teal-soft);color:var(--ws-teal)}' "$ROOT/assets/workspace-domain-nav.css" >/dev/null
+          grep -F "start:'网址',channels:'频道',watch:'影视',topics:'专题'" "$ROOT/assets/workspace-create-bundle.js" >/dev/null
+          printf '%s\n' 'P01_V2310_EXACT_SOURCE_FENCE=PASS' 'P01_V2310_SIX_FILE_DIFF_FENCE=PASS' 'P01_V2310_VERSION_IDENTITY=PASS' 'P01_V2310_NO_MIGRATION=PASS' | tee "$EVID/source-fence.txt"
+      - name: Fresh runtime and verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-v2310-candidate.cookies
+          rm -f "$COOKIE"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-v2310-candidate.pid
+          for i in $(seq 1 40); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/p01-v2310-setup.html && break || sleep .25; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v2310-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 V231 Candidate Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          test -f "$ROOT/app/.runtime.php"
+          php "$ROOT/cli/verify.php" | tee "$EVID/fresh-verify.txt" | grep -Fx VERIFY_PASS=YES
+          php -r 'require getenv("ROOT")."/app/bootstrap.php"; echo "VF_VERSION=".VF_VERSION.PHP_EOL;' | tee "$EVID/runtime-version.txt" | grep -Fx VF_VERSION=2.31.0
+          cat >/tmp/p01-v2310-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';
+          $r=new VfRepository(vf_db());
+          $id=$r->createCategory(['name'=>'V231 Candidate 分类','description'=>'candidate gate','is_private'=>false,'sort_order'=>100]);
+          file_put_contents('/tmp/p01-v2310-category.txt',(string)$id);
+          echo "SEED_PASS\n";
+          PHP
+          php /tmp/p01-v2310-seed.php | grep -Fx SEED_PASS
+          echo P01_V2310_FRESH_RUNTIME=PASS | tee "$EVID/fresh-runtime.txt"
+      - name: Browser and data contract regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v2310-browser && cd /tmp/p01-v2310-browser
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+          cat >gate.mjs <<'JS'
+          import{chromium}from'playwright';import fs from'fs';
+          const base='http://127.0.0.1:18634',pass='P01V231!Candidate',e='/tmp/p01-v2310-candidate-evidence';
+          const paths={start:'start.php',channels:'channels.php',watch:'watch.php',topics:'topics.php'};
+          const nouns={start:'网址',channels:'频道',watch:'影视',topics:'专题'};
+          const common=['url','title','tags','description','is_private','is_favorite'];
+          const hiddenByMode={start:['surface','source_kind','html','resource_kind','cover','media_year','media_status','background_friendly'],channels:['surface','category_id','source_kind','html','media_year','media_status'],watch:['surface','category_id','source_kind','html','background_friendly'],topics:['surface','category_id','html','media_year','media_status','background_friendly']};
+          const visibleByMode={start:['category_id'],channels:['resource_kind','cover','background_friendly'],watch:['resource_kind','cover','media_year','media_status'],topics:['source_kind','resource_kind','cover']};
+          const b=await chromium.launch({headless:true});
+          const make=async(viewport,isMobile=false)=>{const c=await b.newContext({viewport,isMobile});const r=await c.request.post(base+'/api.php?action=login',{data:{password:pass}});if(!r.ok())throw Error('login '+r.status());return c};
+          const fieldState=async(page,name)=>page.locator('[data-add-form]').evaluate((form,name)=>{const control=form.elements.namedItem(name);if(!control)return{exists:false};const box=control.closest('[data-surface-field],[data-html-field],[data-url-field],label')||control;const css=getComputedStyle(box);return{exists:true,visible:!box.hidden&&css.display!=='none'&&css.visibility!=='hidden'}},name);
+          const assertField=async(page,name,want)=>{const s=await fieldState(page,name);if(!s.exists||s.visible!==want)throw Error(`field ${name} expected ${want} got ${JSON.stringify(s)}`)};
+          const openAdd=async(page,path)=>{await page.goto(base+'/'+path,{waitUntil:'networkidle'});const add=page.locator('[data-open-add]:visible').first();await add.waitFor();await add.click();await page.locator('[data-panel="add"]:visible').waitFor();await page.waitForTimeout(60);return add};
+          const verifyCopy=async(page,path,noun)=>{const add=page.locator('[data-open-add]:visible').first();const trigger=(await add.innerText()).replace(/\s+/g,' ').trim();if(!trigger.includes('添加'+noun))throw Error(path+' trigger '+trigger);const panel=page.locator('[data-panel="add"]:visible');const aria=await panel.getAttribute('aria-label');const title=(await panel.locator('header strong').innerText()).trim();const primary=(await panel.locator('button[type="submit"]:not([data-add-continue])').innerText()).trim();for(const [k,v] of Object.entries({aria,title,primary}))if(v!=='添加'+noun)throw Error(`${path} ${k} ${v}`)};
+          const d=await make({width:1440,height:960});const p=await d.newPage();
+          await openAdd(p,'surfaces.php');await assertField(p,'surface',true);await verifyCopy(p,'surfaces.php','资源');await p.locator('[data-close-panel]:visible').first().click();
+          for(const mode of Object.keys(paths)){
+            await openAdd(p,paths[mode]);
+            for(const f of common)await assertField(p,f,true);
+            for(const f of visibleByMode[mode])await assertField(p,f,true);
+            for(const f of hiddenByMode[mode])await assertField(p,f,false);
+            await verifyCopy(p,paths[mode],nouns[mode]);
+            if(mode==='start'){
+              const hint=p.locator('[data-add-form] [data-privacy-hint]');await hint.waitFor();
+              const truth=await hint.evaluate(el=>{const probe=document.createElement('span');probe.style.color='var(--ws-teal)';probe.style.backgroundColor='var(--ws-teal-soft)';document.body.appendChild(probe);const a=getComputedStyle(el),q=getComputedStyle(probe);const out={text:el.textContent||'',private:el.classList.contains('private'),color:a.color,bg:a.backgroundColor,expectedColor:q.color,expectedBg:q.backgroundColor};probe.remove();return out});
+              if(!truth.private||!truth.text.includes('有效可见：私人')||truth.color!==truth.expectedColor||truth.bg!==truth.expectedBg)throw Error('private semantic '+JSON.stringify(truth));
+              const box=p.locator('[data-add-form] input[name="is_private"]');await box.uncheck();const pub=await hint.evaluate(el=>({text:el.textContent||'',private:el.classList.contains('private')}));if(pub.private||!pub.text.includes('有效可见：公开'))throw Error('public semantic '+JSON.stringify(pub));await box.check();
+            }
+            if(mode==='topics'){
+              await p.locator('[data-add-form] select[name="source_kind"]').selectOption('hosted_html');await assertField(p,'url',false);await assertField(p,'html',true);
+              await p.locator('[data-add-form] select[name="source_kind"]').selectOption('remote_url');await assertField(p,'url',true);await assertField(p,'html',false);
+            }
+            await p.screenshot({path:`${e}/${mode}-desktop.png`,fullPage:true});await p.locator('[data-close-panel]:visible').first().click();
+          }
+          const m=await make({width:390,height:844},true);const mp=await m.newPage();
+          for(const mode of Object.keys(paths)){
+            await openAdd(mp,paths[mode]);for(const f of common)await assertField(mp,f,true);for(const f of visibleByMode[mode])await assertField(mp,f,true);for(const f of hiddenByMode[mode])await assertField(mp,f,false);await verifyCopy(mp,paths[mode],nouns[mode]);
+            if(mode==='start'){const hint=mp.locator('[data-add-form] [data-privacy-hint]');await hint.waitFor();const t=await hint.evaluate(el=>({text:el.textContent||'',private:el.classList.contains('private'),color:getComputedStyle(el).color,bg:getComputedStyle(el).backgroundColor}));if(!t.private||!t.text.includes('有效可见：私人'))throw Error('mobile private semantic '+JSON.stringify(t));}
+            await mp.screenshot({path:`${e}/${mode}-mobile.png`,fullPage:true});await mp.locator('[data-close-panel]:visible').first().click();
+          }
+          await p.goto(base+'/start.php',{waitUntil:'networkidle'});const categoryId=await p.locator('#vf-workspace-data').evaluate(n=>String(JSON.parse(n.textContent||'{}').categories?.[0]?.id||''));if(!categoryId)throw Error('no category');
+          const post=async(endpoint,fields)=>await p.evaluate(async({endpoint,fields})=>{const state=JSON.parse(document.getElementById('vf-workspace-data')?.textContent||'{}');const fd=new FormData();fd.set('csrf',state.csrf||'');for(const[k,v]of Object.entries(fields))fd.set(k,String(v));const r=await fetch(endpoint,{method:'POST',body:fd,credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}});const j=await r.json();if(!r.ok||!j.ok)throw Error(endpoint+': '+(j.error||r.status));return j;},{endpoint,fields});
+          const baseFields=(title,url,surface)=>({category_id:categoryId,title,url,surface,resource_kind:'Gate',description:'gate',tags:'v231',is_private:'1',is_favorite:'0',source_kind:'remote_url'});
+          const createChannel=await post('workspace-create.php',{...baseFields('V231 Candidate Channel','https://v231-candidate-channel.example.com','channels'),background_friendly:'1',media_year:'1999',media_status:'watched',source_kind:'hosted_html'});
+          const createWatch=await post('workspace-create.php',{...baseFields('V231 Candidate Watch','https://v231-candidate-watch.example.com','watch'),background_friendly:'1',media_year:'2025',media_status:'watching'});
+          const createTopics=await post('workspace-create.php',{...baseFields('V231 Candidate Topics','https://v231-candidate-topics.example.com','topics'),background_friendly:'1',media_year:'1988',media_status:'favorite'});
+          const toWatch=await post('workspace-create.php',{...baseFields('V231 Candidate To Watch','https://v231-candidate-save-watch.example.com','channels'),background_friendly:'1'});await post('workspace-save.php',{...baseFields('V231 Candidate To Watch','https://v231-candidate-save-watch.example.com','watch'),id:toWatch.id,background_friendly:'1',media_year:'2024',media_status:'watched'});
+          const toChannels=await post('workspace-create.php',{...baseFields('V231 Candidate To Channels','https://v231-candidate-save-channel.example.com','watch'),background_friendly:'1',media_year:'2023',media_status:'favorite'});await post('workspace-save.php',{...baseFields('V231 Candidate To Channels','https://v231-candidate-save-channel.example.com','channels'),id:toChannels.id,background_friendly:'1',media_year:'1990',media_status:'favorite'});
+          await post('workspace-create.php',{...baseFields('V231 Public Boundary','https://v231-public-boundary.example.com','start'),is_private:'0'});await post('workspace-create.php',{...baseFields('V231 Private Boundary','https://v231-private-boundary.example.com','start'),is_private:'1'});
+          const anon=await b.newContext({viewport:{width:1280,height:800}});const ap=await anon.newPage();await ap.goto(base+'/',{waitUntil:'networkidle'});const body=await ap.locator('body').innerText();if(!body.includes('V231 Public Boundary')||body.includes('V231 Private Boundary'))throw Error('anonymous privacy boundary');await ap.screenshot({path:`${e}/anonymous-public-boundary.png`,fullPage:true});await anon.close();
+          fs.writeFileSync(`${e}/browser-contract.json`,JSON.stringify({categoryId,createChannel,createWatch,createTopics,toWatch,toChannels},null,2));await d.close();await m.close();await b.close();console.log('V2310_BROWSER_DATA_CONTRACT_PASS');
+          JS
+          node gate.mjs | tee "$EVID/browser.txt" | grep -Fx V2310_BROWSER_DATA_CONTRACT_PASS
+          cd /
+          cat >/tmp/p01-v2310-data-verify.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('ROOT');require $root.'/app/bootstrap.php';$db=vf_db();
+          $get=static function(string $title)use($db):array{$s=$db->prepare('SELECT p.domain_key,p.background_friendly,p.media_year,p.media_status,p.source_kind FROM resource_domain_profiles p JOIN links l ON l.id=p.link_id WHERE l.title=?');$s->execute([$title]);$r=$s->fetch(PDO::FETCH_ASSOC);if(!is_array($r))throw new RuntimeException('missing '.$title);return $r;};
+          $cases=['V231 Candidate Channel'=>['channels',1,null,'','remote_url'],'V231 Candidate Watch'=>['watch',0,2025,'watching','remote_url'],'V231 Candidate Topics'=>['topics',0,null,'','remote_url'],'V231 Candidate To Watch'=>['watch',0,2024,'watched','remote_url'],'V231 Candidate To Channels'=>['channels',1,null,'','remote_url']];
+          $out=[];foreach($cases as $title=>$want){$r=$get($title);$got=[(string)$r['domain_key'],(int)$r['background_friendly'],$r['media_year']===null?null:(int)$r['media_year'],(string)$r['media_status'],(string)$r['source_kind']];if($got!==$want)throw new RuntimeException($title.' '.json_encode($got).' != '.json_encode($want));$out[$title]=$r;}
+          $schema=(string)$db->query("SELECT MAX(version) FROM schema_migrations WHERE status='success'")->fetchColumn();if($schema!=='2026082901')throw new RuntimeException('schema '.$schema);if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')throw new RuntimeException('integrity');if(count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))!==0)throw new RuntimeException('fk');file_put_contents(getenv('EVID').'/data-contract.json',json_encode(['schema'=>$schema,'cases'=>$out],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));echo "V2310_DATA_NORMALIZATION_PASS\n";
+          PHP
+          php /tmp/p01-v2310-data-verify.php | tee "$EVID/data.txt" | grep -Fx V2310_DATA_NORMALIZATION_PASS
+          php "$ROOT/cli/verify.php" | tee "$EVID/post-verify.txt" | grep -Fx VERIFY_PASS=YES
+      - name: Final verdict
+        shell: bash
+        run: |
+          cat >"$EVID/verdict.txt" <<'EOF'
+          P01_V2310_CANDIDATE_SOURCE=be006e19bab6e51e5d31f3db69a44b1a159f73ed
+          P01_V2310_CANDIDATE_TREE=e5e1a36a8fed34459a0e8b1a7e60510a20422eba
+          P01_V2310_SOURCE_VERSION=2.30.0
+          P01_V2310_TARGET_VERSION=2.31.0
+          P01_V2310_SCHEMA=2026082901
+          P01_V2310_EXACT_SIX_FILE_DELTA=PASS
+          P01_V2310_FRESH_RUNTIME=PASS
+          P01_V2310_CONTEXTUAL_FORM=PASS
+          P01_V2310_DOMAIN_NORMALIZATION=PASS
+          P01_V2310_PRIVATE_SEMANTIC=PASS
+          P01_V2310_CONTEXTUAL_ACTION_COPY=PASS
+          P01_V2310_ANONYMOUS_PRIVACY_BOUNDARY=PASS
+          P01_V2310_READY_FOR_DOCS_CLOSURE=YES
+          FORMAL_RELEASE=NOT_STARTED
+          OWNER_PRODUCTION_WRITE=NO
+          EOF
+          cat "$EVID/verdict.txt"
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v2310-candidate-readiness-evidence-${{ github.run_id }}
+          path: /tmp/p01-v2310-candidate-evidence
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Cleanup server
+        if: always()
+        shell: bash
+        run: if test -f /tmp/p01-v2310-candidate.pid; then kill "$(cat /tmp/p01-v2310-candidate.pid)" >/dev/null 2>&1 || true; fi
