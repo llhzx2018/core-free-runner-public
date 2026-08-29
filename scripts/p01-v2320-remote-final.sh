@@ -121,13 +121,14 @@ async function assertHome(viewport,label){
   if((await p.locator('.vf-home-command h1').innerText()).trim()!=='首页')throw new Error(label+' h1');
   const body=await p.locator('body').innerText();
   for(const text of ['待整理','最近使用','我的收藏','全部资源','从哪里继续','最近操作','V232公开导航资源 1'])if(!body.includes(text))throw new Error(label+' missing '+text);
-  if(!body.includes('V232私人导航资源 1'))throw new Error(label+' owner private missing');
   const overflow=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth); if(overflow>1)throw new Error(label+' overflow '+overflow);
   if(label==='mobile' && !(await p.locator('.vf-home-mobile-command [data-open-add]').isVisible()))throw new Error('mobile add not visible');
   await p.screenshot({path:evid+'/home-'+label+'.png',fullPage:true});
   await p.goto(base+'/surfaces.php',{waitUntil:'networkidle'});
   if(await p.locator('.vf-home-command').count()!==0)throw new Error(label+' all resources collapsed into home');
-  if(!(await p.locator('body').innerText()).includes('全部资源'))throw new Error(label+' all resources missing');
+  const allBody=await p.locator('body').innerText();
+  if(!allBody.includes('全部资源'))throw new Error(label+' all resources missing');
+  if(!allBody.includes('V232私人导航资源 1'))throw new Error(label+' owner private missing in all resources');
   await c.close();
 }
 await assertHome({width:1440,height:1000},'desktop');
