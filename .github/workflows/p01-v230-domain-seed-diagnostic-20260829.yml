@@ -1,0 +1,53 @@
+name: P01 V2.30 Domain Seed Diagnostic
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths:
+      - .github/workflows/p01-v230-domain-seed-diagnostic-20260829.yml
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_SHA: 426740ee3e36d207581dddf9b3fe5d62fd8d1808
+      PORT: '18585'
+      ROOT: /tmp/p01-v230-domain-diagnostic
+      ADMIN_PASS: 'P01V230!DomainUX'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: source
+      - name: Reproduce one create
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/seed-diag-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS -c /tmp/seed-diag.cookies -b /tmp/seed-diag.cookies "http://127.0.0.1:${PORT}/setup.php" -o /tmp/seed-diag-setup.html && break || sleep 1; done
+          CSRF=$(python3 -c "import re; s=open('/tmp/seed-diag-setup.html',encoding='utf-8').read(); m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',s); assert m; print(m.group(1))")
+          curl -fsS -c /tmp/seed-diag.cookies -b /tmp/seed-diag.cookies -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Seed Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/seed-diag-post.html
+          curl -fsS -c /tmp/seed-diag.cookies -b /tmp/seed-diag.cookies -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/seed-diag-login.json
+          jq . /tmp/seed-diag-login.json
+          TOKEN=$(jq -r '.csrf' /tmp/seed-diag-login.json)
+          CAT=$(curl -fsS -c /tmp/seed-diag.cookies -b /tmp/seed-diag.cookies -H 'Content-Type: application/json' -H "X-CSRF-Token: $TOKEN" -d '{"name":"开发工具","description":"开发","is_private":false,"sort_order":90}' "http://127.0.0.1:${PORT}/api.php?action=category_save")
+          echo "$CAT" | jq .
+          CID=$(echo "$CAT" | jq -r '.id')
+          set +e
+          RESP=$(curl -sS -w '\nHTTP_STATUS=%{http_code}\n' -c /tmp/seed-diag.cookies -b /tmp/seed-diag.cookies -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$TOKEN" -F "category_id=$CID" -F 'surface=start' -F 'title=开发网址 1' -F 'url=https://example.com/dev-1' -F 'resource_kind=' -F 'tags=开发,工具' -F 'is_private=0' -F 'background_friendly=0' -F 'source_kind=remote_url')
+          RC=$?
+          set -e
+          printf '%s\n' "$RESP"
+          cat /tmp/seed-diag-server.log | tail -80
+          test "$RC" -eq 0
+          echo "$RESP" | grep -F '"ok":true'
+          echo P01_V230_DOMAIN_SEED_DIAGNOSTIC=PASS
