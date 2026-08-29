@@ -1,0 +1,190 @@
+name: P05 V1.1.1 Main Release Exact Gate
+
+on:
+  push:
+    branches:
+      - verify/p05-v1.1.0-release-source-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.1-main-release-exact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_MAIN_SHA: ac8c3f2bedf3b1fe16f38ed079ffbe2f29e54cbc
+      P05_EXPECTED_TREE: 0012ca03e7a065a1d5866e1d6dcc62e79c901fff
+      VERIFIED_SOURCE_SHA: ad661a2858d916f04ee797804e52e187684990c5
+      P05_VERSION: 1.1.1
+      RELEASE_ASSET: VF_SEO_V1.1.1_FULL.zip
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read capability
+        shell: bash
+        run: test -n "$PRIVATE_READ_TOKEN" || { echo TOKEN_MISSING; exit 78; }
+
+      - name: Checkout exact P05 main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_MAIN_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact main tree identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_MAIN_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXPECTED_TREE"
+          test "$(git rev-parse "$VERIFIED_SOURCE_SHA^{tree}")" = "$P05_EXPECTED_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$P05_VERSION"
+          echo P05_V111_MAIN_TREE_IDENTITY=PASS
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Full exact main regression and gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run migrate
+          npm run verify:schema
+          npm run test
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+          echo P05_V111_MAIN_NODE_REGRESSION=PASS
+
+      - name: PHP exact main runtime gate
+        shell: bash
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-v111-main-php.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-v111-main-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -euo pipefail
+          php -r 'if (PHP_VERSION_ID < 80200 || !extension_loaded("pdo_sqlite")) exit(1);'
+          php -l index.php
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          bash php/tests/http-smoke.sh
+          echo P05_V111_MAIN_PHP_RUNTIME=PASS
+
+      - name: Build exact main release staging and direct-extract smoke
+        shell: bash
+        env:
+          VF_RELEASE_SOURCE_SHA: ${{ env.P05_MAIN_SHA }}
+        run: |
+          set -euo pipefail
+          npm run build:php-release
+          npm run php:release:gate
+          bash php/tests/cloudpanel-root-smoke.sh build/vf-seo-php-release
+          node - <<'JS'
+          const fs=require('fs');
+          const m=JSON.parse(fs.readFileSync('build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json','utf8'));
+          if(m.version!==process.env.P05_VERSION||m.sourceCommit!==process.env.P05_MAIN_SHA) throw new Error('main manifest identity');
+          if(m.cloudPanelDirectExtract!==true||m.rootEntryPoint!=='index.php'||m.hardenedDocumentRoot!=='php/public') throw new Error('cloudpanel contract');
+          JS
+          echo P05_V111_MAIN_CLOUDPANEL_DIRECT_EXTRACT=PASS
+
+      - name: Build deterministic formal FULL and receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/p05-v111-main-release"
+          mkdir -p "$OUT"
+          zip_stage() {
+            local out="$1"
+            STAGE="$(pwd)/build/vf-seo-php-release" OUT_FILE="$out" python3 - <<'PY'
+          import os,pathlib,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT_FILE'])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+                  rel=p.relative_to(stage).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3
+                  info.external_attr=((0o100755 if rel=='install-cloudpanel-php.sh' else 0o100644)<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          }
+          zip_stage "$OUT/a.zip"
+          zip_stage "$OUT/b.zip"
+          cmp "$OUT/a.zip" "$OUT/b.zip"
+          mv "$OUT/a.zip" "$OUT/$RELEASE_ASSET"
+          rm "$OUT/b.zip"
+          SHA="$(sha256sum "$OUT/$RELEASE_ASSET" | awk '{print $1}')"
+          BYTES="$(stat -c %s "$OUT/$RELEASE_ASSET")"
+          FILES="$(unzip -Z1 "$OUT/$RELEASE_ASSET" | grep -cv '/$')"
+          unzip -p "$OUT/$RELEASE_ASSET" VERSION | tr -d '\r\n' | grep -Fxq "$P05_VERSION"
+          unzip -Z1 "$OUT/$RELEASE_ASSET" | grep -Fxq 'index.php'
+          unzip -Z1 "$OUT/$RELEASE_ASSET" | grep -Eq '^assets/.+\.(js|css)$'
+          unzip -p "$OUT/$RELEASE_ASSET" PHP_RELEASE_MANIFEST.json | jq -e --arg v "$P05_VERSION" --arg s "$P05_MAIN_SHA" '.version==$v and .sourceCommit==$s and .cloudPanelDirectExtract==true' >/dev/null
+          cat > "$OUT/VF_SEO_V1.1.1_RELEASE_RECEIPT.txt" <<EOF
+          P05_V111_MAIN_RELEASE_MACHINE=PASS
+          P05_EXACT_MAIN=$P05_MAIN_SHA
+          P05_TREE=$P05_EXPECTED_TREE
+          P05_VERSION=$P05_VERSION
+          P05_CLOUDPANEL_DIRECT_EXTRACT=PASS
+          P05_ROOT_ENTRY=index.php
+          P05_HARDENED_ROOT=php/public
+          P05_FORMAL_FULL_FILES=$FILES
+          P05_FORMAL_FULL_BYTES=$BYTES
+          P05_FORMAL_FULL_SHA256=$SHA
+          P05_PRODUCTION=NOT_DEPLOYED
+          EOF
+          cat "$OUT/VF_SEO_V1.1.1_RELEASE_RECEIPT.txt"
+
+      - name: Repository cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --porcelain --untracked-files=all | grep -Ev '^(\?\? | M )?(build/|dist/)' > /tmp/p05-dirty.txt || true
+          test ! -s /tmp/p05-dirty.txt
+          echo P05_V111_MAIN_CLEANLINESS=PASS
+
+      - name: Upload exact main formal release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: P05_V1.1.1_MAIN_RELEASE
+          path: |
+            ${{ runner.temp }}/p05-v111-main-release/VF_SEO_V1.1.1_FULL.zip
+            ${{ runner.temp }}/p05-v111-main-release/VF_SEO_V1.1.1_RELEASE_RECEIPT.txt
+          retention-days: 90
