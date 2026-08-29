@@ -20,7 +20,7 @@ s=s.replace(old,new)
 
 marker="j('evidence/generation_responsibility_contract.json', gen)\n"
 assert s.count(marker)==1
-insert=r'''# Promise responsibilities inferred from this fresh book's own reader contract.
+insert=r"""# Promise responsibilities inferred from this fresh book's own reader contract.
 w('references/operator/observability_decision.md', r'''
 # Observability Decision Operator Reference
 Baseline: the approved event plan and baseline snapshot. Signal interpretation: compare attendance friction, discussion participation, access defects and host load against the same definitions used during the event. Change control: do not change format from one emotional comment; link evidence IDs, state the proposed change, impact and revalidation. Next decision: KEEP / REVISE / STOP with rationale, UNKNOWN handling and revisit trigger. Judgment: weak signals remain hypotheses. Execution: collect post-event evidence from at least two independent sources where possible. Validation: the next decision must cite the evidence trace. Failure recovery: if feedback is contradictory, keep UNKNOWN and collect another sample rather than forcing a conclusion. Completion: close only when baseline, interpreted signal and next action are linked.
@@ -58,7 +58,7 @@ gen['promise_responsibilities'] = [
     },
 ]
 
-'''+marker
+"""+marker
 s=s.replace(marker,insert)
 p.write_text(s,encoding='utf-8')
 print('FRESH_GENERATOR_PROMISE_RESPONSIBILITY_PATCH_V2_APPLIED')
