@@ -1,4 +1,4 @@
-name: V5.8 Manifest + Regression Verify
+name: V5.8 Final Identity + Regression Verify
 
 on:
   push:
@@ -15,13 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      GOV_REPO: llhzx2018/gov-doc
-      GOV_SHA: d95e619ae563974d0752c1c8df311828f9dd1c2b
+      GOV_SHA: 6555f0829f2606b493f26cf2c6b1374903108489
       V58_ROOT: gov/skills/skill-book/V5.8
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - name: Require registered read capability
-        shell: bash
         run: |
           set -Eeuo pipefail
           test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
@@ -43,128 +41,84 @@ jobs:
           fetch-depth: 0
           path: gov
 
-      - name: Bind exact GOV-DOC SHA
-        working-directory: gov
+      - name: Verify final package identity
         shell: bash
         run: |
           set -Eeuo pipefail
-          ACTUAL="$(git rev-parse HEAD)"
-          test "$ACTUAL" = "$GOV_SHA"
-          echo "GOV_DOC_SOURCE_SHA=$ACTUAL"
-
-      - name: Compute exact V5.8 source manifest basis
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          rm -rf results/v58 && mkdir -p results/v58
+          rm -rf results/v58-final && mkdir -p results/v58-final
+          cd "$V58_ROOT"
+          test "$(git rev-parse HEAD)" = "$GOV_SHA"
           python3 - <<'PY'
           from pathlib import Path
-          import hashlib, json, os
-          root=Path(os.environ['V58_ROOT'])
+          import hashlib, json, os, sys
+          root=Path('.')
           excluded={'MANIFEST.json','SHA256SUMS.txt'}
           rows=[]
           for p in sorted(x for x in root.rglob('*') if x.is_file()):
               rel=p.relative_to(root).as_posix()
-              if rel in excluded:
-                  continue
-              b=p.read_bytes()
-              rows.append({'path':rel,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
-          basis=''.join(f"{r['path']}  {r['sha256']}\n" for r in rows)
-          out=Path('results/v58')
-          (out/'V58_FILES.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          (out/'SHA256SUMS.txt').write_text(basis,encoding='utf-8')
-          (out/'TREE_SHA256.txt').write_text(hashlib.sha256(basis.encode('utf-8')).hexdigest()+'\n',encoding='utf-8')
-          (out/'SOURCE_SHA.txt').write_text(os.environ['GOV_SHA']+'\n',encoding='utf-8')
-          print(f'V58_NON_MANIFEST_FILE_COUNT={len(rows)}')
-          print('V58_NON_MANIFEST_TREE_SHA256='+hashlib.sha256(basis.encode('utf-8')).hexdigest())
+              if rel in excluded: continue
+              rows.append((rel, hashlib.sha256(p.read_bytes()).hexdigest()))
+          basis=''.join(f'{p}  {h}\n' for p,h in rows)
+          tree=hashlib.sha256(basis.encode()).hexdigest()
+          checked=(root/'SHA256SUMS.txt').read_text(encoding='utf-8')
+          m=json.loads((root/'MANIFEST.json').read_text(encoding='utf-8'))
+          checks={
+            'sha256sums_exact': checked == basis,
+            'file_count': len(rows) == 108,
+            'tree_sha': tree == '415f2f8b166b097e149890a9cd67cbcc32014db29cb1f8fd37773b4df6c31da4',
+            'manifest_version': m.get('version') == '5.8',
+            'manifest_artifact': m.get('artifact_id') == 'SKILL-BOOK-V5.8-CANDIDATE-DEVELOPMENT',
+            'runtime_contract': m.get('runtime_contract_id') == 'SB58-RUNTIME-CONTRACT-BF41D2E7',
+            'manifest_tree': m.get('package_identity',{}).get('source_non_manifest_tree_sha256') == tree,
+            'manifest_file_count': m.get('package_identity',{}).get('non_manifest_file_count') == 108,
+            'candidate_release_not_run': m.get('validation',{}).get('v58_candidate_release') == 'NOT_RUN',
+            'standalone_not_run': m.get('validation',{}).get('v58_standalone_a1') == 'NOT_RUN',
+            'blind_proxy_not_run': m.get('validation',{}).get('fresh_isolated_blind_proxy') == 'NOT_RUN',
+            'real_reader_not_run': m.get('real_reader_evidence') == 'NOT_RUN',
+            'promotion_not_authorized': m.get('current_promotion') == 'NOT_AUTHORIZED'
+          }
+          result={'gov_sha':os.environ['GOV_SHA'],'non_manifest_file_count':len(rows),'tree_sha256':tree,'checks':checks,'identity_pass':all(checks.values())}
+          out=Path(os.environ['GITHUB_WORKSPACE'])/'results/v58-final/IDENTITY.json'
+          out.write_text(json.dumps(result,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result,indent=2))
+          if not all(checks.values()): sys.exit(1)
           PY
 
-      - name: Run V5.8 full unittest regression
+      - name: Run final V5.8 unittest regression
         shell: bash
         run: |
           set +e
           cd "$V58_ROOT"
-          python3 -m unittest discover -s tests -p 'test_*.py' -v > "$GITHUB_WORKSPACE/results/v58/UNITTEST.txt" 2>&1
+          python3 -m unittest discover -s tests -p 'test_*.py' -v > "$GITHUB_WORKSPACE/results/v58-final/UNITTEST.txt" 2>&1
           RC=$?
-          echo "$RC" > "$GITHUB_WORKSPACE/results/v58/UNITTEST_EXIT_CODE.txt"
-          cat "$GITHUB_WORKSPACE/results/v58/UNITTEST.txt"
+          echo "$RC" > "$GITHUB_WORKSPACE/results/v58-final/UNITTEST_EXIT_CODE.txt"
+          tail -n 8 "$GITHUB_WORKSPACE/results/v58-final/UNITTEST.txt"
           exit 0
 
-      - name: Compile V5.8 Python
+      - name: Compile final V5.8 Python
         shell: bash
         run: |
           set +e
-          python3 -m compileall -q "$V58_ROOT/scripts" "$V58_ROOT/tests" > results/v58/COMPILE.txt 2>&1
+          python3 -m compileall -q "$V58_ROOT/scripts" "$V58_ROOT/tests" > results/v58-final/COMPILE.txt 2>&1
           RC=$?
-          echo "$RC" > results/v58/COMPILE_EXIT_CODE.txt
-          cat results/v58/COMPILE.txt
+          echo "$RC" > results/v58-final/COMPILE_EXIT_CODE.txt
           exit 0
 
-      - name: Generate truthful V5.8 development manifest
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import json, re
-          out=Path('results/v58')
-          rows=json.loads((out/'V58_FILES.json').read_text(encoding='utf-8'))
-          tree=(out/'TREE_SHA256.txt').read_text(encoding='utf-8').strip()
-          tests=(out/'UNITTEST.txt').read_text(encoding='utf-8')
-          m=re.search(r'Ran\s+(\d+)\s+tests?', tests)
-          test_count=int(m.group(1)) if m else None
-          unit_rc=(out/'UNITTEST_EXIT_CODE.txt').read_text().strip()
-          compile_rc=(out/'COMPILE_EXIT_CODE.txt').read_text().strip()
-          manifest={
-            'artifact_id':'SKILL-BOOK-V5.8-CANDIDATE-DEVELOPMENT',
-            'version':'5.8',
-            'status':'CANDIDATE_DEVELOPMENT_NOT_PUBLISHED_NOT_CURRENT',
-            'build_date':'2026-08-29',
-            'method_lineage':'V5.7 Source Current -> V5.8 Reader-First Rebalance Candidate Development',
-            'previous_published_candidate_skill':'5.7',
-            'source_current_skill':'5.7',
-            'runtime_contract_id':'SB58-RUNTIME-CONTRACT-BF41D2E7',
-            'v58_scope':'READER_FIRST_REBALANCE_FULL_BOOK_SUBSTANCE_CONTINUOUS_READING_PRODUCT_PACKAGING',
-            'validation':{
-              'post_cleanup_full_regression':f'{test_count}/{test_count} PASS' if unit_rc=='0' and test_count is not None else 'FAIL',
-              'post_cleanup_python_compile':'PASS' if compile_rc=='0' else 'FAIL',
-              'source_non_manifest_tree_sha256':tree,
-              'source_non_manifest_tree_basis':'sorted path + two spaces + sha256 + LF; excludes MANIFEST.json and SHA256SUMS.txt',
-              'v58_candidate_release':'NOT_RUN',
-              'v58_standalone_a1':'NOT_RUN',
-              'fresh_isolated_blind_proxy':'NOT_RUN',
-              'real_reader_evidence':'NOT_RUN'
-            },
-            'candidate_authorization':'NOT_RUN',
-            'current_promotion':'NOT_AUTHORIZED',
-            'current_distribution_promotion':'NOT_AUTHORIZED',
-            'backend_installed_runtime':'NOT_RUN',
-            'real_reader_evidence':'NOT_RUN',
-            'historical_canonical_policy':'FIRST_FREEZE_PLUS_EVALUATOR_ONLY_NOT_GENERATION_TEMPLATE',
-            'files':rows
-          }
-          (out/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          print('V58_MANIFEST_GENERATED=TRUE')
-          PY
-
-      - name: Commit verifier results to isolated runner branch
+      - name: Commit final verifier evidence
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name 'VF Runner'
           git config user.email 'vf-runner@users.noreply.github.com'
-          git add results/v58
-          if git diff --cached --quiet; then
-            echo 'RESULTS_UNCHANGED=TRUE'
-          else
-            git commit -m "verify: V5.8 manifest basis and regression for ${GOV_SHA}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          fi
+          git add results/v58-final
+          git commit -m "verify: final V5.8 identity and regression for ${GOV_SHA}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Enforce regression result
+      - name: Enforce final result
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(cat results/v58/UNITTEST_EXIT_CODE.txt)" = '0'
-          test "$(cat results/v58/COMPILE_EXIT_CODE.txt)" = '0'
-          echo 'V58_POST_CLEANUP_REGRESSION=PASS'
+          test "$(cat results/v58-final/UNITTEST_EXIT_CODE.txt)" = '0'
+          test "$(cat results/v58-final/COMPILE_EXIT_CODE.txt)" = '0'
+          grep -q '"identity_pass": true' results/v58-final/IDENTITY.json
+          echo 'V58_FINAL_IDENTITY_AND_REGRESSION=PASS'
