@@ -4,7 +4,7 @@ p=Path('temp/skill-book-v56/fresh_non_a1_reading_club.py')
 s=p.read_text(encoding='utf-8')
 marker="# GOOD fresh-generation tree: broad generation responsibilities + depth + local-value gates.\n"
 assert s.count(marker)==1
-insert=r'''# Fresh-generation PRE_FREEZE strengthening: make the actual reader-facing bytes self-sufficient,
+insert=r"""# Fresh-generation PRE_FREEZE strengthening: make the actual reader-facing bytes self-sufficient,
 # rather than satisfying only the PRE_DRAFT responsibility declaration.
 def append_runtime(rel: str, body: str) -> None:
     fp=OUT/rel
@@ -76,7 +76,7 @@ Input: failure trigger and incident record. Execution steps: diagnose, stop affe
 Validation uses the same acceptance rule that failed. Failure / recovery: if retest fails again, stop repeated retries and escalate. Completion state requires rollback target, method, post-retry evidence, boundary and handoff.
 ''' + '\n' + rb.read_text(encoding='utf-8'),encoding='utf-8')
 
-'''
+"""
 s=s.replace(marker,insert+marker)
 p.write_text(s,encoding='utf-8')
 print('FRESH_GENERATOR_PREFREEZE_SELF_SUFFICIENCY_PATCH_V3_APPLIED')
