@@ -1,0 +1,169 @@
+name: TEMP skill-book V5.7 Candidate seal
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GOV_REPO: llhzx2018/gov-doc
+  V57_BRANCH: work/skill-book-v57-reader-transfer
+  V57_EXPECTED: e0efe4c19dff57a27b96714e8b9e3a6a46f5a6ca
+  RUNNER_REPO: llhzx2018/core-free-runner-public
+  RUNNER_BRANCH: test/skill-book-v57-candidate-seal-20260829
+  V57_RID: SB57-RUNTIME-CONTRACT-8ADCAF17
+
+jobs:
+  candidate-seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Clone exact authorized V5.7 work branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+          git clone --quiet "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${GOV_REPO}.git" gov
+          git -C gov checkout --quiet "$V57_BRANCH"
+          test "$(git -C gov rev-parse HEAD)" = "$V57_EXPECTED"
+          git clone --quiet --branch "$RUNNER_BRANCH" --single-branch "https://github.com/${RUNNER_REPO}.git" runner
+          test -f runner/temp/skill-book-v57-candidate-seal/seal_v57_candidate.py
+          echo 'V57_CANDIDATE_INPUT_HEAD=PASS'
+
+      - name: Apply minimal Candidate identity delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python runner/temp/skill-book-v57-candidate-seal/seal_v57_candidate.py gov | tee /tmp/v57-seal.txt
+          root=skills/skill-book/V5.7
+          expected="$(printf '%s\n' \
+            $root/agents/openai.yaml \
+            $root/SKILL.md \
+            $root/SOURCE_PACKAGE_IDENTITY.md \
+            $root/MANIFEST.json \
+            $root/SHA256SUMS.txt \
+            $root/tests/test_skill_contract.py | sort)"
+          test "$(git -C gov diff --name-only | sort)" = "$expected"
+          grep -q '^# skill-book V5.7 Candidate$' gov/$root/SKILL.md
+          grep -q 'Status: `CANDIDATE / NOT CURRENT`' gov/$root/SKILL.md
+          grep -q '^status: candidate_not_current$' gov/$root/agents/openai.yaml
+          grep -q 'Fresh isolated blind proxy: `PASS`' gov/$root/SOURCE_PACKAGE_IDENTITY.md
+          echo 'V57_CANDIDATE_IDENTITY_SCOPE=PASS'
+
+      - name: Validate exact Candidate package integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('gov/skills/skill-book/V5.7')
+          m=json.loads((root/'MANIFEST.json').read_text())
+          assert m['artifact_id']=='SKILL-BOOK-V5.7-CANDIDATE'
+          assert m['version']=='5.7'
+          assert m['status']=='CANDIDATE_NOT_CURRENT'
+          assert m['runtime_contract_id']=='SB57-RUNTIME-CONTRACT-8ADCAF17'
+          assert m['candidate_authorization']=='AUTHORIZED'
+          assert m['validation']['fresh_isolated_blind_proxy']=='PASS'
+          assert m['validation']['fresh_proxy_receipt_validation']=='PASS_RECEIPT_AUTHORITY_VALIDATION'
+          assert m['real_reader_evidence']=='NOT_RUN'
+          for row in m['files']:
+              p=root/row['path']; b=p.read_bytes()
+              assert len(b)==row['bytes'],row['path']
+              assert hashlib.sha256(b).hexdigest()==row['sha256'],row['path']
+          rows=[]
+          for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              rel=p.relative_to(root).as_posix()
+              if rel in {'MANIFEST.json','SHA256SUMS.txt'}: continue
+              rows.append(f"{rel}  {hashlib.sha256(p.read_bytes()).hexdigest()}")
+          tree=hashlib.sha256(('\n'.join(rows)+'\n').encode()).hexdigest()
+          assert tree==m['validation']['source_non_manifest_tree_sha256']
+          sums={}
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+              h,rel=line.split('  ',1); sums[rel]=h
+          actual=[p for p in sorted(root.rglob('*')) if p.is_file() and p.name!='SHA256SUMS.txt']
+          assert len(sums)==len(actual)
+          for p in actual:
+              rel=p.relative_to(root).as_posix(); assert sums[rel]==hashlib.sha256(p.read_bytes()).hexdigest(),rel
+          print('V57_CANDIDATE_TREE_SHA256='+tree)
+          print('V57_CANDIDATE_MANIFEST_SOURCE_FILES='+str(len(m['files'])))
+          print('V57_CANDIDATE_SHA_ENTRIES='+str(len(sums)))
+          print('V57_CANDIDATE_PACKAGE_INTEGRITY=PASS')
+          PY
+
+      - name: Compile and run full regression on exact Candidate bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find gov/skills/skill-book/V5.7 -type f -name '*.py' | sort)
+          python -m py_compile "${files[@]}"
+          test "${#files[@]}" -eq 42
+          echo 'V57_CANDIDATE_PYTHON_COMPILE=42/42_PASS'
+          python -m pip install -q pytest
+          python -m pytest -q gov/skills/skill-book/V5.7/tests | tee /tmp/v57-candidate-pytest.txt
+          grep -q '140 passed' /tmp/v57-candidate-pytest.txt
+          echo 'V57_CANDIDATE_FULL_REGRESSION=140/140_PASS'
+
+      - name: Revalidate declared bytes and build Candidate ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          find gov/skills/skill-book/V5.7 -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find gov/skills/skill-book/V5.7 -type f -name '*.pyc' -delete
+          python - <<'PY'
+          import hashlib,json,zipfile
+          from pathlib import Path
+          root=Path('gov/skills/skill-book/V5.7')
+          m=json.loads((root/'MANIFEST.json').read_text())
+          for row in m['files']:
+              p=root/row['path']; assert hashlib.sha256(p.read_bytes()).hexdigest()==row['sha256'],row['path']
+          sums={}
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+              h,rel=line.split('  ',1); sums[rel]=h
+          for rel,h in sums.items(): assert hashlib.sha256((root/rel).read_bytes()).hexdigest()==h,rel
+          out=Path('/tmp/skill-book_V5.7_CANDIDATE_20260829.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()): z.write(p,p.relative_to(root).as_posix())
+          h=hashlib.sha256(out.read_bytes()).hexdigest()
+          Path('/tmp/skill-book_V5.7_CANDIDATE_20260829.zip.sha256').write_text(h+'  '+out.name+'\n')
+          print('V57_CANDIDATE_ZIP_BYTES='+str(out.stat().st_size))
+          print('V57_CANDIDATE_ZIP_SHA256='+h)
+          print('V57_POST_TEST_DECLARED_BYTES_STABLE=PASS')
+          PY
+
+      - name: Guarded Candidate identity writeback
+        shell: bash
+        run: |
+          set -euo pipefail
+          live="$(git -C gov ls-remote origin refs/heads/${V57_BRANCH} | awk '{print $1}')"
+          test "$live" = "$V57_EXPECTED"
+          root=skills/skill-book/V5.7
+          expected="$(printf '%s\n' \
+            $root/agents/openai.yaml \
+            $root/SKILL.md \
+            $root/SOURCE_PACKAGE_IDENTITY.md \
+            $root/MANIFEST.json \
+            $root/SHA256SUMS.txt \
+            $root/tests/test_skill_contract.py | sort)"
+          test "$(git -C gov diff --name-only | sort)" = "$expected"
+          git -C gov config user.name VictorForge
+          git -C gov config user.email llhzx2018@gmail.com
+          while IFS= read -r path; do git -C gov add "$path"; done <<< "$expected"
+          git -C gov commit -m 'skill-book: seal V5.7 Candidate reader-transfer identity'
+          git -C gov push origin HEAD:refs/heads/${V57_BRANCH}
+          new="$(git -C gov rev-parse HEAD)"
+          test "$(git -C gov ls-remote origin refs/heads/${V57_BRANCH} | awk '{print $1}')" = "$new"
+          echo "V57_CANDIDATE_SOURCE_COMMIT=$new"
+
+      - name: Upload Candidate package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-book-v57-candidate-20260829
+          path: |
+            /tmp/skill-book_V5.7_CANDIDATE_20260829.zip
+            /tmp/skill-book_V5.7_CANDIDATE_20260829.zip.sha256
+          if-no-files-found: error
