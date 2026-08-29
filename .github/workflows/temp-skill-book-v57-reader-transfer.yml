@@ -1,4 +1,4 @@
-name: TEMP skill-book V5.7 active identity inventory
+name: TEMP skill-book V5.7 WIP identity reconciliation
 
 on:
   pull_request:
@@ -9,33 +9,157 @@ permissions:
 
 env:
   GOV_REPO: llhzx2018/gov-doc
-  V57_EXACT: 1918f413a0e24e696245f8c76aeb93c017bf256d
+  V57_BRANCH: work/skill-book-v57-reader-transfer
+  V57_EXPECTED: 1918f413a0e24e696245f8c76aeb93c017bf256d
+  RUNNER_REPO: llhzx2018/core-free-runner-public
+  RUNNER_BRANCH: test/skill-book-v57-reader-transfer-20260829
+  V57_RID: SB57-RUNTIME-CONTRACT-8ADCAF17
 
 jobs:
-  active-identity-inventory:
+  wip-identity-reconciliation:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Clone exact stable V5.7 WIP
+      - name: Clone exact stable WIP and reconciliation helper
         shell: bash
         run: |
           set -euo pipefail
           test -n "$VF_RELEASE_WRITE_TOKEN"
           git clone --quiet "https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/${GOV_REPO}.git" gov
-          git -C gov checkout --quiet "$V57_EXACT"
-          test "$(git -C gov rev-parse HEAD)" = "$V57_EXACT"
+          git -C gov checkout --quiet "$V57_BRANCH"
+          test "$(git -C gov rev-parse HEAD)" = "$V57_EXPECTED"
+          git clone --quiet --branch "$RUNNER_BRANCH" --single-branch "https://github.com/${RUNNER_REPO}.git" runner
+          test -f runner/temp/skill-book-v57/reconcile_v57_wip_identity.py
 
-      - name: Inventory inherited V5.6 active identity references
+      - name: Apply exact WIP identity reconciliation locally
         shell: bash
         run: |
           set -euo pipefail
-          root=gov/skills/skill-book/V5.7
-          grep -R -l -E 'SB56-RUNTIME-CONTRACT-CBE00206|V5\.6|(^|[^0-9])5\.6([^0-9]|$)' "$root" \
-            --exclude-dir=validation --exclude='SHA256SUMS.txt' | sort | tee /tmp/identity-files.txt
-          echo "ACTIVE_IDENTITY_FILE_COUNT=$(wc -l < /tmp/identity-files.txt)"
-          echo '--- ACTIVE IDENTITY LINES ---'
-          grep -R -n -E 'SB56-RUNTIME-CONTRACT-CBE00206|V5\.6|(^|[^0-9])5\.6([^0-9]|$)' "$root" \
-            --exclude-dir=validation --exclude='SHA256SUMS.txt' | head -n 240
-          echo 'V57_ACTIVE_IDENTITY_INVENTORY=PASS'
+          python runner/temp/skill-book-v57/reconcile_v57_wip_identity.py gov | tee /tmp/v57-reconcile.txt
+          root=skills/skill-book/V5.7
+          expected="$(printf '%s\n' \
+            $root/VERSION \
+            $root/agents/openai.yaml \
+            $root/SKILL.md \
+            $root/SOURCE_PACKAGE_IDENTITY.md \
+            $root/MANIFEST.json \
+            $root/SHA256SUMS.txt \
+            $root/references/runtime_entry_receipt_contract.md \
+            $root/references/runtime_authority_fidelity_contract.md \
+            $root/references/runtime_enforcement_contract.md \
+            $root/scripts/runtime_acceptance_audit.py \
+            $root/scripts/runtime_authority_fidelity_audit.py \
+            $root/tests/test_runtime_acceptance_audit.py \
+            $root/tests/test_runtime_authority_fidelity_audit.py \
+            $root/tests/test_skill_contract.py | sort)"
+          test "$(git -C gov diff --name-only | sort)" = "$expected"
+          test "$(cat gov/$root/VERSION)" = '5.7'
+          grep -q "$V57_RID" gov/$root/SKILL.md
+          grep -q 'DESIGN_GATE / WIP / NOT CANDIDATE / NOT CURRENT' gov/$root/SKILL.md
+          grep -q 'V5.7 Reader Transfer' gov/$root/SKILL.md
+          grep -q 'reader_transfer_contract.json' gov/$root/references/runtime_entry_receipt_contract.md
+          echo 'V57_IDENTITY_SCOPE_GUARD=PASS'
+
+      - name: Validate WIP manifest and SHA coverage before tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('gov/skills/skill-book/V5.7')
+          m=json.loads((root/'MANIFEST.json').read_text())
+          assert m['artifact_id']=='SKILL-BOOK-V5.7-DESIGN-GATE-WIP'
+          assert m['version']=='5.7'
+          assert m['status']=='DESIGN_GATE_WIP_NOT_CANDIDATE_NOT_CURRENT'
+          assert m['runtime_contract_id']=='SB57-RUNTIME-CONTRACT-8ADCAF17'
+          assert m['candidate_authorization']=='NOT_AUTHORIZED_BLOCKED_PENDING_FRESH_ISOLATED_PROXY'
+          assert m['validation']['fresh_isolated_blind_proxy']=='NOT_RUN'
+          assert m['real_reader_evidence']=='NOT_RUN'
+          for row in m['files']:
+              p=root/row['path']; b=p.read_bytes()
+              assert len(b)==row['bytes'], row['path']
+              assert hashlib.sha256(b).hexdigest()==row['sha256'], row['path']
+          rows=[]
+          for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              rel=p.relative_to(root).as_posix()
+              if rel in {'MANIFEST.json','SHA256SUMS.txt'}: continue
+              rows.append(f"{rel}  {hashlib.sha256(p.read_bytes()).hexdigest()}")
+          tree=hashlib.sha256(('\n'.join(rows)+'\n').encode()).hexdigest()
+          assert tree==m['validation']['source_non_manifest_tree_sha256']
+          sums={}
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+              h,rel=line.split('  ',1); sums[rel]=h
+          actual=[p for p in sorted(root.rglob('*')) if p.is_file() and p.name!='SHA256SUMS.txt']
+          assert len(sums)==len(actual)
+          for p in actual:
+              rel=p.relative_to(root).as_posix(); assert sums[rel]==hashlib.sha256(p.read_bytes()).hexdigest(),rel
+          print(f"V57_MANIFEST_SOURCE_FILES={len(m['files'])}")
+          print(f"V57_SHA_ENTRIES={len(sums)}")
+          print('V57_WIP_PACKAGE_INTEGRITY=PASS')
+          PY
+
+      - name: Compile and run full V5.7 regression on reconciled bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find gov/skills/skill-book/V5.7 -type f -name '*.py' | sort)
+          python -m py_compile "${files[@]}"
+          echo "V57_RECONCILED_PYTHON_COMPILE_COUNT=${#files[@]}"
+          python -m pip install -q pytest
+          python -m pytest -q gov/skills/skill-book/V5.7/tests | tee /tmp/v57-reconciled-full.txt
+          grep -q '140 passed' /tmp/v57-reconciled-full.txt
+          echo 'V57_RECONCILED_FULL_REGRESSION=140/140_PASS'
+
+      - name: Revalidate package hashes after tests ignore pycache
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('gov/skills/skill-book/V5.7')
+          m=json.loads((root/'MANIFEST.json').read_text())
+          for row in m['files']:
+              p=root/row['path']; assert hashlib.sha256(p.read_bytes()).hexdigest()==row['sha256'],row['path']
+          sums={}
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+              h,rel=line.split('  ',1); sums[rel]=h
+          for rel,h in sums.items(): assert hashlib.sha256((root/rel).read_bytes()).hexdigest()==h,rel
+          print('V57_POST_TEST_DECLARED_BYTES_STABLE=PASS')
+          PY
+
+      - name: Guarded fourteen-file WIP writeback
+        shell: bash
+        run: |
+          set -euo pipefail
+          live="$(git -C gov ls-remote origin refs/heads/${V57_BRANCH} | awk '{print $1}')"
+          test "$live" = "$V57_EXPECTED"
+          root=skills/skill-book/V5.7
+          expected="$(printf '%s\n' \
+            $root/VERSION \
+            $root/agents/openai.yaml \
+            $root/SKILL.md \
+            $root/SOURCE_PACKAGE_IDENTITY.md \
+            $root/MANIFEST.json \
+            $root/SHA256SUMS.txt \
+            $root/references/runtime_entry_receipt_contract.md \
+            $root/references/runtime_authority_fidelity_contract.md \
+            $root/references/runtime_enforcement_contract.md \
+            $root/scripts/runtime_acceptance_audit.py \
+            $root/scripts/runtime_authority_fidelity_audit.py \
+            $root/tests/test_runtime_acceptance_audit.py \
+            $root/tests/test_runtime_authority_fidelity_audit.py \
+            $root/tests/test_skill_contract.py | sort)"
+          test "$(git -C gov diff --name-only | sort)" = "$expected"
+          git -C gov config user.name VictorForge
+          git -C gov config user.email llhzx2018@gmail.com
+          git -C gov add $expected
+          git -C gov diff --cached --quiet && exit 1 || true
+          git -C gov commit -m 'skill-book: reconcile V5.7 WIP reader-transfer identity'
+          git -C gov push origin HEAD:refs/heads/${V57_BRANCH}
+          new="$(git -C gov rev-parse HEAD)"
+          test "$(git -C gov ls-remote origin refs/heads/${V57_BRANCH} | awk '{print $1}')" = "$new"
+          echo "V57_RECONCILED_WIP_COMMIT=$new"
