@@ -1,4 +1,4 @@
-name: P01 V2.30 Navigation Taxonomy Selector Patch
+name: P01 V2.30 Navigation Taxonomy UX Gate
 on:
   push:
     branches:
@@ -8,49 +8,129 @@ on:
 permissions:
   contents: read
 jobs:
-  patch:
+  gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 35
     env:
-      SOURCE_SHA: 237f0c954bb065a885d168d3b88fe8af4e918236
-      PRODUCT_BRANCH: feature/p01-v230-domain-nav-shell-20260829
+      SOURCE_SHA: 817a252216a11bc665bfae9c59daa264ef5087ec
+      PORT: '18584'
+      ROOT: /tmp/p01-v230-nav-taxonomy-gate
+      ADMIN_PASS: 'P01V230!TaxGate'
     steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/vf-start
-          ref: ${{ env.PRODUCT_BRANCH }}
-          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          fetch-depth: 0
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
           path: source
-      - name: Exact source fence
+      - name: Exact source and fresh runtime
         shell: bash
         run: |
           set -Eeuo pipefail
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
-          grep -F '.vf-mobile-functional-filters.is-picker-enhanced select[aria-label="分类"]{display:none}' source/src/assets/workspace-rebaseline.css >/dev/null
-      - name: Patch selector compatibility
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          php -l source/src/app/FunctionalWorkspaceShell.php >/dev/null
+          node --check source/src/assets/workspace-rebaseline.js
+          rm -rf "$ROOT" /tmp/p01-v230-taxgate.cookies evidence
+          mkdir -p evidence
+          cp -a source/src "$ROOT"
+          php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/p01-v230-taxgate-server.log 2>&1 &
+          COOKIE=/tmp/p01-v230-taxgate.cookies
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o /tmp/setup.html && break || sleep 1; done
+          CSRF=$(python3 -c 'import re; s=open("/tmp/setup.html",encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))')
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.30 Taxonomy Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o /tmp/setup-post.html
+          grep -F 'VF Start 安装完成' /tmp/setup-post.html >/dev/null
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login" -o /tmp/login.json
+          jq -e '.ok==true' /tmp/login.json >/dev/null
+          CSRF=$(jq -r '.csrf' /tmp/login.json)
+          ROOT_ID=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"开发工具","description":"公开根分类","is_private":false,"sort_order":100}' "http://127.0.0.1:${PORT}/api.php?action=category_save" | jq -er '.id')
+          EMPTY_PAYLOAD=$(jq -nc --argjson parent "$ROOT_ID" '{name:"待拓展",description:"零网址分类",parent_id:$parent,is_private:false,sort_order:90}')
+          EMPTY_ID=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$EMPTY_PAYLOAD" "http://127.0.0.1:${PORT}/api.php?action=category_save" | jq -er '.id')
+          PRIVATE_ROOT=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d '{"name":"私人资料","description":"私人根分类","is_private":true,"sort_order":80}' "http://127.0.0.1:${PORT}/api.php?action=category_save" | jq -er '.id')
+          PRIVATE_PAYLOAD=$(jq -nc --argjson parent "$PRIVATE_ROOT" '{name:"私有工具",description:"继承私人",parent_id:$parent,is_private:false,sort_order:70}')
+          PRIVATE_CHILD=$(curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$PRIVATE_PAYLOAD" "http://127.0.0.1:${PORT}/api.php?action=category_save" | jq -er '.id')
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$ROOT_ID" -F 'surface=start' -F 'title=GitHub' -F 'url=https://github.com/' -F 'tags=开发,代码' -F 'is_private=0' -F 'source_kind=remote_url' -o /tmp/create-public.json
+          jq -e '.ok==true' /tmp/create-public.json >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$CSRF" -F "category_id=$PRIVATE_CHILD" -F 'surface=start' -F 'title=Private Tool' -F 'url=https://example.com/private-tool' -F 'tags=私人' -F 'is_private=0' -F 'source_kind=remote_url' -o /tmp/create-private.json
+          jq -e '.ok==true' /tmp/create-private.json >/dev/null
+          printf '%s %s %s %s\n' "$ROOT_ID" "$EMPTY_ID" "$PRIVATE_ROOT" "$PRIVATE_CHILD" >/tmp/taxonomy-ids
+          cp /tmp/taxonomy-ids evidence/taxonomy-ids.txt
+          echo P01_V230_NAV_TAXONOMY_RUNTIME=PASS
+      - name: Install Playwright
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 -c 'from pathlib import Path; p=Path("source/src/assets/workspace-rebaseline.css"); s=p.read_text(encoding="utf-8"); old=".vf-mobile-functional-filters.is-picker-enhanced select[aria-label=\"分类\"]{display:none}"; new=".vf-mobile-functional-filters.is-picker-enhanced select[aria-label=\"网址分类\"],.vf-mobile-functional-filters.is-picker-enhanced select[aria-label=\"分类\"]{display:none}"; assert old in s; p.write_text(s.replace(old,new,1),encoding="utf-8")'
-          git -C source diff --check
-          test "$(git -C source status --short | wc -l)" -eq 1
-      - name: Commit product branch
+          mkdir -p /tmp/p01-playwright && cd /tmp/p01-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Desktop and mobile browser gate
         shell: bash
         run: |
           set -Eeuo pipefail
-          cd source
-          git config user.name VictorForge
-          git config user.email llhzx2018@gmail.com
-          git add src/assets/workspace-rebaseline.css
-          git commit -m "fix(P01): keep mobile taxonomy picker single-control"
-          git push origin "HEAD:${PRODUCT_BRANCH}"
-          echo "PRODUCT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "PRODUCT_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          read ROOT_ID EMPTY_ID PRIVATE_ROOT PRIVATE_CHILD </tmp/taxonomy-ids
+          export EMPTY_ID PRIVATE_CHILD
+          cat >/tmp/p01-playwright/gate.js <<'JS'
+          const { chromium }=require('playwright');const fs=require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18584',password='P01V230!TaxGate';
+            const emptyId=process.env.EMPTY_ID,privateChild=process.env.PRIVATE_CHILD;
+            const browser=await chromium.launch({headless:true});
+            const desktop=await browser.newContext({viewport:{width:1440,height:960}});
+            let r=await desktop.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('desktop login');
+            const dp=await desktop.newPage();await dp.goto(base+'/start.php',{waitUntil:'networkidle'});
+            const empty=dp.locator(`[data-category-node][href*="category=${emptyId}"]`);await empty.waitFor({state:'visible'});
+            if(!(await empty.textContent()).includes('0'))throw new Error('desktop zero category count');
+            await empty.click();await dp.waitForLoadState('networkidle');
+            if(new URL(dp.url()).searchParams.get('category')!==String(emptyId))throw new Error('desktop empty route');
+            await dp.locator('.vf-domain-subbar [data-open-add]').click();
+            const add=dp.locator('[data-add-form]');await add.waitFor({state:'visible'});
+            if(await add.locator('[name="category_id"]').inputValue()!==String(emptyId))throw new Error('desktop add inheritance');
+            await dp.goto(base+'/start.php?category='+privateChild,{waitUntil:'networkidle'});
+            await dp.locator('.vf-domain-subbar [data-open-add]').click();await add.waitFor({state:'visible'});
+            const hint=add.locator('[data-privacy-hint]');await hint.waitFor({state:'visible'});
+            if(!(await hint.textContent()).includes('继承自分类'))throw new Error('private inheritance hint');
+            await dp.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/desktop-navigation.png',fullPage:true});
+            await desktop.close();
+
+            const mobile=await browser.newContext({viewport:{width:390,height:844}});
+            r=await mobile.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw new Error('mobile login');
+            const mp=await mobile.newPage();await mp.goto(base+'/start.php',{waitUntil:'networkidle'});
+            const trigger=mp.locator('.vf-mobile-category-trigger');await trigger.waitFor({state:'visible'});
+            if(await mp.locator('select[aria-label="网址分类"]:visible').count())throw new Error('fallback select duplicated');
+            await trigger.click();
+            const overlay=mp.locator('.vf-mobile-category-overlay');await overlay.waitFor({state:'visible'});
+            const search=overlay.locator('input[type="search"]');await search.fill('待拓展');
+            const item=overlay.locator(`[data-category-picker-item][href*="category=${emptyId}"]`);await item.waitFor({state:'visible'});
+            if(!(await item.textContent()).includes('0'))throw new Error('mobile zero category missing');
+            await item.click();await mp.waitForLoadState('networkidle');
+            if(new URL(mp.url()).searchParams.get('category')!==String(emptyId))throw new Error('mobile empty route');
+            await mp.locator('.vf-mobile-command-add').click();
+            const madd=mp.locator('[data-add-form]');await madd.waitFor({state:'visible'});
+            if(await madd.locator('[name="category_id"]').inputValue()!==String(emptyId))throw new Error('mobile add inheritance');
+            const overflow=await mp.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(overflow>1)throw new Error('mobile overflow '+overflow);
+            await mp.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-navigation.png',fullPage:true});
+            await mobile.close();await browser.close();
+            fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_NAV_TAXONOMY_UX=PASS\n');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/p01-playwright && node gate.js
+          echo P01_V230_NAV_TAXONOMY_BROWSER=PASS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P01-v230-navigation-taxonomy-evidence
+          path: evidence
+          retention-days: 7
       - name: Final verdict
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "P01_V230_NAV_TAXONOMY_SOURCE=${PRODUCT_SHA}"
-          echo "P01_V230_NAV_TAXONOMY_TREE=${PRODUCT_TREE}"
-          echo P01_V230_NAV_TAXONOMY_SELECTOR_PATCH=PASS
+          echo "P01_V230_NAV_TAXONOMY_SOURCE=$SOURCE_SHA"
+          echo P01_V230_NAV_TAXONOMY_GATE=PASS
