@@ -1,0 +1,85 @@
+name: P01 V2.30 Final Candidate Gate
+on:
+  push:
+    branches: [task/p01-v230-domain-nav-shell-20260829]
+    paths: [.github/workflows/p01-v230-final-candidate-gate-20260829.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: 426740ee3e36d207581dddf9b3fe5d62fd8d1808
+      PORT: '18589'
+      ROOT: /tmp/p01-v230-final
+      ADMIN_PASS: 'P01V230!Final'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.4', extensions: 'pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo', coverage: none}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: {repository: llhzx2018/vf-start, ref: '${{ env.SOURCE_SHA }}', token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}', fetch-depth: 0, path: source}
+      - name: Exact source static gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = 2.30.0
+          test "$(tr -d '\r\n' < source/src/VERSION.txt)" = 2.30.0
+          grep -F "define('VF_VERSION', '2.30.0')" source/src/app/bootstrap.php >/dev/null
+          find source/src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          for f in source/src/assets/workspace.js source/src/assets/workspace-rebaseline.js source/src/assets/workspace-create-bundle.js; do node --check "$f"; done
+          git -C source diff --check
+          echo P01_V230_STATIC=PASS
+      - name: Fresh install and seed 450 navigation links
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" /tmp/final.cookies evidence; mkdir -p evidence; cp -a source/src "$ROOT"; php -S "127.0.0.1:${PORT}" -t "$ROOT" >/tmp/final-server.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS -c /tmp/final.cookies -b /tmp/final.cookies "http://127.0.0.1:${PORT}/setup.php" -o /tmp/final-setup.html && break || sleep 1; done
+          S=$(python3 -c "import re;s=open('/tmp/final-setup.html').read();m=re.search(r'name=\"setup_csrf\"\\s+value=\"([^\"]+)\"',s);assert m;print(m.group(1))")
+          curl -fsS -c /tmp/final.cookies -b /tmp/final.cookies -X POST "http://127.0.0.1:${PORT}/setup.php" --data-urlencode "setup_csrf=$S" --data-urlencode 'site_title=VF Start V2.30 Final' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" >/dev/null
+          php "$ROOT/cli/verify.php"|grep -Fx VERIFY_PASS=YES
+          LOGIN=$(curl -fsS -c /tmp/final.cookies -b /tmp/final.cookies -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login"); T=$(echo "$LOGIN"|jq -r '.csrf'); test "$T" != null
+          postcat(){ curl -fsS -c /tmp/final.cookies -b /tmp/final.cookies -H 'Content-Type: application/json' -H "X-CSRF-Token: $T" -d "$1" "http://127.0.0.1:${PORT}/api.php?action=category_save"; }
+          R=$(postcat '{"name":"资源库","is_private":false,"sort_order":100}'); RID=$(echo "$R"|jq -r '.id'); D=$(postcat "{\"name\":\"开发\",\"parent_id\":$RID,\"is_private\":false,\"sort_order\":90}"); DID=$(echo "$D"|jq -r '.id'); P=$(postcat "{\"name\":\"私人\",\"parent_id\":$RID,\"is_private\":true,\"sort_order\":80}"); PID=$(echo "$P"|jq -r '.id'); E=$(postcat "{\"name\":\"待拓展\",\"parent_id\":$RID,\"is_private\":false,\"sort_order\":70}"); EID=$(echo "$E"|jq -r '.id')
+          create(){ local cid="$1" title="$2" url="$3" priv="${4:-0}" surface="${5:-start}" kind="${6:-}"; local out code body; out=$(curl -sS -w '\n%{http_code}' -c /tmp/final.cookies -b /tmp/final.cookies -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$T" -F "category_id=$cid" -F "surface=$surface" -F "title=$title" -F "url=$url" -F "resource_kind=$kind" -F 'tags=Gate' -F "is_private=$priv" -F 'source_kind=remote_url'); code=$(printf '%s' "$out"|tail -1); body=$(printf '%s' "$out"|sed '$d'); test "$code" = 200 || { echo "$body"; return 1; }; echo "$body"|jq -e '.ok==true' >/dev/null; }
+          for i in $(seq 1 450); do create "$DID" "导航资源 $i" "https://gate-$i.example.org/" 0; done
+          create "$PID" '私人资源' 'https://private-gate.example.org/' 0
+          create "$RID" '频道资源' 'https://channel-gate.example.org/' 0 channels '科技'
+          create "$RID" '影视资源' 'https://watch-gate.example.org/' 0 watch '电影'
+          create "$RID" '专题资源' 'https://topic-gate.example.org/' 0 topics 'AI'
+          php "$ROOT/cli/verify.php"|grep -Fx VERIFY_PASS=YES
+          echo P01_V230_450_SEED=PASS
+      - name: Hosted HTML sandbox and privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          T=$(jq -r '.csrf' /tmp/final-login.json 2>/dev/null || true); if [ -z "$T" ] || [ "$T" = null ]; then LOGIN=$(curl -fsS -c /tmp/final.cookies -b /tmp/final.cookies -H 'Content-Type: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "http://127.0.0.1:${PORT}/api.php?action=login"); T=$(echo "$LOGIN"|jq -r '.csrf'); fi
+          RID=$(sqlite3 "$ROOT/private/data.sqlite" 'select id from categories where name="资源库" limit 1;' 2>/dev/null || true)
+          if [ -z "$RID" ]; then RID=$(find "$ROOT" -name '*.sqlite' -o -name '*.db' | head -1 | xargs -r sqlite3 'select id from categories where name="资源库" limit 1;'); fi
+          printf '<!doctype html><title>V2.30 Gate</title><h1>Sandbox topic</h1><script>document.body.dataset.script="ok"</script>' >/tmp/gate-topic.html
+          OUT=$(curl -sS -w '\n%{http_code}' -c /tmp/final.cookies -b /tmp/final.cookies -X POST "http://127.0.0.1:${PORT}/workspace-create.php" -F "csrf=$T" -F "category_id=$RID" -F 'surface=topics' -F 'title=Hosted Gate Topic' -F 'url=' -F 'resource_kind=AI' -F 'tags=Gate' -F 'is_private=0' -F 'source_kind=hosted_html' -F 'html=@/tmp/gate-topic.html;type=text/html'); CODE=$(printf '%s' "$OUT"|tail -1); BODY=$(printf '%s' "$OUT"|sed '$d'); test "$CODE" = 200; ID=$(echo "$BODY"|jq -r '.id'); test "$ID" != null
+          curl -fsS "http://127.0.0.1:${PORT}/resource-html.php?id=$ID" | grep -F 'Sandbox topic' >/dev/null
+          curl -fsS "http://127.0.0.1:${PORT}/start.php" -o /tmp/public-start.html
+          ! grep -F '私人资源' /tmp/public-start.html
+          grep -F '导航资源 1' /tmp/public-start.html >/dev/null
+          echo P01_V230_SANDBOX_PRIVACY=PASS
+      - name: Install Playwright
+        shell: bash
+        run: |
+          mkdir -p /tmp/pw-final && cd /tmp/pw-final && npm init -y >/dev/null 2>&1 && npm install playwright@1.55.0 >/dev/null 2>&1 && npx playwright install chromium --with-deps >/dev/null 2>&1
+      - name: Large library and mobile product gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/pw-final/gate.js <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');(async()=>{const base='http://127.0.0.1:18589',password='P01V230!Final',browser=await chromium.launch({headless:true});async function login(c){let r=await c.request.post(base+'/api.php?action=login',{data:{password}});if(!r.ok())throw Error('login')};let d=await browser.newContext({viewport:{width:1440,height:960}});await login(d);let p=await d.newPage();await p.goto(base+'/start.php?per=50',{waitUntil:'networkidle'});if(await p.locator('.vf-asset-row').count()!==50)throw Error('page size');let count=(await p.locator('.vf-workspace-count').innerText());if(!count.includes('450')&&!count.includes('451'))throw Error('large count '+count);if(await p.locator('.vf-global-domain-nav a').count()!==5)throw Error('global nav');if(await p.locator('.vf-category-tree').count()!==1)throw Error('category tree');if(await p.locator('[data-category-node]',{hasText:'待拓展'}).count()!==1)throw Error('zero category');await p.locator('.vf-global-search input[name=q]').fill('导航资源 449');await p.locator('.vf-global-search').evaluate(f=>f.submit());await p.waitForLoadState('networkidle');if(await p.locator('.vf-asset-row').count()!==1)throw Error('search');await p.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/desktop-large.png',fullPage:true});await d.close();let m=await browser.newContext({viewport:{width:390,height:844}});await login(m);let q=await m.newPage();await q.goto(base+'/start.php',{waitUntil:'networkidle'});await q.locator('.vf-mobile-command-row').waitFor({state:'visible'});let trig=q.locator('.vf-mobile-category-trigger');await trig.waitFor({state:'visible'});await trig.click();let overlay=q.locator('.vf-mobile-category-overlay');await overlay.waitFor({state:'visible'});await overlay.locator('input[type=search]').fill('待拓展');if(await overlay.locator('[data-category-picker-item]',{hasText:'待拓展'}).count()!==1)throw Error('mobile zero category');let ov=await q.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);if(ov>1)throw Error('mobile overflow '+ov);await q.screenshot({path:'/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/mobile-large.png',fullPage:true});await m.close();await browser.close();fs.writeFileSync('/home/runner/work/core-free-runner-public/core-free-runner-public/evidence/verdict.txt','P01_V230_FINAL_CANDIDATE=PASS\n')})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd /tmp/pw-final && node gate.js
+          echo P01_V230_LARGE_BROWSER=PASS
+      - uses: actions/upload-artifact@v4
+        with: {name: P01-v230-final-candidate-evidence, path: evidence, retention-days: 7}
+      - name: Final verdict
+        run: |
+          echo "SOURCE=$SOURCE_SHA"; echo "TREE=$(git -C source rev-parse HEAD^{tree})"; echo P01_V230_FINAL_CANDIDATE_GATE=PASS
