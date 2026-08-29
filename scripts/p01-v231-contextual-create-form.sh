@@ -18,9 +18,10 @@ start_server(){
 }
 
 # 1. Exact candidate and syntax fence.
-test "$(git -C "$PRODUCT" rev-parse HEAD)" = "2bf77af426ca39667600c8e0939d3580c80133ba"
+test "$(git -C "$PRODUCT" rev-parse HEAD)" = "08a24118fc660f5c9b937866d4b58aeba36c15c3"
 test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = "2.30.0"
 grep -F '[data-surface-field][hidden]' "$ROOT/assets/workspace-domain-nav.css" >/dev/null
+grep -F '.surface-start [data-add-form]' "$ROOT/assets/workspace-domain-nav.css" >/dev/null
 php -l "$ROOT/workspace-create.php" >/dev/null
 php -l "$ROOT/workspace-save.php" >/dev/null
 php "$ROOT/cli/verify.php" | tee "$EVID/pre-verify.txt" | grep -Fx VERIFY_PASS=YES || true
@@ -66,12 +67,12 @@ const login=async(context)=>{const r=await context.request.post(base+'/api.php?a
 const fieldState=async(page,name)=>page.locator('[data-add-form]').evaluate((form,name)=>{const control=form.elements.namedItem(name);if(!control)return{exists:false};const box=control.closest('[data-surface-field],[data-html-field],[data-url-field],label')||control;const css=getComputedStyle(box);return{exists:true,hidden:box.hidden,display:css.display,visible:css.display!=='none'&&css.visibility!=='hidden'}},name);
 const assertField=async(page,name,want)=>{const s=await fieldState(page,name);if(!s.exists||s.visible!==want)throw new Error(`field ${name} expected ${want?'visible':'hidden'} got ${JSON.stringify(s)}`)};
 const openAdd=async(page,path)=>{await page.goto(base+'/'+path,{waitUntil:'networkidle'});await page.locator('[data-open-add]:visible').first().click();await page.locator('[data-panel="add"]:visible').waitFor();await page.waitForTimeout(80)};
-const common=['url','title','surface','tags','description','is_private','is_favorite'];
+const common=['url','title','tags','description','is_private','is_favorite'];
 const hiddenByMode={
-  start:['source_kind','html','resource_kind','cover','media_year','media_status','background_friendly'],
-  channels:['category_id','source_kind','html','media_year','media_status'],
-  watch:['category_id','source_kind','html','background_friendly'],
-  topics:['category_id','html','media_year','media_status','background_friendly']
+  start:['surface','source_kind','html','resource_kind','cover','media_year','media_status','background_friendly'],
+  channels:['surface','category_id','source_kind','html','media_year','media_status'],
+  watch:['surface','category_id','source_kind','html','background_friendly'],
+  topics:['surface','category_id','html','media_year','media_status','background_friendly']
 };
 const visibleByMode={
   start:['category_id'],
@@ -95,6 +96,8 @@ for(const mode of Object.keys(paths)){
   await p.screenshot({path:`${e}/${mode}-desktop.png`,fullPage:true});
   await p.locator('[data-close-panel]:visible').first().click();
 }
+// All Resources is the intentional cross-domain add entry and keeps the domain selector.
+await openAdd(p,'surfaces.php');for(const f of common)await assertField(p,f,true);await assertField(p,'surface',true);await p.screenshot({path:`${e}/all-resources-desktop.png`,fullPage:true});await p.locator('[data-close-panel]:visible').first().click();
 
 // Mobile verifies the same contextual contract at the narrow breakpoint.
 const m=await browser.newContext({viewport:{width:390,height:844},isMobile:true});await login(m);const mp=await m.newPage();
@@ -145,6 +148,8 @@ php /tmp/p01-v231-data-verify.php | tee "$EVID/data.txt" | grep -Fx DATA_DOMAIN_
 php "$ROOT/cli/verify.php" | tee "$EVID/post-verify.txt" | grep -Fx VERIFY_PASS=YES
 cat >"$EVID/verdict.txt" <<'EOF'
 P01_V231_CONTEXTUAL_CREATE_FORM=PASS
+P01_V231_CURRENT_DOMAIN_ADD_LOCK=PASS
+P01_V231_ALL_RESOURCES_CROSS_DOMAIN_ADD=PASS
 P01_V231_DESKTOP_CONTEXT_FIELDS=PASS
 P01_V231_MOBILE_CONTEXT_FIELDS=PASS
 P01_V231_CREATE_DOMAIN_NORMALIZATION=PASS
