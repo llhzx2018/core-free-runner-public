@@ -1,0 +1,171 @@
+name: P05 PHP Runtime Exact Source Gate
+
+on:
+  push:
+    branches:
+      - verify/p05-php-runtime-487c337d-20260830
+    paths:
+      - '.github/workflows/p05-php-runtime-exact-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_SOURCE_SHA: 487c337d0399035036dbfc4b49c602c285933fd7
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+    steps:
+      - name: Verify private read capability
+        shell: bash
+        run: |
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            echo "RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING"
+            exit 78
+          fi
+
+      - name: Checkout exact P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Verify exact source identity
+        working-directory: source
+        shell: bash
+        run: |
+          ACTUAL="$(git rev-parse HEAD)"
+          echo "expected=$P05_SOURCE_SHA"
+          echo "actual=$ACTUAL"
+          test "$ACTUAL" = "$P05_SOURCE_SHA"
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 Node24
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Install dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Lint
+        working-directory: source
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: source
+        run: npm run typecheck
+
+      - name: Migrate
+        working-directory: source
+        run: npm run migrate
+
+      - name: Verify schema
+        working-directory: source
+        run: npm run verify:schema
+
+      - name: Test Node contracts and integration
+        working-directory: source
+        run: npm run test
+
+      - name: Build Node and React client
+        working-directory: source
+        run: npm run build
+
+      - name: PHP runtime compatibility gate
+        working-directory: source
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-php-runner.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-php-runner-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        shell: bash
+        run: |
+          php -v
+          php -r 'if (PHP_VERSION_ID < 80200) { fwrite(STDERR,"PHP >= 8.2 required\n"); exit(1); }'
+          php -r 'if (!extension_loaded("pdo_sqlite")) { fwrite(STDERR,"missing php extension: pdo_sqlite\n"); exit(1); }'
+          command -v curl
+          bash -n install-cloudpanel-php.sh
+          bash -n php/tests/http-smoke.sh
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          php -r '$db=new PDO("sqlite:".getenv("VF_SQLITE_PATH")); $v=$db->query("SELECT password_hash FROM admins LIMIT 1")->fetchColumn(); if (!str_starts_with($v,"pbkdf2-sha256$310000$")) exit(1); echo "php sqlite/admin: PASS\n";'
+          bash php/tests/http-smoke.sh
+
+      - name: PHP release package gate
+        working-directory: source
+        shell: bash
+        run: |
+          npm run build:php-release
+          test -f build/vf-seo-php-release/dist/client/index.html
+          test -f build/vf-seo-php-release/php/public/index.php
+          test -f build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json
+          test ! -e build/vf-seo-php-release/php/tests
+          node -e "const m=require('./build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json'); if(m.runtime!=='php'||m.serverNodeRequired!==false||m.databaseProvider!=='sqlite'||!m.requiredExtensions.includes('pdo_sqlite')) process.exit(1)"
+
+      - name: Source gate
+        working-directory: source
+        run: npm run source:gate
+
+      - name: Scope gate
+        working-directory: source
+        run: npm run scope:gate
+
+      - name: Phase 2 security gates
+        working-directory: source
+        shell: bash
+        run: |
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+
+      - name: Repository cleanliness
+        working-directory: source
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            exit 1
+          fi
+
+      - name: Exact Source receipt
+        working-directory: source
+        shell: bash
+        run: |
+          echo "P05_PHP_RUNTIME_MACHINE=PASS"
+          echo "P05_EXACT_SOURCE=$P05_SOURCE_SHA"
+          echo "PHP_WEB_RUNTIME=READY"
+          echo "NODE_WORKER=OPTIONAL"
