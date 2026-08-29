@@ -1,0 +1,123 @@
+name: V5.8 Manifest + Regression Verify
+
+on:
+  push:
+    branches:
+      - work/v58-manifest-regression-20260829
+    paths:
+      - '.github/workflows/v58-manifest-regression.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOV_REPO: llhzx2018/gov-doc
+      GOV_SHA: d95e619ae563974d0752c1c8df311828f9dd1c2b
+      V58_ROOT: gov/skills/skill-book/V5.8
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Require registered read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+
+      - name: Checkout runner branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Checkout exact GOV-DOC source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ env.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: gov
+
+      - name: Bind exact GOV-DOC SHA
+        working-directory: gov
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ACTUAL="$(git rev-parse HEAD)"
+          test "$ACTUAL" = "$GOV_SHA"
+          echo "GOV_DOC_SOURCE_SHA=$ACTUAL"
+
+      - name: Compute exact V5.8 source manifest basis
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf results/v58 && mkdir -p results/v58
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, os
+          root=Path(os.environ['V58_ROOT'])
+          excluded={'MANIFEST.json','SHA256SUMS.txt'}
+          rows=[]
+          for p in sorted(x for x in root.rglob('*') if x.is_file()):
+              rel=p.relative_to(root).as_posix()
+              if rel in excluded:
+                  continue
+              b=p.read_bytes()
+              rows.append({'path':rel,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          basis=''.join(f"{r['path']}  {r['sha256']}\n" for r in rows)
+          out=Path('results/v58')
+          (out/'V58_FILES.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          (out/'SHA256SUMS.txt').write_text(basis,encoding='utf-8')
+          (out/'TREE_SHA256.txt').write_text(hashlib.sha256(basis.encode('utf-8')).hexdigest()+'\n',encoding='utf-8')
+          (out/'SOURCE_SHA.txt').write_text(os.environ['GOV_SHA']+'\n',encoding='utf-8')
+          print(f'V58_NON_MANIFEST_FILE_COUNT={len(rows)}')
+          print('V58_NON_MANIFEST_TREE_SHA256='+hashlib.sha256(basis.encode('utf-8')).hexdigest())
+          PY
+
+      - name: Run V5.8 full unittest regression
+        shell: bash
+        run: |
+          set +e
+          cd "$V58_ROOT"
+          python3 -m unittest discover -s tests -p 'test_*.py' -v > "$GITHUB_WORKSPACE/results/v58/UNITTEST.txt" 2>&1
+          RC=$?
+          echo "$RC" > "$GITHUB_WORKSPACE/results/v58/UNITTEST_EXIT_CODE.txt"
+          cat "$GITHUB_WORKSPACE/results/v58/UNITTEST.txt"
+          exit 0
+
+      - name: Compile V5.8 Python
+        shell: bash
+        run: |
+          set +e
+          python3 -m compileall -q "$V58_ROOT/scripts" "$V58_ROOT/tests" > results/v58/COMPILE.txt 2>&1
+          RC=$?
+          echo "$RC" > results/v58/COMPILE_EXIT_CODE.txt
+          cat results/v58/COMPILE.txt
+          exit 0
+
+      - name: Commit verifier results to isolated runner branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VF Runner'
+          git config user.email 'vf-runner@users.noreply.github.com'
+          git add results/v58
+          if git diff --cached --quiet; then
+            echo 'RESULTS_UNCHANGED=TRUE'
+          else
+            git commit -m "verify: V5.8 manifest basis and regression for ${GOV_SHA}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Enforce regression result
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat results/v58/UNITTEST_EXIT_CODE.txt)" = '0'
+          test "$(cat results/v58/COMPILE_EXIT_CODE.txt)" = '0'
+          echo 'V58_POST_CLEANUP_REGRESSION=PASS'
