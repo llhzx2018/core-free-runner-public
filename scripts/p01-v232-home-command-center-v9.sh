@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SRC="$(dirname "$0")/p01-v232-home-command-center-v8.sh"
+RUNNER_DIR="$(cd "$(dirname "$0")" && pwd)"
+export P01_V232_RUNNER_DIR="$RUNNER_DIR"
+SRC="$RUNNER_DIR/p01-v232-home-command-center-v8.sh"
 TMP="$(mktemp /tmp/p01-v232-home-v9-wrapper.XXXXXX.sh)"
 trap 'rm -f "$TMP"' EXIT
 python3 - "$SRC" "$TMP" <<'PY'
 import pathlib, sys
 src = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+path_old = 'SRC="$(dirname "$0")/p01-v232-home-command-center-v4.sh"'
+path_new = 'SRC="${P01_V232_RUNNER_DIR:?}/p01-v232-home-command-center-v4.sh"'
+if src.count(path_old) != 1:
+    raise SystemExit('V9 nested V8 source-path anchor drift')
+src = src.replace(path_old, path_new, 1)
 
 # V9 keeps the proven V8 transformer, but updates its incremental authority
 # from the one-file polish to the current two-file Activity/Health rail.
