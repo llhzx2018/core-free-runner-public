@@ -1,0 +1,88 @@
+name: P05 V1.1.1 Release Closure Gate
+
+on:
+  push:
+    branches:
+      - verify/p05-v1.1.0-release-source-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.1-release-closure-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CLOSURE_SHA: 789cd3023b13326a02f3ad70d7637f9b9689ef1c
+      RELEASE_SOURCE: ac8c3f2bedf3b1fe16f38ed079ffbe2f29e54cbc
+      RELEASE_TREE: 0012ca03e7a065a1d5866e1d6dcc62e79c901fff
+      RELEASE_ID: '379069840'
+      FULL_ASSET_ID: '535585680'
+      FULL_BYTES: '218144'
+      FULL_SHA: 905f7381a5c2e526c585c578df58aa604fffbab457e96d47444f78a3ff885c4c
+      CORE_UPDATES_MAIN: d7aa807b588fcdcc60f2f719895d9ae111a1a5d9
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read capability
+        shell: bash
+        run: test -n "$PRIVATE_READ_TOKEN" || { echo TOKEN_MISSING; exit 78; }
+      - name: Checkout exact P05 closure source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.CLOSURE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Closure truth and regression gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CLOSURE_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '1.1.1'
+          mapfile -t CHANGED < <(git diff --name-only "$RELEASE_SOURCE" "$CLOSURE_SHA" | sort)
+          EXPECTED=(CHANGELOG.md README.md VF_PROJECT.json docs/authority/RELEASE_V1.1.1_CURRENT.md docs/release/README.md)
+          test "${#CHANGED[@]}" -eq "${#EXPECTED[@]}"
+          for i in "${!EXPECTED[@]}"; do test "${CHANGED[$i]}" = "${EXPECTED[$i]}"; done
+          npm ci
+          npm run release:source:gate
+          npm run source:gate
+          npm run scope:gate
+          node - <<'JS'
+          const fs=require('fs'); const p=JSON.parse(fs.readFileSync('VF_PROJECT.json','utf8'));
+          const must=(c,m)=>{if(!c) throw new Error(m)};
+          must(p.status==='V1.1.1_RELEASED / DEPLOYMENT_READY / PRODUCTION_NOT_DEPLOYED','status');
+          must(p.version==='1.1.1'&&p.formal_release==='v1.1.1'&&p.formal_release_state==='RELEASED_CURRENT','release');
+          must(p.formal_release_candidate_commit===process.env.RELEASE_SOURCE&&p.formal_release_candidate_tree===process.env.RELEASE_TREE,'source');
+          must(p.formal_release_id===Number(process.env.RELEASE_ID)&&p.formal_release_asset_id===Number(process.env.FULL_ASSET_ID),'ids');
+          must(p.formal_release_asset_bytes===Number(process.env.FULL_BYTES)&&p.formal_release_asset_sha256===process.env.FULL_SHA,'asset');
+          must(p.production_deployment==='NOT_DEPLOYED'&&p.production_version===null&&p.production_write===0,'production');
+          must(p.authority?.release==='docs/authority/RELEASE_V1.1.1_CURRENT.md','authority');
+          must(p.release_publication?.distribution_commit===process.env.CORE_UPDATES_MAIN&&p.release_publication?.state==='PASS_V1.1.1_CURRENT','distribution');
+          JS
+          grep -F 'Current Formal Release: v1.1.1' README.md
+          grep -F '## 1.1.1 · CloudPanel Direct-Extract Fix（正式发布 · 2026-08-30）' CHANGELOG.md
+          grep -F 'P05 V1.1.1 RELEASE = PASS / CLOSED' docs/authority/RELEASE_V1.1.1_CURRENT.md
+          RELEASE="$(gh api repos/llhzx2018/vf-seo/releases/tags/v1.1.1)"
+          test "$(printf '%s' "$RELEASE" | jq -r '.id')" = "$RELEASE_ID"
+          test "$(printf '%s' "$RELEASE" | jq -r '.target_commitish')" = "$RELEASE_SOURCE"
+          ASSET="$(printf '%s' "$RELEASE" | jq --argjson id "$FULL_ASSET_ID" '.assets[]|select(.id==$id)')"
+          test "$(printf '%s' "$ASSET" | jq -r '.size')" = "$FULL_BYTES"
+          DIGEST="$(printf '%s' "$ASSET" | jq -r '.digest // empty')"
+          if [[ -n "$DIGEST" ]]; then test "$DIGEST" = "sha256:$FULL_SHA"; fi
+          CORE_SHA="$(gh api repos/llhzx2018/core-updates/branches/main --jq '.commit.sha')"
+          test "$CORE_SHA" = "$CORE_UPDATES_MAIN"
+          MANIFEST="$(gh api repos/llhzx2018/core-updates/contents/projects/P05.json?ref=main --jq '.content' | base64 -d)"
+          printf '%s' "$MANIFEST" | jq -e --arg s "$RELEASE_SOURCE" --arg h "$FULL_SHA" '.target_version=="1.1.1" and .release_product_commit==$s and .asset_sha256==$h and .update_type=="FULL_ONLY" and (.from_versions|length)==0 and .deployment_state=="NOT_DEPLOYED"' >/dev/null
+          git status --porcelain --untracked-files=all | grep -Ev '^(\?\? | M )?(node_modules/)' > /tmp/dirty.txt || true
+          test ! -s /tmp/dirty.txt
+          echo P05_V111_RELEASE_CLOSURE=PASS
+          echo P05_V111_PRODUCTION=NOT_DEPLOYED
