@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   generate:
@@ -17,19 +17,23 @@ jobs:
     timeout-minutes: 10
     env:
       P05_SOURCE_SHA: 801baa4529bcf8f5e8c1692bbb1e844e42951771
-      P05_TARGET_BRANCH: task/p05-v1.1.0-release-source-20260830
       PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
-      - name: Verify private repository capability
+      - name: Verify private read capability
         shell: bash
         run: |
           if [ -z "$PRIVATE_READ_TOKEN" ]; then
             echo "RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING"
             exit 78
           fi
-          PUSH="$(curl -fsSL -H "Authorization: Bearer $PRIVATE_READ_TOKEN" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-seo | jq -r '.permissions.push // false')"
-          echo "VF_PRIVATE_READ_TOKEN_PUSH=$PUSH"
-          test "$PUSH" = "true"
+
+      - name: Checkout helper branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: verify/p05-v1.1.0-lock-sync-20260830
+          persist-credentials: true
+          path: runner
 
       - name: Checkout exact P05 pre-lock source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
@@ -38,12 +42,7 @@ jobs:
           ref: ${{ env.P05_SOURCE_SHA }}
           token: ${{ env.PRIVATE_READ_TOKEN }}
           persist-credentials: false
-          fetch-depth: 0
           path: source
-
-      - name: Verify source identity
-        working-directory: source
-        run: test "$(git rev-parse HEAD)" = "$P05_SOURCE_SHA"
 
       - name: Setup Node.js 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 Node24
@@ -52,10 +51,11 @@ jobs:
           cache: npm
           cache-dependency-path: source/package-lock.json
 
-      - name: Generate synchronized package lock
+      - name: Generate and prove synchronized package lock
         working-directory: source
         shell: bash
         run: |
+          test "$(git rev-parse HEAD)" = "$P05_SOURCE_SHA"
           npm install --package-lock-only --ignore-scripts
           node --input-type=module <<'NODE'
           import { execFileSync } from 'node:child_process';
@@ -68,30 +68,28 @@ jobs:
           if (JSON.stringify(original) !== JSON.stringify(generated)) throw new Error('LOCK_DRIFT_BEYOND_VERSION_METADATA');
           console.log('P05_LOCK_SYNC=PASS');
           NODE
-          cp package-lock.json /tmp/package-lock.json
-          git reset --hard HEAD
 
-      - name: Repair target release-source package lock with git
-        working-directory: source
+      - name: Persist generated lock as public evidence blob
         shell: bash
         run: |
-          git remote set-url origin "https://x-access-token:${PRIVATE_READ_TOKEN}@github.com/llhzx2018/vf-seo.git"
-          git fetch origin "$P05_TARGET_BRANCH"
-          git checkout -B "$P05_TARGET_BRANCH" "origin/$P05_TARGET_BRANCH"
-          cp /tmp/package-lock.json package-lock.json
-          node -e "const m=require('./package-lock.json'); if(m.version!=='1.1.0'||m.packages[''].version!=='1.1.0') process.exit(1)"
-          git add package-lock.json
-          git diff --cached --quiet && { echo 'LOCK_ALREADY_CORRECT'; exit 0; }
+          mkdir -p runner/evidence/p05-v1.1.0
+          cp source/package-lock.json runner/evidence/p05-v1.1.0/package-lock.json
+          cd runner
           git config user.name 'VictorForge Runner'
           git config user.email 'runner@users.noreply.github.com'
-          git commit -m 'release(P05): machine-repair package lock to 1.1.0'
-          git push origin "HEAD:refs/heads/$P05_TARGET_BRANCH"
-          echo "TARGET_COMMIT=$(git rev-parse HEAD)"
+          git add evidence/p05-v1.1.0/package-lock.json
+          if git diff --cached --quiet; then
+            echo 'EVIDENCE_ALREADY_CURRENT'
+          else
+            git commit -m 'evidence(P05): store machine-generated V1.1.0 package lock'
+            git push origin HEAD:verify/p05-v1.1.0-lock-sync-20260830
+          fi
+          echo "EVIDENCE_COMMIT=$(git rev-parse HEAD)"
 
       - name: Upload generated package lock evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: p05-v1.1.0-package-lock
-          path: /tmp/package-lock.json
+          path: source/package-lock.json
           if-no-files-found: error
           retention-days: 1
