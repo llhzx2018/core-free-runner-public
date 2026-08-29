@@ -44,8 +44,8 @@ foreach([['channels','频道','V232公开频道','V232私人频道'],['watch','�
  $x=$r->saveLink(null,['category_id'=>$priv,'title'=>$qt.' 1','url'=>'https://v232-'.$domain.'-private-1.example.com','description'=>'private domain','tags'=>'v232,私人','is_private'=>true],'manual');$p=['surface'=>$domain,'resource_kind'=>$kind,'note'=>'private-'.$domain];if($domain==='channels')$p['background_friendly']=true;if($domain==='watch'){$p['media_year']=2020;$p['media_status']='favorite';}if($domain==='topics'){$p['source_kind']='remote_url';$p['source_ref']='https://v232-'.$domain.'-private-1.example.com';}$s->upsertProfile((int)$x['id'],$p);
 }
 $db=vf_db();$c=$s->counts(true);$b=['links'=>(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn(),'categories'=>(int)$db->query("SELECT COUNT(*) FROM categories WHERE lifecycle_state='active'")->fetchColumn(),'favorites'=>(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_favorite=1")->fetchColumn(),'profiles'=>(int)$db->query('SELECT COUNT(*) FROM resource_domain_profiles')->fetchColumn(),'schema'=>(string)$db->query("SELECT MAX(version) FROM schema_migrations WHERE status='success'")->fetchColumn(),'surface_counts'=>$c];
-if($b['links']!==17||$b['categories']!==2||$b['favorites']!==2||$b['profiles']!==9||$b['schema']!=='2026082901')throw new RuntimeException('seed '.json_encode($b));
-foreach(['start'=>10,'channels'=>3,'watch'=>2,'topics'=>2,'total'=>17] as $k=>$v)if((int)($c[$k]??-1)!==$v)throw new RuntimeException('surface '.$k.' '.json_encode($c));
+if($b['links']!==19||$b['categories']!==2||$b['favorites']!==2||$b['profiles']!==9||$b['schema']!=='2026082901')throw new RuntimeException('seed '.json_encode($b));
+foreach(['start'=>10,'channels'=>3,'watch'=>3,'topics'=>3,'total'=>19] as $k=>$v)if((int)($c[$k]??-1)!==$v)throw new RuntimeException('surface '.$k.' '.json_encode($c));
 file_put_contents('/tmp/p01-v2320-final-before.json',json_encode($b,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));echo "SEED_PASS\n";
 PHP
 ROOT="$ROOT" php /tmp/p01-v2320-final-seed.php | grep -Fx SEED_PASS
