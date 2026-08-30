@@ -1,0 +1,149 @@
+name: P01 V2.34.0 Unified Candidate Readiness Gate
+
+on:
+  push:
+    branches: [task/p01-v2340-candidate-readiness-20260830]
+    paths:
+      - .github/workflows/p01-v2340-unified-candidate-readiness-20260830.yml
+      - scripts/p01-v2340-build-candidate-artifacts.py
+      - scripts/p01-v2340-candidate-readiness.sh
+      - scripts/p01-v2340-resource-efficiency-browser.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout gate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: runner
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - name: Checkout exact V2.34 versioned candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: 8cd4b78ec27ced5657888a692a32bad1cc953fcd
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: candidate
+
+      - name: Checkout immutable V2.33 production source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.33.0
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+
+      - name: Checkout proven Atomic builder
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: agent/p01-22121-formal-artifact-gate-20260819
+          path: proven
+
+      - name: Unified candidate machine and actual upgrade gate
+        shell: bash
+        run: bash runner/scripts/p01-v2340-candidate-readiness.sh
+
+      - name: Browser interaction on upgraded V2.34 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v2340-ui
+          cd /tmp/p01-v2340-ui
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 --no-save >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+          cp "$GITHUB_WORKSPACE/runner/scripts/p01-v2340-resource-efficiency-browser.mjs" ./gate.mjs
+          node gate.mjs | tee /tmp/p01-v2340-candidate-evidence/browser-console.txt
+          grep -Fx P01_V2340_BROWSER=PASS /tmp/p01-v2340-candidate-evidence/browser-result.txt
+          grep -Fx P01_V2340_423_SCALE_UI=PASS /tmp/p01-v2340-candidate-evidence/browser-result.txt
+
+      - name: Verify upgraded mutation persistence and final database integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php <<'PHP' | tee /tmp/p01-v2340-candidate-evidence/database-result.txt
+          <?php
+          declare(strict_types=1);
+          require '/tmp/p01-v2340-upgrade-runtime/app/bootstrap.php';
+          $db=vf_db();
+          $total=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn();
+          $pub=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_private=0")->fetchColumn();
+          $recent=(int)$db->query("SELECT COUNT(*) FROM resource_domain_profiles WHERE last_opened_at IS NOT NULL")->fetchColumn();
+          $schema=(string)$db->query("SELECT MAX(version) FROM schema_migrations WHERE status='success'")->fetchColumn();
+          if($total!==423||$pub!==423||$recent!==4||$schema!=='2026082901'){
+              fwrite(STDERR,"total=$total public=$pub recent=$recent schema=$schema\n"); exit(1);
+          }
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(2);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(3);
+          echo "P01_V2340_BULK_VISIBILITY_423=PASS\n";
+          echo "P01_V2340_FINAL_SQLITE_FK=PASS\n";
+          PHP
+          grep -Fx P01_V2340_BULK_VISIBILITY_423=PASS /tmp/p01-v2340-candidate-evidence/database-result.txt
+          grep -Fx P01_V2340_FINAL_SQLITE_FK=PASS /tmp/p01-v2340-candidate-evidence/database-result.txt
+
+      - name: Record exact V2.34 candidate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-v2340-candidate-evidence/verdict.txt <<'EOF'
+          P01_V2340_CANDIDATE_SOURCE=8cd4b78ec27ced5657888a692a32bad1cc953fcd
+          P01_V2340_CANDIDATE_TREE=67ece5c16135e43acbfe6be8d1dad96e3d541900
+          P01_V2340_RUNTIME_TREE=f3eeb66fbce3949ef50483ac4c5a821edbd15d35
+          P01_V2340_PRODUCT_SOURCE=25dd705582a6f2c0c06a3f52c32c780c2268b5fa
+          P01_V2340_PRODUCT_TREE=d44882648a101e314ba66a66eb8b7f72ec67b283
+          P01_V2340_PRODUCTION_SOURCE=8c819c8bfd055d16b3ac367cef15f723431d9a42
+          P01_V2340_CANDIDATE_READINESS=PASS
+          P01_V2340_METADATA_ONLY_FENCE=PASS
+          P01_V2340_DETERMINISTIC_ARTIFACTS=PASS
+          P01_V2330_TO_V2340_ACTUAL_UPGRADE=PASS
+          P01_V2340_DATA_PRESERVATION_423=PASS
+          P01_V2340_IDEMPOTENCE=PASS
+          P01_V2340_REPAIR_SELF_TEST=PASS
+          P01_V2340_FRESH_RUNTIME=PASS
+          P01_V2340_BROWSER=PASS
+          P01_V2340_423_SCALE_UI=PASS
+          P01_V2340_BULK_VISIBILITY_423=PASS
+          P01_V2340_SCHEMA_UNCHANGED_2026082901=PASS
+          OWNER_PRODUCTION_WRITE=NO
+          RELEASE=NO
+          EOF
+          cat /tmp/p01-v2340-candidate-evidence/verdict.txt
+
+      - name: Upload V2.34 candidate readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v2340-candidate-readiness-evidence-${{ github.run_id }}
+          path: /tmp/p01-v2340-candidate-evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload unpublished V2.34 candidate artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v2340-unpublished-candidate-artifacts-${{ github.run_id }}
+          path: /tmp/p01-v2340-candidate-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop upgraded runtime
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-v2340-browser-server.pid 2>/dev/null)" 2>/dev/null || true
