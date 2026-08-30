@@ -1,0 +1,117 @@
+name: P01 Workspace Action Affordance Gate V2
+
+on:
+  push:
+    branches:
+      - task/p01-workspace-action-affordance-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      EVID: /tmp/p01-workspace-action-affordance-v2
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: b4eb10fbe2006202912a02e2c974194432bb66e8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p01
+
+      - name: Exact source, scope and renderer fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C p01 rev-parse HEAD)" = b4eb10fbe2006202912a02e2c974194432bb66e8
+          test "$(git -C p01 rev-parse HEAD:src/assets/resource-actions.css)" = 7babea0694d041db250aa7c0ba7c9ef19ef3dafd
+          test "$(git -C p01 rev-parse HEAD:src/assets/resource-media.css)" = 05e65a3752d76473e5051c8588d40fa992c63d1e
+          test "$(git -C p01 diff --name-only b649ba93ffa661f719e2cb16a17963dac9063076..HEAD | sort | tr '\n' ' ')" = "src/assets/resource-actions.css src/assets/resource-media.css "
+          grep -Fx '@import url("resource-actions.css");' p01/src/assets/resource-media.css
+          git -C p01 diff --check b649ba93ffa661f719e2cb16a17963dac9063076..HEAD
+          php -l p01/src/app/FunctionalWorkspaceShell.php
+          echo P01_WORKSPACE_ACTION_V2_SOURCE=PASS | tee "$EVID/source.txt"
+
+      - name: Build actual renderer fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r '
+            require "p01/src/app/FunctionalHome.php";
+            $asset=["id"=>17,"surface"=>"watch","url"=>"https://example.com/movie","title"=>"我的团长我的团","resource_kind"=>"movie","media_year"=>2026,"media_status"=>"watching","is_favorite"=>1,"is_private"=>0,"effective_private"=>0,"tags"=>["战争","中国"],"description"=>""];
+            ob_start();
+            echo "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+            foreach(["surfaces.css","surface-workspace.css","workspace-v228.css","workspace-rebaseline.css","resource-media.css","workspace-domain-nav.css"] as $css) echo "<link rel=\"stylesheet\" href=\"assets/$css\">";
+            echo "<title>Action Affordance Gate V2</title></head><body class=\"vf-surface-app vf-workspace-page vf-functional-workspace surface-watch\" data-vf-mode=\"watch\"><main class=\"vf-shell-main\">";
+            echo "<section class=\"vf-workspace-list\">"; vf_fw_render_row($asset,true,true); echo "</section>";
+            echo "<section class=\"vf-watch-grid\" style=\"margin-top:24px\">"; vf_fw_render_watch_card($asset,true); echo "</section>";
+            echo "</main><script src=\"assets/workspace-primary-open.js\"></script></body></html>";
+            file_put_contents("p01/src/workspace-action-fixture.html",ob_get_clean());
+          '
+          python3 -m http.server 8127 --directory p01/src >/tmp/p01-action-http.log 2>&1 &
+
+      - name: Chromium computed-style interaction gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > /tmp/p01-action-v2.cjs <<'EOF'
+          const {chromium}=require('/tmp/node_modules/playwright');
+          const fs=require('fs');
+          const evid=process.env.EVID;
+          const near=(a,b,t=.6)=>Math.abs(a-b)<=t;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:900}});
+            await page.goto('http://127.0.0.1:8127/workspace-action-fixture.html',{waitUntil:'networkidle'});
+            await page.waitForSelector('.vf-asset-row a.vf-asset-copy[data-primary-open="1"]');
+            const snap=async()=>page.evaluate(()=>{
+              const row=document.querySelector('.vf-asset-row'), actions=row.querySelector('.vf-asset-actions'), fav=row.querySelector('[data-favorite-id]'), edit=row.querySelector('[data-edit-id]'), direct=row.querySelector('.vf-asset-actions>a.vf-icon-button[href*="surface-open.php?id="]'), primary=row.querySelector('a.vf-asset-copy[data-primary-open="1"]');
+              const rect=x=>{const r=x.getBoundingClientRect();return [r.width,r.height]};
+              return {opacity:getComputedStyle(actions).opacity,fav:rect(fav),edit:rect(edit),direct:rect(direct),editDisplay:getComputedStyle(edit).display,directDisplay:getComputedStyle(direct).display,primaryHref:primary?.getAttribute('href')||'',overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            const idle=await snap();
+            if(idle.opacity!=='0.58'||!idle.primaryHref.includes('surface-open.php?id=17')||idle.overflow>1) throw new Error('desktop idle regression '+JSON.stringify(idle));
+            for(const d of [idle.fav,idle.edit,idle.direct]) if(!near(d[0],32)||!near(d[1],32)) throw new Error('desktop size regression '+JSON.stringify(idle));
+            await page.hover('.vf-asset-row'); await page.waitForTimeout(180);
+            const hoverOpacity=await page.$eval('.vf-asset-row .vf-asset-actions',e=>getComputedStyle(e).opacity);
+            if(hoverOpacity!=='1') throw new Error('desktop hover regression '+hoverOpacity);
+            await page.locator('.vf-asset-row [data-edit-id]').focus(); await page.waitForTimeout(180);
+            const focus=await page.evaluate(()=>({outline:getComputedStyle(document.querySelector('.vf-asset-row [data-edit-id]')).outlineWidth,opacity:getComputedStyle(document.querySelector('.vf-asset-row .vf-asset-actions')).opacity}));
+            if(focus.outline!=='2px'||focus.opacity!=='1') throw new Error('desktop focus regression '+JSON.stringify(focus));
+            await page.locator('.vf-asset-row a.vf-asset-copy[data-primary-open="1"]').focus();
+            const primaryOutline=await page.$eval('.vf-asset-row a.vf-asset-copy[data-primary-open="1"]',e=>getComputedStyle(e).outlineWidth);
+            if(primaryOutline!=='2px') throw new Error('primary focus regression '+primaryOutline);
+            fs.writeFileSync(evid+'/desktop.json',JSON.stringify({idle,hoverOpacity,focus,primaryOutline},null,2));
+            await page.screenshot({path:evid+'/workspace-actions-1440.png',fullPage:true});
+
+            await page.setViewportSize({width:390,height:844}); await page.reload({waitUntil:'networkidle'}); await page.waitForSelector('.vf-asset-row a.vf-asset-copy[data-primary-open="1"]');
+            const mobile=await page.evaluate(()=>{
+              const row=document.querySelector('.vf-asset-row'), a=row.querySelector('.vf-asset-actions'), fav=row.querySelector('[data-favorite-id]'), edit=row.querySelector('[data-edit-id]'), direct=row.querySelector('.vf-asset-actions>a.vf-icon-button[href*="surface-open.php?id="]'), watch=document.querySelector('.vf-watch-card'), wf=watch.querySelector('[data-favorite-id]'), we=watch.querySelector('[data-edit-id]'), wd=watch.querySelector('.vf-asset-actions>a.vf-icon-button[href*="surface-open.php?id="]');
+              const rect=x=>{const r=x.getBoundingClientRect();return [r.width,r.height]};
+              return {opacity:getComputedStyle(a).opacity,fav:rect(fav),edit:rect(edit),editDisplay:getComputedStyle(edit).display,directDisplay:getComputedStyle(direct).display,watchFav:rect(wf),watchEdit:rect(we),watchDirectDisplay:getComputedStyle(wd).display,primary:!!row.querySelector('a.vf-asset-copy[data-primary-open="1"]'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            if(mobile.opacity!=='1'||mobile.editDisplay==='none'||mobile.directDisplay!=='none'||mobile.watchDirectDisplay!=='none'||!mobile.primary||mobile.overflow>1) throw new Error('mobile visibility regression '+JSON.stringify(mobile));
+            for(const d of [mobile.fav,mobile.edit,mobile.watchFav,mobile.watchEdit]) if(!near(d[0],40)||!near(d[1],40)) throw new Error('mobile touch target regression '+JSON.stringify(mobile));
+            fs.writeFileSync(evid+'/mobile.json',JSON.stringify(mobile,null,2));
+            await page.screenshot({path:evid+'/workspace-actions-390.png',fullPage:true});
+            fs.writeFileSync(evid+'/verdict.txt','P01_WORKSPACE_ACTION_AFFORDANCE=PASS\nSOURCE=b4eb10fbe2006202912a02e2c974194432bb66e8\n');
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          EOF
+          EVID="$EVID" node /tmp/p01-action-v2.cjs
+
+      - name: Upload UI evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-workspace-action-affordance-v2-${{ github.run_id }}
+          path: /tmp/p01-workspace-action-affordance-v2
+          if-no-files-found: error
