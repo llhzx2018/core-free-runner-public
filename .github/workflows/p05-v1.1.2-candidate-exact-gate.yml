@@ -1,0 +1,161 @@
+name: P05 V1.1.2 Candidate Exact Gate
+
+on:
+  push:
+    branches:
+      - release/p05-v1.1.2-orchestrator-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.2-candidate-exact-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_EXACT_SOURCE: 7c132c2a08cab32b11f85daf166685d86fbd089e
+      P05_EXPECTED_TREE: 644136d1c486d67f1b3f4bde87b0e4e4b7cee9f4
+      P05_VERSION: 1.1.2
+    steps:
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 7c132c2a08cab32b11f85daf166685d86fbd089e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Exact source and release identity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXPECTED_TREE"
+          test "$(cat VERSION)" = "$P05_VERSION"
+          test "$(jq -r .version package.json)" = "$P05_VERSION"
+          test "$(jq -r .version VF_PROJECT.json)" = "$P05_VERSION"
+          test "$(jq -r .target_version VF_PROJECT.json)" = "$P05_VERSION"
+          test "$(jq -r .working_version VF_PROJECT.json)" = "$P05_VERSION"
+          test "$(jq -r .production_deployment VF_PROJECT.json)" = 'NOT_DEPLOYED'
+          test "$(jq -r .v1_1_2_browser_first_install.machine_gate VF_PROJECT.json)" = 'PASS'
+          git diff --check
+          echo "P05_EXACT_SOURCE=$(git rev-parse HEAD)"
+          echo "P05_TREE=$(git rev-parse HEAD^{tree})"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Source and static gates
+        run: |
+          set -euo pipefail
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+
+      - name: Node data and regression gates
+        run: |
+          set -euo pipefail
+          npm run migrate
+          npm run verify:schema
+          npm run test
+          npm run build
+
+      - name: PHP compatibility and shared-service gates
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-v112-candidate.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-v112-candidate-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: v112-candidate-portable-password-123
+        run: |
+          set -euo pipefail
+          php -v
+          php -r 'if (!extension_loaded("pdo_sqlite")) { exit(1); }'
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          php -r '$db=new PDO("sqlite:".getenv("VF_SQLITE_PATH")); $v=$db->query("SELECT password_hash FROM admins LIMIT 1")->fetchColumn(); if (!str_starts_with($v,"pbkdf2-sha256$310000$")) exit(1);'
+          bash php/tests/http-smoke.sh
+
+      - name: Build and verify clean FULL staging
+        run: |
+          set -euo pipefail
+          npm run build:php-release
+          npm run php:release:gate
+          bash php/tests/cloudpanel-root-smoke.sh build/vf-seo-php-release
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/browser-install-smoke.sh
+
+      - name: Real Chrome Browser-first gate
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT=build/vf-seo-php-release python3 php/tests/browser-install-e2e.py
+
+      - name: Security and source scope gates
+        run: |
+          set -euo pipefail
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+
+      - name: Release candidate delta gate
+        run: |
+          set -euo pipefail
+          git diff --name-only 7fc30cf980e3c175888336879a62fcd5dcaf9964..HEAD | sort > /tmp/changed.txt
+          cat /tmp/changed.txt
+          cat > /tmp/allowed.txt <<'EOF'
+          CHANGELOG.md
+          README.md
+          VERSION
+          VF_PROJECT.json
+          package.json
+          EOF
+          diff -u /tmp/allowed.txt /tmp/changed.txt
+          test "$(jq -r .schema_version VF_PROJECT.json)" = '1'
+          test "$(jq -r .production_write VF_PROJECT.json)" = '0'
+
+      - name: Machine receipt
+        run: |
+          echo 'P05_V112_CANDIDATE_MACHINE=PASS'
+          echo 'P05_VERSION=1.1.2'
+          echo 'P05_EXACT_SOURCE=7c132c2a08cab32b11f85daf166685d86fbd089e'
+          echo 'P05_TREE=644136d1c486d67f1b3f4bde87b0e4e4b7cee9f4'
+          echo 'P05_BROWSER_FIRST_INSTALL=PASS'
+          echo 'P05_CLEAN_FULL=PASS'
+          echo 'P05_SECURITY=PASS'
+          echo 'P05_SCHEMA=VF-SEO-SCHEMA@1/1'
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
