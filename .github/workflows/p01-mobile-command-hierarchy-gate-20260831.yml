@@ -1,0 +1,169 @@
+name: P01 Mobile Command Hierarchy Gate
+
+on:
+  push:
+    branches: [task/p01-mobile-command-hierarchy-gate-20260831]
+    paths:
+      - .github/workflows/p01-mobile-command-hierarchy-gate-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 514c8ff73b714604bb0f39a54aa2a7dc4f8c72de
+      TREE: 859fbf6b5878b39fe48961b100f9f320d650b0d1
+      BASE_SOURCE: 8324c65888ebe2518fbd9ea48b8a72ea9fc5b7b2
+      CSS_BLOB: cd8a771b46f3b894285672d3ec1a5115d759039f
+      ROOT: /tmp/p01-command-hierarchy
+      PORT: '18358'
+      EVID: /tmp/p01-command-hierarchy-ui
+      COOKIE: /tmp/p01-command-hierarchy.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_COMMAND_HIERARCHY_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-command-hierarchy-server.log 2>&1 & echo $! >/tmp/p01-command-hierarchy.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-command-hierarchy-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-command-hierarchy-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Command Hierarchy Gate' \
+            --data-urlencode 'admin_password=P01Command!Hierarchy' \
+            --data-urlencode 'admin_password_confirm=P01Command!Hierarchy' \
+            -o /tmp/p01-command-hierarchy-setup-post.html
+          echo P01_COMMAND_HIERARCHY_RUNTIME=PASS
+
+      - name: Chromium mobile command hierarchy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-command-hierarchy-playwright
+          cd /tmp/p01-command-hierarchy-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18358',evid=process.env.EVID;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:390,height:844}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Command!Hierarchy'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const inspect=async()=>page.evaluate(()=>{
+              const row=document.querySelector('.vf-mobile-command-row');
+              const search=document.querySelector('.vf-mobile-command-search');
+              const searchInput=search?.querySelector('input[name="q"]');
+              const pending=document.querySelector('.vf-mobile-command-row [data-mobile-pending]');
+              const add=document.querySelector('.vf-mobile-command-row [data-open-add].vf-mobile-command-add');
+              if(!row||!search||!searchInput||!pending||!add) return null;
+              const box=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,bg:s.backgroundColor,color:s.color,border:s.borderTopColor,fontWeight:s.fontWeight,whiteSpace:s.whiteSpace}};
+              return {row:{clientWidth:row.clientWidth,scrollWidth:row.scrollWidth,gap:getComputedStyle(row).gap},search:box(search),input:box(searchInput),pending:{...box(pending),text:pending.textContent.trim()},add:{...box(add),text:add.textContent.trim()},openAddCount:document.querySelectorAll('.vf-mobile-command-row [data-open-add]').length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            const assertState=(m,width)=>{
+              if(!m) throw new Error('mobile command authority missing');
+              if(m.pending.text!=='◇ 待整理') throw new Error('pending copy '+JSON.stringify(m.pending));
+              if(m.add.text!=='添加影视') throw new Error('add copy '+JSON.stringify(m.add));
+              if(m.openAddCount!==1) throw new Error('add authority count '+m.openAddCount);
+              if(Math.abs(m.pending.height-m.add.height)>1||m.pending.height<37) throw new Error('action height '+JSON.stringify(m));
+              if(m.pending.bg===m.add.bg||m.pending.border===m.add.border) throw new Error('pending still primary '+JSON.stringify(m));
+              if(m.pending.whiteSpace!=='nowrap'||m.add.whiteSpace!=='nowrap') throw new Error('action wraps '+JSON.stringify(m));
+              if(m.row.scrollWidth>m.row.clientWidth+1||m.overflow>1) throw new Error('horizontal overflow '+JSON.stringify(m));
+              if(m.input.width<(width<=320?48:78)) throw new Error('search input too narrow '+JSON.stringify(m));
+            };
+
+            await page.goto(base+'/watch.php',{waitUntil:'networkidle'}); await page.waitForSelector('[data-mobile-pending]'); await page.waitForTimeout(160);
+            const light390=await inspect(); assertState(light390,390);
+            await page.screenshot({path:evid+'/watch-command-390-light.png'});
+
+            await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(160);
+            const dark390=await inspect(); assertState(dark390,390);
+            if(dark390.pending.bg===light390.pending.bg) throw new Error('pending did not adapt to dark '+JSON.stringify({light390,dark390}));
+            await page.screenshot({path:evid+'/watch-command-390-dark.png'});
+
+            await page.setViewportSize({width:320,height:760}); await page.waitForTimeout(160);
+            const dark320=await inspect(); assertState(dark320,320);
+            await page.screenshot({path:evid+'/watch-command-320-dark.png'});
+
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/metrics.json',JSON.stringify({light390,dark390,dark320},null,2));
+            fs.writeFileSync(evid+'/verdict.txt',`P01_MOBILE_COMMAND_HIERARCHY=PASS\nSOURCE=${process.env.SOURCE}\n`);
+            await browser.close(); console.log('P01_COMMAND_HIERARCHY_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" SOURCE="$SOURCE" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_COMMAND_HIERARCHY_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-command-hierarchy-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-command-hierarchy-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-command-hierarchy-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-command-hierarchy-baseline.txt
+          php -r 'require "/tmp/p01-command-hierarchy/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_COMMAND_HIERARCHY_SQLITE=PASS\n";' | grep -Fx P01_COMMAND_HIERARCHY_SQLITE=PASS
+          echo P01_COMMAND_HIERARCHY_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-command-hierarchy-${{ github.run_id }}
+          path: /tmp/p01-command-hierarchy-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_COMMAND_HIERARCHY_SOURCE=$SOURCE
+          echo P01_COMMAND_HIERARCHY_TREE=$TREE
+          echo P01_COMMAND_HIERARCHY_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-command-hierarchy.pid 2>/dev/null)" 2>/dev/null || true
