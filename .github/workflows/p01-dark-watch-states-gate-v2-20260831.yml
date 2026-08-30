@@ -1,0 +1,171 @@
+name: P01 Dark Watch States Gate V2
+
+on:
+  push:
+    branches: [task/p01-dark-watch-states-gate-20260831]
+    paths:
+      - .github/workflows/p01-dark-watch-states-gate-v2-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 68d046122ce26067792b573fbea6207259fc0206
+      TREE: cbdec775db4589015843efbf546a57bacf97107d
+      BASE_SOURCE: e8cc1d24ddb0f6940a26d8b88fc2400580891771
+      CSS_BLOB: 90dbe8c4344978a53707d4c7672cdfeb587fa3f4
+      ROOT: /tmp/p01-dark-watch-v2
+      PORT: '18356'
+      EVID: /tmp/p01-dark-watch-v2-ui
+      COOKIE: /tmp/p01-dark-watch-v2.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_DARK_WATCH_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-dark-watch-v2-server.log 2>&1 & echo $! >/tmp/p01-dark-watch-v2.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-dark-watch-v2-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-dark-watch-v2-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Dark Watch Gate V2' \
+            --data-urlencode 'admin_password=P01Dark!Watch' \
+            --data-urlencode 'admin_password_confirm=P01Dark!Watch' \
+            -o /tmp/p01-dark-watch-v2-setup-post.html
+          cat >/tmp/p01-dark-watch-v2-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-dark-watch-v2/app/bootstrap.php';
+          require_once '/tmp/p01-dark-watch-v2/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $category=$r->createCategory(['name'=>'影视','description'=>'','is_private'=>false]);
+          $kinds=['movie','series','documentary','variety','anime','movie'];
+          for($i=1;$i<=6;$i++){
+              $x=$r->saveLink(null,['category_id'=>$category,'title'=>'Dark Watch '.$i,'url'=>'https://example.com/watch-v2-'.$i,'description'=>'dark watch placeholder fixture','tags'=>'影视','is_private'=>true],'manual');
+              $s->upsertProfile((int)$x['id'],['surface'=>'watch','resource_kind'=>$kinds[$i-1],'surface_note'=>'dark fixture','media_year'=>2020+$i,'media_status'=>$i===1?'favorite':'want']);
+          }
+          echo "P01_DARK_WATCH_V2_SEED=PASS\n";
+          PHP
+          php /tmp/p01-dark-watch-v2-seed.php | grep -Fx P01_DARK_WATCH_V2_SEED=PASS
+          echo P01_DARK_WATCH_V2_RUNTIME=PASS
+
+      - name: Chromium dark Watch authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-dark-watch-v2-playwright
+          cd /tmp/p01-dark-watch-v2-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18356',evid=process.env.EVID;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Dark!Watch'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(base+'/watch.php',{waitUntil:'networkidle'});
+            const first=page.locator('.vf-watch-card').first();
+            const fav=first.locator('[data-favorite-id]');
+            if(!(await fav.evaluate(el=>el.classList.contains('active')))){
+              await fav.click({force:true});
+              await page.waitForTimeout(180);
+            }
+            if(!(await fav.evaluate(el=>el.classList.contains('active')))) throw new Error('favorite active state not reached');
+            await first.hover();
+            const light=await page.evaluate(()=>{const p=document.querySelector('.vf-watch-poster'),f=document.querySelector('.vf-watch-card [data-favorite-id]');return {poster:getComputedStyle(p).backgroundColor,favBg:getComputedStyle(f).backgroundColor,favColor:getComputedStyle(f).color,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+            if(light.poster!=='rgb(233, 239, 238)'||light.favBg!=='rgb(255, 248, 232)'||light.overflow>1) throw new Error('light authority drift '+JSON.stringify(light));
+            await page.screenshot({path:evid+'/watch-1440-light.png'});
+
+            await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(180); await first.hover();
+            const dark=await page.evaluate(()=>{const p=document.querySelector('.vf-watch-poster'),f=document.querySelector('.vf-watch-card [data-favorite-id]');return {poster:getComputedStyle(p).backgroundColor,favBg:getComputedStyle(f).backgroundColor,favColor:getComputedStyle(f).color,soft2:getComputedStyle(document.documentElement).getPropertyValue('--ws-soft-2').trim(),panel:getComputedStyle(document.documentElement).getPropertyValue('--ws-panel').trim(),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+            if(dark.poster===light.poster||dark.favBg===light.favBg||dark.poster!=='rgb(32, 42, 45)'||dark.overflow>1) throw new Error('dark authority '+JSON.stringify({light,dark}));
+            await page.screenshot({path:evid+'/watch-1440-dark.png'});
+
+            await page.setViewportSize({width:390,height:844}); await page.waitForTimeout(180);
+            const mobile=await page.evaluate(()=>{const cards=[...document.querySelectorAll('.vf-watch-card')],p=document.querySelector('.vf-watch-poster');return {poster:getComputedStyle(p).backgroundColor,columns:cards.length>1?Math.abs(cards[0].getBoundingClientRect().top-cards[1].getBoundingClientRect().top)<4:false,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+            if(mobile.poster!=='rgb(32, 42, 45)'||!mobile.columns||mobile.overflow>1) throw new Error('mobile dark authority '+JSON.stringify(mobile));
+            await page.screenshot({path:evid+'/watch-390-dark.png'});
+
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/metrics.json',JSON.stringify({light,dark,mobile},null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_DARK_WATCH=PASS\nSOURCE=68d046122ce26067792b573fbea6207259fc0206\n');
+            await browser.close(); console.log('P01_DARK_WATCH_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_DARK_WATCH_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-dark-watch-v2-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-dark-watch-v2-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-dark-watch-v2-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-dark-watch-v2-baseline.txt
+          php -r 'require "/tmp/p01-dark-watch-v2/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_DARK_WATCH_V2_SQLITE=PASS\n";' | grep -Fx P01_DARK_WATCH_V2_SQLITE=PASS
+          echo P01_DARK_WATCH_V2_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-dark-watch-states-v2-${{ github.run_id }}
+          path: /tmp/p01-dark-watch-v2-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_DARK_WATCH_SOURCE=$SOURCE
+          echo P01_DARK_WATCH_TREE=$TREE
+          echo P01_DARK_WATCH_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-dark-watch-v2.pid 2>/dev/null)" 2>/dev/null || true
