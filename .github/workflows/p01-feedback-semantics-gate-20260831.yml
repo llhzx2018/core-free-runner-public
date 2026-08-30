@@ -1,0 +1,193 @@
+name: P01 Feedback Semantics Gate
+
+on:
+  push:
+    branches: [task/p01-feedback-semantics-gate-20260831]
+    paths:
+      - .github/workflows/p01-feedback-semantics-gate-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 2be0bf81329e3725c660586fa20d7507045da7c7
+      TREE: 1cd1416aae744ddb4faff9f686b3362fff2a0390
+      BASE_SOURCE: 510de49d6693b25d4a7bf84aee713f257f78ddea
+      PHP_BLOB: 5af2bc656699b692b67b3ead792f7b4f609550dc
+      JS_BLOB: 50e5d82ec223102e4b9d8e3682bc852597c6c5bb
+      ROOT: /tmp/p01-feedback-semantics
+      PORT: '18354'
+      EVID: /tmp/p01-feedback-semantics-ui
+      COOKIE: /tmp/p01-feedback-semantics.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source and syntax fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/app/FunctionalWorkspace.php)" = "$PHP_BLOB"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace.js)" = "$JS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          diff -u <(printf '%s\n' 'src/app/FunctionalWorkspace.php' 'src/assets/workspace.js') <(git -C product diff --name-only "$BASE_SOURCE"..HEAD)
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          php -l product/src/app/FunctionalWorkspace.php | grep -F 'No syntax errors detected'
+          node --check product/src/assets/workspace.js
+          echo P01_FEEDBACK_SEMANTICS_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-feedback-semantics-server.log 2>&1 & echo $! >/tmp/p01-feedback-semantics.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-feedback-semantics-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-feedback-semantics-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Feedback Semantics Gate' \
+            --data-urlencode 'admin_password=P01Feedback!Semantics' \
+            --data-urlencode 'admin_password_confirm=P01Feedback!Semantics' \
+            -o /tmp/p01-feedback-semantics-setup-post.html
+          cat >/tmp/p01-feedback-semantics-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-feedback-semantics/app/bootstrap.php';
+          require_once '/tmp/p01-feedback-semantics/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $category=$r->createCategory(['name'=>'频道','description'=>'','is_private'=>false]);
+          for($i=1;$i<=4;$i++){
+              $x=$r->saveLink(null,['category_id'=>$category,'title'=>'Semantics Channel '.$i,'url'=>'https://youtube.com/@semantics-'.$i,'description'=>'semantic feedback fixture','tags'=>'频道','is_private'=>true],'manual');
+              $s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','surface_note'=>'semantics','background_friendly'=>true]);
+          }
+          echo "P01_FEEDBACK_SEMANTICS_SEED=PASS\n";
+          PHP
+          php /tmp/p01-feedback-semantics-seed.php | grep -Fx P01_FEEDBACK_SEMANTICS_SEED=PASS
+          echo P01_FEEDBACK_SEMANTICS_RUNTIME=PASS
+
+      - name: Chromium feedback semantics and empty-state authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-feedback-semantics-playwright
+          cd /tmp/p01-feedback-semantics-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18354',evid=process.env.EVID;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Feedback!Semantics'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const emptyText=async()=>({title:(await page.locator('.vf-workspace-empty strong').textContent()||'').trim(),copy:(await page.locator('.vf-workspace-empty p').textContent()||'').trim(),overflow:await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth)});
+            const toastAttrs=async(sel)=>page.locator(sel).evaluate(el=>({role:el.getAttribute('role'),live:el.getAttribute('aria-live'),atomic:el.getAttribute('aria-atomic'),text:(el.textContent||'').trim()}));
+
+            await page.goto(base+'/topics.php',{waitUntil:'networkidle'});
+            const trueEmpty=await emptyText();
+            if(trueEmpty.title!=='还没有专题'||trueEmpty.copy!=='从添加入口开始建立这个资源域。'||trueEmpty.overflow>1) throw new Error('true empty authority '+JSON.stringify(trueEmpty));
+            await page.screenshot({path:evid+'/desktop-true-empty-topics.png'});
+
+            await page.goto(base+'/channels.php?q=definitely-no-result',{waitUntil:'networkidle'});
+            const searchEmpty=await emptyText();
+            if(searchEmpty.title!=='没有找到符合条件的内容'||!searchEmpty.copy.includes('换一个关键词')||searchEmpty.overflow>1) throw new Error('search empty authority '+JSON.stringify(searchEmpty));
+            await page.screenshot({path:evid+'/desktop-filtered-empty-search.png'});
+
+            await page.goto(base+'/channels.php?scope=public',{waitUntil:'networkidle'});
+            const scopeEmpty=await emptyText();
+            if(scopeEmpty.title!=='没有找到符合条件的内容'||scopeEmpty.copy!=='调整可见范围、分类或筛选条件继续查找。'||scopeEmpty.overflow>1) throw new Error('scope empty authority '+JSON.stringify(scopeEmpty));
+
+            await page.goto(base+'/channels.php',{waitUntil:'networkidle'});
+            await page.locator('[data-favorite-id]').first().click({force:true});
+            const ok=page.locator('.vf-workspace-toast.show:not(.error)').first(); await ok.waitFor();
+            const okAttrs=await toastAttrs('.vf-workspace-toast.show:not(.error)');
+            if(okAttrs.role!=='status'||okAttrs.live!=='polite'||okAttrs.atomic!=='true'||!okAttrs.text) throw new Error('success semantics '+JSON.stringify(okAttrs));
+            await page.screenshot({path:evid+'/desktop-status-toast.png'});
+
+            await page.route('**/workspace-action.php',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({ok:false,error:'模拟语义错误'})}),{times:1});
+            await page.locator('[data-favorite-id]').nth(1).click({force:true});
+            const err=page.locator('.vf-workspace-toast.show.error').first(); await err.waitFor();
+            const errAttrs=await toastAttrs('.vf-workspace-toast.show.error');
+            if(errAttrs.role!=='alert'||errAttrs.live!=='assertive'||errAttrs.atomic!=='true'||errAttrs.text!=='模拟语义错误') throw new Error('error semantics '+JSON.stringify(errAttrs));
+            await page.screenshot({path:evid+'/desktop-alert-toast.png'});
+
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(base+'/topics.php',{waitUntil:'networkidle'});
+            const mobileTrue=await emptyText();
+            if(mobileTrue.title!=='还没有专题'||mobileTrue.copy!=='从添加入口开始建立这个资源域。'||mobileTrue.overflow>1) throw new Error('mobile true empty '+JSON.stringify(mobileTrue));
+            await page.screenshot({path:evid+'/mobile-true-empty-topics-390.png'});
+
+            await page.goto(base+'/channels.php?q=definitely-no-result',{waitUntil:'networkidle'});
+            const mobileSearch=await emptyText();
+            if(mobileSearch.title!=='没有找到符合条件的内容'||!mobileSearch.copy.includes('换一个关键词')||mobileSearch.overflow>1) throw new Error('mobile search empty '+JSON.stringify(mobileSearch));
+            await page.screenshot({path:evid+'/mobile-filtered-empty-search-390.png'});
+
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/metrics.json',JSON.stringify({trueEmpty,searchEmpty,scopeEmpty,okAttrs,errAttrs,mobileTrue,mobileSearch},null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_FEEDBACK_SEMANTICS=PASS\nSOURCE=2be0bf81329e3725c660586fa20d7507045da7c7\n');
+            await browser.close(); console.log('P01_FEEDBACK_SEMANTICS_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_FEEDBACK_SEMANTICS_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-feedback-semantics-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-feedback-semantics-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-feedback-semantics-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-feedback-semantics-baseline.txt
+          php -r 'require "/tmp/p01-feedback-semantics/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_FEEDBACK_SEMANTICS_SQLITE=PASS\n";' | grep -Fx P01_FEEDBACK_SEMANTICS_SQLITE=PASS
+          echo P01_FEEDBACK_SEMANTICS_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-feedback-semantics-${{ github.run_id }}
+          path: /tmp/p01-feedback-semantics-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_FEEDBACK_SEMANTICS_SOURCE=$SOURCE
+          echo P01_FEEDBACK_SEMANTICS_TREE=$TREE
+          echo P01_FEEDBACK_SEMANTICS_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=2
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-feedback-semantics.pid 2>/dev/null)" 2>/dev/null || true
