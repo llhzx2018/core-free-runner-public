@@ -1,0 +1,92 @@
+name: P05 Updater OPcache Detection Patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      P05_BRANCH: fix/p05-php-online-update-20260831
+      EXPECTED_HEAD: c1b79206444a20da42925367944266521dd02e1c
+    steps:
+      - name: Checkout exact P05 branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: p05
+      - name: Verify and patch only OPcache detection
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('php/src/PhpUpdater.php')
+          s=p.read_text()
+          old='''    private function opcacheControlReady(): bool
+    {
+        $enabled = filter_var((string) ini_get('opcache.enable'), FILTER_VALIDATE_BOOL);
+        if (!$enabled) return true;
+        return function_exists('opcache_reset');
+    }
+
+    private function resetOpcacheIfNeeded(): bool
+    {
+        $enabled = filter_var((string) ini_get('opcache.enable'), FILTER_VALIDATE_BOOL);
+        if (!$enabled) return false;
+        if (!function_exists('opcache_reset') || @opcache_reset() !== true) throw new \\RuntimeException('UPDATE_OPCACHE_RESET_FAILED');
+        return true;
+    }
+'''
+          new='''    private function opcacheIsActive(): bool
+    {
+        if (!function_exists('opcache_get_status')) return false;
+        $status = @opcache_get_status(false);
+        return is_array($status) && ($status['opcache_enabled'] ?? false) === true;
+    }
+
+    private function opcacheControlReady(): bool
+    {
+        if (!$this->opcacheIsActive()) return true;
+        return function_exists('opcache_reset');
+    }
+
+    private function resetOpcacheIfNeeded(): bool
+    {
+        if (!$this->opcacheIsActive()) return false;
+        if (!function_exists('opcache_reset') || @opcache_reset() !== true) throw new \\RuntimeException('UPDATE_OPCACHE_RESET_FAILED');
+        return true;
+    }
+'''
+          if old not in s:
+              raise SystemExit('P05_OPCACHE_EXPECTED_SNIPPET_MISSING')
+          p.write_text(s.replace(old,new,1))
+          PY
+          php -l php/src/PhpUpdater.php
+          test "$(git diff --name-only)" = "php/src/PhpUpdater.php"
+          grep -q "opcache_get_status(false)" php/src/PhpUpdater.php
+          grep -q "UPDATE_OPCACHE_RESET_FAILED" php/src/PhpUpdater.php
+          echo "P05_OPCACHE_ACTUAL_RUNTIME_DETECTION=PASS"
+      - name: Commit exact one-file patch
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          git config user.name "VF Public Runner"
+          git config user.email "actions@users.noreply.github.com"
+          git add php/src/PhpUpdater.php
+          git commit -m "fix(P05): detect active OPcache runtime before reset"
+          git push origin "HEAD:$P05_BRANCH"
+          echo "P05_PATCHED_HEAD=$(git rev-parse HEAD)"
+          echo "P05_PATCH_SCOPE=php/src/PhpUpdater.php"
+          echo "P05_RELEASE_WRITE=0"
+          echo "P05_PRODUCTION_WRITE=0"
