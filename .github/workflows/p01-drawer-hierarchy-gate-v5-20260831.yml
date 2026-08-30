@@ -1,0 +1,175 @@
+name: P01 Drawer Hierarchy Gate V5
+
+on:
+  push:
+    branches: [task/p01-drawer-hierarchy-gate-20260831]
+    paths:
+      - .github/workflows/p01-drawer-hierarchy-gate-v5-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 18f819e6077ea8cdc14d046a7a85140d165d6297
+      TREE: c74c5121152e7c2c9d7effd772f0acff1dfbb412
+      BASE_SOURCE: 6212ed3e020900bcea4124a1d72d352a4589045e
+      CSS_BLOB: 19dc74d2fbdab88fe2ec94d1e56f668bb49f5194
+      ROOT: /tmp/p01-drawer-v5
+      PORT: '18345'
+      EVID: /tmp/p01-drawer-v5-ui
+      COOKIE: /tmp/p01-drawer-v5.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_DRAWER_HIERARCHY_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-drawer-v5-server.log 2>&1 & echo $! >/tmp/p01-drawer-v5.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-drawer-v5-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-drawer-v5-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Drawer V5 Gate' \
+            --data-urlencode 'admin_password=P01Drawer!Hierarchy' \
+            --data-urlencode 'admin_password_confirm=P01Drawer!Hierarchy' \
+            -o /tmp/p01-drawer-v5-setup-post.html
+          cat >/tmp/p01-drawer-v5-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-drawer-v5/app/bootstrap.php';
+          require_once '/tmp/p01-drawer-v5/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $dev=$r->createCategory(['name'=>'开发工具','description'=>'','is_private'=>false]);
+          $channel=$r->createCategory(['name'=>'频道','description'=>'','is_private'=>false]);
+          for($i=1;$i<=20;$i++) $r->saveLink(null,['category_id'=>$dev,'title'=>'Dev Tool '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://dev'.$i.'.example.com','description'=>'developer tool','tags'=>'工具','is_private'=>true],'manual');
+          for($i=1;$i<=8;$i++){ $x=$r->saveLink(null,['category_id'=>$channel,'title'=>'Channel '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://youtube.com/@drawer-v5-'.$i,'description'=>'channel description','tags'=>'频道, 后台听','is_private'=>true],'manual'); $s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','surface_note'=>'private note','background_friendly'=>$i%2===0]); }
+          echo "P01_DRAWER_V5_SEED=PASS\n";
+          PHP
+          php /tmp/p01-drawer-v5-seed.php | grep -Fx P01_DRAWER_V5_SEED=PASS
+          echo P01_DRAWER_V5_RUNTIME=PASS
+
+      - name: Chromium drawer hierarchy and reachability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-drawer-v5-playwright
+          cd /tmp/p01-drawer-v5-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18345',evid=process.env.EVID,near=(a,b,t=2)=>Math.abs(a-b)<=t;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Drawer!Hierarchy'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const openAdd=async()=>{const trigger=page.locator('[data-open-add]:visible').first(); await trigger.waitFor(); await trigger.click(); await page.locator('[data-panel="add"]:not([hidden])').waitFor(); await page.waitForTimeout(180);};
+            const close=async sel=>{await page.locator(sel+' header [data-close-panel]').click(); await page.waitForTimeout(180);};
+            const sticky=async(panel,head,foot)=>page.evaluate(({panel,head,foot})=>{const p=document.querySelector(panel),h=document.querySelector(head),f=document.querySelector(foot);p.scrollTop=p.scrollHeight;const pr=p.getBoundingClientRect(),hr=h.getBoundingClientRect(),fr=f.getBoundingClientRect();return {p:{top:pr.top,bottom:pr.bottom,width:pr.width,height:pr.height},h:{top:hr.top,pos:getComputedStyle(h).position},f:{top:fr.top,bottom:fr.bottom,pos:getComputedStyle(f).position,clientWidth:f.clientWidth,scrollWidth:f.scrollWidth},overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};},{panel,head,foot});
+
+            await page.goto(base+'/channels.php',{waitUntil:'networkidle'}); await openAdd();
+            const add=page.locator('[data-panel="add"]');
+            const desktop=await add.evaluate(el=>{const r=el.getBoundingClientRect(),url=el.querySelector('input[name="url"]'),title=el.querySelector('input[name="title"]'),cover=el.querySelector('.vf-cover-field'),buttons=[...el.querySelectorAll('footer button')].map(x=>(x.textContent||'').trim());return {width:r.width,urlH:url.getBoundingClientRect().height,titleH:title.getBoundingClientRect().height,coverBorder:getComputedStyle(cover).borderTopStyle,headPos:getComputedStyle(el.querySelector('header')).position,buttons};});
+            if(desktop.width<640||desktop.width>680||desktop.urlH<39||desktop.titleH<39||desktop.coverBorder!=='solid'||desktop.headPos!=='sticky') throw new Error('desktop add hierarchy '+JSON.stringify(desktop));
+            if(desktop.buttons.length!==3||desktop.buttons[0]!=='取消'||desktop.buttons[1]!=='添加并继续'||!/^添加(?:资源|导航|频道|影视|专题)$/.test(desktop.buttons[2])) throw new Error('semantic actions '+JSON.stringify(desktop));
+            let s=await sticky('[data-panel="add"]','[data-panel="add"]>header','[data-add-form]>footer'); if(!near(s.h.top,s.p.top)||s.f.bottom>s.p.bottom+2||s.f.pos!=='sticky') throw new Error('desktop add sticky '+JSON.stringify(s));
+            await page.waitForTimeout(80); await page.screenshot({path:evid+'/desktop-add-scrolled.png'}); await close('[data-panel="add"]');
+
+            const edit=page.locator('[data-asset-row] [data-edit-id]').first(); await edit.click(); await page.locator('[data-panel="detail"]:not([hidden])').waitFor(); await page.waitForTimeout(180);
+            const drawer=page.locator('[data-panel="detail"]');
+            const detail=await drawer.evaluate(el=>{const r=el.getBoundingClientRect(),a=el.querySelector('[data-detail-open]');return {width:r.width,openBg:getComputedStyle(a).backgroundColor,openPad:getComputedStyle(a).paddingInline};});
+            if(detail.width<475||detail.width>485) throw new Error('detail width '+JSON.stringify(detail));
+            s=await sticky('[data-panel="detail"]','[data-panel="detail"]>.vf-detail-head','[data-detail-form]>footer'); if(!near(s.h.top,s.p.top)||s.f.bottom>s.p.bottom+2||s.f.pos!=='sticky') throw new Error('detail sticky '+JSON.stringify(s));
+            await page.waitForTimeout(80); await page.screenshot({path:evid+'/desktop-detail-scrolled.png'}); await close('[data-panel="detail"]');
+
+            const mobile={};
+            for(const [width,height] of [[390,844],[320,700]]){
+              await page.setViewportSize({width,height}); await page.goto(base+'/channels.php',{waitUntil:'networkidle'}); await openAdd();
+              const m=await add.evaluate(el=>{const r=el.getBoundingClientRect(),f=el.querySelector('footer'),buttons=[...f.querySelectorAll('button')].map(b=>{const x=b.getBoundingClientRect();return {text:(b.textContent||'').trim(),top:x.top,bottom:x.bottom,left:x.left,right:x.right};});return {rect:{left:r.left,top:r.top,width:r.width,height:r.height},docOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,footerOverflow:f.scrollWidth-f.clientWidth,buttons};});
+              const tops=m.buttons.map(x=>x.top); if(!near(m.rect.left,0,1)||!near(m.rect.top,0,1)||!near(m.rect.width,width)||!near(m.rect.height,height)||m.docOverflow>1||m.footerOverflow>1||Math.max(...tops)-Math.min(...tops)>2) throw new Error('mobile geometry '+width+' '+JSON.stringify(m));
+              s=await sticky('[data-panel="add"]','[data-panel="add"]>header','[data-add-form]>footer'); if(!near(s.h.top,0)||s.f.bottom>height+2||s.f.top>=height) throw new Error('mobile sticky '+width+' '+JSON.stringify(s));
+              mobile[width]={m,s};
+              if(width===390){await page.screenshot({path:evid+'/mobile-add-390-light.png'}); await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(180); await page.screenshot({path:evid+'/mobile-add-390-dark.png'}); await page.evaluate(()=>document.documentElement.dataset.theme='light'); await page.waitForTimeout(80);} else await page.screenshot({path:evid+'/mobile-add-320.png'});
+              await close('[data-panel="add"]');
+            }
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/geometry.json',JSON.stringify({desktop,detail,mobile},null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_DRAWER_HIERARCHY=PASS\nSOURCE=18f819e6077ea8cdc14d046a7a85140d165d6297\n');
+            await browser.close(); console.log('P01_DRAWER_HIERARCHY_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_DRAWER_HIERARCHY_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-drawer-v5-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-drawer-v5-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-drawer-v5-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-drawer-v5-baseline.txt
+          php -r 'require "/tmp/p01-drawer-v5/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_DRAWER_V5_SQLITE=PASS\n";' | grep -Fx P01_DRAWER_V5_SQLITE=PASS
+          echo P01_DRAWER_HIERARCHY_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-drawer-hierarchy-v5-${{ github.run_id }}
+          path: /tmp/p01-drawer-v5-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_DRAWER_HIERARCHY_SOURCE=$SOURCE
+          echo P01_DRAWER_HIERARCHY_TREE=$TREE
+          echo P01_DRAWER_HIERARCHY_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-drawer-v5.pid 2>/dev/null)" 2>/dev/null || true
