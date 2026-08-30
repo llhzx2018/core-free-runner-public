@@ -1,0 +1,126 @@
+name: P05 V1.1.6 Prepare And Real Install Test
+on:
+  push:
+    branches: [gate/p05-v115-stale-empty-install-20260830]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout P05 main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Create V1.1.6 candidate branch
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git checkout -B release/p05-v1.1.6-real-fresh-install-20260830 origin/main
+          printf '1.1.6\n' > VERSION
+          node - <<'NODE'
+          const fs=require('fs');
+          const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.version='1.1.6'; fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');
+          const v=JSON.parse(fs.readFileSync('VF_PROJECT.json','utf8')); v.version='1.1.6'; v.target_version='1.1.6'; v.working_version='1.1.6'; v.status='V1.1.6_RELEASE_CANDIDATE / DEPLOYMENT_READY / PRODUCTION_NOT_DEPLOYED'; fs.writeFileSync('VF_PROJECT.json',JSON.stringify(v,null,2)+'\n');
+          NODE
+          git add VERSION package.json VF_PROJECT.json
+          git commit -m 'release(P05): prepare V1.1.6 real fresh-install candidate'
+          git push origin HEAD:release/p05-v1.1.6-real-fresh-install-20260830
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Build V1.1.6 FULL staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run build:php-release
+          npm run php:release:gate
+      - name: Real test A - absolutely clean HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(pwd)/build/vf-seo-php-release"
+          TMP="$(mktemp -d)"; export HOME="$TMP/home"; mkdir -p "$HOME"
+          export APP_ENV=development VF_REQUIRE_HTTPS=0 VF_SECURE_COOKIES=0
+          PORT=19741; BASE="http://127.0.0.1:$PORT"; COOKIE="$TMP/cookie"
+          php -S "127.0.0.1:$PORT" -t "$ROOT" "$ROOT/index.php" >"$TMP/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf "$TMP"' EXIT
+          for i in $(seq 1 50); do curl -sS "$BASE/setup" -o /dev/null 2>/dev/null && break; sleep .1; done
+          curl -fsS -c "$COOKIE" "$BASE/setup" -o "$TMP/setup.html"
+          grep -q '首次安装' "$TMP/setup.html"
+          TOKEN=$(grep -o 'name="csrf_token" value="[^"]*"' "$TMP/setup.html"|head -1|sed 's/.*value="\([^"]*\)"/\1/')
+          PASS='OwnerFreshInstall-2026!'
+          code=$(curl -sS -b "$COOKIE" -c "$COOKIE" -o "$TMP/done.html" -w '%{http_code}' -H "Origin: $BASE" --data-urlencode "csrf_token=$TOKEN" --data-urlencode username=admin --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup")
+          test "$code" = 200; grep -q '安装完成' "$TMP/done.html"
+          code=$(curl -sS -o "$TMP/login.json" -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $BASE" --data "{\"username\":\"admin\",\"password\":\"$PASS\"}" "$BASE/api/auth/login")
+          test "$code" = 200
+          code=$(curl -sS -o "$TMP/locked.html" -w '%{http_code}' "$BASE/setup"); test "$code" = 404
+          kill $PID; trap - EXIT; rm -rf "$TMP"
+          echo P05_REAL_CLEAN_HOME_INSTALL=PASS
+      - name: Real test B - V1.1.5 leftover HOME then V1.1.6 install
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEWROOT="$(pwd)/build/vf-seo-php-release"
+          OLDZIP="$RUNNER_TEMP/v115.zip"; OLDROOT="$RUNNER_TEMP/v115"
+          gh release download v1.1.5 -R llhzx2018/vf-seo -p VF_SEO_V1.1.5_FULL.zip -O "$OLDZIP"
+          mkdir -p "$OLDROOT"; unzip -q "$OLDZIP" -d "$OLDROOT"
+          TMP="$(mktemp -d)"; export HOME="$TMP/home"; mkdir -p "$HOME"
+          export APP_ENV=development VF_REQUIRE_HTTPS=0 VF_SECURE_COOKIES=0 VF_ADMIN_USERNAME=admin VF_ADMIN_PASSWORD='OldUnknownLikePassword-2026!'
+          php "$OLDROOT/php/bin/migrate.php" >/dev/null
+          php "$OLDROOT/php/bin/bootstrap-admin.php" >/dev/null
+          LOCK="$HOME/.config/vf-seo/setup.lock.json"; mkdir -p "$(dirname "$LOCK")"
+          printf '%s\n' '{"project":"P05","product":"VF SEO","version":"1.1.5","schema":"VF-SEO-SCHEMA@1","schemaVersion":1,"installer":"browser-first-v1"}' > "$LOCK"; chmod 600 "$LOCK"
+          PORT=19742; BASE="http://127.0.0.1:$PORT"; COOKIE="$TMP/cookie"
+          php -S "127.0.0.1:$PORT" -t "$NEWROOT" "$NEWROOT/index.php" >"$TMP/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf "$TMP"' EXIT
+          for i in $(seq 1 50); do curl -sS "$BASE/" -o /dev/null 2>/dev/null && break; sleep .1; done
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/"); test "$code" = 302
+          curl -fsS -c "$COOKIE" "$BASE/setup" -o "$TMP/setup.html"; grep -q '设置管理员密码' "$TMP/setup.html"
+          TOKEN=$(grep -o 'name="csrf_token" value="[^"]*"' "$TMP/setup.html"|head -1|sed 's/.*value="\([^"]*\)"/\1/')
+          PASS='OwnerRecoveredInstall-2026!'
+          code=$(curl -sS -b "$COOKIE" -c "$COOKIE" -o "$TMP/done.html" -w '%{http_code}' -H "Origin: $BASE" --data-urlencode "csrf_token=$TOKEN" --data-urlencode username=admin --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup")
+          test "$code" = 200; grep -q '管理员设置完成' "$TMP/done.html"
+          code=$(curl -sS -o "$TMP/login.json" -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $BASE" --data "{\"username\":\"admin\",\"password\":\"$PASS\"}" "$BASE/api/auth/login")
+          test "$code" = 200
+          code=$(curl -sS -o "$TMP/locked.html" -w '%{http_code}' "$BASE/setup"); test "$code" = 404
+          kill $PID; trap - EXIT; rm -rf "$TMP"
+          echo P05_REAL_V115_LEFTOVER_TO_V116=PASS
+      - name: Real test C - existing owner data remains protected
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          ROOT="$(pwd)/build/vf-seo-php-release"
+          TMP="$(mktemp -d)"; export HOME="$TMP/home"; mkdir -p "$HOME"
+          export APP_ENV=development VF_REQUIRE_HTTPS=0 VF_SECURE_COOKIES=0 VF_ADMIN_USERNAME=admin VF_ADMIN_PASSWORD='ProtectedPassword-2026!'
+          php "$ROOT/php/bin/migrate.php" >/dev/null; php "$ROOT/php/bin/bootstrap-admin.php" >/dev/null
+          DB="$HOME/.local/share/vf-seo/vf-seo.sqlite3"; LOCK="$HOME/.config/vf-seo/setup.lock.json"; mkdir -p "$(dirname "$LOCK")"
+          printf '%s\n' '{"project":"P05","version":"1.1.5","installer":"browser-first-v1"}' > "$LOCK"
+          php -r '$p=new PDO("sqlite:".$argv[1]);$p->exec("INSERT INTO projects(id,name,created_at,updated_at) VALUES(\"00000000-0000-4000-8000-000000000099\",\"real\",strftime(\"%Y-%m-%dT%H:%M:%fZ\",\"now\"),strftime(\"%Y-%m-%dT%H:%M:%fZ\",\"now\"))");' "$DB"
+          PORT=19743; BASE="http://127.0.0.1:$PORT"; php -S "127.0.0.1:$PORT" -t "$ROOT" "$ROOT/index.php" >"$TMP/server.log" 2>&1 & PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -rf "$TMP"' EXIT
+          for i in $(seq 1 50); do curl -sS "$BASE/" -o /dev/null 2>/dev/null && break; sleep .1; done
+          code=$(curl -sS -o "$TMP/setup.html" -w '%{http_code}' "$BASE/setup"); test "$code" = 404; test -f "$LOCK"
+          kill $PID; trap - EXIT; rm -rf "$TMP"
+          echo P05_REAL_EXISTING_DATA_PROTECTION=PASS
+      - name: Final receipt
+        run: |
+          echo P05_V116_OWN_ENV_REAL_INSTALL=PASS
+          echo "P05_V116_CANDIDATE=$CANDIDATE_SHA"
