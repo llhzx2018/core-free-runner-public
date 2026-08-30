@@ -1,0 +1,172 @@
+name: P01 Sidebar Productization Gate
+
+on:
+  push:
+    branches: [task/p01-sidebar-productization-gate-20260831]
+    paths:
+      - .github/workflows/p01-sidebar-productization-gate-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: e3ae2c7cf589d2de67b3efeb3bfdab2f632fad8c
+      TREE: a07118c9e4afe03b45343b83489edd8204393662
+      BASE_SOURCE: 96b4c07d7de4eb2fb9d45956d8d207b4edd09fbe
+      CSS_BLOB: f43324ec364d52c8e98e3d2ac8a04dc5c037e686
+      ROOT: /tmp/p01-sidebar
+      PORT: '18347'
+      EVID: /tmp/p01-sidebar-ui
+      COOKIE: /tmp/p01-sidebar.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-domain-nav.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-domain-nav.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_SIDEBAR_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-sidebar-server.log 2>&1 & echo $! >/tmp/p01-sidebar.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-sidebar-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-sidebar-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Sidebar Product Gate' \
+            --data-urlencode 'admin_password=P01Sidebar!Product' \
+            --data-urlencode 'admin_password_confirm=P01Sidebar!Product' \
+            -o /tmp/p01-sidebar-setup-post.html
+          cat >/tmp/p01-sidebar-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-sidebar/app/bootstrap.php';
+          require_once '/tmp/p01-sidebar/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $dev=$r->createCategory(['name'=>'开发工具','description'=>'','is_private'=>false]);
+          $learn=$r->createCategory(['name'=>'学习资料','description'=>'','is_private'=>false]);
+          $channel=$r->createCategory(['name'=>'频道','description'=>'','is_private'=>false]);
+          for($i=1;$i<=18;$i++) $r->saveLink(null,['category_id'=>$i%2?$dev:$learn,'title'=>'Resource '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://resource'.$i.'.example.com','description'=>'workspace resource','tags'=>'工具, 学习','is_private'=>$i%3===0],'manual');
+          for($i=1;$i<=8;$i++){ $x=$r->saveLink(null,['category_id'=>$channel,'title'=>'Channel '.str_pad((string)$i,2,'0',STR_PAD_LEFT),'url'=>'https://youtube.com/@sidebar-'.$i,'description'=>'channel description','tags'=>'频道, 后台听','is_private'=>$i%2===0],'manual'); $s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','surface_note'=>'private note','background_friendly'=>$i%2===0]); }
+          echo "P01_SIDEBAR_SEED=PASS\n";
+          PHP
+          php /tmp/p01-sidebar-seed.php | grep -Fx P01_SIDEBAR_SEED=PASS
+          echo P01_SIDEBAR_RUNTIME=PASS
+
+      - name: Chromium sidebar hierarchy and responsive authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-sidebar-playwright
+          cd /tmp/p01-sidebar-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18347',evid=process.env.EVID,near=(a,b,t=2)=>Math.abs(a-b)<=t;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Sidebar!Product'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const inspect=async()=>page.evaluate(()=>{
+              const sidebar=document.querySelector('.vf-functional-sidebar'),stage=document.querySelector('.vf-app-stage'),scope=document.querySelector('.vf-sidebar-scope'),scopeActive=document.querySelector('.vf-sidebar-scope a.active'),category=document.querySelector('.vf-category-tree a.active,.vf-category-node.active>summary>a'),bottom=document.querySelector('.vf-sidebar-bottom'),bottomLink=bottom?.querySelector('a'),bottomSpan=bottomLink?.querySelector('span'),domain=document.querySelector('.vf-global-domain-nav'),command=document.querySelector('.vf-mobile-command-row');
+              const sr=sidebar?.getBoundingClientRect(),dr=domain?.getBoundingClientRect();
+              return {sidebar:{display:getComputedStyle(sidebar).display,width:sr?.width||0,bg:getComputedStyle(sidebar).backgroundColor},stage:{marginLeft:parseFloat(getComputedStyle(stage).marginLeft)||0},scope:{border:getComputedStyle(scope).borderTopWidth,activeBg:getComputedStyle(scopeActive).backgroundColor,activeShadow:getComputedStyle(scopeActive).boxShadow},category:{weight:getComputedStyle(category).fontWeight,bg:getComputedStyle(category).backgroundColor},bottom:{display:getComputedStyle(bottom).display,columns:getComputedStyle(bottom).gridTemplateColumns,linkFont:getComputedStyle(bottomLink).fontSize,spanFont:getComputedStyle(bottomSpan).fontSize},domain:{display:getComputedStyle(domain).display,pos:getComputedStyle(domain).position,height:dr?.height||0},command:{display:command?getComputedStyle(command).display:'missing'},overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+
+            await page.goto(base+'/channels.php',{waitUntil:'networkidle'}); await page.waitForTimeout(120);
+            let d=await inspect();
+            if(d.sidebar.display==='none'||!near(d.sidebar.width,232)||!near(d.stage.marginLeft,232)||d.scope.border!=='0px'||d.scope.activeShadow!=='none'||d.bottom.display!=='grid'||d.bottom.linkFont!=='0px'||parseFloat(d.bottom.spanFont)<11||d.domain.pos!=='fixed'||!near(d.domain.height,38)||d.overflow>1) throw new Error('desktop 1440 sidebar '+JSON.stringify(d));
+            await page.screenshot({path:evid+'/channels-1440-light.png',fullPage:true});
+            await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(180); await page.screenshot({path:evid+'/channels-1440-dark.png',fullPage:true});
+            await page.evaluate(()=>document.documentElement.dataset.theme='light');
+
+            await page.goto(base+'/start.php',{waitUntil:'networkidle'}); await page.waitForTimeout(120); d=await inspect();
+            if(!near(d.sidebar.width,232)||!near(d.stage.marginLeft,232)||d.category.weight!=='650'||d.overflow>1) throw new Error('start 1440 category hierarchy '+JSON.stringify(d));
+            await page.screenshot({path:evid+'/start-1440-light.png',fullPage:true});
+
+            await page.setViewportSize({width:900,height:820}); await page.goto(base+'/channels.php',{waitUntil:'networkidle'}); await page.waitForTimeout(120); d=await inspect();
+            if(d.sidebar.display==='none'||!near(d.sidebar.width,216)||!near(d.stage.marginLeft,216)||d.overflow>1) throw new Error('desktop 900 sidebar '+JSON.stringify(d));
+            await page.screenshot({path:evid+'/channels-900-light.png',fullPage:true});
+
+            await page.setViewportSize({width:390,height:844}); await page.goto(base+'/channels.php',{waitUntil:'networkidle'}); await page.waitForTimeout(120); d=await inspect();
+            if(d.sidebar.display!=='none'||!near(d.stage.marginLeft,0)||d.domain.display==='none'||d.command.display==='none'||d.overflow>1) throw new Error('mobile authority '+JSON.stringify(d));
+            await page.screenshot({path:evid+'/channels-390-light.png',fullPage:true});
+
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/geometry.json',JSON.stringify(d,null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_SIDEBAR_PRODUCTIZATION=PASS\nSOURCE=e3ae2c7cf589d2de67b3efeb3bfdab2f632fad8c\n');
+            await browser.close(); console.log('P01_SIDEBAR_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_SIDEBAR_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-sidebar-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-sidebar-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-sidebar-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-sidebar-baseline.txt
+          php -r 'require "/tmp/p01-sidebar/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_SIDEBAR_SQLITE=PASS\n";' | grep -Fx P01_SIDEBAR_SQLITE=PASS
+          echo P01_SIDEBAR_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-sidebar-productization-${{ github.run_id }}
+          path: /tmp/p01-sidebar-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_SIDEBAR_SOURCE=$SOURCE
+          echo P01_SIDEBAR_TREE=$TREE
+          echo P01_SIDEBAR_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-sidebar.pid 2>/dev/null)" 2>/dev/null || true
