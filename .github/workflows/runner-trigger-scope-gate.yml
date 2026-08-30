@@ -50,6 +50,47 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Patch bridge origin validation for reverse-proxy HTTPS R2
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/p05-v1111-standard-atomic-builder-bootstrap.py')
+          s=p.read_text()
+          old="""    private static function originAllowed(): bool
+              {
+                  if (strtolower((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')) === 'cross-site') return false;
+                  $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+                  if ($origin === '') return true;
+                  $parts = parse_url($origin);
+                  if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) return false;
+                  $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+                  $originHost = strtolower((string) $parts['host']) . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
+                  return strtolower((string) $parts['scheme']) === (self::isHttps() ? 'https' : 'http') && $originHost === $host;
+              }
+          """
+          new="""    private static function originAllowed(): bool
+              {
+                  $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? ''));
+                  if ($fetchSite === 'cross-site') return false;
+
+                  $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+                  if ($origin === '') return true;
+
+                  $parts = parse_url($origin);
+                  if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) return false;
+                  $scheme = strtolower((string) $parts['scheme']);
+                  if (!in_array($scheme, ['http', 'https'], true)) return false;
+
+                  $requestHost = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
+                  $originHost = strtolower((string) $parts['host']) . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
+                  return $requestHost !== '' && hash_equals($requestHost, $originHost);
+              }
+          """
+          assert old in s, 'origin block not found'
+          p.write_text(s.replace(old,new), encoding='utf-8')
+          PY
+
       - name: Execute P05 standard Atomic artifact gate
         shell: bash
         run: |
@@ -66,11 +107,44 @@ jobs:
           PY
           bash scripts/p05-v1111-standard-atomic-current-gate.sh
 
+      - name: Verify reverse-proxy HTTPS same-origin regression
+        shell: bash
+        run: |
+          php -r '
+          define("P05_ATOMIC_LIBRARY_MODE", true);
+          require "/tmp/p05-atomic/out1/repair-v1.1.11.php";
+          $m = new ReflectionMethod("P05AtomicPackage", "originAllowed");
+          $_SERVER = ["HTTP_SEC_FETCH_SITE"=>"same-origin", "HTTP_ORIGIN"=>"https://seo.kewaro.com", "HTTP_HOST"=>"seo.kewaro.com"];
+          if ($m->invoke(null) !== true) { fwrite(STDERR, "proxy same-origin rejected\n"); exit(1); }
+          $_SERVER = ["HTTP_SEC_FETCH_SITE"=>"cross-site", "HTTP_ORIGIN"=>"https://evil.example", "HTTP_HOST"=>"seo.kewaro.com"];
+          if ($m->invoke(null) !== false) { fwrite(STDERR, "cross-site accepted\n"); exit(1); }
+          $_SERVER = ["HTTP_SEC_FETCH_SITE"=>"same-origin", "HTTP_ORIGIN"=>"https://evil.example", "HTTP_HOST"=>"seo.kewaro.com"];
+          if ($m->invoke(null) !== false) { fwrite(STDERR, "foreign host accepted\n"); exit(1); }
+          echo "P05_ATOMIC_PROXY_ORIGIN_R2=PASS\n";
+          '
+          python3 - <<'PY'
+          import json, pathlib
+          out=pathlib.Path('/tmp/p05-atomic/out1')
+          for name in ['P05-V1.1.11-ATOMIC-METADATA.json','P05-V1.1.11-ATOMIC-GATE.json']:
+              p=out/name
+              x=json.loads(p.read_text())
+              x['proxy_https_same_origin']='PASS'
+              x['distribution_revision']='R2'
+              p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n')
+          PY
+          sha256sum \
+            /tmp/p05-atomic/out1/repair-v1.1.11.php \
+            /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip \
+            /tmp/p05-atomic/out1/atomic-self-test.json \
+            /tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-METADATA.json \
+            /tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-GATE.json \
+            > /tmp/p05-atomic/out1/SHA256SUMS.txt
+
       - name: Upload P05 standard Atomic artifacts
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
         with:
-          name: P05_V1.1.11_STANDARD_ATOMIC_ARTIFACTS_${{ github.event.pull_request.head.sha }}
+          name: P05_V1.1.11_STANDARD_ATOMIC_R2_${{ github.event.pull_request.head.sha }}
           path: |
             /tmp/p05-atomic/out1/repair-v1.1.11.php
             /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip
