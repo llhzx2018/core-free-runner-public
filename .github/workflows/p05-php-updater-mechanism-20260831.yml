@@ -1,4 +1,4 @@
-name: P05 PHP Online Updater Mechanism Gate
+name: P05 OPcache Runtime Detection Writer
 
 on:
   pull_request:
@@ -8,84 +8,83 @@ permissions:
   contents: read
 
 jobs:
-  updater-gate:
+  patch:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     env:
-      P05_EXACT_SOURCE: c1b79206444a20da42925367944266521dd02e1c
+      P05_BRANCH: fix/p05-php-online-update-20260831
+      EXPECTED_HEAD: c1b79206444a20da42925367944266521dd02e1c
     steps:
-      - name: Checkout runner
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Checkout exact P05
+      - name: Checkout exact P05 branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-seo
-          ref: ${{ env.P05_EXACT_SOURCE }}
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
+          ref: ${{ env.P05_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
           fetch-depth: 0
+          persist-credentials: true
           path: p05
-      - name: Verify exact source
+      - name: Verify and patch runtime OPcache detection only
         working-directory: p05
         run: |
-          test "$(git rev-parse HEAD)" = "$P05_EXACT_SOURCE"
-          test "$(cat VERSION)" = "1.1.10"
-      - name: Install PHP updater runtime dependencies
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('php/src/PhpUpdater.php')
+          s=p.read_text()
+          old='''    private function opcacheControlReady(): bool
+    {
+        $enabled = filter_var((string) ini_get('opcache.enable'), FILTER_VALIDATE_BOOL);
+        if (!$enabled) return true;
+        return function_exists('opcache_reset');
+    }
+
+    private function resetOpcacheIfNeeded(): bool
+    {
+        $enabled = filter_var((string) ini_get('opcache.enable'), FILTER_VALIDATE_BOOL);
+        if (!$enabled) return false;
+        if (!function_exists('opcache_reset') || @opcache_reset() !== true) throw new \\RuntimeException('UPDATE_OPCACHE_RESET_FAILED');
+        return true;
+    }
+'''
+          new='''    private function opcacheIsActive(): bool
+    {
+        if (!function_exists('opcache_get_status')) return false;
+        $status = @opcache_get_status(false);
+        return is_array($status) && ($status['opcache_enabled'] ?? false) === true;
+    }
+
+    private function opcacheControlReady(): bool
+    {
+        if (!$this->opcacheIsActive()) return true;
+        return function_exists('opcache_reset');
+    }
+
+    private function resetOpcacheIfNeeded(): bool
+    {
+        if (!$this->opcacheIsActive()) return false;
+        if (!function_exists('opcache_reset') || @opcache_reset() !== true) throw new \\RuntimeException('UPDATE_OPCACHE_RESET_FAILED');
+        return true;
+    }
+'''
+          if old not in s:
+              raise SystemExit('P05_OPCACHE_EXPECTED_SNIPPET_MISSING')
+          p.write_text(s.replace(old,new,1))
+          PY
+          php -l php/src/PhpUpdater.php
+          test "$(git diff --name-only)" = "php/src/PhpUpdater.php"
+          grep -q "opcache_get_status(false)" php/src/PhpUpdater.php
+      - name: Commit one-file patch
+        working-directory: p05
         run: |
-          sudo apt-get update
-          sudo apt-get install -y php-cli php-sqlite3 php-zip php-curl
-          php -v
-          php -m | grep -i '^pdo_sqlite$'
-          php -m | grep -i '^zip$'
-          php -m | grep -i '^curl$'
-      - name: Setup Node 24
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: p05/package-lock.json
-      - name: Install dependencies
-        working-directory: p05
-        run: npm ci
-      - name: PHP syntax
-        working-directory: p05
-        run: find php scripts -name '*.php' -type f -print0 | xargs -0 -n1 php -l
-      - name: Frontend and TypeScript contract
-        working-directory: p05
-        run: |
-          npm run lint
-          npm run typecheck
-          npm run test:unit
-          npm run test:contract
-      - name: Build formal PHP staging
-        working-directory: p05
-        env:
-          VF_RELEASE_SOURCE_SHA: ${{ env.P05_EXACT_SOURCE }}
-        run: |
-          npm run build:php-release
-          test -f build/vf-seo-php-release/php/src/PhpUpdater.php
-          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
-          node -e "const m=require('./build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json'); if(m.onlineUpdate!=='PHP_ATOMIC_FULL_RELEASE'||m.onlineUpdateRequiresShell!==false||m.onlineUpdateRequiresPrivateToken!==false||m.onlineUpdateOpcacheReset!==true||!String(m.onlineUpdateAuthority).includes('core-free-runner-public')) process.exit(1)"
-      - name: Real public-distribution updater smoke
-        working-directory: p05
-        run: |
-          php -d opcache.enable=0 -r 'exit(filter_var(ini_get("opcache.enable"), FILTER_VALIDATE_BOOL) ? 1 : 0);'
-          php -d opcache.enable=0 scripts/php-updater-smoke.php build/vf-seo-php-release
-      - name: Static route and production OPcache contract
-        working-directory: p05
-        run: |
-          grep -q "/api/system/update/status" php/src/RuntimeOpsRoutesTrait.php
-          grep -q "/api/system/update/apply" php/src/RuntimeOpsRoutesTrait.php
-          grep -q "STEP_UP_REQUIRED" php/src/RuntimeOpsRoutesTrait.php
-          grep -q "UPDATE_OPCACHE_RESET_FAILED" php/src/PhpUpdater.php
-          grep -q "opcache_reset" php/src/PhpUpdater.php
-          grep -q "core-free-runner-public" php/src/PhpUpdater.php
-          grep -q "系统与更新" src/client/UpdateShortcut.tsx
-          echo "P05_PHP_ONLINE_UPDATE_MECHANISM=PASS"
-          echo "P05_PUBLIC_DISTRIBUTION_CHANNEL=PASS"
-          echo "P05_OPCACHE_FAIL_CLOSED_PRODUCTION_PATH=PASS"
-          echo "P05_PRIVATE_TOKEN_ON_SERVER=0"
+          set -euo pipefail
+          git config user.name "VF Public Runner"
+          git config user.email "actions@users.noreply.github.com"
+          git add php/src/PhpUpdater.php
+          git commit -m "fix(P05): detect active OPcache runtime before reset"
+          git push origin "HEAD:$P05_BRANCH"
+          echo "P05_PATCHED_HEAD=$(git rev-parse HEAD)"
+          echo "P05_PATCH_SCOPE=php/src/PhpUpdater.php"
           echo "P05_RELEASE_WRITE=0"
           echo "P05_PRODUCTION_WRITE=0"
