@@ -35,7 +35,8 @@ try{
         csrfLength:String(payload.csrf||'').length,
         assetKeys:Object.keys(payload.assets||{}).length,
         bulkbar:!!document.querySelector('[data-bulkbar]'),
-        bulkPublic:!!document.querySelector('[data-bulk-visibility="public"]'),
+        bulkPrivacy:!!document.querySelector('[data-bulk-privacy]'),
+        legacyBulkVisibility:document.querySelectorAll('[data-bulk-visibility]').length,
         globalPlaceholder:document.querySelector('.vf-global-search input[name="q"]')?.getAttribute('placeholder')||'',
         scripts:Array.from(document.scripts).map(s=>s.src||'[inline]').filter(Boolean),
       };
@@ -50,9 +51,8 @@ try{
   if(!state.url.includes('/surfaces.php'))throw new Error('owner route lost '+state.url);
   if(!state.payloadNode||state.csrfLength<8)throw new Error('owner payload/csrf missing '+JSON.stringify(state));
   if(!state.bulkbar)throw new Error('bulkbar missing '+JSON.stringify(state));
-  if(!state.bulkPublic){
-    throw new Error('bulk enhancement missing '+JSON.stringify({state,events}));
-  }
+  if(!state.bulkPrivacy)throw new Error('converged bulk privacy selector missing '+JSON.stringify({state,events}));
+  if(state.legacyBulkVisibility!==0)throw new Error('legacy bulk visibility buttons survived convergence '+JSON.stringify(state));
 
   const desktopSearch=page.locator('.vf-global-search input[name="q"]');
   if(await desktopSearch.getAttribute('placeholder')!=='搜索全部资源')throw new Error('desktop search not global');
@@ -68,18 +68,18 @@ try{
   const synthetic=await page.locator('[data-cross-page-selection]').count();
   if(selected!==423||synthetic!==323)throw new Error('cross-page selection '+JSON.stringify({selected,synthetic}));
   if(!(await visible('[data-bulk-category]')))throw new Error('navigation category bulk capability hidden');
-  if(!(await visible('[data-bulk-visibility="public"]')))throw new Error('public bulk action hidden');
+  if(!(await visible('[data-bulk-privacy]')))throw new Error('bulk privacy selector hidden');
   await expectNoOverflow('desktop bulk');
   await page.screenshot({path:evidence+'/desktop-cross-page-bulk.png',fullPage:true});
 
   const [bulkResponse]=await Promise.all([
-    page.waitForResponse(r=>r.url().includes('/workspace-action.php')&&r.request().method()==='POST'),
-    page.locator('[data-bulk-visibility="public"]').click(),
+    page.waitForResponse(r=>r.url().includes('/workspace-visibility-action.php')&&r.request().method()==='POST'),
+    page.locator('[data-bulk-privacy]').selectOption('public'),
   ]);
   const bulkBody=await bulkResponse.text();
   fs.writeFileSync(evidence+'/bulk-response.txt',`HTTP=${bulkResponse.status()}\n${bulkBody}\n`);
-  if(!bulkResponse.ok())throw new Error('bulk visibility http '+bulkResponse.status());
-  await page.waitForTimeout(400);
+  if(!bulkResponse.ok())throw new Error('bulk privacy http '+bulkResponse.status());
+  await page.waitForTimeout(450);
 
   await page.goto(base+'/start.php?category='+ids.dev+'&per=100',{waitUntil:'networkidle'});
   const q=page.locator('.vf-global-search input[name="q"]');
@@ -135,8 +135,9 @@ try{
   await page.screenshot({path:evidence+'/mobile-home.png',fullPage:true});
 
   await snapshot('browser-final-diagnostic');
-  fs.writeFileSync(evidence+'/browser-result.txt','P01_L2_BROWSER=PASS\n');
+  fs.writeFileSync(evidence+'/browser-result.txt','P01_L2_BROWSER=PASS\nP01_L2_BULK_PRIVACY_CONVERGENCE=PASS\n');
   console.log('P01_L2_BROWSER=PASS');
+  console.log('P01_L2_BULK_PRIVACY_CONVERGENCE=PASS');
 } catch(error){
   fs.writeFileSync(evidence+'/browser-error.txt',String(error?.stack||error)+'\n');
   fs.writeFileSync(evidence+'/browser-events.json',JSON.stringify(events,null,2));
