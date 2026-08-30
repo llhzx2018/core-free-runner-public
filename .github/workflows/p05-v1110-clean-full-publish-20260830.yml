@@ -1,0 +1,288 @@
+name: P05 V1.1.10 Clean FULL Publish
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_MAIN_SOURCE: cc8927d4b2d7c558b7803318abf311e2d145e829
+      P05_VERIFIED_TREE: 900900bc7cb16e8dab9554e64b3282c19819d28d
+      P05_CANDIDATE_SOURCE: e65d59e89487cd0748cfd5e9ad714b3a4c19c03f
+      P05_FINAL_EXACT_RUN: '33317247019'
+      P05_FINAL_EXACT_JOB: '99272835058'
+      VERSION: 1.1.10
+      ASSET: VF_SEO_V1.1.10_FULL.zip
+      RECEIPT: VF_SEO_V1.1.10_RELEASE_RECEIPT.txt
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+    steps:
+      - name: Checkout exact P05 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: cc8927d4b2d7c558b7803318abf311e2d145e829
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+
+      - name: Verify exact main and tree-equivalent promotion
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_MAIN_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_VERIFIED_TREE"
+          test "$(git rev-parse "$P05_CANDIDATE_SOURCE^{tree}")" = "$P05_VERIFIED_TREE"
+          test "$(cat VERSION)" = "$VERSION"
+          node - <<'NODE'
+          const p=require('./package.json'), l=require('./package-lock.json'), v=require('./VF_PROJECT.json');
+          const x=process.env.VERSION;
+          if(p.version!==x||l.version!==x||l.packages[''].version!==x) process.exit(1);
+          if(v.version!==x||v.target_version!==x||v.working_version!==x) process.exit(1);
+          if(v.production_deployment!=='NOT_DEPLOYED'||v.production_write!==0) process.exit(1);
+          const r=v.v1_1_10_runtime_pointer_install_fix;
+          if(!r||r.pointer_created!=='AFTER_SUCCESSFUL_SETUP_ONLY'||r.private_state_isolation!=='POINTER_BOUND_RANDOM_SIBLING') process.exit(1);
+          NODE
+          test ! -e VF_INSTALL_INSTANCE.json
+          test ! -e .vf-seo-site-instance.json
+          echo "P05_MAIN_SOURCE=$P05_MAIN_SOURCE"
+          echo "P05_VERIFIED_TREE=$P05_VERIFIED_TREE"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Complete engineering and security regression
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run test:integration
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          if [ -f scripts/security-gate.mjs ]; then
+            npm run dependency:gate
+            npm audit --audit-level=high
+            npm run security:gate
+          fi
+
+      - name: PHP compatibility and path authority regression
+        working-directory: p05
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-v1110-publish-ci.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-v1110-publish-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -euo pipefail
+          php -v
+          php -r 'if (!extension_loaded("pdo_sqlite")) { fwrite(STDERR,"missing php extension: pdo_sqlite\n"); exit(1); }'
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          php -r '$db=new PDO("sqlite:".getenv("VF_SQLITE_PATH")); $v=$db->query("SELECT password_hash FROM admins LIMIT 1")->fetchColumn(); if (!str_starts_with($v,"pbkdf2-sha256$310000$")) exit(1); echo "php sqlite/admin: PASS\n";'
+          bash php/tests/http-smoke.sh
+          test ! -e php/src/FreshInstallRecovery.php
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+
+      - name: Build formal test staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run build:php-release
+          npm run php:release:gate
+          STAGING=build/vf-seo-php-release
+          test ! -e "$STAGING/VF_INSTALL_INSTANCE.json"
+          test ! -e "$STAGING/.vf-seo-site-instance.json"
+          test ! -e "$STAGING/.vf-seo-installing.lock"
+          test -z "$(find "$STAGING" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '*.wal' -o -name '*.shm' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+          find "$STAGING" -type f | sort > /tmp/test-staging-before.txt
+          while IFS= read -r file; do sha256sum "$file"; done < /tmp/test-staging-before.txt > /tmp/test-staging-before.sha
+
+      - name: Browser pointer-last and dirty-state reinstall regression
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          STAGING=build/vf-seo-php-release
+          VF_INSTALL_ROOT="$STAGING" bash php/tests/browser-install-smoke.sh
+          VF_INSTALL_ROOT="$STAGING" bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT="$STAGING" python3 php/tests/browser-install-e2e.py
+          test ! -e "$STAGING/VF_INSTALL_INSTANCE.json"
+          test ! -e "$STAGING/.vf-seo-site-instance.json"
+
+      - name: Prove formal test staging remained byte-identical
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          STAGING=build/vf-seo-php-release
+          find "$STAGING" -type f | sort > /tmp/test-staging-after.txt
+          while IFS= read -r file; do sha256sum "$file"; done < /tmp/test-staging-after.txt > /tmp/test-staging-after.sha
+          cmp /tmp/test-staging-before.txt /tmp/test-staging-after.txt
+          cmp /tmp/test-staging-before.sha /tmp/test-staging-after.sha
+
+      - name: Rebuild pristine release staging after all tests
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          rm -rf build/vf-seo-php-release dist/client
+          npm run build:php-release
+          npm run php:release:gate
+          STAGING=build/vf-seo-php-release
+          test ! -e "$STAGING/VF_INSTALL_INSTANCE.json"
+          test ! -e "$STAGING/.vf-seo-site-instance.json"
+          test ! -e "$STAGING/.vf-seo-installing.lock"
+          test ! -e "$STAGING/.env"
+          test ! -e "$STAGING/php/src/FreshInstallRecovery.php"
+          test -z "$(find "$STAGING" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '*.wal' -o -name '*.shm' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+          find "$STAGING" -type f | sort > /tmp/release-staging-files.txt
+          while IFS= read -r file; do sha256sum "$file"; done < /tmp/release-staging-files.txt > /tmp/release-staging.sha
+
+      - name: Deterministic pristine FULL build
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          import os
+          root=Path('build/vf-seo-php-release')
+          asset=os.environ['ASSET']
+          def build(out):
+              with ZipFile(out,'w') as z:
+                  for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                      rel=p.relative_to(root).as_posix()
+                      info=ZipInfo(rel,(1980,1,1,0,0,0))
+                      mode=p.stat().st_mode & 0o777
+                      info.external_attr=(mode & 0xFFFF) << 16
+                      info.compress_type=ZIP_DEFLATED
+                      z.writestr(info,p.read_bytes(),compress_type=ZIP_DEFLATED,compresslevel=9)
+          build('../'+asset+'.a')
+          build('../'+asset+'.b')
+          PY
+          cmp "../$ASSET.a" "../$ASSET.b"
+          mv "../$ASSET.a" "../$ASSET"
+          rm "../$ASSET.b"
+          python3 - <<'PY'
+          from zipfile import ZipFile
+          import os
+          asset='../'+os.environ['ASSET']
+          forbidden={'VF_INSTALL_INSTANCE.json','.vf-seo-site-instance.json','.vf-seo-installing.lock','.env'}
+          with ZipFile(asset) as z:
+              names=z.namelist()
+              assert not forbidden.intersection(names), forbidden.intersection(names)
+              assert not any(n.endswith(('.sqlite','.sqlite3','.db','.wal','.shm')) for n in names)
+              assert not any(n.endswith('/setup.lock.json') or n.endswith('/runtime.env') for n in names)
+              assert not any('.vfseo-data-' in n for n in names)
+              assert 'php/src/FreshInstallRecovery.php' not in names
+          print('P05_FINAL_ZIP_RUNTIME_STATE=ABSENT')
+          PY
+          sha="$(sha256sum "../$ASSET" | awk '{print $1}')"
+          bytes="$(stat -c '%s' "../$ASSET")"
+          files="$(find build/vf-seo-php-release -type f | wc -l | tr -d ' ')"
+          zip_files="$(python3 -c 'from zipfile import ZipFile; import os; print(len(ZipFile("../"+os.environ["ASSET"]).namelist()))')"
+          test "$files" = "$zip_files"
+          printf 'P05_VERSION=%s\nP05_MAIN_SOURCE=%s\nP05_TREE=%s\nP05_CANDIDATE_SOURCE=%s\nP05_FINAL_EXACT_RUN=%s\nP05_FINAL_EXACT_JOB=%s\nP05_FILES=%s\nP05_BYTES=%s\nP05_SHA256=%s\nINSTALL_IDENTITY_AUTHORITY=WEBROOT_RUNTIME_POINTER\nRUNTIME_POINTER=VF_INSTALL_INSTANCE.json\nPOINTER_CREATED=AFTER_SUCCESSFUL_SETUP_ONLY\nPRIVATE_STATE_ISOLATION=POINTER_BOUND_RANDOM_SIBLING\nFRESH_INSTALL_USES_HOME=FALSE\nFRESH_INSTALL_USES_STORAGE_ENV=FALSE\nDIRTY_STATE_FULL_DELETE_REINSTALL=PASS\nFORMAL_TEST_STAGING_IMMUTABLE=PASS\nPOST_TEST_PRISTINE_REBUILD=PASS\nCHROME_E2E=PASS\nPRODUCTION=NOT_DEPLOYED\n' "$VERSION" "$P05_MAIN_SOURCE" "$P05_VERIFIED_TREE" "$P05_CANDIDATE_SOURCE" "$P05_FINAL_EXACT_RUN" "$P05_FINAL_EXACT_JOB" "$files" "$bytes" "$sha" > "../$RECEIPT"
+          echo "P05_FILES=$files" >> "$GITHUB_ENV"
+          echo "P05_BYTES=$bytes" >> "$GITHUB_ENV"
+          echo "P05_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd p05
+          test -f "../$ASSET"
+          test -f "../$RECEIPT"
+          if gh release view "v$VERSION" --repo llhzx2018/vf-seo >/dev/null 2>&1; then
+            echo "release v$VERSION already exists" >&2
+            exit 1
+          fi
+          gh release create "v$VERSION" \
+            --repo llhzx2018/vf-seo \
+            --target "$P05_MAIN_SOURCE" \
+            --title 'P05 · VF SEO v1.1.10 · Runtime Pointer Install Model' \
+            --notes 'Replaces fresh-install heuristics with the same runtime-pointer principle used by the mature VF products. A Webroot without VF_INSTALL_INSTANCE.json is always fresh; simply opening the site does not create the pointer. The pointer is committed only after owner creation, SQLite initialization, and final self-test, and binds a random sibling private directory. Fresh installs no longer discover storage through HOME/POSIX-home or VF_SQLITE_PATH/VF_BACKUP_DIR. Full-delete/re-extract is verified against intentionally dirty historical SQLite/admin/login/business data, which remains preserved but is never auto-adopted. Formal Browser/Chrome tests run on isolated copies, staging is proven byte-identical, and this FULL is rebuilt pristine from exact main after all tests. Production remains NOT_DEPLOYED.' \
+            "../$ASSET" "../$RECEIPT"
+
+      - name: Remote release readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/llhzx2018/vf-seo/releases/tags/v$VERSION" > /tmp/release.json
+          python3 - <<'PY'
+          import json, os
+          r=json.load(open('/tmp/release.json'))
+          assert r['tag_name']=='v'+os.environ['VERSION']
+          assert r['target_commitish']==os.environ['P05_MAIN_SOURCE']
+          assets={a['name']:a for a in r['assets']}
+          a=assets[os.environ['ASSET']]
+          receipt=assets[os.environ['RECEIPT']]
+          assert int(a['size'])==int(os.environ['P05_BYTES'])
+          digest=a.get('digest')
+          if digest is not None:
+              assert digest=='sha256:'+os.environ['P05_SHA256'], (digest,os.environ['P05_SHA256'])
+          print('P05_RELEASE_ID='+str(r['id']))
+          print('P05_ASSET_ID='+str(a['id']))
+          print('P05_RECEIPT_ASSET_ID='+str(receipt['id']))
+          print('P05_REMOTE_DIGEST='+str(digest))
+          print('P05_V1110_RELEASE_REMOTE_READBACK=PASS')
+          PY
+
+      - name: Machine receipt
+        run: |
+          echo 'P05_V1110_FORMAL_RELEASE=PASS'
+          echo "P05_MAIN_SOURCE=$P05_MAIN_SOURCE"
+          echo "P05_VERIFIED_TREE=$P05_VERIFIED_TREE"
+          echo "P05_FILES=$P05_FILES"
+          echo "P05_BYTES=$P05_BYTES"
+          echo "P05_SHA256=$P05_SHA256"
+          echo 'WEBROOT_RUNTIME_POINTER_AUTHORITY=PASS'
+          echo 'POINTER_CREATED_AFTER_SETUP_ONLY=PASS'
+          echo 'POINTER_BOUND_RANDOM_SIBLING=PASS'
+          echo 'DIRTY_STATE_FULL_DELETE_REINSTALL=PASS'
+          echo 'FORMAL_TEST_STAGING_IMMUTABLE=PASS'
+          echo 'POST_TEST_PRISTINE_REBUILD=PASS'
+          echo 'CHROME_E2E=PASS'
+          echo 'PRODUCTION_WRITE=0'
