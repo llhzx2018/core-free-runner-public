@@ -1,0 +1,103 @@
+name: P01 Mobile Toolbar Density Gate
+
+on:
+  push:
+    branches:
+      - task/p01-mobile-toolbar-density-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      EVID: /tmp/p01-mobile-toolbar-density
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: 52f59f9952c43162df3a2209841aea4e79283270
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p01
+
+      - name: Exact source and one-file scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C p01 rev-parse HEAD)" = 52f59f9952c43162df3a2209841aea4e79283270
+          test "$(git -C p01 rev-parse HEAD:src/assets/resource-actions.css)" = aa61c41f2bfea3b59b087b0ddd93105bf66699c0
+          test "$(git -C p01 diff --name-only 346e8acdedbbcad800126df7035fa01cd643151e..HEAD)" = "src/assets/resource-actions.css"
+          git -C p01 diff --check 346e8acdedbbcad800126df7035fa01cd643151e..HEAD
+          echo P01_MOBILE_TOOLBAR_SCOPE=PASS | tee "$EVID/source.txt"
+
+      - name: Build actual toolbar fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l p01/src/app/FunctionalWorkspaceShell.php
+          php -r '
+            require "p01/src/app/FunctionalHome.php";
+            $ctx=["mode"=>"start","view"=>"all","sort"=>"default","per"=>50,"density"=>"comfortable","layout"=>"list","background"=>false,"discover"=>false,"status"=>"","status_counts"=>[],"favorite_count"=>4];
+            ob_start();
+            echo "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+            foreach(["surfaces.css","surface-workspace.css","workspace-v228.css","workspace-rebaseline.css","resource-media.css","workspace-domain-nav.css"] as $css) echo "<link rel=\"stylesheet\" href=\"assets/$css\">";
+            echo "<style>.gate .vf-workspace-toolbar{position:relative!important;top:auto!important}.gate{margin-bottom:24px}.gate>h2{font:600 12px system-ui;margin:0 0 6px;color:#667085}</style></head><body class=\"vf-surface-app vf-workspace-page vf-functional-workspace surface-start\"><main class=\"vf-shell-main\">";
+            echo "<div class=\"gate\" id=\"admin-gate\"><h2>Admin</h2>"; vf_fw_render_toolbar($ctx+["admin"=>true]); echo "</div>";
+            echo "<div class=\"gate\" id=\"public-gate\"><h2>Public</h2>"; vf_fw_render_toolbar($ctx+["admin"=>false]); echo "</div>";
+            echo "</main></body></html>";
+            file_put_contents("p01/src/mobile-toolbar-density-fixture.html",ob_get_clean());
+          '
+          python3 -m http.server 8129 --directory p01/src >/tmp/p01-toolbar-http.log 2>&1 &
+
+      - name: Chromium 390 360 320 single-row gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > /tmp/p01-toolbar-density.cjs <<'EOF'
+          const {chromium}=require('/tmp/node_modules/playwright');
+          const fs=require('fs');
+          const evid=process.env.EVID;
+          const inspect=()=>{
+            const one=id=>{
+              const root=document.querySelector(id+' .vf-toolbar-controls');
+              const visible=[...root.children].filter(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();return s.display!=='none'&&r.width>0&&r.height>0});
+              const rects=visible.map(el=>{const r=el.getBoundingClientRect();return {tag:el.tagName,text:(el.textContent||'').trim(),label:el.getAttribute('aria-label')||'',left:r.left,top:r.top,width:r.width,height:r.height,display:getComputedStyle(el).display}});
+              const tops=rects.map(x=>x.top); const selectWidths=rects.filter(x=>x.tag==='SELECT').map(x=>x.width);
+              return {count:visible.length,rects,rowSpread:Math.max(...tops)-Math.min(...tops),selectWidths,clientWidth:root.clientWidth,scrollWidth:root.scrollWidth};
+            };
+            return {admin:one('#admin-gate'),public:one('#public-gate'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+          };
+          (async()=>{
+            const b=await chromium.launch({headless:true}); const p=await b.newPage({viewport:{width:390,height:844}});
+            await p.goto('http://127.0.0.1:8129/mobile-toolbar-density-fixture.html',{waitUntil:'networkidle'});
+            const results={};
+            for(const width of [390,360,320]){
+              await p.setViewportSize({width,height:844}); await p.waitForTimeout(60); const x=await p.evaluate(inspect); results[width]=x;
+              if(x.admin.count!==4||x.public.count!==3) throw new Error('visible control count regression '+width+' '+JSON.stringify(x));
+              if(x.admin.rowSpread>1.5||x.public.rowSpread>1.5) throw new Error('toolbar wrapped '+width+' '+JSON.stringify(x));
+              if(x.admin.selectWidths.some(v=>v<82)||x.public.selectWidths.some(v=>v<82)) throw new Error('select too narrow '+width+' '+JSON.stringify(x));
+              if(x.admin.scrollWidth>x.admin.clientWidth+1||x.public.scrollWidth>x.public.clientWidth+1||x.overflow>1) throw new Error('toolbar overflow '+width+' '+JSON.stringify(x));
+              if(width===390) await p.screenshot({path:evid+'/mobile-toolbar-390.png',fullPage:true});
+              if(width===320) await p.screenshot({path:evid+'/mobile-toolbar-320.png',fullPage:true});
+            }
+            fs.writeFileSync(evid+'/geometry.json',JSON.stringify(results,null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_MOBILE_TOOLBAR_DENSITY=PASS\nSOURCE=52f59f9952c43162df3a2209841aea4e79283270\n');
+            await b.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          EOF
+          EVID="$EVID" node /tmp/p01-toolbar-density.cjs
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-toolbar-density-${{ github.run_id }}
+          path: /tmp/p01-mobile-toolbar-density
+          if-no-files-found: error
