@@ -59,12 +59,14 @@ file_put_contents(getenv('EVID').'/update.json',json_encode(['check'=>$c,'prepar
 PHP
 ROOT="$ROOT" EVID="$EVID" php /tmp/p01-v2340-final-update.php | grep -Fx REMOTE_UPDATE_PASS
 
-# 4. Post-upgrade exact version/schema/data/integrity/runtime bytes.
+# 4. Post-upgrade exact version/schema/data/integrity and byte-for-byte V2.34 runtime binding.
 test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.34.0
 grep -F "define('VF_VERSION', '2.34.0')" "$ROOT/app/bootstrap.php" >/dev/null
-test -f "$ROOT/assets/workspace-primary-open.js"
-grep -F 'data-bulk-privacy' "$ROOT/assets/surface-home.js" >/dev/null
-grep -F 'recent_window' "$ROOT/app/FunctionalWorkspace.php" >/dev/null
+test "$(git -C production rev-parse v2.34.0)" = 518d10f446ea85445d1110a3defafc5bcbece473
+for f in VERSION.txt app/FunctionalWorkspace.php app/SurfaceShell.php app/bootstrap.php assets/surface-home.js assets/workspace-create-bundle.js assets/workspace-primary-open.js assets/workspace-rebaseline.js assets/workspace.js cli/surface-verify.php workspace-action.php; do
+  cmp <(git -C production show "v2.34.0:src/$f") "$ROOT/$f"
+done
+echo P01_V2340_REMOTE_RUNTIME_BYTES_MATCH_TAG=PASS | tee "$EVID/runtime-bytes.txt"
 php "$ROOT/cli/verify.php" | tee "$EVID/post-verify.txt" | grep -Fx VERIFY_PASS=YES
 php "$ROOT/cli/surface-verify.php" | tee "$EVID/post-surface-verify.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
 cat >/tmp/p01-v2340-final-post.php <<'PHP'
