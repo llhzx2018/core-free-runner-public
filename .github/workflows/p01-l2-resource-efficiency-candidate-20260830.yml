@@ -1,0 +1,198 @@
+name: P01 L2 Resource Efficiency Exact Candidate Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-l2-resource-efficiency-candidate-20260830.yml
+      - .github/scripts/p01-l2-resource-efficiency-candidate-20260830.sh
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 25dd705582a6f2c0c06a3f52c32c780c2268b5fa
+      TREE: d44882648a101e314ba66a66eb8b7f72ec67b283
+      BASELINE: 2733f9687a9f72d740b6289d938a9f0e01e62e4f
+      ROOT: /tmp/p01-l2-resource-efficiency
+      COOKIE: /tmp/p01-l2-resource-efficiency.cookies
+      EVIDENCE: /tmp/p01-l2-resource-efficiency-evidence
+      PORT: '18342'
+
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: runner
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source, fresh runtime and machine regression
+        run: bash runner/.github/scripts/p01-l2-resource-efficiency-candidate-20260830.sh
+
+      - name: Browser interaction and responsive UI gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-l2-ui "$EVIDENCE"
+          cd /tmp/p01-l2-ui
+          npm init -y >/dev/null 2>&1
+          npm install playwright >/dev/null 2>&1
+          npx playwright install chromium >/dev/null 2>&1
+          cat > gate.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          (async()=>{
+            const base='http://127.0.0.1:18342';
+            const evidence='/tmp/p01-l2-resource-efficiency-evidence';
+            const ids=JSON.parse(fs.readFileSync('/tmp/p01-l2-ids.json','utf8'));
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01L2!Resource'}});
+            if(!login.ok())throw new Error('login http '+login.status());
+            const loginBody=await login.json();
+            if(!loginBody.ok)throw new Error('login rejected');
+            const page=await context.newPage();
+
+            const expectNoOverflow=async(label)=>{
+              const state=await page.evaluate(()=>({doc:document.documentElement.scrollWidth,win:window.innerWidth}));
+              if(state.doc>state.win+2)throw new Error(label+' overflow '+JSON.stringify(state));
+            };
+            const visible=async selector=>await page.locator(selector).evaluate(el=>el.getClientRects().length>0&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none');
+
+            await page.goto(base+'/surfaces.php?per=100',{waitUntil:'networkidle'});
+            await page.waitForFunction(()=>document.querySelector('[data-bulk-visibility="public"]'));
+            const desktopSearch=page.locator('.vf-global-search input[name="q"]');
+            if(await desktopSearch.getAttribute('placeholder')!=='搜索全部资源')throw new Error('desktop search not global');
+            await page.keyboard.press('Control+K');
+            if(!(await desktopSearch.evaluate(el=>document.activeElement===el)))throw new Error('desktop ctrl+k target');
+            await page.locator('[data-select-all]').check();
+            const allResults=page.locator('[data-select-all-results]');
+            await allResults.waitFor({state:'visible'});
+            if(!(await allResults.textContent()).includes('423'))throw new Error('all-results CTA count');
+            await allResults.click();
+            await page.waitForFunction(()=>document.querySelectorAll('[data-select-asset]:checked').length===423);
+            const selected=await page.locator('[data-select-asset]:checked').count();
+            const synthetic=await page.locator('[data-cross-page-selection]').count();
+            if(selected!==423||synthetic!==323)throw new Error('cross-page selection '+JSON.stringify({selected,synthetic}));
+            if(!(await visible('[data-bulk-category]')))throw new Error('navigation category bulk capability hidden');
+            if(!(await visible('[data-bulk-visibility="public"]')))throw new Error('public bulk action hidden');
+            await expectNoOverflow('desktop bulk');
+            await page.screenshot({path:evidence+'/desktop-cross-page-bulk.png',fullPage:true});
+
+            const [bulkResponse]=await Promise.all([
+              page.waitForResponse(r=>r.url().includes('/workspace-action.php')&&r.request().method()==='POST'),
+              page.locator('[data-bulk-visibility="public"]').click(),
+            ]);
+            if(!bulkResponse.ok())throw new Error('bulk visibility http '+bulkResponse.status());
+            await page.waitForTimeout(350);
+
+            await page.goto(base+'/start.php?category='+ids.dev+'&per=100',{waitUntil:'networkidle'});
+            const q=page.locator('.vf-global-search input[name="q"]');
+            await q.fill('Needle Resource 423');
+            await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),q.press('Enter')]);
+            const u=new URL(page.url());
+            if(!u.pathname.endsWith('/surfaces.php')||u.searchParams.get('q')!=='Needle Resource 423'||u.searchParams.has('category'))throw new Error('global search routing '+u.toString());
+            if(!(await page.locator('.vf-workspace-count').textContent()).includes('1 项'))throw new Error('global search result count');
+            await page.screenshot({path:evidence+'/desktop-global-search.png',fullPage:true});
+
+            for(const [window,count] of [['7',1],['30',2],['90',3],['all',4]]){
+              const url=window==='all'?base+'/surfaces.php?view=recent':base+'/surfaces.php?view=recent&recent_window='+window;
+              await page.goto(url,{waitUntil:'networkidle'});
+              const text=await page.locator('.vf-workspace-count').textContent();
+              if(!text.includes(count+' 项'))throw new Error('recent '+window+' count '+text);
+              const select=page.locator('select[aria-label="最近使用时间范围"]');
+              await select.waitFor();
+              if(await page.locator('[data-recent-age]').count()<1)throw new Error('recent age missing '+window);
+            }
+            await page.screenshot({path:evidence+'/desktop-recent-all.png',fullPage:true});
+
+            await page.setViewportSize({width:900,height:900});
+            await page.goto(base+'/start.php?per=100',{waitUntil:'networkidle'});
+            const categorySearch=page.locator('.vf-category-search input[data-category-search]');
+            await categorySearch.waitFor();
+            if(!(await visible('.vf-category-search')))throw new Error('900 category search hidden');
+            await categorySearch.fill('AI');
+            await page.waitForTimeout(60);
+            const hiddenNodes=await page.locator('[data-category-node][data-filter-hidden="1"]').count();
+            if(hiddenNodes<2)throw new Error('category filtering not applied');
+            if(!(await page.locator('[data-category-node]',{hasText:'AI 资料'}).first().isVisible()))throw new Error('AI category not visible');
+            await expectNoOverflow('900 category search');
+            await page.screenshot({path:evidence+'/narrow-category-search.png',fullPage:true});
+
+            await page.setViewportSize({width:390,height:844});
+            await page.goto(base+'/surfaces.php?per=30',{waitUntil:'networkidle'});
+            const mobileSearch=page.locator('.vf-mobile-command-search input[name="q"]');
+            await mobileSearch.waitFor();
+            if(!(await visible('.vf-mobile-command-search input[name="q"]')))throw new Error('mobile search hidden');
+            if(await mobileSearch.getAttribute('placeholder')!=='搜索全部资源')throw new Error('mobile search not global');
+            await page.keyboard.press('Control+K');
+            if(!(await mobileSearch.evaluate(el=>document.activeElement===el)))throw new Error('mobile ctrl+k target');
+            await expectNoOverflow('390 workspace');
+            await page.screenshot({path:evidence+'/mobile-visible-search.png',fullPage:true});
+
+            await page.goto(base+'/home.php',{waitUntil:'networkidle'});
+            const homeMobile=page.locator('.vf-home-mobile-command form input[name="q"]');
+            if(await homeMobile.count()){
+              if(!(await visible('.vf-home-mobile-command form input[name="q"]')))throw new Error('home mobile search hidden');
+              await page.keyboard.press('Control+K');
+              if(!(await homeMobile.evaluate(el=>document.activeElement===el)))throw new Error('home ctrl+k target');
+            }
+            await expectNoOverflow('390 home');
+            await page.screenshot({path:evidence+'/mobile-home.png',fullPage:true});
+
+            await browser.close();
+            console.log('P01_L2_BROWSER=PASS');
+          })().catch(error=>{console.error(error);process.exit(1)});
+          JS
+          node gate.js | tee "$EVIDENCE/browser-result.txt"
+          grep -Fx 'P01_L2_BROWSER=PASS' "$EVIDENCE/browser-result.txt"
+
+      - name: Verify bulk visibility mutation and final database integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r 'require "/tmp/p01-l2-resource-efficiency/app/bootstrap.php";$db=vf_db();$total=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn();$pub=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_private=0")->fetchColumn();if($total!==423||$pub!==423){fwrite(STDERR,"total=$total public=$pub\n");exit(1);}if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(2);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(3);echo "P01_L2_BULK_VISIBILITY=PASS\n";' | tee "$EVIDENCE/database-result.txt"
+          grep -Fx 'P01_L2_BULK_VISIBILITY=PASS' "$EVIDENCE/database-result.txt"
+
+      - name: Record exact candidate verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo 'P01_L2_RESOURCE_EFFICIENCY_CANDIDATE=PASS'
+            echo "SOURCE=$SOURCE"
+            echo "TREE=$TREE"
+            echo 'VERSION=2.33.0'
+            echo 'SCHEMA=2026082901'
+            echo 'RELEASE=NO'
+            echo 'PRODUCTION=NO'
+          } | tee "$EVIDENCE/verdict.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: P01-L2-resource-efficiency-candidate-evidence
+          path: /tmp/p01-l2-resource-efficiency-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-l2-server.pid 2>/dev/null)" 2>/dev/null || true
