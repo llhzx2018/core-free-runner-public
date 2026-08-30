@@ -1,0 +1,109 @@
+name: P05 V1.1.2 Publish Release
+
+on:
+  push:
+    branches:
+      - release/p05-v1.1.2-orchestrator-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.2-publish-release.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: llhzx2018/vf-seo
+      P05_MAIN_SHA: 37c2f50b178c18feed26cbb82a6abc5bb9fc576b
+      P05_EXPECTED_TREE: 644136d1c486d67f1b3f4bde87b0e4e4b7cee9f4
+      RELEASE_TAG: v1.1.2
+      RELEASE_ASSET: VF_SEO_V1.1.2_FULL.zip
+      RECEIPT_ASSET: VF_SEO_V1.1.2_RELEASE_RECEIPT.txt
+      EXPECTED_SHA256: 34c9a88e01197eb6f4ee8943c33d38f832246e72e965e574c9766dbf5ace15fa
+      EXPECTED_BYTES: '231699'
+      SOURCE_RUN: '33304335080'
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Verify release write token
+        run: test -n "$GH_TOKEN" || { echo TOKEN_MISSING; exit 78; }
+
+      - name: Download exact main release artifact
+        env:
+          PUBLIC_GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf payload
+          mkdir payload
+          GH_TOKEN="$PUBLIC_GH_TOKEN" gh run download "$SOURCE_RUN" --repo llhzx2018/core-free-runner-public --name P05_V1.1.2_MAIN_RELEASE --dir payload
+          test -f "payload/$RELEASE_ASSET"
+          test -f "payload/$RECEIPT_ASSET"
+          test "$(sha256sum "payload/$RELEASE_ASSET" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          test "$(stat -c %s "payload/$RELEASE_ASSET")" = "$EXPECTED_BYTES"
+          grep -F 'P05_V112_MAIN_RELEASE_MACHINE=PASS' "payload/$RECEIPT_ASSET"
+          grep -F "P05_EXACT_MAIN=$P05_MAIN_SHA" "payload/$RECEIPT_ASSET"
+          grep -F "P05_TREE=$P05_EXPECTED_TREE" "payload/$RECEIPT_ASSET"
+          grep -F 'P05_CLOUDPANEL_DIRECT_EXTRACT=PASS' "payload/$RECEIPT_ASSET"
+          grep -F 'P05_BROWSER_FIRST_INSTALL=PASS' "payload/$RECEIPT_ASSET"
+          grep -F 'P05_NORMAL_INSTALL_REQUIRES_SHELL=false' "payload/$RECEIPT_ASSET"
+          grep -F 'P05_SETUP_PATH=/setup' "payload/$RECEIPT_ASSET"
+          grep -F "P05_FORMAL_FULL_SHA256=$EXPECTED_SHA256" "payload/$RECEIPT_ASSET"
+          grep -F 'P05_PRODUCTION=NOT_DEPLOYED' "payload/$RECEIPT_ASSET"
+
+      - name: Publish GitHub Release v1.1.2
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/p05-v112-publication"
+          mkdir -p "$ROOT"
+          MAIN_SHA="$(gh api "repos/$TARGET_REPO/branches/main" --jq '.commit.sha')"
+          test "$MAIN_SHA" = "$P05_MAIN_SHA"
+          MAIN_TREE="$(gh api "repos/$TARGET_REPO/git/commits/$MAIN_SHA" --jq '.tree.sha')"
+          test "$MAIN_TREE" = "$P05_EXPECTED_TREE"
+          code=$(curl -sS -o "$ROOT/existing.json" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$TARGET_REPO/releases/tags/$RELEASE_TAG")
+          test "$code" = 404 || { cat "$ROOT/existing.json"; echo RELEASE_ALREADY_EXISTS; exit 1; }
+          BODY='P05 v1.1.2 publishes the Browser-first Zero-SSH first-install path. Normal CloudPanel setup is: upload FULL ZIP → extract → open domain → /setup → environment check → admin username/password → one-click initialize → setup lock → enter system. Normal clean install does not require SSH, shell, manual .env, manual migration, or CLI admin bootstrap. CloudPanel direct-extract remains supported; private runtime config and SQLite stay outside Web Root; Schema remains VF-SEO-SCHEMA@1 / 1. Distribution is FULL_ONLY with from_versions=[]; Production remains NOT_DEPLOYED.'
+          jq -nc --arg tag "$RELEASE_TAG" --arg target "$P05_MAIN_SHA" --arg name 'P05 · VF SEO v1.1.2 · Browser-first Zero-SSH Install' --arg body "$BODY" \
+            '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:false,prerelease:false}' > "$ROOT/release-request.json"
+          curl -fsS -X POST -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H 'Content-Type: application/json' --data-binary @"$ROOT/release-request.json" \
+            "https://api.github.com/repos/$TARGET_REPO/releases" > "$ROOT/release.json"
+          RID="$(jq -r '.id' "$ROOT/release.json")"
+          test "$RID" -gt 0
+          for file in "$RELEASE_ASSET" "$RECEIPT_ASSET"; do
+            ctype='application/octet-stream'
+            [[ "$file" == *.zip ]] && ctype='application/zip'
+            [[ "$file" == *.txt ]] && ctype='text/plain; charset=utf-8'
+            curl -fsS -X POST -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' \
+              -H "Content-Type: $ctype" --data-binary @"payload/$file" \
+              "https://uploads.github.com/repos/$TARGET_REPO/releases/$RID/assets?name=$file" > "$ROOT/asset-$file.json"
+            jq -e --arg n "$file" '.name==$n and .state=="uploaded"' "$ROOT/asset-$file.json" >/dev/null
+          done
+          echo "P05_V112_RELEASE_ID=$RID"
+          echo P05_V112_PUBLICATION_WRITE=PASS
+
+      - name: Final remote release readback
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$RELEASE_TAG")"
+          test "$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name')" = "$RELEASE_TAG"
+          test "$(printf '%s' "$RELEASE_JSON" | jq -r '.target_commitish')" = "$P05_MAIN_SHA"
+          test "$(printf '%s' "$RELEASE_JSON" | jq -r '.draft')" = false
+          test "$(printf '%s' "$RELEASE_JSON" | jq -r '.prerelease')" = false
+          RID="$(printf '%s' "$RELEASE_JSON" | jq -r '.id')"
+          ASSETS="$(gh api "repos/$TARGET_REPO/releases/$RID/assets")"
+          test "$(printf '%s' "$ASSETS" | jq --arg n "$RELEASE_ASSET" '[.[]|select(.name==$n)]|length')" = 1
+          test "$(printf '%s' "$ASSETS" | jq --arg n "$RECEIPT_ASSET" '[.[]|select(.name==$n)]|length')" = 1
+          test "$(printf '%s' "$ASSETS" | jq -r --arg n "$RELEASE_ASSET" '.[]|select(.name==$n)|.size')" = "$EXPECTED_BYTES"
+          DIGEST="$(printf '%s' "$ASSETS" | jq -r --arg n "$RELEASE_ASSET" '.[]|select(.name==$n)|.digest // empty')"
+          if [[ -n "$DIGEST" ]]; then test "$DIGEST" = "sha256:$EXPECTED_SHA256"; fi
+          TAG_SHA="$(gh api "repos/$TARGET_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$TAG_SHA" = "$P05_MAIN_SHA"
+          echo "P05_V112_RELEASE_ID=$RID"
+          echo "P05_V112_FULL_ASSET_ID=$(printf '%s' "$ASSETS" | jq -r --arg n "$RELEASE_ASSET" '.[]|select(.name==$n)|.id')"
+          echo "P05_V112_RECEIPT_ASSET_ID=$(printf '%s' "$ASSETS" | jq -r --arg n "$RECEIPT_ASSET" '.[]|select(.name==$n)|.id')"
+          echo "P05_V112_PUBLISHED_AT=$(printf '%s' "$RELEASE_JSON" | jq -r '.published_at')"
+          echo P05_V112_RELEASE_PUBLICATION=PASS
