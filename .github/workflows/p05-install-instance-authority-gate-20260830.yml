@@ -1,0 +1,122 @@
+name: P05 Install Instance Authority Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      P05_EXACT_SOURCE: f1ec6e25d728634c7668020e075a06996f29cce0
+    steps:
+      - name: Checkout runner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: f1ec6e25d728634c7668020e075a06996f29cce0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p05
+
+      - name: Verify exact source
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SOURCE"
+          test ! -e VF_INSTALL_INSTANCE.json
+          test ! -e .vf-seo-site-instance.json
+          echo "P05_EXACT_SOURCE=$P05_EXACT_SOURCE"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Static and PHP syntax gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          php -l php/src/RuntimePaths.php
+          php -l php/src/SiteInstance.php
+          php -l php/src/setup-bootstrap.php
+          php -l php/src/Installer.php
+          test ! -e php/src/FreshInstallRecovery.php
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+
+      - name: Build clean formal FULL staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run build:php-release
+          npm run php:release:gate
+          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
+          test ! -e build/vf-seo-php-release/.vf-seo-site-instance.json
+          find build/vf-seo-php-release -type f | sort > /tmp/staging-before.txt
+          sha256sum $(find build/vf-seo-php-release -type f -print0 | sort -z | xargs -0) > /tmp/staging-before.sha
+
+      - name: Browser-first install isolated from staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/browser-install-smoke.sh
+          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
+          test ! -e build/vf-seo-php-release/.vf-seo-site-instance.json
+
+      - name: Real legacy state then full-delete reinstall
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
+          test ! -e build/vf-seo-php-release/.vf-seo-site-instance.json
+
+      - name: Real Chrome isolated E2E
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT=build/vf-seo-php-release python3 php/tests/browser-install-e2e.py
+          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
+          test ! -e build/vf-seo-php-release/.vf-seo-site-instance.json
+
+      - name: Prove formal staging remained byte-identical
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          find build/vf-seo-php-release -type f | sort > /tmp/staging-after.txt
+          sha256sum $(find build/vf-seo-php-release -type f -print0 | sort -z | xargs -0) > /tmp/staging-after.sha
+          cmp /tmp/staging-before.txt /tmp/staging-after.txt
+          cmp /tmp/staging-before.sha /tmp/staging-after.sha
+          test ! -e build/vf-seo-php-release/VF_INSTALL_INSTANCE.json
+          test ! -e build/vf-seo-php-release/.vf-seo-site-instance.json
+
+      - name: Machine receipt
+        run: |
+          echo 'P05_INSTALL_INSTANCE_AUTHORITY_MACHINE=PASS'
+          echo 'WEBROOT_MARKER_IS_AUTHORITY=PASS'
+          echo 'LEGACY_STATE_FULL_DELETE_REINSTALL=PASS'
+          echo 'OLD_PRIVATE_DATA_PRESERVED_NOT_ADOPTED=PASS'
+          echo 'FRESH_INSTALL_DATABASE_HEURISTICS=DISABLED'
+          echo 'FORMAL_STAGING_IMMUTABLE_DURING_TESTS=PASS'
+          echo 'CHROME_E2E=PASS'
+          echo 'RELEASE_WRITE=0'
+          echo 'PRODUCTION_WRITE=0'
