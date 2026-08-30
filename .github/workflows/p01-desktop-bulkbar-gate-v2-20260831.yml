@@ -1,0 +1,111 @@
+name: P01 Desktop Bulkbar Gate V2
+on:
+  push:
+    branches: [task/p01-desktop-bulkbar-gate-20260831]
+    paths: [.github/workflows/p01-desktop-bulkbar-gate-v2-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 2bd2dee2b7f427843b3d6666c5e764f9af8c2909
+      TREE: f87fc573fae93b4f850fd57a38d2759cf0ef7b12
+      BASE_SOURCE: b16ee5f5fc449378c84e916a6ed437ba23dc4b45
+      CSS_BLOB: da45586084b5e3f9cb6d98c6297574447fc44fb6
+      ROOT: /tmp/p01-bulk-v2
+      EVID: /tmp/p01-bulk-v2-evid
+      PORT: '18362'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          test "$(git -C product diff --numstat "$BASE_SOURCE"..HEAD)" = $'34\t0\tsrc/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_BULK_SOURCE=PASS
+      - name: Fresh runtime fixture
+        run: |
+          set -Eeuo pipefail
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-bulk-v2-server.log 2>&1 & echo $! >/tmp/p01-bulk-v2.pid
+          sleep 1
+          curl -fsS -c /tmp/p01-bulk-v2.cookies -b /tmp/p01-bulk-v2.cookies "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-bulk-v2-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-bulk-v2-setup.html',encoding='utf-8').read();print(re.search(r'name="setup_csrf"\s+value="([^"]+)"',s).group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-bulk-v2.cookies -b /tmp/p01-bulk-v2.cookies -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Bulk Gate' --data-urlencode 'admin_password=BulkGate2026' --data-urlencode 'admin_password_confirm=BulkGate2026' -o /tmp/p01-bulk-v2-post.html
+          cat >/tmp/p01-bulk-v2-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-bulk-v2/app/bootstrap.php'; require_once '/tmp/p01-bulk-v2/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());$c=$r->createCategory(['name'=>'批量验证','description'=>'','is_private'=>false]);
+          for($i=1;$i<=3;$i++){$x=$r->saveLink(null,['category_id'=>$c,'title'=>'Bulk '.$i,'url'=>'https://example.com/bulk-'.$i,'description'=>'','tags'=>'','is_private'=>false],'manual');$s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator']);}
+          echo "SEED_PASS\n";
+          PHP
+          php /tmp/p01-bulk-v2-seed.php | grep -Fx SEED_PASS
+          echo P01_BULK_RUNTIME=PASS
+      - name: Chromium bulkbar composition
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-bulk-v2-pw; cd /tmp/p01-bulk-v2-pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:1440,height:1000}});const login=await c.request.post('http://127.0.0.1:18362/api.php?action=login',{data:{password:'BulkGate2026'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');const p=await c.newPage();
+          const open=async()=>{await p.goto('http://127.0.0.1:18362/channels.php',{waitUntil:'networkidle'});const x=p.locator('[data-select-asset]');await x.nth(0).check();await x.nth(1).check();await p.locator('[data-bulk-privacy]').waitFor();await p.waitForTimeout(120)};
+          const read=()=>p.evaluate(()=>{const bar=document.querySelector('[data-bulkbar]:not([hidden])'),strong=bar.querySelector('strong'),r=bar.getBoundingClientRect(),sr=strong.getBoundingClientRect(),stage=document.querySelector('.vf-app-stage').getBoundingClientRect();const controls=[...bar.querySelectorAll('select,button')].map(el=>{const q=el.getBoundingClientRect();return{text:el.textContent.trim(),top:q.top,width:q.width,height:q.height,whiteSpace:getComputedStyle(el).whiteSpace}}).filter(x=>x.width>0&&x.height>0);return{bar:{left:r.left,right:r.right,width:r.width,height:r.height,clientWidth:bar.clientWidth,scrollWidth:bar.scrollWidth,wrap:getComputedStyle(bar).flexWrap},strong:{text:strong.textContent.trim(),top:sr.top,bottom:sr.bottom,width:sr.width,height:sr.height,ws:getComputedStyle(strong).whiteSpace},controls,stage:{left:stage.left,right:stage.right},overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}});
+          const common=(m,n)=>{if(m.strong.text!=='2 / 3 项已选择'||m.strong.ws!=='nowrap'||m.strong.height>26||m.strong.width<80)throw Error(n+' count '+JSON.stringify(m));if(m.controls.length<8||m.controls.some(x=>x.whiteSpace!=='nowrap'||x.height<30))throw Error(n+' controls '+JSON.stringify(m));if(m.bar.scrollWidth>m.bar.clientWidth+2||m.overflow>1)throw Error(n+' overflow '+JSON.stringify(m))};
+          await open();const w=await read();common(w,'1440');if(w.bar.width<880||w.bar.width>950||w.bar.wrap!=='nowrap')throw Error('1440 '+JSON.stringify(w));if(Math.max(...w.controls.map(x=>x.top))-Math.min(...w.controls.map(x=>x.top))>2)throw Error('1440 rows');if(Math.abs((w.bar.left+w.bar.right)/2-(w.stage.left+w.stage.right)/2)>3)throw Error('1440 center');await p.screenshot({path:process.env.EVID+'/bulkbar-1440.png'});
+          await p.setViewportSize({width:1024,height:900});await open();const a=await read();common(a,'1024');if(a.bar.wrap!=='wrap'||a.bar.width<740||a.controls[0].top<=a.strong.bottom+1)throw Error('1024 '+JSON.stringify(a));await p.screenshot({path:process.env.EVID+'/bulkbar-1024.png'});
+          await p.setViewportSize({width:900,height:820});await open();const m=await read();common(m,'900');if(m.bar.wrap!=='wrap'||m.bar.width<620)throw Error('900 '+JSON.stringify(m));await p.screenshot({path:process.env.EVID+'/bulkbar-900.png'});
+          await p.setViewportSize({width:390,height:844});await open();const s=await read();common(s,'390');if(s.bar.left<9||s.bar.right>381)throw Error('390 '+JSON.stringify(s));await p.screenshot({path:process.env.EVID+'/bulkbar-390.png'});
+          fs.writeFileSync(process.env.EVID+'/metrics.json',JSON.stringify({w,a,m,s},null,2));await b.close();console.log('P01_BULK_UI=PASS')})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/result.txt"
+          grep -Fx P01_BULK_UI=PASS "$EVID/result.txt"
+      - name: Regression baseline and data integrity
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-bulk-v2-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-bulk-v2-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-bulk-v2-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-bulk-v2-baseline.txt
+          php -r 'require "/tmp/p01-bulk-v2/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "SQLITE_PASS\n";' | grep -Fx SQLITE_PASS
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-desktop-bulkbar-v2-${{ github.run_id }}
+          path: /tmp/p01-bulk-v2-evid
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verdict
+        run: |
+          echo P01_DESKTOP_BULKBAR_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo PRODUCTION_WRITE=NO
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-bulk-v2.pid 2>/dev/null)" 2>/dev/null || true
