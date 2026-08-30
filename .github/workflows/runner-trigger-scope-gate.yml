@@ -9,6 +9,7 @@ on:
       - 'tests/test_runner_trigger_scope.py'
       - 'scripts/check_estate_anti_drift.py'
       - 'tests/test_estate_anti_drift.py'
+      - 'scripts/p05-v1112-demo-seed.php'
   workflow_dispatch:
 
 permissions:
@@ -22,18 +23,140 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-
       - name: Verify trigger quarantine
         run: python scripts/check_runner_trigger_scope.py --inventory
-
       - name: Run trigger scope regression tests
         run: python -m unittest discover -s tests -v
-
       - name: Verify Git Estate anti-drift
         env:
           VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: python scripts/check_estate_anti_drift.py --live
+
+  p05-v1112-demo-seed:
+    if: github.event_name == 'pull_request' && github.head_ref == 'tmp/p05-v1112-demo-seed-20260831'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Normalize single-transaction demo seed
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('scripts/p05-v1112-demo-seed.php')
+          s=p.read_text()
+          pattern=r"    \$pdo->beginTransaction\(\);\n    try \{\n(.*?)        \$pdo->commit\(\);\n        return (\[[^\n]+\]);\n    \} catch\(Throwable \$e\) \{ if\(\$pdo->inTransaction\(\)\)\$pdo->rollBack\(\); throw \$e; \}"
+          s2,n=re.subn(pattern,lambda m:m.group(1)+'    return '+m.group(2)+';',s,count=1,flags=re.S)
+          assert n==1, 'clearDemo transaction block not found'
+          assert '$pdo->beginTransaction();' not in s2
+          p.write_text(s2)
+          PY
+          php -l scripts/p05-v1112-demo-seed.php
+
+      - name: Install test runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 curl unzip jq sqlite3
+          php -m | grep -Fi pdo_sqlite
+
+      - name: Download exact formal v1.1.12 FULL
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p05-demo && mkdir -p /tmp/p05-demo/site
+          gh release download v1.1.12 --repo llhzx2018/vf-seo --pattern VF_SEO_V1.1.12_FULL.zip --dir /tmp/p05-demo
+          test "$(sha256sum /tmp/p05-demo/VF_SEO_V1.1.12_FULL.zip | awk '{print $1}')" = '45cb4916408d470559b4420317934c298a59b26f41c82bdbea7872a1f2e98e20'
+          unzip -q /tmp/p05-demo/VF_SEO_V1.1.12_FULL.zip -d /tmp/p05-demo/site
+          test "$(cat /tmp/p05-demo/site/VERSION)" = '1.1.12'
+          cp scripts/p05-v1112-demo-seed.php /tmp/p05-demo/site/seed-demo-v1.1.12.php
+
+      - name: Fresh install and authenticated seed bridge
+        run: |
+          set -Eeuo pipefail
+          SITE=/tmp/p05-demo/site
+          COOKIE=/tmp/p05-demo/cookie
+          PASSWORD='P05DemoSeed-2026-Strong'
+          php -d opcache.enable_cli=0 -S 127.0.0.1:18741 -t "$SITE" "$SITE/index.php" >/tmp/p05-demo/router.log 2>&1 &
+          PID=$!
+          trap 'kill $PID >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 100); do curl -fsS http://127.0.0.1:18741/setup -o /tmp/p05-demo/setup.html && break; sleep .1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p05-demo/setup.html').read(); m=re.search(r'name="csrf_token"[^>]*value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Origin: http://127.0.0.1:18741' -X POST http://127.0.0.1:18741/setup \
+            --data-urlencode "csrf_token=$CSRF" --data-urlencode 'username=admin' --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" -o /tmp/p05-demo/setup-post.html
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Origin: http://127.0.0.1:18741' -H 'Content-Type: application/json' -X POST http://127.0.0.1:18741/api/auth/login \
+            --data "{\"username\":\"admin\",\"password\":\"$PASSWORD\"}" -o /tmp/p05-demo/login.json
+          jq -e '.ok==true' /tmp/p05-demo/login.json >/dev/null
+          kill $PID; wait $PID 2>/dev/null || true; trap - EXIT
+
+          php -d opcache.enable_cli=0 -S 127.0.0.1:18741 -t "$SITE" >/tmp/p05-demo/seed-server.log 2>&1 &
+          PID=$!; trap 'kill $PID >/dev/null 2>&1 || true' EXIT
+          sleep .3
+          test "$(curl -sS -o /tmp/p05-demo/unauth.html -w '%{http_code}' http://127.0.0.1:18741/seed-demo-v1.1.12.php)" = '401'
+          curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18741/seed-demo-v1.1.12.php -o /tmp/p05-demo/seed-get.html
+          grep -F '只认当前登录会话' /tmp/p05-demo/seed-get.html >/dev/null
+          SEED_CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p05-demo/seed-get.html').read(); m=re.search(r'name="csrf" value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Origin: http://127.0.0.1:18741' -X POST http://127.0.0.1:18741/seed-demo-v1.1.12.php \
+            --data-urlencode "csrf=$SEED_CSRF" --data-urlencode 'action=load' -o /tmp/p05-demo/load.html
+          grep -F '完整演示数据已载入' /tmp/p05-demo/load.html >/dev/null
+
+          SLUG=$(jq -r .storageSlug "$SITE/VF_INSTALL_INSTANCE.json")
+          DB="$(dirname "$SITE")/$SLUG/data/vf-seo.sqlite3"
+          test -f "$DB"
+          test "$(sqlite3 "$DB" "SELECT count(*) FROM projects WHERE name LIKE '[演示]%';")" = '5'
+          test "$(sqlite3 "$DB" "SELECT count(*) FROM websites WHERE name LIKE '[演示]%';")" = '8'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM queries;')" = '80'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM pages;')" = '64'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM search_observation_daily;')" = '7200'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM analytics_observation_daily;')" = '4320'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM opportunities;')" = '80'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM audit_findings;')" = '64'
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM oauth_credentials;')" = '0'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM admins;')" = '1'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM sessions WHERE revoked_at IS NULL;')" -ge '1'
+
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Origin: http://127.0.0.1:18741' -X POST http://127.0.0.1:18741/seed-demo-v1.1.12.php \
+            --data-urlencode "csrf=$SEED_CSRF" --data-urlencode 'action=load' -o /tmp/p05-demo/load2.html
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM search_observation_daily;')" = '7200'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM opportunities;')" = '80'
+          echo 'P05_DEMO_SEED_IDEMPOTENCE=PASS'
+
+          sqlite3 "$DB" "INSERT INTO projects(id,name,description) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','REAL_KEEP','must survive demo clear');"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Origin: http://127.0.0.1:18741' -X POST http://127.0.0.1:18741/seed-demo-v1.1.12.php \
+            --data-urlencode "csrf=$SEED_CSRF" --data-urlencode 'action=clear' -o /tmp/p05-demo/clear.html
+          grep -F '演示数据已清除' /tmp/p05-demo/clear.html >/dev/null
+          test "$(sqlite3 "$DB" "SELECT count(*) FROM projects WHERE name='REAL_KEEP';")" = '1'
+          test "$(sqlite3 "$DB" "SELECT count(*) FROM websites WHERE name LIKE '[演示]%';")" = '0'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM admins;')" = '1'
+          test "$(sqlite3 "$DB" 'SELECT count(*) FROM sessions WHERE revoked_at IS NULL;')" -ge '1'
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          echo 'P05_DEMO_CLEAR_REAL_DATA_PRESERVED=PASS'
+          echo 'P05_DEMO_CURRENT_LOGIN_ONLY=PASS'
+          echo 'P05_DEMO_ADMIN_SESSION_PRESERVED=PASS'
+          echo 'P05_DEMO_SEED_GATE=PASS'
+
+      - name: Upload tested demo seed bridge
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P05_V1.1.12_DEMO_SEED_${{ github.event.pull_request.head.sha }}
+          path: scripts/p05-v1112-demo-seed.php
+          if-no-files-found: error
+          retention-days: 7
