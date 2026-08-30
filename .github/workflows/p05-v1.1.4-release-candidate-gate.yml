@@ -1,0 +1,130 @@
+name: P05 V1.1.4 Release Candidate Exact Gate
+
+on:
+  push:
+    branches:
+      - gate/p05-v114-owner-takeover-20260830
+    paths:
+      - '.github/workflows/p05-v1.1.4-release-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_EXACT_SHA: 45e5fe3489b2ebbca4f32b42cc0539d812e0233e
+      P05_EXPECTED_TREE: 71bdb33f90283adc16eaeaf3717d4032a1af89b3
+      P05_VERSION: 1.1.4
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read capability
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact P05 release candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXPECTED_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$P05_VERSION"
+          test "$(jq -r .version package.json)" = "$P05_VERSION"
+          test "$(jq -r .version VF_PROJECT.json)" = "$P05_VERSION"
+          test "$(jq -r .target_version VF_PROJECT.json)" = "$P05_VERSION"
+          test "$(jq -r .working_version VF_PROJECT.json)" = "$P05_VERSION"
+          echo P05_V114_RELEASE_IDENTITY=PASS
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Full regression and security
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run migrate
+          npm run verify:schema
+          npm run test
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+          echo P05_V114_NODE=PASS
+
+      - name: PHP and browser owner setup regression
+        shell: bash
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-v114-candidate.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-v114-candidate-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: candidate-runtime-password-123
+        run: |
+          set -euo pipefail
+          php -r 'if (PHP_VERSION_ID < 80200 || !extension_loaded("pdo_sqlite")) exit(1);'
+          npm run php:lint
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          bash php/tests/http-smoke.sh
+          bash php/tests/login-session-compat-smoke.sh
+          VF_RELEASE_SOURCE_SHA="$P05_EXACT_SHA" npm run build:php-release
+          npm run php:release:gate
+          test -f build/vf-seo-php-release/php/src/LegacyBrowserTakeover.php
+          grep -Fq 'browser-owner-takeover-v1' build/vf-seo-php-release/php/src/LegacyBrowserTakeover.php
+          bash php/tests/cloudpanel-root-smoke.sh build/vf-seo-php-release
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/browser-install-smoke.sh
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT=build/vf-seo-php-release python3 php/tests/browser-install-e2e.py
+          node - <<'JS'
+          const fs=require('fs'); const m=JSON.parse(fs.readFileSync('build/vf-seo-php-release/PHP_RELEASE_MANIFEST.json','utf8'));
+          if(m.version!==process.env.P05_VERSION||m.sourceCommit!==process.env.P05_EXACT_SHA) throw new Error('candidate manifest identity');
+          if(m.browserFirstInstall!==true||m.normalInstallRequiresShell!==false||m.setupPath!=='/setup') throw new Error('browser-first contract');
+          JS
+          echo P05_V114_BROWSER_OWNER_SETUP=PASS
+
+      - name: Machine receipt
+        run: |
+          echo P05_V114_RELEASE_CANDIDATE_MACHINE=PASS
+          echo P05_EXACT_SOURCE=$P05_EXACT_SHA
+          echo P05_TREE=$P05_EXPECTED_TREE
+          echo P05_PRODUCTION_WRITE=0
