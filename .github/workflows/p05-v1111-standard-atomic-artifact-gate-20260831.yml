@@ -1,0 +1,212 @@
+name: P05 V1.1.11 Standard Atomic Artifact Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_VERSION: 1.1.10
+  TARGET_VERSION: 1.1.11
+  SOURCE_SHA256: 16448869130988685c5fadb42f50362dfac08d6b2dd8657394b8a43c7787ba5d
+  TARGET_SHA256: b24bbbeb997fa6414689a01b32eb70a7bf20c82ffeec8761fea4b69612629ce8
+  PASSWORD: P05AtomicGate-2026-Strong
+
+jobs:
+  atomic-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout one-off gate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Runtime prerequisites
+        run: |
+          set -euo pipefail
+          php -v
+          php -m | grep -Fx PDO
+          php -m | grep -Fi sqlite
+          command -v sqlite3
+          command -v gh
+          command -v jq
+          command -v unzip
+          python3 scripts/p05-v1111-standard-atomic-builder-bootstrap.py 2>&1 | grep -F 'usage: builder.py' >/dev/null || test $? -eq 0
+
+      - name: Download exact formal P05 releases
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/p05-atomic && mkdir -p /tmp/p05-atomic/source /tmp/p05-atomic/target
+          gh release download "v$SOURCE_VERSION" -R llhzx2018/vf-seo -p "VF_SEO_V${SOURCE_VERSION}_FULL.zip" -D /tmp/p05-atomic
+          gh release download "v$TARGET_VERSION" -R llhzx2018/vf-seo -p "VF_SEO_V${TARGET_VERSION}_FULL.zip" -D /tmp/p05-atomic
+          test "$(sha256sum /tmp/p05-atomic/VF_SEO_V${SOURCE_VERSION}_FULL.zip | cut -d' ' -f1)" = "$SOURCE_SHA256"
+          test "$(sha256sum /tmp/p05-atomic/VF_SEO_V${TARGET_VERSION}_FULL.zip | cut -d' ' -f1)" = "$TARGET_SHA256"
+          unzip -q /tmp/p05-atomic/VF_SEO_V${SOURCE_VERSION}_FULL.zip -d /tmp/p05-atomic/source
+          unzip -q /tmp/p05-atomic/VF_SEO_V${TARGET_VERSION}_FULL.zip -d /tmp/p05-atomic/target
+          test "$(cat /tmp/p05-atomic/source/VERSION)" = "$SOURCE_VERSION"
+          test "$(cat /tmp/p05-atomic/target/VERSION)" = "$TARGET_VERSION"
+          test ! -e /tmp/p05-atomic/source/VF_INSTALL_INSTANCE.json
+          test ! -e /tmp/p05-atomic/target/VF_INSTALL_INSTANCE.json
+          echo P05_FORMAL_SOURCE_ASSETS_EXACT=PASS
+
+      - name: Build deterministic Atomic artifacts
+        run: |
+          set -euo pipefail
+          python3 scripts/p05-v1111-standard-atomic-builder-bootstrap.py /tmp/p05-atomic/source /tmp/p05-atomic/target /tmp/p05-atomic/out1 | tee /tmp/p05-atomic/build1.json
+          php -l /tmp/p05-atomic/out1/repair-v1.1.11.php
+          php /tmp/p05-atomic/out1/repair-v1.1.11.php --self-test | tee /tmp/p05-atomic/out1/atomic-self-test.json
+          jq -e '.ok==true and .source_version=="1.1.10" and .target_version=="1.1.11" and .recovery_point==true and .rollback==true and .interruption_recovery==true and .idempotence==true and .runtime_pointer_preserved==true' /tmp/p05-atomic/out1/atomic-self-test.json >/dev/null
+          python3 scripts/p05-v1111-standard-atomic-builder-bootstrap.py /tmp/p05-atomic/source /tmp/p05-atomic/target /tmp/p05-atomic/out2 >/tmp/p05-atomic/build2.json
+          test "$(sha256sum /tmp/p05-atomic/out1/repair-v1.1.11.php | cut -d' ' -f1)" = "$(sha256sum /tmp/p05-atomic/out2/repair-v1.1.11.php | cut -d' ' -f1)"
+          test "$(sha256sum /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip | cut -d' ' -f1)" = "$(sha256sum /tmp/p05-atomic/out2/VF_SEO_V1.1.11_UPDATE.zip | cut -d' ' -f1)"
+          unzip -Z1 /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip | grep -Fx repair-v1.1.11.php >/dev/null
+          test "$(unzip -Z1 /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip | wc -l)" -eq 1
+          echo P05_ATOMIC_DETERMINISTIC_ARTIFACTS=PASS
+
+      - name: Real V1.1.10 to V1.1.11 upgrade, rollback and interruption recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPAIR=/tmp/p05-atomic/out1/repair-v1.1.11.php
+          PIDS=()
+          cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" >/dev/null 2>&1 || true; done; }
+          trap cleanup EXIT
+
+          start_router(){
+            local root="$1" port="$2" log="$3"
+            php -d opcache.enable_cli=0 -S "127.0.0.1:$port" -t "$root" "$root/index.php" >"$log" 2>&1 &
+            local pid=$!; PIDS+=("$pid")
+            for i in $(seq 1 80); do curl -fsS "http://127.0.0.1:$port/setup" -o /dev/null && return 0 || true; sleep .15; done
+            cat "$log"; return 1
+          }
+          stop_last(){ local p="${PIDS[-1]}"; kill "$p" >/dev/null 2>&1 || true; unset 'PIDS[-1]'; }
+          setup_source(){
+            local root="$1" port="$2" label="$3"
+            rm -rf "$root"; mkdir -p "$(dirname "$root")"; cp -a /tmp/p05-atomic/source "$root"
+            start_router "$root" "$port" "/tmp/p05-atomic/${label}-server.log"
+            local cookie="/tmp/p05-atomic/${label}.cookie" page="/tmp/p05-atomic/${label}-setup.html"
+            curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup" -o "$page"
+            local csrf
+            csrf=$(python3 - "$page" <<'PY'
+import re,sys
+s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="csrf_token"[^>]*value="([^"]+)"',s);assert m;print(m.group(1))
+PY
+)
+            curl -fsS -c "$cookie" -b "$cookie" -H "Origin: http://127.0.0.1:$port" -X POST "http://127.0.0.1:$port/setup" \
+              --data-urlencode "csrf_token=$csrf" --data-urlencode 'username=admin' --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" \
+              -o "/tmp/p05-atomic/${label}-setup-post.html"
+            grep -E '安装完成|已完成' "/tmp/p05-atomic/${label}-setup-post.html" >/dev/null
+            stop_last
+            test -f "$root/VF_INSTALL_INSTANCE.json"
+            test "$(jq -r .format "$root/VF_INSTALL_INSTANCE.json")" = 3
+          }
+          db_path(){ local root="$1" slug; slug=$(jq -r .storageSlug "$root/VF_INSTALL_INSTANCE.json"); printf '%s/%s/data/vf-seo.sqlite3' "$(dirname "$root")" "$slug"; }
+          updates_path(){ local root="$1" slug; slug=$(jq -r .storageSlug "$root/VF_INSTALL_INSTANCE.json"); printf '%s/%s/updates' "$(dirname "$root")" "$slug"; }
+          seed(){ local root="$1" db; db=$(db_path "$root"); sqlite3 "$db" "INSERT INTO projects(id,name,description) VALUES('11111111-1111-4111-8111-111111111111','ATOMIC_KEEP','must survive');"; }
+          assert_data(){ local root="$1" db; db=$(db_path "$root"); test "$(sqlite3 "$db" "SELECT count(*) FROM projects WHERE id='11111111-1111-4111-8111-111111111111' AND name='ATOMIC_KEEP';")" = 1; test "$(sqlite3 "$db" "SELECT schema_identity||':'||schema_version FROM schema_metadata WHERE singleton=1;")" = 'VF-SEO-SCHEMA@1:1'; test "$(sqlite3 "$db" 'PRAGMA integrity_check;')" = ok; }
+
+          U=/tmp/p05-atomic/upgrade/site
+          setup_source "$U" 18710 upgrade; seed "$U"; P_BEFORE=$(sha256sum "$U/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1); DB_BEFORE=$(db_path "$U")
+          php -d opcache.enable_cli=0 "$REPAIR" --verify-source="$U" | jq -e '.ok==true' >/dev/null
+          php -d opcache.enable_cli=0 "$REPAIR" --run="$U" | tee /tmp/p05-atomic/upgrade-result.json
+          jq -e '.ok==true and .already_current==false and .pointer_preserved==true and .rollback_supported==true and .schema_version==1' /tmp/p05-atomic/upgrade-result.json >/dev/null
+          test "$(cat "$U/VERSION")" = 1.1.11
+          php -d opcache.enable_cli=0 "$REPAIR" --verify-target="$U" | jq -e '.ok==true' >/dev/null
+          test "$(sha256sum "$U/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1)" = "$P_BEFORE"
+          test "$(db_path "$U")" = "$DB_BEFORE"; assert_data "$U"
+          php -d opcache.enable_cli=0 "$REPAIR" --run="$U" | tee /tmp/p05-atomic/idempotent.json
+          jq -e '.ok==true and .already_current==true' /tmp/p05-atomic/idempotent.json >/dev/null
+          echo P05_V1110_TO_V1111_ACTUAL_UPGRADE_DATA_IDEMPOTENCE=PASS
+
+          F=/tmp/p05-atomic/failure/site
+          setup_source "$F" 18711 failure; seed "$F"; FP=$(sha256sum "$F/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1)
+          set +e; VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php -d opcache.enable_cli=0 "$REPAIR" --run="$F" >/tmp/p05-atomic/failure.out 2>/tmp/p05-atomic/failure.err; RC=$?; set -e
+          test "$RC" -ne 0; test "$(cat "$F/VERSION")" = 1.1.10
+          php -d opcache.enable_cli=0 "$REPAIR" --verify-source="$F" | jq -e '.ok==true' >/dev/null
+          test "$(sha256sum "$F/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1)" = "$FP"; assert_data "$F"
+          test ! -e "$(updates_path "$F")/p05-atomic-transaction.json"
+          echo P05_V1111_FAILURE_ROLLBACK=PASS
+
+          H=/tmp/p05-atomic/hard/site
+          setup_source "$H" 18712 hard; seed "$H"; HP=$(sha256sum "$H/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1)
+          set +e; VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php -d opcache.enable_cli=0 "$REPAIR" --run="$H" >/tmp/p05-atomic/hard.out 2>/tmp/p05-atomic/hard.err; RC=$?; set -e
+          test "$RC" -eq 97; test -f "$(updates_path "$H")/p05-atomic-transaction.json"
+          php -d opcache.enable_cli=0 "$REPAIR" --run="$H" | tee /tmp/p05-atomic/hard-recovery.json
+          jq -e '.ok==true and .interrupted_recovered==true and .already_current==false' /tmp/p05-atomic/hard-recovery.json >/dev/null
+          test "$(cat "$H/VERSION")" = 1.1.11; test "$(sha256sum "$H/VF_INSTALL_INSTANCE.json"|cut -d' ' -f1)" = "$HP"; assert_data "$H"
+          test ! -e "$(updates_path "$H")/p05-atomic-transaction.json"
+          echo P05_V1111_HARD_INTERRUPTION_RECOVERY=PASS
+
+      - name: Browser single-PHP upgrade contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPAIR=/tmp/p05-atomic/out1/repair-v1.1.11.php
+          B=/tmp/p05-atomic/browser/site
+          rm -rf "$B"; mkdir -p "$(dirname "$B")"; cp -a /tmp/p05-atomic/source "$B"
+          php -d opcache.enable_cli=0 -S 127.0.0.1:18713 -t "$B" "$B/index.php" >/tmp/p05-atomic/browser-setup-server.log 2>&1 & SPID=$!
+          trap 'kill $SPID $RPID >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 80); do curl -fsS http://127.0.0.1:18713/setup -o /dev/null && break || true; sleep .15; done
+          curl -fsS -c /tmp/p05-atomic/bsetup.cookie -b /tmp/p05-atomic/bsetup.cookie http://127.0.0.1:18713/setup -o /tmp/p05-atomic/bsetup.html
+          CSRF=$(python3 - <<'PY'
+import re
+s=open('/tmp/p05-atomic/bsetup.html',encoding='utf-8').read();m=re.search(r'name="csrf_token"[^>]*value="([^"]+)"',s);assert m;print(m.group(1))
+PY
+)
+          curl -fsS -c /tmp/p05-atomic/bsetup.cookie -b /tmp/p05-atomic/bsetup.cookie -H 'Origin: http://127.0.0.1:18713' -X POST http://127.0.0.1:18713/setup \
+            --data-urlencode "csrf_token=$CSRF" --data-urlencode 'username=admin' --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" -o /tmp/p05-atomic/bsetup-post.html
+          grep -E '安装完成|已完成' /tmp/p05-atomic/bsetup-post.html >/dev/null
+          kill $SPID; wait $SPID 2>/dev/null || true
+          cp "$REPAIR" "$B/repair-v1.1.11.php"
+          php -d opcache.enable_cli=0 -S 127.0.0.1:18714 -t "$B" >/tmp/p05-atomic/browser-repair-server.log 2>&1 & RPID=$!
+          for i in $(seq 1 80); do curl -fsS http://127.0.0.1:18714/repair-v1.1.11.php -o /dev/null && break || true; sleep .15; done
+          curl -fsS -c /tmp/p05-atomic/repair.cookie -b /tmp/p05-atomic/repair.cookie http://127.0.0.1:18714/repair-v1.1.11.php -o /tmp/p05-atomic/repair-get.html
+          grep -F '执行原子升级' /tmp/p05-atomic/repair-get.html >/dev/null
+          RCSRF=$(python3 - <<'PY'
+import re
+s=open('/tmp/p05-atomic/repair-get.html',encoding='utf-8').read();m=re.search(r'name="csrf" value="([^"]+)"',s);assert m;print(m.group(1))
+PY
+)
+          curl -fsS -c /tmp/p05-atomic/repair.cookie -b /tmp/p05-atomic/repair.cookie -H 'Origin: http://127.0.0.1:18714' -X POST http://127.0.0.1:18714/repair-v1.1.11.php --data-urlencode "csrf=$RCSRF" --data-urlencode 'password=wrong-password' -o /tmp/p05-atomic/repair-wrong.html
+          grep -F '管理员密码不正确' /tmp/p05-atomic/repair-wrong.html >/dev/null
+          curl -fsS -c /tmp/p05-atomic/repair.cookie -b /tmp/p05-atomic/repair.cookie -H 'Origin: http://127.0.0.1:18714' -X POST http://127.0.0.1:18714/repair-v1.1.11.php --data-urlencode "csrf=$RCSRF" --data-urlencode "password=$PASSWORD" -o /tmp/p05-atomic/repair-post.html
+          grep -F '升级完成' /tmp/p05-atomic/repair-post.html >/dev/null
+          test "$(cat "$B/VERSION")" = 1.1.11
+          echo P05_V1111_BROWSER_SINGLE_PHP_ATOMIC_UPGRADE=PASS
+
+      - name: Seal Gate evidence
+        run: |
+          set -euo pipefail
+          OUT=/tmp/p05-atomic/out1
+          python3 - <<'PY'
+import json, pathlib
+p=pathlib.Path('/tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-METADATA.json')
+x=json.loads(p.read_text())
+x.update({'status':'FORMAL_ATOMIC_ARTIFACT_GATE_PASS','formal_source_release':'v1.1.10','formal_target_release':'v1.1.11','actual_upgrade':'PASS','data_preservation':'PASS','idempotence':'PASS','failure_rollback':'PASS','hard_interruption_recovery':'PASS','browser_single_php':'PASS','schema_change':False,'production_write':0})
+p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n')
+(pathlib.Path('/tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-GATE.json')).write_text(json.dumps({'project_id':'P05','source_version':'1.1.10','target_version':'1.1.11','result':'PASS','source_formal_sha256':'16448869130988685c5fadb42f50362dfac08d6b2dd8657394b8a43c7787ba5d','target_formal_sha256':'b24bbbeb997fa6414689a01b32eb70a7bf20c82ffeec8761fea4b69612629ce8','self_test':'PASS','actual_upgrade':'PASS','data_preservation':'PASS','idempotence':'PASS','rollback':'PASS','interruption_recovery':'PASS','browser_single_php':'PASS','production_write':0},ensure_ascii=False,indent=2)+'\n')
+PY
+          sha256sum "$OUT/repair-v1.1.11.php" "$OUT/VF_SEO_V1.1.11_UPDATE.zip" "$OUT/atomic-self-test.json" "$OUT/P05-V1.1.11-ATOMIC-METADATA.json" "$OUT/P05-V1.1.11-ATOMIC-GATE.json" > "$OUT/SHA256SUMS.txt"
+          cat "$OUT/P05-V1.1.11-ATOMIC-METADATA.json"
+          cat "$OUT/SHA256SUMS.txt"
+          echo P05_V1111_STANDARD_ATOMIC_ARTIFACT_GATE=PASS
+          echo P05_PRODUCTION_WRITE=0
+
+      - name: Upload standard Atomic artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: P05_V1.1.11_STANDARD_ATOMIC_ARTIFACTS
+          path: |
+            /tmp/p05-atomic/out1/repair-v1.1.11.php
+            /tmp/p05-atomic/out1/VF_SEO_V1.1.11_UPDATE.zip
+            /tmp/p05-atomic/out1/atomic-self-test.json
+            /tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-METADATA.json
+            /tmp/p05-atomic/out1/P05-V1.1.11-ATOMIC-GATE.json
+            /tmp/p05-atomic/out1/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
