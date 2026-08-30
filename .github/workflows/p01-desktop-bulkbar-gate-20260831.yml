@@ -1,0 +1,187 @@
+name: P01 Desktop Bulkbar Gate
+
+on:
+  push:
+    branches: [task/p01-desktop-bulkbar-gate-20260831]
+    paths:
+      - .github/workflows/p01-desktop-bulkbar-gate-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 2bd2dee2b7f427843b3d6666c5e764f9af8c2909
+      TREE: f87fc573fae93b4f850fd57a38d2759cf0ef7b12
+      BASE_SOURCE: b16ee5f5fc449378c84e916a6ed437ba23dc4b45
+      CSS_BLOB: da45586084b5e3f9cb6d98c6297574447fc44fb6
+      ROOT: /tmp/p01-desktop-bulkbar
+      PORT: '18361'
+      EVID: /tmp/p01-desktop-bulkbar-evid
+      COOKIE: /tmp/p01-desktop-bulkbar.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          test "$(git -C product diff --numstat "$BASE_SOURCE"..HEAD)" = $'34\t0\tsrc/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_DESKTOP_BULKBAR_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-desktop-bulkbar-server.log 2>&1 & echo $! >/tmp/p01-desktop-bulkbar.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-desktop-bulkbar-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-desktop-bulkbar-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Bulkbar Gate' \
+            --data-urlencode 'admin_password=P01Bulkbar!Gate' \
+            --data-urlencode 'admin_password_confirm=P01Bulkbar!Gate' \
+            -o /tmp/p01-desktop-bulkbar-setup-post.html
+          cat >/tmp/p01-desktop-bulkbar-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-desktop-bulkbar/app/bootstrap.php';
+          require_once '/tmp/p01-desktop-bulkbar/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db());$s=new VfSurfaceRepository(vf_db());
+          $c=$r->createCategory(['name'=>'批量工具验证','description'=>'','is_private'=>false]);
+          for($i=1;$i<=3;$i++){$x=$r->saveLink(null,['category_id'=>$c,'title'=>'Bulkbar Channel '.$i,'url'=>'https://youtube.com/@bulkbar-'.$i,'description'=>'bulkbar fixture','tags'=>'批量','is_private'=>false],'manual');$s->upsertProfile((int)$x['id'],['surface'=>'channels','resource_kind'=>'creator','surface_note'=>'bulkbar','background_friendly'=>false]);}
+          echo "P01_DESKTOP_BULKBAR_SEED=PASS\n";
+          PHP
+          php /tmp/p01-desktop-bulkbar-seed.php | grep -Fx P01_DESKTOP_BULKBAR_SEED=PASS
+          echo P01_DESKTOP_BULKBAR_RUNTIME=PASS
+
+      - name: Chromium bulkbar composition
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-desktop-bulkbar-playwright
+          cd /tmp/p01-desktop-bulkbar-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18361',evid=process.env.EVID;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Bulkbar!Gate'}});
+            if(!login.ok()||!(await login.json()).ok)throw new Error('login failed');
+            const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(String(e)));
+            const openBulk=async()=>{
+              await page.goto(base+'/channels.php',{waitUntil:'networkidle'});await page.waitForTimeout(120);
+              const boxes=page.locator('[data-select-asset]');if(await boxes.count()<2)throw new Error('fixture rows missing');
+              await boxes.nth(0).check();await boxes.nth(1).check();
+              await page.locator('[data-bulkbar]:not([hidden])').waitFor();await page.locator('[data-bulk-privacy]').waitFor();await page.waitForTimeout(120);
+            };
+            const inspect=()=>page.evaluate(()=>{
+              const bar=document.querySelector('[data-bulkbar]:not([hidden])'),strong=bar?.querySelector('strong');
+              if(!bar||!strong)return null;
+              const br=bar.getBoundingClientRect(),sr=strong.getBoundingClientRect(),style=getComputedStyle(bar),ss=getComputedStyle(strong);
+              const controls=[...bar.querySelectorAll('select,button')].map(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return {text:el.textContent.trim(),top:r.top,bottom:r.bottom,left:r.left,right:r.right,width:r.width,height:r.height,whiteSpace:s.whiteSpace}});
+              const stage=document.querySelector('.vf-app-stage')?.getBoundingClientRect();
+              return {bar:{left:br.left,right:br.right,top:br.top,bottom:br.bottom,width:br.width,height:br.height,clientWidth:bar.clientWidth,scrollWidth:bar.scrollWidth,flexWrap:style.flexWrap},strong:{text:strong.textContent.trim(),width:sr.width,height:sr.height,whiteSpace:ss.whiteSpace},controls,stage:stage?{left:stage.left,right:stage.right,width:stage.width}:null,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            const assertCommon=(m,label)=>{
+              if(!m)throw new Error(label+' bulkbar missing');
+              if(m.strong.text!=='2 / 3 项已选择')throw new Error(label+' count '+JSON.stringify(m.strong));
+              if(m.strong.whiteSpace!=='nowrap'||m.strong.height>26||m.strong.width<80)throw new Error(label+' count wraps '+JSON.stringify(m.strong));
+              if(m.controls.length<7)throw new Error(label+' controls incomplete '+m.controls.length);
+              if(m.controls.some(x=>x.whiteSpace!=='nowrap'||x.height<30))throw new Error(label+' control wraps '+JSON.stringify(m.controls));
+              if(m.bar.scrollWidth>m.bar.clientWidth+2||m.overflow>1)throw new Error(label+' overflow '+JSON.stringify(m));
+            };
+
+            await openBulk();const wide=await inspect();assertCommon(wide,'1440');
+            if(wide.bar.width<880||wide.bar.width>950||wide.bar.flexWrap!=='nowrap')throw new Error('1440 width '+JSON.stringify(wide));
+            const tops=wide.controls.map(x=>Math.round(x.top));if(Math.max(...tops)-Math.min(...tops)>2)throw new Error('1440 controls not one row '+JSON.stringify(wide));
+            if(wide.stage&&(Math.abs((wide.bar.left+wide.bar.right)/2-(wide.stage.left+wide.stage.right)/2)>3))throw new Error('1440 not stage centered '+JSON.stringify(wide));
+            await page.screenshot({path:evid+'/bulkbar-1440.png'});
+
+            await page.setViewportSize({width:1024,height:900});await openBulk();const mid1024=await inspect();assertCommon(mid1024,'1024');
+            if(mid1024.bar.flexWrap!=='wrap'||mid1024.bar.width<740)throw new Error('1024 composition '+JSON.stringify(mid1024));
+            if(mid1024.controls[0].top<=mid1024.strong.height+mid1024.bar.top-2)throw new Error('1024 count not own row '+JSON.stringify(mid1024));
+            await page.screenshot({path:evid+'/bulkbar-1024.png'});
+
+            await page.setViewportSize({width:900,height:820});await openBulk();const mid900=await inspect();assertCommon(mid900,'900');
+            if(mid900.bar.width<620||mid900.bar.flexWrap!=='wrap')throw new Error('900 composition '+JSON.stringify(mid900));
+            await page.screenshot({path:evid+'/bulkbar-900.png'});
+
+            await page.setViewportSize({width:390,height:844});await openBulk();const mobile=await inspect();assertCommon(mobile,'390');
+            if(mobile.bar.left<9||mobile.bar.right>381)throw new Error('390 mobile authority changed '+JSON.stringify(mobile));
+            await page.screenshot({path:evid+'/bulkbar-390.png'});
+
+            if(errors.length)throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/metrics.json',JSON.stringify({wide,mid1024,mid900,mobile},null,2));
+            fs.writeFileSync(evid+'/verdict.txt',`P01_DESKTOP_BULKBAR=PASS\nSOURCE=${process.env.SOURCE}\n`);
+            await browser.close();console.log('P01_DESKTOP_BULKBAR_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" SOURCE="$SOURCE" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_DESKTOP_BULKBAR_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-desktop-bulkbar-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-desktop-bulkbar-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-desktop-bulkbar-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-desktop-bulkbar-baseline.txt
+          php -r 'require "/tmp/p01-desktop-bulkbar/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_DESKTOP_BULKBAR_SQLITE=PASS\n";' | grep -Fx P01_DESKTOP_BULKBAR_SQLITE=PASS
+          echo P01_DESKTOP_BULKBAR_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-desktop-bulkbar-${{ github.run_id }}
+          path: /tmp/p01-desktop-bulkbar-evid
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_DESKTOP_BULKBAR_SOURCE=$SOURCE
+          echo P01_DESKTOP_BULKBAR_TREE=$TREE
+          echo P01_DESKTOP_BULKBAR_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-desktop-bulkbar.pid 2>/dev/null)" 2>/dev/null || true
