@@ -1,0 +1,162 @@
+name: P01 Workspace Responsive Authority Gate
+
+on:
+  push:
+    branches:
+      - task/p01-workspace-responsive-authority-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      EVID: /tmp/p01-workspace-responsive-authority
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: 79a9b033a0bcb2e727588dcabc156c13e3866613
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p01
+
+      - name: Exact source and two-file scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C p01 rev-parse HEAD)" = 79a9b033a0bcb2e727588dcabc156c13e3866613
+          test "$(git -C p01 rev-parse HEAD:src/assets/resource-actions.css)" = 0f19d524ce38a1736e36ed0e0d3640d8b61f89eb
+          test "$(git -C p01 rev-parse HEAD:src/assets/workspace-primary-open.js)" = f1ca7e297bff814aec32f4a8c4d54f77053c6756
+          git -C p01 diff --name-only bbca465b1af6e64a296e45e49506657d2d6fe102..HEAD | sort > "$EVID/actual-files.txt"
+          printf '%s\n' src/assets/resource-actions.css src/assets/workspace-primary-open.js | sort > "$EVID/expected-files.txt"
+          diff -u "$EVID/expected-files.txt" "$EVID/actual-files.txt"
+          git -C p01 diff --check bbca465b1af6e64a296e45e49506657d2d6fe102..HEAD
+          echo P01_RESPONSIVE_AUTHORITY_SCOPE=PASS | tee "$EVID/source-fence.txt"
+
+      - name: JS single-purpose static gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --check p01/src/assets/workspace-primary-open.js
+          ! grep -q 'matchMedia' p01/src/assets/workspace-primary-open.js
+          ! grep -q 'style\.display' p01/src/assets/workspace-primary-open.js
+          ! grep -q 'addEventListener.*change' p01/src/assets/workspace-primary-open.js
+          grep -q 'data-primary-open\|primaryOpen' p01/src/assets/workspace-primary-open.js
+          grep -q 'select\[aria-label="排序"\]' p01/src/assets/resource-actions.css
+          grep -q 'href\*="density="' p01/src/assets/resource-actions.css
+          grep -q 'vf-category-search' p01/src/assets/resource-actions.css
+          grep -q 'vf-asset-meta:has' p01/src/assets/resource-actions.css
+          echo P01_RESPONSIVE_AUTHORITY_STATIC=PASS | tee "$EVID/static.txt"
+
+      - name: Build actual Workspace renderer fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l p01/src/app/FunctionalWorkspaceShell.php
+          php -r '
+            require "p01/src/app/FunctionalHome.php";
+            $_GET=[];
+            $categories=[["id"=>1,"parent_id"=>null,"name"=>"开发工具","depth"=>0,"effective_private"=>0]];
+            $asset=["id"=>17,"surface"=>"start","url"=>"https://example.com/tool","title"=>"示例工具","category_name"=>"开发工具","resource_kind"=>"","is_favorite"=>1,"is_private"=>0,"effective_private"=>0,"tags"=>["开发","工具"],"description"=>"用于响应式 Authority Gate"];
+            ob_start();
+            echo "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+            foreach(["surfaces.css","surface-workspace.css","workspace-v228.css","workspace-rebaseline.css","resource-media.css","workspace-domain-nav.css"] as $css) echo "<link rel=\"stylesheet\" href=\"assets/$css\">";
+            echo "<title>Responsive Authority Gate</title></head><body class=\"vf-surface-app vf-workspace-page vf-functional-workspace surface-start\" data-vf-mode=\"start\">";
+            vf_fw_render_sidebar(["mode"=>"start","scope"=>"all","admin"=>true,"surface_counts"=>["total"=>406,"start"=>349,"channels"=>15,"watch"=>41,"topics"=>1],"scope_counts"=>["all"=>349,"public"=>100,"private"=>249],"categories"=>$categories,"category_counts"=>[1=>1],"category_id"=>0,"category_total"=>349,"kind_counts"=>[],"kind"=>"","pending"=>0,"active_view"=>"start","logo_url"=>""]);
+            echo "<section class=\"vf-app-stage\"><main class=\"vf-shell-main\">";
+            vf_fw_render_toolbar(["mode"=>"start","view"=>"all","sort"=>"default","per"=>50,"density"=>"comfortable","layout"=>"list","admin"=>true,"background"=>false,"discover"=>false,"status"=>"","status_counts"=>[],"favorite_count"=>4]);
+            echo "<section class=\"vf-workspace-list\">"; vf_fw_render_row($asset,true,true); echo "</section></main></section></body></html>";
+            file_put_contents("p01/src/workspace-responsive-authority-fixture.html",ob_get_clean());
+          '
+          python3 -m http.server 8128 --directory p01/src >/tmp/p01-responsive-http.log 2>&1 &
+
+      - name: Chromium CSS Authority and primary-open gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > /tmp/p01-responsive-authority.cjs <<'EOF'
+          const {chromium}=require('/tmp/node_modules/playwright');
+          const fs=require('fs');
+          const evid=process.env.EVID;
+          const visible=e=>{const s=getComputedStyle(e);const r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:900,height:800}});
+            await page.goto('http://127.0.0.1:8128/workspace-responsive-authority-fixture.html',{waitUntil:'networkidle'});
+
+            // CSS-only proof: JS has not been loaded yet.
+            const mid=await page.evaluate(()=>{
+              const category=document.querySelector('.vf-category-search');
+              const sort=document.querySelector('select[aria-label="排序"]');
+              const density=[...document.querySelectorAll('.vf-toolbar-controls>a')].find(a=>a.href.includes('density='));
+              return {categoryDisplay:getComputedStyle(category).display,categoryVisible:category.getBoundingClientRect().height>0,sortDisplay:getComputedStyle(sort).display,densityDisplay:getComputedStyle(density).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            if(mid.categoryDisplay!=='flex'||!mid.categoryVisible||mid.overflow>1) throw new Error('900px CSS authority regression '+JSON.stringify(mid));
+            fs.writeFileSync(evid+'/mid-css-only.json',JSON.stringify(mid,null,2));
+            await page.screenshot({path:evid+'/workspace-responsive-900-css-only.png',fullPage:true});
+
+            await page.setViewportSize({width:390,height:844});
+            const mobileCss=await page.evaluate(()=>{
+              const sort=document.querySelector('select[aria-label="排序"]');
+              const density=[...document.querySelectorAll('.vf-toolbar-controls>a')].find(a=>a.href.includes('density='));
+              const row=document.querySelector('.vf-asset-row');
+              const meta=row.querySelector('.vf-asset-meta');
+              const actions=meta.querySelector('.vf-asset-actions');
+              const edit=actions.querySelector('[data-edit-id]');
+              const direct=actions.querySelector('a.vf-icon-button[href*="surface-open.php?id="]');
+              const chip=[...meta.children].find(x=>x!==actions);
+              return {sortDisplay:getComputedStyle(sort).display,densityDisplay:getComputedStyle(density).display,metaDisplay:getComputedStyle(meta).display,actionsDisplay:getComputedStyle(actions).display,editDisplay:getComputedStyle(edit).display,directDisplay:getComputedStyle(direct).display,chipDisplay:chip?getComputedStyle(chip).display:'missing',inline:{sort:sort.getAttribute('style'),density:density.getAttribute('style'),meta:meta.getAttribute('style'),edit:edit.getAttribute('style')},overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            if(mobileCss.sortDisplay==='none'||mobileCss.densityDisplay==='none'||mobileCss.metaDisplay!=='flex'||mobileCss.actionsDisplay==='none'||mobileCss.editDisplay==='none'||mobileCss.directDisplay!=='none'||mobileCss.chipDisplay!=='none'||mobileCss.overflow>1) throw new Error('390px CSS-only authority regression '+JSON.stringify(mobileCss));
+            if(Object.values(mobileCss.inline).some(v=>v!==null)) throw new Error('CSS-only fixture unexpectedly has inline display state '+JSON.stringify(mobileCss.inline));
+            fs.writeFileSync(evid+'/mobile-css-only.json',JSON.stringify(mobileCss,null,2));
+
+            // Load only the single-purpose primary-open script.
+            await page.addScriptTag({url:'http://127.0.0.1:8128/assets/workspace-primary-open.js'});
+            const afterJs=await page.evaluate(()=>{
+              const row=document.querySelector('.vf-asset-row');
+              const primary=row.querySelector('a.vf-asset-copy[data-primary-open="1"]');
+              const visual=row.querySelector('a.vf-asset-icon[data-primary-open="1"]');
+              const sort=document.querySelector('select[aria-label="排序"]');
+              const density=[...document.querySelectorAll('.vf-toolbar-controls>a')].find(a=>a.href.includes('density='));
+              const meta=row.querySelector('.vf-asset-meta');
+              const edit=meta.querySelector('[data-edit-id]');
+              return {primaryHref:primary?.getAttribute('href')||'',primaryAria:primary?.getAttribute('aria-label')||'',visualTab:visual?.getAttribute('tabindex')||'',visualHidden:visual?.getAttribute('aria-hidden')||'',inline:{sort:sort.getAttribute('style'),density:density.getAttribute('style'),meta:meta.getAttribute('style'),edit:edit.getAttribute('style')}};
+            });
+            if(!afterJs.primaryHref.includes('surface-open.php?id=17')||!afterJs.primaryAria.includes('示例工具')||afterJs.visualTab!=='-1'||afterJs.visualHidden!=='true') throw new Error('primary-open regression '+JSON.stringify(afterJs));
+            if(Object.values(afterJs.inline).some(v=>v!==null)) throw new Error('primary-open JS leaked responsive inline styles '+JSON.stringify(afterJs.inline));
+
+            // Resize after JS: CSS must continue owning reachability without listeners.
+            await page.setViewportSize({width:900,height:800}); await page.waitForTimeout(80);
+            const resizedMid=await page.evaluate(()=>({category:getComputedStyle(document.querySelector('.vf-category-search')).display,sort:getComputedStyle(document.querySelector('select[aria-label="排序"]')).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));
+            if(resizedMid.category!=='flex'||resizedMid.overflow>1) throw new Error('post-JS 900px resize regression '+JSON.stringify(resizedMid));
+            await page.setViewportSize({width:390,height:844}); await page.waitForTimeout(80);
+            const resizedMobile=await page.evaluate(()=>{
+              const sort=document.querySelector('select[aria-label="排序"]');
+              const density=[...document.querySelectorAll('.vf-toolbar-controls>a')].find(a=>a.href.includes('density='));
+              const meta=document.querySelector('.vf-asset-row .vf-asset-meta');
+              return {sort:getComputedStyle(sort).display,density:getComputedStyle(density).display,meta:getComputedStyle(meta).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+            });
+            if(resizedMobile.sort==='none'||resizedMobile.density==='none'||resizedMobile.meta!=='flex'||resizedMobile.overflow>1) throw new Error('post-JS 390px resize regression '+JSON.stringify(resizedMobile));
+            fs.writeFileSync(evid+'/after-js.json',JSON.stringify({afterJs,resizedMid,resizedMobile},null,2));
+            await page.screenshot({path:evid+'/workspace-responsive-390-after-js.png',fullPage:true});
+            fs.writeFileSync(evid+'/verdict.txt','P01_WORKSPACE_RESPONSIVE_AUTHORITY=PASS\nSOURCE=79a9b033a0bcb2e727588dcabc156c13e3866613\n');
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          EOF
+          EVID="$EVID" node /tmp/p01-responsive-authority.cjs
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-workspace-responsive-authority-${{ github.run_id }}
+          path: /tmp/p01-workspace-responsive-authority
+          if-no-files-found: error
