@@ -1,0 +1,186 @@
+name: P01 Private Protected State Gate
+
+on:
+  push:
+    branches: [task/p01-private-protected-state-gate-20260831]
+    paths:
+      - .github/workflows/p01-private-protected-state-gate-20260831.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 952f93dbd0e151b6cc3c2778ab0f0edab0ec4a63
+      TREE: 090a2438af70ab676272c74cece3635c8262038d
+      BASE_SOURCE: 4a0a1d13cb953746436ae0dc021d3bb5facce049
+      CSS_BLOB: 3eeba4384e0017ceafb25d8e5f241d8a9084cd48
+      ROOT: /tmp/p01-private-state
+      PORT: '18357'
+      EVID: /tmp/p01-private-state-ui
+      COOKIE: /tmp/p01-private-state.cookies
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P01 source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product rev-parse HEAD:src/assets/workspace-v228.css)" = "$CSS_BLOB"
+          test "$(cat product/VERSION)" = '2.34.0'
+          test "$(git -C product diff --name-only "$BASE_SOURCE"..HEAD)" = 'src/assets/workspace-v228.css'
+          git -C product diff --check "$BASE_SOURCE"..HEAD
+          echo P01_PRIVATE_STATE_SOURCE=PASS
+
+      - name: Fresh runtime fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-private-state-server.log 2>&1 & echo $! >/tmp/p01-private-state.pid
+          for i in $(seq 1 30); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-private-state-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-private-state-setup.html',encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Private Protected Gate' \
+            --data-urlencode 'admin_password=P01Private!Protected' \
+            --data-urlencode 'admin_password_confirm=P01Private!Protected' \
+            -o /tmp/p01-private-state-setup-post.html
+          cat >/tmp/p01-private-state-seed.php <<'PHP'
+          <?php
+          require '/tmp/p01-private-state/app/bootstrap.php';
+          require_once '/tmp/p01-private-state/app/SurfaceRepository.php';
+          $r=new VfRepository(vf_db()); $s=new VfSurfaceRepository(vf_db());
+          $start=$r->createCategory(['name'=>'导航','description'=>'','is_private'=>false]);
+          $channels=$r->createCategory(['name'=>'频道','description'=>'','is_private'=>false]);
+          $watch=$r->createCategory(['name'=>'影视','description'=>'','is_private'=>false]);
+          $a=$r->saveLink(null,['category_id'=>$start,'title'=>'Private Start','url'=>'https://example.com/private-start','description'=>'private start','tags'=>'私有','is_private'=>true],'manual');
+          $s->upsertProfile((int)$a['id'],['surface'=>'start']);
+          $b=$r->saveLink(null,['category_id'=>$channels,'title'=>'Private Channel','url'=>'https://youtube.com/@private-protected','description'=>'private channel','tags'=>'私有','is_private'=>true],'manual');
+          $s->upsertProfile((int)$b['id'],['surface'=>'channels','resource_kind'=>'creator','surface_note'=>'private protected']);
+          for($i=1;$i<=2;$i++){
+            $x=$r->saveLink(null,['category_id'=>$watch,'title'=>'Private Watch '.$i,'url'=>'https://example.com/private-watch-'.$i,'description'=>'private watch','tags'=>'私有','is_private'=>true],'manual');
+            $s->upsertProfile((int)$x['id'],['surface'=>'watch','resource_kind'=>'movie','media_year'=>2025+$i,'media_status'=>'want']);
+          }
+          echo "P01_PRIVATE_STATE_SEED=PASS\n";
+          PHP
+          php /tmp/p01-private-state-seed.php | grep -Fx P01_PRIVATE_STATE_SEED=PASS
+          echo P01_PRIVATE_STATE_RUNTIME=PASS
+
+      - name: Chromium private protected-state authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID" /tmp/p01-private-state-playwright
+          cd /tmp/p01-private-state-playwright
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18357',evid=process.env.EVID;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1000}});
+            const login=await context.request.post(base+'/api.php?action=login',{data:{password:'P01Private!Protected'}});
+            if(!login.ok()||!(await login.json()).ok) throw new Error('login failed');
+            const page=await context.newPage(),errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const readStyle=async(sel)=>page.locator(sel).first().evaluate(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect(),root=getComputedStyle(document.documentElement);return {bg:s.backgroundColor,color:s.color,border:s.borderColor,display:s.display,width:r.width,height:r.height,teal:root.getPropertyValue('--ws-teal').trim(),tealSoft:root.getPropertyValue('--ws-teal-soft').trim(),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+
+            await page.goto(base+'/start.php?scope=private',{waitUntil:'networkidle'});
+            const contextLight=await readStyle('.vf-context-chip.private');
+            const chipLight=await readStyle('.vf-chip.private');
+            if(contextLight.bg!=='rgb(232, 245, 243)'||contextLight.color!=='rgb(15, 118, 110)'||chipLight.bg!==contextLight.bg||chipLight.color!==contextLight.color||contextLight.overflow>1) throw new Error('light private authority '+JSON.stringify({contextLight,chipLight}));
+            await page.screenshot({path:evid+'/start-private-1440-light.png'});
+
+            await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(180);
+            const contextDark=await readStyle('.vf-context-chip.private');
+            const chipDark=await readStyle('.vf-chip.private');
+            if(contextDark.bg!=='rgb(16, 59, 55)'||contextDark.color!=='rgb(45, 212, 191)'||chipDark.bg!==contextDark.bg||chipDark.color!==contextDark.color||contextDark.overflow>1) throw new Error('dark private authority '+JSON.stringify({contextDark,chipDark}));
+            await page.screenshot({path:evid+'/start-private-1440-dark.png'});
+
+            await page.goto(base+'/watch.php?scope=private',{waitUntil:'networkidle'}); await page.waitForTimeout(120);
+            await page.evaluate(()=>document.documentElement.dataset.theme='light'); await page.waitForTimeout(120);
+            const watchLight=await readStyle('.vf-status-label.private');
+            const cardWidth=await page.locator('.vf-watch-card').first().evaluate(el=>el.getBoundingClientRect().width);
+            if(watchLight.bg!=='rgb(232, 245, 243)'||watchLight.color!=='rgb(15, 118, 110)'||watchLight.display!=='inline-flex'||watchLight.width>=cardWidth*.6||watchLight.width>80||watchLight.overflow>1) throw new Error('watch light private chip '+JSON.stringify({watchLight,cardWidth}));
+            await page.screenshot({path:evid+'/watch-private-1440-light.png'});
+
+            await page.evaluate(()=>document.documentElement.dataset.theme='dark'); await page.waitForTimeout(180);
+            const watchDark=await readStyle('.vf-status-label.private');
+            if(watchDark.bg!=='rgb(16, 59, 55)'||watchDark.color!=='rgb(45, 212, 191)'||watchDark.display!=='inline-flex'||watchDark.width>80||watchDark.overflow>1) throw new Error('watch dark private chip '+JSON.stringify(watchDark));
+            await page.screenshot({path:evid+'/watch-private-1440-dark.png'});
+
+            await page.setViewportSize({width:390,height:844}); await page.waitForTimeout(180);
+            const mobile=await readStyle('.vf-status-label.private');
+            const mobileCards=await page.locator('.vf-watch-card').count();
+            const mobileColumns=mobileCards>1?await page.evaluate(()=>{const c=[...document.querySelectorAll('.vf-watch-card')];return Math.abs(c[0].getBoundingClientRect().top-c[1].getBoundingClientRect().top)<4;}):false;
+            if(mobile.bg!=='rgb(16, 59, 55)'||mobile.color!=='rgb(45, 212, 191)'||mobile.width>80||mobile.overflow>1||!mobileColumns) throw new Error('mobile private authority '+JSON.stringify({mobile,mobileColumns}));
+            await page.screenshot({path:evid+'/watch-private-390-dark.png'});
+
+            if(errors.length) throw new Error('page errors '+errors.join(' | '));
+            fs.writeFileSync(evid+'/metrics.json',JSON.stringify({contextLight,chipLight,contextDark,chipDark,watchLight,cardWidth,watchDark,mobile,mobileColumns},null,2));
+            fs.writeFileSync(evid+'/verdict.txt','P01_PRIVATE_PROTECTED_STATE=PASS\nSOURCE=952f93dbd0e151b6cc3c2778ab0f0edab0ec4a63\n');
+            await browser.close(); console.log('P01_PRIVATE_STATE_UI=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_PRIVATE_STATE_UI=PASS "$EVID/result.txt"
+
+      - name: Regression baseline and data integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          php "$ROOT/cli/baseline-verify.php" | tee /tmp/p01-private-state-baseline.txt
+          grep -Fx BASELINE_CORE_PASS=YES /tmp/p01-private-state-baseline.txt
+          grep -Fx DRIFT_COUNT=0 /tmp/p01-private-state-baseline.txt
+          grep -Fx UNKNOWN_COUNT=0 /tmp/p01-private-state-baseline.txt
+          php -r 'require "/tmp/p01-private-state/app/bootstrap.php";$db=vf_db();if(strtolower((string)$db->query("PRAGMA integrity_check")->fetchColumn())!=="ok")exit(1);if($db->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC))exit(2);echo "P01_PRIVATE_STATE_SQLITE=PASS\n";' | grep -Fx P01_PRIVATE_STATE_SQLITE=PASS
+          echo P01_PRIVATE_STATE_REGRESSION=PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-private-protected-state-${{ github.run_id }}
+          path: /tmp/p01-private-state-ui
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verdict
+        run: |
+          echo P01_PRIVATE_STATE_SOURCE=$SOURCE
+          echo P01_PRIVATE_STATE_TREE=$TREE
+          echo P01_PRIVATE_STATE_GATE=PASS
+          echo PRODUCT_FILES_CHANGED=1
+          echo SCHEMA_CHANGE=NO
+          echo PRODUCTION_WRITE=NO
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-private-state.pid 2>/dev/null)" 2>/dev/null || true
