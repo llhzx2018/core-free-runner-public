@@ -1,0 +1,145 @@
+name: P05 V1.1.10 Release Source Authority Fix Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_EXACT_SOURCE: b06d67831509c48272838ef77b9b44f9dba58391
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Verify exact source and one-file repair scope
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SOURCE"
+          test "$(cat VERSION)" = '1.1.10'
+          git diff --name-only cc8927d4b2d7c558b7803318abf311e2d145e829..HEAD | tee /tmp/scope
+          test "$(cat /tmp/scope)" = 'scripts/release-source-gate.mjs'
+          grep -Fq "lock.version !== version" scripts/release-source-gate.mjs
+          ! grep -Fq "VERIFIED_LOCK_METADATA_VERSION" scripts/release-source-gate.mjs
+      - name: Complete engineering release-source and security contract
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run test:integration
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+      - name: PHP compatibility and runtime-pointer contract
+        working-directory: p05
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-v1110-gate.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-v1110-gate-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -euo pipefail
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          bash php/tests/http-smoke.sh
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+          test ! -e php/src/FreshInstallRecovery.php
+      - name: Build test FULL and snapshot staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run build:php-release
+          npm run php:release:gate
+          S=build/vf-seo-php-release
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test ! -e "$S/.vf-seo-site-instance.json"
+          test -z "$(find "$S" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+          find "$S" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/staging-before.sha
+      - name: Browser dirty-state and Chrome E2E
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          S=build/vf-seo-php-release
+          VF_INSTALL_ROOT="$S" bash php/tests/browser-install-smoke.sh
+          VF_INSTALL_ROOT="$S" bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT="$S" python3 php/tests/browser-install-e2e.py
+      - name: Staging immutability and pristine rebuild
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          S=build/vf-seo-php-release
+          find "$S" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/staging-after.sha
+          cmp /tmp/staging-before.sha /tmp/staging-after.sha
+          rm -rf "$S" dist/client
+          npm run build:php-release
+          npm run php:release:gate
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test -z "$(find "$S" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+      - name: Machine receipt
+        run: |
+          echo 'P05_V1110_RELEASE_SOURCE_AUTHORITY_FIX=PASS'
+          echo "EXACT_SOURCE=$P05_EXACT_SOURCE"
+          echo 'RELEASE_SOURCE_GATE=PASS'
+          echo 'DEPENDENCY_GRAPH_FROZEN=PASS'
+          echo 'ENGINEERING_REGRESSION=PASS'
+          echo 'SECURITY_GATES=PASS'
+          echo 'PHP_RUNTIME=PASS'
+          echo 'DIRTY_STATE_REINSTALL=PASS'
+          echo 'CHROME_E2E=PASS'
+          echo 'STAGING_IMMUTABLE=PASS'
+          echo 'PRISTINE_REBUILD=PASS'
+          echo 'RELEASE_WRITE=0'
+          echo 'PRODUCTION_WRITE=0'
