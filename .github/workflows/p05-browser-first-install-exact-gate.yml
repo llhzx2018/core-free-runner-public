@@ -1,0 +1,147 @@
+name: P05 Browser First Install Exact Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_EXACT_SOURCE: e788e93941e91b63e7af483a806f2579a72ccbcb
+    steps:
+      - name: Checkout runner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact private P05 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: e788e93941e91b63e7af483a806f2579a72ccbcb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: p05
+
+      - name: Verify exact source identity
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$P05_EXACT_SOURCE"
+          echo "P05_EXACT_SOURCE=$actual"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Install dependencies
+        working-directory: p05
+        run: npm ci
+
+      - name: Source and static gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+
+      - name: Node data and regression gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run migrate
+          npm run verify:schema
+          npm run test
+          npm run build
+
+      - name: PHP compatibility and shared-service gates
+        working-directory: p05
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SQLITE_PATH: /tmp/vf-seo-php-exact.sqlite3
+          VF_BACKUP_DIR: /tmp/vf-seo-php-exact-backups
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: exact-gate-portable-password-123
+        run: |
+          set -euo pipefail
+          php -v
+          php -r 'if (!extension_loaded("pdo_sqlite")) { fwrite(STDERR,"missing php extension: pdo_sqlite\n"); exit(1); }'
+          npm run php:lint
+          php php/tests/security-interop.php
+          rm -f "$VF_SQLITE_PATH" "$VF_SQLITE_PATH-wal" "$VF_SQLITE_PATH-shm"
+          rm -rf "$VF_BACKUP_DIR"
+          php php/bin/migrate.php
+          php php/bin/bootstrap-admin.php
+          php -r '$db=new PDO("sqlite:".getenv("VF_SQLITE_PATH")); $v=$db->query("SELECT password_hash FROM admins LIMIT 1")->fetchColumn(); if (!str_starts_with($v,"pbkdf2-sha256$310000$")) exit(1); echo "php sqlite/admin shared-service: PASS\n";'
+          bash php/tests/http-smoke.sh
+
+      - name: Build clean FULL staging
+        working-directory: p05
+        run: npm run build:php-release
+
+      - name: Package and CloudPanel gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run php:release:gate
+          bash php/tests/cloudpanel-root-smoke.sh build/vf-seo-php-release
+
+      - name: Browser-first clean FULL install gate
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/browser-install-smoke.sh
+
+      - name: Source scope and security gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+
+      - name: Machine receipt
+        run: |
+          echo 'P05_BROWSER_FIRST_INSTALL_MACHINE=PASS'
+          echo 'P05_EXACT_SOURCE=e788e93941e91b63e7af483a806f2579a72ccbcb'
+          echo 'INSTALL=PASS'
+          echo 'SECURITY=PASS'
+          echo 'TESTING=PASS'
+          echo 'DATA_SCHEMA=PASS'
+          echo 'GIT=PASS'
+          echo 'UA_UI=HTTP_CONTRACT_PASS_BROWSER_VISUAL_PENDING'
+          echo 'RELEASE_WRITE=0'
+          echo 'PRODUCTION_WRITE=0'
