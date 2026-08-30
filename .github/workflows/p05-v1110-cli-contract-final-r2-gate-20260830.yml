@@ -1,0 +1,161 @@
+name: P05 V1.1.10 Final Closure Gate R2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: vfseo_test
+          POSTGRES_USER: vfseo
+          POSTGRES_PASSWORD: vfseo-test-password
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U vfseo -d vfseo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      P05_EXACT_SOURCE: c4fe3d5cf49fd33d0214f58244ccc112279944a5
+      P05_BASE_MAIN: cc8927d4b2d7c558b7803318abf311e2d145e829
+      DATABASE_URL: postgresql://vfseo:vfseo-test-password@127.0.0.1:5432/vfseo_test
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Verify exact source and five-file closure scope
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SOURCE"
+          test "$(cat VERSION)" = '1.1.10'
+          git diff --name-only "$P05_BASE_MAIN"..HEAD | sort > /tmp/scope
+          cat > /tmp/expected <<'EOF'
+          .github/workflows/ci.yml
+          php/tests/browser-install-smoke.sh
+          php/tests/cloudpanel-root-smoke.sh
+          php/tests/http-smoke.sh
+          scripts/release-source-gate.mjs
+          EOF
+          diff -u /tmp/expected /tmp/scope
+          grep -Fq "lock.version !== version" scripts/release-source-gate.mjs
+          ! grep -Fq "VERIFIED_LOCK_METADATA_VERSION" scripts/release-source-gate.mjs
+          grep -Fq 'P05_POINTERLESS_CLI_FAIL_CLOSED=PASS' php/tests/http-smoke.sh
+          grep -Fq 'P05_BROWSER_POINTER_CLI_MAINTENANCE=PASS' php/tests/browser-install-smoke.sh
+          grep -Fq 'P05_CLOUDPANEL_ROOT_STAGING_PRISTINE=PASS' php/tests/cloudpanel-root-smoke.sh
+          ! grep -Fq 'VF_SQLITE_PATH: /tmp/vf-seo-php-ci.sqlite3' .github/workflows/ci.yml
+      - name: Complete engineering release-source and security contract
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run test:unit
+          npm run test:contract
+          npm run test:integration
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+      - name: PHP compatibility and pointer-bound CLI contract
+        working-directory: p05
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -euo pipefail
+          php -v
+          php -r 'if (!extension_loaded("pdo_sqlite")) { fwrite(STDERR,"missing php extension: pdo_sqlite\n"); exit(1); }'
+          npm run php:lint
+          php php/tests/security-interop.php
+          bash php/tests/http-smoke.sh
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+          test ! -e VF_INSTALL_INSTANCE.json
+          test ! -e php/src/FreshInstallRecovery.php
+      - name: Build test FULL and snapshot staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run build:php-release
+          npm run php:release:gate
+          S=build/vf-seo-php-release
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test ! -e "$S/.vf-seo-site-instance.json"
+          test -z "$(find "$S" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+          bash php/tests/cloudpanel-root-smoke.sh "$S"
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          find "$S" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/staging-before.sha
+      - name: Browser dirty-state CLI maintenance and Chrome E2E
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          S=build/vf-seo-php-release
+          VF_INSTALL_ROOT="$S" bash php/tests/browser-install-smoke.sh
+          VF_INSTALL_ROOT="$S" bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT="$S" python3 php/tests/browser-install-e2e.py
+      - name: Staging immutability and pristine rebuild
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          S=build/vf-seo-php-release
+          find "$S" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/staging-after.sha
+          cmp /tmp/staging-before.sha /tmp/staging-after.sha
+          rm -rf "$S" dist/client
+          npm run build:php-release
+          npm run php:release:gate
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test ! -e "$S/.vf-seo-site-instance.json"
+          test -z "$(find "$S" \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name 'runtime.env' -o -name 'setup.lock.json' -o -name '.vfseo-data-*' \) -print -quit)"
+      - name: Machine receipt
+        run: |
+          echo 'P05_V1110_FINAL_CLOSURE_GATE_R2=PASS'
+          echo "EXACT_SOURCE=$P05_EXACT_SOURCE"
+          echo 'RELEASE_SOURCE_GATE=PASS'
+          echo 'DEPENDENCY_GRAPH_FROZEN=PASS'
+          echo 'ENGINEERING_REGRESSION=PASS'
+          echo 'SECURITY_GATES=PASS'
+          echo 'POINTERLESS_CLI_FAIL_CLOSED=PASS'
+          echo 'POINTER_BOUND_HTTP_RUNTIME=PASS'
+          echo 'CLOUDPANEL_ROOT_POINTER_BOUND=PASS'
+          echo 'CLOUDPANEL_ROOT_STAGING_PRISTINE=PASS'
+          echo 'BROWSER_POINTER_CLI_MAINTENANCE=PASS'
+          echo 'DIRTY_STATE_REINSTALL=PASS'
+          echo 'CHROME_E2E=PASS'
+          echo 'STAGING_IMMUTABLE=PASS'
+          echo 'PRISTINE_REBUILD=PASS'
+          echo 'RELEASE_WRITE=0'
+          echo 'PRODUCTION_WRITE=0'
