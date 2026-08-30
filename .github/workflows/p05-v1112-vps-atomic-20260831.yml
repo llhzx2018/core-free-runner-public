@@ -1,0 +1,115 @@
+name: P05 V1.1.12 VPS Atomic Bridge Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  atomic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Adapt proven R2 builder to v1.1.11 to v1.1.12
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ['scripts/p05-v1111-standard-atomic-builder-bootstrap.py','scripts/p05-v1111-standard-atomic-current-gate.sh']:
+              p=Path(name); s=p.read_text()
+              s=s.replace('1.1.11','__P05_TARGET__').replace('1.1.10','1.1.11').replace('__P05_TARGET__','1.1.12')
+              s=s.replace('16448869130988685c5fadb42f50362dfac08d6b2dd8657394b8a43c7787ba5d','b24bbbeb997fa6414689a01b32eb70a7bf20c82ffeec8761fea4b69612629ce8')
+              s=s.replace('b24bbbeb997fa6414689a01b32eb70a7bf20c82ffeec8761fea4b69612629ce8','45cb4916408d470559b4420317934c298a59b26f41c82bdbea7872a1f2e98e20',1) if name.endswith('.sh') else s
+              p.write_text(s)
+          p=Path('scripts/p05-v1111-standard-atomic-current-gate.sh'); s=p.read_text()
+          old='''curl -fsSL "$BASE/p05-dist-v${SOURCE_VERSION}/VF_SEO_V${SOURCE_VERSION}_FULL.zip" -o "$WORK/VF_SEO_V${SOURCE_VERSION}_FULL.zip"\ncurl -fsSL "$BASE/p05-dist-v${TARGET_VERSION}/VF_SEO_V${TARGET_VERSION}_FULL.zip" -o "$WORK/VF_SEO_V${TARGET_VERSION}_FULL.zip"'''
+          new='''gh release download "v${SOURCE_VERSION}" --repo llhzx2018/vf-seo --pattern "VF_SEO_V${SOURCE_VERSION}_FULL.zip" --dir "$WORK"\ngh release download "v${TARGET_VERSION}" --repo llhzx2018/vf-seo --pattern "VF_SEO_V${TARGET_VERSION}_FULL.zip" --dir "$WORK"'''
+          assert old in s
+          s=s.replace(old,new)
+          s=s.replace('curl -fsS -c "$WORK/repair.cookie"','curl -sS -c "$WORK/repair.cookie"')
+          p.write_text(s)
+          PY
+
+      - name: Apply reverse-proxy HTTPS origin R2 fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/p05-v1111-standard-atomic-builder-bootstrap.py'); s=p.read_text()
+          old="""    private static function originAllowed(): bool
+              {
+                  if (strtolower((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')) === 'cross-site') return false;
+                  $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+                  if ($origin === '') return true;
+                  $parts = parse_url($origin);
+                  if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) return false;
+                  $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
+                  $originHost = strtolower((string) $parts['host']) . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
+                  return strtolower((string) $parts['scheme']) === (self::isHttps() ? 'https' : 'http') && $originHost === $host;
+              }
+          """
+          new="""    private static function originAllowed(): bool
+              {
+                  $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+                  if ($fetchSite === 'cross-site') return false;
+                  $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+                  if ($origin === '') return true;
+                  $parts = parse_url($origin);
+                  if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) return false;
+                  $scheme = strtolower((string) $parts['scheme']);
+                  if (!in_array($scheme, ['http', 'https'], true)) return false;
+                  $requestHost = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
+                  $originHost = strtolower((string) $parts['host']) . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
+                  return $requestHost !== '' && hash_equals($requestHost, $originHost);
+              }
+          """
+          assert old in s
+          p.write_text(s.replace(old,new))
+          PY
+
+      - name: Execute formal Atomic bridge gate
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          bash scripts/p05-v1111-standard-atomic-current-gate.sh
+
+      - name: Verify VPS proxy-origin regression and seal R2
+        run: |
+          php -r '
+          define("P05_ATOMIC_LIBRARY_MODE", true);
+          require "/tmp/p05-atomic/out1/repair-v1.1.12.php";
+          $m = new ReflectionMethod("P05AtomicPackage", "originAllowed");
+          $_SERVER=["HTTP_SEC_FETCH_SITE"=>"same-origin","HTTP_ORIGIN"=>"https://seo.kewaro.com","HTTP_HOST"=>"seo.kewaro.com"];
+          if($m->invoke(null)!==true) exit(1);
+          $_SERVER=["HTTP_SEC_FETCH_SITE"=>"cross-site","HTTP_ORIGIN"=>"https://evil.example","HTTP_HOST"=>"seo.kewaro.com"];
+          if($m->invoke(null)!==false) exit(1);
+          echo "P05_V1112_PROXY_ORIGIN=PASS\n";'
+          python3 - <<'PY'
+          import json,pathlib
+          out=pathlib.Path('/tmp/p05-atomic/out1')
+          for name in ['P05-V1.1.12-ATOMIC-METADATA.json','P05-V1.1.12-ATOMIC-GATE.json']:
+              p=out/name; x=json.loads(p.read_text()); x['proxy_https_same_origin']='PASS'; x['distribution_revision']='R2'; p.write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n')
+          PY
+          sha256sum /tmp/p05-atomic/out1/repair-v1.1.12.php /tmp/p05-atomic/out1/VF_SEO_V1.1.12_UPDATE.zip /tmp/p05-atomic/out1/atomic-self-test.json /tmp/p05-atomic/out1/P05-V1.1.12-ATOMIC-METADATA.json /tmp/p05-atomic/out1/P05-V1.1.12-ATOMIC-GATE.json > /tmp/p05-atomic/out1/SHA256SUMS.txt
+
+      - name: Upload exact VPS Atomic artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P05_V1.1.12_VPS_ATOMIC_${{ github.event.pull_request.head.sha }}
+          path: |
+            /tmp/p05-atomic/out1/repair-v1.1.12.php
+            /tmp/p05-atomic/out1/VF_SEO_V1.1.12_UPDATE.zip
+            /tmp/p05-atomic/out1/atomic-self-test.json
+            /tmp/p05-atomic/out1/P05-V1.1.12-ATOMIC-METADATA.json
+            /tmp/p05-atomic/out1/P05-V1.1.12-ATOMIC-GATE.json
+            /tmp/p05-atomic/out1/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
