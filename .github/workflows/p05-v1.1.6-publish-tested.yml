@@ -1,0 +1,98 @@
+name: P05 V1.1.6 Publish Tested Build
+on:
+  push:
+    branches: [gate/p05-v115-stale-empty-install-20260830]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: v1.1.6
+      RELEASE_ASSET: VF_SEO_V1.1.6_FULL.zip
+      RECEIPT_ASSET: VF_SEO_V1.1.6_RELEASE_RECEIPT.txt
+    steps:
+      - name: Checkout exact P05 main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-seo
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify main identity and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = 1.1.6
+          test "$(node -p "require('./package.json').version")" = 1.1.6
+          test "$(jq -r .version VF_PROJECT.json)" = 1.1.6
+          echo "P05_MAIN_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "P05_MAIN_TREE=$(git rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          npm ci
+          npm run release:source:gate
+          npm run build:php-release
+          npm run php:release:gate
+      - name: Re-run real clean install on main staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(pwd)/build/vf-seo-php-release"; TMP="$(mktemp -d)"; export HOME="$TMP/home"; mkdir -p "$HOME"
+          export APP_ENV=development VF_REQUIRE_HTTPS=0 VF_SECURE_COOKIES=0
+          PORT=19751; BASE="http://127.0.0.1:$PORT"; COOKIE="$TMP/cookie"; PASS='ReleaseCleanInstall-2026!'
+          php -S "127.0.0.1:$PORT" -t "$ROOT" "$ROOT/index.php" >"$TMP/server.log" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true; rm -rf "$TMP"' EXIT
+          for i in $(seq 1 50); do curl -sS "$BASE/setup" -o /dev/null 2>/dev/null && break; sleep .1; done
+          curl -fsS -c "$COOKIE" "$BASE/setup" -o "$TMP/setup.html"; grep -q '首次安装' "$TMP/setup.html"
+          TOKEN=$(grep -o 'name="csrf_token" value="[^"]*"' "$TMP/setup.html"|head -1|sed 's/.*value="\([^"]*\)"/\1/')
+          code=$(curl -sS -b "$COOKIE" -c "$COOKIE" -o "$TMP/done.html" -w '%{http_code}' -H "Origin: $BASE" --data-urlencode "csrf_token=$TOKEN" --data-urlencode username=admin --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" "$BASE/setup"); test "$code" = 200
+          code=$(curl -sS -o "$TMP/login.json" -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $BASE" --data "{\"username\":\"admin\",\"password\":\"$PASS\"}" "$BASE/api/auth/login"); test "$code" = 200
+          code=$(curl -sS -o "$TMP/locked.html" -w '%{http_code}' "$BASE/setup"); test "$code" = 404
+          kill $PID; trap - EXIT; rm -rf "$TMP"
+          echo P05_V116_MAIN_CLEAN_INSTALL=PASS
+      - name: Build deterministic FULL ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/p05-v116"; mkdir -p "$OUT"
+          zip_stage(){ STAGE="$(pwd)/build/vf-seo-php-release" OUT_FILE="$1" python3 - <<'PY'
+          import os,pathlib,zipfile
+          stage=pathlib.Path(os.environ['STAGE']); out=pathlib.Path(os.environ['OUT_FILE'])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in stage.rglob('*') if x.is_file()):
+                  rel=p.relative_to(stage).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=((0o100755 if rel=='install-cloudpanel-php.sh' else 0o100644)<<16); z.writestr(info,p.read_bytes())
+          PY
+          }
+          zip_stage "$OUT/a.zip"; zip_stage "$OUT/b.zip"; cmp "$OUT/a.zip" "$OUT/b.zip"; mv "$OUT/a.zip" "$OUT/$RELEASE_ASSET"; rm "$OUT/b.zip"
+          SHA=$(sha256sum "$OUT/$RELEASE_ASSET"|awk '{print $1}'); BYTES=$(stat -c %s "$OUT/$RELEASE_ASSET"); FILES=$(unzip -Z1 "$OUT/$RELEASE_ASSET"|grep -cv '/$')
+          cat > "$OUT/$RECEIPT_ASSET" <<EOF
+          P05_V116_OWN_ENV_REAL_INSTALL=PASS
+          P05_MAIN_SHA=$P05_MAIN_SHA
+          P05_MAIN_TREE=$P05_MAIN_TREE
+          P05_FORMAL_FULL_FILES=$FILES
+          P05_FORMAL_FULL_BYTES=$BYTES
+          P05_FORMAL_FULL_SHA256=$SHA
+          P05_PRODUCTION=NOT_DEPLOYED
+          EOF
+          echo "RELEASE_DIR=$OUT" >> "$GITHUB_ENV"; echo "RELEASE_SHA=$SHA" >> "$GITHUB_ENV"; echo "RELEASE_BYTES=$BYTES" >> "$GITHUB_ENV"; echo "RELEASE_FILES=$FILES" >> "$GITHUB_ENV"
+      - name: Publish v1.1.6
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          ! gh release view "$RELEASE_TAG" -R llhzx2018/vf-seo >/dev/null 2>&1
+          gh release create "$RELEASE_TAG" "$RELEASE_DIR/$RELEASE_ASSET#$RELEASE_ASSET" "$RELEASE_DIR/$RECEIPT_ASSET#$RECEIPT_ASSET" -R llhzx2018/vf-seo --target "$P05_MAIN_SHA" --title 'P05 · VF SEO v1.1.6 · Real Fresh Install Verified' --notes 'Verified in an independent runner environment from the actual FULL staging: clean HOME install, administrator password setup, login success, and setup lock. The v1.1.5 leftover HOME transition was separately verified before main promotion. Production remains NOT_DEPLOYED.'
+      - name: Remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON=$(gh api repos/llhzx2018/vf-seo/releases/tags/$RELEASE_TAG); FULL=$(jq -c --arg n "$RELEASE_ASSET" '.assets[]|select(.name==$n)' <<<"$JSON")
+          test "$(jq -r .target_commitish <<<"$JSON")" = "$P05_MAIN_SHA"; test "$(jq -r .size <<<"$FULL")" = "$RELEASE_BYTES"; test "$(jq -r .digest <<<"$FULL")" = "sha256:$RELEASE_SHA"
+          echo "P05_V116_RELEASE_ID=$(jq -r .id <<<"$JSON")"; echo "P05_V116_FULL_ASSET_ID=$(jq -r .id <<<"$FULL")"; echo "P05_V116_FULL_BYTES=$RELEASE_BYTES"; echo "P05_V116_FULL_SHA256=$RELEASE_SHA"; echo P05_V116_REMOTE_READBACK=PASS
