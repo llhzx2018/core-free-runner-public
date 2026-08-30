@@ -1,0 +1,180 @@
+name: P05 V1.1.8 Publish Tested FULL
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P05_MAIN_SOURCE: 998e8c793ad6c3e306f522fd47271284d672471f
+      P05_VERIFIED_TREE: 0066972cafd25778930f4032b4aa9863ee279ed4
+      VERSION: 1.1.8
+      ASSET: VF_SEO_V1.1.8_FULL.zip
+      RECEIPT: VF_SEO_V1.1.8_RELEASE_RECEIPT.txt
+    steps:
+      - name: Checkout exact P05 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 998e8c793ad6c3e306f522fd47271284d672471f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+
+      - name: Verify exact main and verified tree
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_MAIN_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_VERIFIED_TREE"
+          test "$(cat VERSION)" = "$VERSION"
+          node -e "const p=require('./package.json'); if(p.version!==process.env.VERSION) process.exit(1)"
+          node -e "const p=require('./VF_PROJECT.json'); if(p.version!==process.env.VERSION||p.target_version!==process.env.VERSION||p.working_version!==process.env.VERSION) process.exit(1)"
+          echo "P05_MAIN_SOURCE=$P05_MAIN_SOURCE"
+          echo "P05_VERIFIED_TREE=$P05_VERIFIED_TREE"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Install dependencies and static gates
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          php -v
+          php -l php/src/RuntimePaths.php
+          php -l php/src/SiteInstance.php
+          php -l php/src/FreshInstallRecovery.php
+          php -l php/src/setup-bootstrap.php
+          php -l php/src/LegacyBrowserTakeover.php
+          php -l php/src/Installer.php
+
+      - name: Build formal staging
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run build:php-release
+          npm run php:release:gate
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+
+      - name: Formal FULL real fresh-install closure
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          VF_INSTALL_ROOT=build/vf-seo-php-release bash php/tests/browser-install-smoke.sh
+
+      - name: Real Chrome final regression
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          VF_INSTALL_ROOT=build/vf-seo-php-release python3 php/tests/browser-install-e2e.py
+
+      - name: Deterministic FULL build
+        working-directory: p05
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          import os
+          root=Path('build/vf-seo-php-release')
+          version=os.environ['VERSION']
+          asset=os.environ['ASSET']
+          def build(out):
+              with ZipFile(out,'w') as z:
+                  for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                      rel=p.relative_to(root).as_posix()
+                      info=ZipInfo(rel,(1980,1,1,0,0,0))
+                      mode=p.stat().st_mode & 0o777
+                      info.external_attr=(mode & 0xFFFF) << 16
+                      info.compress_type=ZIP_DEFLATED
+                      z.writestr(info,p.read_bytes(),compress_type=ZIP_DEFLATED,compresslevel=9)
+          build('../'+asset+'.a')
+          build('../'+asset+'.b')
+          PY
+          cmp "../$ASSET.a" "../$ASSET.b"
+          mv "../$ASSET.a" "../$ASSET"
+          rm "../$ASSET.b"
+          sha="$(sha256sum "../$ASSET" | awk '{print $1}')"
+          bytes="$(stat -c '%s' "../$ASSET")"
+          files="$(find build/vf-seo-php-release -type f | wc -l | tr -d ' ')"
+          printf 'P05_VERSION=%s\nP05_SOURCE=%s\nP05_TREE=%s\nP05_FILES=%s\nP05_BYTES=%s\nP05_SHA256=%s\nSITE_INSTANCE_IDENTITY=PASS\nSAME_VERSION_WEBROOT_REINSTALL=PASS\nHOME_POSIX_FALLBACK=PASS\nCLOUDFLARE_LIKE_NOSTORE=PASS\nRUNTIME_IDENTITY_HEADERS=PASS\nEXISTING_DATA_PROTECTION=PASS\nCHROME_E2E=PASS\nPRODUCTION=NOT_DEPLOYED\n' "$VERSION" "$P05_MAIN_SOURCE" "$P05_VERIFIED_TREE" "$files" "$bytes" "$sha" > "../$RECEIPT"
+          echo "P05_FILES=$files" >> "$GITHUB_ENV"
+          echo "P05_BYTES=$bytes" >> "$GITHUB_ENV"
+          echo "P05_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd p05
+          test -f "../$ASSET"
+          test -f "../$RECEIPT"
+          if gh release view "v$VERSION" --repo llhzx2018/vf-seo >/dev/null 2>&1; then
+            echo "release v$VERSION already exists" >&2
+            exit 1
+          fi
+          gh release create "v$VERSION" \
+            --repo llhzx2018/vf-seo \
+            --target "$P05_MAIN_SOURCE" \
+            --title 'P05 · VF SEO v1.1.8 · Site Instance Fresh Install Fix' \
+            --notes 'Fixes the real fresh-install failure that remained after v1.1.7. A recreated webroot now has an explicit Site Instance identity bound to the private setup lock. If the external private database has no real business data, a new Site Instance enters browser Owner Setup; if real business data exists, setup fails closed and SQLite is preserved. Dynamic responses expose X-VF-SEO-Version and X-VF-SEO-Source for remote runtime identity. Verified from the exact main tree using the formal FULL under HOME/POSIX fallback conditions, whole-webroot deletion and same-version re-extract, login history, Existing Data Protection, Cloudflare-like no-store behavior, and real Chrome E2E. Production remains NOT_DEPLOYED.' \
+            "../$ASSET" "../$RECEIPT"
+
+      - name: Remote release readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/llhzx2018/vf-seo/releases/tags/v$VERSION" > /tmp/release.json
+          python3 - <<'PY'
+          import json, os
+          r=json.load(open('/tmp/release.json'))
+          assert r['tag_name']=='v'+os.environ['VERSION']
+          assert r['target_commitish']==os.environ['P05_MAIN_SOURCE']
+          assets={a['name']:a for a in r['assets']}
+          a=assets[os.environ['ASSET']]
+          receipt=assets[os.environ['RECEIPT']]
+          assert int(a['size'])==int(os.environ['P05_BYTES'])
+          digest=a.get('digest')
+          if digest is not None:
+              assert digest=='sha256:'+os.environ['P05_SHA256'], (digest,os.environ['P05_SHA256'])
+          print('P05_RELEASE_ID='+str(r['id']))
+          print('P05_ASSET_ID='+str(a['id']))
+          print('P05_RECEIPT_ASSET_ID='+str(receipt['id']))
+          print('P05_REMOTE_DIGEST='+str(digest))
+          print('P05_V118_RELEASE_REMOTE_READBACK=PASS')
+          PY
+
+      - name: Machine receipt
+        run: |
+          echo 'P05_V118_FORMAL_RELEASE=PASS'
+          echo "P05_MAIN_SOURCE=$P05_MAIN_SOURCE"
+          echo "P05_VERIFIED_TREE=$P05_VERIFIED_TREE"
+          echo "P05_FILES=$P05_FILES"
+          echo "P05_BYTES=$P05_BYTES"
+          echo "P05_SHA256=$P05_SHA256"
+          echo 'SITE_INSTANCE_IDENTITY=PASS'
+          echo 'SAME_VERSION_WEBROOT_REINSTALL=PASS'
+          echo 'EXISTING_DATA_PROTECTION=PASS'
+          echo 'CHROME_E2E=PASS'
+          echo 'PRODUCTION_WRITE=0'
