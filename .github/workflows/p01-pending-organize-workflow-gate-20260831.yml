@@ -1,0 +1,201 @@
+name: P01 Pending Organize Workflow Gate
+on:
+  push:
+    branches: [product/p01-pending-organize-gate-20260831]
+    paths: [.github/workflows/p01-pending-organize-workflow-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 8eee2b085195f965f0c7fad0112f1647a1aa4706
+      BASE: 98079c8f2207cd7342fd31ca136c97569ef771ea
+      TREE: 239c62c1c87809603c5b539340844cfcacb00f22
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-pending/evidence
+      COOKIE: /tmp/p01-pending.cookies
+      PORT: '18474'
+      ADMIN_PASS: P01PendingGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-pending "$COOKIE"; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          mapfile -t changed < <(git -C product diff --name-only "$BASE"...HEAD | sort)
+          test "$(printf '%s\n' "${changed[@]}")" = 'src/links-admin.php'
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -F '仅标记已整理' product/src/links-admin.php >/dev/null
+          grep -F '归类并完成' product/src/links-admin.php >/dev/null
+          grep -F 'display:none!important' product/src/links-admin.php >/dev/null
+          test "$(git -C product rev-parse "$BASE:src/assets/links-admin.js")" = "$(git -C product rev-parse "HEAD:src/assets/links-admin.js")"
+          test "$(git -C product rev-parse "$BASE:src/app/Repository.php")" = "$(git -C product rev-parse "HEAD:src/app/Repository.php")"
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          printf 'P01_PENDING_SCOPE=PASS\nP01_PENDING_API_BYTES_UNCHANGED=PASS\n' | tee "$EVID/scope.txt"
+      - name: Fresh install and seed pending workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-pending.pid
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Pending Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $source=$repo->createCategory(['name'=>'待整理来源','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $target=$repo->createCategory(['name'=>'正式分类','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $ids=[];
+          foreach ([1,2,3] as $n) {
+            $r=$repo->saveLink(null,['category_id'=>$source,'title'=>'Pending Item '.$n,'url'=>'https://pending-'.$n.'.example/','description'=>'gate','is_private'=>1,'is_pending'=>1],'admin');
+            $ids[]=(int)$r['id'];
+          }
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);
+          file_put_contents(getenv('EVID').'/seed.json',json_encode(['source'=>$source,'target'=>$target,'ids'=>$ids],JSON_PRETTY_PRINT));
+          echo "P01_PENDING_SEED=PASS\nP01_PENDING_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          for path in 'links-admin.php?view=pending' 'links-admin.php'; do code=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$path"); echo "$path=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          echo P01_PENDING_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium pending organization semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-pending/pw; cd /tmp/p01-pending/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');
+          const fs=require('fs');
+          const seed=JSON.parse(fs.readFileSync(process.env.EVID+'/seed.json','utf8'));
+          const base='http://127.0.0.1:18474/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            let q=await c.request.post(base+'api.php?action=login',{data:{password:'P01PendingGate'}});
+            if(!q.ok()||!(await q.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});
+            const pendingRead=()=>p.evaluate(()=>({
+              title:document.querySelector('.vf-admin-titleblock h1')?.textContent?.trim()||'',
+              stateHidden:document.querySelector('#stateFilter')?.hidden===true,
+              stateDisplay:getComputedStyle(document.querySelector('#stateFilter')).display,
+              bulk:[...document.querySelectorAll('#batchBar [data-bulk]')].map(x=>({action:x.dataset.bulk,text:x.textContent.trim(),primary:x.classList.contains('primary')})),
+              body:document.body.innerText,
+              overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth
+            }));
+            let m=await pendingRead();
+            if(m.title!=='待整理'||!m.stateHidden||m.stateDisplay!=='none'||m.bulk.some(x=>x.action==='pending')||!m.bulk.some(x=>x.action==='organized'&&x.text==='仅标记已整理')||!m.bulk.some(x=>x.action==='move'&&x.text==='归类并完成'&&x.primary)||m.overflow>1)throw Error('pending initial '+JSON.stringify(m));
+            await p.screenshot({path:process.env.EVID+'/pending-1440.png',fullPage:true});
+
+            // Primary path: choose target category; pending view maps move -> organize.
+            let row=p.locator('tr').filter({hasText:'Pending Item 1'}); if(await row.count()!==1)throw Error('item1 row');
+            await row.locator('input[data-select]').check();
+            await p.locator('#batchBar [data-bulk="move"]').click();
+            if(!await p.locator('#moveDialog').evaluate(d=>d.open))throw Error('move dialog not open');
+            if((await p.locator('#moveDialog .vf-dialog-head strong').textContent()).trim()!=='归类并完成')throw Error('dialog title');
+            if((await p.locator('#moveConfirm').textContent()).trim()!=='归类并完成')throw Error('confirm copy');
+            await p.locator('#moveCategory').selectOption(String(seed.target));
+            await p.locator('#moveConfirm').click();
+            await p.waitForFunction(()=>!document.body.innerText.includes('Pending Item 1'));
+            let boot=await p.evaluate(async()=>await (await fetch('api.php?action=bootstrap',{credentials:'same-origin'})).json());
+            let one=boot.data.links.find(x=>Number(x.id)===Number(window.__seedId||0));
+            // Read by title because ids are kept in Node seed, not page global.
+            one=boot.data.links.find(x=>x.title==='Pending Item 1');
+            if(!one||Number(one.is_pending)!==0||Number(one.category_id)!==Number(seed.target))throw Error('organize semantics '+JSON.stringify(one));
+
+            // Secondary path: clear pending only; category must remain unchanged.
+            row=p.locator('tr').filter({hasText:'Pending Item 2'}); if(await row.count()!==1)throw Error('item2 row');
+            await row.locator('input[data-select]').check();
+            await p.locator('#batchBar [data-bulk="organized"]').click();
+            await p.waitForFunction(()=>!document.body.innerText.includes('Pending Item 2'));
+            boot=await p.evaluate(async()=>await (await fetch('api.php?action=bootstrap',{credentials:'same-origin'})).json());
+            const two=boot.data.links.find(x=>x.title==='Pending Item 2');
+            if(!two||Number(two.is_pending)!==0||Number(two.category_id)!==Number(seed.source))throw Error('organized semantics '+JSON.stringify(two));
+            if(!document.body.innerText.includes('Pending Item 3'))throw Error('remaining pending missing');
+
+            // Normal URL admin remains unchanged.
+            await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+            const stateDisplay=await p.locator('#stateFilter').evaluate(x=>getComputedStyle(x).display);
+            if(stateDisplay==='none')throw Error('normal state filter hidden');
+            row=p.locator('tr').filter({hasText:'Pending Item 3'}); await row.locator('input[data-select]').check();
+            const normalBulk=await p.locator('#batchBar [data-bulk]').evaluateAll(xs=>xs.map(x=>[x.dataset.bulk,x.textContent.trim()]));
+            for(const pair of [['pending','移入待整理'],['organized','标记已整理'],['move','移动分类']])if(!normalBulk.some(x=>x[0]===pair[0]&&x[1]===pair[1]))throw Error('normal bulk '+JSON.stringify(normalBulk));
+            await p.screenshot({path:process.env.EVID+'/normal-1440.png',fullPage:true});
+
+            // Mobile pending view remains usable and overflow-free.
+            await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});
+            await p.setViewportSize({width:390,height:844}); await p.waitForTimeout(120);
+            m=await pendingRead();
+            if(m.stateDisplay!=='none'||m.overflow>1||m.bulk.some(x=>x.action==='pending'))throw Error('mobile '+JSON.stringify(m));
+            row=p.locator('tr').filter({hasText:'Pending Item 3'}); await row.locator('input[data-select]').check();
+            if(!await p.locator('#batchBar [data-bulk="move"]').isVisible())throw Error('mobile primary unreachable');
+            await p.screenshot({path:process.env.EVID+'/pending-390.png',fullPage:true});
+            await b.close();
+            console.log('P01_PENDING_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_PENDING_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final database and verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          $rows=$db->query("SELECT title,category_id,is_pending FROM links WHERE title LIKE 'Pending Item %' ORDER BY title")->fetchAll(PDO::FETCH_ASSOC);
+          if(count($rows)!==3)exit(21);
+          if((int)$rows[0]['is_pending']!==0||(int)$rows[1]['is_pending']!==0||(int)$rows[2]['is_pending']!==1)exit(22);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(23);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(24);
+          echo "P01_PENDING_POST_DB=PASS\n";
+          PHP
+          grep -Fx P01_PENDING_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_PENDING_API_BYTES_UNCHANGED=PASS "$EVID/scope.txt"
+          grep -Fx P01_PENDING_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_PENDING_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_PENDING_POST_DB=PASS "$EVID/post-db.txt"
+          printf 'P01_PENDING_ORGANIZE_WORKFLOW_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-pending-organize-workflow-${{ github.run_id }}
+          path: /tmp/p01-pending/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-pending.pid 2>/dev/null)" 2>/dev/null || true
