@@ -11,13 +11,15 @@ const password = 'Vf' + crypto.randomUUID().replaceAll('-', '') + 'Aa1';
 const domains = Array.from({ length: 14 }, (_, index) => `return-audit-${String(index + 1).padStart(2, '0')}.example`);
 const targetName = domains[9];
 const report = {
-  schema: 'p04-mobile-domain-detail-return-context-audit/v2',
+  schema: 'p04-mobile-domain-detail-return-context-audit/v3',
   source_sha: candidate,
   status: 'FAIL',
   synthetic_domains: [],
+  runtime: {},
   list_before: {},
   detail: {},
   return_bar: {},
+  return_events: [],
   return_timeline: [],
   list_after: {},
   failures: [],
@@ -69,6 +71,38 @@ async function snapshot(label) {
   }), label);
   report.return_timeline.push(value);
   return value;
+}
+
+async function installReturnEventProbe() {
+  report.runtime = await page.evaluate(() => {
+    window.__p04ReturnAuditEvents = [];
+    const capture = (type, extra = {}) => {
+      window.__p04ReturnAuditEvents.push({
+        type,
+        at: performance.now(),
+        hash: location.hash,
+        scroll_y: window.scrollY,
+        scroll_height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+        stored_scroll: sessionStorage.getItem('vf-infra-v275:scroll:domains'),
+        ...extra,
+      });
+    };
+    document.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target.closest('[data-v275-go]') : null;
+      if (!target) return;
+      capture('click-capture', {
+        data_go: target.getAttribute('data-v275-go') || '',
+        has_primary_nav: Boolean(target.closest('[data-v270-nav]')),
+      });
+    }, true);
+    window.addEventListener('popstate', () => capture('popstate'));
+    window.addEventListener('hashchange', () => capture('hashchange'));
+    return {
+      v278_script_count: [...document.scripts].filter((script) => String(script.src || '').includes('v278-route-scroll-reset.js')).length,
+      v275_script_count: [...document.scripts].filter((script) => String(script.src || '').includes('v275-ua-workflow.js')).length,
+      current_hash: location.hash,
+    };
+  });
 }
 
 async function csrf() {
@@ -200,6 +234,10 @@ try {
   assert(report.return_bar.next_count === 1, `next detail control missing ${report.return_bar.next_count}`);
   assert(report.return_bar.page_overflow <= 1, `detail page overflow ${report.return_bar.page_overflow}`);
 
+  await installReturnEventProbe();
+  assert(report.runtime.v278_script_count === 1, `V278 runtime script count ${report.runtime.v278_script_count}`);
+  assert(report.runtime.v275_script_count === 1, `V275 runtime script count ${report.runtime.v275_script_count}`);
+
   await pointerClick(back);
   await page.waitForFunction(() => location.hash === '#domains', null, { timeout: 10000 });
   await snapshot('hash-domains');
@@ -217,6 +255,7 @@ try {
   await snapshot('plus-350ms');
   await page.waitForTimeout(250);
   await snapshot('plus-600ms');
+  report.return_events = await page.evaluate(() => window.__p04ReturnAuditEvents || []);
 
   const queryAfter = page.locator('[data-v275-query]').first();
   await queryAfter.waitFor({ state: 'visible', timeout: 10000 });
