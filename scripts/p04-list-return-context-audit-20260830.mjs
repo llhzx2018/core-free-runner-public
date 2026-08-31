@@ -7,7 +7,7 @@ const base=process.env.VF_E2E_BASE_URL||'http://127.0.0.1:19057';
 const evidence=process.env.EVIDENCE,candidate=process.env.CANDIDATE,webRoot=process.env.WEB_ROOT,productRoot=process.env.PRODUCT_ROOT||path.join(process.cwd(),'product');
 if(!evidence||!candidate||!webRoot)throw new Error('list return context audit environment missing');
 const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
-const report={schema:'p04-list-return-context-audit/v3',source_sha:candidate,status:'FAIL',domain:{},server:{},mobile:{},page_errors:[],console_errors:[],production_actions_executed:false,synthetic_test_data_only:true};
+const report={schema:'p04-list-return-context-audit/v4',source_sha:candidate,status:'FAIL',domain:{quick_menu:{}},server:{},mobile:{},page_errors:[],console_errors:[],production_actions_executed:false,synthetic_test_data_only:true};
 const browser=await chromium.launch({headless:true});
 const context=await browser.newContext({viewport:{width:1365,height:900}});
 const page=await context.newPage();
@@ -22,13 +22,49 @@ const waitList=async(kind)=>{
   return{toolbar,input};
 };
 const currentCount=async(toolbar)=>clean(await toolbar.locator('[data-v275-count]').innerText().catch(()=>''));
+const installQuickMenuTrace=async()=>page.evaluate(()=>{
+  window.__p04QuickTrace=[];
+  const push=(type,extra={})=>window.__p04QuickTrace.push({type,t:performance.now(),scrollY:window.scrollY,...extra});
+  const observer=new MutationObserver(records=>records.forEach(record=>{
+    record.addedNodes.forEach(node=>{if(node instanceof Element&&node.classList.contains('v275-quick-menu'))push('menu-added',{html:node.outerHTML.slice(0,900)});});
+    record.removedNodes.forEach(node=>{if(node instanceof Element&&node.classList.contains('v275-quick-menu'))push('menu-removed');});
+  }));
+  observer.observe(document.body,{childList:true});
+  window.__p04QuickObserver=observer;
+  document.addEventListener('click',event=>push('document-click-capture',{target:event.target?.className||event.target?.tagName||''}),true);
+  window.addEventListener('scroll',()=>push('window-scroll-capture'),true);
+});
+const readQuickMenuState=async()=>page.evaluate(()=>{
+  const menu=document.querySelector('.v275-quick-menu');
+  const open=menu?.querySelector('[data-action="open"]')||null;
+  const style=menu?getComputedStyle(menu):null;
+  const rect=menu?.getBoundingClientRect()||null;
+  const openRect=open?.getBoundingClientRect()||null;
+  return {
+    trace:window.__p04QuickTrace||[],
+    menu_exists:Boolean(menu),
+    menu_html:menu?.outerHTML?.slice(0,1500)||'',
+    display:style?.display||'',visibility:style?.visibility||'',opacity:style?.opacity||'',
+    rect:rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null,
+    open_rect:openRect?{x:openRect.x,y:openRect.y,width:openRect.width,height:openRect.height}:null,
+    open_exists:Boolean(open),
+    open_text:open?.textContent?.trim()||'',
+    viewport:{width:innerWidth,height:innerHeight,scrollY:scrollY}
+  };
+});
 const openDomainDetail=async()=>{
   const trigger=page.locator('table.domain-table .v275-more-button:visible').first();
   await trigger.waitFor({state:'visible',timeout:10000});
   const id=await trigger.getAttribute('data-v275-domain-actions');
+  await installQuickMenuTrace();
   await trigger.click();
-  const open=page.locator('.v275-quick-menu [data-action="open"]:visible');
-  await open.waitFor({state:'visible',timeout:10000});
+  await page.waitForTimeout(180);
+  const state=await readQuickMenuState();
+  report.domain.quick_menu=state;
+  if(!state.menu_exists||!state.open_exists||!state.open_rect||state.open_rect.width<=0||state.open_rect.height<=0){
+    throw new Error(`domain quick menu not usable ${JSON.stringify(state)}`);
+  }
+  const open=page.locator('.v275-quick-menu [data-action="open"]');
   await open.click();
   await page.waitForFunction(value=>location.hash===`#domain/${encodeURIComponent(value)}`,id,{timeout:10000});
   return id;
@@ -51,7 +87,6 @@ try{
   });
   if(!savedDomain?.ok||!savedDomain?.domain?.id)throw new Error(`domain fixture failed ${JSON.stringify(savedDomain)}`);
 
-  // New document required after fixture writes because v270 caches the snapshot in-memory for the current document.
   await page.goto(`${base}/index.php?audit=${Date.now()}#domains`,{waitUntil:'domcontentloaded'});
   let domainList=await waitList('domains');
   report.domain.loaded={rows:await page.locator('table.domain-table tbody tr').count(),quick_actions:await page.locator('table.domain-table .v275-more-button').count()};
@@ -69,7 +104,6 @@ try{
   report.domain.after_browser_back={query:await domainList.input.inputValue(),count:await currentCount(domainList.toolbar)};
   await page.screenshot({path:`${evidence}/01-domains-after-browser-back.png`,fullPage:true,animations:'disabled'});
 
-  // Current product route: quick menu -> detail -> V2.75 explicit contextual return button.
   await domainList.input.fill('infra-home');
   await page.waitForTimeout(250);
   await openDomainDetail();
