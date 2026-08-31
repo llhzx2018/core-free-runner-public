@@ -1,0 +1,302 @@
+name: P04 V2.8.12 Final Exact Source Gate
+
+on:
+  push:
+    branches:
+      - release/p04-v2812-final-gate-20260831
+    paths:
+      - '.github/workflows/p04-v2812-final-exact-source-gate-20260831.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE: 318608e6af0cbae8f0f9f9f83ca68ab4f28e7b7b
+  DEVELOP: fdbaf33544a76b41af68b3e66d4463443959cb08
+  BASE_MAIN: b4ecd5dd150165b43be9404ab7ceb18c53b36137
+  OLD_RELEASE: d6f1e0660ba859d160bc3393cc281bcbe186c779
+  TARGET_BRANCH: release/p04-v2.8.12-daily-ux-20260831
+  EVIDENCE: ${{ github.workspace }}/evidence-p04-v2812-final
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify private read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+
+      - name: Checkout exact P04 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Checkout exact P04 V2.8.11 formal source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.OLD_RELEASE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: old
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+          ini-file: production
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+
+      - name: Exact source authority and release scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/develop)" = "$DEVELOP"
+          test "$(git -C product rev-parse origin/main)" = "$BASE_MAIN"
+          test "$(git -C product rev-parse origin/$TARGET_BRANCH)" = "$CANDIDATE"
+          test "$(git -C old rev-parse HEAD)" = "$OLD_RELEASE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.12'
+          test "$(tr -d '\r\n' < old/VERSION)" = '2.8.11'
+          mapfile -t changed < <(git -C product diff --name-only "$DEVELOP" "$CANDIDATE")
+          printf '%s\n' "${changed[@]}" | tee "$EVIDENCE/release-candidate-scope.txt"
+          test "${#changed[@]}" -eq 4
+          for f in VERSION VF_PROJECT.json scripts/build-v2812-release-tree.py scripts/build-v2812-update-release.py; do
+            printf '%s\n' "${changed[@]}" | grep -Fxq "$f"
+          done
+          git -C product diff --quiet "$DEVELOP" "$CANDIDATE" -- src public database config
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          python3 -m py_compile scripts/build-release-tree.py scripts/build-v2812-release-tree.py scripts/build-v2812-update-release.py scripts/validate-online-atomic-package.py scripts/full-runtime-vs-update-result-source-exact-gate.py
+          find src public tests -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          for f in public/assets/v270-reference-lock.js public/assets/v271-unified-shell.js public/assets/daily-onboarding.js public/assets/daily-route-error-recovery.js; do node --check "$f"; done
+          php tests/unit/ui_zero_data_onboarding_contract.php .
+          php tests/unit/ui_mobile_unified_modal_touch_floor_contract.php .
+          php tests/unit/ui_primary_route_error_recovery_contract.php .
+          php tests/unit/ui_overview_attention_action_dedup_contract.php .
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json',encoding='utf-8'))
+          assert p['project_id']=='P04'
+          assert p['status']=='V2.8.12 RELEASE CANDIDATE / V2.8.11 PRODUCTION'
+          assert p['lifecycle']=='RELEASE_CANDIDATE'
+          assert p['version']=='2.8.12' and p['candidate_version']=='2.8.12' and p['production_version']=='2.8.11'
+          assert p['schema']==14 and p['schema_version_contract']==14
+          c=p['release_source_contract']
+          assert c['type']=='DAILY_UX_MAINTENANCE_RELEASE'
+          assert c['allowed_source_versions']==['2.8.11']
+          assert c['migration']=='NONE' and c['provider_authority']=='READ_ONLY_FIRST' and c['provider_authority_change'] is False
+          runs=c['candidate_evidence']
+          for k in ['zero_data_onboarding_run','connected_data_transition_run','overview_owner_action_dedup_run','provider_safe_actions_run','primary_route_error_recovery_run','desktop_regression_run']:
+              assert isinstance(runs[k],int) and runs[k]>0
+          assert p['production_truth']['installed_version']=='2.8.11'
+          assert p['release']['published'] is False and p['release']['target_version']=='2.8.12'
+          print('P04_V2812_CANDIDATE_AUTHORITY=PASS')
+          PY
+          echo P04_V2812_EXACT_SOURCE_SCOPE=PASS
+
+      - name: Fresh install Schema 14
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          VF_INFRA_TEST_PORT=19122 bash scripts/run-clean-full-install-gate.sh | tee "$EVIDENCE/fresh-install.txt"
+          echo P04_V2812_FRESH_INSTALL=PASS
+
+      - name: Deterministic FULL UPDATE Atomic self-test and source exactness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p04-v2812-final"
+          mkdir -p "$ROOT" "$EVIDENCE/release-assets"
+          cd product
+          python3 scripts/build-v2812-release-tree.py "$ROOT/tree-a" | tee "$EVIDENCE/build-tree-a.json"
+          python3 scripts/build-v2812-release-tree.py "$ROOT/tree-b" | tee "$EVIDENCE/build-tree-b.json"
+          diff -qr "$ROOT/tree-a" "$ROOT/tree-b"
+          python3 - "$ROOT/tree-a" "$ROOT/VF_Infra_V2.8.12_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          python3 - "$ROOT/tree-b" "$ROOT/VF_Infra_V2.8.12_FULL_B.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          cmp "$ROOT/VF_Infra_V2.8.12_FULL.zip" "$ROOT/VF_Infra_V2.8.12_FULL_B.zip"
+          python3 scripts/build-v2812-update-release.py --target-runtime "$ROOT/tree-a" --output "$ROOT/update-a" | tee "$EVIDENCE/build-update-a.json"
+          python3 scripts/build-v2812-update-release.py --target-runtime "$ROOT/tree-b" --output "$ROOT/update-b" | tee "$EVIDENCE/build-update-b.json"
+          cmp "$ROOT/update-a/VF_Infra_V2.8.12_UPDATE.zip" "$ROOT/update-b/VF_Infra_V2.8.12_UPDATE.zip"
+          test "$(jq -r '.version' "$ROOT/tree-a/release-manifest.json")" = '2.8.12'
+          test "$(jq -r '.target_schema' "$ROOT/tree-a/release-manifest.json")" = '14'
+          test "$(jq -r '.release_kind' "$ROOT/tree-a/release-manifest.json")" = 'daily_ux_maintenance_release'
+          test "$(jq -r '.provider_authority' "$ROOT/tree-a/release-manifest.json")" = 'READ_ONLY_FIRST'
+          test "$(jq -c '.allowed_source_versions' "$ROOT/update-a/PACKAGE_MANIFEST.json")" = '["2.8.11"]'
+          test "$(jq -r '.migration' "$ROOT/update-a/PACKAGE_MANIFEST.json")" = 'NONE'
+          test "$(jq -r '.provider_authority' "$ROOT/update-a/PACKAGE_MANIFEST.json")" = 'READ_ONLY_FIRST'
+          test "$(jq -r '.update_and_atomic_bytes_identical' "$ROOT/update-a/PACKAGE_MANIFEST.json")" = 'true'
+          python3 scripts/validate-online-atomic-package.py --runtime "$ROOT/tree-a" --zip "$ROOT/update-a/VF_Infra_V2.8.12_UPDATE.zip" --version 2.8.12 | tee "$EVIDENCE/atomic-package-self-test.txt"
+          php "$ROOT/update-a/repair-v2.8.12.php" --self-test | tee "$EVIDENCE/repair-self-test.txt"
+          cd ../old
+          python3 scripts/build-v2811-release-tree.py "$ROOT/old-tree" >/dev/null
+          python3 - "$ROOT/old-tree" "$ROOT/VF_Infra_V2.8.11_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix(); info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED; info.create_system=3; info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          cd ../product
+          python3 scripts/full-runtime-vs-update-result-source-exact-gate.py \
+            --baseline-full "$ROOT/VF_Infra_V2.8.11_FULL.zip" \
+            --candidate-full "$ROOT/VF_Infra_V2.8.12_FULL.zip" \
+            --candidate-update "$ROOT/update-a/VF_Infra_V2.8.12_UPDATE.zip" \
+            --expected-source-version 2.8.11 \
+            --expected-target-version 2.8.12 | tee "$EVIDENCE/source-exact.txt"
+          cp "$ROOT/VF_Infra_V2.8.12_FULL.zip" "$EVIDENCE/release-assets/"
+          cp "$ROOT/update-a/VF_Infra_V2.8.12_UPDATE.zip" "$EVIDENCE/release-assets/"
+          cp "$ROOT/update-a/PACKAGE_MANIFEST.json" "$EVIDENCE/"
+          sha256sum "$EVIDENCE/release-assets/VF_Infra_V2.8.12_FULL.zip" "$EVIDENCE/release-assets/VF_Infra_V2.8.12_UPDATE.zip" | tee "$EVIDENCE/RELEASE_SHA256SUMS.txt"
+          stat -c '%n %s' "$EVIDENCE/release-assets/VF_Infra_V2.8.12_FULL.zip" "$EVIDENCE/release-assets/VF_Infra_V2.8.12_UPDATE.zip" | tee "$EVIDENCE/RELEASE_BYTES.txt"
+          echo P04_V2812_DETERMINISTIC_ATOMIC_SOURCE_EXACT=PASS
+
+      - name: Install Fresh Chromium
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Fresh V2.8.12 final browser smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p04-v2812-final"
+          PORT=19120
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$ROOT/tree-a" >"$EVIDENCE/final-browser-php.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-v2812-final-smoke-20260831.mjs
+          test "$(jq -r '.status' "$EVIDENCE/browser-report.json")" = PASS
+          test "$(jq -r '.version' "$EVIDENCE/browser-report.json")" = '2.8.12'
+          test "$(jq -r '.post_requests_after_login' "$EVIDENCE/browser-report.json")" = '0'
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          echo P04_V2812_FINAL_BROWSER=PASS
+
+      - name: Real isolated V2.8.11 to V2.8.12 Atomic browser upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p04-v2812-final"
+          SITE="$ROOT/upgrade-site"
+          DATA="$ROOT/.vfinfra-data"
+          rm -rf "$SITE" "$DATA"
+          cp -a "$ROOT/old-tree" "$SITE"
+          cp "$ROOT/update-a/repair-v2.8.12.php" "$SITE/repair-v2.8.12.php"
+          PORT=19121
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$EVIDENCE/atomic-upgrade-php.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" VF_UPGRADE_BASE_URL="http://127.0.0.1:$PORT" VF_UPGRADE_DATA_DIR="$DATA" node scripts/p04-v2812-atomic-upgrade-20260831.mjs
+          test "$(jq -r '.status' "$EVIDENCE/atomic-upgrade-report.json")" = PASS
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = '2.8.12'
+          test ! -e "$SITE/repair-v2.8.12.php"
+          test -f "$DATA/V2812_PROTECTED_SENTINEL.txt"
+          test -f "$DATA/database/vf-domain.sqlite"
+          test "$(sqlite3 "$DATA/database/vf-domain.sqlite" 'PRAGMA integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DATA/database/vf-domain.sqlite" 'PRAGMA foreign_key_check;')"
+          test "$(sqlite3 "$DATA/database/vf-domain.sqlite" "SELECT COALESCE(MAX(version),0) FROM schema_migrations WHERE status='success';")" = '14'
+          test "$(sqlite3 "$DATA/database/vf-domain.sqlite" "SELECT COUNT(*) FROM backups WHERE backup_type='pre_update' AND protected=1;")" -ge 1
+          test ! -e "$DATA/state/release-journal-v1.json"
+          test -z "$(find "$DATA/temp" -maxdepth 1 -type d -name 'atomic-payload-*' -print -quit 2>/dev/null || true)"
+          if grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)' "$EVIDENCE/atomic-upgrade-php.log"; then cat "$EVIDENCE/atomic-upgrade-php.log"; exit 67; fi
+          {
+            echo source_version=2.8.11
+            echo target_version=2.8.12
+            echo schema=14
+            echo integrity=ok
+            echo foreign_keys=0
+            echo protected_sentinel=PASS
+            echo pre_update_backup=PASS
+            echo repair_cleanup=PASS
+            echo release_journal_cleanup=PASS
+          } | tee "$EVIDENCE/post-upgrade-state.txt"
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          echo P04_V2811_TO_V2812_ATOMIC_REAL_GATE=PASS
+
+      - name: Final gate summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$EVIDENCE/FINAL_GATE_SUMMARY.json" <<JSON
+          {
+            "project":"P04",
+            "version":"2.8.12",
+            "candidate":"$CANDIDATE",
+            "base_develop":"$DEVELOP",
+            "base_main":"$BASE_MAIN",
+            "old_release":"$OLD_RELEASE",
+            "schema":14,
+            "migration":"NONE",
+            "provider_authority":"READ_ONLY_FIRST",
+            "deterministic_full_update":true,
+            "atomic_self_test":true,
+            "source_exact_2_8_11_to_2_8_12":true,
+            "real_isolated_atomic_upgrade":true,
+            "pre_update_backup":true,
+            "protected_data_preserved":true,
+            "fresh_install":true,
+            "desktop_mobile_browser":true,
+            "status":"PASS"
+          }
+          JSON
+          echo P04_V2812_FINAL_EXACT_SOURCE_GATE=PASS
+
+      - name: Upload final public-safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-V2.8.12-FINAL-${{ env.CANDIDATE }}
+          path: evidence-p04-v2812-final/
+          if-no-files-found: error
+          retention-days: 30
