@@ -1,0 +1,157 @@
+name: P01 Backend IA Authority Gate
+on:
+  push:
+    branches: [product/p01-backend-ia-authority-gate-20260831]
+    paths: [.github/workflows/p01-backend-ia-authority-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: a48f8f53462a04fb222f2ba9df67d96ddec77d52
+      BASE: fa77d516957058b3a60fa6cc839326c91c5329fa
+      TREE: 8b073a799cfd20ef1ec1fa260e9cdf16631b928a
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-backend-ia/evidence
+      COOKIE: /tmp/p01-backend-ia.cookies
+      PORT: '18471'
+      ADMIN_PASS: P01BackendIAGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-backend-ia "$COOKIE"; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          mapfile -t changed < <(git -C product diff --name-only "$BASE"...HEAD | sort)
+          expected=$'src/app/AdminShell.php\nsrc/settings.php\nsrc/system.php'
+          test "$(printf '%s\n' "${changed[@]}")" = "$expected"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -Fx "define('VF_VERSION', '2.35.3');" product/src/app/bootstrap.php >/dev/null
+          jq -e '.production_version=="2.35.3" and .schema_version=="2026082901"' product/VF_PROJECT.json >/dev/null
+          grep -F "['key'=>'recovery','label'=>'备份与恢复'" product/src/app/AdminShell.php >/dev/null
+          grep -F "['key'=>'update','label'=>'更新'" product/src/app/AdminShell.php >/dev/null
+          ! grep -F "['key'=>'system','label'=>'系统'" product/src/app/AdminShell.php
+          grep -F "'workbench.php?route=rss','label'=>'RSS 订阅'" product/src/app/AdminShell.php >/dev/null
+          grep -F "'system.php','label'=>'系统状态'" product/src/app/AdminShell.php >/dev/null
+          grep -F '公开首页常用入口' product/src/settings.php >/dev/null
+          grep -F '不控制管理员工作台首页' product/src/settings.php >/dev/null
+          grep -F '高级诊断信息' product/src/system.php >/dev/null
+          grep -F 'system-info.php' product/src/system.php >/dev/null
+          grep -F 'system-baseline.php' product/src/system.php >/dev/null
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          echo P01_BACKEND_IA_SCOPE=PASS | tee "$EVID/scope.txt"
+      - name: Fresh install and backend route verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-backend-ia.pid
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Backend IA Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/database.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);echo "P01_BACKEND_IA_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          : > "$EVID/http.txt"
+          for page in links-admin.php browser-helper.php data-safety.php settings.php update.php system.php system-info.php system-baseline.php plugins.php; do code=$(curl -sS -o "$EVID/${page%.php}.html" -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$page"); echo "$page=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          echo P01_BACKEND_IA_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium backend hierarchy and mobile reachability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-backend-ia/pw; cd /tmp/p01-backend-ia/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');
+          const base='http://127.0.0.1:18471/';
+          const expected=['网址','浏览器助手','备份与恢复','设置','更新'];
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            let q=await c.request.post(base+'api.php?action=login',{data:{password:'P01BackendIAGate'}});
+            if(!q.ok()||!(await q.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            const read=()=>p.evaluate(()=>({
+              group:document.body.dataset.vfGroup||'',
+              top:[...document.querySelectorAll('.vf-rail-section>.vf-rail-item>span')].map(x=>x.textContent.trim()),
+              active:document.querySelector('.vf-rail-section.active>.vf-rail-item>span')?.textContent?.trim()||'',
+              sub:[...document.querySelectorAll('.vf-rail-subitem')].map(x=>x.textContent.trim()),
+              overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+              railOpen:document.body.classList.contains('vf-rail-open')
+            }));
+            async function go(path,group,active){await p.goto(base+path,{waitUntil:'networkidle'});let m=await read();if(JSON.stringify(m.top)!==JSON.stringify(expected)||m.top.includes('系统')||m.group!==group||m.active!==active||m.overflow>1)throw Error(path+' '+JSON.stringify(m));return m;}
+            let m=await go('settings.php','settings','设置');
+            for(const x of ['站点与品牌','阅读与列表','公开首页与现场','公开展示与 SEO','管理员账号','RSS 订阅','系统状态'])if(!m.sub.includes(x))throw Error('settings sub '+x+' '+JSON.stringify(m));
+            if(!await p.locator('text=公开首页常用入口').count()||!await p.locator('text=不控制管理员工作台首页').count())throw Error('settings public home copy');
+            await p.screenshot({path:process.env.EVID+'/settings-1440.png',fullPage:true});
+            m=await go('data-safety.php','recovery','备份与恢复');
+            for(const x of ['SQLite 备份','完整恢复','旧站迁移'])if(!m.sub.includes(x))throw Error('recovery sub '+x+' '+JSON.stringify(m));
+            await go('update.php','update','更新');
+            m=await go('system.php','settings','设置');
+            if(!await p.locator('a[href="system-info.php"]').count()||!await p.locator('a[href="system-baseline.php"]').count())throw Error('advanced diagnostics missing');
+            await go('system-info.php','settings','设置');
+            await go('system-baseline.php','settings','设置');
+            await go('plugins.php','settings','设置');
+            await p.goto(base+'settings.php',{waitUntil:'networkidle'});
+            await p.setViewportSize({width:390,height:844}); await p.waitForTimeout(100);
+            await p.locator('.vf-admin-menu-button').click(); await p.waitForTimeout(100);
+            m=await read();
+            if(!m.railOpen||JSON.stringify(m.top)!==JSON.stringify(expected)||m.overflow>1)throw Error('mobile '+JSON.stringify(m));
+            const box=await p.locator('#vfAdminRail').boundingBox();if(!box||box.x>1||box.width<220)throw Error('mobile rail '+JSON.stringify(box));
+            await p.screenshot({path:process.env.EVID+'/settings-390.png',fullPage:true});
+            await b.close();
+            console.log('P01_BACKEND_IA_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_BACKEND_IA_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fx P01_BACKEND_IA_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_BACKEND_IA_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_BACKEND_IA_SQLITE=PASS "$EVID/database.txt"
+          grep -Fx P01_BACKEND_IA_CHROMIUM=PASS "$EVID/chromium.txt"
+          printf 'P01_BACKEND_IA_AUTHORITY_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-backend-ia-authority-${{ github.run_id }}
+          path: /tmp/p01-backend-ia/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-backend-ia.pid 2>/dev/null)" 2>/dev/null || true
