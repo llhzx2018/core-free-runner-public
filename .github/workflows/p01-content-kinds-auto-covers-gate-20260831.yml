@@ -1,0 +1,166 @@
+name: P01 Content Kinds Auto Covers Gate
+on:
+  push:
+    branches: [gate/p01-content-kinds-auto-covers-20260831]
+    paths: [.github/workflows/p01-content-kinds-auto-covers-gate-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: f578ca9306ee0ace4d851ad10a1049e66c7708e2
+      BASE: a429d2660c165feae51a46f2144f8de6bda3961f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-content-covers/evidence
+      PORT: '18517'
+      ADMIN_PASS: P01ContentCoversPass2026
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and eight-file fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-content-covers; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse "$SOURCE^")" = "$BASE"
+          git -C product diff --name-only "$BASE" "$SOURCE" | sort | tee "$EVID/changed-files.txt"
+          cat > /tmp/expected.txt <<'EOF'
+          src/app/FunctionalWorkspace.php
+          src/app/FunctionalWorkspaceShell.php
+          src/app/ResourceCoverCache.php
+          src/app/ResourceMetadata.php
+          src/app/SurfaceRepository.php
+          src/app/SurfaceShell.php
+          src/assets/workspace.js
+          src/resource-cover-refresh.php
+          EOF
+          diff -u /tmp/expected.txt "$EVID/changed-files.txt"
+          test -z "$(grep '^src/migrations/' "$EVID/changed-files.txt" || true)"
+          git -C product diff --check "$BASE" "$SOURCE"
+          for f in product/src/app/FunctionalWorkspace.php product/src/app/FunctionalWorkspaceShell.php product/src/app/ResourceCoverCache.php product/src/app/ResourceMetadata.php product/src/app/SurfaceRepository.php product/src/app/SurfaceShell.php product/src/resource-cover-refresh.php; do php -l "$f"; done | tee "$EVID/php-lint.txt"
+          node --check product/src/assets/workspace.js
+          ! grep -F "\$kind = 'YouTube'" product/src/app/SurfaceRepository.php
+          grep -F "resource-cover-refresh.php" product/src/assets/workspace.js >/dev/null
+          test -z "$(git -C product status --porcelain)"
+      - name: Fresh runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import struct,zlib,binascii
+          w,h=120,180
+          rows=[]
+          for y in range(h):
+              row=bytearray([0])
+              for x in range(w): row.extend(((20+x)%256,(110+y//2)%256,125))
+              rows.append(bytes(row))
+          raw=b''.join(rows)
+          def c(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',binascii.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+c(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+c(b'IDAT',zlib.compress(raw,9))+c(b'IEND',b'')
+          open('/tmp/p01-content-covers/test-cover.png','wb').write(png)
+          PY
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-content-covers.pid
+          COOKIE=/tmp/p01-content-covers.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Content Covers Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Deterministic taxonomy and cover-cache contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" IMG=/tmp/p01-content-covers/test-cover.png EVID="$EVID" php <<'PHP' | tee "$EVID/php-contract.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          function A($v,$m){if(!$v){fwrite(STDERR,"FAIL: $m\n");exit(1);}}
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $provider=VfResourceMetadata::provider('https://www.youtube.com/@vf-private');A($provider['code']==='youtube'&&$provider['label']==='YouTube','YouTube provider');
+          A(VfResourceMetadata::normalizeKind('channels','YouTube')==='频道','legacy YouTube -> channel');
+          A(VfResourceMetadata::normalizeKind('watch','movie')==='电影','movie -> 电影');
+          A(VfResourceMetadata::normalizeKind('watch','series')==='剧集','series -> 剧集');
+          $c=VfResourceCoverCache::extractCoverCandidates('<meta property="og:image" content="/poster.png"><meta name="twitter:image" content="https://cdn.example/twitter.jpg">','https://media.example/film/1');
+          A(($c[0]??'')==='https://media.example/poster.png','relative og:image resolve');
+          $cat=$repo->createCategory(['name'=>'Gate Backing','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $channel=$repo->saveLink(null,['category_id'=>$cat,'title'=>'VF 私人频道','url'=>'https://www.youtube.com/@vf-private','description'=>'','is_private'=>1],'manual')['id'];
+          $watch=$repo->saveLink(null,['category_id'=>$cat,'title'=>'VF 公开电影','url'=>'https://iyf.tv/movie/vf-public','description'=>'','is_private'=>0],'manual')['id'];
+          $pending=$repo->saveLink(null,['category_id'=>$cat,'title'=>'VF 待整理频道','url'=>'https://www.youtube.com/@vf-pending','description'=>'','is_private'=>1,'is_pending'=>1],'manual')['id'];
+          $manual=$repo->saveLink(null,['category_id'=>$cat,'title'=>'VF 手工封面频道','url'=>'https://www.bilibili.com/12345','description'=>'','is_private'=>1],'manual')['id'];
+          $hydrate=$repo->saveLink(null,['category_id'=>$cat,'title'=>'VF 自动触发频道','url'=>'https://www.youtube.com/@vf-hydrate','description'=>'','is_private'=>1],'manual')['id'];
+          $surface->upsertProfile($channel,['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($watch,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2024']);
+          $surface->upsertProfile($pending,['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($manual,['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($hydrate,['surface'=>'channels','resource_kind'=>'频道']);
+          // Simulate legacy production values: platform/type aliases already persisted before this candidate.
+          $db->prepare("UPDATE resource_domain_profiles SET resource_kind='YouTube' WHERE link_id=?")->execute([$channel]);
+          $db->prepare("UPDATE resource_domain_profiles SET resource_kind='movie' WHERE link_id=?")->execute([$watch]);
+          $img=file_get_contents(getenv('IMG'));$calls=0;
+          $fetcher=function(string $url,int $max,string $accept)use($img,&$calls){$calls++;if(str_contains($url,'img.example')||str_contains($url,'/covers/'))return ['status'=>200,'contentType'=>'image/png','body'=>$img,'url'=>$url];if(str_contains($url,'youtube.com/@vf-private'))return ['status'=>200,'contentType'=>'text/html','body'=>'<meta property="og:image" content="https://img.example/private.png">','url'=>$url];if(str_contains($url,'iyf.tv/movie/vf-public'))return ['status'=>200,'contentType'=>'text/html','body'=>'<meta property="og:image" content="/covers/movie.png">','url'=>$url];throw new RuntimeException('unexpected deterministic URL '.$url);};
+          $cache=new VfResourceCoverCache($db,$fetcher);$r1=$cache->refreshOne($channel);A($r1['success']&&!$r1['cached'],'private channel auto cover');$afterFirst=$calls;$r2=$cache->refreshOne($channel);A($r2['success']&&$r2['cached']&&$calls===$afterFirst,'auto cache reuse');
+          $rw=$cache->refreshOne($watch);A($rw['success'],'public watch auto cover');
+          try{$cache->refreshOne($pending);A(false,'pending must reject');}catch(RuntimeException $e){A(str_contains($e->getMessage(),'不会向远端请求封面'),'pending rejection reason');}
+          $dir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets/covers';if(!is_dir($dir))mkdir($dir,0750,true);$manualFile='cover-'.$manual.'-manual.png';copy(getenv('IMG'),$dir.'/'.$manualFile);$hash=hash_file('sha256',$dir.'/'.$manualFile);$now=gmdate('c');$db->prepare("INSERT INTO resource_asset_files(link_id,asset_kind,file_name,original_name,mime_type,byte_size,width,height,file_hash,created_at,updated_at) VALUES(?,'cover',?,'manual.png','image/png',?,120,180,?,?,?)")->execute([$manual,$manualFile,filesize($dir.'/'.$manualFile),$hash,$now,$now]);
+          $manualCalls=0;$manualCache=new VfResourceCoverCache($db,function()use(&$manualCalls){$manualCalls++;throw new RuntimeException('manual cover must not fetch');});$rm=$manualCache->refreshOne($manual);A($rm['success']&&$rm['cached']&&$rm['source']==='manual'&&$manualCalls===0,'manual override preserved');
+          $assets=$surface->allAssets(true);$map=[];foreach($assets as $a)$map[(int)$a['id']]=$a;
+          A(($map[$channel]['resource_kind']??'')==='频道','legacy channel read normalization');A(($map[$channel]['provider']??'')==='youtube'&&($map[$channel]['provider_label']??'')==='YouTube','channel provider metadata');A(!empty($map[$channel]['cover_url']),'channel local cover URL');
+          A(($map[$watch]['resource_kind']??'')==='电影','legacy watch read normalization');A(($map[$watch]['provider']??'')==='iyf'&&($map[$watch]['provider_label']??'')==='爱一帆','watch provider metadata');A(!empty($map[$watch]['cover_url']),'watch local cover URL');A(empty($map[$hydrate]['cover_url']),'hydrate seed must have no cover');
+          $rows=$db->query("SELECT link_id,original_name FROM resource_asset_files WHERE asset_kind='cover' ORDER BY link_id")->fetchAll(PDO::FETCH_ASSOC);$auto=0;foreach($rows as $x)if(str_starts_with((string)$x['original_name'],'auto:'))$auto++;A($auto>=2,'automatic covers marked');
+          file_put_contents(getenv('EVID').'/ids.json',json_encode(['channel'=>$channel,'watch'=>$watch,'pending'=>$pending,'manual'=>$manual,'hydrate'=>$hydrate],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+          echo "TAXONOMY=PASS\nAUTO_COVER=PASS\nMANUAL_OVERRIDE=PASS\nCALLS=$calls\n";
+          PHP
+      - name: Browser taxonomy, hydration and anonymous privacy gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; "$CHROME" --version | tee "$EVID/chrome.txt"
+          mkdir -p /tmp/p01-content-covers/pw; cd /tmp/p01-content-covers/pw; npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright-core'),fs=require('fs');
+          const base='http://127.0.0.1:18517/',ids=JSON.parse(fs.readFileSync(process.env.EVID+'/ids.json','utf8')),A=(v,m)=>{if(!v)throw Error(m)};
+          async function overflow(p,label){const n=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(n===0,label+' overflow='+n);return n}
+          const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+          (async()=>{const b=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});const admin=await b.newContext({viewport:{width:390,height:844}});const login=await admin.request.post(base+'api.php?action=login',{data:{password:process.env.ADMIN_PASS}});A(login.ok()&&(await login.json()).ok,'admin login');
+          await admin.route('**/resource-cover-refresh.php',async route=>{const req=route.request(),body=req.postData()||'',m=body.match(/name="ids"\r?\n\r?\n([^\r\n]+)/);let requested=[];try{requested=JSON.parse(m?m[1]:'[]')}catch(_){};const results=requested.map(id=>Number(id)===Number(ids.hydrate)?{id:Number(id),success:true,cover:{url:pixel}}:{id:Number(id),success:false,error:'gate'});await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,processed:results.length,results})})});
+          const p=await admin.newPage();p.setDefaultTimeout(10000);const out={source:process.env.SOURCE,base:process.env.BASE};await p.goto(base+'channels.php',{waitUntil:'domcontentloaded'});A(await p.getByText('VF 私人频道',{exact:true}).count()===1,'private channel missing admin');const tree=(await p.locator('.vf-category-section .vf-category-tree').textContent())||'';A(tree.includes('频道'),'channel semantic category missing');A(!tree.includes('YouTube'),'provider leaked into category tree: '+tree);const row=p.locator(`[data-asset-row="${ids.channel}"]`);A(await row.count()===1,'channel row missing');const small=(await row.locator('.vf-asset-copy small').textContent())||'';A(small.includes('YouTube')&&small.includes('频道'),'channel provider/kind copy '+small);A(await row.locator('.vf-asset-icon img').count()===1,'channel cached cover missing');A((await p.locator('body').textContent()).includes('自动获取 · 可手工覆盖'),'automatic cover copy missing');await p.waitForFunction(id=>document.querySelector(`[data-asset-row="${id}"] .vf-asset-icon img`),ids.hydrate);out.channels390={tree,rowMeta:small,overflow:await overflow(p,'channels 390')};await p.screenshot({path:process.env.EVID+'/channels-390.png',fullPage:true});
+          await p.setViewportSize({width:1440,height:900});await p.goto(base+'channels.php',{waitUntil:'domcontentloaded'});out.channels1440={overflow:await overflow(p,'channels 1440')};
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'watch.php',{waitUntil:'domcontentloaded'});const movie=p.locator(`[data-asset-row="${ids.watch}"]`);A(await movie.count()===1,'watch card missing');const movieMeta=(await movie.locator('.vf-watch-copy small').textContent())||'';A(movieMeta.includes('电影')&&movieMeta.includes('爱一帆'),'movie kind/provider '+movieMeta);A(await movie.locator('.vf-watch-poster img').count()===1,'movie cover missing');out.watch390={meta:movieMeta,overflow:await overflow(p,'watch 390')};await p.screenshot({path:process.env.EVID+'/watch-390.png',fullPage:true});
+          const pub=await b.newContext({viewport:{width:390,height:844}}),q=await pub.newPage();q.setDefaultTimeout(10000);await q.goto(base+'channels.php',{waitUntil:'domcontentloaded'});A(await q.getByText('VF 私人频道',{exact:true}).count()===0,'PRIVATE CHANNEL LEAK');A(await q.getByText('VF 自动触发频道',{exact:true}).count()===0,'PRIVATE HYDRATE CHANNEL LEAK');const privCover=await pub.request.get(base+`resource-cover.php?id=${ids.channel}`);A(privCover.status()!==200,'PRIVATE COVER LEAK status='+privCover.status());const refresh=await pub.request.post(base+'resource-cover-refresh.php',{form:{ids:JSON.stringify([ids.channel]),csrf:'anonymous'}});A(refresh.status()===403,'anonymous refresh endpoint status='+refresh.status());
+          await q.goto(base+'watch.php',{waitUntil:'domcontentloaded'});A(await q.getByText('VF 公开电影',{exact:true}).count()===1,'public movie missing');const pubCover=await pub.request.get(base+`resource-cover.php?id=${ids.watch}`);A(pubCover.status()===200,'public cover status='+pubCover.status());A((pubCover.headers()['content-type']||'').startsWith('image/'),'public cover mime');out.privacy={privateChannel:'HIDDEN',privateCoverStatus:privCover.status(),refreshStatus:refresh.status(),publicMovie:'VISIBLE',publicCoverStatus:pubCover.status(),overflow:await overflow(q,'public watch')};out.verdict='PASS';fs.writeFileSync(process.env.EVID+'/browser.json',JSON.stringify(out,null,2));console.log('P01_CONTENT_KINDS_AUTO_COVERS=PASS');console.log(JSON.stringify(out));await pub.close();await admin.close();await b.close()})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          CHROME="$CHROME" SOURCE="$SOURCE" BASE="$BASE" EVID="$EVID" ADMIN_PASS="$ADMIN_PASS" node gate.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and contract summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));$migrationCount=(int)$db->query('SELECT COUNT(*) FROM migrations')->fetchColumn();echo "INTEGRITY=$i\nFK=$fk\nMIGRATIONS=$migrationCount\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-content-kinds-auto-covers-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-content-covers.pid 2>/dev/null)" 2>/dev/null || true
