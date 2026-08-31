@@ -1,0 +1,148 @@
+name: P04 V2.8.12 Promotion Delta Gate
+
+on:
+  push:
+    branches:
+      - release/p04-v2812-promotion-delta-gate-20260831
+    paths:
+      - '.github/workflows/p04-v2812-promotion-delta-gate-20260831.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OLD_CANDIDATE: 3b87a1ffea5fe2caafceef4ca9db87c871ff2882
+  CANDIDATE: 5e628a932d5bbd7393bf8e8d4008785a4f04bed2
+  DEVELOP: fdbaf33544a76b41af68b3e66d4463443959cb08
+  BASE_MAIN: b4ecd5dd150165b43be9404ab7ceb18c53b36137
+  EXPECTED_FULL_SHA256: a8144f46c78fea31e3c2508a1e34f2d122835e4fcf66a63d50ac95f861500634
+  EXPECTED_UPDATE_SHA256: 89e43645b1b434ce86f575c835517a15f29711ccbd586311ac5957d2e8ba4246
+  EXPECTED_RUNTIME_FINGERPRINT: e31410c2b49db9dc94babbfc6d50eda0cbfd265d71371899e7c1f0c5626d5e19
+  EVIDENCE: ${{ github.workspace }}/evidence-p04-v2812-promotion-delta
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify private read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+
+      - name: Checkout exact new candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+          ini-file: production
+
+      - name: Prove CI-only candidate delta and unchanged authorities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/develop)" = "$DEVELOP"
+          test "$(git -C product rev-parse origin/main)" = "$BASE_MAIN"
+          test "$(git -C product rev-parse origin/release/p04-v2.8.12-daily-ux-20260831)" = "$CANDIDATE"
+          mapfile -t delta < <(git -C product diff --name-only "$OLD_CANDIDATE" "$CANDIDATE")
+          printf '%s\n' "${delta[@]}" | tee "$EVIDENCE/old-to-new-candidate-delta.txt"
+          test "${#delta[@]}" -eq 1
+          test "${delta[0]}" = '.github/workflows/ci.yml'
+          git -C product diff --quiet "$OLD_CANDIDATE" "$CANDIDATE" -- src public database config VERSION VF_PROJECT.json scripts tests
+          mapfile -t from_develop < <(git -C product diff --name-only "$DEVELOP" "$CANDIDATE")
+          printf '%s\n' "${from_develop[@]}" | tee "$EVIDENCE/develop-to-new-candidate-scope.txt"
+          test "${#from_develop[@]}" -eq 6
+          for f in .github/workflows/ci.yml VERSION VF_PROJECT.json scripts/build-v2812-release-tree.py scripts/build-v2812-update-release.py tests/unit/ui_zero_data_onboarding_contract.php; do
+            printf '%s\n' "${from_develop[@]}" | grep -Fxq "$f"
+          done
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.12'
+          echo P04_V2812_PROMOTION_DELTA_SCOPE=PASS
+
+      - name: Rebuild frozen runtime assets and require byte identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p04-v2812-delta"
+          mkdir -p "$ROOT"
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          python3 scripts/build-v2812-release-tree.py "$ROOT/tree" | tee "$EVIDENCE/build-tree.json"
+          test "$(jq -r '.version' "$ROOT/tree/release-manifest.json")" = '2.8.12'
+          test "$(jq -r '.target_schema' "$ROOT/tree/release-manifest.json")" = '14'
+          test "$(jq -r '.source_fingerprint' "$EVIDENCE/build-tree.json")" = "$EXPECTED_RUNTIME_FINGERPRINT"
+          python3 - "$ROOT/tree" "$ROOT/VF_Infra_V2.8.12_FULL.zip" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          root=Path(sys.argv[1]); out=Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9,strict_timestamps=True) as z:
+              for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                  rel=p.relative_to(root).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.create_system=3
+                  info.external_attr=(0o100644<<16)
+                  z.writestr(info,p.read_bytes())
+          PY
+          python3 scripts/build-v2812-update-release.py --target-runtime "$ROOT/tree" --output "$ROOT/update" | tee "$EVIDENCE/build-update.json"
+          full_sha="$(sha256sum "$ROOT/VF_Infra_V2.8.12_FULL.zip" | awk '{print $1}')"
+          update_sha="$(sha256sum "$ROOT/update/VF_Infra_V2.8.12_UPDATE.zip" | awk '{print $1}')"
+          printf 'FULL %s\nUPDATE %s\n' "$full_sha" "$update_sha" | tee "$EVIDENCE/rebuilt-hashes.txt"
+          test "$full_sha" = "$EXPECTED_FULL_SHA256"
+          test "$update_sha" = "$EXPECTED_UPDATE_SHA256"
+          test "$(jq -c '.allowed_source_versions' "$ROOT/update/PACKAGE_MANIFEST.json")" = '["2.8.11"]'
+          test "$(jq -r '.migration' "$ROOT/update/PACKAGE_MANIFEST.json")" = 'NONE'
+          test "$(jq -r '.provider_authority' "$ROOT/update/PACKAGE_MANIFEST.json")" = 'READ_ONLY_FIRST'
+          python3 scripts/validate-online-atomic-package.py --runtime "$ROOT/tree" --zip "$ROOT/update/VF_Infra_V2.8.12_UPDATE.zip" --version 2.8.12 | tee "$EVIDENCE/atomic-self-test.txt"
+          php "$ROOT/update/repair-v2.8.12.php" --self-test | tee "$EVIDENCE/repair-self-test.txt"
+          echo P04_V2812_FROZEN_RUNTIME_BYTES_IDENTICAL=PASS
+
+      - name: Promotion delta summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$EVIDENCE/PROMOTION_DELTA_GATE_SUMMARY.json" <<JSON
+          {
+            "project":"P04",
+            "version":"2.8.12",
+            "old_final_gate_candidate":"$OLD_CANDIDATE",
+            "candidate":"$CANDIDATE",
+            "delta_only":".github/workflows/ci.yml",
+            "old_final_gate_run":33409138217,
+            "old_final_gate_artifact":9764418835,
+            "old_final_gate_artifact_digest":"sha256:de030adf90743691e8c598a27f069602ce79e210d7646a6531563ced4c2adcae",
+            "full_sha256":"$EXPECTED_FULL_SHA256",
+            "update_sha256":"$EXPECTED_UPDATE_SHA256",
+            "runtime_bytes_identical_to_browser_atomic_gated_assets":true,
+            "status":"PASS"
+          }
+          JSON
+          echo P04_V2812_PROMOTION_DELTA_GATE=PASS
+
+      - name: Upload promotion delta evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-V2.8.12-PROMOTION-DELTA-${{ env.CANDIDATE }}
+          path: evidence-p04-v2812-promotion-delta/
+          if-no-files-found: error
+          retention-days: 30
