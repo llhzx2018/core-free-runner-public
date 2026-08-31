@@ -59,7 +59,11 @@ try {
   const row = page.locator('table.server-table tbody tr').filter({ hasText: 'v260-edge-01' }).first();
   await row.waitFor({ state: 'visible' });
   assert((await row.getAttribute('data-v2812-server-risk')) === 'attention', 'stopped server attention missing');
-  assert((await row.locator('[data-v270-action="server"]').getAttribute('aria-label')) === '管理 v260-edge-01', 'server action aria missing');
+  const listAction = row.locator('[data-v270-action="server"]');
+  assert((await listAction.getAttribute('aria-label')) === '管理 v260-edge-01', 'server action aria missing');
+  const serverId = await listAction.getAttribute('data-id');
+  assert(Boolean(serverId), 'server data-id missing');
+  report.detail.server_id = serverId;
   assert((await toolbar.locator('input[type="search"]').getAttribute('placeholder')) === '搜索服务器、服务商、区域或状态', 'server search placeholder missing');
   const initial = (await brief.innerText()).replace(/\s+/g, ' ').trim();
   assert(initial.includes('本页 1 台服务器'), `initial brief ${initial}`);
@@ -77,11 +81,24 @@ try {
   report.list.filter_summary = 'PASS';
   await page.screenshot({ path: `${evidence}/01-servers-desktop.png`, fullPage: true, animations: 'disabled' });
 
-  await row.locator('[data-v270-action="server"]').click();
+  await listAction.click();
+  await page.waitForTimeout(700);
+  const routeState = await page.evaluate(() => ({
+    hash: location.hash,
+    title: document.querySelector('#v270-app h1')?.textContent?.trim() || '',
+    error: document.querySelector('#v270-app .v270-error')?.textContent?.trim() || '',
+    text: (document.querySelector('#v270-app')?.innerText || '').replace(/\s+/g, ' ').slice(0, 600),
+  }));
+  report.detail.route_after_click = routeState.hash;
+  report.detail.title_after_click = routeState.title;
+  report.detail.error_after_click = routeState.error;
+  assert(routeState.hash === `#server/${encodeURIComponent(serverId)}`, `server click did not navigate: ${JSON.stringify(routeState)}`);
+  assert(!routeState.error, `server detail readback error: ${JSON.stringify(routeState)}`);
   await page.locator('.v270-ref-summary[data-ref-lock="server-summary"]').waitFor({ state: 'visible', timeout: 10000 });
   assert(await page.locator('.v270-ref-summary[data-ref-lock="server-summary"] .v270-ref-metric[data-v2812-server-priority]').count() >= 1, 'detail priority missing');
   assert((await page.locator('.v270-next h2').innerText()).trim() === '下一步', 'owner next copy not simplified');
   assert(await page.locator('.v270-side h2').filter({ hasText: '高风险操作边界' }).count() === 1, 'risk boundary copy missing');
+  report.detail.navigation = 'PASS';
   report.detail.priority = 'PASS';
   report.detail.next_action = 'PASS';
   report.detail.risk_boundary = 'PASS';
