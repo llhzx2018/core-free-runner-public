@@ -1,0 +1,168 @@
+name: P04 V2.8.12 Online Discovery Gate
+
+on:
+  push:
+    branches:
+      - verify/p04-v2812-online-discovery-20260831
+    paths:
+      - '.github/workflows/p04-v2812-online-discovery-20260831.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  V2811_SOURCE: d6f1e0660ba859d160bc3393cc281bcbe186c779
+  CORE_UPDATES_SOURCE: 99af2c7a323d7a07db0979bf071d9c891dffe51e
+  RELEASE_SOURCE: 9bf4500c2dea214386bc2a6dd81893cafed0947c
+  RELEASE_TREE: d74cf7b76f0e4941bbe09cd839dbf9d70a72b516
+  RELEASE_ID: '379896011'
+  UPDATE_ASSET_ID: '538235899'
+  UPDATE_BYTES: '1338985'
+  UPDATE_SHA256: 89e43645b1b434ce86f575c835517a15f29711ccbd586311ac5957d2e8ba4246
+  EVIDENCE: ${{ github.workspace }}/evidence-p04-v2812-online-discovery
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify private read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+
+      - name: Checkout exact V2.8.11 production client source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.V2811_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: curl, mbstring, json
+          coverage: none
+          ini-file: production
+
+      - name: Live V2.8.11 update-client discovery
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          test "$(git -C product rev-parse HEAD)" = "$V2811_SOURCE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          test "$(gh api repos/llhzx2018/core-updates/branches/main --jq '.commit.sha')" = "$CORE_UPDATES_SOURCE"
+          test "$(gh api repos/llhzx2018/vf-infra/git/ref/tags/v2.8.12 --jq '.object.sha')" = "$RELEASE_SOURCE"
+          test "$(gh api repos/llhzx2018/vf-infra/git/commits/$RELEASE_SOURCE --jq '.tree.sha')" = "$RELEASE_TREE"
+          test "$(gh api repos/llhzx2018/vf-infra/releases/tags/v2.8.12 --jq '.id')" = "$RELEASE_ID"
+
+          cat > "$RUNNER_TEMP/p04-v2812-discover.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('GITHUB_WORKSPACE').'/product';
+          require $root.'/src/app/Support.php';
+          require $root.'/src/app/Core/Update/UpdateTransportInterface.php';
+          require $root.'/src/app/Core/Update/UpdateSourceInterface.php';
+          require $root.'/src/app/Core/Update/UpdateContract.php';
+          require $root.'/src/app/Core/Update/UpdateRepositoryClient.php';
+          require $root.'/src/app/Core/Update/UpdateManifestService.php';
+
+          use VFInfra\Core\Update\UpdateRepositoryClient;
+          use VFInfra\Core\Update\UpdateManifestService;
+
+          $expectSha=getenv('UPDATE_SHA256');
+          $expectBytes=(int)getenv('UPDATE_BYTES');
+          $expectAssetId=(int)getenv('UPDATE_ASSET_ID');
+          $evidence=getenv('EVIDENCE');
+          $client=new UpdateRepositoryClient();
+          $source=$client->fetchProjectManifest();
+          $m=$source['manifest'];
+          if (($m['target_version']??null)!=='2.8.12') throw new RuntimeException('target_version mismatch');
+          if (($m['from_versions']??null)!==['2.8.11']) throw new RuntimeException('from_versions mismatch');
+          if (($m['schema_from']??null)!=='14'||($m['schema_to']??null)!=='14') throw new RuntimeException('schema mismatch');
+          if (($m['update_type']??null)!=='ATOMIC') throw new RuntimeException('update_type mismatch');
+          if (($m['release_tag']??null)!=='v2.8.12') throw new RuntimeException('release_tag mismatch');
+          if (($m['release_id']??null)!==379896011) throw new RuntimeException('release_id mismatch');
+          if (($m['release_product_commit']??null)!==getenv('RELEASE_SOURCE')) throw new RuntimeException('release commit mismatch');
+          if (($m['release_product_tree']??null)!==getenv('RELEASE_TREE')) throw new RuntimeException('release tree mismatch');
+          if (($m['asset_id']??null)!==$expectAssetId) throw new RuntimeException('asset id mismatch');
+          if (($m['asset_bytes']??null)!==$expectBytes) throw new RuntimeException('asset bytes mismatch');
+          if (($m['asset_sha256']??null)!==$expectSha) throw new RuntimeException('asset sha mismatch');
+          if (($m['backup_required']??null)!==true||($m['rollback_supported']??null)!==true) throw new RuntimeException('backup/rollback mismatch');
+
+          $asset=$client->resolveReleaseAsset((string)$m['repository'],(string)$m['release_tag'],(string)$m['asset_name']);
+          if ($asset['id']!==$expectAssetId||$asset['size']!==$expectBytes) throw new RuntimeException('resolved asset mismatch');
+
+          $service=new UpdateManifestService($client,'2.8.11',14);
+          $state=$service->evaluate($m);
+          if (($state['status']??null)!=='update_available') throw new RuntimeException('status='.$state['status']);
+          if (($state['can_update']??null)!==true) throw new RuntimeException('can_update false');
+          if (($state['current_version']??null)!=='2.8.11'||($state['latest_version']??null)!=='2.8.12') throw new RuntimeException('version decision mismatch');
+          if (($state['current_schema']??null)!==14||($state['latest_schema']??null)!==14) throw new RuntimeException('schema decision mismatch');
+          if (($state['allowed_source_versions']??null)!==['2.8.11']) throw new RuntimeException('allowed source decision mismatch');
+          if (($state['update_type']??null)!=='ATOMIC') throw new RuntimeException('decision update type mismatch');
+          if (($state['backup_required']??null)!==true||($state['rollback_supported']??null)!==true) throw new RuntimeException('decision backup/rollback mismatch');
+
+          $dest=getenv('RUNNER_TEMP').'/VF_Infra_V2.8.12_UPDATE.zip';
+          $download=$client->download($asset['url'],$dest,$expectBytes,$expectSha);
+          if (($download['bytes']??null)!==$expectBytes||($download['sha256']??null)!==$expectSha) throw new RuntimeException('actual client download mismatch');
+
+          $out=[
+            'gate'=>'P04_V2812_ONLINE_DISCOVERY',
+            'client_source'=>getenv('V2811_SOURCE'),
+            'core_updates_source'=>getenv('CORE_UPDATES_SOURCE'),
+            'current_version'=>'2.8.11',
+            'current_schema'=>14,
+            'latest_version'=>$state['latest_version'],
+            'latest_schema'=>$state['latest_schema'],
+            'status'=>$state['status'],
+            'can_update'=>$state['can_update'],
+            'reason'=>$state['reason'],
+            'update_type'=>$state['update_type'],
+            'allowed_source_versions'=>$state['allowed_source_versions'],
+            'backup_required'=>$state['backup_required'],
+            'rollback_supported'=>$state['rollback_supported'],
+            'release_tag'=>$m['release_tag'],
+            'release_id'=>$m['release_id'],
+            'release_product_commit'=>$m['release_product_commit'],
+            'release_product_tree'=>$m['release_product_tree'],
+            'asset_name'=>$m['asset_name'],
+            'asset_id'=>$asset['id'],
+            'asset_bytes'=>$download['bytes'],
+            'asset_sha256'=>$download['sha256'],
+            'manifest_sha256'=>$source['sha256'],
+            'production_upgrade_executed'=>false,
+            'provider_api_called'=>false,
+            'status_gate'=>'PASS'
+          ];
+          file_put_contents($evidence.'/ONLINE_DISCOVERY.json',json_encode($out,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n");
+          echo "P04_V2812_ONLINE_DISCOVERY=PASS\n";
+          echo "CURRENT_VERSION=2.8.11\nLATEST_VERSION=2.8.12\nSTATUS=update_available\nCAN_UPDATE=true\n";
+          PHP
+
+          php "$RUNNER_TEMP/p04-v2812-discover.php" | tee "$EVIDENCE/discovery.txt"
+          test "$(jq -r '.status_gate' "$EVIDENCE/ONLINE_DISCOVERY.json")" = PASS
+          test "$(jq -r '.status' "$EVIDENCE/ONLINE_DISCOVERY.json")" = update_available
+          test "$(jq -r '.can_update' "$EVIDENCE/ONLINE_DISCOVERY.json")" = true
+          test "$(jq -r '.latest_version' "$EVIDENCE/ONLINE_DISCOVERY.json")" = '2.8.12'
+          test "$(jq -r '.production_upgrade_executed' "$EVIDENCE/ONLINE_DISCOVERY.json")" = false
+          echo P04_V2812_LIVE_V2811_CLIENT_DISCOVERY_GATE=PASS
+
+      - name: Upload discovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-V2.8.12-ONLINE-DISCOVERY-EVIDENCE
+          path: evidence-p04-v2812-online-discovery/
+          if-no-files-found: error
+          retention-days: 30
