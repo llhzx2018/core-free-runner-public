@@ -1,0 +1,155 @@
+name: P04 Server Daily UX Exact-Source Gate R3
+
+on:
+  push:
+    branches:
+      - candidate/p04-server-daily-ux-gate-20260830
+    paths:
+      - '.github/workflows/p04-server-daily-ux-gate-r3-20260830.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE: a90d0cc288d9fbac4ba08d9f294688efbd4bca19
+      BASE_DEVELOP: 99e7b1e4c647ed9cc85cd257fa5ba63feadaf4a5
+      TARGET_BRANCH: ui/p04-server-daily-ux-20260830
+      EVIDENCE: ${{ github.workspace }}/evidence-r3
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify registered private read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+
+      - name: Checkout exact aligned P04 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+
+      - name: Aligned source fence and static contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/$TARGET_BRANCH)" = "$CANDIDATE"
+          test "$(git -C product merge-base "$BASE_DEVELOP" "$CANDIDATE")" = "$BASE_DEVELOP"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          mapfile -t changed < <(git -C product diff --name-only "$BASE_DEVELOP" "$CANDIDATE")
+          test "${#changed[@]}" -eq 4
+          for file in \
+            public/assets/daily-server-ux-polish.css \
+            public/assets/daily-server-ux-polish.js \
+            public/index.php \
+            tests/unit/ui_daily_server_ux_polish_contract.php; do
+            printf '%s\n' "${changed[@]}" | grep -Fxq "$file"
+          done
+          git -C product diff --quiet "$BASE_DEVELOP" "$CANDIDATE" -- database config src VERSION VF_PROJECT.json
+          grep -Fq 'daily-ux-polish.css' product/public/index.php
+          grep -Fq 'daily-ux-polish.js' product/public/index.php
+          grep -Fq 'daily-server-ux-polish.css' product/public/index.php
+          grep -Fq 'daily-server-ux-polish.js' product/public/index.php
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          find src public tests -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          node --check public/assets/daily-ux-polish.js
+          node --check public/assets/daily-server-ux-polish.js
+          php tests/unit/ui_daily_ux_polish_contract.php .
+          php tests/unit/ui_daily_server_ux_polish_contract.php .
+          php tests/unit/ui_contract_v280.php .
+          php tests/unit/maintenance_ui_contract_v288.php .
+          php tests/unit/domain_attention_group_management_ui_v289.php .
+          echo P04_SERVER_DAILY_UX_ALIGNED_STATIC_GATE=PASS
+
+      - name: Install browser runtime beside runner script
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Fresh-install aligned server browser UX gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          WEB="$RUNNER_TEMP/p04-server-daily-ux-r3-runtime"
+          python3 product/scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          test -f "$WEB/assets/daily-ux-polish.css"
+          test -f "$WEB/assets/daily-ux-polish.js"
+          test -f "$WEB/assets/daily-server-ux-polish.css"
+          test -f "$WEB/assets/daily-server-ux-polish.js"
+          PORT=19044
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" CANDIDATE="$CANDIDATE" WEB_ROOT="$WEB" PRODUCT_ROOT="$GITHUB_WORKSPACE/product" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-server-daily-ux-browser-20260830.mjs
+          grep -Fq '"status": "PASS"' "$EVIDENCE/P04_SERVER_DAILY_UX_REPORT.json"
+          if grep -Ev 'JIT is incompatible with third party extensions that override zend_execute_ex\(\)\. JIT disabled\.' "$EVIDENCE/php-server.log" | grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)'; then cat "$EVIDENCE/php-server.log"; exit 1; fi
+          echo P04_SERVER_DAILY_UX_ALIGNED_BROWSER_GATE=PASS
+
+      - name: Seal public-safe aligned evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['EVIDENCE']); report=root/'P04_SERVER_DAILY_UX_REPORT.json'
+          payload={
+            'schema':'p04-server-daily-ux-public-evidence/v2',
+            'source_sha':os.environ['CANDIDATE'],
+            'base_develop_sha':os.environ['BASE_DEVELOP'],
+            'private_source_persisted':False,
+            'synthetic_test_data_only':True,
+            'production_server_actions_executed':False,
+            'batch1_assets_preserved':True,
+          }
+          if report.exists():
+              detail=json.loads(report.read_text(encoding='utf-8'))
+              payload.update({'status':detail.get('status'),'list':detail.get('list'),'detail':detail.get('detail'),'mobile':detail.get('mobile'),'page_error_count':len(detail.get('page_errors',[])),'console_error_count':len(detail.get('console_errors',[]))})
+          else: payload['status']='BLOCKED_BEFORE_BROWSER_REPORT'
+          raw=json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(); payload['sha256']=hashlib.sha256(raw).hexdigest()
+          (root/'PUBLIC_EVIDENCE.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+
+      - name: Upload public-safe aligned evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-SERVER-DAILY-UX-R3-${{ env.CANDIDATE }}
+          path: |
+            evidence-r3/PUBLIC_EVIDENCE.json
+            evidence-r3/P04_SERVER_DAILY_UX_REPORT.json
+            evidence-r3/01-servers-desktop.png
+            evidence-r3/02-server-detail-desktop.png
+            evidence-r3/03-servers-mobile-390.png
+          if-no-files-found: warn
+          retention-days: 14
