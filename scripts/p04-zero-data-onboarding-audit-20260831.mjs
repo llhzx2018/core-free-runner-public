@@ -4,12 +4,12 @@ import fs from 'node:fs';
 const base = process.env.VF_E2E_BASE_URL || 'http://127.0.0.1:19078';
 const evidence = process.env.EVIDENCE || '';
 const source = process.env.SOURCE || '';
-if (!evidence || !source) throw new Error('zero-data onboarding audit environment missing');
+if (!evidence || !source) throw new Error('zero-data onboarding gate environment missing');
 fs.mkdirSync(evidence, { recursive: true });
 
 const password = 'Vf' + crypto.randomUUID().replaceAll('-', '') + 'Aa1';
 const report = {
-  schema: 'p04-zero-data-onboarding-audit/v1',
+  schema: 'p04-zero-data-onboarding-gate/v2',
   source_sha: source,
   status: 'FAIL',
   views: {},
@@ -22,30 +22,42 @@ const report = {
   production_actions_executed: false,
 };
 
-const routeDefs = [
-  ['overview', '#overview'],
-  ['domains', '#domains'],
-  ['servers', '#servers'],
-  ['providers', '#providers'],
-];
-const viewports = [
-  ['desktop', { width: 1440, height: 900 }],
-  ['mobile', { width: 390, height: 844 }],
-];
+const routes = {
+  overview: { hash: '#overview', title: '先连接服务商账号' },
+  domains: { hash: '#domains', title: '先从服务商同步域名' },
+  servers: { hash: '#servers', title: '先从服务商同步服务器' },
+};
+const viewports = {
+  desktop: { width: 1440, height: 900 },
+  mobile: { width: 390, height: 844 },
+};
 
 const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({ viewport: viewports[0][1] });
+const context = await browser.newContext({ viewport: viewports.desktop });
 const page = await context.newPage();
 page.on('pageerror', (e) => report.page_errors.push(String(e?.stack || e)));
 page.on('console', (m) => { if (m.type() === 'error') report.console_errors.push(m.text()); });
 
-function addFinding(severity, key, issue, observed = null) {
-  report.findings.push({ severity, key, issue, ...(observed === null ? {} : { observed }) });
+function fail(message) {
+  report.failures.push(message);
+}
+
+async function pointerClick(locator) {
+  await locator.waitFor({ state: 'visible', timeout: 15000 });
+  await locator.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(80);
+  const box = await locator.boundingBox();
+  if (!box || box.width <= 0 || box.height <= 0) throw new Error('pointer target has no visible box');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(35);
+  await page.mouse.up();
+  return box;
 }
 
 async function installAndLogin() {
   await page.goto(`${base}/setup.php`, { waitUntil: 'domcontentloaded' });
-  await page.locator('#site_name').fill('VF Infra Zero Data Onboarding Audit');
+  await page.locator('#site_name').fill('VF Infra Zero Data Onboarding Gate');
   await page.locator('#password').fill(password);
   await page.locator('#password_confirm').fill(password);
   await Promise.all([
@@ -61,97 +73,125 @@ async function installAndLogin() {
   if (version !== '2.8.11') throw new Error(`version mismatch ${version}`);
 }
 
-async function inspectView(routeName, hash, viewportName, viewport) {
-  await page.setViewportSize(viewport);
-  await page.goto(`${base}/index.php?audit=${Date.now()}${hash}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(650);
-  await page.waitForFunction((expected) => location.hash === expected, hash, { timeout: 10000 });
+async function go(hash) {
+  await page.evaluate((target) => { location.hash = target; }, hash);
+  await page.waitForFunction((target) => location.hash === target, hash, { timeout: 10000 });
+  await page.waitForTimeout(450);
+}
 
+async function inspectProvider(viewportName) {
+  const key = `${viewportName}:providers`;
+  await go('#providers');
+  await page.getByRole('heading', { name: '服务商', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+  const injectedCount = await page.locator('[data-v2813-zero-onboarding]').count();
+  const connect = page.locator('[data-v271-action="provider-connect"]').first();
+  await connect.waitFor({ state: 'visible', timeout: 15000 });
+  const box = await connect.boundingBox();
+  const empty = page.locator('.v271-empty').filter({ hasText: '还没有连接账号。点击“连接新账号”开始。' }).first();
+  const emptyVisible = await empty.isVisible().catch(() => false);
+  const overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
+  const label = (await connect.textContent() || '').trim();
+  report.views[key] = {
+    hash: await page.evaluate(() => location.hash),
+    injected_onboarding_count: injectedCount,
+    connect_label: label,
+    connect_size: { width: box?.width || 0, height: box?.height || 0 },
+    empty_copy_visible: emptyVisible,
+    overflow_x: overflow,
+  };
+  if (injectedCount !== 0) fail(`${key}: provider route must not receive duplicate onboarding`);
+  if (label !== '连接新账号') fail(`${key}: missing real connect-account action`);
+  if (!emptyVisible) fail(`${key}: mature provider empty-state copy missing`);
+  if (viewportName === 'mobile' && (!box || box.height < 40)) fail(`${key}: connect action under 40px`);
+  if (overflow > 1) fail(`${key}: horizontal overflow ${overflow}`);
+  await page.screenshot({ path: `${evidence}/${viewportName}-providers-zero-data-gate.png`, fullPage: true, animations: 'disabled' });
+}
+
+async function inspectOnboardingRoute(routeName, def, viewportName) {
   const key = `${viewportName}:${routeName}`;
-  const data = await page.evaluate(() => {
-    const visible = (node) => Boolean(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
-    const text = (node) => (node?.textContent || '').replace(/\s+/g, ' ').trim();
-    const actions = [...document.querySelectorAll('button, a[href], [role="button"]')]
-      .filter(visible)
-      .map((node) => {
-        const rect = node.getBoundingClientRect();
-        return {
-          tag: node.tagName.toLowerCase(),
-          text: text(node).slice(0, 140),
-          aria_label: node.getAttribute('aria-label') || '',
-          title: node.getAttribute('title') || '',
-          href: node.getAttribute('href') || '',
-          v270_action: node.getAttribute('data-v270-action') || '',
-          v271_action: node.getAttribute('data-v271-action') || '',
-          v275_go: node.getAttribute('data-v275-go') || '',
-          width: Math.round(rect.width * 10) / 10,
-          height: Math.round(rect.height * 10) / 10,
-        };
-      })
-      .filter((item) => item.text || item.aria_label || item.href || item.v270_action || item.v271_action || item.v275_go);
-    const bodyText = text(document.querySelector('#v270-app') || document.body);
-    const headings = [...document.querySelectorAll('h1,h2,h3')].filter(visible).map((node) => text(node)).filter(Boolean);
-    const emptyMatches = [...new Set((bodyText.match(/[^。；！？]{0,30}(?:暂无|还没有|没有|未添加|未录入|暂无数据|空)[^。；！？]{0,50}/g) || []).map((s) => s.trim()))].slice(0, 20);
-    const guidanceMatches = [...new Set((bodyText.match(/[^。；！？]{0,35}(?:添加|新建|录入|开始|设置|先|下一步|导入|创建)[^。；！？]{0,60}/g) || []).map((s) => s.trim()))].slice(0, 24);
-    return {
-      hash: location.hash,
-      title: document.title,
-      headings,
-      body_excerpt: bodyText.slice(0, 2600),
-      actions,
-      empty_matches: emptyMatches,
-      guidance_matches: guidanceMatches,
-      overflow_x: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth,
-      scroll_height: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
-    };
-  });
+  await go(def.hash);
+  const card = page.locator(`[data-v2813-zero-onboarding="${routeName}"]`);
+  await card.waitFor({ state: 'visible', timeout: 15000 });
+  const count = await page.locator('[data-v2813-zero-onboarding]').count();
+  const heading = card.locator('h3').first();
+  const headingText = (await heading.textContent() || '').trim();
+  const button = card.locator('[data-v2813-onboarding-go="providers"]').first();
+  await button.waitFor({ state: 'visible', timeout: 15000 });
+  const buttonLabel = (await button.textContent() || '').trim();
+  const aria = await button.getAttribute('aria-label');
+  const box = await button.boundingBox();
+  const overflowBefore = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
 
-  data.primary_action_candidates = data.actions.filter((item) => /添加|新建|录入|开始|创建|设置|导入/.test(`${item.text} ${item.aria_label} ${item.title}`));
-  data.detail_action_candidates = data.actions.filter((item) => item.v270_action || item.v271_action || item.v275_go);
-  report.views[key] = data;
+  report.views[key] = {
+    hash_before: await page.evaluate(() => location.hash),
+    onboarding_count: count,
+    title: headingText,
+    action_label: buttonLabel,
+    action_aria: aria || '',
+    action_size: { width: box?.width || 0, height: box?.height || 0 },
+    overflow_before: overflowBefore,
+    provider: {},
+    onboarding_reappears_after_return: false,
+  };
 
-  if (data.overflow_x > 1) addFinding('ux', key, 'horizontal_overflow', data.overflow_x);
-  if (!data.headings.length) addFinding('ux', key, 'missing_visible_heading');
+  if (count !== 1) fail(`${key}: expected exactly one onboarding card, got ${count}`);
+  if (headingText !== def.title) fail(`${key}: wrong onboarding title ${headingText}`);
+  if (!/服务商/.test(buttonLabel)) fail(`${key}: CTA does not clearly point to provider ${buttonLabel}`);
+  if (!/服务商/.test(aria || '')) fail(`${key}: CTA aria does not explain provider destination`);
+  if (viewportName === 'mobile' && (!box || box.height < 40)) fail(`${key}: onboarding action under 40px`);
+  if (overflowBefore > 1) fail(`${key}: horizontal overflow ${overflowBefore}`);
 
-  if (routeName !== 'overview') {
-    const hasEmptySignal = data.empty_matches.length > 0 || /暂无|还没有|没有|未添加|未录入/.test(data.body_excerpt);
-    const hasGuidance = data.guidance_matches.length > 0 || /添加|新建|录入|开始|创建|设置|导入/.test(data.body_excerpt);
-    const hasAction = data.primary_action_candidates.length > 0;
-    if (!hasEmptySignal) addFinding('ux', key, 'zero_state_not_explicit');
-    if (!hasGuidance) addFinding('ux', key, 'zero_state_missing_next_step_copy');
-    if (!hasAction) addFinding('ux', key, 'zero_state_missing_visible_action');
-  } else {
-    const hasOnboardingSignal = /添加|新建|录入|开始|创建|设置|先/.test(data.body_excerpt) || data.primary_action_candidates.length > 0;
-    if (!hasOnboardingSignal) addFinding('ux', key, 'overview_missing_first_step_guidance');
-  }
+  await page.screenshot({ path: `${evidence}/${viewportName}-${routeName}-zero-data-gate.png`, fullPage: true, animations: 'disabled' });
 
-  if (viewportName === 'mobile') {
-    const actionable = data.actions.filter((item) => item.v270_action || item.v271_action || /添加|新建|录入|开始|创建|设置|导入/.test(`${item.text} ${item.aria_label}`));
-    const undersized = actionable.filter((item) => item.height > 0 && item.height < 40);
-    if (undersized.length) addFinding('ux', key, 'mobile_action_under_40px', undersized.slice(0, 12));
-  }
+  await pointerClick(button);
+  await page.waitForFunction(() => location.hash === '#providers', null, { timeout: 10000 });
+  await page.waitForTimeout(450);
+  const connect = page.locator('[data-v271-action="provider-connect"]').first();
+  await connect.waitFor({ state: 'visible', timeout: 15000 });
+  const connectBox = await connect.boundingBox();
+  const providerInjected = await page.locator('[data-v2813-zero-onboarding]').count();
+  const providerEmpty = await page.locator('.v271-empty').filter({ hasText: '还没有连接账号。点击“连接新账号”开始。' }).first().isVisible().catch(() => false);
+  report.views[key].provider = {
+    hash: await page.evaluate(() => location.hash),
+    connect_label: (await connect.textContent() || '').trim(),
+    connect_size: { width: connectBox?.width || 0, height: connectBox?.height || 0 },
+    injected_onboarding_count: providerInjected,
+    mature_empty_copy_visible: providerEmpty,
+  };
+  if (providerInjected !== 0) fail(`${key}: provider destination received duplicate onboarding`);
+  if ((await connect.textContent() || '').trim() !== '连接新账号') fail(`${key}: destination lacks real connect action`);
+  if (!providerEmpty) fail(`${key}: destination lacks mature provider empty copy`);
+  if (viewportName === 'mobile' && (!connectBox || connectBox.height < 40)) fail(`${key}: provider connect target under 40px`);
 
-  await page.screenshot({ path: `${evidence}/${viewportName}-${routeName}-zero-data.png`, fullPage: true, animations: 'disabled' });
+  await go(def.hash);
+  const returned = page.locator(`[data-v2813-zero-onboarding="${routeName}"]`);
+  await returned.waitFor({ state: 'visible', timeout: 15000 });
+  report.views[key].onboarding_reappears_after_return = true;
+  const overflowAfter = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
+  report.views[key].overflow_after_return = overflowAfter;
+  if (overflowAfter > 1) fail(`${key}: overflow after return ${overflowAfter}`);
 }
 
 try {
   await installAndLogin();
-  for (const [viewportName, viewport] of viewports) {
-    for (const [routeName, hash] of routeDefs) {
-      await inspectView(routeName, hash, viewportName, viewport);
+  for (const [viewportName, viewport] of Object.entries(viewports)) {
+    await page.setViewportSize(viewport);
+    for (const [routeName, def] of Object.entries(routes)) {
+      await inspectOnboardingRoute(routeName, def, viewportName);
     }
+    await inspectProvider(viewportName);
   }
-  if (report.page_errors.length) report.failures.push(`page errors: ${JSON.stringify(report.page_errors)}`);
-  if (report.console_errors.length) report.failures.push(`console errors: ${JSON.stringify(report.console_errors)}`);
+  if (report.page_errors.length) fail(`page errors: ${JSON.stringify(report.page_errors)}`);
+  if (report.console_errors.length) fail(`console errors: ${JSON.stringify(report.console_errors)}`);
   report.status = report.failures.length === 0 ? 'PASS' : 'FAIL';
 } catch (error) {
-  report.failures.push(String(error?.stack || error));
+  fail(String(error?.stack || error));
   report.status = 'FAIL';
 } finally {
   fs.writeFileSync(`${evidence}/P04_ZERO_DATA_ONBOARDING_AUDIT.json`, JSON.stringify(report, null, 2) + '\n');
   await browser.close();
 }
 
-console.log(`P04_ZERO_DATA_ONBOARDING_AUDIT=${report.status}`);
-console.log(`P04_ZERO_DATA_ONBOARDING_FINDINGS=${JSON.stringify(report.findings)}`);
+console.log(`P04_ZERO_DATA_ONBOARDING_GATE=${report.status}`);
+if (report.failures.length) console.error(report.failures.join('\n'));
 if (report.status !== 'PASS') process.exit(1);
