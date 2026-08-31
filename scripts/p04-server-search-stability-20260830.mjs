@@ -19,6 +19,13 @@ page.on('pageerror', e => report.page_errors.push(String(e?.stack || e)));
 page.on('console', m => { if (m.type() === 'error') report.console_errors.push(m.text()); });
 const assert = (v, m) => { if (!v) throw new Error(m); };
 
+async function cold(hash) {
+  await page.goto('about:blank');
+  await page.goto(`${base}/index.php#${hash}`, { waitUntil: 'domcontentloaded' });
+  await page.locator('#v270-app h1').waitFor({ state: 'visible', timeout: 15000 });
+  await page.waitForTimeout(600);
+}
+
 try {
   await page.goto(`${base}/setup.php`, { waitUntil: 'domcontentloaded' });
   await page.locator('#site_name').fill('VF Infra Search Stability Diagnostic');
@@ -32,7 +39,7 @@ try {
   assert(fixture.includes('P04_V260_USER_TASK_FIXTURE_PASS'), 'fixture failed');
   execFileSync('php', ['-r', 'require getenv("WEB_ROOT")."/bootstrap.php"; Database::connection()->exec("UPDATE compute_instances SET power_status=\'stopped\', external_status=\'stopped\' WHERE external_instance_id=\'v260-edge-01\'");'], { cwd: productRoot, env: { ...process.env, WEB_ROOT: webRoot }, encoding: 'utf8' });
 
-  await page.goto(`${base}/index.php#servers`, { waitUntil: 'domcontentloaded' });
+  await cold('servers');
   const toolbar = page.locator('[data-v275-toolbar="servers"]');
   await toolbar.waitFor({ state: 'visible', timeout: 15000 });
   const search = toolbar.locator('input[type="search"]');
