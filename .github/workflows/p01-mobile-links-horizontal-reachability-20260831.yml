@@ -1,0 +1,139 @@
+name: P01 Mobile Links Horizontal Reachability Diagnostic
+on:
+  push:
+    branches: [diagnostic/p01-mobile-links-horizontal-reachability-20260831]
+    paths: [.github/workflows/p01-mobile-links-horizontal-reachability-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: c798eaea4b6892a2b6d550cb2162d60c6c18c6c6
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-mobile-links-reachability/evidence
+      PORT: '18488'
+      ADMIN_PASS: P01MobileLinksReachability
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup and fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-mobile-links-reachability; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-mobile-links-reachability.pid
+          COOKIE=/tmp/p01-mobile-links-reachability.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Mobile Reachability Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $cat=$repo->createCategory(['name'=>'移动端日常','description'=>'','parent_id'=>null,'is_private'=>true]);
+          foreach ([
+            ['Mobile Alpha','https://mobile-alpha.example/','第一条用于移动端操作可达性诊断'],
+            ['Mobile Beta','https://mobile-beta.example/','第二条用于移动端操作可达性诊断'],
+            ['Mobile Gamma','https://mobile-gamma.example/','第三条用于移动端操作可达性诊断']
+          ] as $x) $repo->saveLink(null,['category_id'=>$cat,'title'=>$x[0],'url'=>$x[1],'description'=>$x[2],'is_private'=>1,'is_pending'=>0],'admin');
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium desktop/mobile reachability measurement
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-mobile-links-reachability/pw; cd /tmp/p01-mobile-links-reachability/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18488/';
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:900}});
+            const login=await context.request.post(base+'api.php?action=login',{data:{password:'P01MobileLinksReachability'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await context.newPage();
+            async function measure(width,height){
+              await p.setViewportSize({width,height});
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+              const m=await p.evaluate(()=>{
+                const wrap=document.querySelector('.table-wrap');
+                const table=document.querySelector('.vf-links-table');
+                const row=document.querySelector('#linksBody tr');
+                const actionCell=row?.querySelector('td:last-child');
+                const open=row?.querySelector('[data-open]');
+                const edit=row?.querySelector('[data-edit]');
+                const wr=wrap?.getBoundingClientRect();
+                const ar=actionCell?.getBoundingClientRect();
+                const or=open?.getBoundingClientRect();
+                const er=edit?.getBoundingClientRect();
+                const within=(r)=>!!r&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight;
+                return {
+                  viewport:{width:innerWidth,height:innerHeight},
+                  documentOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+                  wrapClientWidth:wrap?.clientWidth||0,
+                  wrapScrollWidth:wrap?.scrollWidth||0,
+                  wrapHorizontalOverflow:(wrap?.scrollWidth||0)-(wrap?.clientWidth||0),
+                  tableWidth:table?.getBoundingClientRect().width||0,
+                  wrapRect:wr?{left:wr.left,right:wr.right,width:wr.width}:null,
+                  actionCellRect:ar?{left:ar.left,right:ar.right,width:ar.width}:null,
+                  openRect:or?{left:or.left,right:or.right,width:or.width}:null,
+                  editRect:er?{left:er.left,right:er.right,width:er.width}:null,
+                  openVisibleAtScroll0:within(or),
+                  editVisibleAtScroll0:within(er),
+                  actionCellIntersectsWrapAtScroll0:!!(ar&&wr&&ar.left<wr.right&&ar.right>wr.left),
+                  scrollLeft:wrap?.scrollLeft||0,
+                  maxScrollLeft:Math.max(0,(wrap?.scrollWidth||0)-(wrap?.clientWidth||0)),
+                  firstRowText:row?.innerText||''
+                };
+              });
+              if(width===390){await p.screenshot({path:process.env.EVID+'/links-mobile-scroll0.png',fullPage:true});await p.evaluate(()=>{const w=document.querySelector('.table-wrap');if(w)w.scrollLeft=w.scrollWidth});await p.waitForTimeout(80);m.afterScroll=await p.evaluate(()=>{const w=document.querySelector('.table-wrap'),r=document.querySelector('#linksBody tr'),o=r?.querySelector('[data-open]'),e=r?.querySelector('[data-edit]');const or=o?.getBoundingClientRect(),er=e?.getBoundingClientRect();return{scrollLeft:w?.scrollLeft||0,openLeft:or?.left||0,openRight:or?.right||0,editLeft:er?.left||0,editRight:er?.right||0,openVisible:!!or&&or.left>=0&&or.right<=innerWidth,editVisible:!!er&&er.left>=0&&er.right<=innerWidth}});await p.screenshot({path:process.env.EVID+'/links-mobile-scrolled.png',fullPage:true});}
+              return m;
+            }
+            const desktop=await measure(1440,900);const mobile=await measure(390,844);
+            const defect=mobile.wrapHorizontalOverflow>200 && (!mobile.openVisibleAtScroll0 || !mobile.editVisibleAtScroll0) && mobile.afterScroll?.openVisible && mobile.afterScroll?.editVisible;
+            const out={source:process.env.SOURCE,desktop,mobile,defect};
+            fs.writeFileSync(process.env.EVID+'/measurement.json',JSON.stringify(out,null,2));
+            console.log('P01_MOBILE_LINKS_HORIZONTAL_SCROLL='+String(mobile.wrapHorizontalOverflow>1).toUpperCase());
+            console.log('P01_MOBILE_ROW_ACTIONS_REQUIRE_HORIZONTAL_SCROLL='+String(defect).toUpperCase());
+            console.log(JSON.stringify({desktop:{wrapClientWidth:desktop.wrapClientWidth,wrapScrollWidth:desktop.wrapScrollWidth,openVisibleAtScroll0:desktop.openVisibleAtScroll0,editVisibleAtScroll0:desktop.editVisibleAtScroll0},mobile:{wrapClientWidth:mobile.wrapClientWidth,wrapScrollWidth:mobile.wrapScrollWidth,overflow:mobile.wrapHorizontalOverflow,openVisibleAtScroll0:mobile.openVisibleAtScroll0,editVisibleAtScroll0:mobile.editVisibleAtScroll0,maxScrollLeft:mobile.maxScrollLeft,afterScroll:mobile.afterScroll}}));
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" EVID="$EVID" node diag.cjs | tee "$EVID/diagnostic.txt"
+      - name: SQLite integrity
+        shell: bash
+        run: |
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();echo 'INTEGRITY='.strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())."\n";echo 'FK='.count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))."\n";
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-links-reachability-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-mobile-links-reachability.pid 2>/dev/null)" 2>/dev/null || true
