@@ -1,0 +1,107 @@
+name: P01 Admin Hidden Branding Sync Gate
+on:
+  push:
+    branches: [gate/p01-admin-hidden-branding-sync-20260831]
+    paths: [.github/workflows/p01-admin-hidden-branding-sync-gate-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 1e88ef2e949fcb1fb51e809ba4bd5465975debb4
+      BASE: 9e7a79114490fff7fbb6f6058bd89b4cc021adca
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-admin-hidden-branding/evidence
+      PORT: '18498'
+      ADMIN_PASS: P01HiddenBrandGatePass
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and file fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-admin-hidden-branding; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          mapfile -t files < <(git -C product diff --name-only "$BASE" "$SOURCE")
+          test "${#files[@]}" -eq 1
+          test "${files[0]}" = 'src/assets/admin-consolidation.css'
+          git -C product diff "$BASE" "$SOURCE" -- src/assets/admin-consolidation.css | tee "$EVID/source.patch"
+          grep -F 'body[data-vf-admin-shell="server"] [hidden]{display:none!important}' product/src/assets/admin-consolidation.css
+          test -z "$(git -C product status --porcelain)"
+      - name: Fresh setup and test logo
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import struct,zlib,binascii
+          w,h=64,32
+          raw=b''.join(b'\x00'+bytes([15,118,110])*w for _ in range(h))
+          def chunk(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',binascii.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b'')
+          open('/tmp/p01-admin-hidden-branding/test-logo.png','wb').write(png)
+          PY
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-admin-hidden-branding.pid
+          COOKIE=/tmp/p01-admin-hidden-branding.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Hidden Brand Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Chromium branding and hidden-state chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-admin-hidden-branding/pw; cd /tmp/p01-admin-hidden-branding/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18498/';const A=(v,m)=>{if(!v)throw Error(m)};const abs=u=>new URL(u,base).href;
+          async function ov(p,label){const n=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(n===0,label+' overflow '+n);return n}
+          (async()=>{const b=await chromium.launch({headless:true});const admin=await b.newContext({viewport:{width:390,height:844}});const lr=await admin.request.post(base+'api.php?action=login',{data:{password:'P01HiddenBrandGatePass'}});A(lr.ok(),'login');A((await lr.json()).ok,'login payload');const p=await admin.newPage();p.setDefaultTimeout(10000);const out={source:process.env.SOURCE,base:process.env.BASE};
+          await p.goto(base+'settings.php#brand',{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>document.querySelector('#settingsRoot')?.getAttribute('aria-busy')==='false');
+          const fresh=await p.evaluate(()=>['deleteLogo','deleteFavicon'].map(id=>{const e=document.getElementById(id),r=e.getBoundingClientRect(),s=getComputedStyle(e);return{id,hidden:e.hidden,display:s.display,w:r.width,h:r.height}}));for(const x of fresh){A(x.hidden===true,x.id+' hidden prop');A(x.display==='none',x.id+' display '+x.display);A(x.w===0&&x.h===0,x.id+' geometry '+JSON.stringify(x))}out.fresh={buttons:fresh,overflow:await ov(p,'fresh')};
+          await p.locator('#logoFile').setInputFiles('/tmp/p01-admin-hidden-branding/test-logo.png');await p.waitForFunction(()=>document.querySelector('#settingsState')?.textContent.includes('品牌素材已更新'));A(await p.locator('#logoPreview img').count()===1,'preview');A(!(await p.locator('#deleteLogo').isHidden()),'delete visible after upload');const preview=await p.locator('#logoPreview img').getAttribute('src');out.upload={preview,overflow:await ov(p,'upload')};await p.screenshot({path:process.env.EVID+'/settings-logo-390.png',fullPage:true});
+          const br=await admin.request.get(base+'api.php?action=bootstrap');const bj=await br.json();A(bj.ok&&bj.site.branding.hasLogo===true,'bootstrap hasLogo');A(abs(bj.site.branding.logoUrl)===abs(preview),'preview bootstrap mismatch');out.branding=bj.site.branding;
+          await p.setViewportSize({width:1440,height:900});await p.goto(base+'links-admin.php',{waitUntil:'domcontentloaded'});const rail=p.locator('.vf-rail-mark img');A(await rail.count()===1,'admin shell logo');A(abs(await rail.getAttribute('src'))===abs(bj.site.branding.logoUrl),'admin shell mismatch');out.admin={overflow:await ov(p,'admin')};await p.screenshot({path:process.env.EVID+'/admin-shell-logo-1440.png',fullPage:true});
+          const pub=await b.newContext({viewport:{width:390,height:844}});const q=await pub.newPage();q.setDefaultTimeout(10000);await q.goto(base+'index.php',{waitUntil:'domcontentloaded'});await q.waitForSelector('#brandMark img');A(abs(await q.locator('#brandMark img').getAttribute('src'))===abs(bj.site.branding.logoUrl),'public mismatch');out.public={overflow:await ov(q,'public')};await q.screenshot({path:process.env.EVID+'/public-logo-390.png',fullPage:true});
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'settings.php#brand',{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>document.querySelector('#settingsRoot')?.getAttribute('aria-busy')==='false');await p.locator('#deleteLogo').click();await p.waitForFunction(()=>document.querySelector('#settingsState')?.textContent.includes('已恢复默认品牌素材'));A(await p.locator('#logoPreview img').count()===0,'preview reset');A(await p.locator('#deleteLogo').isHidden(),'delete hidden after reset');
+          const br2=await admin.request.get(base+'api.php?action=bootstrap');const b2=await br2.json();A(b2.ok&&b2.site.branding.hasLogo===false&&!b2.site.branding.logoUrl,'bootstrap reset');await p.setViewportSize({width:1440,height:900});await p.goto(base+'links-admin.php',{waitUntil:'domcontentloaded'});A(await p.locator('.vf-rail-mark img').count()===0,'admin custom logo persisted');A((await p.locator('.vf-rail-mark').textContent()).trim()==='VF','admin fallback');await q.reload({waitUntil:'domcontentloaded'});await q.waitForFunction(()=>document.querySelector('#brandMark')?.textContent.trim()==='VF'&&!document.querySelector('#brandMark img'));out.reset={settingsOverflow:await ov(p,'settings reset'),publicOverflow:await ov(q,'public reset')};
+          out.verdict='PASS';fs.writeFileSync(process.env.EVID+'/branding-gate.json',JSON.stringify(out,null,2));console.log('P01_ADMIN_HIDDEN_BRANDING=PASS');console.log(JSON.stringify(out));await pub.close();await admin.close();await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" BASE="$BASE" EVID="$EVID" node gate.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$r=new VfRepository($db);$b=$r->getBranding();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));$files=is_dir(VF_BRAND_DIR)?array_values(array_filter(scandir(VF_BRAND_DIR),fn($x)=>!in_array($x,['.','..','.htaccess','index.php','web.config'],true))):[];echo 'INTEGRITY='.$i."\nFK=".$fk."\nHAS_LOGO=".(!empty($b['hasLogo'])?'1':'0')."\nUSER_BRAND_FILES=".count($files)."\n";if($i!=='ok'||$fk!==0||!empty($b['hasLogo'])||count($files)!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-admin-hidden-branding-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-admin-hidden-branding.pid 2>/dev/null)" 2>/dev/null || true
