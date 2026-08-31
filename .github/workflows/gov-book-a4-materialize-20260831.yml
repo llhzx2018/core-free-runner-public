@@ -1,4 +1,4 @@
-name: GOV-BOOK Exact Reader Source Diagnostic 20260831
+name: GOV-BOOK Exact Reader Source Adoption 20260831
 
 on:
   push:
@@ -16,20 +16,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  diagnose-reader-source:
+  adopt-reader-source:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       TARGET_DEVELOP_SHA: c1570596f168cb78c8f137ffb855bb8dc9fef17e
       TARGET_MAIN_SHA: e89b0b98dd657e19187940e859fe9e5161df750e
       VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Require registered target capability
+      - name: Require registered write capability
         shell: bash
         run: |
           set -Eeuo pipefail
           test -n "$VF_RELEASE_WRITE_TOKEN"
-          echo 'TARGET_READ_CAPABILITY=PASS'
+          echo 'VF_RELEASE_WRITE_CAPABILITY=PASS'
 
       - name: Checkout exact GOV-BOOK develop
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -37,106 +37,173 @@ jobs:
           repository: llhzx2018/gov-book
           ref: ${{ env.TARGET_DEVELOP_SHA }}
           token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: false
+          persist-credentials: true
           fetch-depth: 0
           path: gov-book
 
-      - name: Live authority gate
+      - name: Hard-lock main and develop before source adoption
         working-directory: gov-book
         shell: bash
         run: |
           set -Eeuo pipefail
-          AUTH=$(printf 'x-access-token:%s' "$VF_RELEASE_WRITE_TOKEN" | base64 -w0)
-          REMOTE='https://github.com/llhzx2018/gov-book.git'
-          MAIN=$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" ls-remote "$REMOTE" refs/heads/main | awk '{print $1}')
-          DEVELOP=$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" ls-remote "$REMOTE" refs/heads/develop | awk '{print $1}')
-          echo "LIVE_MAIN=$MAIN"
-          echo "LIVE_DEVELOP=$DEVELOP"
-          test "$MAIN" = "$TARGET_MAIN_SHA"
-          test "$DEVELOP" = "$TARGET_DEVELOP_SHA"
+          git fetch origin main develop
+          ACTUAL_MAIN="$(git rev-parse origin/main)"
+          ACTUAL_DEVELOP="$(git rev-parse origin/develop)"
+          echo "ACTUAL_MAIN=$ACTUAL_MAIN"
+          echo "ACTUAL_DEVELOP=$ACTUAL_DEVELOP"
+          test "$ACTUAL_MAIN" = "$TARGET_MAIN_SHA"
+          test "$ACTUAL_DEVELOP" = "$TARGET_DEVELOP_SHA"
           echo 'LIVE_AUTHORITY_GATE=PASS'
 
-      - name: Compare exact ZIP contents to Reader Source
+      - name: Recover exact frozen Reader Source bytes from verified ZIPs
         working-directory: gov-book
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import hashlib, json, pathlib, zipfile
+          import hashlib, json, pathlib, zipfile, os
 
           root = pathlib.Path('.')
           catalog = json.loads((root/'BOOK_CATALOG.json').read_text(encoding='utf-8'))
           by_id = {b['book_id']: b for b in catalog['books'] if b.get('book_version')}
           ids = ['A1','A3','A4','B1']
-          overall = {}
+          changed = []
 
-          def sha256_bytes(data): return hashlib.sha256(data).hexdigest()
-          def sha256_file(p):
+          def sha256_bytes(data):
+              return hashlib.sha256(data).hexdigest()
+
+          def sha256_file(path):
               h=hashlib.sha256()
-              with p.open('rb') as f:
-                  for chunk in iter(lambda:f.read(1024*1024),b''): h.update(chunk)
+              with path.open('rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024), b''):
+                      h.update(chunk)
               return h.hexdigest()
 
           for book_id in ids:
-              b = by_id[book_id]
-              ver = b['book_version']
-              base = root/'books'/book_id/'versions'/ver
-              manifest_path = base/'SOURCE_MANIFEST.json'
-              manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-              zip_path = root/b['download_path']
-              assert zip_path.exists(), (book_id, 'ZIP_MISSING', zip_path)
-              zip_sha = sha256_file(zip_path)
-              assert zip_sha == b['delivery_sha256'] == manifest['artifact_sha256'], (book_id, zip_sha, b['delivery_sha256'], manifest['artifact_sha256'])
+              b=by_id[book_id]
+              ver=b['book_version']
+              base=root/'books'/book_id/'versions'/ver
+              manifest=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+              zip_path=root/b['download_path']
+              assert zip_path.exists(), (book_id,'DOWNLOAD_ZIP_MISSING')
+              assert sha256_file(zip_path)==b['delivery_sha256']==manifest['artifact_sha256'], (book_id,'DOWNLOAD_ZIP_SHA_MISMATCH')
+
               with zipfile.ZipFile(zip_path) as z:
-                  assert z.testzip() is None
-                  file_members=[n for n in z.namelist() if not n.endswith('/')]
-                  rows=[]
-                  counts={'existing_exact':0,'missing_recoverable':0,'existing_drift':0,'zip_member_not_found':0,'zip_member_ambiguous':0}
+                  assert z.testzip() is None, (book_id,'DOWNLOAD_ZIP_CRC_FAIL')
+                  members=[n for n in z.namelist() if not n.endswith('/')]
                   for item in manifest['files']:
                       rel=item['path']
-                      target=base/'reader'/pathlib.PurePosixPath(rel)
-                      exact_existing=False
-                      existing_sha=None
-                      existing_size=None
-                      if target.exists():
-                          existing_size=target.stat().st_size
-                          existing_sha=sha256_file(target)
-                          exact_existing=(existing_size==item['size_bytes'] and existing_sha==item['sha256'])
-                      candidates=[n for n in file_members if n==rel or n.endswith('/'+rel)]
-                      zip_member=None
-                      zip_sha_member=None
-                      zip_size_member=None
-                      zip_exact=False
-                      if len(candidates)==1:
-                          zip_member=candidates[0]
-                          data=z.read(zip_member)
-                          zip_size_member=len(data)
-                          zip_sha_member=sha256_bytes(data)
-                          zip_exact=(zip_size_member==item['size_bytes'] and zip_sha_member==item['sha256'])
-                      if exact_existing:
-                          status='EXISTING_EXACT'; counts['existing_exact']+=1
-                      elif target.exists():
-                          status='EXISTING_DRIFT'; counts['existing_drift']+=1
-                      elif len(candidates)==0:
-                          status='ZIP_MEMBER_NOT_FOUND'; counts['zip_member_not_found']+=1
-                      elif len(candidates)>1:
-                          status='ZIP_MEMBER_AMBIGUOUS'; counts['zip_member_ambiguous']+=1
-                      elif zip_exact:
-                          status='MISSING_RECOVERABLE'; counts['missing_recoverable']+=1
-                      else:
-                          status='ZIP_MEMBER_HASH_MISMATCH'; counts['existing_drift']+=1
-                      rows.append({
-                          'path':rel,'status':status,
-                          'target_exists':target.exists(),
-                          'existing_size':existing_size,'existing_sha256':existing_sha,
-                          'zip_member':zip_member,'zip_member_size':zip_size_member,'zip_member_sha256':zip_sha_member,
-                          'manifest_size':item['size_bytes'],'manifest_sha256':item['sha256']
-                      })
-                  overall[book_id]={'zip_sha256':zip_sha,'zip_crc':'PASS','counts':counts,'rows':rows}
-                  print('BOOK_SOURCE_DIAGNOSTIC='+json.dumps({book_id:overall[book_id]},ensure_ascii=False,separators=(',',':')))
+                      candidates=[]
+                      for n in members:
+                          if n==rel or n.endswith('/'+rel):
+                              data=z.read(n)
+                              if len(data)==item['size_bytes'] and sha256_bytes(data)==item['sha256']:
+                                  candidates.append((n,data))
+                      if not candidates:
+                          raise AssertionError((book_id,rel,'NO_EXACT_ZIP_MEMBER'))
+                      # Multiple matching members are acceptable only because all have the same
+                      # manifest-locked size+SHA; therefore their bytes are identical by identity.
+                      selected_name, selected_data=sorted(candidates,key=lambda x:(len(x[0]),x[0]))[0]
+                      assert len(selected_data)==item['size_bytes']
+                      assert sha256_bytes(selected_data)==item['sha256']
 
-          print('ALL_SOURCE_DIAGNOSTIC='+json.dumps(overall,ensure_ascii=False,separators=(',',':')))
-          print('GOV_BOOK_WRITE=NO')
-          print('MAIN_WRITE=NO')
-          print('DEVELOP_WRITE=NO')
+                      target=base/'reader'/pathlib.PurePosixPath(rel)
+                      before_exact=False
+                      if target.exists():
+                          before_exact=(target.stat().st_size==item['size_bytes'] and sha256_file(target)==item['sha256'])
+                      if not before_exact:
+                          target.parent.mkdir(parents=True,exist_ok=True)
+                          target.write_bytes(selected_data)
+                          changed.append(str(target))
+                      assert target.stat().st_size==item['size_bytes'], (book_id,rel,'TARGET_SIZE_FAIL')
+                      assert sha256_file(target)==item['sha256'], (book_id,rel,'TARGET_SHA_FAIL')
+                      print('SOURCE_ENTRY_EXACT='+json.dumps({
+                          'book_id':book_id,
+                          'path':rel,
+                          'source_member':selected_name,
+                          'matching_member_count':len(candidates),
+                          'changed':not before_exact,
+                          'sha256':item['sha256']
+                      },ensure_ascii=False,separators=(',',':')))
+
+              print(f'{book_id}_FULL_READER_SOURCE_EXACT=PASS')
+
+          pathlib.Path('/tmp/reader-source-changed.json').write_text(
+              json.dumps(changed,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('READER_SOURCE_CHANGED_COUNT='+str(len(changed)))
+          print('READER_SOURCE_CHANGED='+json.dumps(changed,ensure_ascii=False,separators=(',',':')))
+          print('A3_QUALIFICATION_CHANGE=NO')
+          print('A4_QUALIFICATION_CHANGE=NO')
+          print('PRODUCT_CORRECTION=NO')
           PY
+
+      - name: Enforce changed-path boundary and commit develop only
+        working-directory: gov-book
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git add -f -- \
+            books/A1/versions/v1.0.0/reader \
+            books/A3/versions/v0.9.0/reader \
+            books/A4/versions/v0.9.0/reader \
+            books/B1/versions/v1.0.0/reader
+          changed="$(git -c core.quotepath=false diff --cached --name-only)"
+          echo "$changed"
+          test -n "$changed"
+          while IFS= read -r p; do
+            case "$p" in
+              books/A1/versions/v1.0.0/reader/*|books/A3/versions/v0.9.0/reader/*|books/A4/versions/v0.9.0/reader/*|books/B1/versions/v1.0.0/reader/*) ;;
+              *) echo "BLOCK=UNEXPECTED_STAGED_PATH:$p"; exit 91;;
+            esac
+          done <<< "$changed"
+
+          # Re-verify every manifest target after git-add, so any clean/smudge or EOL conversion fails here.
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('.')
+          for book_id,ver in [('A1','v1.0.0'),('A3','v0.9.0'),('A4','v0.9.0'),('B1','v1.0.0')]:
+              base=root/'books'/book_id/'versions'/ver
+              m=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+              for item in m['files']:
+                  p=base/'reader'/pathlib.PurePosixPath(item['path'])
+                  data=p.read_bytes()
+                  assert len(data)==item['size_bytes'],(book_id,item['path'],'POST_ADD_SIZE')
+                  assert hashlib.sha256(data).hexdigest()==item['sha256'],(book_id,item['path'],'POST_ADD_SHA')
+              print(book_id+'_POST_ADD_MANIFEST_EXACT=PASS')
+          PY
+
+          git fetch origin main develop
+          test "$(git rev-parse origin/main)" = "$TARGET_MAIN_SHA"
+          test "$(git rev-parse origin/develop)" = "$TARGET_DEVELOP_SHA"
+          git config user.name 'VF Public Runner'
+          git config user.email 'runner@users.noreply.github.com'
+          git commit -m 'content(book): adopt exact Reader Source from verified downloads'
+          git push origin HEAD:develop
+
+      - name: Remote exact readback for all four Reader Source manifests
+        working-directory: gov-book
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch origin main develop
+          REMOTE_MAIN="$(git rev-parse origin/main)"
+          REMOTE_DEVELOP="$(git rev-parse origin/develop)"
+          test "$REMOTE_MAIN" = "$TARGET_MAIN_SHA"
+          git reset --hard origin/develop
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('.')
+          for book_id,ver in [('A1','v1.0.0'),('A3','v0.9.0'),('A4','v0.9.0'),('B1','v1.0.0')]:
+              base=root/'books'/book_id/'versions'/ver
+              m=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+              for item in m['files']:
+                  p=base/'reader'/pathlib.PurePosixPath(item['path'])
+                  data=p.read_bytes()
+                  assert len(data)==item['size_bytes'],(book_id,item['path'],'REMOTE_SIZE')
+                  assert hashlib.sha256(data).hexdigest()==item['sha256'],(book_id,item['path'],'REMOTE_SHA')
+              print(book_id+'_REMOTE_FULL_READER_SOURCE_EXACT=PASS')
+          PY
+          echo "GOV_BOOK_DEVELOP_RESULT=$REMOTE_DEVELOP"
+          echo 'MAIN_UNCHANGED=PASS'
+          echo 'STATUS_DOCS_CHANGED=NO'
+          echo 'QUALIFICATION_CHANGED=NO'
