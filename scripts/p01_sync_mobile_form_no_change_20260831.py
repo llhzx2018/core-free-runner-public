@@ -50,4 +50,4 @@ for rel in [
     text = p.read_text(encoding='utf-8')
     marker = '## L2 Mobile Form Usability / Browser Helper Token Copy Closure · 2026-08-31'
     if marker not in text:
-        p.write_text(text.rstrip() + block + '\n', encoding='utf-8')
+        p.write_text(text.rstrip() + block.rstrip() + '\n', encoding='utf-8')
