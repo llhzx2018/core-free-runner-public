@@ -14,7 +14,7 @@ fs.mkdirSync(evidence, { recursive: true });
 const password = 'Vf' + crypto.randomUUID().replaceAll('-', '') + 'Aa1';
 const query = 'v260-edge-01';
 const report = {
-  schema: 'p04-mobile-topbar-bottom-safe-audit/v1',
+  schema: 'p04-mobile-topbar-bottom-safe-audit/v2',
   source_sha: candidate,
   status: 'FAIL',
   routes: {},
@@ -64,37 +64,47 @@ async function waitRoute(route, expectedH1) {
 }
 
 async function inspectBottomSafety(route) {
-  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await page.evaluate(() => window.scrollTo(0, document.scrollingElement?.scrollHeight || document.documentElement.scrollHeight));
   await page.waitForTimeout(180);
   const geometry = await page.evaluate(() => {
     const nav = document.querySelector('.v270-mobile-nav');
     const footer = document.querySelector('#v270-app .v270-footer');
     const app = document.querySelector('#v270-app');
+    const scroller = document.scrollingElement || document.documentElement;
     if (!nav || !footer || !app) return null;
     const nr = nav.getBoundingClientRect();
     const fr = footer.getBoundingClientRect();
     const ar = app.getBoundingClientRect();
+    const navStyle = getComputedStyle(nav);
     const bodyStyle = getComputedStyle(document.body);
     const appStyle = getComputedStyle(app);
     return {
+      nav_position: navStyle.position,
       nav_top: nr.top,
+      nav_bottom: nr.bottom,
       nav_height: nr.height,
       footer_bottom: fr.bottom,
       footer_top: fr.top,
-      footer_to_nav_gap: nr.top - fr.bottom,
+      footer_to_viewport_bottom: innerHeight - fr.bottom,
       app_bottom: ar.bottom,
       body_padding_bottom: bodyStyle.paddingBottom,
       app_padding_bottom: appStyle.paddingBottom,
-      scroll_y: window.scrollY,
-      max_scroll: Math.max(0, document.documentElement.scrollHeight - innerHeight),
+      scroll_y: scroller.scrollTop,
+      max_scroll: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+      viewport_height: innerHeight,
       viewport_overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth,
     };
   });
   assert(geometry, `${route} bottom geometry missing`);
   assert(geometry.viewport_overflow <= 1, `${route} viewport overflow ${geometry.viewport_overflow}`);
   assert(geometry.nav_height >= 44, `${route} mobile nav total height ${geometry.nav_height}`);
-  assert(geometry.footer_to_nav_gap >= 8, `${route} footer is obscured by fixed nav: gap ${geometry.footer_to_nav_gap}`);
-  assert(Math.abs(geometry.scroll_y - geometry.max_scroll) <= 2, `${route} did not reach document bottom`);
+  assert(Math.abs(geometry.scroll_y - geometry.max_scroll) <= 2, `${route} did not reach document bottom: ${JSON.stringify(geometry)}`);
+  if (geometry.nav_position === 'fixed') {
+    assert(geometry.footer_bottom <= geometry.nav_top - 8, `${route} footer is obscured by fixed nav: ${JSON.stringify(geometry)}`);
+  } else {
+    assert(geometry.footer_top >= 0, `${route} footer scrolled past viewport top: ${JSON.stringify(geometry)}`);
+    assert(geometry.footer_bottom <= geometry.viewport_height - 8, `${route} footer not fully visible at document bottom: ${JSON.stringify(geometry)}`);
+  }
   return geometry;
 }
 
