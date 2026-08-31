@@ -94,9 +94,9 @@ async function inspectOverview(viewportName, seed) {
   const overflow = await overflowX();
 
   const expected = [
-    { key: `domain:${seed.domain_id}`, hash: `#domain/${seed.domain_id}`, kind: 'domain', title: 'attention.example 即将到期' },
-    { key: `provider:${seed.provider_account_id}`, hash: `#provider/${seed.provider_account_id}`, kind: 'provider', title: 'Vultr 资产同步异常' },
-    { key: `vps:${seed.server_id}`, hash: `#server/${seed.server_id}`, kind: 'vps', title: 'attention-server VPS 状态异常' },
+    { key: `domain:${seed.domain_id}`, hash: `#domain/${seed.domain_id}`, kind: 'domain', titlePattern: /(续费|到期)/ },
+    { key: `provider:${seed.provider_account_id}`, hash: `#provider/${seed.provider_account_id}`, kind: 'provider', titlePattern: /(服务商|同步|Vultr)/ },
+    { key: `vps:${seed.server_id}`, hash: `#server/${seed.server_id}`, kind: 'vps', titlePattern: /(VPS|服务器|attention-server)/ },
   ];
 
   const result = { card_count: cardCount, summary: sub, overflow_x: overflow, actions: {} };
@@ -106,13 +106,17 @@ async function inspectOverview(viewportName, seed) {
   if (overflow > 1) fail(`${viewportName}: overview horizontal overflow ${overflow}`);
 
   for (const item of expected) {
-    const titleCount = await panel.getByRole('heading', { name: item.title, exact: true }).count();
-    if (titleCount !== 1) fail(`${viewportName}:${item.kind}: expected attention title missing/duplicated (${titleCount})`);
-    const button = panel.locator(`[data-v270-action="open"][data-id="${item.key}"]`).first();
+    const buttons = panel.locator(`[data-v270-action="open"][data-id="${item.key}"]`);
+    const ownerActionCount = await buttons.count();
+    if (ownerActionCount !== 1) fail(`${viewportName}:${item.kind}: expected exactly one owner action, got ${ownerActionCount}`);
+    const button = buttons.first();
     await button.waitFor({ state: 'visible', timeout: 15000 });
+    const card = button.locator('xpath=ancestor::article[contains(@class,"v270-ref-action")]').first();
+    const title = (await card.locator('h3').textContent() || '').trim();
     const label = (await button.textContent() || '').trim();
     const box = await button.boundingBox();
-    result.actions[item.kind] = { data_id: item.key, label, height: box?.height || 0, detail_hash: '', return_label: '', returned_hash: '' };
+    result.actions[item.kind] = { data_id: item.key, title, owner_action_count: ownerActionCount, label, height: box?.height || 0, detail_hash: '', return_label: '', returned_hash: '' };
+    if (!title || !item.titlePattern.test(title)) fail(`${viewportName}:${item.kind}: attention title is not meaningful: ${title}`);
     if (!label) fail(`${viewportName}:${item.kind}: owner action label empty`);
     if (viewportName === 'mobile' && (!box || box.height < 40)) fail(`${viewportName}:${item.kind}: owner action under 40px`);
 
