@@ -1,0 +1,181 @@
+name: P01 V2.36.0 Candidate Readiness
+on:
+  push:
+    branches: [temp/p01-v2360-release-gate-20260901]
+    paths: [.github/workflows/p01-v2360-candidate-readiness-20260901.yml]
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CANDIDATE: 92c461c2ce2f1a8b6b1f5a09e2e54bad2408bef9
+      CANDIDATE_TREE: 19bbda0dfdfbaaa990dcffd9006a7e2a602b5c95
+      CANDIDATE_RUNTIME_TREE: ad3f96345ead330adffb20c7ecb3cdf6537036b6
+      SOURCE: 8f1073120f8096fc23554906615601752feb036d
+      SOURCE_TREE: ece02ef928ad5b119e2b0237e7963a607865ddbb
+      SOURCE_RUNTIME_TREE: 7f181909c7ccd3179491f21cfca426008de4295f
+      VERSION: 2.36.0
+      SOURCE_VERSION: 2.35.3
+      SCHEMA: '2026082901'
+      OUT: /tmp/p01-v2360-candidate-artifacts
+      EVID: /tmp/p01-v2360-candidate-evidence
+      UPGRADE: /tmp/p01-v2360-upgrade
+      FRESH: /tmp/p01-v2360-fresh
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: candidate
+      - name: Checkout immutable V2.35.3 predecessor
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.35.3
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - name: Checkout proven Atomic builder
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: agent/p01-22121-formal-artifact-gate-20260819
+          path: proven
+      - name: Exact source runtime authority fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$OUT" "$EVID" "$UPGRADE" "$FRESH"; mkdir -p "$OUT" "$EVID"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git -C candidate rev-parse HEAD:src)" = "$CANDIDATE_RUNTIME_TREE"
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C production rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(git -C production rev-parse HEAD:src)" = "$SOURCE_RUNTIME_TREE"
+          test "$(git -C candidate merge-base "$SOURCE" HEAD)" = "$SOURCE"
+          test "$(cat candidate/VERSION)" = "$VERSION"
+          test "$(cat candidate/src/VERSION.txt)" = "$VERSION"
+          grep -Fx "define('VF_VERSION', '2.36.0');" candidate/src/app/bootstrap.php >/dev/null
+          test "$(cat production/VERSION)" = "$SOURCE_VERSION"
+          jq -e '.production_version=="2.35.3" and .candidate_version=="2.36.0" and .schema_version=="2026082901" and .v2_36_0_release_candidate.schema_change==false and .v2_36_0_release_candidate.migration==null and .v2_36_0_release_candidate.base_product_source=="8b210c93f2d4c71126ff1aed6ec3d317abb51d15"' candidate/VF_PROJECT.json >/dev/null
+          test "$(git -C candidate rev-parse HEAD:database)" = "$(git -C production rev-parse HEAD:database)"
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-syntax.txt"
+          find candidate/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          git -C candidate diff --name-status "$SOURCE"...HEAD -- src | tee "$EVID/runtime-delta.txt"
+          grep -F $'A\tsrc/app/ResourceCoverCache.php' "$EVID/runtime-delta.txt" >/dev/null
+          grep -F $'A\tsrc/app/ResourceMetadata.php' "$EVID/runtime-delta.txt" >/dev/null
+          grep -F $'A\tsrc/resource-cover-refresh.php' "$EVID/runtime-delta.txt" >/dev/null
+          printf 'P01_V2360_EXACT_SOURCE=PASS\nP01_V2360_SCHEMA_CHANGE=NO\nP01_V2360_MIGRATION=NONE\nOWNER_PRODUCTION_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Build deterministic candidate artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v2360-build.py <<'PY'
+          from pathlib import Path
+          import hashlib,importlib.util,json,os,re
+          ROOT=Path(os.environ['GITHUB_WORKSPACE']); VERSION=os.environ['VERSION']; SOURCE_VERSION=os.environ['SOURCE_VERSION']; SCHEMA=os.environ['SCHEMA']
+          def load(name,path):
+              s=importlib.util.spec_from_file_location(name,path); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
+          base=load('base',ROOT/'proven/scripts/p01-build-release.py'); v2=load('v2',ROOT/'proven/scripts/p01-build-release-v2.py')
+          sha=lambda b:hashlib.sha256(b).hexdigest(); gate_only={'.gitignore','CHANGELOG.md','DEPLOY-HERE.txt','FULL-PACKAGE-NOTES.txt','README.md','UPGRADE-V2.txt','robots.txt'}
+          def runtime(files): return {k:v for k,v in files.items() if k!='release-manifest.json' and k not in gate_only and k!='VF-Start-Browser-Extension.zip'}
+          td=base.collect(ROOT/'candidate/src'); sd=base.collect(ROOT/'production/src'); target=runtime(td); source=runtime(sd)
+          changed=sorted(k for k in target if k in source and sha(target[k])!=sha(source[k])); added=sorted(set(target)-set(source)); removed=sorted(set(source)-set(target))
+          required_added={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}
+          if not required_added.issubset(set(added)): raise SystemExit('required runtime additions missing '+json.dumps(added))
+          manifest={'project':'VF Start','project_id':'P01','component_id':'APP','version':VERSION,'source_version':SOURCE_VERSION,'schema_version':SCHEMA,'source_schema_version':SCHEMA,'release_type':'candidate','stage':'CANDIDATE_READINESS','deployable':False,'release_authorized':False,'candidate_source_commit':os.environ['CANDIDATE'],'candidate_source_tree':os.environ['CANDIDATE_TREE'],'runtime_source_tree':os.environ['CANDIDATE_RUNTIME_TREE'],'production_source_commit':os.environ['SOURCE'],'production_source_tree':os.environ['SOURCE_TREE'],'production_runtime_tree':os.environ['SOURCE_RUNTIME_TREE'],'schema_change':False,'schema_migrations':[],'runtime_data_included':False,'runtime_files':{k:sha(v) for k,v in sorted(target.items())},'atomic_runtime_boundary':{'source_version':SOURCE_VERSION,'target_version':VERSION,'source_schema':SCHEMA,'target_schema':SCHEMA,'added_files':added,'removed_files':removed,'changed_files':changed},'update':{'asset_name':'VF_Start_V2.36.0_UPDATE.zip','supported_from':[SOURCE_VERSION],'backup_required':True,'rollback_supported':True}}
+          mb=(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n').encode(); full=dict(td); full['release-manifest.json']=mb; atomic=dict(target); atomic['release-manifest.json']=mb
+          repair=v2.build_repair(source,atomic,sha(target['app/UpdateManager.php']))
+          repair,n=re.subn(r"public const SOURCE_VERSION='2\.21\.14';\n    public const TARGET_VERSION='2\.21\.15';\n    public const TARGET_SCHEMA='2026080902';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';\n    public const TARGET_VERSION='{VERSION}';\n    public const TARGET_SCHEMA='{SCHEMA}';",repair,count=1)
+          if n!=1: raise SystemExit('repair constant anchor mismatch')
+          out=Path(os.environ['OUT']); rp=out/'repair-v2.36.0.php'; rp.write_text(repair,encoding='utf-8',newline='\n')
+          base.deterministic_zip(out/'VF-Start-V2.36.0-FULL.zip',full); base.deterministic_zip(out/'VF_Start_V2.36.0_UPDATE.zip',{rp.name:rp.read_bytes()})
+          result={'status':'CANDIDATE_ARTIFACT_BUILD_PASS','candidate':os.environ['CANDIDATE'],'candidate_tree':os.environ['CANDIDATE_TREE'],'runtime_tree':os.environ['CANDIDATE_RUNTIME_TREE'],'source':os.environ['SOURCE'],'version':VERSION,'source_version':SOURCE_VERSION,'schema':SCHEMA,'changed':changed,'added':added,'removed':removed,'release_published':False,'owner_production_write':False}
+          (out/'P01-V2.36.0-CANDIDATE.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8'); print(json.dumps(result,ensure_ascii=False))
+          PY
+          python3 /tmp/p01-v2360-build.py | tee "$EVID/build-1.json"
+          php -l "$OUT/repair-v2.36.0.php" >/dev/null
+          php "$OUT/repair-v2.36.0.php" --self-test | tee "$EVID/repair-self-test.json" | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          sha256sum "$OUT"/* | sort > "$EVID/artifacts-sha-1.txt"
+          cp -a "$OUT" /tmp/p01-v2360-first; rm -rf "$OUT"; mkdir -p "$OUT"
+          python3 /tmp/p01-v2360-build.py >/dev/null
+          sha256sum "$OUT"/* | sort > "$EVID/artifacts-sha-2.txt"
+          diff -u "$EVID/artifacts-sha-1.txt" "$EVID/artifacts-sha-2.txt"
+          echo P01_V2360_CANDIDATE_DETERMINISTIC=PASS | tee "$EVID/artifact-verdict.txt"
+      - name: Actual V2.35.3 to V2.36.0 Atomic upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REPAIR="$OUT/repair-v2.36.0.php"; rm -rf "$UPGRADE"; cp -a production/src "$UPGRADE"
+          php -S 127.0.0.1:18460 -t "$UPGRADE" >"$EVID/upgrade-server.log" 2>&1 & echo $! >/tmp/p01-v2360-upgrade.pid
+          COOKIE="$EVID/upgrade.cookies"
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18460/setup.php -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18460/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V2360 Candidate' --data-urlencode 'admin_password=V2360Candidate!2026' --data-urlencode 'admin_password_confirm=V2360Candidate!2026' -o "$EVID/setup-post.html"
+          ROOT="$UPGRADE" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$r=new VfRepository(vf_db());$c=$r->createCategory(['name'=>'V2360 Gate','description'=>'','is_private'=>false]);for($i=1;$i<=40;$i++)$r->saveLink(null,['category_id'=>$c,'title'=>'Candidate '.$i,'url'=>'https://example.com/v2360-'.$i,'description'=>'preserve','tags'=>'candidate','is_private'=>$i%5===0,'is_favorite'=>$i<=4],'manual');echo "P01_V2360_SEED_40=PASS\n";
+          PHP
+          kill "$(cat /tmp/p01-v2360-upgrade.pid)" || true
+          php "$REPAIR" --verify-source="$UPGRADE" | tee "$EVID/verify-source.json" | jq -e '.ok==true' >/dev/null
+          php "$REPAIR" --run="$UPGRADE" | tee "$EVID/upgrade-run.json" | jq -e '.ok==true and .already_current==false and .schema=="2026082901"' >/dev/null
+          test "$(cat "$UPGRADE/VERSION.txt")" = 2.36.0
+          grep -Fx "define('VF_VERSION', '2.36.0');" "$UPGRADE/app/bootstrap.php" >/dev/null
+          test -f "$UPGRADE/app/ResourceCoverCache.php"; test -f "$UPGRADE/app/ResourceMetadata.php"; test -f "$UPGRADE/resource-cover-refresh.php"
+          ROOT="$UPGRADE" php <<'PHP' | tee "$EVID/preservation.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn()!==40)exit(1);if((int)$d->query("SELECT COUNT(*) FROM links WHERE is_favorite=1 AND lifecycle_state='active'")->fetchColumn()!==4)exit(2);if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(3);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(4);echo "P01_V2360_DATA_PRESERVATION=PASS\n";
+          PHP
+          php "$UPGRADE/cli/verify.php" | tee "$EVID/verify-upgraded.txt" | grep -Fx VERIFY_PASS=YES
+          php "$UPGRADE/cli/surface-verify.php" | tee "$EVID/surface-upgraded.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          php "$REPAIR" --run="$UPGRADE" | tee "$EVID/idempotent.json" | jq -e '.ok==true and .already_current==true' >/dev/null
+          echo P01_V2353_TO_V2360_ATOMIC=PASS | tee "$EVID/atomic-verdict.txt"
+      - name: Strict fresh candidate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$FRESH"; cp -a candidate/src "$FRESH"
+          php -S 127.0.0.1:18461 -t "$FRESH" >"$EVID/fresh-server.log" 2>&1 & echo $! >/tmp/p01-v2360-fresh.pid
+          COOKIE="$EVID/fresh.cookies"
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18461/setup.php -o "$EVID/fresh-setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/fresh-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18461/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V2360 Fresh' --data-urlencode 'admin_password=V2360Fresh!2026' --data-urlencode 'admin_password_confirm=V2360Fresh!2026' -o "$EVID/fresh-post.html"
+          php "$FRESH/cli/verify.php" | tee "$EVID/fresh-verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$FRESH/cli/surface-verify.php" | tee "$EVID/fresh-surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$FRESH" php <<'PHP' | tee "$EVID/fresh-db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();foreach(['categories','links','import_batches','backup_records','operation_history'] as $t){if((int)$d->query("SELECT COUNT(*) FROM $t")->fetchColumn()!==0)exit(10);}if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);echo "P01_V2360_FRESH_DATA_ZERO=PASS\nP01_V2360_SQLITE=PASS\n";
+          PHP
+          kill "$(cat /tmp/p01-v2360-fresh.pid)" || true
+          printf 'P01_V2360_CANDIDATE_READINESS=PASS\nSOURCE=%s\nTREE=%s\nRUNTIME_TREE=%s\nSCHEMA=%s\nOWNER_PRODUCTION_WRITE=NO\n' "$CANDIDATE" "$CANDIDATE_TREE" "$CANDIDATE_RUNTIME_TREE" "$SCHEMA" | tee "$EVID/verdict.txt"
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-v2360-candidate-readiness-${{ github.run_id }}
+          path: |
+            ${{ env.EVID }}
+            ${{ env.OUT }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop servers
+        if: always()
+        shell: bash
+        run: |
+          kill "$(cat /tmp/p01-v2360-upgrade.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/p01-v2360-fresh.pid 2>/dev/null)" 2>/dev/null || true
