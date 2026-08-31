@@ -1,0 +1,155 @@
+name: P02 R35 V2.5.32 Browser Visual
+on:
+  push:
+    branches: [run/p02-r35-v2532-browser-visual]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCT_REF: 61a46e5d704139ffdf5c1f0f0886a10a02983a9a
+      EXPECTED_VERSION: '2.5.32'
+      PORT: '18080'
+    steps:
+      - name: Checkout exact P02 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Install runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 curl >/dev/null
+          cd product
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build isolated site
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r35"
+          SITE="$RUN_ROOT/site"
+          mkdir -p "$RUN_ROOT" visual-audit
+          bash scripts/build-deploy-tree.sh "$SITE"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = "$EXPECTED_VERSION"
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          BASE_URL="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          PASSWORD="VF-R35-${GITHUB_RUN_ID}!"; printf '%s' "$PASSWORD" > "$RUN_ROOT/password"
+          curl -fsS -c "$RUN_ROOT/cookie" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$RUN_ROOT/cookie" -c "$RUN_ROOT/cookie" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = '303'
+          echo P02_R35_SITE_READY=PASS
+
+      - name: Run real Chromium task flow
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r35"
+          VF_UX_E2E_BASE_URL="http://127.0.0.1:$PORT" VF_UX_E2E_PASSWORD="$(cat "$RUN_ROOT/password")" VF_UX_E2E_VERSION="$EXPECTED_VERSION" node tests/e2e/p02_ux_task_flow.mjs
+
+      - name: Verify visual geometry and responsive surfaces
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r35"
+          cat > r35.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base=process.env.BASE_URL,password=process.env.PASSWORD,out='visual-audit';
+          fs.mkdirSync(out,{recursive:true});
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage();
+          const assert=(v,m)=>{if(!v)throw new Error(m)};
+          const shot=async n=>{await page.waitForTimeout(80);await page.screenshot({path:`${out}/${n}.png`,fullPage:false});console.log('SHOT='+n)};
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          if(await page.locator('[data-open-login]').count()){
+            await page.locator('[data-open-login]').click();
+            await page.locator('#loginForm input[name="password"]').fill(password);
+            await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));
+          }
+          const fixture=await page.evaluate(async()=>{
+            const s=await (await fetch('/api.php?action=session')).json();
+            const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(a+JSON.stringify(j));return j;};
+            const c=await post('category_save',{name:'R35 视觉收敛',description:'isolated',icon:'folder'});
+            const title='这是一个特别长的移动端编辑标题，用来确认标题会自然换行而不是横向被裁掉';
+            const x=await post('content_save',{category_id:c.id,title,content:'# '+title+'\n\n'+('真实浏览器布局验证。中文 English 123。\n\n').repeat(50),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});
+            return {categoryId:c.id,id:x.item?.id||x.id};
+          });
+          assert(fixture.id,'fixture id missing');
+          await page.evaluate(id=>openReader(id),fixture.id);await page.waitForSelector('.reader-page');await shot('01-reader-desktop');
+          await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');await page.waitForTimeout(120);
+          const edit=await page.evaluate(()=>{const l=document.querySelector('#notebookLayout'),p=document.querySelector('#notebookListPane'),r=document.querySelector('#notebookResizer'),d=document.querySelector('#notebookDetailScroll');return {pane:getComputedStyle(p).display,resizer:getComputedStyle(r).display,layout:Math.round(l.getBoundingClientRect().width),detail:Math.round(d.getBoundingClientRect().width),grid:getComputedStyle(l).gridTemplateColumns,detailColumn:getComputedStyle(d).gridColumn};});
+          console.log('R35_EDIT='+JSON.stringify(edit));
+          assert(edit.pane==='none'&&edit.resizer==='none','Edit list ownership not retired '+JSON.stringify(edit));
+          assert(Math.abs(edit.layout-edit.detail)<=3,'Edit detail does not own full workspace '+JSON.stringify(edit));
+          await shot('02-edit-desktop');
+          await page.locator('.workspace-mode-switch [data-workspace-command="split"]').click();await page.waitForSelector('.article-workspace.mode-split');await page.waitForTimeout(100);
+          const split=await page.evaluate(()=>{const l=document.querySelector('#notebookLayout'),d=document.querySelector('#notebookDetailScroll'),s=document.querySelector('.article-source-pane'),v=document.querySelector('.article-preview-pane');return {layout:Math.round(l.getBoundingClientRect().width),detail:Math.round(d.getBoundingClientRect().width),source:Math.round(s.getBoundingClientRect().width),preview:Math.round(v.getBoundingClientRect().width),grid:getComputedStyle(l).gridTemplateColumns};});
+          console.log('R35_SPLIT='+JSON.stringify(split));
+          assert(Math.abs(split.layout-split.detail)<=3,'Split detail does not own full workspace '+JSON.stringify(split));
+          assert(split.source>500&&split.preview>500,'Split panes remain constrained '+JSON.stringify(split));
+          await shot('03-split-desktop');
+          await page.locator('.workspace-mode-switch [data-workspace-command="read"]').click();await page.waitForTimeout(100);
+          const read=await page.evaluate(()=>{const l=document.querySelector('#notebookLayout'),p=document.querySelector('#notebookListPane'),d=document.querySelector('#notebookDetailScroll');return {pane:getComputedStyle(p).display,layout:Math.round(l.getBoundingClientRect().width),detail:Math.round(d.getBoundingClientRect().width),grid:getComputedStyle(l).gridTemplateColumns};});
+          console.log('R35_READ='+JSON.stringify(read));
+          assert(read.pane==='flex','Read did not restore list pane');
+          assert(read.detail<read.layout-200,'Read did not restore list/detail split '+JSON.stringify(read));
+          await shot('04-read-desktop');
+
+          await page.setViewportSize({width:390,height:844});
+          await page.locator('.workspace-mode-switch [data-workspace-command="edit"]').click();await page.waitForSelector('.article-workspace.mode-edit');await page.waitForTimeout(100);
+          const mobile=await page.evaluate(()=>{const t=document.querySelector('#articleTitleInput'),tb=document.querySelector('.vf-editor-toolbar');return {client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,titleW:Math.round(t.getBoundingClientRect().width),titleScroll:t.scrollWidth,toolbarClient:tb?.clientWidth||0,toolbarScroll:tb?.scrollWidth||0};});
+          console.log('R35_MOBILE_EDIT='+JSON.stringify(mobile));
+          assert(mobile.scroll<=mobile.client+3,'mobile editor page overflow');
+          assert(mobile.titleScroll<=mobile.titleW+3,'mobile title clips horizontally');
+          assert(mobile.toolbarClient<=390,'mobile toolbar escapes viewport');
+          await shot('05-edit-mobile');
+          await page.evaluate(async()=>setMode('settings'));await page.waitForSelector('.settings-page');await page.locator('[data-settings-section="updates"]').click();await page.waitForTimeout(100);
+          const settings=await page.evaluate(()=>{const n=document.querySelector('.settings-nav');return {navH:Math.round(n.getBoundingClientRect().height),client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth};});
+          console.log('R35_MOBILE_SETTINGS='+JSON.stringify(settings));
+          assert(settings.navH<80,'mobile settings nav is still multi-row');
+          assert(settings.scroll<=settings.client+3,'mobile settings overflow');
+          await shot('06-settings-mobile');
+          console.log('P02_R35_BROWSER_VISUAL=PASS');
+          await browser.close();
+          JS
+          BASE_URL="http://127.0.0.1:$PORT" PASSWORD="$(cat "$RUN_ROOT/password")" node r35.mjs
+          rm r35.mjs
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p02-r35-v2532-visual
+          path: product/visual-audit/*.png
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Boundaries
+        if: always()
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r35"; if test -f "$RUN_ROOT/php.pid"; then kill "$(cat "$RUN_ROOT/php.pid")" 2>/dev/null || true; fi
+          echo PRODUCT_WRITE=NO
+          echo MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
