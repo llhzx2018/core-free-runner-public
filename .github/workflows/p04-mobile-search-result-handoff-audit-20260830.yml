@@ -1,0 +1,86 @@
+name: P04 Mobile Search Result Handoff Audit
+
+on:
+  push:
+    branches:
+      - audit/p04-mobile-search-result-handoff-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE: 5dffa885e9a7f257692a5647e9bec1417a6f444c
+      EVIDENCE: ${{ github.workspace }}/evidence-p04-mobile-search-handoff
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify private read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout exact P04 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Exact source and relevant contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          cd product
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          node --check public/assets/v270-reference-lock.js
+          node --check public/assets/v275-ua-workflow.js
+          node --check public/assets/daily-ux-polish.js
+          php tests/unit/ui_global_search_current_contract.php .
+          php tests/unit/ui_daily_ux_polish_contract.php .
+          php tests/unit/ui_daily_server_ux_polish_contract.php .
+      - name: Install Fresh Chromium
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Fresh 390px search result to detail handoff audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          WEB="$RUNNER_TEMP/p04-mobile-search-handoff-runtime"
+          python3 product/scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          PORT=19065
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" CANDIDATE="$CANDIDATE" WEB_ROOT="$WEB" PRODUCT_ROOT="$GITHUB_WORKSPACE/product" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-mobile-search-result-handoff-audit-20260830.mjs
+          grep -Fq '"status": "PASS"' "$EVIDENCE/P04_MOBILE_SEARCH_RESULT_HANDOFF_AUDIT.json"
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-MOBILE-SEARCH-RESULT-HANDOFF-${{ env.CANDIDATE }}
+          path: evidence-p04-mobile-search-handoff/
+          if-no-files-found: error
+          retention-days: 14
