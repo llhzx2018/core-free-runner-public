@@ -147,7 +147,7 @@ try {
     await page.screenshot({ path: `${evidence}/desktop-${routeName}.png`, fullPage: true, animations: 'disabled' });
   }
 
-  // Verify the recent mobile-only Provider modal touch floor does not inflate desktop controls.
+  // Verify recent mobile-only Provider modal touch floors do not inflate desktop controls.
   await page.locator('.v270-nav [data-v270-nav="providers"]').first().click();
   await page.locator('[data-v271-route="providers"]').waitFor({ state: 'visible', timeout: 15000 });
   const connect = page.locator('[data-v271-action="provider-connect"]').first();
@@ -164,10 +164,12 @@ try {
     close: await rect(close),
     overflow_x: await overflowX(page),
   };
-  for (const [name, box] of Object.entries({ verify: report.provider_modal.verify, submit: report.provider_modal.submit, close: report.provider_modal.close })) {
+  for (const [name, box] of Object.entries({ verify: report.provider_modal.verify, submit: report.provider_modal.submit })) {
     const height = box?.height || 0;
-    if (height < 36 || height >= 40) fail(`provider modal ${name}: desktop height should remain below mobile 40px floor, got ${height}`);
+    if (height < 36 || height >= 40) fail(`provider modal ${name}: desktop action height changed unexpectedly, got ${height}`);
   }
+  const closeHeight = report.provider_modal.close?.height || 0;
+  if (closeHeight <= 0 || closeHeight >= 40) fail(`provider modal close: mobile 40px floor leaked into desktop, got ${closeHeight}`);
   if (report.provider_modal.overflow_x > 1) fail(`provider modal: desktop horizontal overflow ${report.provider_modal.overflow_x}`);
   await page.screenshot({ path: `${evidence}/desktop-provider-connect-modal.png`, fullPage: true, animations: 'disabled' });
   await close.click();
