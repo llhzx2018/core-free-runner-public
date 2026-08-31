@@ -1,0 +1,205 @@
+name: P01 Admin Public State Formal Gate
+on:
+  push:
+    branches: [temp/p01-admin-public-state-clarity-20260901]
+    paths: [.github/workflows/p01-admin-public-state-formal-gate-20260901.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: aeee995f8a4b10f330938151bbc05b9fe5c74e82
+      BASE: 5ee91a4e0c2ce66a5c22850ae09b1bd6c7cd8081
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-admin-public-state-gate/evidence
+      PORT: 18541
+      ADMIN_PASS: P01StateClarityGate2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: aeee995f8a4b10f330938151bbc05b9fe5c74e82
+          fetch-depth: 0
+          path: product
+      - name: Exact source, scope and syntax fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-admin-public-state-gate; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          git -C product diff --name-only "$BASE..$SOURCE" | sort | tee "$EVID/changed-files.txt"
+          cat > /tmp/expected-files.txt <<'EOF'
+          src/api.php
+          src/app/FunctionalWorkspace.php
+          src/app/FunctionalWorkspaceCore.php
+          src/app/FunctionalWorkspaceShell.php
+          src/assets/frontend.css
+          src/assets/workspace-domain-nav.css
+          src/index.php
+          src/start.php
+          EOF
+          diff -u /tmp/expected-files.txt "$EVID/changed-files.txt"
+          test "$(git -C product rev-list --count "$BASE..$SOURCE")" = 1
+          for f in "$ROOT/api.php" "$ROOT/app/FunctionalWorkspace.php" "$ROOT/app/FunctionalWorkspaceCore.php" "$ROOT/app/FunctionalWorkspaceShell.php" "$ROOT/index.php" "$ROOT/start.php"; do php -l "$f"; done | tee "$EVID/php-lint.txt"
+          test -z "$(git -C product diff --name-only "$BASE..$SOURCE" | grep -E '(^|/)(migrations?|schema|version|VF_PROJECT\.json)' || true)"
+          git -C product diff --check "$BASE..$SOURCE"
+          printf 'SOURCE=%s\nBASE=%s\nTREE=%s\n' "$SOURCE" "$BASE" "$(git -C product rev-parse HEAD^{tree})" | tee "$EVID/source.txt"
+      - name: Fresh Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-admin-public-state-gate.pid
+          COOKIE=/tmp/p01-admin-public-state-gate.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 State Clarity Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "$EVID/setup-post.html"
+      - name: Seed public and private resources
+        shell: bash
+        run: |
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'视角诊断分类','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($title,$url,$private)use($repo,$cat){return (int)$repo->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'','is_private'=>$private],'manual')['id'];};
+          $ids=[];
+          $ids['public_start']=$save('状态门禁公开导航','https://example.com/state-public-start',0);
+          $ids['private_start']=$save('状态门禁私人导航','https://example.com/state-private-start',1);
+          $ids['public_channel']=$save('状态门禁公开频道','https://www.youtube.com/@state-public-channel',0);
+          $ids['private_channel']=$save('状态门禁私人频道','https://www.youtube.com/@state-private-channel',1);
+          $ids['public_watch']=$save('状态门禁公开电影','https://iyf.tv/movie/state-public-watch',0);
+          $ids['private_watch']=$save('状态门禁私人电影','https://iyf.tv/movie/state-private-watch',1);
+          $surface->upsertProfile($ids['public_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['private_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['public_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026']);
+          $surface->upsertProfile($ids['private_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2025']);
+          file_put_contents(getenv('EVID').'/ids.json',json_encode($ids,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium role, preview, login and security gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; "$CHROME" --version | tee "$EVID/chrome.txt"
+          mkdir -p /tmp/p01-admin-public-state-gate/pw; cd /tmp/p01-admin-public-state-gate/pw
+          npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright-core'),fs=require('fs');
+          const base=`http://127.0.0.1:${process.env.PORT}/`, E=process.env.EVID;
+          const A=(v,m)=>{if(!v)throw Error(m)};
+          const titles={
+            start:['状态门禁公开导航','状态门禁私人导航'],
+            channels:['状态门禁公开频道','状态门禁私人频道'],
+            watch:['状态门禁公开电影','状态门禁私人电影']
+          };
+          const routeKey=r=>r.replace('.php','');
+          async function login(ctx){const r=await ctx.request.post(base+'api.php?action=login',{data:{password:process.env.ADMIN_PASS}});A(r.ok(),'login http');const j=await r.json();A(j.ok===true,'login json');}
+          async function bodyText(page){return (await page.locator('body').innerText()).replace(/\s+/g,' ');}
+          async function noOverflow(page,label){const d=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(d===0,`${label} overflow=${d}`);}
+          async function functionalState(page,label,state,action){
+            const badge=page.locator('[data-vf-view-state] b');
+            await badge.waitFor({state:'visible'});A((await badge.innerText()).trim()===state,`${label} state`);
+            const act=page.locator('[data-vf-view-action]');A((await act.innerText()).trim()===action,`${label} action`);return act;
+          }
+          async function snap(page,name){await page.screenshot({path:`${E}/${name}.png`,fullPage:true});}
+          (async()=>{
+            const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});
+            const out={source:process.env.SOURCE,widths:{}};
+            for(const width of [390,1440]){
+              const height=width===390?844:900, w={};
+              const admin=await browser.newContext({viewport:{width,height}});await admin.route('**/resource-cover-refresh.php',r=>r.fulfill({status:200,contentType:'application/json',body:'{"ok":true,"processed":0,"results":[]}'}));await login(admin);
+              const p=await admin.newPage();
+              w.admin={};
+              for(const route of ['home.php','start.php','channels.php','watch.php']){
+                await p.goto(base+route,{waitUntil:'domcontentloaded'});await p.waitForTimeout(300);
+                await functionalState(p,`admin ${route} ${width}`,'管理员视角','查看公开版');
+                if(titles[routeKey(route)]){const t=await bodyText(p);A(t.includes(titles[routeKey(route)][1]),`admin private missing ${route}`);}
+                A(await p.locator('[data-open-add]').count()>0,`admin add missing ${route}`);
+                await noOverflow(p,`admin ${route} ${width}`);await snap(p,`admin-${routeKey(route)}-${width}`);
+                w.admin[route]={ok:true};
+              }
+
+              w.preview={};
+              for(const route of ['channels.php','watch.php']){
+                const key=routeKey(route), url=`${base}${route}?public_view=1&preview_return=${key}`;
+                await p.goto(url,{waitUntil:'domcontentloaded'});await p.waitForTimeout(300);
+                const act=await functionalState(p,`preview ${route} ${width}`,'公开视角','返回管理');
+                const t=await bodyText(p);A(t.includes(titles[key][0]),`preview public missing ${route}`);A(!t.includes(titles[key][1]),`preview private leak ${route}`);
+                A(await p.locator('[data-open-add]').count()===0,`preview add leaked ${route}`);A(await p.locator('.vf-sidebar-scope-section').count()===0,`preview scope leaked ${route}`);A(await p.locator('#vf-workspace-data').count()===0,`preview workspace payload leaked ${route}`);
+                A(await p.locator('body').getAttribute('data-vf-public-preview')==='1',`preview body flag ${route}`);
+                const href=await act.getAttribute('href');A(href===route,`preview return href ${route}: ${href}`);
+                if(width===390){const box=await act.boundingBox();A(box&&box.height>=40,`preview mobile action height ${route}: ${box&&box.height}`);}
+                const other=key==='channels'?'watch.php':'channels.php';const otherLink=p.locator(`.vf-global-domain-nav a[href^="${other}"]`).first();const otherHref=await otherLink.getAttribute('href');A(otherHref&&otherHref.includes('public_view=1')&&otherHref.includes(`preview_return=${key}`),`preview cross-domain persistence ${route}: ${otherHref}`);
+                await noOverflow(p,`preview ${route} ${width}`);await snap(p,`preview-${key}-${width}`);
+                await p.goto(base+otherHref,{waitUntil:'domcontentloaded'});await functionalState(p,`preview cross ${other} ${width}`,'公开视角','返回管理');
+                const crossText=await bodyText(p);A(!crossText.includes(titles[routeKey(other)][1]),`cross preview private leak ${other}`);
+                w.preview[route]={returnHref:href,crossHref:otherHref};
+              }
+
+              // Legacy Start authenticated preview must be public-read despite live admin session.
+              let resp=await p.goto(base+'start.php?public_view=1&preview_return=start',{waitUntil:'domcontentloaded'});await p.waitForTimeout(700);
+              await p.waitForFunction(()=>document.querySelector('#viewState')?.textContent?.includes('公开视角'));
+              let tx=await bodyText(p);A(tx.includes(titles.start[0]),'start preview public missing');A(!tx.includes(titles.start[1]),'start preview private leak');A((await p.locator('#loginButton').innerText()).includes('返回管理'),'start preview return action');A(await p.locator('body').getAttribute('data-vf-public-preview')==='1','start preview body flag');
+              const boot=await p.evaluate(async()=>await (await fetch('/api.php?action=bootstrap&public_view=1')).json());A(boot.site.auth===false,'start preview bootstrap auth');A(boot.site.publicPreview===true,'start preview bootstrap flag');A(boot.csrf===null,'start preview csrf leaked');
+              const headers=resp.headers();A((headers['cache-control']||'').includes('no-store'),'start preview cache');A((headers['x-robots-tag']||'').includes('noindex'),'start preview robots');await noOverflow(p,`start preview ${width}`);await snap(p,`preview-start-${width}`);
+              await p.locator('#loginButton').click();await p.waitForURL(u=>u.pathname.endsWith('/start.php')&&!u.searchParams.has('public_view'));await p.waitForTimeout(300);await functionalState(p,`start return admin ${width}`,'管理员视角','查看公开版');A((await bodyText(p)).includes(titles.start[1]),'start return lost private');
+
+              // Invalid preview_return must resolve to same-origin safe route.
+              await p.goto(base+'channels.php?public_view=1&preview_return=javascript%3Aalert(1)',{waitUntil:'domcontentloaded'});const badReturn=await p.locator('[data-vf-view-action]').getAttribute('href');A(badReturn==='channels.php',`unsafe preview_return fallback: ${badReturn}`);
+              await admin.close();
+
+              // True anonymous state and login affordance.
+              const anon=await browser.newContext({viewport:{width,height}}), q=await anon.newPage();
+              for(const route of ['channels.php','watch.php']){
+                const key=routeKey(route);await q.goto(base+route,{waitUntil:'domcontentloaded'});await q.waitForTimeout(250);const act=await functionalState(q,`anon ${route} ${width}`,'公开视角','登录');const t=await bodyText(q);A(t.includes(titles[key][0]),`anon public missing ${route}`);A(!t.includes(titles[key][1]),`anon private leak ${route}`);const href=await act.getAttribute('href');A(href===`index.php?login=1&next=${route}`,`anon login href ${route}: ${href}`);A(await q.locator('[data-open-add]').count()===0,`anon add leaked ${route}`);await noOverflow(q,`anon ${route} ${width}`);await snap(q,`anonymous-${key}-${width}`);
+              }
+
+              // Anonymous public_view=1 is still ordinary anonymous, never elevated.
+              await q.goto(base+'channels.php?public_view=1&preview_return=channels',{waitUntil:'domcontentloaded'});await q.waitForTimeout(200);A(await q.locator('body').getAttribute('data-vf-public-preview')==='0','anonymous preview flag elevated');await functionalState(q,`anon spoof ${width}`,'公开视角','登录');A(!(await bodyText(q)).includes(titles.channels[1]),'anonymous spoof private leak');
+
+              // Invalid next cannot become an open redirect and login prompt remains local.
+              await q.goto(base+'index.php?login=1&next=https%3A%2F%2Fevil.example',{waitUntil:'domcontentloaded'});await q.waitForTimeout(500);A(await q.locator('body').getAttribute('data-vf-login-next')==='','unsafe next accepted');A(new URL(q.url()).origin===new URL(base).origin,'unsafe next navigation');A(await q.locator('[name=password]').count()>0,'invalid-next login modal missing');
+
+              // Real functional login should return to requested page and reveal admin state.
+              await q.goto(base+'channels.php',{waitUntil:'domcontentloaded'});await q.locator('[data-vf-view-action]').click();await q.waitForURL(u=>u.pathname.endsWith('/index.php')&&u.searchParams.get('login')==='1');await q.locator('[name=password]').waitFor({state:'visible'});await q.locator('[name=password]').fill(process.env.ADMIN_PASS);await q.locator('#loginSubmit').click();await q.waitForURL(u=>u.pathname.endsWith('/channels.php'));await q.waitForTimeout(300);await functionalState(q,`post-login channels ${width}`,'管理员视角','查看公开版');A((await bodyText(q)).includes(titles.channels[1]),'post-login private not restored');await snap(q,`post-login-channels-${width}`);
+              await anon.close();
+              out.widths[String(width)]=w;
+            }
+            fs.writeFileSync(E+'/browser-gate.json',JSON.stringify(out,null,2));console.log('BROWSER_GATE=PASS');await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          CHROME="$CHROME" PORT="$PORT" EVID="$EVID" SOURCE="$SOURCE" ADMIN_PASS="$ADMIN_PASS" node gate.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$i\nFK=$fk\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-admin-public-state-gate-${{ github.run_id }}
+          path: /tmp/p01-admin-public-state-gate/evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-admin-public-state-gate.pid 2>/dev/null)" 2>/dev/null || true
