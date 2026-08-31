@@ -16,8 +16,11 @@ page.on('console',m=>{if(m.type()==='error')report.console_errors.push(m.text())
 const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
 const pointerClick=async locator=>{
   await locator.waitFor({state:'visible',timeout:12000});
+  await locator.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(60);
   const box=await locator.boundingBox();
   if(!box||box.width<=0||box.height<=0)throw new Error('pointer target has no box');
+  if(box.x<0||box.y<0||box.x+box.width>page.viewportSize().width||box.y+box.height>page.viewportSize().height)throw new Error(`pointer target outside viewport ${JSON.stringify(box)}`);
   await page.mouse.move(box.x+box.width/2,box.y+box.height/2);
   await page.mouse.down();
   await page.waitForTimeout(35);
