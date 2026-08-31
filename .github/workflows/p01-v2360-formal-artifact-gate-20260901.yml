@@ -1,0 +1,167 @@
+name: P01 V2.36.0 Formal Artifact Gate
+on:
+  push:
+    branches: [temp/p01-v2360-release-gate-20260901]
+    paths: [.github/workflows/p01-v2360-formal-artifact-gate-20260901.yml]
+permissions:
+  contents: read
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FORMAL: 225780b1ed56bbcc8e62ba465b1129e1c22ee60a
+      FORMAL_TREE: 8af6d8ea6168fae52988cae8272a19073a0a7a2e
+      FORMAL_RUNTIME_TREE: ad3f96345ead330adffb20c7ecb3cdf6537036b6
+      MAIN_EXPECTED: 3a60430c3c74688f2db81f2fd08e7e8ecd986fc9
+      SOURCE: 8f1073120f8096fc23554906615601752feb036d
+      SOURCE_TREE: ece02ef928ad5b119e2b0237e7963a607865ddbb
+      SOURCE_RUNTIME_TREE: 7f181909c7ccd3179491f21cfca426008de4295f
+      VERSION: 2.36.0
+      SOURCE_VERSION: 2.35.3
+      SCHEMA: '2026082901'
+      CANDIDATE_GATE: '33420047480'
+      CANDIDATE_ARTIFACT: '9768538195'
+      CANDIDATE_DIGEST: aa4b234d12fdf2fbefbcfe295d3bda77ece8f7d7a184d6915b0193124e66290d
+      OUT: /tmp/p01-v2360-formal-artifacts
+      EVID: /tmp/p01-v2360-formal-evidence
+      UPGRADE: /tmp/p01-v2360-formal-upgrade
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.FORMAL }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: formal
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.35.3
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: agent/p01-22121-formal-artifact-gate-20260819
+          path: proven
+      - name: Exact formal fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$OUT" "$EVID" "$UPGRADE"; mkdir -p "$OUT" "$EVID"
+          test "$(git -C formal rev-parse HEAD)" = "$FORMAL"
+          test "$(git -C formal rev-parse HEAD^{tree})" = "$FORMAL_TREE"
+          test "$(git -C formal rev-parse HEAD:src)" = "$FORMAL_RUNTIME_TREE"
+          test "$(git -C formal rev-parse origin/develop)" = "$FORMAL"
+          test "$(git -C formal rev-parse origin/main)" = "$MAIN_EXPECTED"
+          test "$(git -C production rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C production rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(git -C production rev-parse HEAD:src)" = "$SOURCE_RUNTIME_TREE"
+          ! git -C formal show-ref --verify --quiet refs/tags/v2.36.0
+          test "$(cat formal/VERSION)" = "$VERSION"
+          test "$(cat formal/src/VERSION.txt)" = "$VERSION"
+          grep -Fx "define('VF_VERSION', '2.36.0');" formal/src/app/bootstrap.php >/dev/null
+          jq -e '.candidate_state=="PASS" and .v2_36_0_candidate_gate.run==33420047480 and .v2_36_0_candidate_gate.result=="PASS" and .v2_36_0_candidate_gate.artifact==9768538195 and .production_version=="2.35.3" and .schema_version=="2026082901"' formal/VF_PROJECT.json >/dev/null
+          test "$(git -C formal rev-parse HEAD:database)" = "$(git -C production rev-parse HEAD:database)"
+          find formal/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-syntax.txt"
+          find formal/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          git -C formal diff --name-status "$SOURCE"...HEAD -- src | tee "$EVID/runtime-delta.txt"
+          grep -F $'A\tsrc/app/ResourceCoverCache.php' "$EVID/runtime-delta.txt" >/dev/null
+          grep -F $'A\tsrc/app/ResourceMetadata.php' "$EVID/runtime-delta.txt" >/dev/null
+          grep -F $'A\tsrc/resource-cover-refresh.php' "$EVID/runtime-delta.txt" >/dev/null
+          printf 'P01_V2360_FORMAL_FENCE=PASS\nFORMAL=%s\nTREE=%s\nRUNTIME_TREE=%s\nSCHEMA=%s\nMIGRATION=NONE\nCANDIDATE_GATE=%s/PASS\nOWNER_PRODUCTION_WRITE=NO\n' "$FORMAL" "$FORMAL_TREE" "$FORMAL_RUNTIME_TREE" "$SCHEMA" "$CANDIDATE_GATE" | tee "$EVID/fence.txt"
+      - name: Build deterministic formal release artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v2360-formal-build.py <<'PY'
+          from pathlib import Path
+          import hashlib,importlib.util,json,os,re
+          ROOT=Path(os.environ['GITHUB_WORKSPACE']);V=os.environ['VERSION'];SV=os.environ['SOURCE_VERSION'];SCHEMA=os.environ['SCHEMA'];OUT=Path(os.environ['OUT'])
+          def load(name,path):
+              s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
+          base=load('base',ROOT/'proven/scripts/p01-build-release.py');v2=load('v2',ROOT/'proven/scripts/p01-build-release-v2.py')
+          sha=lambda b:hashlib.sha256(b).hexdigest(); gate_only={'.gitignore','CHANGELOG.md','DEPLOY-HERE.txt','FULL-PACKAGE-NOTES.txt','README.md','UPGRADE-V2.txt','robots.txt'}
+          def runtime(files):return{k:v for k,v in files.items() if k!='release-manifest.json' and k not in gate_only and k!='VF-Start-Browser-Extension.zip'}
+          td=base.collect(ROOT/'formal/src');sd=base.collect(ROOT/'production/src');target=runtime(td);source=runtime(sd)
+          changed=sorted(k for k in target if k in source and sha(target[k])!=sha(source[k]));added=sorted(set(target)-set(source));removed=sorted(set(source)-set(target))
+          required={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}
+          if not required.issubset(set(added)): raise SystemExit('formal additions missing '+json.dumps(added))
+          manifest={'project':'VF Start','project_id':'P01','component_id':'APP','version':V,'source_version':SV,'schema_version':SCHEMA,'source_schema_version':SCHEMA,'release_type':'formal','stage':'FORMAL_ARTIFACT_GATE','deployable':True,'release_authorized':True,'formal_source_commit':os.environ['FORMAL'],'formal_source_tree':os.environ['FORMAL_TREE'],'runtime_source_tree':os.environ['FORMAL_RUNTIME_TREE'],'production_source_commit':os.environ['SOURCE'],'production_source_tree':os.environ['SOURCE_TREE'],'production_runtime_tree':os.environ['SOURCE_RUNTIME_TREE'],'candidate_gate':int(os.environ['CANDIDATE_GATE']),'candidate_artifact':int(os.environ['CANDIDATE_ARTIFACT']),'candidate_digest':'sha256:'+os.environ['CANDIDATE_DIGEST'],'schema_change':False,'schema_migrations':[],'runtime_data_included':False,'runtime_files':{k:sha(v) for k,v in sorted(target.items())},'atomic_runtime_boundary':{'source_version':SV,'target_version':V,'source_schema':SCHEMA,'target_schema':SCHEMA,'added_files':added,'removed_files':removed,'changed_files':changed},'update':{'asset_name':'VF_Start_V2.36.0_UPDATE.zip','supported_from':[SV],'backup_required':True,'rollback_supported':True}}
+          mb=(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n').encode();full=dict(td);full['release-manifest.json']=mb;atomic=dict(target);atomic['release-manifest.json']=mb
+          repair=v2.build_repair(source,atomic,sha(target['app/UpdateManager.php']))
+          repair,n=re.subn(r"public const SOURCE_VERSION='2\.21\.14';\n    public const TARGET_VERSION='2\.21\.15';\n    public const TARGET_SCHEMA='2026080902';",f"public const SOURCE_VERSION='{SV}';\n    public const TARGET_VERSION='{V}';\n    public const TARGET_SCHEMA='{SCHEMA}';",repair,count=1)
+          if n!=1:raise SystemExit('repair constants anchor mismatch')
+          rp=OUT/'repair-v2.36.0.php';rp.write_text(repair,encoding='utf-8',newline='\n')
+          base.deterministic_zip(OUT/'VF-Start-V2.36.0-FULL.zip',full)
+          upd={rp.name:rp.read_bytes()};base.deterministic_zip(OUT/'VF-Start-V2.36.0-UPDATE.zip',upd);base.deterministic_zip(OUT/'VF_Start_V2.36.0_UPDATE.zip',upd)
+          formal={'project':'P01','version':V,'source_version':SV,'schema':SCHEMA,'formal_source':os.environ['FORMAL'],'formal_tree':os.environ['FORMAL_TREE'],'runtime_tree':os.environ['FORMAL_RUNTIME_TREE'],'candidate_gate':int(os.environ['CANDIDATE_GATE']),'schema_change':False,'migration':None,'owner_production_write':False}
+          (OUT/'P01-V2.36.0-FORMAL-METADATA.json').write_text(json.dumps(formal,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          gate={'status':'FORMAL_ARTIFACT_GATE_PASS_PENDING_RUNTIME','project':'P01','version':V,'formal_source':os.environ['FORMAL'],'formal_tree':os.environ['FORMAL_TREE'],'runtime_tree':os.environ['FORMAL_RUNTIME_TREE'],'changed':changed,'added':added,'removed':removed,'schema':SCHEMA,'migration':None,'candidate_gate':int(os.environ['CANDIDATE_GATE']),'owner_production_write':False}
+          (OUT/'P01-V2.36.0-ARTIFACT-GATE.json').write_text(json.dumps(gate,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(gate,ensure_ascii=False))
+          PY
+          python3 /tmp/p01-v2360-formal-build.py | tee "$EVID/build.json"
+          php -l "$OUT/repair-v2.36.0.php" >/dev/null
+          php "$OUT/repair-v2.36.0.php" --self-test > "$OUT/atomic-self-test.json"
+          jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' "$OUT/atomic-self-test.json" >/dev/null
+          (cd "$OUT" && sha256sum atomic-self-test.json P01-V2.36.0-ARTIFACT-GATE.json P01-V2.36.0-FORMAL-METADATA.json repair-v2.36.0.php VF-Start-V2.36.0-FULL.zip VF-Start-V2.36.0-UPDATE.zip VF_Start_V2.36.0_UPDATE.zip | sort > SHA256SUMS.txt)
+          cp -a "$OUT" /tmp/p01-v2360-formal-first
+          rm -rf "$OUT";mkdir -p "$OUT"
+          python3 /tmp/p01-v2360-formal-build.py >/dev/null
+          php "$OUT/repair-v2.36.0.php" --self-test > "$OUT/atomic-self-test.json"
+          (cd "$OUT" && sha256sum atomic-self-test.json P01-V2.36.0-ARTIFACT-GATE.json P01-V2.36.0-FORMAL-METADATA.json repair-v2.36.0.php VF-Start-V2.36.0-FULL.zip VF-Start-V2.36.0-UPDATE.zip VF_Start_V2.36.0_UPDATE.zip | sort > SHA256SUMS.txt)
+          diff -rq /tmp/p01-v2360-formal-first "$OUT"
+          test "$(find "$OUT" -maxdepth 1 -type f | wc -l)" -eq 8
+          echo P01_V2360_FORMAL_ARTIFACT_DETERMINISTIC=PASS | tee "$EVID/deterministic.txt"
+      - name: Actual formal V2.35.3 to V2.36.0 upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REPAIR="$OUT/repair-v2.36.0.php";cp -a production/src "$UPGRADE"
+          php -S 127.0.0.1:18462 -t "$UPGRADE" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-v2360-formal.pid
+          C="$EVID/cookies.txt";for i in $(seq 1 60);do curl -fsS -c "$C" -b "$C" http://127.0.0.1:18462/setup.php -o "$EVID/setup.html" && break;sleep .25;done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18462/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V2360 Formal' --data-urlencode 'admin_password=V2360Formal!2026' --data-urlencode 'admin_password_confirm=V2360Formal!2026' -o "$EVID/setup-post.html"
+          ROOT="$UPGRADE" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$r=new VfRepository(vf_db());$c=$r->createCategory(['name'=>'Formal','description'=>'','is_private'=>false]);for($i=1;$i<=50;$i++)$r->saveLink(null,['category_id'=>$c,'title'=>'Formal '.$i,'url'=>'https://example.com/v2360-formal-'.$i,'description'=>'preserve','tags'=>'formal','is_private'=>$i%6===0,'is_favorite'=>$i<=5],'manual');echo "P01_V2360_FORMAL_SEED_50=PASS\n";
+          PHP
+          kill "$(cat /tmp/p01-v2360-formal.pid)" || true
+          php "$REPAIR" --verify-source="$UPGRADE" | tee "$EVID/source-check.json" | jq -e '.ok==true' >/dev/null
+          php "$REPAIR" --run="$UPGRADE" | tee "$EVID/upgrade.json" | jq -e '.ok==true and .already_current==false and .schema=="2026082901"' >/dev/null
+          test "$(cat "$UPGRADE/VERSION.txt")" = 2.36.0
+          test -f "$UPGRADE/app/ResourceCoverCache.php"; test -f "$UPGRADE/app/ResourceMetadata.php"; test -f "$UPGRADE/resource-cover-refresh.php"
+          ROOT="$UPGRADE" php <<'PHP' | tee "$EVID/preservation.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();if((int)$d->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn()!==50)exit(1);if((int)$d->query("SELECT COUNT(*) FROM links WHERE is_favorite=1 AND lifecycle_state='active'")->fetchColumn()!==5)exit(2);if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(3);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(4);echo "P01_V2360_FORMAL_DATA_PRESERVATION=PASS\n";
+          PHP
+          php "$UPGRADE/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$UPGRADE/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          php "$REPAIR" --run="$UPGRADE" | tee "$EVID/idempotent.json" | jq -e '.ok==true and .already_current==true' >/dev/null
+          jq '.status="FORMAL_ARTIFACT_GATE_PASS"' "$OUT/P01-V2.36.0-ARTIFACT-GATE.json" > "$OUT/P01-V2.36.0-ARTIFACT-GATE.json.tmp" && mv "$OUT/P01-V2.36.0-ARTIFACT-GATE.json.tmp" "$OUT/P01-V2.36.0-ARTIFACT-GATE.json"
+          (cd "$OUT" && sha256sum atomic-self-test.json P01-V2.36.0-ARTIFACT-GATE.json P01-V2.36.0-FORMAL-METADATA.json repair-v2.36.0.php VF-Start-V2.36.0-FULL.zip VF-Start-V2.36.0-UPDATE.zip VF_Start_V2.36.0_UPDATE.zip | sort > SHA256SUMS.txt)
+          printf 'P01_V2360_FORMAL_ARTIFACT_GATE=PASS\nFORMAL=%s\nTREE=%s\nRUNTIME_TREE=%s\nSCHEMA=%s\nOWNER_PRODUCTION_WRITE=NO\n' "$FORMAL" "$FORMAL_TREE" "$FORMAL_RUNTIME_TREE" "$SCHEMA" | tee "$EVID/verdict.txt"
+      - name: Upload formal artifacts and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-v2360-formal-artifact-${{ github.run_id }}
+          path: |
+            ${{ env.OUT }}
+            ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-v2360-formal.pid 2>/dev/null)" 2>/dev/null || true
