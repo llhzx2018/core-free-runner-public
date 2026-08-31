@@ -1,0 +1,135 @@
+name: P01 Mobile Admin Action Targets Gate
+on:
+  push:
+    branches: [gate/p01-mobile-admin-action-targets-20260831]
+    paths: [.github/workflows/p01-mobile-admin-action-targets-gate-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BASE: ee5954a652f7f0b874ff3edcebdadb6691cf0546
+      SOURCE: 285a25a7aa2741687a45d73191aaa4bfcd6f39f1
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-mobile-admin-action-targets/evidence
+      PORT: '18492'
+      ADMIN_PASS: P01MobileAdminActionTargets
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source changed-file and CSS scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-mobile-admin-action-targets; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product merge-base "$BASE" "$SOURCE")" = "$BASE"
+          git -C product diff --name-only "$BASE" "$SOURCE" | tee "$EVID/changed-files.txt"
+          test "$(cat "$EVID/changed-files.txt")" = 'src/assets/admin-consolidation.css'
+          git -C product diff --stat "$BASE" "$SOURCE" | tee "$EVID/diff-stat.txt"
+          git -C product diff --check "$BASE" "$SOURCE"
+          BASE="$BASE" SOURCE="$SOURCE" python3 <<'PY' | tee "$EVID/css-scope.txt"
+          import os, subprocess
+          base=os.environ['BASE']; source=os.environ['SOURCE']
+          def show(ref): return subprocess.check_output(['git','-C','product','show',f'{ref}:src/assets/admin-consolidation.css'],text=True)
+          old=show(base); new=show(source)
+          anchor='  body[data-vf-page="links-admin"] .vf-select-page-mobile{display:inline-flex!important;align-items:center;justify-content:flex-start;gap:7px}\n'
+          block=('  body[data-vf-admin-shell="server"] .vf-admin-mobilebar button,\n'
+                 '  body[data-vf-admin-shell="server"] .vf-admin-mobilebar a{min-width:40px!important;min-height:40px!important}\n'
+                 '  body[data-vf-admin-shell="server"] .vf-admin-page-body .btn,\n'
+                 '  body[data-vf-admin-shell="server"] .vf-admin-page-actions .btn,\n'
+                 '  body[data-vf-admin-shell="server"] .vf-admin-page-body summary{min-height:40px!important}\n')
+          assert old.count(anchor)==1, 'anchor drift'
+          assert new==old.replace(anchor,block+anchor,1), 'CSS scope exceeds approved shared mobile action block'
+          media_start=new.index('@media(max-width:768px){')
+          media_end=new.index('\n}',media_start)
+          assert media_start < new.index(block) < media_end, 'shared action block escaped <=768 media scope'
+          print('EXACT_SOURCE='+source)
+          print('CHANGED_FILE=src/assets/admin-consolidation.css')
+          print('CSS_SCOPE=server admin shell <=768 action controls only')
+          print('CSS_TARGET_MIN_HEIGHT=40px')
+          PY
+      - name: Fresh setup and fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-mobile-admin-action-targets.pid
+          COOKIE=/tmp/p01-mobile-admin-action-targets.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Mobile Admin Action Targets' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $pub=$repo->createCategory(['name'=>'Gate Public','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $priv=$repo->createCategory(['name'=>'Gate Private','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $repo->saveLink(null,['category_id'=>$pub,'title'=>'Gate Organized Public','url'=>'https://gate-organized-public.example/','is_private'=>0,'is_pending'=>0,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$priv,'title'=>'Gate Organized Private','url'=>'https://gate-organized-private.example/','is_private'=>1,'is_pending'=>0,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$priv,'title'=>'Gate Pending Private','url'=>'https://gate-pending-private.example/','is_private'=>1,'is_pending'=>1,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$pub,'title'=>'Gate Pending Public','url'=>'https://gate-pending-public.example/','is_private'=>0,'is_pending'=>1,'description'=>''],'admin');
+          PHP
+      - name: Chromium 390 and 1440 product regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-mobile-admin-action-targets/pw; cd /tmp/p01-mobile-admin-action-targets/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18492/';const routes=['links-admin.php','browser-helper.php','data-safety.php','settings.php','update.php'];
+          const assert=(v,m)=>{if(!v)throw Error(m)};const visible=async l=>await l.evaluate(e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length));
+          async function login(c){const r=await c.request.post(base+'api.php?action=login',{data:{password:'P01MobileAdminActionTargets'}});assert(r.ok(),'login status');const j=await r.json();assert(j.ok,'login payload');}
+          async function scanMobile(b){const c=await b.newContext({viewport:{width:390,height:844}});await login(c);const result={};
+            for(const route of routes){const p=await c.newPage();await p.goto(base+route,{waitUntil:'domcontentloaded',timeout:30000});await p.waitForTimeout(900);
+              const d=await p.evaluate(()=>{const vis=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);const label=e=>(e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||e.id||'').trim().replace(/\s+/g,' ').slice(0,80);const pack=e=>{const r=e.getBoundingClientRect();return{label:label(e),tag:e.tagName.toLowerCase(),id:e.id||'',width:+r.width.toFixed(1),height:+r.height.toFixed(1),hidden:!!e.hidden}};const shell=[...document.querySelectorAll('.vf-admin-mobilebar button,.vf-admin-mobilebar a')].filter(vis).map(pack);const actions=[...document.querySelectorAll('.vf-admin-page-body .btn,.vf-admin-page-actions .btn,.vf-admin-page-body summary')].filter(vis).map(pack);return{page:document.body.dataset.vfPage||'',media:matchMedia('(max-width:768px)').matches,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,shell,actions,installHidden:(()=>{const e=document.querySelector('#installUpdate');return e?{hidden:e.hidden,visible:vis(e)}:null})()};});
+              assert(d.media,route+' mobile media inactive');assert(d.overflow===0,route+' horizontal overflow');assert(d.shell.length===2,route+' shell controls missing');assert(d.shell.every(x=>x.width>=40&&x.height>=40),route+' shell control below 40 '+JSON.stringify(d.shell));assert(d.actions.every(x=>x.height>=40),route+' action below 40 '+JSON.stringify(d.actions.filter(x=>x.height<40)));if(d.installHidden&&d.installHidden.hidden)assert(!d.installHidden.visible,'hidden install control resurrected');result[route]=d;await p.screenshot({path:process.env.EVID+'/'+route.replace('.php','')+'-390.png',fullPage:true});await p.close();}
+            const p=await c.newPage();await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('tr').filter({hasText:'Gate Organized Public'}).waitFor();let row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.locator('input[data-select]').check();
+            const batch=await p.locator('#batchBar [data-bulk]').evaluateAll(es=>es.filter(e=>e.offsetWidth||e.offsetHeight).map(e=>({action:e.dataset.bulk,height:+e.getBoundingClientRect().height.toFixed(1)})));assert(batch.length&&batch.every(x=>x.height>=40),'links batch below 40');await row.locator('input[data-select]').uncheck();
+            const pageSelect=p.locator('#selectPageMobile');await pageSelect.check();let counts=await p.evaluate(()=>({shown:document.querySelectorAll('#linksBody input[data-select]').length,checked:document.querySelectorAll('#linksBody input[data-select]:checked').length,batch:document.querySelector('#batchCount').textContent.trim()}));assert(counts.shown===4&&counts.checked===4&&counts.batch==='已选择 4 项','select-page regression');await pageSelect.uncheck();
+            row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.locator('input[data-select]').check();await p.locator('#visibilityFilter').selectOption('private');assert(await p.locator('#linksBody input[data-select]:checked').count()===0,'filter selection did not clear');assert(!(await p.locator('#batchBar').evaluate(e=>e.classList.contains('show'))),'batch remained after filter');
+            await p.locator('#visibilityFilter').selectOption('');row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.locator('input[data-select]').check();await p.evaluate(()=>{location.hash='#categories'});await p.waitForFunction(()=>document.querySelector('#categoryMode').classList.contains('active'));assert(!(await p.locator('#batchBar').evaluate(e=>e.classList.contains('show'))),'mode switch kept selection');await p.evaluate(()=>{location.hash=''});await p.waitForFunction(()=>document.querySelector('#linkMode').classList.contains('active'));
+            await p.locator('#linkSearch').fill('Gate Organized Public');row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.locator('input[data-select]').check();assert(await visible(p.locator('[data-bulk="pending"]')),'pending action hidden for organized');assert(!(await visible(p.locator('[data-bulk="organized"]'))),'organized action visible for organized-only');await p.locator('#linkSearch').fill('Gate Pending Private');row=p.locator('tr').filter({hasText:'Gate Pending Private'});await row.locator('input[data-select]').check();assert(!(await visible(p.locator('[data-bulk="pending"]'))),'pending action visible for pending-only');assert(await visible(p.locator('[data-bulk="organized"]')),'organized action hidden for pending-only');
+            await p.locator('#linkSearch').fill('Gate Organized Public');row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.locator('input[data-select]').check();p.once('dialog',d=>d.accept());await p.locator('[data-bulk="archive"]').click();await p.waitForFunction(()=>!document.querySelector('#batchBar').classList.contains('show'));await p.locator('#linkSearch').fill('');await p.locator('#stateFilter').selectOption('archived');row=p.locator('tr').filter({hasText:'Gate Organized Public'});await row.waitFor();await row.locator('input[data-select]').check();assert(await visible(p.locator('[data-bulk="restore"]')),'restore hidden archived');for(const el of await p.locator('#batchBar [data-active-only]').all())assert(!(await visible(el)),'active-only visible archived');
+            await p.close();await c.close();return{pages:result,selectPage:counts};}
+          async function desktop(b){const c=await b.newContext({viewport:{width:1440,height:900}});await login(c);const result={};for(const route of routes){const p=await c.newPage();await p.goto(base+route,{waitUntil:'domcontentloaded',timeout:30000});await p.waitForTimeout(500);const d=await p.evaluate(()=>({media:matchMedia('(max-width:768px)').matches,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,page:document.body.dataset.vfPage||''}));assert(!d.media,route+' desktop matched mobile');assert(d.overflow===0,route+' desktop overflow');result[route]=d;await p.close();}await c.close();return result;}
+          (async()=>{const b=await chromium.launch({headless:true});const m=await scanMobile(b);const d=await desktop(b);const out={source:process.env.SOURCE,base:process.env.BASE,mobile:m,desktop:d};fs.writeFileSync(process.env.EVID+'/gate.json',JSON.stringify(out,null,2));console.log('P01_MOBILE_ADMIN_ACTION_TARGETS_GATE=PASS');console.log(JSON.stringify(out));await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          BASE="$BASE" SOURCE="$SOURCE" EVID="$EVID" node gate.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$integrity."\n";echo 'FK='.$fk."\n";if($integrity!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-admin-action-targets-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-mobile-admin-action-targets.pid 2>/dev/null)" 2>/dev/null || true
