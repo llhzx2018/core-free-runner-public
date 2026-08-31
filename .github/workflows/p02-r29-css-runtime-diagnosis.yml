@@ -1,0 +1,157 @@
+name: P02 R29 CSS Runtime Diagnosis
+on:
+  push:
+    branches: [run/p02-r29-css-runtime-diagnosis]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCT_REF: ca8d806b11cfbc8cdb5e5998ef65aa8d64abd238
+      PORT: '18080'
+    steps:
+      - name: Checkout exact P02 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Static CSS tail diagnosis
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          echo '=== STATIC_APP_CSS ==='
+          wc -c public/assets/app.css
+          grep -n 'V2.5.32 R27 native UX final cascade' public/assets/app.css
+          grep -n 'V2.5.32 R25 visual audit fixes' public/assets/app.css
+          grep -n 'V2.5.32 R27 CSS convergence guards' public/assets/app.css
+          tail -n 60 public/assets/app.css
+          echo '=== INDEX_STYLES ==='
+          grep -n 'stylesheet' public/index.php
+
+      - name: Install isolated browser runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 curl >/dev/null
+          cd product
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build and boot isolated site
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r29"
+          SITE="$RUN_ROOT/site"
+          mkdir -p "$RUN_ROOT"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          grep -q 'V2.5.32 R27 CSS convergence guards' "$SITE/assets/app.css"
+          test "$(grep -c '<link rel="stylesheet"' "$SITE/index.php")" = '1'
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          BASE_URL="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          PASSWORD="VF-R29-${GITHUB_RUN_ID}!"; printf '%s' "$PASSWORD" > "$RUN_ROOT/password"
+          curl -fsS -c "$RUN_ROOT/cookie" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$RUN_ROOT/cookie" -c "$RUN_ROOT/cookie" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = '303'
+
+      - name: Inspect CSSOM in Chromium
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r29"
+          cat > r29.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base=process.env.BASE_URL,password=process.env.PASSWORD;
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage();
+          page.on('console',m=>console.log('PAGE_CONSOLE='+m.type()+':'+m.text()));
+          page.on('pageerror',e=>console.log('PAGE_ERROR='+e.message));
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          if(await page.locator('[data-open-login]').count()){
+            await page.locator('[data-open-login]').click();
+            await page.locator('#loginForm input[name="password"]').fill(password);
+            await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));
+          }
+          const fixture=await page.evaluate(async()=>{
+            const s=await (await fetch('/api.php?action=session')).json();
+            const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(a+JSON.stringify(j));return j;};
+            const c=await post('category_save',{name:'R29 CSSOM',description:'diagnosis',icon:'folder'});
+            const x=await post('content_save',{category_id:c.id,title:'R29 CSSOM edit diagnosis',content:'# R29\n\n'+('diagnostic paragraph\n\n').repeat(30),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});
+            return {id:x.id};
+          });
+          await page.evaluate(id=>openReader(id),fixture.id);await page.waitForSelector('.reader-page');
+          await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');await page.waitForTimeout(100);
+          const diag=await page.evaluate(async()=>{
+            const layout=document.querySelector('#notebookLayout');
+            const panes=[...document.querySelectorAll('#notebookListPane')];
+            const pane=panes[0]||null;
+            const hrefs=[...document.styleSheets].map(s=>s.href||'INLINE');
+            const response=await fetch('/assets/app.css?v=2.5.32',{cache:'no-store'});const served=await response.text();
+            const matches=[];let totalRules=0,lastRule='';let errors=[];
+            function walk(rules,media=''){
+              for(const rule of [...rules]){
+                totalRules++;lastRule=String(rule.cssText||'').slice(0,300);
+                const text=String(rule.cssText||'');
+                if(text.includes('notebook-editing')||text.includes('notebook-mode-edit')||text.includes('R27 CSS convergence guards'))matches.push({media,text:text.slice(0,900)});
+                try{if(rule.cssRules)walk(rule.cssRules,rule.conditionText||media);}catch(e){errors.push(String(e));}
+              }
+            }
+            for(const sheet of [...document.styleSheets]){try{walk(sheet.cssRules||[]);}catch(e){errors.push('sheet '+sheet.href+': '+e);}}
+            const matchedSelector='.notebook-layout.notebook-editing .notebook-list-pane';
+            return {
+              innerWidth,
+              min901:matchMedia('(min-width:901px)').matches,
+              stylesheets:hrefs,
+              paneCount:panes.length,
+              layoutClass:layout?.className||'',
+              paneParentId:pane?.parentElement?.id||'',
+              paneParentClass:pane?.parentElement?.className||'',
+              closestIsLayout:!!(pane&&layout&&pane.closest('#notebookLayout')===layout),
+              selectorMatches:!!pane?.matches('.notebook-list-pane'),
+              ancestorSelectorMatches:!!pane?.closest('.notebook-layout.notebook-editing'),
+              computedDisplay:pane?getComputedStyle(pane).display:null,
+              inlineStyle:pane?.getAttribute('style')||'',
+              servedBytes:served.length,
+              servedHasNative:served.includes('V2.5.32 R27 native UX final cascade'),
+              servedHasFix:served.includes('V2.5.32 R25 visual audit fixes'),
+              servedHasGuard:served.includes('V2.5.32 R27 CSS convergence guards'),
+              servedHasSelector:served.includes(matchedSelector),
+              totalRules,lastRule,matches,errors
+            };
+          });
+          console.log('R29_DIAG='+JSON.stringify(diag,null,2));
+          if(!diag.min901)throw new Error('media query not active');
+          if(diag.paneCount!==1)throw new Error('unexpected notebook pane count '+diag.paneCount);
+          if(!diag.closestIsLayout||!diag.ancestorSelectorMatches)throw new Error('DOM ancestry mismatch');
+          if(!diag.servedHasGuard||!diag.servedHasSelector)throw new Error('served CSS missing final guards');
+          console.log('P02_R29_CSS_RUNTIME_DIAGNOSIS=PASS');
+          await browser.close();
+          JS
+          BASE_URL="http://127.0.0.1:$PORT" PASSWORD="$(cat "$RUN_ROOT/password")" node r29.mjs
+
+      - name: Boundaries
+        if: always()
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r29"; if test -f "$RUN_ROOT/php.pid"; then kill "$(cat "$RUN_ROOT/php.pid")" 2>/dev/null || true; fi
+          echo PRODUCT_WRITE=NO
+          echo MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
