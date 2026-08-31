@@ -24,6 +24,12 @@ try{
   await Promise.all([page.waitForURL(/index\.php(?:#.*)?$/),page.getByRole('button',{name:'登录'}).click()]);
   const fixture=execFileSync('php',['tests/fixtures/v260-user-task-fixture.php',webRoot],{cwd:productRoot,encoding:'utf8'});
   if(!fixture.includes('P04_V260_USER_TASK_FIXTURE_PASS'))throw new Error('fixture failed');
+  const savedDomain=await page.evaluate(async()=>{
+    const csrf=document.querySelector('meta[name="csrf-token"]')?.content||'';
+    const response=await fetch('api.php?action=domain_save',{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({domain:'infra-home.net',registrar:'Namecheap',renewal_price:'18.50',currency:'USD',renewal_policy:'manual',manual_expiry_date:'2026-12-18',notes:'Synthetic list-return context audit'})});
+    return await response.json();
+  });
+  if(!savedDomain?.ok||!savedDomain?.domain?.id)throw new Error(`domain fixture failed ${JSON.stringify(savedDomain)}`);
 
   await page.goto(`${base}/index.php#domains`,{waitUntil:'domcontentloaded'});
   let domainList=await waitList();
