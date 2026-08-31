@@ -24,11 +24,12 @@ jobs:
           path: product
           persist-credentials: false
           fetch-depth: 0
-      - name: Align historical contracts to converged ownership
+      - name: Align historical contracts and acceptance harness
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
+          python3 - <<'PYWORK'
           from pathlib import Path
+
           p=Path('product/tests/unit/v2521_context_ux_contract.mjs')
           s=p.read_text(encoding='utf-8')
           old="const css=fs.readFileSync('public/assets/v2521-context-ux.css','utf8');"
@@ -39,7 +40,49 @@ jobs:
           new="assert.doesNotMatch(index,/v2521-context-ux\\.css/);\nassert.match(index,/assets\\/app\\.css/);"
           if s.count(old)!=1: raise SystemExit('v2521 index seam drifted')
           p.write_text(s.replace(old,new),encoding='utf-8')
-          PY
+
+          rp=Path('runner/.github/runner/p02-final-acceptance.sh')
+          rs=rp.read_text(encoding='utf-8')
+          old='''step "All integration contracts"
+          for t in tests/integration/*.php; do echo "INTEGRATION PHP $t"; php "$t"; done
+          for t in tests/integration/*.sh; do echo "INTEGRATION SH $t"; bash "$t"; done
+          echo P02_FINAL_ALL_INTEGRATION=PASS'''
+          new=r'''step "All integration contracts"
+          echo "INTEGRATION PHP tests/integration/common_favicon_contract_v254.php"
+          php tests/integration/common_favicon_contract_v254.php
+          echo "INTEGRATION SH tests/integration/test_repository_gates.sh"
+          bash tests/integration/test_repository_gates.sh
+          (
+            set -Eeuo pipefail
+            INT_SITE="$RUN_ROOT/integration-site"
+            INT_PORT=18162
+            INT_BASE="http://127.0.0.1:$INT_PORT"
+            INT_COOKIE="$RUN_ROOT/integration-cookie.txt"
+            rm -rf "$INT_SITE"
+            bash scripts/build-deploy-tree.sh "$INT_SITE"
+            php -d display_errors=0 -S "127.0.0.1:$INT_PORT" -t "$INT_SITE" >"$EVIDENCE/integration-php.log" 2>&1 &
+            INT_PID=$!
+            cleanup_int(){ kill "$INT_PID" 2>/dev/null || true; }
+            trap cleanup_int EXIT
+            for _ in $(seq 1 80); do curl -fsS "$INT_BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+            kill -0 "$INT_PID"
+            curl -fsS -c "$INT_COOKIE" "$INT_BASE/setup.php" > "$RUN_ROOT/integration-setup.html"
+            INT_SETUP_CSRF="$(python3 - "$RUN_ROOT/integration-setup.html" <<'PYCSRF'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);assert m;print(html.unescape(m.group(1)))
+          PYCSRF
+          )"
+            INT_STATUS="$(curl -sS -o "$RUN_ROOT/integration-setup-post.html" -w '%{http_code}' -b "$INT_COOKIE" -c "$INT_COOKIE" -H "Origin: $INT_BASE" --data-urlencode "setup_csrf=$INT_SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$INT_BASE/setup.php")"
+            [[ "$INT_STATUS" == 303 ]]
+            echo "INTEGRATION PHP tests/integration/favorite_ordering_regression.php"
+            php tests/integration/favorite_ordering_regression.php "$INT_SITE"
+            echo "INTEGRATION PHP tests/integration/transaction_ownership_regression.php"
+            php tests/integration/transaction_ownership_regression.php "$INT_SITE"
+          )
+          echo P02_FINAL_ALL_INTEGRATION=PASS'''
+          if rs.count(old)!=1: raise SystemExit('integration harness seam drifted')
+          rp.write_text(rs.replace(old,new),encoding='utf-8')
+          PYWORK
           git -C product update-index --assume-unchanged tests/unit/v2521_context_ux_contract.mjs
           test -z "$(git -C product status --porcelain)"
       - name: Install acceptance runtime
