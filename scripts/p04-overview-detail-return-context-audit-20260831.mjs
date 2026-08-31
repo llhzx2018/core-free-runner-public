@@ -33,10 +33,20 @@ page.on('pageerror', (e) => report.page_errors.push(String(e?.stack || e)));
 page.on('console', (m) => { if (m.type() === 'error') report.console_errors.push(m.text()); });
 const assert = (value, message) => { if (!value) report.failures.push(message); };
 
-async function pointerClick(locator) {
+async function stableBox(locator) {
   await locator.waitFor({ state: 'visible', timeout: 15000 });
-  const box = await locator.boundingBox();
-  if (!box || box.width <= 0 || box.height <= 0) throw new Error('pointer target has no box');
+  await locator.scrollIntoViewIfNeeded();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await page.waitForTimeout(50);
+    const box = await locator.boundingBox();
+    if (box && box.width > 0 && box.height > 0) return box;
+  }
+  return null;
+}
+
+async function pointerClick(locator) {
+  const box = await stableBox(locator);
+  if (!box) throw new Error('pointer target has no stable box');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.waitForTimeout(35);
@@ -119,7 +129,7 @@ async function auditOverviewEntry(config) {
   bucket.button_label = (await button.textContent() || '').trim();
   bucket.entry_action = await button.getAttribute('data-v270-action');
   bucket.entry_id = await button.getAttribute('data-id');
-  const entryBox = await button.boundingBox();
+  const entryBox = await stableBox(button);
   bucket.entry_button_size = { width: entryBox?.width || 0, height: entryBox?.height || 0 };
   bucket.entry_overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
 
@@ -135,17 +145,17 @@ async function auditOverviewEntry(config) {
   const bar = page.locator('[data-v275-context-backbar]').first();
   await bar.waitFor({ state: 'visible', timeout: 10000 });
   const back = bar.locator('[data-v275-go]').first();
-  await back.waitFor({ state: 'visible', timeout: 10000 });
+  const backBox = await stableBox(back);
   bucket.back_target = await back.getAttribute('data-v275-go');
   bucket.back_label = (await back.textContent() || '').trim();
-  const backBox = await back.boundingBox();
   bucket.back_button_size = { width: backBox?.width || 0, height: backBox?.height || 0 };
   bucket.detail_overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
   assert(bucket.back_target === '#overview', `${config.key}: detail does not return to overview ${bucket.back_target}`);
   assert(bucket.back_button_size.height >= 40, `${config.key}: detail return target under 40px ${JSON.stringify(bucket.back_button_size)}`);
   assert(bucket.detail_overflow <= 1, `${config.key}: detail overflow ${bucket.detail_overflow}`);
 
-  if (!/概览/.test(bucket.back_label)) report.findings.push({ severity: 'copy', key: config.key, issue: 'generic_overview_return_label', observed: bucket.back_label });
+  bucket.specific_overview_label = /概览/.test(bucket.back_label);
+  if (!bucket.specific_overview_label) report.findings.push({ severity: 'copy', key: config.key, issue: 'generic_overview_return_label', observed: bucket.back_label });
 
   await pointerClick(back);
   await page.waitForFunction(() => location.hash === '#overview', null, { timeout: 10000 });
