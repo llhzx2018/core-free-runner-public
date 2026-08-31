@@ -1,0 +1,94 @@
+name: P01 Batchbar State Diagnostic
+on:
+  push:
+    branches: [diagnostic/p01-batchbar-state-20260831]
+    paths: [.github/workflows/p01-batchbar-state-diagnostic-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: 67fa7ed6e73fc8b033fc870b310aed9b4abbd6ec
+      TREE: 427293b1e38c0a3695bbfa86f7b213193b90b895
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-batchbar/evidence
+      PORT: '18478'
+      ADMIN_PASS: P01BatchbarDiag
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact develop truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and Fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-batchbar; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-batchbar.pid
+          COOKIE=/tmp/p01-batchbar.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Batchbar Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$repo=new VfRepository($db);
+          $cat=$repo->createCategory(['name'=>'诊断分类','description'=>'','parent_id'=>null,'is_private'=>true]);
+          foreach([1,2] as $n){$repo->saveLink(null,['category_id'=>$cat,'title'=>'Diag Pending '.$n,'url'=>'https://diag-'.$n.'.example/','is_private'=>1,'is_pending'=>1],'admin');}
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium state readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-batchbar/pw;cd /tmp/p01-batchbar/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18478/';
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:390,height:844}});
+          let r=await c.request.post(base+'api.php?action=login',{data:{password:'P01BatchbarDiag'}});if(!r.ok()||!(await r.json()).ok)throw Error('login');
+          const p=await c.newPage();
+          const read=()=>p.evaluate(()=>{const restore=document.querySelector('[data-bulk="restore"]'),state=document.querySelector('#stateFilter');return{
+            stateValue:state?.value,stateDisabled:state?.disabled,stateHidden:state?.hidden,stateDisplay:state?getComputedStyle(state).display:null,
+            restoreHidden:restore?.hidden,restoreDisplay:restore?getComputedStyle(restore).display:null,restoreVisible:restore?!!(restore.offsetWidth||restore.offsetHeight||restore.getClientRects().length):null,
+            actions:[...document.querySelectorAll('#batchBar [data-bulk]')].map(x=>({action:x.dataset.bulk,hidden:x.hidden,display:getComputedStyle(x).display,visible:!!(x.offsetWidth||x.offsetHeight||x.getClientRects().length),text:x.textContent.trim()})),
+            selected:document.querySelectorAll('[data-select]:checked').length,batchShown:document.querySelector('#batchBar')?.classList.contains('show')||false
+          }});
+          await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});await p.locator('[data-select]').first().check();let pending=await read();
+          fs.writeFileSync(process.env.EVID+'/pending-state.json',JSON.stringify(pending,null,2));await p.screenshot({path:process.env.EVID+'/pending-selected.png',fullPage:true});
+          await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('[data-select]').first().check();let normal=await read();
+          fs.writeFileSync(process.env.EVID+'/normal-state.json',JSON.stringify(normal,null,2));await p.screenshot({path:process.env.EVID+'/normal-selected.png',fullPage:true});
+          console.log('PENDING='+JSON.stringify(pending));console.log('NORMAL='+JSON.stringify(normal));await b.close();})();
+          JS
+          EVID="$EVID" node diag.cjs | tee "$EVID/diagnostic.txt"
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-batchbar-state-${{ github.run_id }}
+          path: /tmp/p01-batchbar/evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-batchbar.pid 2>/dev/null)" 2>/dev/null || true
