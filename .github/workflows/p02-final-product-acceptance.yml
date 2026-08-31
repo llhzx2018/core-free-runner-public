@@ -15,7 +15,7 @@ jobs:
         with:
           path: runner
           persist-credentials: false
-      - name: Checkout P02 exact candidate
+      - name: Checkout P02 exact base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-library
@@ -24,25 +24,152 @@ jobs:
           path: product
           persist-credentials: false
           fetch-depth: 0
-      - name: Align historical contracts and acceptance harness
+      - name: Build local retired-runtime cleanup candidate
+        run: |
+          set -Eeuo pipefail
+          cd product
+          test "$(git rev-parse HEAD)" = "e0bac8f6ec30df94e626e07821ae3c39cbcd7f59"
+          test -z "$(git status --porcelain)"
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          import json
+
+          retired = [
+              'navigation-refresh-policy.js',
+              'update-core-ui.js',
+              'v2520-draft-retirement.js',
+              'v2521-context-ux.js',
+              'v254-common-branding.js',
+              'v255-hotfix.js',
+              'editor-enhancements.css',
+              'scratch-tabs.css',
+              'v250-uaui.css',
+              'v250-reader-scale.css',
+              'v251-hotfix.css',
+              'v252-hotfix.css',
+              'v253-hotfix.css',
+              'v254-common-branding.css',
+              'v2514-writing-typography.css',
+              'v2521-context-ux.css',
+          ]
+
+          bootstrap = Path('src/app/bootstrap.php')
+          s = bootstrap.read_text(encoding='utf-8')
+          marker = "\nrequire_once VFTB_ROOT . '/app/Logging.php';"
+          if s.count(marker) != 1:
+              raise SystemExit('bootstrap class-loading seam drifted')
+          asset_lines = "\n".join("        '" + name + "'," for name in retired)
+          functions = """
+
+          /**
+           * V2.5.32 compatibility cleanup for runtime assets retired by source convergence.
+           *
+           * Older upgrade engines activate the target file set but cannot know which files
+           * the target release retired. The first safe V2.5.32+ request therefore removes
+           * only this explicit managed-assets allowlist. Private runtime data is never part
+           * of this cleanup and directories are never recursively removed.
+           */
+          function vftb_retired_runtime_assets(): array
+          {
+              return [
+          """ + asset_lines + """
+              ];
+          }
+
+          function vftb_cleanup_retired_runtime_assets(): array
+          {
+              $removed=[];$failed=[];
+              if(version_compare(VFTB_VERSION,'2.5.32','<'))return ['removed'=>$removed,'failed'=>$failed];
+              $assetRoot=VFTB_ROOT.'/assets';
+              if(!is_dir($assetRoot)||is_link($assetRoot))return ['removed'=>$removed,'failed'=>['assets-root']];
+              foreach(vftb_retired_runtime_assets() as $name){
+                  $path=$assetRoot.'/'.$name;
+                  if(!file_exists($path)&&!is_link($path))continue;
+                  if(is_link($path)||is_file($path)){
+                      if(@unlink($path))$removed[]=$name;else $failed[]=$name;
+                      continue;
+                  }
+                  $failed[]=$name;
+              }
+              sort($removed,SORT_STRING);sort($failed,SORT_STRING);
+              return ['removed'=>$removed,'failed'=>$failed];
+          }
+          """
+          s = s.replace(marker, functions + marker)
+          call_marker = "function vftb_startup_maintenance_status(): array{return is_array($GLOBALS['vftb_startup_maintenance_status']??null)?$GLOBALS['vftb_startup_maintenance_status']:['blocked'=>false];}"
+          if s.count(call_marker) != 1:
+              raise SystemExit('bootstrap startup-status seam drifted')
+          call = """
+          if(vftb_is_installed()&&empty(($GLOBALS['vftb_startup_maintenance_status']??[])['blocked'])){
+              try{
+                  $vftbRetiredCleanup=vftb_cleanup_retired_runtime_assets();
+                  if(!empty($vftbRetiredCleanup['failed']))error_log('[VF Library release cleanup] 未能清理已退休 runtime 资产：'.implode(',',(array)$vftbRetiredCleanup['failed']));
+              }catch(Throwable $e){error_log('[VF Library release cleanup] '.get_class($e));}
+              unset($vftbRetiredCleanup);
+          }
+          """
+          s = s.replace(call_marker, call + call_marker)
+          bootstrap.write_text(s, encoding='utf-8')
+
+          identity_path = Path('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json')
+          identity = json.loads(identity_path.read_text(encoding='utf-8'))
+          convergence = identity.setdefault('convergence', {})
+          if convergence.get('upgrade_retired_runtime_cleanup_native') not in (None, False):
+              raise SystemExit('candidate cleanup flag already moved')
+          convergence['upgrade_retired_runtime_cleanup_native'] = True
+          identity_path.write_text(json.dumps(identity, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          context = Path('tests/unit/v2521_context_ux_contract.mjs')
+          cs = context.read_text(encoding='utf-8')
+          old = "const css=fs.readFileSync('public/assets/v2521-context-ux.css','utf8');"
+          new = "const css=fs.readFileSync('public/assets/app.css','utf8');"
+          if cs.count(old) != 1:
+              raise SystemExit('v2521 css owner seam drifted')
+          cs = cs.replace(old, new)
+          old = "assert.match(index,/v2521-context-ux\\.css/);"
+          new = "assert.doesNotMatch(index,/v2521-context-ux\\.css/);\nassert.match(index,/assets\\/app\\.css/);"
+          if cs.count(old) != 1:
+              raise SystemExit('v2521 index seam drifted')
+          context.write_text(cs.replace(old, new), encoding='utf-8')
+
+          contract = Path('tests/unit/p02_upgrade_retired_runtime_cleanup_contract.mjs')
+          contract.write_text("""import fs from 'node:fs';\nconst b=fs.readFileSync('src/app/bootstrap.php','utf8');\nconst c=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));\nconst retired=%s;\nconst start=b.indexOf('function vftb_retired_runtime_assets(): array');\nconst end=b.indexOf(\"require_once VFTB_ROOT . '/app/Logging.php';\",start);\nif(start<0||end<0)throw new Error('release cleanup ownership missing');\nconst seam=b.slice(start,end);\nfor(const name of retired){if(!seam.includes(\"'\"+name+\"'\"))throw new Error('retired asset missing: '+name);}\nif(!seam.includes(\"$assetRoot=VFTB_ROOT.'/assets';\"))throw new Error('cleanup must be assets-root bounded');\nif(seam.includes('VFTB_PRIVATE_ROOT')||seam.includes('RecursiveIterator')||seam.includes('removeTree('))throw new Error('cleanup escaped managed asset boundary');\nif(!seam.includes(\"version_compare(VFTB_VERSION,'2.5.32','<')\"))throw new Error('cleanup version gate missing');\nconst startup=b.indexOf(\"$GLOBALS['vftb_startup_maintenance_status']\");\nconst call=b.lastIndexOf('vftb_cleanup_retired_runtime_assets();');\nif(call<startup||!b.includes(\"empty(($GLOBALS['vftb_startup_maintenance_status']??[])['blocked'])\"))throw new Error('cleanup must run after maintenance recovery and only when unblocked');\nif(c.convergence?.upgrade_retired_runtime_cleanup_native!==true)throw new Error('candidate cleanup convergence flag missing');\nconsole.log('P02_UPGRADE_RETIRED_RUNTIME_CLEANUP=PASS');\n""" % json.dumps(retired, ensure_ascii=False), encoding='utf-8')
+          PYFIX
+          python3 scripts/generate-source-manifest.py
+          python3 - <<'PYFILES'
+          import subprocess
+          expected={
+            'SOURCE_MANIFEST.json','SOURCE_MANIFEST.txt',
+            'docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json',
+            'src/app/bootstrap.php',
+            'tests/unit/p02_upgrade_retired_runtime_cleanup_contract.mjs',
+            'tests/unit/v2521_context_ux_contract.mjs',
+          }
+          rows=subprocess.check_output(['git','status','--porcelain'],text=True).splitlines()
+          actual={row[3:] for row in rows}
+          if actual!=expected: raise SystemExit(f'candidate fix file set drifted: {sorted(actual)}')
+          PYFILES
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add SOURCE_MANIFEST.json SOURCE_MANIFEST.txt docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json src/app/bootstrap.php tests/unit/p02_upgrade_retired_runtime_cleanup_contract.mjs tests/unit/v2521_context_ux_contract.mjs
+          git commit -m "fix(P02): clean retired runtime assets after upgrade"
+          test "$(git rev-parse HEAD^)" = "e0bac8f6ec30df94e626e07821ae3c39cbcd7f59"
+          test -z "$(git status --porcelain)"
+          echo "P02_BASE_SHA=e0bac8f6ec30df94e626e07821ae3c39cbcd7f59" >> "$GITHUB_ENV"
+          echo "P02_LOCAL_CANDIDATE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "P02_LOCAL_CANDIDATE_TREE=$(git show -s --format=%T HEAD)" >> "$GITHUB_ENV"
+          echo "P02_PREWRITE_LOCAL_CANDIDATE=$(git rev-parse HEAD)"
+      - name: Align acceptance harness
         run: |
           set -Eeuo pipefail
           python3 - <<'PYWORK'
           from pathlib import Path
-
-          p=Path('product/tests/unit/v2521_context_ux_contract.mjs')
-          s=p.read_text(encoding='utf-8')
-          old="const css=fs.readFileSync('public/assets/v2521-context-ux.css','utf8');"
-          new="const css=fs.readFileSync('public/assets/app.css','utf8');"
-          if s.count(old)!=1: raise SystemExit('v2521 css owner seam drifted')
-          s=s.replace(old,new)
-          old="assert.match(index,/v2521-context-ux\\.css/);"
-          new="assert.doesNotMatch(index,/v2521-context-ux\\.css/);\nassert.match(index,/assets\\/app\\.css/);"
-          if s.count(old)!=1: raise SystemExit('v2521 index seam drifted')
-          p.write_text(s.replace(old,new),encoding='utf-8')
-
           rp=Path('runner/.github/runner/p02-final-acceptance.sh')
           rs=rp.read_text(encoding='utf-8')
+          old='[[ "$(git rev-parse HEAD)" == "e0bac8f6ec30df94e626e07821ae3c39cbcd7f59" ]]'
+          new='[[ "$(git rev-parse HEAD)" == "${P02_LOCAL_CANDIDATE_SHA:?}" ]]\n[[ "$(git rev-parse HEAD^)" == "${P02_BASE_SHA:?}" ]]'
+          if rs.count(old)!=1: raise SystemExit('exact candidate SHA seam drifted')
+          rs=rs.replace(old,new)
           old='''step "All integration contracts"
           for t in tests/integration/*.php; do echo "INTEGRATION PHP $t"; php "$t"; done
           for t in tests/integration/*.sh; do echo "INTEGRATION SH $t"; bash "$t"; done
@@ -91,7 +218,6 @@ jobs:
           if rs.count(old)!=1: raise SystemExit('2.5.31 attachment path seam drifted')
           rp.write_text(rs.replace(old,new),encoding='utf-8')
           PYWORK
-          git -C product update-index --assume-unchanged tests/unit/v2521_context_ux_contract.mjs
           test -z "$(git -C product status --porcelain)"
       - name: Install acceptance runtime
         run: |
