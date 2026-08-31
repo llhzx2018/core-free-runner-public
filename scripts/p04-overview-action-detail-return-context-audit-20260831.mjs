@@ -33,12 +33,17 @@ page.on('console', (m) => { if (m.type() === 'error') report.console_errors.push
 const assert = (ok, message) => { if (!ok) report.failures.push(message); };
 
 async function stableBox(locator) {
-  await locator.waitFor({ state: 'visible', timeout: 15000 });
-  await locator.scrollIntoViewIfNeeded();
-  for (let i = 0; i < 4; i += 1) {
-    await page.waitForTimeout(50);
-    const box = await locator.boundingBox();
-    if (box && box.width > 0 && box.height > 0) return box;
+  for (let i = 0; i < 8; i += 1) {
+    try {
+      await locator.waitFor({ state: 'visible', timeout: i === 0 ? 15000 : 2000 });
+      await locator.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(50);
+      const box = await locator.boundingBox();
+      if (box && box.width > 0 && box.height > 0) return box;
+    } catch (error) {
+      if (i === 7) throw error;
+      await page.waitForTimeout(75);
+    }
   }
   return null;
 }
@@ -50,6 +55,29 @@ async function pointerClick(locator) {
   await page.mouse.down();
   await page.waitForTimeout(35);
   await page.mouse.up();
+}
+
+async function visibleBackbar() {
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-v275-context-backbar] [data-v275-go]')]
+    .some((node) => node.getClientRects().length > 0), null, { timeout: 15000 });
+  const inventory = await page.evaluate(() => [...document.querySelectorAll('[data-v275-context-backbar] [data-v275-go]')].map((node, index) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      index,
+      target: node.getAttribute('data-v275-go') || '',
+      label: (node.textContent || '').trim(),
+      visible: node.getClientRects().length > 0,
+      width: rect.width,
+      height: rect.height,
+    };
+  }));
+  report.selected.backbar_inventory = inventory;
+  const visible = inventory.filter((item) => item.visible).at(-1);
+  if (!visible) throw new Error(`no visible backbar ${JSON.stringify(inventory)}`);
+  return {
+    locator: page.locator('[data-v275-context-backbar] [data-v275-go]:visible').last(),
+    snapshot: visible,
+  };
 }
 
 async function returnTimeline() {
@@ -123,18 +151,18 @@ try {
   report.selected.detail_hash = await page.evaluate(() => location.hash);
   report.selected.return_storage = await page.evaluate(() => Object.fromEntries(Object.entries(sessionStorage).filter(([key]) => key.startsWith('vf-infra-v275:return:') || key === 'vf-infra-v275:scroll:overview')));
 
-  const back = page.locator('[data-v275-context-backbar] [data-v275-go]').first();
-  const backBox = await stableBox(back);
-  report.selected.back_target = await back.getAttribute('data-v275-go');
-  report.selected.back_label = (await back.textContent() || '').trim();
-  report.selected.back_button_size = { width: backBox?.width || 0, height: backBox?.height || 0 };
+  const back = await visibleBackbar();
+  const backBox = await stableBox(back.locator);
+  report.selected.back_target = back.snapshot.target;
+  report.selected.back_label = back.snapshot.label;
+  report.selected.back_button_size = { width: backBox?.width || back.snapshot.width || 0, height: backBox?.height || back.snapshot.height || 0 };
   report.selected.detail_overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
 
   if (report.selected.back_target !== '#overview') report.findings.push({ severity: 'ux', issue: 'overview_action_returns_to_default_route', open_spec: recognized.id, observed: report.selected.back_target });
   if (!/概览/.test(report.selected.back_label)) report.findings.push({ severity: 'copy', issue: 'overview_action_return_label_not_overview', observed: report.selected.back_label });
   if (report.selected.scroll_before >= 300 && !('vf-infra-v275:scroll:overview' in report.selected.return_storage)) report.findings.push({ severity: 'ux', issue: 'overview_action_scroll_not_recorded', scroll_before: report.selected.scroll_before });
 
-  await pointerClick(back);
+  await pointerClick(back.locator);
   await page.waitForTimeout(250);
   report.selected.hash_after_return = await page.evaluate(() => location.hash);
   report.selected.return_timeline = await returnTimeline();
