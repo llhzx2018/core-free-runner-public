@@ -8,10 +8,12 @@ if (!evidence || !candidate) throw new Error('mobile group dialog audit environm
 fs.mkdirSync(evidence, { recursive: true });
 
 const password = 'Vf' + crypto.randomUUID().replaceAll('-', '') + 'Aa1';
+const syntheticDomain = 'dialog-audit.example';
 const report = {
   schema: 'p04-mobile-group-dialog-audit/v1',
   source_sha: candidate,
   status: 'FAIL',
+  domain_create: {},
   trigger: {},
   dialog: {},
   controls: {},
@@ -48,6 +50,45 @@ const size = async (locator) => {
   return { width: box?.width || 0, height: box?.height || 0 };
 };
 
+async function createSyntheticDomain() {
+  return await page.evaluate(async (domain) => {
+    const bootstrapRes = await fetch('api.php?action=bootstrap', {
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json' },
+    });
+    const bootstrap = await bootstrapRes.json();
+    if (!bootstrapRes.ok || bootstrap.ok === false || !bootstrap.csrf) {
+      throw new Error(bootstrap.message || 'bootstrap csrf unavailable');
+    }
+    const body = new URLSearchParams({
+      domain,
+      registrar: 'Namecheap',
+      currency: 'USD',
+      renewal_price: '18.50',
+      renewal_policy: 'manual',
+      manual_expiry_date: '2026-09-18',
+      project_name: 'Synthetic Dialog Audit',
+      notes: 'Fresh isolated synthetic test data only',
+    });
+    const saveRes = await fetch('api.php?action=domain_save', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-CSRF-Token': bootstrap.csrf,
+      },
+      body: body.toString(),
+    });
+    const saved = await saveRes.json();
+    if (!saveRes.ok || saved.ok === false) throw new Error(saved.message || 'domain_save failed');
+    return {
+      id: Number(saved.domain?.id || 0),
+      domain: String(saved.domain?.domain || ''),
+    };
+  }, syntheticDomain);
+}
+
 async function openManager(trigger) {
   await pointerClick(trigger);
   const dialog = page.locator('.v275-dialog.v275-group-manager[role="dialog"]').first();
@@ -71,6 +112,11 @@ try {
   ]);
   if ((await page.locator('meta[name="app-version"]').getAttribute('content')) !== '2.8.11') {
     throw new Error('version mismatch');
+  }
+
+  report.domain_create = await createSyntheticDomain();
+  if (report.domain_create.id <= 0 || report.domain_create.domain !== syntheticDomain) {
+    throw new Error(`synthetic domain create mismatch ${JSON.stringify(report.domain_create)}`);
   }
 
   await page.goto(`${base}/index.php?audit=${Date.now()}#domains`, { waitUntil: 'domcontentloaded' });
