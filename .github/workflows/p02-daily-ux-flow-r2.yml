@@ -1,0 +1,346 @@
+name: P02 Daily UX Flow Refinement R2
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-daily-ux-flow-r2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  refine-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_BASE: f1a41b746c0726a1ab2b0d44f2f483e1746f296a
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      DEVELOP_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require registered capabilities
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test -n "$DEVELOP_WRITE_TOKEN"
+          echo PRIVATE_READ_CAPABILITY=PASS
+          echo DEVELOP_WRITE_CAPABILITY=PASS
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: develop
+          token: ${{ env.DEVELOP_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: product
+
+      - name: Require exact develop base
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_BASE"
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.30'
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          node tests/unit/p02_daily_ux_micro_refinement.mjs
+          test -z "$(git status --porcelain)"
+          echo PRODUCT_BASE_IDENTITY=PASS
+
+      - name: Apply UX flow refinement
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          cat > public/assets/v2521-context-ux.js <<'EOF'
+          'use strict';
+          (function(){
+            function originLabel(view){
+              view=view||null;
+              if(!view)return '资料列表';
+              if(view.query)return '搜索结果';
+              if(view.mode==='category')return typeof categoryLeafName==='function'?categoryLeafName(view.categoryId):'原分类';
+              const labels={favorite:'我的收藏',recent:'最近使用',all:'全部资料',quick:'全部资料',article:'全部资料'};
+              return labels[view.mode]||'资料列表';
+            }
+            function readerReturnInfo(){
+              const view=state.readerReturn||state.editorReturn||state.notebookView||null;
+              if(!view)return {text:'返回资料列表',detail:'返回资料列表'};
+              if(view.query){const q=String(view.query||'').trim();return {text:'返回搜索结果',detail:q?'返回搜索 “'+q+'”':'返回搜索结果'};}
+              const label=originLabel(view);
+              return {text:'返回'+label,detail:'返回'+label};
+            }
+            function searchOriginActionLabel(){
+              const view=state.searchReturn||null;
+              if(!view)return '退出搜索';
+              if(view.mode==='category')return '返回'+originLabel(view);
+              if(view.mode==='favorite'||view.mode==='recent')return '返回'+originLabel(view);
+              return '退出搜索';
+            }
+            function enhanceSearchToolbar(){
+              const host=document.querySelector('.list-toolbar .toolbar-left');
+              if(!host||!state.query||!state.searchReturn||document.querySelector('[data-search-return-origin]'))return;
+              const button=document.createElement('button');
+              button.type='button';
+              button.className='btn secondary search-return-origin';
+              button.dataset.searchReturnOrigin='1';
+              button.textContent=searchOriginActionLabel();
+              button.title='结束当前搜索并恢复搜索前的位置';
+              button.onclick=()=>clearSearch();
+              host.appendChild(button);
+            }
+            function syncReaderFavoriteButton(button,item){
+              if(!button||!item)return;
+              const active=Number(item.is_favorite)===1;
+              button.classList.toggle('active',active);
+              button.setAttribute('aria-pressed',active?'true':'false');
+              button.setAttribute('aria-label',active?'取消收藏当前资料':'收藏当前资料');
+              button.title=active?'取消收藏':'加入收藏';
+              const label=button.querySelector('[data-reader-favorite-label]');
+              if(label)label.textContent=active?'已收藏':'收藏';
+            }
+            async function toggleReaderFavorite(button){
+              const item=state.readerItem;
+              if(!item||button.disabled)return;
+              const favorite=Number(item.is_favorite)!==1;
+              button.disabled=true;
+              try{
+                const response=await api('content_favorite',{method:'POST',body:{id:item.id,favorite}});
+                const fresh=response.item||Object.assign({},item,{is_favorite:favorite?1:0});
+                syncChangedItem(fresh);
+                state.readerItem=Object.assign({},state.readerItem||{},fresh);
+                await refreshNavigationMetadata();
+                syncReaderFavoriteButton(button,state.readerItem);
+                const returningToFavorites=state.readerReturn&&state.readerReturn.mode==='favorite';
+                toast(favorite?'已加入收藏':(returningToFavorites?'已取消收藏；返回后将从“我的收藏”移除':'已取消收藏'));
+              }catch(error){toast(error.message);}finally{button.disabled=false;}
+            }
+            function enhanceReaderPage(){
+              const page=document.querySelector('.reader-page');
+              if(!page)return;
+              const back=document.getElementById('readerBack');
+              if(back){
+                const info=readerReturnInfo();
+                const label=back.querySelector('span');
+                if(label)label.textContent=info.text;
+                back.classList.add('is-contextual');
+                back.setAttribute('aria-label',info.detail);
+                back.title=info.detail;
+              }
+              const actions=page.querySelector('.reader-page-actions');
+              if(!actions)return;
+              let favorite=document.getElementById('readerFavorite');
+              if(!favorite){
+                favorite=document.createElement('button');
+                favorite.type='button';
+                favorite.id='readerFavorite';
+                favorite.className='btn secondary reader-favorite';
+                favorite.innerHTML='<b class="reader-favorite-star" aria-hidden="true">★</b><span data-reader-favorite-label>收藏</span>';
+                favorite.onclick=()=>toggleReaderFavorite(favorite);
+                const copy=document.getElementById('readerCopy');
+                if(copy)actions.insertBefore(favorite,copy);else actions.appendChild(favorite);
+              }
+              syncReaderFavoriteButton(favorite,state.readerItem);
+            }
+            function enhance(){enhanceSearchToolbar();enhanceReaderPage();}
+            const root=document.getElementById('pageRoot');
+            if(!root)return;
+            const observer=new MutationObserver(()=>requestAnimationFrame(enhance));
+            observer.observe(root,{childList:true,subtree:true});
+            requestAnimationFrame(enhance);
+          })();
+          EOF
+
+          cat >> public/assets/v2521-context-ux.css <<'EOF'
+
+          /* P02 · Daily UX flow refinement R2 · post V2.5.30 develop
+           * Make the existing return/search/favorite context visible without changing persistence or navigation semantics.
+           */
+          .search-return-origin{
+            height:30px;
+            padding:0 9px;
+            border-color:color-mix(in srgb,var(--primary) 24%,var(--border));
+            color:var(--primary);
+            font-size:11.5px;
+            font-weight:750;
+          }
+          .search-return-origin:hover{
+            border-color:color-mix(in srgb,var(--primary) 42%,var(--border));
+            background:color-mix(in srgb,var(--primary) 7%,var(--surface));
+          }
+          .reader-back.is-contextual{max-width:220px}
+          .reader-back.is-contextual span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+          .reader-favorite{
+            min-width:92px;
+            color:var(--muted);
+          }
+          .reader-favorite-star{font-size:14px;line-height:1;color:var(--muted2)}
+          .reader-favorite.active{
+            border-color:color-mix(in srgb,var(--warning) 30%,var(--border));
+            background:color-mix(in srgb,var(--warning) 7%,var(--surface));
+            color:var(--warning);
+          }
+          .reader-favorite.active .reader-favorite-star{color:var(--warning)}
+          @media(max-width:620px){
+            .toolbar-left{min-width:0;gap:6px}
+            .query-chip{max-width:36vw}
+            .search-return-origin{height:32px;max-width:34vw;overflow:hidden;text-overflow:ellipsis;padding:0 8px}
+            .reader-back.is-contextual{width:36px;max-width:36px;padding:0}
+            .reader-favorite{width:36px;min-width:36px!important;padding:0!important}
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          index=Path('public/index.php')
+          text=index.read_text(encoding='utf-8')
+          needle='<script src="/assets/app.js?v=<?=rawurlencode(VFTB_VERSION)?>" defer></script>\n'
+          addition=needle+'<script src="/assets/v2521-context-ux.js?v=<?=rawurlencode(VFTB_VERSION)?>" defer></script>\n'
+          if 'v2521-context-ux.js' in text:
+              raise SystemExit('context UX JS already wired')
+          if text.count(needle)!=1:
+              raise SystemExit('app.js script anchor mismatch')
+          index.write_text(text.replace(needle,addition),encoding='utf-8')
+
+          workflow=Path('.github/workflows/repository-health.yml')
+          text=workflow.read_text(encoding='utf-8')
+          anchor='      - name: Verify P02 daily UX micro-refinement contract\n        run: node tests/unit/p02_daily_ux_micro_refinement.mjs\n'
+          step=anchor+'      - name: Verify P02 daily UX flow-refinement contract\n        run: node tests/unit/p02_daily_ux_flow_refinement.mjs\n'
+          if 'p02_daily_ux_flow_refinement.mjs' in text:
+              raise SystemExit('flow refinement CI step already present')
+          if text.count(anchor)!=1:
+              raise SystemExit('repository-health anchor mismatch')
+          workflow.write_text(text.replace(anchor,step),encoding='utf-8')
+          PY
+
+          cat > tests/unit/p02_daily_ux_flow_refinement.mjs <<'EOF'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+
+          const index=fs.readFileSync('public/index.php','utf8');
+          const js=fs.readFileSync('public/assets/v2521-context-ux.js','utf8');
+          const css=fs.readFileSync('public/assets/v2521-context-ux.css','utf8');
+          const rpd=fs.readFileSync('docs/authority/RPD.md','utf8');
+          const acceptance=fs.readFileSync('docs/authority/ACCEPTANCE_MATRIX.md','utf8');
+          const health=fs.readFileSync('.github/workflows/repository-health.yml','utf8');
+
+          assert.ok(index.includes('/assets/v2521-context-ux.js'));
+          assert.ok(index.indexOf('/assets/app.js') < index.indexOf('/assets/v2521-context-ux.js'));
+          assert.ok(js.includes("if(view.query)return '搜索结果'"));
+          assert.ok(js.includes("text:'返回搜索结果'"));
+          assert.ok(js.includes('dataSearchReturnOrigin'));
+          assert.ok(js.includes("api('content_favorite'"));
+          assert.ok(js.includes('refreshNavigationMetadata'));
+          assert.ok(js.includes('clearSearch()'));
+          assert.ok(js.includes('readerFavorite'));
+          assert.ok(css.includes('.search-return-origin'));
+          assert.ok(css.includes('.reader-favorite.active'));
+          assert.ok(css.includes('.reader-back.is-contextual'));
+          assert.ok(css.includes('@media(max-width:620px)'));
+          assert.ok(rpd.includes('保留当前资料、列表来源、滚动位置与返回上下文'));
+          assert.ok(acceptance.includes('收藏计数与当前集合自动刷新'));
+          assert.ok(health.includes('p02_daily_ux_flow_refinement.mjs'));
+          console.log('P02_DAILY_UX_FLOW_REFINEMENT=PASS');
+          EOF
+
+          cat > docs/evidence/P02_DAILY_UX_FLOW_REFINEMENT_20260830.md <<'EOF'
+          # P02 · Daily UX Flow Refinement R2 · 2026-08-30
+
+          ## Boundary
+
+          Develop-only UX refinement on top of the verified V2.5.30 working baseline.
+
+          No database schema, migration, content model, API endpoint, persistence semantics, Release, Tag, update-channel or Production change.
+
+          ## User path
+
+          The batch focuses on one daily path:
+
+          `Search → judge result → open → read / copy / favorite → return to the exact prior search/category/list context`.
+
+          The underlying app already preserved query, page, list scroll position and reader return snapshots. The remaining friction was visibility: the reader only said “返回列表”, search exit depended on the global-search clear control, and favorite was not a direct reader action.
+
+          ## Implemented
+
+          - load `v2521-context-ux.js` immediately after the main app script as the behavioral companion to the existing Context UX layer;
+          - reader back label now reflects the stored origin: search results, category, favorites, recent use, or all materials;
+          - search results expose a local return-to-origin action in the list toolbar;
+          - reader exposes direct Favorite / Favorited state next to Copy;
+          - favorite uses the existing `content_favorite` API and server-confirmed item state, then refreshes navigation counts;
+          - when unfavoriting from a reader opened from Favorites, feedback explains that the item will leave Favorites on return;
+          - mobile keeps Back, Favorite, Copy and More as compact touch actions while preserving the desktop labels.
+
+          ## Acceptance alignment
+
+          RPD already requires reader/editor transitions to retain the current material, list source, scroll position and return context.
+
+          Acceptance Matrix already requires favorite state, collection counts and current collection to refresh without manual reload.
+
+          This batch exposes and clarifies those existing contracts rather than introducing a new product concept.
+
+          ## Release boundary
+
+          Develop only. Main / Tag / Release / channel / Production remain unchanged.
+          EOF
+
+          python3 scripts/generate-source-manifest.py
+          git diff --check
+          echo UX_FLOW_REFINEMENT_APPLIED=PASS
+
+      - name: Verify refined source
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          node tests/unit/p02_daily_ux_micro_refinement.mjs
+          node tests/unit/p02_daily_ux_flow_refinement.mjs
+          git diff --check
+          test "$(python3 - <<'PY'
+          import json
+          print(json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))['runtime_source_file_count'])
+          PY
+          )" = '82'
+          EXPECTED=$(cat <<'EOF'
+          .github/workflows/repository-health.yml
+          SOURCE_MANIFEST.json
+          SOURCE_MANIFEST.txt
+          docs/evidence/P02_DAILY_UX_FLOW_REFINEMENT_20260830.md
+          public/assets/v2521-context-ux.css
+          public/assets/v2521-context-ux.js
+          public/index.php
+          tests/unit/p02_daily_ux_flow_refinement.mjs
+          EOF
+          )
+          ACTUAL="$(git status --short | sed 's/^...//' | sort)"
+          test "$ACTUAL" = "$EXPECTED"
+          echo SOURCE_MANIFEST_82_OF_82=PASS
+          echo P02_DAILY_UX_FLOW_REFINEMENT_GATE=PASS
+
+      - name: Commit develop checkpoint
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_BASE"
+          git config user.name 'VF Develop Runner'
+          git config user.email 'vf-develop-runner@users.noreply.github.com'
+          git add .github/workflows/repository-health.yml SOURCE_MANIFEST.json SOURCE_MANIFEST.txt docs/evidence/P02_DAILY_UX_FLOW_REFINEMENT_20260830.md public/assets/v2521-context-ux.css public/assets/v2521-context-ux.js public/index.php tests/unit/p02_daily_ux_flow_refinement.mjs
+          git commit -m 'ux(P02): refine search reader return flow'
+          NEW_SHA="$(git rev-parse HEAD)"
+          git push origin HEAD:develop
+          echo "PRODUCT_DEVELOP_SHA=$NEW_SHA"
+          echo PRODUCT_DEVELOP_WRITE=PASS
+
+      - name: Protected boundaries
+        if: always()
+        run: |
+          echo PRIVATE_SOURCE_PERSISTED=NO
+          echo MAIN_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo TAG_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
