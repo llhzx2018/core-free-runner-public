@@ -1,0 +1,107 @@
+name: P01 Post Bulk Context Diagnostic
+on:
+  push:
+    branches: [diagnostic/p01-post-bulk-context-20260831]
+    paths: [.github/workflows/p01-post-bulk-context-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: c798eaea4b6892a2b6d550cb2162d60c6c18c6c6
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-post-bulk-context/evidence
+      PORT: '18486'
+      ADMIN_PASS: P01PostBulkContextDiag
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact develop product truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup and dataset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-post-bulk-context; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-post-bulk-context.pid
+          COOKIE=/tmp/p01-post-bulk-context.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Post Bulk Context Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $a=$repo->createCategory(['name'=>'批量 A','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $b=$repo->createCategory(['name'=>'批量 B','description'=>'','parent_id'=>null,'is_private'=>true]);
+          for($i=1;$i<=56;$i++)$repo->saveLink(null,['category_id'=>$a,'title'=>sprintf('Bulk Context %02d',$i),'url'=>sprintf('https://bulk-context-%02d.example/',$i),'is_private'=>1,'is_pending'=>0],'admin');
+          $repo->saveLink(null,['category_id'=>$a,'title'=>'Pending Inbox Alpha','url'=>'https://pending-inbox-alpha.example/','is_private'=>1,'is_pending'=>1],'admin');
+          $repo->saveLink(null,['category_id'=>$a,'title'=>'Pending Inbox Beta','url'=>'https://pending-inbox-beta.example/','is_private'=>1,'is_pending'=>1],'admin');
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium post-bulk context readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-post-bulk-context/pw; cd /tmp/p01-post-bulk-context/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18486/';
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:1440,height:900}});
+          const login=await c.request.post(base+'api.php?action=login',{data:{password:'P01PostBulkContextDiag'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');
+          const p=await c.newPage();
+          const read=()=>p.evaluate(()=>({search:document.querySelector('#linkSearch')?.value||'',category:document.querySelector('#categoryFilter')?.selectedOptions?.[0]?.textContent?.trim()||'',page:document.querySelector('#pageInfo')?.textContent?.trim()||'',checked:document.querySelectorAll('[data-select]:checked').length,batch:document.querySelector('#batchBar')?.classList.contains('show')||false,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,rows:[...document.querySelectorAll('#linksBody tr')].map(x=>x.textContent.trim())}));
+          const selectRow=async text=>{const row=p.locator('tr').filter({hasText:text});if(await row.count()!==1)throw Error('row '+text);await row.locator('input[data-select]').check();};
+          await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#linkSearch').fill('Bulk Context');await p.locator('#categoryFilter').selectOption({label:'批量 A'});await p.locator('#nextPage').click();
+          let beforeMove=await read();if(!beforeMove.page.startsWith('第 2 / 2 页')||beforeMove.search!=='Bulk Context'||beforeMove.category!=='批量 A')throw Error('before move '+JSON.stringify(beforeMove));
+          await selectRow('Bulk Context 55');await p.locator('[data-bulk="move"]').click();await p.locator('#moveCategory').selectOption({label:'批量 B'});await p.locator('#moveConfirm').click();await p.waitForTimeout(180);
+          let afterMove=await read();let movePass=afterMove.search==='Bulk Context'&&afterMove.category==='批量 A'&&afterMove.page.startsWith('第 2 / 2 页')&&!afterMove.rows.some(x=>x.includes('Bulk Context 55'))&&!afterMove.batch&&afterMove.checked===0&&afterMove.overflow<=1;
+          await selectRow('Bulk Context 54');p.once('dialog',d=>d.accept());await p.locator('[data-bulk="archive"]').click();await p.waitForTimeout(180);
+          let afterArchive=await read();let archivePass=afterArchive.search==='Bulk Context'&&afterArchive.category==='批量 A'&&afterArchive.page.startsWith('第 2 / 2 页')&&!afterArchive.rows.some(x=>x.includes('Bulk Context 54'))&&!afterArchive.batch&&afterArchive.checked===0&&afterArchive.overflow<=1;
+          await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});await p.locator('#linkSearch').fill('Pending Inbox');await p.locator('#categoryFilter').selectOption({label:'批量 A'});await selectRow('Pending Inbox Alpha');await p.locator('[data-bulk="move"]').click();await p.locator('#moveCategory').selectOption({label:'批量 B'});await p.locator('#moveConfirm').click();await p.waitForTimeout(180);
+          let pendingAfter=await read();let pendingPass=pendingAfter.search==='Pending Inbox'&&pendingAfter.category==='批量 A'&&!pendingAfter.rows.some(x=>x.includes('Pending Inbox Alpha'))&&pendingAfter.rows.some(x=>x.includes('Pending Inbox Beta'))&&!pendingAfter.batch&&pendingAfter.checked===0&&pendingAfter.overflow<=1;
+          await p.setViewportSize({width:390,height:844});await p.screenshot({path:process.env.EVID+'/pending-context-mobile.png',fullPage:true});
+          const all=movePass&&archivePass&&pendingPass;fs.writeFileSync(process.env.EVID+'/state.json',JSON.stringify({beforeMove,afterMove,afterArchive,pendingAfter,movePass,archivePass,pendingPass,all},null,2));
+          console.log('P01_POST_BULK_CONTEXT_PRESERVED='+String(all).toUpperCase());console.log(JSON.stringify({movePass,archivePass,pendingPass,afterMove:{search:afterMove.search,category:afterMove.category,page:afterMove.page},afterArchive:{search:afterArchive.search,category:afterArchive.category,page:afterArchive.page},pendingAfter:{search:pendingAfter.search,category:pendingAfter.category,page:pendingAfter.page}}));await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node diag.cjs | tee "$EVID/diagnostic.txt"
+      - name: SQLite final integrity
+        if: always()
+        shell: bash
+        run: |
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          echo 'INTEGRITY='.strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())."\n";
+          echo 'FK='.count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))."\n";
+          PHP
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-post-bulk-context-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-post-bulk-context.pid 2>/dev/null)" 2>/dev/null || true
