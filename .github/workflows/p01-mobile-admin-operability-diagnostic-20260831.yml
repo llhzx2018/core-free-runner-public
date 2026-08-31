@@ -1,0 +1,98 @@
+name: P01 Mobile Admin Operability Diagnostic
+on:
+  push:
+    branches: [diag/p01-mobile-admin-operability-20260831]
+    paths: [.github/workflows/p01-mobile-admin-operability-diagnostic-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 192a6684975138871a2f2539ff9c511f34d3fe59
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-mobile-admin-operability/evidence
+      PORT: '18491'
+      ADMIN_PASS: P01MobileAdminOperability
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Assert exact runtime and start fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-mobile-admin-operability; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          git -C product status --porcelain | tee "$EVID/source-status.txt"
+          test -z "$(cat "$EVID/source-status.txt")"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-mobile-admin-operability.pid
+          COOKIE=/tmp/p01-mobile-admin-operability.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Mobile Admin Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $pub=$repo->createCategory(['name'=>'Diag Public','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $priv=$repo->createCategory(['name'=>'Diag Private','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $repo->saveLink(null,['category_id'=>$pub,'title'=>'Diag Organized','url'=>'https://diag-organized.example/','is_private'=>0,'is_pending'=>0,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$priv,'title'=>'Diag Pending','url'=>'https://diag-pending.example/','is_private'=>1,'is_pending'=>1,'description'=>''],'admin');
+          PHP
+      - name: Chromium 390 admin operability scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-mobile-admin-operability/pw; cd /tmp/p01-mobile-admin-operability/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright'); const fs=require('fs');
+          const base='http://127.0.0.1:18491/';
+          const pages=['links-admin.php','browser-helper.php','data-safety.php','settings.php','update.php'];
+          const text=e=>(e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||e.name||e.id||'').trim().replace(/\s+/g,' ').slice(0,80);
+          const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+          async function login(c){const r=await c.request.post(base+'api.php?action=login',{data:{password:'P01MobileAdminOperability'}});if(!r.ok())throw Error('login status');const j=await r.json();if(!j.ok)throw Error('login payload');}
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:390,height:844}});await login(c);const out={source:process.env.SOURCE,viewport:{width:390,height:844},pages:{}};
+            for(const route of pages){const p=await c.newPage();await p.goto(base+route,{waitUntil:'domcontentloaded',timeout:30000});await p.waitForTimeout(900);
+              const data=await p.evaluate(()=>{const vis=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);const label=e=>(e.innerText||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||e.name||e.id||'').trim().replace(/\s+/g,' ').slice(0,80);const pack=e=>{const r=e.getBoundingClientRect();return{tag:e.tagName.toLowerCase(),type:e.getAttribute('type')||'',id:e.id||'',cls:String(e.className||'').slice(0,100),label:label(e),width:+r.width.toFixed(1),height:+r.height.toFixed(1),disabled:!!e.disabled,hidden:!!e.hidden}};const body=[...document.querySelectorAll('.vf-admin-page-body button,.vf-admin-page-body input,.vf-admin-page-body select,.vf-admin-page-body textarea,.vf-admin-page-body a.btn,.vf-admin-page-body summary,.vf-admin-page-actions button,.vf-admin-page-actions a.btn')].filter(vis).map(pack);const shell=[...document.querySelectorAll('.vf-admin-mobilebar button,.vf-admin-mobilebar a')].filter(vis).map(pack);const low=body.filter(x=>{const buttonish=x.tag==='button'||x.tag==='summary'||(x.tag==='a')||['submit','button','checkbox','radio'].includes(x.type);return buttonish?(x.height<38||x.width<38):x.height<38});return{page:document.body.dataset.vfPage||'',group:document.body.dataset.vfGroup||'',title:document.title,documentOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,bodyControls:body,shellControls:shell,below38:low};});
+              out.pages[route]=data;await p.screenshot({path:process.env.EVID+'/'+route.replace('.php','')+'-390.png',fullPage:true});await p.close();
+            }
+            fs.writeFileSync(process.env.EVID+'/mobile-admin-operability.json',JSON.stringify(out,null,2));console.log('P01_MOBILE_ADMIN_OPERABILITY_DIAGNOSTIC=PASS');for(const [route,d] of Object.entries(out.pages)){console.log('PAGE='+route+' OVERFLOW='+d.documentOverflow+' BELOW38='+d.below38.length);for(const x of d.below38)console.log('LOW '+route+' '+x.tag+' '+x.label+' '+x.width+'x'+x.height);for(const x of d.shellControls)console.log('SHELL '+route+' '+x.label+' '+x.width+'x'+x.height);}await c.close();await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" EVID="$EVID" node diag.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$integrity."\n";echo 'FK='.$fk."\n";if($integrity!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-admin-operability-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-mobile-admin-operability.pid 2>/dev/null)" 2>/dev/null || true
