@@ -1,0 +1,179 @@
+name: P01 Admin Public State Diagnostic
+on:
+  push:
+    branches: [diag/p01-auth-public-state-20260901]
+    paths: [.github/workflows/p01-auth-public-state-diagnostic-20260901.yml]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: 92169989e3b813328e85133ab9e05bafb8593d0c
+      PRODUCT_TREE: b61812e83e2572ebe42f36991e40521b44e2447f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-auth-public-state/evidence
+      PORT: '18523'
+      ADMIN_PASS: P01AuthPublicState2026
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact Product source and Fresh Runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-auth-public-state; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          test -z "$(git -C product status --porcelain)"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-auth-public-state.pid
+          COOKIE=/tmp/p01-auth-public-state.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Auth Public State Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Seed public and private assets
+        shell: bash
+        run: |
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'诊断分类','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($title,$url,$private)use($repo,$cat){return (int)$repo->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'','is_private'=>$private],'manual')['id'];};
+          $ids=[];
+          $ids['public_start']=$save('VF 公开导航','https://example.com/p01-public-start',0);
+          $ids['private_start']=$save('VF 私人导航','https://example.com/p01-private-start',1);
+          $ids['public_channel']=$save('VF 公开频道','https://www.youtube.com/@p01-public-channel',0);
+          $ids['private_channel']=$save('VF 私人频道','https://www.youtube.com/@p01-private-channel',1);
+          $ids['public_watch']=$save('VF 公开电影','https://iyf.tv/movie/p01-public-watch',0);
+          $ids['private_watch']=$save('VF 私人电影','https://iyf.tv/movie/p01-private-watch',1);
+          $surface->upsertProfile($ids['public_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['private_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['public_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026']);
+          $surface->upsertProfile($ids['private_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2025']);
+          file_put_contents(getenv('EVID').'/ids.json',json_encode($ids,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+          echo 'SEED=PASS'.PHP_EOL;
+          PHP
+      - name: Chromium admin vs anonymous state evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; "$CHROME" --version | tee "$EVID/chrome.txt"
+          mkdir -p /tmp/p01-auth-public-state/pw; cd /tmp/p01-auth-public-state/pw; npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright-core'),fs=require('fs');
+          const base=`http://127.0.0.1:${process.env.PORT}/`;
+          const ids=JSON.parse(fs.readFileSync(process.env.EVID+'/ids.json','utf8'));
+          const routes=['home.php','start.php','channels.php','watch.php'];
+          const modeTitles={
+            'start.php':['VF 公开导航','VF 私人导航'],
+            'channels.php':['VF 公开频道','VF 私人频道'],
+            'watch.php':['VF 公开电影','VF 私人电影']
+          };
+          const A=(v,m)=>{if(!v)throw Error(m)};
+          function identityTerms(text){return ['管理员','已登录','公开视角','访客视角','公开模式','私人模式','登录','退出'].filter(x=>text.includes(x));}
+          async function snap(page,route,role,width){
+            await page.goto(base+route,{waitUntil:'domcontentloaded'});
+            await page.waitForTimeout(400);
+            const data=await page.evaluate(()=>{
+              const text=(document.body.innerText||'').replace(/\s+/g,' ').trim();
+              const hrefs=Array.from(document.querySelectorAll('a[href]')).map(a=>({href:a.getAttribute('href')||'',text:(a.textContent||'').trim()}));
+              const buttons=Array.from(document.querySelectorAll('button')).map(b=>(b.textContent||'').trim()).filter(Boolean);
+              return {
+                finalUrl:location.pathname+location.search,
+                title:document.title,
+                text,
+                overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+                scopeSection:document.querySelectorAll('.vf-sidebar-scope-section').length,
+                adminLinks:hrefs.filter(x=>/links-admin\.php|settings\.php/.test(x.href)),
+                loginLinks:hrefs.filter(x=>/login\.php/.test(x.href)||/登录/.test(x.text)),
+                logoutLinks:hrefs.filter(x=>/logout/.test(x.href)||/退出/.test(x.text)),
+                addControls:document.querySelectorAll('[data-open-add]').length,
+                buttons,
+                bodyClass:document.body.className
+              };
+            });
+            data.identityTerms=identityTerms(data.text);
+            const pair=modeTitles[route];
+            if(pair){
+              data.publicVisible=data.text.includes(pair[0]);
+              data.privateVisible=data.text.includes(pair[1]);
+            }
+            await page.screenshot({path:`${process.env.EVID}/${role}-${route.replace('.php','')}-${width}.png`,fullPage:true});
+            return data;
+          }
+          (async()=>{
+            const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});
+            const out={source:process.env.SOURCE,tree:process.env.PRODUCT_TREE,viewports:{}};
+            for(const width of [390,1440]){
+              const height=width===390?844:900;
+              const admin=await browser.newContext({viewport:{width,height}});
+              await admin.route('**/resource-cover-refresh.php',r=>r.fulfill({status:200,contentType:'application/json',body:'{"ok":true,"processed":0,"results":[]}'}));
+              const login=await admin.request.post(base+'api.php?action=login',{data:{password:process.env.ADMIN_PASS}});A(login.ok()&&(await login.json()).ok,'admin login');
+              const pub=await browser.newContext({viewport:{width,height}});
+              const adminPage=await admin.newPage(), pubPage=await pub.newPage();
+              const v={admin:{},anonymous:{}};
+              for(const route of routes){v.admin[route]=await snap(adminPage,route,'admin',width);v.anonymous[route]=await snap(pubPage,route,'anonymous',width);}
+              out.viewports[String(width)]=v;
+              for(const route of ['start.php','channels.php','watch.php']){
+                A(v.admin[route].privateVisible===true,`admin private missing ${route} ${width}`);
+                A(v.anonymous[route].privateVisible===false,`anonymous private leak ${route} ${width}`);
+                A(v.anonymous[route].publicVisible===true,`anonymous public missing ${route} ${width}`);
+                A(v.admin[route].overflow===0&&v.anonymous[route].overflow===0,`overflow ${route} ${width}`);
+              }
+              await admin.close();await pub.close();
+            }
+            const a=out.viewports['1440'].admin['start.php'];
+            const p=out.viewports['1440'].anonymous['start.php'];
+            out.summary={
+              privacy:'PASS',
+              adminHasCapabilitySignals:a.scopeSection>0&&a.adminLinks.length>0&&a.addControls>0,
+              adminExplicitIdentity:a.identityTerms,
+              anonymousExplicitIdentity:p.identityTerms,
+              anonymousLoginAffordance:p.loginLinks,
+              explicitStateClarity:(a.identityTerms.some(x=>['管理员','已登录'].includes(x)) && (p.identityTerms.some(x=>['公开视角','访客视角'].includes(x))||p.loginLinks.length>0))?'EXPLICIT':'AMBIGUOUS'
+            };
+            fs.writeFileSync(process.env.EVID+'/state-diagnostic.json',JSON.stringify(out,null,2));
+            console.log('PRIVACY='+out.summary.privacy);
+            console.log('ADMIN_CAPABILITY_SIGNALS='+out.summary.adminHasCapabilitySignals);
+            console.log('ADMIN_IDENTITY='+JSON.stringify(out.summary.adminExplicitIdentity));
+            console.log('ANON_IDENTITY='+JSON.stringify(out.summary.anonymousExplicitIdentity));
+            console.log('ANON_LOGIN_AFFORDANCE='+out.summary.anonymousLoginAffordance.length);
+            console.log('STATE_CLARITY='+out.summary.explicitStateClarity);
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          CHROME="$CHROME" PORT="$PORT" EVID="$EVID" SOURCE="$SOURCE" PRODUCT_TREE="$PRODUCT_TREE" ADMIN_PASS="$ADMIN_PASS" node diag.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity
+        shell: bash
+        run: |
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$i\nFK=$fk\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-auth-public-state-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-auth-public-state.pid 2>/dev/null)" 2>/dev/null || true
