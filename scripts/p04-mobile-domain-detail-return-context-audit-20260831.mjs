@@ -11,13 +11,14 @@ const password = 'Vf' + crypto.randomUUID().replaceAll('-', '') + 'Aa1';
 const domains = Array.from({ length: 14 }, (_, index) => `return-audit-${String(index + 1).padStart(2, '0')}.example`);
 const targetName = domains[9];
 const report = {
-  schema: 'p04-mobile-domain-detail-return-context-audit/v1',
+  schema: 'p04-mobile-domain-detail-return-context-audit/v2',
   source_sha: candidate,
   status: 'FAIL',
   synthetic_domains: [],
   list_before: {},
   detail: {},
   return_bar: {},
+  return_timeline: [],
   list_after: {},
   failures: [],
   page_errors: [],
@@ -47,6 +48,27 @@ async function pointerClick(locator) {
   await page.mouse.down();
   await page.waitForTimeout(35);
   await page.mouse.up();
+}
+
+async function snapshot(label) {
+  const value = await page.evaluate((label) => ({
+    label,
+    hash: location.hash,
+    window_scroll_y: window.scrollY,
+    document_scroll_top: document.documentElement.scrollTop,
+    body_scroll_top: document.body.scrollTop,
+    body_scroll_height: document.body.scrollHeight,
+    document_scroll_height: document.documentElement.scrollHeight,
+    inner_height: innerHeight,
+    rendered_route: document.querySelector('[data-v271-route]')?.getAttribute('data-v271-route') || '',
+    visible_domain_cards: [...document.querySelectorAll('.domain-card')].filter((node) => {
+      const style = getComputedStyle(node);
+      return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden';
+    }).length,
+    stored_scroll: sessionStorage.getItem('vf-infra-v275:scroll:domains'),
+  }), label);
+  report.return_timeline.push(value);
+  return value;
 }
 
 async function csrf() {
@@ -145,6 +167,8 @@ try {
   await page.evaluate(() => window.scrollBy(0, -120));
   await page.waitForTimeout(100);
   report.list_before.scroll_y = await page.evaluate(() => window.scrollY);
+  report.list_before.scroll_height = await page.evaluate(() => document.documentElement.scrollHeight);
+  report.list_before.stored_scroll_before_open = await page.evaluate(() => sessionStorage.getItem('vf-infra-v275:scroll:domains'));
   assert(report.list_before.scroll_y > 0, `list did not reach scrollable position ${report.list_before.scroll_y}`);
 
   await openTargetDetail();
@@ -152,6 +176,8 @@ try {
   report.detail.hash = await page.evaluate(() => location.hash);
   report.detail.target_id = target.id;
   report.detail.target_name_visible = (await page.getByText(targetName, { exact: false }).count()) > 0;
+  report.detail.stored_scroll = await page.evaluate(() => sessionStorage.getItem('vf-infra-v275:scroll:domains'));
+  report.detail.window_scroll_y = await page.evaluate(() => window.scrollY);
   assert(report.detail.hash === `#domain/${target.id}`, `detail hash mismatch ${report.detail.hash}`);
   assert(report.detail.target_name_visible, 'target domain name not visible in detail');
 
@@ -160,11 +186,15 @@ try {
   const back = bar.locator('[data-v275-go="#domains"]').first();
   await back.waitFor({ state: 'visible', timeout: 10000 });
   report.return_bar.text = (await back.textContent() || '').trim();
+  report.return_bar.data_go = await back.getAttribute('data-v275-go');
   report.return_bar.back_size = await size(back);
   report.return_bar.previous_count = await bar.locator('[data-v275-go^="#domain/"]').filter({ hasText: '上一条' }).count();
   report.return_bar.next_count = await bar.locator('[data-v275-go^="#domain/"]').filter({ hasText: '下一条' }).count();
   report.return_bar.page_overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
+  report.return_bar.scroll_before_click = await page.evaluate(() => window.scrollY);
+  report.return_bar.stored_scroll_before_click = await page.evaluate(() => sessionStorage.getItem('vf-infra-v275:scroll:domains'));
   assert(report.return_bar.text.includes('返回域名列表'), `return label mismatch ${report.return_bar.text}`);
+  assert(report.return_bar.data_go === '#domains', `return data-v275-go mismatch ${report.return_bar.data_go}`);
   assert(report.return_bar.back_size.height >= 40 && report.return_bar.back_size.width >= 52, `return button too small ${JSON.stringify(report.return_bar.back_size)}`);
   assert(report.return_bar.previous_count === 1, `previous detail control missing ${report.return_bar.previous_count}`);
   assert(report.return_bar.next_count === 1, `next detail control missing ${report.return_bar.next_count}`);
@@ -172,9 +202,24 @@ try {
 
   await pointerClick(back);
   await page.waitForFunction(() => location.hash === '#domains', null, { timeout: 10000 });
+  await snapshot('hash-domains');
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+  await snapshot('raf-1');
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+  await snapshot('raf-2');
+  await page.waitForTimeout(50);
+  await snapshot('plus-50ms');
+  await page.waitForTimeout(70);
+  await snapshot('plus-120ms');
+  await page.waitForTimeout(80);
+  await snapshot('plus-200ms');
+  await page.waitForTimeout(150);
+  await snapshot('plus-350ms');
+  await page.waitForTimeout(250);
+  await snapshot('plus-600ms');
+
   const queryAfter = page.locator('[data-v275-query]').first();
   await queryAfter.waitFor({ state: 'visible', timeout: 10000 });
-  await page.waitForTimeout(350);
   report.list_after.hash = await page.evaluate(() => location.hash);
   report.list_after.query = await queryAfter.inputValue();
   report.list_after.visible_count = await page.locator('.domain-card:visible').count();
@@ -182,6 +227,8 @@ try {
   report.list_after.target_visible = await (await domainCard(targetName)).isVisible();
   report.list_after.scroll_delta = Math.abs(report.list_after.scroll_y - report.list_before.scroll_y);
   report.list_after.page_overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
+  report.list_after.stored_scroll = await page.evaluate(() => sessionStorage.getItem('vf-infra-v275:scroll:domains'));
+  report.list_after.scroll_height = await page.evaluate(() => document.documentElement.scrollHeight);
 
   assert(report.list_after.hash === '#domains', `return hash mismatch ${report.list_after.hash}`);
   assert(report.list_after.query === 'return-audit', `query lost after return ${report.list_after.query}`);
