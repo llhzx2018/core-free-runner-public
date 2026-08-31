@@ -1,0 +1,194 @@
+name: P01 Mobile Page Select Sync Gate
+on:
+  push:
+    branches: [product/p01-mobile-page-select-gate-20260831]
+    paths: [.github/workflows/p01-mobile-page-select-sync-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: aed641c8b6884fa34a5be31361c8456eaa548909
+      BASE: c611e00a7510f0c241200d6215a57e4a7588bbf0
+      TREE: 001b578d6e7c3517f78e996134e8f6ee435a0322
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-mobile-select/evidence
+      COOKIE: /tmp/p01-mobile-select.cookies
+      PORT: '18477'
+      ADMIN_PASS: P01MobileSelectGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and JS-only fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-mobile-select "$COOKIE"; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git -C product diff --name-only "$BASE"...HEAD)" = 'src/assets/links-admin.js'
+          test "$(git -C product rev-parse "$BASE:src/links-admin.php")" = "$(git -C product rev-parse "HEAD:src/links-admin.php")"
+          test "$(git -C product rev-parse "$BASE:src/api.php")" = "$(git -C product rev-parse "HEAD:src/api.php")"
+          test "$(git -C product rev-parse "$BASE:src/app/Repository.php")" = "$(git -C product rev-parse "HEAD:src/app/Repository.php")"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -F "'#selectPageMobile'" product/src/assets/links-admin.js >/dev/null
+          grep -F 'syncPageSelectors' product/src/assets/links-admin.js >/dev/null
+          grep -F 'togglePageSelection' product/src/assets/links-admin.js >/dev/null
+          node --check product/src/assets/links-admin.js
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          printf 'P01_MOBILE_SELECT_SCOPE=PASS\nP01_MOBILE_SELECT_SERVER_BYTES_UNCHANGED=PASS\n' | tee "$EVID/scope.txt"
+      - name: Fresh install and seed selectable rows
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-mobile-select.pid
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Mobile Select Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $cat=$repo->createCategory(['name'=>'选择测试','description'=>'','parent_id'=>null,'is_private'=>true]);
+          foreach ([1,2,3,4] as $n) {
+            $repo->saveLink(null,[
+              'category_id'=>$cat,
+              'title'=>'Select Item '.$n,
+              'url'=>'https://select-'.$n.'.example/',
+              'description'=>'gate',
+              'is_private'=>1,
+              'is_pending'=>$n<=2?1:0
+            ],'admin');
+          }
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);
+          echo "P01_MOBILE_SELECT_SEED=PASS\nP01_MOBILE_SELECT_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          for path in 'links-admin.php' 'links-admin.php?view=pending'; do code=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$path"); echo "$path=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          echo P01_MOBILE_SELECT_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium desktop and mobile selection synchronization
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-mobile-select/pw; cd /tmp/p01-mobile-select/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');
+          const base='http://127.0.0.1:18477/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            const login=await c.request.post(base+'api.php?action=login',{data:{password:'P01MobileSelectGate'}});
+            if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            const selectorState=()=>p.evaluate(()=>{
+              const d=document.querySelector('#selectPage'),m=document.querySelector('#selectPageMobile');
+              return {
+                desktop:{checked:d.checked,indeterminate:d.indeterminate,disabled:d.disabled,visible:!!(d.offsetWidth||d.offsetHeight||d.getClientRects().length)},
+                mobile:{checked:m.checked,indeterminate:m.indeterminate,disabled:m.disabled,visible:!!(m.offsetWidth||m.offsetHeight||m.getClientRects().length)},
+                rowCount:document.querySelectorAll('[data-select]').length,
+                rowChecked:[...document.querySelectorAll('[data-select]')].filter(x=>x.checked).length,
+                batch:document.querySelector('#batchCount')?.textContent?.trim()||'',
+                batchShown:document.querySelector('#batchBar')?.classList.contains('show')||false,
+                overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth
+              };
+            });
+            await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+            let s=await selectorState();
+            if(s.rowCount!==4||s.desktop.checked||s.mobile.checked||s.desktop.indeterminate||s.mobile.indeterminate||s.desktop.disabled||s.mobile.disabled)throw Error('initial '+JSON.stringify(s));
+
+            let rows=p.locator('[data-select]');
+            await rows.nth(0).check();
+            s=await selectorState();
+            if(s.rowChecked!==1||!s.desktop.indeterminate||!s.mobile.indeterminate||s.batch!=='已选择 1 项'||!s.batchShown)throw Error('single '+JSON.stringify(s));
+
+            await p.locator('#selectPage').check();
+            s=await selectorState();
+            if(s.rowChecked!==4||!s.desktop.checked||!s.mobile.checked||s.desktop.indeterminate||s.mobile.indeterminate||s.batch!=='已选择 4 项')throw Error('desktop all '+JSON.stringify(s));
+            await p.screenshot({path:process.env.EVID+'/desktop-selected.png',fullPage:true});
+
+            await p.setViewportSize({width:390,height:844});await p.waitForTimeout(150);
+            s=await selectorState();
+            if(!s.mobile.visible||s.overflow>1||!s.mobile.checked)throw Error('mobile visible '+JSON.stringify(s));
+            await p.locator('#selectPageMobile').uncheck();
+            s=await selectorState();
+            if(s.rowChecked!==0||s.desktop.checked||s.mobile.checked||s.desktop.indeterminate||s.mobile.indeterminate||s.batchShown)throw Error('mobile clear '+JSON.stringify(s));
+
+            await p.locator('#selectPageMobile').check();
+            s=await selectorState();
+            if(s.rowChecked!==4||!s.desktop.checked||!s.mobile.checked||s.batch!=='已选择 4 项')throw Error('mobile all '+JSON.stringify(s));
+            await rows.nth(0).uncheck();
+            s=await selectorState();
+            if(s.rowChecked!==3||!s.desktop.indeterminate||!s.mobile.indeterminate||s.batch!=='已选择 3 项')throw Error('mobile partial '+JSON.stringify(s));
+            await p.screenshot({path:process.env.EVID+'/mobile-partial.png',fullPage:true});
+
+            await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});
+            await p.waitForTimeout(100);
+            s=await selectorState();
+            if(s.rowCount!==2||s.rowChecked!==0||!s.mobile.visible||s.overflow>1)throw Error('pending initial '+JSON.stringify(s));
+            await p.locator('#selectPageMobile').check();
+            s=await selectorState();
+            if(s.rowCount!==2||s.rowChecked!==2||s.batch!=='已选择 2 项'||!s.desktop.checked||!s.mobile.checked)throw Error('pending filtered all '+JSON.stringify(s));
+            await p.screenshot({path:process.env.EVID+'/pending-mobile-all.png',fullPage:true});
+            await b.close();
+            console.log('P01_MOBILE_SELECT_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_MOBILE_SELECT_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final DB and verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE title LIKE 'Select Item %'")->fetchColumn()!==4)exit(21);
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE title LIKE 'Select Item %' AND is_pending=1")->fetchColumn()!==2)exit(22);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(23);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(24);
+          echo "P01_MOBILE_SELECT_POST_DB=PASS\n";
+          PHP
+          grep -Fx P01_MOBILE_SELECT_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_MOBILE_SELECT_SERVER_BYTES_UNCHANGED=PASS "$EVID/scope.txt"
+          grep -Fx P01_MOBILE_SELECT_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_MOBILE_SELECT_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_MOBILE_SELECT_POST_DB=PASS "$EVID/post-db.txt"
+          printf 'P01_MOBILE_PAGE_SELECT_SYNC_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-page-select-sync-${{ github.run_id }}
+          path: /tmp/p01-mobile-select/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-mobile-select.pid 2>/dev/null)" 2>/dev/null || true
