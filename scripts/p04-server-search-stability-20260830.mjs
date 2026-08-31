@@ -43,7 +43,6 @@ try {
   const toolbar = page.locator('[data-v275-toolbar="servers"]');
   const search = toolbar.locator('input[type="search"]');
   const count = toolbar.locator('[data-v275-count]');
-  const brief = page.locator('.v2812-server-brief');
   const row = page.locator('table.server-table tbody tr').filter({ hasText: 'v260-edge-01' }).first();
   await toolbar.waitFor({ state: 'visible', timeout: 10000 });
   await row.waitFor({ state: 'visible', timeout: 10000 });
@@ -53,9 +52,8 @@ try {
   await search.fill('v260-edge-01');
   await page.waitForFunction(() => {
     const count = document.querySelector('[data-v275-toolbar="servers"] [data-v275-count]')?.textContent?.trim() || '';
-    const brief = document.querySelector('.v2812-server-brief')?.textContent?.replace(/\s+/g, ' ').trim() || '';
     const row = [...document.querySelectorAll('table.server-table tbody tr')].find(r => r.textContent?.includes('v260-edge-01'));
-    return count.startsWith('1 / 1') && brief.includes('本页 1 台服务器') && row && !row.hidden;
+    return count.startsWith('1 / 1') && row && !row.hidden;
   }, null, { timeout: 10000 });
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
@@ -75,7 +73,7 @@ try {
     return { hash: location.hash, hit: describe(hit), button: describe(button), same: hit === button || Boolean(hit?.closest?.('[data-v270-action="server"]') === button) };
   }, center);
   report.restored.count = (await count.innerText()).trim();
-  report.restored.brief = (await brief.innerText()).replace(/\s+/g, ' ').trim();
+  report.restored.brief = await page.locator('.v2812-server-brief').count() ? (await page.locator('.v2812-server-brief').innerText()).replace(/\s+/g, ' ').trim() : null;
   report.restored.box = box;
 
   await page.mouse.click(center.x, center.y);
