@@ -1,5 +1,5 @@
 const {chromium}=require('playwright-core'),fs=require('fs');
-const base='http://127.0.0.1:18518/',ids=JSON.parse(fs.readFileSync(process.env.EVID+'/ids.json','utf8')),A=(v,m)=>{if(!v)throw Error(m)};
+const base=`http://127.0.0.1:${process.env.PORT||'18518'}/`,ids=JSON.parse(fs.readFileSync(process.env.EVID+'/ids.json','utf8')),A=(v,m)=>{if(!v)throw Error(m)};
 async function overflow(p,label){const n=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(n===0,label+' overflow='+n);return n}
 const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 (async()=>{
@@ -20,6 +20,6 @@ const pixel='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCA
   const pub=await b.newContext({viewport:{width:390,height:844}}),q=await pub.newPage();q.setDefaultTimeout(10000);
   await q.goto(base+'channels.php',{waitUntil:'domcontentloaded'});A(await q.getByText('VF 私人频道',{exact:true}).count()===0,'PRIVATE CHANNEL LEAK');A(await q.getByText('VF 自动触发频道',{exact:true}).count()===0,'PRIVATE HYDRATE CHANNEL LEAK');const pc=await pub.request.get(base+`resource-cover.php?id=${ids.channel}`);A(pc.status()!==200,'PRIVATE COVER LEAK '+pc.status());const rr=await pub.request.post(base+'resource-cover-refresh.php',{form:{ids:JSON.stringify([ids.channel]),csrf:'anonymous'}});A(rr.status()===403,'anonymous refresh status '+rr.status());
   await q.goto(base+'watch.php',{waitUntil:'domcontentloaded'});A(await q.getByText('VF 公开电影',{exact:true}).count()===1,'public movie missing');const wc=await pub.request.get(base+`resource-cover.php?id=${ids.watch}`);A(wc.status()===200,'public cover '+wc.status());A((wc.headers()['content-type']||'').startsWith('image/'),'public cover mime');
-  out.privacy={privateChannel:'HIDDEN',privateCoverStatus:pc.status(),anonymousRefreshStatus:rr.status(),publicMovie:'VISIBLE',publicCoverStatus:wc.status(),overflow:await overflow(q,'public watch')};out.verdict='PASS';fs.writeFileSync(process.env.EVID+'/browser.json',JSON.stringify(out,null,2));console.log('P01_CONTENT_KINDS_AUTO_COVERS_R2=PASS');console.log(JSON.stringify(out));
+  out.privacy={privateChannel:'HIDDEN',privateCoverStatus:pc.status(),anonymousRefreshStatus:rr.status(),publicMovie:'VISIBLE',publicCoverStatus:wc.status(),overflow:await overflow(q,'public watch')};out.verdict='PASS';fs.writeFileSync(process.env.EVID+'/browser.json',JSON.stringify(out,null,2));console.log('P01_CONTENT_KINDS_AUTO_COVERS=PASS');console.log(JSON.stringify(out));
   await pub.close();await admin.close();await b.close();
 })().catch(e=>{console.error(e);process.exit(1)});
