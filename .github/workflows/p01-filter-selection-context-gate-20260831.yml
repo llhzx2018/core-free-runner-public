@@ -1,0 +1,152 @@
+name: P01 Filter Selection Context Gate
+on:
+  push:
+    branches: [product/p01-filter-selection-context-gate-20260831]
+    paths: [.github/workflows/p01-filter-selection-context-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 79b864ed6c54f3ba06e86cb2a4c4e67f780dc4c5
+      BASE: 9d9b573323d11d3b4dc1f6b8a7d9ae3da244761e
+      TREE: 7fdcc2e2abb4d7b5c1771a525dcaa42b72d453e5
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-filter-context/evidence
+      PORT: '18481'
+      ADMIN_PASS: P01FilterContextGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and JS-only fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-filter-context; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git -C product diff --name-only "$BASE"...HEAD)" = 'src/assets/links-admin.js'
+          test "$(git -C product rev-parse "$BASE:src/assets/admin-consolidation.css")" = "$(git -C product rev-parse "HEAD:src/assets/admin-consolidation.css")"
+          test "$(git -C product rev-parse "$BASE:src/links-admin.php")" = "$(git -C product rev-parse "HEAD:src/links-admin.php")"
+          test "$(git -C product rev-parse "$BASE:src/api.php")" = "$(git -C product rev-parse "HEAD:src/api.php")"
+          test "$(git -C product rev-parse "$BASE:src/app/Repository.php")" = "$(git -C product rev-parse "HEAD:src/app/Repository.php")"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -F 'function resetFilterSelection(){page=1;selected.clear();renderLinks()}' product/src/assets/links-admin.js >/dev/null
+          grep -F "$('#linkSearch').oninput=resetFilterSelection" product/src/assets/links-admin.js >/dev/null
+          grep -F "$('#visibilityFilter').onchange=$('#categoryFilter').onchange=resetFilterSelection" product/src/assets/links-admin.js >/dev/null
+          node --check product/src/assets/links-admin.js
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          printf 'P01_FILTER_CONTEXT_SCOPE=PASS\nP01_FILTER_CONTEXT_SERVER_BYTES_UNCHANGED=PASS\n' | tee "$EVID/scope.txt"
+      - name: Fresh install and seed filter contexts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-filter-context.pid
+          COOKIE=/tmp/p01-filter-context.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Filter Context Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $a=$repo->createCategory(['name'=>'筛选 A','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $b=$repo->createCategory(['name'=>'筛选 B','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $repo->saveLink(null,['category_id'=>$a,'title'=>'Alpha Selected','url'=>'https://alpha-selected.example/','is_private'=>0,'is_pending'=>0],'admin');
+          $repo->saveLink(null,['category_id'=>$b,'title'=>'Beta Visible','url'=>'https://beta-visible.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $repo->saveLink(null,['category_id'=>$a,'title'=>'Pending Alpha','url'=>'https://pending-alpha.example/','is_private'=>1,'is_pending'=>1],'admin');
+          $repo->saveLink(null,['category_id'=>$b,'title'=>'Pending Beta','url'=>'https://pending-beta.example/','is_private'=>1,'is_pending'=>1],'admin');
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn()!==4)exit(13);
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==2)exit(14);
+          echo "P01_FILTER_CONTEXT_SEED=PASS\nP01_FILTER_CONTEXT_SQLITE=PASS\n";
+          PHP
+          echo P01_FILTER_CONTEXT_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium filter-context contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-filter-context/pw; cd /tmp/p01-filter-context/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18481/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            const login=await c.request.post(base+'api.php?action=login',{data:{password:'P01FilterContextGate'}});
+            if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            const state=()=>p.evaluate(()=>({batchText:document.querySelector('#batchCount')?.textContent?.trim()||'',batchShown:document.querySelector('#batchBar')?.classList.contains('show')||false,checked:document.querySelectorAll('[data-select]:checked').length,rows:[...document.querySelectorAll('#linksBody tr')].map(x=>x.innerText),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,restoreVisible:(()=>{const x=document.querySelector('[data-bulk="restore"]');return x?!!(x.offsetWidth||x.offsetHeight||x.getClientRects().length):false})()}));
+            const selectTitle=async title=>{const row=p.locator('tr').filter({hasText:title});if(await row.count()!==1)throw Error('row '+title);await row.locator('input[data-select]').check();};
+            const expectCleared=(m,label)=>{if(m.batchShown||m.checked!==0||!/0/.test(m.batchText))throw Error(label+' selection leak '+JSON.stringify(m));if(m.restoreVisible)throw Error(label+' restore regression '+JSON.stringify(m));if(m.overflow>1)throw Error(label+' overflow '+JSON.stringify(m));};
+            async function searchCase(){await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await selectTitle('Alpha Selected');await p.locator('#linkSearch').fill('Beta Visible');await p.waitForTimeout(80);let m=await state();expectCleared(m,'search');if(!m.rows.join('\n').includes('Beta Visible')||m.rows.join('\n').includes('Alpha Selected'))throw Error('search rows');return m;}
+            async function visibilityCase(){await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await selectTitle('Alpha Selected');await p.locator('#visibilityFilter').selectOption('private');await p.waitForTimeout(80);let m=await state();expectCleared(m,'visibility');if(m.rows.join('\n').includes('Alpha Selected')||!m.rows.join('\n').includes('Beta Visible'))throw Error('visibility rows');return m;}
+            async function categoryCase(){await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await selectTitle('Alpha Selected');await p.locator('#categoryFilter').selectOption({label:'筛选 B'});await p.waitForTimeout(80);let m=await state();expectCleared(m,'category');if(m.rows.join('\n').includes('Alpha Selected')||!m.rows.join('\n').includes('Beta Visible'))throw Error('category rows');return m;}
+            async function pendingCase(){await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});await selectTitle('Pending Alpha');await p.locator('#linkSearch').fill('Pending Beta');await p.waitForTimeout(80);let m=await state();expectCleared(m,'pending');if(m.rows.join('\n').includes('Pending Alpha')||!m.rows.join('\n').includes('Pending Beta'))throw Error('pending rows');return m;}
+            const desktop={search:await searchCase(),visibility:await visibilityCase(),category:await categoryCase(),pending:await pendingCase()};
+            await p.screenshot({path:process.env.EVID+'/desktop-pending-filter.png',fullPage:true});
+            await p.setViewportSize({width:390,height:844});
+            const mobile={search:await searchCase(),visibility:await visibilityCase(),category:await categoryCase(),pending:await pendingCase()};
+            await p.screenshot({path:process.env.EVID+'/mobile-pending-filter.png',fullPage:true});
+            fs.writeFileSync(process.env.EVID+'/states.json',JSON.stringify({desktop,mobile},null,2));
+            await b.close();console.log('P01_FILTER_SELECTION_CONTEXT_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_FILTER_SELECTION_CONTEXT_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final DB and verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn()!==4)exit(21);
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==2)exit(22);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(23);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(24);
+          echo "P01_FILTER_CONTEXT_POST_DB=PASS\n";
+          PHP
+          grep -Fx P01_FILTER_CONTEXT_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_FILTER_CONTEXT_SERVER_BYTES_UNCHANGED=PASS "$EVID/scope.txt"
+          grep -Fx P01_FILTER_CONTEXT_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_FILTER_SELECTION_CONTEXT_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_FILTER_CONTEXT_POST_DB=PASS "$EVID/post-db.txt"
+          printf 'P01_FILTER_SELECTION_CONTEXT_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-filter-selection-context-${{ github.run_id }}
+          path: /tmp/p01-filter-context/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-filter-context.pid 2>/dev/null)" 2>/dev/null || true
