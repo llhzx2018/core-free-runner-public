@@ -18,7 +18,7 @@ const routes = {
   settings: { owned: 'v271', heading: '设置', emptySelector: '.v271-settings-layout' },
 };
 const report = {
-  schema: 'p04-primary-route-states-audit/v1',
+  schema: 'p04-primary-route-states-audit/v2',
   source_sha: source,
   status: 'FAIL',
   synthetic_faults_only: true,
@@ -27,13 +27,14 @@ const report = {
   external_provider_api_called: false,
   production_actions_executed: false,
   findings: [],
-  failures: [],
+  harness_failures: [],
   page_errors: [],
   console_errors: [],
+  expected_synthetic_console_errors: [],
   views: {},
 };
 const finding = (message) => { if (!report.findings.includes(message)) report.findings.push(message); };
-const failure = (message) => report.failures.push(message);
+const harnessFailure = (message) => report.harness_failures.push(message);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
@@ -98,6 +99,15 @@ async function openCase(viewName, routeName, mode) {
   return { context, page, pageErrors, consoleErrors };
 }
 
+function recordDiagnostics(viewName, routeName, mode, pageErrors, consoleErrors) {
+  report.page_errors.push(...pageErrors.map((x) => `${viewName}/${routeName}/${mode}: ${x}`));
+  for (const x of consoleErrors) {
+    const tagged = `${viewName}/${routeName}/${mode}: ${x}`;
+    if (mode === 'error' && /503|Service Unavailable|Failed to load resource/i.test(x)) report.expected_synthetic_console_errors.push(tagged);
+    else report.console_errors.push(tagged);
+  }
+}
+
 async function overflowX(page) {
   return page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - innerWidth);
 }
@@ -115,11 +125,8 @@ async function emptyCase(viewName, routeName, spec) {
   const { context, page, pageErrors, consoleErrors } = await openCase(viewName, routeName, 'empty');
   const result = {};
   try {
-    if (spec.owned === 'v271') {
-      await page.locator(`[data-v271-route="${routeName}"]`).waitFor({ state: 'visible', timeout: 15000 });
-    } else {
-      await page.getByRole('heading', { name: spec.heading, exact: true }).waitFor({ state: 'visible', timeout: 15000 });
-    }
+    if (spec.owned === 'v271') await page.locator(`[data-v271-route="${routeName}"]`).waitFor({ state: 'visible', timeout: 15000 });
+    else await page.getByRole('heading', { name: spec.heading, exact: true }).waitFor({ state: 'visible', timeout: 15000 });
     await page.waitForTimeout(450);
     result.heading = clean(await page.locator('#v270-app h1').first().textContent().catch(() => ''));
     result.overflow_x = await overflowX(page);
@@ -128,7 +135,7 @@ async function emptyCase(viewName, routeName, spec) {
     result.onboarding_count = await page.locator('[data-v2813-zero-onboarding]').count();
     result.recovery_or_start_actions = (await page.locator('#v270-app button, #v270-app a').allTextContents()).map(clean).filter(Boolean);
     if (routeName === 'providers') result.empty_copy = await visibleText(page, '.v271-empty');
-    if (routeName === 'settings') result.settings_sections = await page.locator('.v271-settings-nav button').allTextContents();
+    if (routeName === 'settings') result.settings_sections = (await page.locator('.v271-settings-nav button').allTextContents()).map(clean);
     if (!result.empty_visible) finding(`${viewName}/${routeName}: empty/default state is missing its expected usable content`);
     if (result.overflow_x > 1) finding(`${viewName}/${routeName}: empty/default state horizontal overflow ${result.overflow_x}`);
     if (['overview','domains','servers'].includes(routeName)) {
@@ -149,45 +156,48 @@ async function emptyCase(viewName, routeName, spec) {
     if (routeName === 'settings' && !result.current_owner_marker) finding(`${viewName}/settings: Current v271 settings owner did not take control`);
     await screenshot(page, `${viewName}-${routeName}-empty`);
   } finally {
-    report.page_errors.push(...pageErrors.map((x) => `${viewName}/${routeName}/empty: ${x}`));
-    report.console_errors.push(...consoleErrors.map((x) => `${viewName}/${routeName}/empty: ${x}`));
+    recordDiagnostics(viewName, routeName, 'empty', pageErrors, consoleErrors);
     await context.close();
   }
   return result;
 }
 
+async function loadingSample(page, routeName, spec, atMs) {
+  const app = page.locator('#v270-app');
+  const appText = clean(await app.textContent().catch(() => ''));
+  const loadingText = await visibleText(page, '.v270-loading');
+  const marker = await page.locator(`[data-v271-route="${routeName}"]`).count() > 0;
+  const legacyCount = spec.owned === 'v271' ? await page.locator('#v270-app .v270-section, #v270-app .v270-settings').count() : 0;
+  return { at_ms: atMs, app_text: appText.slice(0, 300), loading_visible: Boolean(loadingText) || /正在读取|加载|读取中/.test(appText), current_owner_marker: marker, legacy_content_count: legacyCount, overflow_x: await overflowX(page) };
+}
+
 async function loadingCase(viewName, routeName, spec) {
   const { context, page, pageErrors, consoleErrors } = await openCase(viewName, routeName, 'loading');
-  const result = {};
+  const result = { samples: [] };
   try {
-    await page.waitForTimeout(300);
-    const app = page.locator('#v270-app');
-    const appText = clean(await app.textContent().catch(() => ''));
-    const loadingText = await visibleText(page, '.v270-loading');
-    result.early_app_text = appText.slice(0, 240);
-    result.loading_visible = Boolean(loadingText) || /正在读取|加载|读取中/.test(appText);
-    result.loading_text = loadingText;
-    result.shell_nav_count = await page.locator('[data-v270-nav]').count();
-    result.current_owner_marker_early = await page.locator(`[data-v271-route="${routeName}"]`).count() > 0;
-    result.legacy_content_early = spec.owned === 'v271'
-      && !result.current_owner_marker_early
-      && !result.loading_visible
-      && await page.locator('#v270-app .v270-section, #v270-app .v270-settings').count() > 0;
-    result.overflow_x_early = await overflowX(page);
-    if (!result.loading_visible && !result.legacy_content_early) finding(`${viewName}/${routeName}: loading state is blank or has no clear progress feedback`);
-    if (result.shell_nav_count < 5) finding(`${viewName}/${routeName}: primary shell/nav disappeared during loading`);
-    if (result.legacy_content_early) finding(`${viewName}/${routeName}: Current v271-owned route exposes retired v270 content while its data is loading`);
-    if (result.overflow_x_early > 1) finding(`${viewName}/${routeName}: loading state horizontal overflow ${result.overflow_x_early}`);
-    await screenshot(page, `${viewName}-${routeName}-loading`);
-    if (spec.owned === 'v271') {
-      await page.locator(`[data-v271-route="${routeName}"]`).waitFor({ state: 'visible', timeout: 10000 });
-    } else {
-      await page.getByRole('heading', { name: spec.heading, exact: true }).waitFor({ state: 'visible', timeout: 10000 });
+    let elapsed = 0;
+    for (const target of [120, 350, 800]) {
+      await page.waitForTimeout(target - elapsed);
+      elapsed = target;
+      result.samples.push(await loadingSample(page, routeName, spec, target));
     }
+    const probe = result.samples.find((x) => x.at_ms === 350) || result.samples[0];
+    result.shell_nav_count = await page.locator('[data-v270-nav]').count();
+    result.loading_visible_at_350 = Boolean(probe?.loading_visible);
+    result.current_owner_marker_at_350 = Boolean(probe?.current_owner_marker);
+    result.legacy_content_at_350 = spec.owned === 'v271' && !probe?.current_owner_marker && !probe?.loading_visible && Number(probe?.legacy_content_count || 0) > 0;
+    result.blank_at_350 = !probe?.loading_visible && !probe?.current_owner_marker && Number(probe?.legacy_content_count || 0) === 0 && !clean(probe?.app_text);
+    if (!probe?.loading_visible && !probe?.current_owner_marker) finding(`${viewName}/${routeName}: 350ms loading state has no Current owner/progress feedback`);
+    if (result.legacy_content_at_350) finding(`${viewName}/${routeName}: Current v271-owned route exposes retired v270 content while its data is loading`);
+    if (result.blank_at_350) finding(`${viewName}/${routeName}: loading state is blank at 350ms`);
+    if (result.shell_nav_count < 5) finding(`${viewName}/${routeName}: primary shell/nav disappeared during loading`);
+    if (result.samples.some((x) => x.overflow_x > 1)) finding(`${viewName}/${routeName}: loading state has horizontal overflow`);
+    await screenshot(page, `${viewName}-${routeName}-loading`);
+    if (spec.owned === 'v271') await page.locator(`[data-v271-route="${routeName}"]`).waitFor({ state: 'visible', timeout: 12000 });
+    else await page.getByRole('heading', { name: spec.heading, exact: true }).waitFor({ state: 'visible', timeout: 12000 });
     result.resolved = true;
   } finally {
-    report.page_errors.push(...pageErrors.map((x) => `${viewName}/${routeName}/loading: ${x}`));
-    report.console_errors.push(...consoleErrors.map((x) => `${viewName}/${routeName}/loading: ${x}`));
+    recordDiagnostics(viewName, routeName, 'loading', pageErrors, consoleErrors);
     await context.close();
   }
   return result;
@@ -197,35 +207,37 @@ async function errorCase(viewName, routeName, spec) {
   const { context, page, pageErrors, consoleErrors } = await openCase(viewName, routeName, 'error');
   const result = {};
   try {
-    if (spec.owned === 'v271') {
-      await page.getByRole('heading', { name: '暂时无法读取', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
-    } else {
-      await page.locator('.v270-error').waitFor({ state: 'visible', timeout: 15000 });
-    }
+    await page.waitForFunction((fault) => (document.querySelector('#v270-app')?.textContent || '').includes(fault), faultMessage, { timeout: 15000 });
     await page.waitForTimeout(150);
     result.app_text = clean(await page.locator('#v270-app').textContent());
     result.h1 = clean(await page.locator('#v270-app h1').first().textContent().catch(() => ''));
-    result.error_visible = spec.owned === 'v271'
-      ? await page.locator('.v271-help.danger').first().isVisible().catch(() => false)
-      : await page.locator('.v270-error').first().isVisible().catch(() => false);
+    const v271Visible = await page.locator('.v271-help.danger').first().isVisible().catch(() => false);
+    const v270Visible = await page.locator('.v270-error').first().isVisible().catch(() => false);
+    result.error_owner = v271Visible ? 'v271' : (v270Visible ? 'v270' : 'unknown');
+    result.error_visible = v271Visible || v270Visible;
     const actionTexts = (await page.locator('#v270-app button, #v270-app a').allTextContents()).map(clean).filter(Boolean);
     result.actions = actionTexts;
     result.has_recovery_action = actionTexts.some((x) => /重新|重试|刷新|再试/.test(x));
     result.route_context_preserved = Boolean(result.h1);
     result.shell_nav_count = await page.locator('[data-v270-nav]').count();
     result.overflow_x = await overflowX(page);
-    if (!result.error_visible || !result.app_text.includes(faultMessage)) failure(`${viewName}/${routeName}: synthetic error did not reach visible error state`);
+    if (!result.error_visible || !result.app_text.includes(faultMessage)) harnessFailure(`${viewName}/${routeName}: synthetic error did not reach an observable error owner`);
+    if (spec.owned === 'v271' && result.error_owner !== 'v271') finding(`${viewName}/${routeName}: Current v271 route error fell back to ${result.error_owner} owner`);
     if (!result.route_context_preserved) finding(`${viewName}/${routeName}: error state drops the page/route heading context`);
     if (!result.has_recovery_action) finding(`${viewName}/${routeName}: error state has no visible retry/reload recovery action`);
     if (result.shell_nav_count < 5) finding(`${viewName}/${routeName}: shell/nav disappeared in error state`);
     if (result.overflow_x > 1) finding(`${viewName}/${routeName}: error state horizontal overflow ${result.overflow_x}`);
     await screenshot(page, `${viewName}-${routeName}-error`);
   } finally {
-    report.page_errors.push(...pageErrors.map((x) => `${viewName}/${routeName}/error: ${x}`));
-    report.console_errors.push(...consoleErrors.map((x) => `${viewName}/${routeName}/error: ${x}`));
+    recordDiagnostics(viewName, routeName, 'error', pageErrors, consoleErrors);
     await context.close();
   }
   return result;
+}
+
+async function runCase(viewName, routeName, mode, fn) {
+  try { return await fn(); }
+  catch (error) { harnessFailure(`${viewName}/${routeName}/${mode}: ${String(error?.stack || error)}`); return { harness_error: String(error?.message || error) }; }
 }
 
 try {
@@ -233,18 +245,17 @@ try {
   for (const [viewName] of Object.entries(viewports)) {
     report.views[viewName] = {};
     for (const [routeName, spec] of Object.entries(routes)) {
-      report.views[viewName][routeName] = {
-        empty: await emptyCase(viewName, routeName, spec),
-        loading: await loadingCase(viewName, routeName, spec),
-        error: await errorCase(viewName, routeName, spec),
-      };
+      report.views[viewName][routeName] = {};
+      report.views[viewName][routeName].empty = await runCase(viewName, routeName, 'empty', () => emptyCase(viewName, routeName, spec));
+      report.views[viewName][routeName].loading = await runCase(viewName, routeName, 'loading', () => loadingCase(viewName, routeName, spec));
+      report.views[viewName][routeName].error = await runCase(viewName, routeName, 'error', () => errorCase(viewName, routeName, spec));
     }
   }
-  if (report.page_errors.length) failure(`page errors: ${JSON.stringify(report.page_errors)}`);
-  if (report.console_errors.length) failure(`console errors: ${JSON.stringify(report.console_errors)}`);
-  report.status = report.failures.length === 0 && report.findings.length === 0 ? 'PASS' : 'FAIL';
+  if (report.page_errors.length) harnessFailure(`page errors: ${JSON.stringify(report.page_errors)}`);
+  if (report.console_errors.length) harnessFailure(`unexpected console errors: ${JSON.stringify(report.console_errors)}`);
+  report.status = report.harness_failures.length === 0 && report.findings.length === 0 ? 'PASS' : 'FAIL';
 } catch (error) {
-  failure(String(error?.stack || error));
+  harnessFailure(String(error?.stack || error));
   report.status = 'FAIL';
 } finally {
   fs.writeFileSync(`${evidence}/P04_PRIMARY_ROUTE_STATES_AUDIT.json`, JSON.stringify(report, null, 2) + '\n');
@@ -253,5 +264,5 @@ try {
 
 console.log(`P04_PRIMARY_ROUTE_STATES_GATE=${report.status}`);
 if (report.findings.length) console.error(`FINDINGS\n${report.findings.join('\n')}`);
-if (report.failures.length) console.error(`FAILURES\n${report.failures.join('\n')}`);
+if (report.harness_failures.length) console.error(`HARNESS_FAILURES\n${report.harness_failures.join('\n')}`);
 if (report.status !== 'PASS') process.exit(1);
