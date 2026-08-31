@@ -1,4 +1,4 @@
-name: GOV-BOOK A3 Exact Binary Materialize 20260831
+name: GOV-BOOK A3 Payload Diagnostic 20260831
 
 on:
   push:
@@ -16,34 +16,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  materialize:
+  diagnose:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      PRIVATE_SOURCE_REPO: llhzx2018/core-free-runner-private
       PRIVATE_SOURCE_SHA: 25e9c5597e50f263c287e771d8c81163805d5d4f
-      TARGET_REPO: llhzx2018/gov-book
-      TARGET_DEVELOP_SHA: 3270c3f0c5ba29ce4ecc54cb11a16200961e553f
-      TARGET_MAIN_SHA: e89b0b98dd657e19187940e859fe9e5161df750e
-      BOOK_ID: A3
-      XZ_SHA256: c93e1de102b8b22a8631ceb48e0c8696443329640991fdd15c1cdc1b167f40ef
-      XZ_SIZE: '140588'
-      ZIP_SHA256: 936b7576b882e0e7db7e1559b44f2cb52b6bee80fd477cabf2628abac8f4b92a
-      ZIP_SIZE: '145204'
-      TARGET_PATH: downloads/A3/v0.9.0/A3_网站案例拆解_v0.9.0_中文版_PARTIAL.zip
+      EXPECTED_XZ_SHA256: c93e1de102b8b22a8631ceb48e0c8696443329640991fdd15c1cdc1b167f40ef
+      EXPECTED_XZ_SIZE: '140588'
+      EXPECTED_ZIP_SHA256: 936b7576b882e0e7db7e1559b44f2cb52b6bee80fd477cabf2628abac8f4b92a
+      EXPECTED_ZIP_SIZE: '145204'
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
 
     steps:
-      - name: Require registered VF capabilities
+      - name: Require private read capability
         shell: bash
         run: |
           set -Eeuo pipefail
           test -n "$VF_PRIVATE_READ_TOKEN"
-          test -n "$VF_RELEASE_WRITE_TOKEN"
-          echo 'REGISTERED_VF_CAPABILITIES=PASS'
+          echo 'VF_PRIVATE_READ_CAPABILITY=PASS'
 
-      - name: Checkout exact private task input
+      - name: Checkout exact private source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/core-free-runner-private
@@ -53,115 +45,86 @@ jobs:
           fetch-depth: 1
           path: private-input
 
-      - name: Rebuild and verify exact A3 ZIP
+      - name: Diagnose A3 transport and final payload
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C private-input rev-parse HEAD)" = "$PRIVATE_SOURCE_SHA"
           python3 - <<'PY'
           import base64, hashlib, json, lzma, os, pathlib, subprocess, zipfile
+
           q = pathlib.Path('private-input/queue/gov-book-20260831/A3')
           spec = json.loads((q/'READY.json').read_text(encoding='utf-8'))
-          assert spec['book_id'] == os.environ['BOOK_ID']
-          assert spec['payload_sha256'] == os.environ['ZIP_SHA256']
-          assert spec['payload_size_bytes'] == int(os.environ['ZIP_SIZE'])
-          assert spec['xz_sha256'] == os.environ['XZ_SHA256']
-          assert spec['xz_size_bytes'] == int(os.environ['XZ_SIZE'])
-          assert spec['expected_target_head'] == os.environ['TARGET_DEVELOP_SHA']
-          assert spec['expected_main_head'] == os.environ['TARGET_MAIN_SHA']
-          assert spec['target_path'] == os.environ['TARGET_PATH']
+          assert spec['book_id'] == 'A3'
+          assert spec['payload_sha256'] == os.environ['EXPECTED_ZIP_SHA256']
+          assert spec['payload_size_bytes'] == int(os.environ['EXPECTED_ZIP_SIZE'])
+
           pieces = []
           mismatches = []
           for c in spec['chunks']:
-              path = q/c['path']
-              data = path.read_bytes()
-              assert len(data) == c['size']
+              p = q/c['path']
+              data = p.read_bytes()
+              assert len(data) == c['size'], (c['path'], len(data), c['size'])
               git_path = f"queue/gov-book-20260831/A3/{c['path']}"
-              actual_blob = subprocess.check_output(['git','-C','private-input','rev-parse',f"HEAD:{git_path}"], text=True).strip()
+              actual_blob = subprocess.check_output(
+                  ['git','-C','private-input','rev-parse',f"HEAD:{git_path}"], text=True
+              ).strip()
               if actual_blob != c['git_blob']:
-                  mismatches.append((c['path'], actual_blob, c['git_blob']))
+                  mismatches.append({'path': c['path'], 'actual': actual_blob, 'declared': c['git_blob']})
               pieces.append(data.decode('ascii'))
-          expected_known = [
-              ('chunk-0044a.b64','416bc27c420f75cfb855657df7670a63d37e3e9c','416bc27c5f9155cea95b744663f33dd9df554ff5'),
-              ('chunk-0045a.b64','7dd364c7784f840757a0c36622f6ee9a46859272','7dd364c72b8e6524793ea5c3982ed19bf4c5af26'),
-              ('chunk-0046a.b64','85e3eed3af6283619b9bfbb9a832cb5e893fda18','85e3eed30caf432326707e4c56b6bc09213aa1cc'),
-          ]
-          assert mismatches == expected_known, mismatches
-          print('A3_READY_METADATA_KNOWN_THREE_BLOB_DRIFTS=RECORDED')
-          encoded = ''.join(pieces)
-          assert len(encoded.encode('ascii')) == spec['encoded_size_bytes']
+
+          print('A3_CHUNK_BLOB_MISMATCHES=' + json.dumps(mismatches, separators=(',',':')))
+          encoded = ''.join(pieces).encode('ascii')
+          print('A3_ENCODED_SIZE_ACTUAL=' + str(len(encoded)))
+          print('A3_ENCODED_SIZE_DECLARED=' + str(spec['encoded_size_bytes']))
+          assert len(encoded) == spec['encoded_size_bytes']
+
           packed = base64.b64decode(encoded, validate=True)
-          assert len(packed) == int(os.environ['XZ_SIZE'])
-          assert hashlib.sha256(packed).hexdigest() == os.environ['XZ_SHA256']
-          raw = lzma.decompress(packed)
-          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'A3.zip'
+          actual_xz_sha = hashlib.sha256(packed).hexdigest()
+          print('A3_XZ_SIZE_ACTUAL=' + str(len(packed)))
+          print('A3_XZ_SIZE_EXPECTED=' + os.environ['EXPECTED_XZ_SIZE'])
+          print('A3_XZ_SHA256_ACTUAL=' + actual_xz_sha)
+          print('A3_XZ_SHA256_EXPECTED=' + os.environ['EXPECTED_XZ_SHA256'])
+          print('A3_XZ_EXACT=' + ('PASS' if len(packed)==int(os.environ['EXPECTED_XZ_SIZE']) and actual_xz_sha==os.environ['EXPECTED_XZ_SHA256'] else 'FAIL'))
+
+          try:
+              raw = lzma.decompress(packed)
+          except Exception as e:
+              print('A3_XZ_DECOMPRESS=FAIL:' + repr(e))
+              raise
+
+          actual_zip_sha = hashlib.sha256(raw).hexdigest()
+          print('A3_XZ_DECOMPRESS=PASS')
+          print('A3_ZIP_SIZE_ACTUAL=' + str(len(raw)))
+          print('A3_ZIP_SIZE_EXPECTED=' + os.environ['EXPECTED_ZIP_SIZE'])
+          print('A3_ZIP_SHA256_ACTUAL=' + actual_zip_sha)
+          print('A3_ZIP_SHA256_EXPECTED=' + os.environ['EXPECTED_ZIP_SHA256'])
+
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'A3-diagnostic.zip'
           out.write_bytes(raw)
-          assert len(raw) == int(os.environ['ZIP_SIZE'])
-          assert hashlib.sha256(raw).hexdigest() == os.environ['ZIP_SHA256']
-          with zipfile.ZipFile(out) as z:
-              assert z.testzip() is None
-          print('A3_PRIVATE_REBUILD_XZ_SHA256_ZIP_SHA256_CRC=PASS')
+          crc_ok = False
+          try:
+              with zipfile.ZipFile(out) as z:
+                  crc_ok = z.testzip() is None
+                  print('A3_ZIP_MEMBER_COUNT=' + str(len(z.infolist())))
+          except Exception as e:
+              print('A3_ZIP_OPEN=FAIL:' + repr(e))
+              raise
+
+          print('A3_ZIP_CRC=' + ('PASS' if crc_ok else 'FAIL'))
+          payload_exact = (
+              len(raw) == int(os.environ['EXPECTED_ZIP_SIZE'])
+              and actual_zip_sha == os.environ['EXPECTED_ZIP_SHA256']
+              and crc_ok
+          )
+          print('A3_FINAL_PAYLOAD_EXACT=' + ('PASS' if payload_exact else 'FAIL'))
+          if not payload_exact:
+              raise SystemExit(42)
           PY
 
-      - name: Checkout exact GOV-BOOK develop start
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          repository: llhzx2018/gov-book
-          ref: ${{ env.TARGET_DEVELOP_SHA }}
-          token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: true
-          fetch-depth: 0
-          path: gov-book
-
-      - name: Live ref gate and write A3 download only
-        working-directory: gov-book
+      - name: Assert no gov-book write path exists
         shell: bash
         run: |
-          set -Eeuo pipefail
-          git fetch origin main develop
-          ACTUAL_MAIN="$(git rev-parse origin/main)"
-          ACTUAL_DEVELOP="$(git rev-parse origin/develop)"
-          echo "ACTUAL_MAIN=$ACTUAL_MAIN"
-          echo "ACTUAL_DEVELOP=$ACTUAL_DEVELOP"
-          test "$ACTUAL_MAIN" = "$TARGET_MAIN_SHA"
-          test "$ACTUAL_DEVELOP" = "$TARGET_DEVELOP_SHA"
-          mkdir -p "$(dirname "$TARGET_PATH")"
-          cp "$RUNNER_TEMP/A3.zip" "$TARGET_PATH"
-          python3 - <<'PY'
-          import hashlib, os, pathlib, zipfile
-          p = pathlib.Path(os.environ['TARGET_PATH'])
-          assert p.stat().st_size == int(os.environ['ZIP_SIZE'])
-          assert hashlib.sha256(p.read_bytes()).hexdigest() == os.environ['ZIP_SHA256']
-          with zipfile.ZipFile(p) as z:
-              assert z.testzip() is None
-          print('A3_TARGET_PRECOMMIT_SHA256_CRC=PASS')
-          PY
-          git add -f -- "$TARGET_PATH"
-          changed="$(git -c core.quotepath=false diff --cached --name-only)"
-          echo "STAGED_PATH=$changed"
-          test "$changed" = "$TARGET_PATH"
-          git config user.name 'VF Public Runner'
-          git config user.email 'runner@users.noreply.github.com'
-          git commit -m 'content(book): materialize exact A3 Chinese download'
-          git push origin HEAD:develop
-
-      - name: Exact remote readback gate
-        working-directory: gov-book
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git fetch origin develop
-          REMOTE_HEAD="$(git rev-parse origin/develop)"
-          git show "origin/develop:$TARGET_PATH" > "$RUNNER_TEMP/A3-remote.zip"
-          python3 - <<'PY'
-          import hashlib, os, pathlib, zipfile
-          p = pathlib.Path(os.environ['RUNNER_TEMP'])/'A3-remote.zip'
-          assert p.stat().st_size == int(os.environ['ZIP_SIZE'])
-          assert hashlib.sha256(p.read_bytes()).hexdigest() == os.environ['ZIP_SHA256']
-          with zipfile.ZipFile(p) as z:
-              assert z.testzip() is None
-          print('A3_REMOTE_EXACT_READBACK=PASS')
-          PY
-          echo "GOV_BOOK_DEVELOP_RESULT=$REMOTE_HEAD"
+          echo 'GOV_BOOK_CHECKOUT=NO'
+          echo 'GOV_BOOK_WRITE=NO'
           echo 'MAIN_WRITE=NO'
-          echo 'PRIVATE_SOURCE_PERSISTED_PUBLIC=NO'
+          echo 'DEVELOP_WRITE=NO'
