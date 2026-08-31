@@ -25,9 +25,9 @@ const report = {
 const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
 const fail = (m) => report.failures.push(m);
 const routes = {
-  overview: { title: '个人基础设施概览', onboarding: '先连接服务商账号' },
-  domains: { title: '域名', onboarding: '先从服务商同步域名' },
-  servers: { title: '服务器', onboarding: '先从服务商同步服务器' },
+  overview: { title: '个人基础设施概览', onboarding: true },
+  domains: { title: '域名', onboarding: true },
+  servers: { title: '服务器', onboarding: true },
   providers: { title: '服务商' },
   settings: { title: '设置' },
 };
@@ -40,7 +40,7 @@ async function route(page, name, title) {
   await page.evaluate((n) => { location.hash = `#${n}`; }, name);
   await page.waitForFunction((n) => location.hash === `#${n}`, name);
   await page.locator('#v270-app h1').filter({ hasText: title }).first().waitFor({ state:'visible', timeout:15000 });
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(250);
 }
 
 const browser = await chromium.launch({ headless:true });
@@ -81,8 +81,12 @@ try {
       current_v271_owner: await page.locator(`[data-v271-route="${name}"]`).count() > 0,
     };
     if (spec.onboarding) {
-      result.onboarding_visible = await visible(page.getByRole('button', { name:spec.onboarding, exact:true }));
-      if (!result.onboarding_visible) fail(`${name}: onboarding missing`);
+      const onboarding = page.locator(`[data-v2813-zero-onboarding="${name}"]`).first();
+      const onboardingCta = onboarding.locator('[data-v2813-onboarding-go="providers"]').first();
+      result.onboarding_visible = await visible(onboarding);
+      result.onboarding_cta_visible = await visible(onboardingCta);
+      result.onboarding_copy = clean(await onboarding.textContent().catch(() => ''));
+      if (!result.onboarding_visible || !result.onboarding_cta_visible) fail(`${name}: stable onboarding marker/CTA missing`);
     }
     if (name === 'providers') {
       result.connect_visible = await visible(page.locator('[data-v271-action="provider-connect"]').first());
@@ -95,6 +99,14 @@ try {
     report.routes[name] = result;
     await page.screenshot({ path:path.join(evidenceDir, `desktop-${name}.png`), fullPage:true, animations:'disabled' });
   }
+
+  // One stable navigation probe proves onboarding delegates to the existing Providers owner.
+  await route(page, 'overview', '个人基础设施概览');
+  const onboardingCta = page.locator('[data-v2813-zero-onboarding="overview"] [data-v2813-onboarding-go="providers"]').first();
+  await onboardingCta.click();
+  await page.waitForFunction(() => location.hash === '#providers');
+  await page.locator('[data-v271-route="providers"]').waitFor({ state:'visible', timeout:15000 });
+  report.routes.overview.onboarding_to_providers = true;
 
   await page.setViewportSize({ width:390, height:844 });
   for (const [name, spec] of Object.entries(routes)) {
