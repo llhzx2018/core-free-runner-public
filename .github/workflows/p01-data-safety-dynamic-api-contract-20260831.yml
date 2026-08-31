@@ -1,0 +1,117 @@
+name: P01 Data Safety Dynamic API Contract
+on:
+  push:
+    branches: [diag/p01-data-safety-mobile-dynamic-actions-20260831]
+    paths: [.github/workflows/p01-data-safety-dynamic-api-contract-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      SOURCE: 7a9e9fd3e2505e85d7aa5781da8b23db7d961a9f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-data-safety-api/evidence
+      PORT: '18496'
+      ADMIN_PASS: P01DataSafetyApi
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-data-safety-api; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git -C product status --porcelain)"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-data-safety-api.pid
+          COOKIE=/tmp/p01-data-safety-api.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Data Safety API' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Dynamic backup API lifecycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE=/tmp/p01-data-safety-api.cookies
+          BASE="http://127.0.0.1:$PORT"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -d "{\"password\":\"$ADMIN_PASS\"}" "$BASE/api.php?action=login" > "$EVID/login.json"
+          python3 - "$EVID/login.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j.get('ok') is True, j
+          PY
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/data-safety.php" > "$EVID/data-safety.html"
+          CSRF=$(python3 - "$EVID/data-safety.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'<meta\s+name="csrf-token"\s+content="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          post(){ curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Accept: application/json' -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" -d "$2" "$BASE/api.php?action=$1"; }
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/api.php?action=backup_list" > "$EVID/list0.json"
+          python3 - "$EVID/list0.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j.get('ok') is True and len(j.get('backups',[]))==0, j
+          PY
+          post backup_create '{"reason":"L2 dynamic API diagnostic"}' > "$EVID/create.json"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/api.php?action=backup_list" > "$EVID/list1.json"
+          KEY=$(python3 - "$EVID/list1.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j.get('ok') is True and len(j.get('backups',[]))==1, j
+          b=j['backups'][0]; assert b.get('backup_key'); print(b['backup_key'])
+          PY
+          )
+          post backup_verify "{\"backup_key\":\"$KEY\"}" > "$EVID/verify.json"
+          post backup_protect "{\"backup_key\":\"$KEY\",\"protected\":true}" > "$EVID/protect.json"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/api.php?action=backup_list" > "$EVID/list-protected.json"
+          python3 - "$EVID/list-protected.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); b=j['backups'][0]; assert int(b.get('is_protected',0))==1, b
+          PY
+          post backup_protect "{\"backup_key\":\"$KEY\",\"protected\":false}" > "$EVID/unprotect.json"
+          post backup_preview_restore "{\"backup_key\":\"$KEY\"}" > "$EVID/preview.json"
+          python3 - "$EVID/preview.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j.get('ok') is True and isinstance(j.get('preview'),dict), j
+          PY
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/api.php?action=backup_download&backup_key=$KEY" -o "$EVID/download.sqlite"
+          test "$(wc -c < "$EVID/download.sqlite")" -gt 100
+          post backup_delete "{\"backup_key\":\"$KEY\"}" > "$EVID/delete.json"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/api.php?action=backup_list" > "$EVID/list-final.json"
+          python3 - "$EVID/list-final.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j.get('ok') is True and len(j.get('backups',[]))==0, j
+          PY
+          printf '%s\n' 'CREATE=PASS' 'VERIFY=PASS' 'PROTECT=PASS' 'UNPROTECT=PASS' 'PREVIEW_RESTORE=PASS' 'DOWNLOAD=PASS' 'DELETE=PASS' | tee "$EVID/contract.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$i."\nFK=".$fk."\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-data-safety-api-contract-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-data-safety-api.pid 2>/dev/null)" 2>/dev/null || true
