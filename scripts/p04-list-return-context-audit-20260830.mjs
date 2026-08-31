@@ -7,7 +7,7 @@ const base=process.env.VF_E2E_BASE_URL||'http://127.0.0.1:19057';
 const evidence=process.env.EVIDENCE,candidate=process.env.CANDIDATE,webRoot=process.env.WEB_ROOT,productRoot=process.env.PRODUCT_ROOT||path.join(process.cwd(),'product');
 if(!evidence||!candidate||!webRoot)throw new Error('list return context audit environment missing');
 const password='Vf'+crypto.randomUUID().replaceAll('-','')+'Aa1';
-const report={schema:'p04-list-return-context-audit/v2',source_sha:candidate,status:'FAIL',domain:{},server:{},mobile:{},page_errors:[],console_errors:[],production_actions_executed:false,synthetic_test_data_only:true};
+const report={schema:'p04-list-return-context-audit/v3',source_sha:candidate,status:'FAIL',domain:{},server:{},mobile:{},page_errors:[],console_errors:[],production_actions_executed:false,synthetic_test_data_only:true};
 const browser=await chromium.launch({headless:true});
 const context=await browser.newContext({viewport:{width:1365,height:900}});
 const page=await context.newPage();
@@ -22,6 +22,17 @@ const waitList=async(kind)=>{
   return{toolbar,input};
 };
 const currentCount=async(toolbar)=>clean(await toolbar.locator('[data-v275-count]').innerText().catch(()=>''));
+const openDomainDetail=async()=>{
+  const trigger=page.locator('table.domain-table .v275-more-button:visible').first();
+  await trigger.waitFor({state:'visible',timeout:10000});
+  const id=await trigger.getAttribute('data-v275-domain-actions');
+  await trigger.click();
+  const open=page.locator('.v275-quick-menu [data-action="open"]:visible');
+  await open.waitFor({state:'visible',timeout:10000});
+  await open.click();
+  await page.waitForFunction(value=>location.hash===`#domain/${encodeURIComponent(value)}`,id,{timeout:10000});
+  return id;
+};
 
 try{
   await page.goto(`${base}/setup.php`,{waitUntil:'domcontentloaded'});
@@ -40,20 +51,16 @@ try{
   });
   if(!savedDomain?.ok||!savedDomain?.domain?.id)throw new Error(`domain fixture failed ${JSON.stringify(savedDomain)}`);
 
-  // Force a new document after fixture writes so v270's in-memory snapshot cache is rebuilt from the runtime DB.
+  // New document required after fixture writes because v270 caches the snapshot in-memory for the current document.
   await page.goto(`${base}/index.php?audit=${Date.now()}#domains`,{waitUntil:'domcontentloaded'});
   let domainList=await waitList('domains');
-  report.domain.loaded={rows:await page.locator('table.domain-table tbody tr').count(),actions:await page.locator('table.domain-table [data-v270-action="domain"]').count()};
-  if(report.domain.loaded.actions<1)throw new Error(`domain fixture not visible ${JSON.stringify(report.domain.loaded)}`);
+  report.domain.loaded={rows:await page.locator('table.domain-table tbody tr').count(),quick_actions:await page.locator('table.domain-table .v275-more-button').count()};
+  if(report.domain.loaded.quick_actions<1)throw new Error(`domain fixture not visible ${JSON.stringify(report.domain.loaded)}`);
 
   await domainList.input.fill('infra-home');
   await page.waitForTimeout(350);
   report.domain.before={query:await domainList.input.inputValue(),count:await currentCount(domainList.toolbar)};
-  const domainAction=page.locator('table.domain-table [data-v270-action="domain"]:visible').first();
-  await domainAction.waitFor({state:'visible',timeout:10000});
-  const domainId=await domainAction.getAttribute('data-id');
-  await domainAction.click();
-  await page.waitForFunction(id=>location.hash===`#domain/${encodeURIComponent(id)}`,domainId,{timeout:10000});
+  const domainId=await openDomainDetail();
   report.domain.detail_hash=await page.evaluate(()=>location.hash);
   await page.goBack();
   await page.waitForFunction(()=>location.hash==='#domains',null,{timeout:10000});
@@ -62,15 +69,20 @@ try{
   report.domain.after_browser_back={query:await domainList.input.inputValue(),count:await currentCount(domainList.toolbar)};
   await page.screenshot({path:`${evidence}/01-domains-after-browser-back.png`,fullPage:true,animations:'disabled'});
 
+  // Current product route: quick menu -> detail -> V2.75 explicit contextual return button.
   await domainList.input.fill('infra-home');
   await page.waitForTimeout(250);
-  await page.locator('table.domain-table [data-v270-action="domain"]:visible').first().click();
-  await page.locator('.v270-breadcrumb').waitFor({state:'visible',timeout:10000});
-  await page.locator('.v270-breadcrumb [data-v270-action="goto"][data-id="domains"]').click();
+  await openDomainDetail();
+  const backbar=page.locator('[data-v275-context-backbar]');
+  await backbar.waitFor({state:'visible',timeout:10000});
+  const backButton=backbar.locator('[data-v275-go="#domains"]');
+  await backButton.waitFor({state:'visible',timeout:10000});
+  await backButton.click();
   await page.waitForFunction(()=>location.hash==='#domains',null,{timeout:10000});
   domainList=await waitList('domains');
   await page.waitForTimeout(300);
-  report.domain.after_breadcrumb={query:await domainList.input.inputValue(),count:await currentCount(domainList.toolbar)};
+  report.domain.after_context_back={query:await domainList.input.inputValue(),count:await currentCount(domainList.toolbar)};
+  report.domain.id=domainId;
 
   await page.goto(`${base}/index.php?audit=${Date.now()}#servers`,{waitUntil:'domcontentloaded'});
   let serverList=await waitList('servers');
@@ -110,7 +122,7 @@ try{
 
   const expectedDomain='infra-home',expectedServer='v260-edge-01';
   if(report.domain.after_browser_back.query!==expectedDomain)throw new Error(`domain browser-back query lost: ${report.domain.after_browser_back.query}`);
-  if(report.domain.after_breadcrumb.query!==expectedDomain)throw new Error(`domain breadcrumb query lost: ${report.domain.after_breadcrumb.query}`);
+  if(report.domain.after_context_back.query!==expectedDomain)throw new Error(`domain context-back query lost: ${report.domain.after_context_back.query}`);
   if(report.server.after_browser_back.query!==expectedServer)throw new Error(`server browser-back query lost: ${report.server.after_browser_back.query}`);
   if(report.mobile.server_after_back.query!==expectedServer)throw new Error(`mobile server query lost: ${report.mobile.server_after_back.query}`);
   if(report.mobile.server_after_back.overflow>1)throw new Error(`mobile overflow ${report.mobile.server_after_back.overflow}`);
