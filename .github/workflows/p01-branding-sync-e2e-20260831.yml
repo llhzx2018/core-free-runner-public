@@ -1,0 +1,112 @@
+name: P01 Branding Sync E2E
+on:
+  push:
+    branches: [diag/p01-branding-sync-e2e-20260831]
+    paths: [.github/workflows/p01-branding-sync-e2e-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 7a9e9fd3e2505e85d7aa5781da8b23db7d961a9f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-branding-sync/evidence
+      PORT: '18496'
+      ADMIN_PASS: P01BrandingSyncPass
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup and test logo
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-branding-sync; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git -C product status --porcelain)"
+          python3 - <<'PY'
+          import struct,zlib,binascii
+          w,h=64,32
+          raw=b''.join(b'\x00'+bytes([15,118,110])*w for _ in range(h))
+          def chunk(t,d):
+              return struct.pack('>I',len(d))+t+d+struct.pack('>I',binascii.crc32(t+d)&0xffffffff)
+          png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b'')
+          open('/tmp/p01-branding-sync/test-logo.png','wb').write(png)
+          PY
+          file /tmp/p01-branding-sync/test-logo.png | tee "$EVID/logo-file.txt"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-branding-sync.pid
+          COOKIE=/tmp/p01-branding-sync.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Branding Sync' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Chromium branding upload sync delete chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-branding-sync/pw; cd /tmp/p01-branding-sync/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18496/';const A=(v,m)=>{if(!v)throw Error(m)};const abs=u=>new URL(u,base).href;
+          async function overflow(p,label){const n=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(n===0,label+' overflow='+n);return n;}
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const admin=await b.newContext({viewport:{width:390,height:844}});
+            const lr=await admin.request.post(base+'api.php?action=login',{data:{password:'P01BrandingSyncPass'}});A(lr.ok(),'login status');A((await lr.json()).ok,'login payload');
+            const p=await admin.newPage();p.setDefaultTimeout(8000);
+            const out={source:process.env.SOURCE,viewport:{width:390,height:844}};
+            await p.goto(base+'settings.php#brand',{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>document.querySelector('#settingsRoot')?.getAttribute('aria-busy')==='false');
+            A(await p.locator('#logoPreview img').count()===0,'fresh preview unexpectedly custom');A(await p.locator('#deleteLogo').isHidden(),'fresh delete logo should be hidden');out.initialOverflow=await overflow(p,'settings fresh');
+            await p.locator('#logoFile').setInputFiles('/tmp/p01-branding-sync/test-logo.png');await p.waitForFunction(()=>document.querySelector('#settingsState')?.textContent.includes('品牌素材已更新'));
+            A(await p.locator('#logoPreview img').count()===1,'settings preview logo missing');A(!(await p.locator('#deleteLogo').isHidden()),'delete logo should be visible');
+            const previewSrc=await p.locator('#logoPreview img').getAttribute('src');A(previewSrc,'preview src missing');out.upload={previewSrc,settingsOverflow:await overflow(p,'settings upload')};await p.screenshot({path:process.env.EVID+'/settings-logo-390.png',fullPage:true});
+            const boot=await admin.request.get(base+'api.php?action=bootstrap');A(boot.ok(),'admin bootstrap status');const bj=await boot.json();A(bj.ok&&bj.site&&bj.site.branding&&bj.site.branding.hasLogo===true,'admin bootstrap hasLogo');A(abs(bj.site.branding.logoUrl)===abs(previewSrc),'preview/bootstrap logo mismatch');out.branding=bj.site.branding;
+            const ar=await admin.request.get(abs(bj.site.branding.logoUrl));A(ar.ok(),'brand asset fetch failed '+ar.status());const bytes=await ar.body();A(bytes.length>32,'brand asset too small');out.asset={status:ar.status(),bytes:bytes.length};
+            await p.setViewportSize({width:1440,height:900});await p.goto(base+'links-admin.php',{waitUntil:'domcontentloaded'});const adminLogo=p.locator('.vf-rail-mark img');A(await adminLogo.count()===1,'admin shell logo missing');A(abs(await adminLogo.getAttribute('src'))===abs(bj.site.branding.logoUrl),'admin shell logo mismatch');out.adminShell={logo:'PASS',overflow:await overflow(p,'admin shell')};await p.screenshot({path:process.env.EVID+'/admin-shell-logo-1440.png',fullPage:true});
+            const pub=await b.newContext({viewport:{width:390,height:844}});const q=await pub.newPage();q.setDefaultTimeout(8000);await q.goto(base+'index.php',{waitUntil:'domcontentloaded'});await q.waitForSelector('#brandMark img');const pubSrc=await q.locator('#brandMark img').getAttribute('src');A(abs(pubSrc)===abs(bj.site.branding.logoUrl),'public logo mismatch');out.public={logo:'PASS',overflow:await overflow(q,'public logo')};await q.screenshot({path:process.env.EVID+'/public-logo-390.png',fullPage:true});
+            await p.setViewportSize({width:390,height:844});await p.goto(base+'settings.php#brand',{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>document.querySelector('#settingsRoot')?.getAttribute('aria-busy')==='false');A(!(await p.locator('#deleteLogo').isHidden()),'delete button absent before reset');await p.locator('#deleteLogo').click();await p.waitForFunction(()=>document.querySelector('#settingsState')?.textContent.includes('已恢复默认品牌素材'));
+            A(await p.locator('#logoPreview img').count()===0,'settings preview not reset');A(await p.locator('#deleteLogo').isHidden(),'delete logo not hidden after reset');out.resetSettings=await overflow(p,'settings reset');
+            const boot2=await admin.request.get(base+'api.php?action=bootstrap');const b2=await boot2.json();A(b2.ok&&b2.site.branding.hasLogo===false,'bootstrap hasLogo not reset');A(!b2.site.branding.logoUrl,'bootstrap logoUrl not empty');
+            await p.setViewportSize({width:1440,height:900});await p.goto(base+'links-admin.php',{waitUntil:'domcontentloaded'});A(await p.locator('.vf-rail-mark img').count()===0,'admin shell custom logo persisted');A((await p.locator('.vf-rail-mark').textContent()).trim()==='VF','admin shell fallback not VF');out.adminReset='PASS';
+            await q.reload({waitUntil:'domcontentloaded'});await q.waitForFunction(()=>document.querySelector('#brandMark')?.textContent.trim()==='VF'&&!document.querySelector('#brandMark img'));out.publicReset={fallback:'PASS',overflow:await overflow(q,'public reset')};
+            out.verdict='PASS_NO_PRODUCT_CHANGE';fs.writeFileSync(process.env.EVID+'/branding-sync.json',JSON.stringify(out,null,2));console.log('P01_BRANDING_SYNC=PASS_NO_PRODUCT_CHANGE');console.log(JSON.stringify(out));
+            await pub.close();await admin.close();await b.close();
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" EVID="$EVID" node diag.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and brand cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));$b=(new VfRepository($db))->getBranding();echo 'INTEGRITY='.$i."\nFK=".$fk."\nHAS_LOGO=".(!empty($b['hasLogo'])?'1':'0')."\n";if($i!=='ok'||$fk!==0||!empty($b['hasLogo']))exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-branding-sync-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-branding-sync.pid 2>/dev/null)" 2>/dev/null || true
