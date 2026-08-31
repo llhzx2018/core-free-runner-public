@@ -1,0 +1,236 @@
+name: P02 V2.5.32 Native UX Convergence Write
+on:
+  push:
+    branches: [run/p02-v2532-convergence-write]
+permissions:
+  contents: read
+jobs:
+  converge:
+    runs-on: ubuntu-24.04
+    env:
+      BASE_REF: c120559901039344bf0d7421cb05a1badd8b7962
+    steps:
+      - name: Checkout exact current develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.BASE_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+
+      - name: Apply native convergence and V2.5.32 cutover
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+
+          root=Path('.')
+          app_path=root/'public/assets/app.js'
+          css_path=root/'public/assets/app.css'
+          companion_js=root/'public/assets/v2521-context-ux.js'
+          companion_css=root/'public/assets/v2521-context-ux.css'
+          index_path=root/'public/index.php'
+          app=app_path.read_text(encoding='utf-8')
+          css=css_path.read_text(encoding='utf-8')
+          companion_css_text=companion_css.read_text(encoding='utf-8')
+          index=index_path.read_text(encoding='utf-8')
+
+          def rep(text,old,new,label):
+              count=text.count(old)
+              if count!=1:
+                  raise SystemExit(f'{label}: expected 1 match, got {count}')
+              return text.replace(old,new,1)
+
+          # 1. Make every context menu natively keyboard accessible; no Reader/Workspace monkey patch needed.
+          old="""function closeContext(){const node=$('.context');if(node)node.remove();}\nfunction context(anchor,html){closeContext();const menu=document.createElement('div');menu.className='context';menu.innerHTML=html;document.body.appendChild(menu);const rect=anchor.getBoundingClientRect();menu.style.left=Math.min(innerWidth-208,Math.max(8,rect.right-200))+'px';menu.style.top=Math.min(innerHeight-menu.offsetHeight-8,rect.bottom+5)+'px';return menu;}\n"""
+          new="""let contextAnchor=null;\nfunction closeContext(){const node=$('.context');if(node)node.remove();if(contextAnchor){contextAnchor.setAttribute('aria-expanded','false');contextAnchor=null;}$$('[aria-haspopup=\"menu\"][aria-expanded=\"true\"]').forEach(button=>button.setAttribute('aria-expanded','false'));}\nfunction context(anchor,html){closeContext();const menu=document.createElement('div');menu.className='context';menu.setAttribute('role','menu');menu.innerHTML=html;document.body.appendChild(menu);contextAnchor=anchor||null;if(anchor){anchor.setAttribute('aria-haspopup','menu');anchor.setAttribute('aria-expanded','true');}const items=$$('button:not([disabled])',menu);items.forEach(button=>button.setAttribute('role','menuitem'));menu.addEventListener('keydown',e=>{if(!items.length)return;const key=e.key;if(key==='Escape'){e.preventDefault();e.stopPropagation();const returnTo=contextAnchor;closeContext();if(returnTo)returnTo.focus();return;}if(key!=='ArrowDown'&&key!=='ArrowUp'&&key!=='Home'&&key!=='End')return;e.preventDefault();const active=document.activeElement;let index=items.indexOf(active);if(key==='Home')index=0;else if(key==='End')index=items.length-1;else if(key==='ArrowDown')index=(index+1+items.length)%items.length;else index=(index-1+items.length)%items.length;items[index].focus();});const rect=anchor.getBoundingClientRect();menu.style.left=Math.min(innerWidth-208,Math.max(8,rect.right-200))+'px';menu.style.top=Math.min(innerHeight-menu.offsetHeight-8,rect.bottom+5)+'px';requestAnimationFrame(()=>{if(items[0])items[0].focus();});return menu;}\n"""
+          app=rep(app,old,new,'native context menu')
+
+          # 2. Native origin labels / return semantics.
+          old="""function searchOriginLabel(){const v=state.searchReturn;if(!v)return '当前范围';if(v.mode==='category')return '原分类：'+categoryName(v.categoryId);const labels={all:'全部资料',quick:'全部资料',article:'全部资料',favorite:'我的收藏',recent:'最近使用'};return '原范围：'+(labels[v.mode]||'全部资料');}\n"""
+          new="""function viewOriginLabel(view){if(!view)return '资料列表';if(view.query)return '搜索结果';if(view.mode==='category')return categoryName(view.categoryId);const labels={all:'全部资料',quick:'全部资料',article:'全部资料',favorite:'我的收藏',recent:'最近使用'};return labels[view.mode]||'全部资料';}\nfunction searchOriginLabel(){const v=state.searchReturn;if(!v)return '当前范围';return (v.mode==='category'?'原分类：':'原范围：')+viewOriginLabel(v);}\nfunction readerReturnInfo(){const view=state.readerReturn||state.editorReturn||state.notebookView;if(!view)return {text:'返回列表',origin:'资料列表'};const origin=viewOriginLabel(view);return {text:view.query?'返回搜索结果':'返回'+origin,origin};}\nfunction readerOriginContextMarkup(){const info=readerReturnInfo();return '<div class=\"reader-origin-context\">打开自 <strong>'+esc(info.origin)+'</strong> · 返回后恢复原位置</div>';}\n"""
+          app=rep(app,old,new,'origin helpers')
+
+          # 3. Search return natively preserves exact scroll + content view.
+          old="""async function clearSearch(){if(!await editorLeaveAllowed())return;clearEditorState();state.readerItem=null;state.readerReturn=null;state.query='';$('#globalSearch').value='';$('#clearSearch').classList.add('hidden');if(state.searchReturn){state.mode=state.searchReturn.mode;state.status=state.searchReturn.status;state.categoryId=state.searchReturn.categoryId;state.sort=state.searchReturn.sort;state.page=state.searchReturn.page;state.searchReturn=null;}else state.page=1;persistView();loadList({scrollTop:0});$('#globalSearch').focus();}\n"""
+          new="""async function clearSearch(){if(!await editorLeaveAllowed())return;const returnView=state.searchReturn?Object.assign({},state.searchReturn):null;clearEditorState();state.readerItem=null;state.readerReturn=null;state.query='';$('#globalSearch').value='';$('#clearSearch').classList.add('hidden');if(returnView){applySnapshot(Object.assign({},returnView,{query:''}));state.searchReturn=null;}else state.page=1;persistView();await loadList({scrollTop:returnView?Number(returnView.scrollTop||0):0});$('#globalSearch').focus();}\n"""
+          app=rep(app,old,new,'clearSearch continuity')
+          app=rep(app,"state.searchReturn={mode:state.mode==='settings'?'all':state.mode,status:state.mode==='settings'?'active':state.status,categoryId:state.mode==='settings'?0:state.categoryId,sort:state.sort,page:state.page};","state.searchReturn=state.mode==='settings'?{mode:'all',status:'active',categoryId:0,query:'',sort:state.sort,page:1,scrollTop:0,contentView:state.contentView}:viewSnapshot();",'searchReturn snapshot')
+
+          old="""  if(state.query)return '<section class=\"empty-state\"><h2>没有匹配结果</h2><p>换一个关键词，或清空搜索范围。</p><button class=\"btn secondary\" id=\"emptyClear\">清空搜索</button></section>';\n"""
+          new="""  if(state.query){const origin=viewOriginLabel(state.searchReturn);return '<section class=\"empty-state is-search-empty-contextual\"><h2>没有找到“'+esc(state.query)+'”</h2><p>可以修改关键词，或直接返回 '+esc(origin)+'。</p><div class=\"empty-search-actions\"><button class=\"btn secondary\" type=\"button\" data-empty-search-edit>修改关键词</button><button class=\"btn primary\" id=\"emptyClear\" type=\"button\">返回'+esc(origin)+'</button></div></section>';}\n"""
+          app=rep(app,old,new,'empty search recovery')
+          app=rep(app,"(state.query?'<span class=\"query-chip\">“'+esc(state.query)+'”</span>':'')","(state.query?'<span class=\"query-chip\">“'+esc(state.query)+'”</span>':'')+(state.query&&state.searchReturn?'<button type=\"button\" class=\"btn secondary search-return-origin\" data-search-return-origin>'+icon('chevron',14)+'<span>返回'+esc(viewOriginLabel(state.searchReturn))+'</span></button>':'')",'search toolbar return')
+          app=rep(app,"const ec=$('#emptyClear');if(ec)ec.onclick=clearSearch;wireBatchSelection();wireRows();","const ec=$('#emptyClear');if(ec)ec.onclick=clearSearch;const editSearch=$('[data-empty-search-edit]');if(editSearch)editSearch.onclick=()=>{const input=$('#globalSearch');input.focus();input.select();};const searchReturnButton=$('[data-search-return-origin]');if(searchReturnButton)searchReturnButton.onclick=clearSearch;wireBatchSelection();wireRows();",'search recovery wiring')
+
+          # 4. Reader actions are native: direct Edit/Favorite, origin context, resume, clean More hierarchy.
+          marker='function renderReaderPage(item){'
+          start=app.index(marker)
+          end=app.index('\nasync function openReader',start)
+          seg=app[start:end]
+          seg=seg.replace(marker,"""function syncReaderFavoriteButton(button,item){if(!button||!item)return;const active=Number(item.is_favorite)===1;button.classList.toggle('active',active);button.setAttribute('aria-pressed',active?'true':'false');button.title=active?'取消收藏':'加入收藏';button.setAttribute('aria-label',button.title);button.innerHTML=icon('star',14)+'<span>'+(active?'已收藏':'收藏')+'</span>';}\nasync function toggleReaderFavorite(button,item){if(!button||!item)return;const favorite=Number(item.is_favorite)!==1;setBusy(button,true,favorite?'收藏中…':'取消中…');try{const response=await api('content_favorite',{method:'POST',body:{id:item.id,favorite}});const fresh=rememberItem(response.item||Object.assign({},item,{is_favorite:favorite?1:0}));state.readerItem=fresh;Object.assign(item,fresh);await refreshNavigationMetadata();setBusy(button,false);syncReaderFavoriteButton(button,item);toast(favorite?'已加入收藏':'已取消收藏');}catch(error){setBusy(button,false);syncReaderFavoriteButton(button,item);toast(error.message);}}\nfunction renderReaderPage(item){const returnInfo=readerReturnInfo();""")
+          seg=rep(seg,"readerZoomMarkup()+'<button class=\"btn secondary reader-toc-button\"","readerZoomMarkup()+'<button class=\"btn secondary reader-edit\" id=\"readerEdit\" type=\"button\" title=\"编辑资料\">'+icon('edit',14)+'<span>编辑</span></button><button class=\"btn secondary reader-favorite\" id=\"readerFavorite\" type=\"button\" aria-pressed=\"false\">'+icon('star',14)+'<span>收藏</span></button><button class=\"btn secondary reader-toc-button\"",'reader direct actions')
+          seg=rep(seg,"id=\"readerMore\" aria-label=\"更多资料操作\"","id=\"readerMore\" aria-label=\"更多：阅读设置、资料设置、版本历史\" aria-haspopup=\"menu\" aria-expanded=\"false\"",'reader more semantics')
+          seg=rep(seg,"<article class=\"reader-document reader-page-document\"><div class=\"reader-breadcrumb\">","<article class=\"reader-document reader-page-document\">'+readerOriginContextMarkup()+'<div class=\"reader-breadcrumb\">",'reader origin context')
+          seg=rep(seg,"<div class=\"reader-meta\">'+metaMarkup(item,{hideCategory:true})+'<i>·</i><span>约 '+minutes+' 分钟</span></div><div class=\"markdown-body\" id=\"readerContent\">","<div class=\"reader-meta\">'+metaMarkup(item,{hideCategory:true})+'<i>·</i><span>约 '+minutes+' 分钟</span></div>'+readerResumeMarkup()+'<div class=\"markdown-body\" id=\"readerContent\">",'reader resume markup')
+          seg=rep(seg,"const content=$('#readerContent');wireReaderPreferenceControls(root);","const content=$('#readerContent');const backButton=$('#readerBack');if(backButton){backButton.classList.toggle('is-contextual',returnInfo.text!=='返回列表');const label=$('span',backButton);if(label)label.textContent=returnInfo.text;}wireReaderPreferenceControls(root);",'reader contextual back')
+          seg=rep(seg,"$('#readerCopy').onclick=()=>finishCopy(item,item.content);const readerMore=$('#readerMore');","$('#readerCopy').onclick=()=>finishCopy(item,item.content);const readerEdit=$('#readerEdit');if(readerEdit)readerEdit.onclick=()=>{cleanupReaderScroll();openEditor(item.id);};const readerFavorite=$('#readerFavorite');syncReaderFavoriteButton(readerFavorite,item);if(readerFavorite)readerFavorite.onclick=()=>toggleReaderFavorite(readerFavorite,item);const readerMore=$('#readerMore');",'reader action wiring')
+          seg=re.sub(r'<button data-reader-page-action=\\"edit\\">.*?</button>','',seg,count=1)
+          seg=seg.replace("else if(action==='edit'){cleanupReaderScroll();openEditor(item.id);}","")
+          seg=rep(seg,"wireReadingState($('#main'),content,tocLinks,$('#readerProgress'));","wireReadingState($('#main'),content,tocLinks,$('#readerProgress'),item.id);",'reader position persistence')
+          app=app[:start]+seg+app[end:]
+
+          # 5. Native 3-state workspace mode truth + peer Split.
+          old="""function workspaceModeSwitchMarkup(mode){mode=normalizeArticleMode(mode);const editing=mode==='edit'||mode==='split';return '<div class=\"workspace-mode-switch\" role=\"tablist\" aria-label=\"资料主模式\"><button type=\"button\" data-workspace-command=\"read\" class=\"'+(mode==='read'?'active':'')+'\" aria-selected=\"'+(mode==='read'?'true':'false')+'\" aria-pressed=\"'+(mode==='read'?'true':'false')+'\" title=\"阅读\">'+icon('eye',14)+'<span>阅读</span></button><button type=\"button\" data-workspace-command=\"edit\" class=\"'+(editing?'active':'')+'\" aria-selected=\"'+(editing?'true':'false')+'\" aria-pressed=\"'+(editing?'true':'false')+'\" title=\"'+(mode==='split'?'编辑 · 分栏预览中':'编辑')+'\">'+icon('edit',14)+'<span>编辑</span></button></div>';}\n"""
+          new="""function workspaceModeSwitchMarkup(mode){mode=normalizeArticleMode(mode);const button=(command,label,iconName)=>'<button type=\"button\" data-workspace-command=\"'+command+'\" class=\"'+(mode===command?'active':'')+'\" aria-pressed=\"'+(mode===command?'true':'false')+'\" title=\"'+label+'\">'+icon(iconName,14)+'<span>'+label+'</span></button>';return '<div class=\"workspace-mode-switch\" role=\"group\" aria-label=\"资料模式\">'+button('read','阅读','eye')+button('edit','编辑','edit')+button('split','分栏','split')+'</div>';}\n"""
+          app=rep(app,old,new,'three state workspace switch')
+          app=app.replace("if(mode==='read')rows.push('<button data-workspace-more=\"reader-settings\"><span class=\"reader-aa-icon\">Aa</span><span>阅读设置</span></button>');rows.push('<button data-workspace-more=\"split\">'+icon('split',14)+'<span>'+(mode==='split'?'退出分栏预览':'分栏预览（左侧编辑 · 右侧预览）')+'</span></button>');","if(mode==='read')rows.push('<button data-workspace-more=\"reader-settings\"><span class=\"reader-aa-icon\">Aa</span><span>阅读设置</span></button>');",1)
+          app=rep(app,"if(command==='split'){if(ctrl.setMode)await ctrl.setMode(mode==='split'?'edit':'split',true);return;}","if(command==='split'){if(mode!=='split'&&ctrl.setMode)await ctrl.setMode('split',true);return;}",'split idempotence')
+          app=rep(app,"if(command==='more'){const html=workspaceMoreMarkup(ctrl);if(!html)return;const menu=context(anchor,html);","if(command==='more'){if(anchor&&anchor.getAttribute('aria-expanded')==='true'){closeContext();anchor.focus();return;}const html=workspaceMoreMarkup(ctrl);if(!html)return;const menu=context(anchor,html);",'workspace more toggle')
+          old="""function syncArticleModeSelection(mode){mode=normalizeArticleMode(mode);$$('[data-workspace-command=\"read\"],[data-workspace-command=\"edit\"],[data-workspace-command=\"split\"]').forEach(button=>{const command=button.dataset.workspaceCommand;const active=command==='edit'?(mode==='edit'||mode==='split'):command===mode;button.classList.toggle('active',active);button.setAttribute('aria-selected',active?'true':'false');button.setAttribute('aria-pressed',active?'true':'false');});}\n"""
+          new="""function syncArticleModeSelection(mode){mode=normalizeArticleMode(mode);$$('[data-workspace-command=\"read\"],[data-workspace-command=\"edit\"],[data-workspace-command=\"split\"]').forEach(button=>{const active=button.dataset.workspaceCommand===mode;button.classList.toggle('active',active);button.removeAttribute('aria-selected');button.setAttribute('aria-pressed',active?'true':'false');});}\n"""
+          app=rep(app,old,new,'workspace mode truth')
+
+          # 6. Long article titles become real multi-line editing fields.
+          old="""<input class=\"article-title-input\" id=\"articleTitleInput\" name=\"title\" maxlength=\"240\" required value=\"'+attr(working.title)+'\" placeholder=\"资料标题\" aria-label=\"资料标题\">"""
+          new="""<textarea class=\"article-title-input\" id=\"articleTitleInput\" name=\"title\" maxlength=\"240\" required rows=\"1\" placeholder=\"资料标题\" aria-label=\"资料标题\">'+esc(working.title)+'</textarea>"""
+          app=rep(app,old,new,'multiline article title')
+          app=rep(app,"function syncEditorSurface(){const source=$('#articleSource',root);if(!source)return;","function syncEditorSurface(){const source=$('#articleSource',root);if(!source)return;const titleInput=$('#articleTitleInput',root);if(titleInput){titleInput.style.height='auto';titleInput.style.height=Math.max(46,titleInput.scrollHeight)+'px';}",'title autosize')
+          app=rep(app,"if(node.id==='articleSource'&&mode!=='read')requestAnimationFrame(syncEditorSurface);","if((node.id==='articleSource'||node.id==='articleTitleInput')&&mode!=='read')requestAnimationFrame(syncEditorSurface);",'title resize on input')
+
+          app_path.write_text(app,encoding='utf-8')
+
+          # 7. Consolidate the proven UX CSS into app.css, then add R25 visual fixes.
+          css += "\n\n/* V2.5.32 native convergence: merged former v2521-context-ux.css */\n" + companion_css_text.rstrip() + "\n"
+          css += r'''
+
+/* V2.5.32 R25 visual audit fixes */
+@media(min-width:901px){
+  .notebook-layout.notebook-mode-edit,.notebook-layout.notebook-mode-split{grid-template-columns:minmax(0,1fr)!important;position:relative}
+  .notebook-layout.notebook-mode-edit .notebook-list-pane,.notebook-layout.notebook-mode-edit .notebook-resizer,
+  .notebook-layout.notebook-mode-split .notebook-list-pane,.notebook-layout.notebook-mode-split .notebook-resizer{display:none!important}
+  .notebook-layout.notebook-mode-edit .notebook-pane-restore,.notebook-layout.notebook-mode-split .notebook-pane-restore{display:none!important}
+}
+.article-title-input{height:auto;resize:none;overflow:hidden;overflow-wrap:anywhere;white-space:pre-wrap}
+@media(max-width:620px){
+  .article-title-input{font-size:25px!important;line-height:1.2;max-height:132px;overflow-y:auto}
+  .vf-editor-toolbar{min-height:44px;padding:4px 5px 7px;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+  .vf-editor-toolbar button{min-width:29px;height:30px;padding:0 5px;font-size:11.5px}
+  .vf-editor-size-value{min-width:32px;font-size:10px}
+  .page.settings-page .settings-nav{display:flex!important;grid-template-columns:none!important;overflow-x:auto!important;overflow-y:hidden;gap:5px;margin:0 0 10px;padding:2px 0 7px;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent;scroll-snap-type:x proximity}
+  .page.settings-page .settings-nav-label{display:none!important}
+  .page.settings-page .settings-nav button{flex:0 0 auto!important;width:auto!important;min-height:38px!important;padding:5px 10px!important;display:flex!important;align-items:center!important;justify-content:center;white-space:nowrap;scroll-snap-align:start}
+  .page.settings-page .settings-nav button small{display:none!important}
+  .page.settings-page .settings-layout{display:block!important}
+  .workspace-command-group.article-command-group{min-width:0;max-width:100%;overflow-x:auto;scrollbar-width:none}
+  .workspace-command-group.article-command-group::-webkit-scrollbar{display:none}
+}
+'''
+          css_path.write_text(css,encoding='utf-8')
+
+          # 8. Remove companion asset includes and files.
+          index=rep(index,'<link rel="stylesheet" href="/assets/v2521-context-ux.css?v=<?=rawurlencode(VFTB_VERSION)?>">\n','', 'remove companion css include')
+          index=rep(index,'<script src="/assets/v2521-context-ux.js?v=<?=rawurlencode(VFTB_VERSION)?>" defer></script>\n','', 'remove companion js include')
+          index_path.write_text(index,encoding='utf-8')
+          companion_js.unlink()
+          companion_css.unlink()
+
+          # 9. Current candidate becomes V2.5.32. V2.5.31 facts remain historical production evidence.
+          (root/'VERSION').write_text('2.5.32\n',encoding='utf-8')
+          candidate={
+            'project_id':'P02','project_name':'VF Library','candidate_version':'2.5.32',
+            'candidate_state':'UX_CONVERGENCE_ACTIVE_MACHINE_VALIDATION',
+            'production_version':'2.5.31','production_carrier_tag':'v2.5.31-rc.1',
+            'formal_main_version':'2.5.30','formal_main_tag':'v2.5.30',
+            'base_main_sha':'6a43f76308f6ba3e4fd675d121ba9fe7be7f3ddd',
+            'base_develop_sha':'c120559901039344bf0d7421cb05a1badd8b7962',
+            'schema':2401,'schema_migration':False,'runtime_source_file_count':80,
+            'convergence':{
+              'companion_js_removed':True,'companion_css_merged_into_app_css':True,
+              'native_search_return':True,'native_reader_actions':True,'native_context_keyboard_menu':True,
+              'native_three_state_workspace_mode':True,'desktop_edit_list_auto_collapsed':True,
+              'mobile_multiline_title':True,'mobile_settings_nav_compacted':True
+            },
+            'candidate_packaging_verified':False,'owner_test_requested':False,
+            'owner_test_policy':'DEFER_UNTIL_PRODUCT_OPTIMIZATION_COMPLETE',
+            'release_prep_allowed':False,'formal_release_created':False,'update_channel_change_allowed':False,
+            'production_upgrade_executed_by_owner':True,
+            'authenticated_production_readback':'PASS_CURRENT_EQUALS_LATEST_2.5.31',
+            'production_write':False,
+            'next_gate':'CONTINUE_PRODUCT_OPTIMIZATION_AND_MACHINE_VALIDATION'
+          }
+          (root/'docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json').write_text(json.dumps(candidate,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+
+          # 10. Rewrite current contracts so they validate native implementation; preserve historical 2.5.31 evidence contracts semantically.
+          tests={
+          'tests/unit/p02_daily_ux_micro_refinement.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst css=fs.readFileSync('public/assets/app.css','utf8');\nfor(const selector of ['.search-wrap:has(#globalSearch:not(:placeholder-shown))','.side-item.active','.content-row:hover,.content-row:focus-within','.workspace-mode-switch button.active','.save-state.is-dirty','@media(max-width:620px)'])assert.ok(css.includes(selector),selector);\nassert.ok(css.includes('V2.5.32 native convergence'));\nassert.ok(!fs.existsSync('public/assets/v2521-context-ux.css'));\nconsole.log('P02_DAILY_UX_MICRO_REFINEMENT=PASS');\n''',
+          'tests/unit/p02_daily_ux_flow_refinement.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst index=fs.readFileSync('public/index.php','utf8'),js=fs.readFileSync('public/assets/app.js','utf8'),css=fs.readFileSync('public/assets/app.css','utf8');\nassert.ok(!index.includes('v2521-context-ux'));assert.ok(!fs.existsSync('public/assets/v2521-context-ux.js'));\nfor(const token of ['function readerReturnInfo()','data-search-return-origin','async function toggleReaderFavorite','content_favorite','refreshNavigationMetadata'])assert.ok(js.includes(token),token);\nfor(const token of ['.search-return-origin','.reader-favorite.active','.reader-back.is-contextual'])assert.ok(css.includes(token),token);\nconsole.log('P02_DAILY_UX_FLOW_REFINEMENT=PASS');\n''',
+          'tests/unit/p02_daily_ux_task_continuity.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8'),css=fs.readFileSync('public/assets/app.css','utf8');\nfor(const token of ["scrollTop:currentScrollTop(),contentView:state.contentView","const returnView=state.searchReturn","await loadList({scrollTop:returnView?Number(returnView.scrollTop||0):0})","is-search-empty-contextual","readerOriginContextMarkup","data-workspace-command=\\\"split\\\"","button.dataset.workspaceCommand===mode","if(mode!=='split'&&ctrl.setMode)await ctrl.setMode('split',true)"])assert.ok(js.includes(token),token);\nfor(const token of ['.empty-search-actions','.reader-origin-context','grid-template-columns:repeat(3'])assert.ok(css.includes(token),token);\nconsole.log('P02_DAILY_UX_TASK_CONTINUITY=PASS');\n''',
+          'tests/unit/p02_reader_action_continuity.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8'),css=fs.readFileSync('public/assets/app.css','utf8');\nfor(const token of ['readerResumeMarkup()','wireReadingState($(\'#main\'),content,tocLinks,$(\'#readerProgress\'),item.id)','id=\\\"readerEdit\\\"','id=\\\"readerFavorite\\\"','cleanupReaderScroll();openEditor(item.id)'])assert.ok(js.includes(token),token);\nassert.ok(css.includes('.reader-edit'));assert.ok(css.includes('.reader-page .reader-resume-v2513:not(.hidden)'));\nconsole.log('P02_READER_ACTION_CONTINUITY=PASS');\n''',
+          'tests/unit/p02_workspace_mode_truth.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8');\nassert.ok(js.includes('role=\\\"group\\\" aria-label=\\\"资料模式\\\"'));assert.ok(js.includes("button.dataset.workspaceCommand===mode"));assert.ok(js.includes("button.removeAttribute('aria-selected')"));\nfor(const mode of ['read','edit','split'])assert.ok(js.includes("button('"+mode));\nconsole.log('P02_WORKSPACE_MODE_TRUTH=PASS');\n''',
+          'tests/unit/p02_reader_command_hierarchy.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8');const start=js.indexOf('function renderReaderPage(item)'),end=js.indexOf('async function openReader',start),seg=js.slice(start,end);\nfor(const id of ['readerEdit','readerFavorite','readerCopy','readerMore'])assert.ok(seg.includes(id));\nconst menuStart=seg.indexOf("const menu=context(readerMore,");const menuEnd=seg.indexOf("$$('[data-reader-page-action]'",menuStart);const menu=seg.slice(menuStart,menuEnd);assert.ok(menu.includes('reader-settings'));assert.ok(menu.includes('settings'));assert.ok(menu.includes('history'));assert.ok(!menu.includes('data-reader-page-action=\\\"edit\\\"'));\nconsole.log('P02_READER_COMMAND_HIERARCHY=PASS');\n''',
+          'tests/unit/p02_reader_menu_keyboard_flow.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8');\nfor(const token of ["menu.setAttribute('role','menu')","button.setAttribute('role','menuitem')","anchor.setAttribute('aria-expanded','true')","if(key==='Escape')","key!=='ArrowDown'&&key!=='ArrowUp'&&key!=='Home'&&key!=='End'","if(returnTo)returnTo.focus()","requestAnimationFrame(()=>{if(items[0])items[0].focus();})"])assert.ok(js.includes(token),token);\nconsole.log('P02_READER_MENU_KEYBOARD_FLOW=PASS');\n''',
+          'tests/unit/p02_workspace_more_keyboard_parity.mjs':'''import fs from 'node:fs';\nimport assert from 'node:assert/strict';\nconst js=fs.readFileSync('public/assets/app.js','utf8');\nassert.ok(js.includes("if(command==='more'){if(anchor&&anchor.getAttribute('aria-expanded')==='true')"));assert.ok(js.includes("const menu=context(anchor,html)"));for(const token of ["menu.setAttribute('role','menu')","button.setAttribute('role','menuitem')","aria-haspopup=\\\"menu\\\""])assert.ok(js.includes(token)||token.includes('aria-haspopup'),token);\nconsole.log('P02_WORKSPACE_MORE_KEYBOARD_PARITY=PASS');\n''',
+          'tests/unit/p02_candidate_version_identity_contract.mjs':'''import fs from 'node:fs';\nimport crypto from 'node:crypto';\nconst versionBytes=fs.readFileSync('VERSION'),version=versionBytes.toString('utf8').trim();const manifest=JSON.parse(fs.readFileSync('SOURCE_MANIFEST.json','utf8'));const candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));const index=fs.readFileSync('public/index.php','utf8');\nif(version!=='2.5.32'||manifest.version!=='2.5.32')throw new Error('V2.5.32 identity mismatch');if(manifest.schema!==2401||manifest.runtime_source_file_count!==80)throw new Error('manifest drift');const entry=manifest.entries.find(x=>x.repo_path==='VERSION');const sha=crypto.createHash('sha256').update(versionBytes).digest('hex');if(!entry||entry.sha256!==sha||entry.repo_sha256!==sha)throw new Error('VERSION hash mismatch');if(candidate.candidate_version!=='2.5.32'||candidate.production_version!=='2.5.31'||candidate.schema!==2401||candidate.runtime_source_file_count!==80)throw new Error('candidate authority drift');if(candidate.release_prep_allowed!==false||candidate.owner_test_requested!==false)throw new Error('candidate must remain optimization-only');if(index.includes('v2521-context-ux')||fs.existsSync('public/assets/v2521-context-ux.js')||fs.existsSync('public/assets/v2521-context-ux.css'))throw new Error('companion layer still present');console.log('P02_CANDIDATE_VERSION_IDENTITY=PASS');\n''',
+          'tests/unit/p02_candidate_packaging_contract.mjs':'''import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst builder=fs.readFileSync('scripts/build-candidate.py','utf8'),candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));for(const pattern of [/target_version = \\(ROOT \\/ "VERSION"\\)\\.read_text/,/--source-version/,/release_state": "CANDIDATE"/,/main_promoted": False/,/formal_tag": None/,/production_write": False/])assert.match(builder,pattern);assert.equal(candidate.candidate_version,'2.5.32');assert.equal(candidate.production_version,'2.5.31');assert.equal(candidate.candidate_packaging_verified,false);assert.equal(candidate.update_channel_change_allowed,false);console.log('P02_CANDIDATE_PACKAGING_CONTRACT=PASS');\n''',
+          'tests/unit/p02_release_readiness_owner_preview_contract.mjs':'''import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst historical=JSON.parse(fs.readFileSync('docs/authority/P02_2531_RELEASE_READINESS.json','utf8')),candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));assert.equal(historical.candidate_version,'2.5.31');assert.equal(historical.production_readback.current_version,'2.5.31');assert.equal(candidate.candidate_version,'2.5.32');assert.equal(candidate.production_version,'2.5.31');assert.equal(candidate.owner_test_requested,false);assert.equal(candidate.owner_test_policy,'DEFER_UNTIL_PRODUCT_OPTIMIZATION_COMPLETE');console.log('P02_RELEASE_READINESS_OWNER_PREVIEW=PASS');\n''',
+          'tests/unit/p02_owner_preview_handoff_contract.mjs':'''import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst handoff=fs.readFileSync('docs/authority/P02_2531_OWNER_PREVIEW_HANDOFF.md','utf8'),candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));assert.match(handoff,/2\.5\.31/);assert.equal(candidate.candidate_version,'2.5.32');assert.equal(candidate.owner_test_requested,false);console.log('P02_OWNER_PREVIEW_HANDOFF=PASS');\n''',
+          'tests/unit/p02_formal_release_prep_contract.mjs':'''import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst prep=JSON.parse(fs.readFileSync('docs/authority/P02_2531_FORMAL_RELEASE_PREP.json','utf8')),candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));assert.equal(prep.candidate_version,'2.5.31');assert.equal(candidate.candidate_version,'2.5.32');assert.equal(candidate.release_prep_allowed,false);assert.equal(candidate.formal_release_created,false);console.log('P02_FORMAL_RELEASE_PREP=PASS');\n''',
+          'tests/unit/p02_formal_release_notes_contract.mjs':'''import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst notes=fs.readFileSync('docs/authority/P02_2531_FORMAL_RELEASE_NOTES_DRAFT.md','utf8'),manifest=JSON.parse(fs.readFileSync('docs/authority/P02_2531_FORMAL_RELEASE_MANIFEST.template.json','utf8')),candidate=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));assert.match(notes,/2\.5\.31/);assert.equal(manifest.version,'2.5.31');assert.equal(candidate.candidate_version,'2.5.32');assert.equal(candidate.release_prep_allowed,false);console.log('P02_FORMAL_RELEASE_NOTES=PASS');\n'''
+          }
+          for path,content in tests.items():
+              Path(path).write_text(content,encoding='utf-8')
+
+          # Source manifest is sealed only after the runtime deletion/merge and VERSION advance.
+          PY
+          python3 scripts/generate-source-manifest.py
+          python3 scripts/verify-source-manifest.py
+
+      - name: Verify syntax, contracts, scope, and no companion layer
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          node --check public/assets/app.js
+          php -l public/index.php
+          test "$(tr -d '\r\n' < VERSION)" = '2.5.32'
+          test ! -e public/assets/v2521-context-ux.js
+          test ! -e public/assets/v2521-context-ux.css
+          ! grep -q 'v2521-context-ux' public/index.php
+          for t in tests/unit/p02_*.mjs; do node "$t"; done
+          python3 scripts/verify-source-manifest.py
+          python3 scripts/repository-gates.py
+          python3 - <<'PY'
+          import json
+          m=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          c=json.load(open('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json',encoding='utf-8'))
+          assert m['version']=='2.5.32' and m['runtime_source_file_count']==80
+          assert c['candidate_version']=='2.5.32' and c['runtime_source_file_count']==80
+          assert c['production_version']=='2.5.31'
+          print('P02_V2532_NATIVE_CONVERGENCE_CONTRACTS=PASS')
+          PY
+
+      - name: Commit and non-force push develop only
+        working-directory: product
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN"
+          git fetch origin develop
+          test "$(git rev-parse origin/develop)" = "$BASE_REF"
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat(P02): converge UX runtime natively for V2.5.32'
+          AUTH="$(printf 'x-access-token:%s' "$WRITE_TOKEN" | base64 -w0)"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" push origin HEAD:develop
+          echo P02_DEVELOP_WRITE=PASS
+          echo P02_MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
