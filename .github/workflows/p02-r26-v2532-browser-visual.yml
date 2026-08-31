@@ -1,0 +1,143 @@
+name: P02 R26 V2.5.32 Browser Visual Convergence
+on:
+  push:
+    branches: [run/p02-r26-v2532-browser-visual]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCT_REF: 7dff06b2fe73afb41ff58c9e2f53d988c4a3cec2
+      EXPECTED_VERSION: '2.5.32'
+      PORT: '18080'
+    steps:
+      - name: Checkout exact P02 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Install isolated browser runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 curl >/dev/null
+          cd product
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build isolated V2.5.32 site
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r26-v2532"
+          SITE="$RUN_ROOT/site"
+          mkdir -p "$RUN_ROOT" visual-audit
+          bash scripts/build-deploy-tree.sh "$SITE"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = "$EXPECTED_VERSION"
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          BASE_URL="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          PASSWORD="VF-R26-${GITHUB_RUN_ID}!"
+          printf '%s' "$PASSWORD" > "$RUN_ROOT/password"
+          curl -fsS -c "$RUN_ROOT/cookie" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$RUN_ROOT/cookie" -c "$RUN_ROOT/cookie" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = '303'
+          echo "VF_R26_SITE_READY=PASS"
+
+      - name: Run real Chromium task-flow regression
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r26-v2532"
+          VF_UX_E2E_BASE_URL="http://127.0.0.1:$PORT" \
+          VF_UX_E2E_PASSWORD="$(cat "$RUN_ROOT/password")" \
+          VF_UX_E2E_VERSION="$EXPECTED_VERSION" \
+          node tests/e2e/p02_ux_task_flow.mjs
+
+      - name: Capture post-convergence visual audit
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r26-v2532"
+          cat > r26-visual.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base=process.env.BASE_URL,password=process.env.PASSWORD,expected=process.env.EXPECTED_VERSION;
+          const out='visual-audit';fs.mkdirSync(out,{recursive:true});
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900},deviceScaleFactor:1});
+          const page=await context.newPage();
+          const assert=(v,m)=>{if(!v)throw new Error(m)};
+          const shot=async name=>{await page.waitForTimeout(180);await page.screenshot({path:`${out}/${name}.png`,fullPage:false});console.log('R26_SHOT='+name);};
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          const unlock=page.locator('[data-open-login]').first();
+          if(await unlock.count()){
+            await unlock.click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
+          }
+          const version=await page.evaluate(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return j.version;});
+          assert(version===expected,`runtime version ${version}`);
+          const fixture=await page.evaluate(async()=>{
+            const s=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();
+            const post=async(action,body)=>{const r=await fetch('/api.php?action='+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify(body)});const j=await r.json();if(!j.ok)throw new Error(action+': '+JSON.stringify(j));return j;};
+            const cats=['99 待整理','07 私人资料','06 域名与数字资产','05 技术运维','04 商业化与广告','03 SEO与内容增长','02 网站与独立产品','01 AI与软件开发'];
+            const categoryIds=[];for(const name of cats){const c=await post('category_save',{name,description:'R26 V2532 visual demo',icon:'folder'});categoryIds.push(c.id);}
+            const titles=['ChatGPT 长任务工作流：从想法到可复用模板','Cloudflare Pages 部署检查清单','独立站首页转化率优化笔记','SEO 内容集群：关键词到专题页','海外联盟营销渠道实验记录','VPS 日常巡检与故障恢复','域名续费与 DNS 变更记录','账号恢复与 2FA 备份边界','产品需求证据账本','网站速度优化：真实用户指标','Stripe 支付失败排查清单','内容更新节奏与复盘模板','API 接入安全检查','数据库备份恢复演练','站点发布前 20 项检查','用户反馈归类与优先级','AI 编程提示词沉淀','竞争产品观察记录','Search Console 异常排查','邮件投递与域名信誉','服务器迁移计划','隐私政策更新记录','首页文案 A/B 测试','内容生产 SOP','海外工具站增长实验','Git 发布与回滚规范','错误日志阅读方法','独立开发者每周复盘','付费用户问题追踪','网站监控报警说明','常用命令速查表','项目交接 Current Truth','第三方 API 成本表','产品数据指标词典','网站可访问性检查','移动端体验问题清单','Reader 阅读体验设计','编辑器保存状态设计','搜索无结果恢复设计','知识库分类整理原则'];
+            const ids=[];for(let i=0;i<titles.length;i++){const content=`# ${titles[i]}\n\n这是一份用于 V2.5.32 收敛后视觉审计的示例资料。\n\n## 当前结论\n\n- 真实问题优先。\n- 状态必须一眼看懂。\n- 阅读与编辑要连续。\n\n## 操作记录\n\n${('这一段模拟真实知识库中的长文内容，用来检查行宽、留白、滚动与阅读密度。中文 English 123。\n\n').repeat(11)}\n## 下一步\n\n完成验证后记录结果。`;const saved=await post('content_save',{category_id:categoryIds[i%categoryIds.length],title:titles[i],content,content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});ids.push(saved.id);}
+            return {categoryIds,ids};
+          });
+          await page.evaluate(async()=>{if(state.contentView!=='list')await setContentView('list');await setMode('all','active');});
+          await page.waitForFunction(()=>state.loading===false&&document.querySelectorAll('.content-row').length>0);await shot('01-list-desktop');
+          await page.evaluate(id=>selectCategory(id),fixture.categoryIds[6]);await page.waitForFunction(()=>state.loading===false&&state.mode==='category');await shot('02-category-desktop');
+          await page.locator('#globalSearch').fill('网站');await page.waitForFunction(()=>state.query==='网站'&&state.loading===false);await shot('03-search-desktop');
+          await page.locator('#globalSearch').fill('绝对不存在_R26');await page.waitForSelector('.empty-state.is-search-empty-contextual');await shot('04-empty-search-desktop');
+          await page.locator('#emptyClear').click();await page.waitForFunction(()=>!state.query&&state.loading===false);
+          await page.evaluate(id=>openReader(id),fixture.ids[1]);await page.waitForSelector('.reader-page');await shot('05-reader-desktop');
+          await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');
+          const editLayout=await page.evaluate(()=>{const l=document.querySelector('#notebookLayout'),p=document.querySelector('#notebookListPane'),d=document.querySelector('#notebookDetailScroll');const pr=p?getComputedStyle(p):null;return {editing:l?.classList.contains('notebook-editing'),paneDisplay:pr?.display||'',detailWidth:Math.round(d?.getBoundingClientRect().width||0),viewport:innerWidth};});
+          console.log('R26_EDIT_LAYOUT='+JSON.stringify(editLayout));
+          assert(editLayout.editing,'desktop edit did not enter notebook-editing layout');assert(editLayout.paneDisplay==='none','desktop edit title pane still visible');assert(editLayout.detailWidth>700,'desktop edit detail remains squeezed');await shot('06-edit-desktop');
+          await page.locator('.workspace-mode-switch [data-workspace-command="split"]').click();await page.waitForSelector('.article-workspace.mode-split');
+          const splitWidths=await page.evaluate(()=>({source:Math.round(document.querySelector('.article-source-pane')?.getBoundingClientRect().width||0),preview:Math.round(document.querySelector('.article-preview-pane')?.getBoundingClientRect().width||0)}));console.log('R26_SPLIT_WIDTHS='+JSON.stringify(splitWidths));assert(splitWidths.source>340&&splitWidths.preview>340,'desktop split panes remain too narrow');await shot('07-split-desktop');
+          await page.evaluate(async()=>{await setMode('settings');});await page.waitForSelector('.settings-page');await shot('08-settings-basic-desktop');await page.locator('[data-settings-section="updates"]').click();await page.waitForTimeout(120);await shot('09-settings-update-desktop');
+          await page.setViewportSize({width:390,height:844});await page.evaluate(async()=>{await setMode('all','active');});await page.waitForFunction(()=>state.loading===false&&document.querySelectorAll('.content-row').length>0);await shot('10-list-mobile');
+          await page.evaluate(id=>openReader(id),fixture.ids[2]);await page.waitForSelector('.reader-page');await shot('11-reader-mobile');await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');await page.waitForTimeout(120);
+          const mobileEdit=await page.evaluate(()=>{const title=document.querySelector('#articleTitleInput'),tb=document.querySelector('.vf-editor-toolbar');return {docClient:document.documentElement.clientWidth,docScroll:document.documentElement.scrollWidth,titleWidth:Math.round(title?.getBoundingClientRect().width||0),titleScroll:title?.scrollWidth||0,toolbarClient:tb?.clientWidth||0,toolbarScroll:tb?.scrollWidth||0};});console.log('R26_MOBILE_EDIT='+JSON.stringify(mobileEdit));assert(mobileEdit.docScroll<=mobileEdit.docClient+3,'mobile edit causes page horizontal overflow');assert(mobileEdit.titleWidth<=390&&mobileEdit.titleScroll<=mobileEdit.titleWidth+3,'mobile title still clips horizontally');assert(mobileEdit.toolbarClient<=390,'mobile toolbar escapes viewport');await shot('12-edit-mobile');
+          await page.evaluate(async()=>{await setMode('settings');});await page.waitForSelector('.settings-page');await page.locator('[data-settings-section="updates"]').click();await page.waitForTimeout(120);const mobileSettings=await page.evaluate(()=>{const nav=document.querySelector('.settings-nav'),panel=document.querySelector('.settings-panel');return {navHeight:Math.round(nav?.getBoundingClientRect().height||0),panelTop:Math.round(panel?.getBoundingClientRect().top||0),docClient:document.documentElement.clientWidth,docScroll:document.documentElement.scrollWidth};});console.log('R26_MOBILE_SETTINGS='+JSON.stringify(mobileSettings));assert(mobileSettings.navHeight<80,'mobile settings navigation still consumes multiple rows');assert(mobileSettings.docScroll<=mobileSettings.docClient+3,'mobile settings causes horizontal page overflow');await shot('13-settings-update-mobile');
+          console.log('P02_R26_VISUAL_CONVERGENCE=PASS');await browser.close();
+          JS
+          BASE_URL="http://127.0.0.1:$PORT" PASSWORD="$(cat "$RUN_ROOT/password")" EXPECTED_VERSION="$EXPECTED_VERSION" node r26-visual.mjs
+          rm -f r26-visual.mjs
+
+      - name: Upload R26 screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: p02-r26-v2532-visual-audit
+          path: product/visual-audit/*.png
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Boundaries
+        if: always()
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r26-v2532"
+          if test -f "$RUN_ROOT/php.pid"; then kill "$(cat "$RUN_ROOT/php.pid")" 2>/dev/null || true; fi
+          echo PRODUCT_WRITE=NO
+          echo P02_MAIN_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo TAG_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
