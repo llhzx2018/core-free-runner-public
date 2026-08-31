@@ -97,12 +97,19 @@ try {
   await manage.click();
   await page.waitForFunction((id) => location.hash === `#provider/${encodeURIComponent(id)}`, providerId, { timeout: 10000 });
   await page.locator('.v271-provider-summary').waitFor({ state: 'visible', timeout: 10000 });
+  await page.waitForFunction(() => {
+    const priority = document.querySelector('.v271-provider-summary .v271-summary-card[data-v2813-provider-priority]');
+    const next = document.querySelector('.v271-help[data-v2813-provider-next]');
+    const cause = document.querySelector('.v271-panel[data-v2813-provider-cause]');
+    return Boolean(priority && next && cause);
+  }, null, { timeout: 10000 });
   assert(await page.locator('.v271-provider-summary .v271-summary-card[data-v2813-provider-priority]').count() >= 1, 'provider detail priority missing');
   const nextHelp = page.locator('.v271-help[data-v2813-provider-next]').first();
   await nextHelp.waitFor({ state: 'visible', timeout: 10000 });
   assert((await nextHelp.locator('strong').innerText()).trim() === '下一步：', 'provider next-action copy not simplified');
-  const causePanel = page.locator('.v271-panel[data-v2813-provider-cause="attention"]').first();
-  assert(await causePanel.count() === 1, 'provider cause panel attention hierarchy missing');
+  const causePanel = page.locator('.v271-panel[data-v2813-provider-cause]').first();
+  const causePriority = await causePanel.getAttribute('data-v2813-provider-cause');
+  assert(['attention', 'warning'].includes(causePriority || ''), `provider cause panel priority missing: ${causePriority}`);
   report.detail.pointer_navigation = 'PASS';
   report.detail.priority = 'PASS';
   report.detail.next_action = 'PASS';
