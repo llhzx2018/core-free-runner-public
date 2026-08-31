@@ -202,7 +202,7 @@ MAIN="$(git ls-remote https://github.com/llhzx2018/vf-library.git refs/heads/mai
 [[ "$DEV" == "e0bac8f6ec30df94e626e07821ae3c39cbcd7f59" ]]
 [[ "$MAIN" == "6a43f76308f6ba3e4fd675d121ba9fe7be7f3ddd" ]]
 [[ -z "$(git ls-remote --tags https://github.com/llhzx2018/vf-library.git refs/tags/v2.5.32)" ]]
-curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-updates/main/projects/P02.json > "$RUN_ROOT/P02.json"
+curl -fsSL -H "Authorization: Bearer ${VF_RELEASE_WRITE_TOKEN:?}" -H "Accept: application/vnd.github.raw+json" "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/P02.json?ref=main" > "$RUN_ROOT/P02.json"
 python3 - "$RUN_ROOT/P02.json" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1],encoding='utf-8'));assert x['target_version']=='2.5.31';assert x['release_tag']=='v2.5.31-rc.1'
