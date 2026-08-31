@@ -1,0 +1,89 @@
+name: P01 Data Safety Mobile Dynamic Actions R3
+on:
+  push:
+    branches: [diag/p01-data-safety-mobile-dynamic-actions-20260831]
+    paths: [.github/workflows/p01-data-safety-mobile-dynamic-actions-r3-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE: 7a9e9fd3e2505e85d7aa5781da8b23db7d961a9f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-data-safety-r3/evidence
+      PORT: '18495'
+      ADMIN_PASS: P01DataSafetyR3
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-data-safety-r3; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git -C product status --porcelain)"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-data-safety-r3.pid
+          COOKIE=/tmp/p01-data-safety-r3.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Data Safety R3' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Chromium 390 segmented dynamic chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-data-safety-r3/pw; cd /tmp/p01-data-safety-r3/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18495/';const A=(v,m)=>{if(!v)throw Error(m)};const mark=s=>console.log('PHASE='+s);
+          const state=async p=>p.evaluate(()=>({overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:390,height:844}});const lr=await c.request.post(base+'api.php?action=login',{data:{password:'P01DataSafetyR3'},timeout:5000});A(lr.ok(),'login');const p=await c.newPage();p.setDefaultTimeout(5000);await p.goto(base+'data-safety.php',{waitUntil:'domcontentloaded',timeout:10000});await p.waitForFunction(()=>!document.querySelector('#backupPolicyStatus')?.textContent.includes('加载中'));A((await state(p)).overflow===0,'initial overflow');mark('loaded');
+            A(await p.locator('#backups .backup-item').count()===0,'not fresh');await p.locator('#createBackup2').click();await p.waitForFunction(()=>document.querySelectorAll('#backups .backup-item').length===1);mark('created');
+            const acts=await p.locator('#backups .backup-item .actions .btn').evaluateAll(es=>es.filter(e=>e.offsetWidth||e.offsetHeight).map(e=>{const r=e.getBoundingClientRect();return{text:e.textContent.trim(),w:+r.width.toFixed(1),h:+r.height.toFixed(1),left:+r.left.toFixed(1),right:+r.right.toFixed(1)}}));A(acts.length===5,'five actions');for(const x of acts){A(x.h>=40,'short '+JSON.stringify(x));A(x.left>=0&&x.right<=390,'clipped '+JSON.stringify(x));}A((await state(p)).overflow===0,'created overflow');mark('geometry');
+            await p.locator('#backups [data-verify]').click();await p.waitForFunction(()=>document.querySelector('#backups .status')?.textContent.includes('校验正常'));mark('verified');
+            await p.locator('#backups [data-protect]').click();await p.waitForFunction(()=>document.querySelector('#backups [data-protect]')?.textContent.includes('取消保护'));A(await p.locator('#backups [data-delete]').isDisabled(),'protected delete enabled');mark('protected');
+            await p.locator('#backups [data-protect]').click();await p.waitForFunction(()=>document.querySelector('#backups [data-protect]')?.textContent.trim()==='保护');A(!(await p.locator('#backups [data-delete]').isDisabled()),'unprotected delete disabled');mark('unprotected');
+            await p.locator('#backups [data-restore]').click();await p.waitForFunction(()=>document.querySelector('#modal')?.classList.contains('open'));const mbtn=await p.locator('#modal .dialog-actions .btn').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return{text:e.textContent.trim(),h:+r.height.toFixed(1),left:+r.left.toFixed(1),right:+r.right.toFixed(1)}}));for(const x of mbtn){A(x.h>=40,'modal short '+JSON.stringify(x));A(x.left>=0&&x.right<=390,'modal clipped '+JSON.stringify(x));}A((await state(p)).overflow===0,'modal overflow');mark('restore-modal');await p.locator('#modalCancel').click();await p.waitForFunction(()=>!document.querySelector('#modal')?.classList.contains('open'));mark('restore-cancel');
+            const href=await p.locator('#backups a[href*="backup_download"]').getAttribute('href');A(href,'href');const dr=await c.request.get(new URL(href,base).href,{timeout:5000});A(dr.ok(),'download '+dr.status());const body=await dr.body();A(body.length>100,'download bytes');mark('download');
+            await p.screenshot({path:process.env.EVID+'/backup-dynamic-actions-390.png',fullPage:true});
+            await p.locator('#backups [data-delete]').click();await p.waitForFunction(()=>document.querySelector('#modal')?.classList.contains('open'));mark('delete-modal');await p.locator('#modalConfirm').click();await p.waitForFunction(()=>document.querySelectorAll('#backups .backup-item').length===0);A((await p.locator('#backups').textContent()).includes('还没有 SQLite 备份'),'empty missing');A((await state(p)).overflow===0,'final overflow');mark('deleted');
+            const out={source:process.env.SOURCE,viewport:'390x844',actions:acts,modalButtons:mbtn,download:{status:dr.status(),bytes:body.length},verify:'PASS',protect:'PASS',unprotect:'PASS',restorePreviewCancel:'PASS',delete:'PASS',overflow:0,verdict:'PASS_NO_PRODUCT_CHANGE'};fs.writeFileSync(process.env.EVID+'/result.json',JSON.stringify(out,null,2));console.log('P01_DATA_SAFETY_DYNAMIC_R3=PASS_NO_CHANGE');console.log(JSON.stringify(out));await c.close();await b.close();})().catch(e=>{console.error('FAIL_PHASE',e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" EVID="$EVID" node diag.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$i."\nFK=".$fk."\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-data-safety-mobile-r3-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-data-safety-r3.pid 2>/dev/null)" 2>/dev/null || true
