@@ -1,0 +1,151 @@
+name: P01 Links Mobile Touch Target Gate
+on:
+  push:
+    branches: [gate/p01-links-mobile-touch-targets-20260831-2fbe25c]
+    paths: [.github/workflows/p01-links-mobile-touch-target-gate-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BASE: 9603fce323e9906532da6662079f02d4e2c2f44a
+      SOURCE: 2fbe25c3ffc1ed9c4c911bef05f052d396379031
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-links-mobile-touch-gate/evidence
+      PORT: '18490'
+      ADMIN_PASS: P01LinksMobileTouchGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact Product Source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source changed-file and CSS scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-links-mobile-touch-gate; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product merge-base "$BASE" "$SOURCE")" = "$BASE"
+          git -C product diff --name-only "$BASE" "$SOURCE" | tee "$EVID/changed-files.txt"
+          test "$(cat "$EVID/changed-files.txt")" = 'src/assets/admin-consolidation.css'
+          git -C product diff --stat "$BASE" "$SOURCE" | tee "$EVID/diff-stat.txt"
+          git -C product diff --check "$BASE" "$SOURCE"
+          BASE="$BASE" SOURCE="$SOURCE" python3 <<'PY' | tee "$EVID/css-scope.txt"
+          import os, subprocess
+          base=os.environ['BASE']; source=os.environ['SOURCE']
+          def show(ref):
+              return subprocess.check_output(['git','-C','product','show',f'{ref}:src/assets/admin-consolidation.css'],text=True)
+          old=show(base); new=show(source)
+          anchor='  .vf-settings-link-grid{grid-template-columns:1fr}\n'
+          block=('  body[data-vf-page="links-admin"] .vf-links-actions .btn,\n'
+                 '  body[data-vf-page="links-admin"] .vf-batchbar .btn,\n'
+                 '  body[data-vf-page="links-admin"] .vf-pagination .btn{min-height:40px!important}\n')
+          assert old.count(anchor)==1, 'anchor drift'
+          assert new==old.replace(anchor,block+anchor,1), 'CSS scope exceeds approved mobile links-only block'
+          media_start=new.index('@media(max-width:768px){')
+          media_end=new.index('\n}',media_start)
+          assert media_start < new.index(block) < media_end, 'touch target block escaped <=768 media scope'
+          print('EXACT_SOURCE='+source)
+          print('CHANGED_FILE=src/assets/admin-consolidation.css')
+          print('CSS_SCOPE=links-admin <=768 only')
+          print('CSS_TARGET_MIN_HEIGHT=40px')
+          PY
+      - name: Fresh setup and fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-links-mobile-touch-gate.pid
+          COOKIE=/tmp/p01-links-mobile-touch-gate.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Links Mobile Touch Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $pub=$repo->createCategory(['name'=>'Touch Public','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $priv=$repo->createCategory(['name'=>'Touch Private','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $repo->saveLink(null,['category_id'=>$pub,'title'=>'Touch Organized Public','url'=>'https://touch-organized-public.example/','is_private'=>0,'is_pending'=>0,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$priv,'title'=>'Touch Organized Private','url'=>'https://touch-organized-private.example/','is_private'=>1,'is_pending'=>0,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$priv,'title'=>'Touch Pending Private','url'=>'https://touch-pending-private.example/','is_private'=>1,'is_pending'=>1,'description'=>''],'admin');
+          $repo->saveLink(null,['category_id'=>$pub,'title'=>'Touch Pending Public','url'=>'https://touch-pending-public.example/','is_private'=>0,'is_pending'=>1,'description'=>''],'admin');
+          PHP
+      - name: Chromium 390 and 1440 product regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-links-mobile-touch-gate/pw; cd /tmp/p01-links-mobile-touch-gate/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18490/';
+          const assert=(v,m)=>{if(!v)throw Error(m)};
+          const visible=async l=>await l.evaluate(e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length));
+          async function login(c){const r=await c.request.post(base+'api.php?action=login',{data:{password:'P01LinksMobileTouchGate'}});assert(r.ok(),'login status');const j=await r.json();assert(j.ok,'login payload');}
+          async function mobile(b){
+            const c=await b.newContext({viewport:{width:390,height:844}});await login(c);const p=await c.newPage();await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('tr').filter({hasText:'Touch Organized Public'}).waitFor();
+            const media=await p.evaluate(()=>matchMedia('(max-width:768px)').matches);assert(media,'390 media fence not active');
+            const first=p.locator('tr').filter({hasText:'Touch Organized Public'});await first.locator('input[data-select]').check();
+            const measurement=await p.evaluate(()=>{const rect=s=>{const e=document.querySelector(s),r=e?.getBoundingClientRect();return r?{width:+r.width.toFixed(1),height:+r.height.toFixed(1)}:null};const batch=[...document.querySelectorAll('#batchBar [data-bulk]')].filter(e=>e.offsetWidth||e.offsetHeight).map(e=>{const r=e.getBoundingClientRect();return{action:e.dataset.bulk,height:+r.height.toFixed(1),width:+r.width.toFixed(1)}});return{open:rect('[data-open]'),edit:rect('[data-edit]'),selectPageMobile:rect('.vf-select-page-mobile'),prev:rect('#prevPage'),next:rect('#nextPage'),batch,documentOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+            for(const [k,v] of Object.entries({open:measurement.open,edit:measurement.edit,prev:measurement.prev,next:measurement.next}))assert(v&&v.height>=38,`${k} below 38: ${v&&v.height}`);
+            assert(measurement.selectPageMobile&&measurement.selectPageMobile.height>=38,'mobile page-select regressed');
+            assert(measurement.batch.length>0&&measurement.batch.every(x=>x.height>=38),'visible batch action below 38');
+            assert(measurement.documentOverflow===0,'390 document horizontal overflow');
+            await first.locator('input[data-select]').uncheck();
+            const pageSelect=p.locator('#selectPageMobile');await pageSelect.check();
+            let counts=await p.evaluate(()=>({shown:document.querySelectorAll('#linksBody input[data-select]').length,checked:document.querySelectorAll('#linksBody input[data-select]:checked').length,batch:document.querySelector('#batchCount').textContent.trim()}));
+            assert(counts.shown===4&&counts.checked===4&&counts.batch==='已选择 4 项','select-page behavior regressed');
+            await pageSelect.uncheck();assert(await p.locator('#linksBody input[data-select]:checked').count()===0,'select-page clear regressed');
+            await first.locator('input[data-select]').check();await p.locator('#visibilityFilter').selectOption('private');
+            assert(await p.locator('#linksBody input[data-select]:checked').count()===0,'filter selection did not clear');assert(!(await p.locator('#batchBar').evaluate(e=>e.classList.contains('show'))),'batch remained after filter change');
+            await p.locator('#visibilityFilter').selectOption('');await p.locator('tr').filter({hasText:'Touch Organized Public'}).locator('input[data-select]').check();await p.evaluate(()=>{location.hash='#categories'});await p.waitForFunction(()=>document.querySelector('#categoryMode').classList.contains('active'));
+            assert(await p.locator('#categoryMode').evaluate(e=>e.classList.contains('active')),'category mode inactive');assert(!(await p.locator('#linkMode').evaluate(e=>e.classList.contains('active'))),'link mode stayed active');assert(!(await p.locator('#batchBar').evaluate(e=>e.classList.contains('show'))),'mode switch kept selection');
+            await p.evaluate(()=>{location.hash=''});await p.waitForFunction(()=>document.querySelector('#linkMode').classList.contains('active'));
+            await p.locator('#linkSearch').fill('Touch Organized Public');let row=p.locator('tr').filter({hasText:'Touch Organized Public'});await row.locator('input[data-select]').check();
+            assert(await visible(p.locator('[data-bulk="pending"]')),'pending action should show for organized active selection');assert(!(await visible(p.locator('[data-bulk="organized"]'))),'organized action should hide for all-organized selection');
+            await p.locator('#linkSearch').fill('Touch Pending Private');row=p.locator('tr').filter({hasText:'Touch Pending Private'});await row.locator('input[data-select]').check();assert(!(await visible(p.locator('[data-bulk="pending"]'))),'pending action should hide for all-pending selection');assert(await visible(p.locator('[data-bulk="organized"]')),'organized action should show for pending selection');
+            await p.locator('#linkSearch').fill('Touch Organized Public');row=p.locator('tr').filter({hasText:'Touch Organized Public'});await row.locator('input[data-select]').check();p.once('dialog',d=>d.accept());await p.locator('[data-bulk="archive"]').click();await p.waitForFunction(()=>!document.querySelector('#batchBar').classList.contains('show'));
+            await p.locator('#linkSearch').fill('');await p.locator('#stateFilter').selectOption('archived');await p.locator('tr').filter({hasText:'Touch Organized Public'}).waitFor();row=p.locator('tr').filter({hasText:'Touch Organized Public'});await row.locator('input[data-select]').check();
+            assert(await visible(p.locator('[data-bulk="restore"]')),'restore action hidden in archived state');for(const el of await p.locator('#batchBar [data-active-only]').all())assert(!(await visible(el)),'active-only action visible in archived state');
+            const archivedVisible=await p.locator('#batchBar [data-bulk]').evaluateAll(es=>es.filter(e=>e.offsetWidth||e.offsetHeight).map(e=>({action:e.dataset.bulk,height:+e.getBoundingClientRect().height.toFixed(1)})));assert(archivedVisible.every(x=>x.height>=38),'archived visible batch below 38');
+            await p.screenshot({path:process.env.EVID+'/links-390.png',fullPage:true});await c.close();return{measurement,selectPage:counts,archivedVisible};
+          }
+          async function desktop(b){const c=await b.newContext({viewport:{width:1440,height:900}});await login(c);const p=await c.newPage();await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#linksBody tr').first().waitFor();const d=await p.evaluate(()=>({mobileMedia:matchMedia('(max-width:768px)').matches,documentOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,page:document.body.dataset.vfPage,shell:document.body.dataset.vfAdminShell}));assert(!d.mobileMedia,'1440 incorrectly matched mobile media');assert(d.documentOverflow===0,'1440 document horizontal overflow');assert(d.page==='links-admin'&&d.shell==='server','desktop shell regression');await p.screenshot({path:process.env.EVID+'/links-1440.png',fullPage:true});await c.close();return d;}
+          (async()=>{const b=await chromium.launch({headless:true});const m=await mobile(b);const d=await desktop(b);const out={source:process.env.SOURCE,base:process.env.BASE,threshold:38,mobile:m,desktop:d};fs.writeFileSync(process.env.EVID+'/gate.json',JSON.stringify(out,null,2));console.log('P01_LINKS_MOBILE_TOUCH_TARGET_GATE=PASS');console.log(JSON.stringify(out));await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          BASE="$BASE" SOURCE="$SOURCE" EVID="$EVID" node gate.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$integrity."\n";echo 'FK='.$fk."\n";if($integrity!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-links-mobile-touch-gate-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-links-mobile-touch-gate.pid 2>/dev/null)" 2>/dev/null || true
