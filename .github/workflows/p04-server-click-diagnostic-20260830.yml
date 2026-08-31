@@ -1,0 +1,68 @@
+name: P04 Server Click Event Diagnostic
+
+on:
+  push:
+    branches:
+      - candidate/p04-server-daily-ux-gate-20260830
+    paths:
+      - '.github/workflows/p04-server-click-diagnostic-20260830.yml'
+      - 'scripts/p04-server-click-diagnostic-20260830.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE: a90d0cc288d9fbac4ba08d9f294688efbd4bca19
+      EVIDENCE: ${{ github.workspace }}/evidence-click
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify private read capability
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Install Playwright
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Build synthetic runtime and diagnose click event chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          WEB="$RUNNER_TEMP/p04-server-click-runtime"
+          python3 product/scripts/build-release-tree.py "$WEB" >/dev/null
+          PORT=19045
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" CANDIDATE="$CANDIDATE" WEB_ROOT="$WEB" PRODUCT_ROOT="$GITHUB_WORKSPACE/product" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-server-click-diagnostic-20260830.mjs | tee "$EVIDENCE/summary.txt"
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-SERVER-CLICK-DIAGNOSTIC-${{ env.CANDIDATE }}
+          path: evidence-click/
+          if-no-files-found: error
+          retention-days: 7
