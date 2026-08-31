@@ -55,23 +55,34 @@ jobs:
           test "$ACTUAL_DEVELOP" = "$TARGET_DEVELOP_SHA"
           echo 'LIVE_AUTHORITY_GATE=PASS'
 
-      - name: Recover exact frozen Reader Source bytes from verified ZIPs
+      - name: Reconcile one A4 manifest typo and recover frozen Reader Source bytes
         working-directory: gov-book
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import hashlib, json, pathlib, zipfile, os
+          import hashlib, json, pathlib, zipfile
 
           root = pathlib.Path('.')
           catalog = json.loads((root/'BOOK_CATALOG.json').read_text(encoding='utf-8'))
           by_id = {b['book_id']: b for b in catalog['books'] if b.get('book_version')}
-          ids = ['A1','A3','A4','B1']
-          changed = []
 
-          def sha256_bytes(data):
-              return hashlib.sha256(data).hexdigest()
+          # Governance metadata correction only. The frozen A4 ZIP's own exact
+          # SHA256 list and the ZIP member bytes both prove the 64-hex value.
+          a4_manifest_path = root/'books/A4/versions/v0.9.0/SOURCE_MANIFEST.json'
+          old_bad = 'bd0fc01307c1b16bc8fb21adb0e49b528e2562d14351f81cbc88a5171c0360b5c'
+          corrected = 'bd0fc01307c1b16bc8fb21adb0e49b528e2562d14351f81cbc88a5171c0360b5'
+          text = a4_manifest_path.read_text(encoding='utf-8')
+          assert text.count(old_bad) == 1
+          assert corrected not in text.replace(old_bad, '')
+          sha_list = (root/'books/A4/versions/v0.9.0/reader/00_SHA256_文件清单.txt').read_text(encoding='utf-8')
+          assert corrected + '  A4_Niche网站变现_v0.9.0_中文版当前交付包_PARTIAL/04_实操模板/06_Affiliate项目条款模板.csv' in sha_list
+          a4_manifest_path.write_text(text.replace(old_bad, corrected), encoding='utf-8', newline='')
+          print('A4_SOURCE_MANIFEST_SINGLE_SHA_TYPO_CORRECTION=PASS')
+          print('A4_PRODUCT_CONTENT_CHANGED=NO')
+          print('A4_QUALIFICATION_CHANGED=NO')
 
+          def sha256_bytes(data): return hashlib.sha256(data).hexdigest()
           def sha256_file(path):
               h=hashlib.sha256()
               with path.open('rb') as f:
@@ -79,65 +90,48 @@ jobs:
                       h.update(chunk)
               return h.hexdigest()
 
-          for book_id in ids:
+          changed=[]
+          for book_id in ['A1','A3','A4','B1']:
               b=by_id[book_id]
               ver=b['book_version']
               base=root/'books'/book_id/'versions'/ver
               manifest=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
+              assert manifest['qualification'] == b['qualification']
               zip_path=root/b['download_path']
               assert zip_path.exists(), (book_id,'DOWNLOAD_ZIP_MISSING')
               assert sha256_file(zip_path)==b['delivery_sha256']==manifest['artifact_sha256'], (book_id,'DOWNLOAD_ZIP_SHA_MISMATCH')
-
               with zipfile.ZipFile(zip_path) as z:
                   assert z.testzip() is None, (book_id,'DOWNLOAD_ZIP_CRC_FAIL')
                   members=[n for n in z.namelist() if not n.endswith('/')]
                   for item in manifest['files']:
+                      assert len(item['sha256']) == 64, (book_id,item['path'],'INVALID_MANIFEST_SHA_LENGTH')
                       rel=item['path']
-                      candidates=[]
+                      exact=[]
                       for n in members:
                           if n==rel or n.endswith('/'+rel):
                               data=z.read(n)
                               if len(data)==item['size_bytes'] and sha256_bytes(data)==item['sha256']:
-                                  candidates.append((n,data))
-                      if not candidates:
-                          raise AssertionError((book_id,rel,'NO_EXACT_ZIP_MEMBER'))
-                      # Multiple matching members are acceptable only because all have the same
-                      # manifest-locked size+SHA; therefore their bytes are identical by identity.
-                      selected_name, selected_data=sorted(candidates,key=lambda x:(len(x[0]),x[0]))[0]
-                      assert len(selected_data)==item['size_bytes']
-                      assert sha256_bytes(selected_data)==item['sha256']
-
+                                  exact.append((n,data))
+                      assert exact, (book_id,rel,'NO_EXACT_ZIP_MEMBER')
+                      selected_name,selected_data=sorted(exact,key=lambda x:(len(x[0]),x[0]))[0]
                       target=base/'reader'/pathlib.PurePosixPath(rel)
-                      before_exact=False
-                      if target.exists():
-                          before_exact=(target.stat().st_size==item['size_bytes'] and sha256_file(target)==item['sha256'])
-                      if not before_exact:
+                      before=target.read_bytes() if target.exists() else None
+                      if before != selected_data:
                           target.parent.mkdir(parents=True,exist_ok=True)
                           target.write_bytes(selected_data)
                           changed.append(str(target))
-                      assert target.stat().st_size==item['size_bytes'], (book_id,rel,'TARGET_SIZE_FAIL')
-                      assert sha256_file(target)==item['sha256'], (book_id,rel,'TARGET_SHA_FAIL')
+                      assert target.stat().st_size==item['size_bytes']
+                      assert sha256_file(target)==item['sha256']
                       print('SOURCE_ENTRY_EXACT='+json.dumps({
-                          'book_id':book_id,
-                          'path':rel,
-                          'source_member':selected_name,
-                          'matching_member_count':len(candidates),
-                          'changed':not before_exact,
-                          'sha256':item['sha256']
+                          'book_id':book_id,'path':rel,'matching_members':len(exact),
+                          'selected':selected_name,'changed':before!=selected_data,'sha256':item['sha256']
                       },ensure_ascii=False,separators=(',',':')))
-
-              print(f'{book_id}_FULL_READER_SOURCE_EXACT=PASS')
-
-          pathlib.Path('/tmp/reader-source-changed.json').write_text(
-              json.dumps(changed,ensure_ascii=False,indent=2),encoding='utf-8')
-          print('READER_SOURCE_CHANGED_COUNT='+str(len(changed)))
-          print('READER_SOURCE_CHANGED='+json.dumps(changed,ensure_ascii=False,separators=(',',':')))
-          print('A3_QUALIFICATION_CHANGE=NO')
-          print('A4_QUALIFICATION_CHANGE=NO')
+              print(book_id+'_WORKTREE_FULL_READER_SOURCE_EXACT=PASS')
+          print('READER_SOURCE_WORKTREE_CHANGED_COUNT='+str(len(changed)))
           print('PRODUCT_CORRECTION=NO')
           PY
 
-      - name: Enforce changed-path boundary and commit develop only
+      - name: Stage only allowed source paths and verify staged Git blobs exact
         working-directory: gov-book
         shell: bash
         run: |
@@ -146,32 +140,44 @@ jobs:
             books/A1/versions/v1.0.0/reader \
             books/A3/versions/v0.9.0/reader \
             books/A4/versions/v0.9.0/reader \
+            books/A4/versions/v0.9.0/SOURCE_MANIFEST.json \
             books/B1/versions/v1.0.0/reader
-          changed="$(git -c core.quotepath=false diff --cached --name-only)"
-          echo "$changed"
-          test -n "$changed"
-          while IFS= read -r p; do
-            case "$p" in
-              books/A1/versions/v1.0.0/reader/*|books/A3/versions/v0.9.0/reader/*|books/A4/versions/v0.9.0/reader/*|books/B1/versions/v1.0.0/reader/*) ;;
-              *) echo "BLOCK=UNEXPECTED_STAGED_PATH:$p"; exit 91;;
-            esac
-          done <<< "$changed"
-
-          # Re-verify every manifest target after git-add, so any clean/smudge or EOL conversion fails here.
           python3 - <<'PY'
-          import hashlib,json,pathlib
+          import hashlib,json,pathlib,subprocess
           root=pathlib.Path('.')
+          changed=subprocess.check_output(['git','-c','core.quotepath=false','diff','--cached','--name-only','-z']).decode('utf-8').split('\0')
+          changed=[p for p in changed if p]
+          assert changed, 'NO_STAGED_CHANGE'
+          allowed_prefixes=(
+              'books/A1/versions/v1.0.0/reader/',
+              'books/A3/versions/v0.9.0/reader/',
+              'books/A4/versions/v0.9.0/reader/',
+              'books/B1/versions/v1.0.0/reader/',
+          )
+          for p in changed:
+              assert p.startswith(allowed_prefixes) or p=='books/A4/versions/v0.9.0/SOURCE_MANIFEST.json', ('UNEXPECTED_STAGED_PATH',p)
+          print('STAGED_CHANGED_PATHS='+json.dumps(changed,ensure_ascii=False,separators=(',',':')))
+
           for book_id,ver in [('A1','v1.0.0'),('A3','v0.9.0'),('A4','v0.9.0'),('B1','v1.0.0')]:
-              base=root/'books'/book_id/'versions'/ver
-              m=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
-              for item in m['files']:
-                  p=base/'reader'/pathlib.PurePosixPath(item['path'])
-                  data=p.read_bytes()
-                  assert len(data)==item['size_bytes'],(book_id,item['path'],'POST_ADD_SIZE')
-                  assert hashlib.sha256(data).hexdigest()==item['sha256'],(book_id,item['path'],'POST_ADD_SHA')
-              print(book_id+'_POST_ADD_MANIFEST_EXACT=PASS')
+              manifest_path=f'books/{book_id}/versions/{ver}/SOURCE_MANIFEST.json'
+              if book_id=='A4':
+                  manifest_bytes=subprocess.check_output(['git','show',':'+manifest_path])
+                  manifest=json.loads(manifest_bytes.decode('utf-8'))
+              else:
+                  manifest=json.loads(pathlib.Path(manifest_path).read_text(encoding='utf-8'))
+              for item in manifest['files']:
+                  path=f"books/{book_id}/versions/{ver}/reader/{item['path']}"
+                  blob=subprocess.check_output(['git','show',':'+path])
+                  assert len(blob)==item['size_bytes'],(book_id,item['path'],'STAGED_BLOB_SIZE')
+                  assert hashlib.sha256(blob).hexdigest()==item['sha256'],(book_id,item['path'],'STAGED_BLOB_SHA')
+              print(book_id+'_STAGED_GIT_BLOB_MANIFEST_EXACT=PASS')
           PY
 
+      - name: Re-lock authority then commit develop only
+        working-directory: gov-book
+        shell: bash
+        run: |
+          set -Eeuo pipefail
           git fetch origin main develop
           test "$(git rev-parse origin/main)" = "$TARGET_MAIN_SHA"
           test "$(git rev-parse origin/develop)" = "$TARGET_DEVELOP_SHA"
@@ -180,7 +186,7 @@ jobs:
           git commit -m 'content(book): adopt exact Reader Source from verified downloads'
           git push origin HEAD:develop
 
-      - name: Remote exact readback for all four Reader Source manifests
+      - name: Remote Git-blob exact readback for all four manifests
         working-directory: gov-book
         shell: bash
         run: |
@@ -189,21 +195,22 @@ jobs:
           REMOTE_MAIN="$(git rev-parse origin/main)"
           REMOTE_DEVELOP="$(git rev-parse origin/develop)"
           test "$REMOTE_MAIN" = "$TARGET_MAIN_SHA"
-          git reset --hard origin/develop
           python3 - <<'PY'
-          import hashlib,json,pathlib
-          root=pathlib.Path('.')
+          import hashlib,json,subprocess
           for book_id,ver in [('A1','v1.0.0'),('A3','v0.9.0'),('A4','v0.9.0'),('B1','v1.0.0')]:
-              base=root/'books'/book_id/'versions'/ver
-              m=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
-              for item in m['files']:
-                  p=base/'reader'/pathlib.PurePosixPath(item['path'])
-                  data=p.read_bytes()
-                  assert len(data)==item['size_bytes'],(book_id,item['path'],'REMOTE_SIZE')
-                  assert hashlib.sha256(data).hexdigest()==item['sha256'],(book_id,item['path'],'REMOTE_SHA')
+              manifest_path=f'books/{book_id}/versions/{ver}/SOURCE_MANIFEST.json'
+              manifest_bytes=subprocess.check_output(['git','show','origin/develop:'+manifest_path])
+              manifest=json.loads(manifest_bytes.decode('utf-8'))
+              for item in manifest['files']:
+                  path=f"books/{book_id}/versions/{ver}/reader/{item['path']}"
+                  blob=subprocess.check_output(['git','show','origin/develop:'+path])
+                  assert len(blob)==item['size_bytes'],(book_id,item['path'],'REMOTE_BLOB_SIZE')
+                  assert hashlib.sha256(blob).hexdigest()==item['sha256'],(book_id,item['path'],'REMOTE_BLOB_SHA')
               print(book_id+'_REMOTE_FULL_READER_SOURCE_EXACT=PASS')
           PY
           echo "GOV_BOOK_DEVELOP_RESULT=$REMOTE_DEVELOP"
           echo 'MAIN_UNCHANGED=PASS'
+          echo 'A3_QUALIFICATION=PARTIAL_UNCHANGED'
+          echo 'A4_QUALIFICATION=PARTIAL_UNCHANGED'
+          echo 'PRODUCT_CORRECTION=NO'
           echo 'STATUS_DOCS_CHANGED=NO'
-          echo 'QUALIFICATION_CHANGED=NO'
