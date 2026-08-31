@@ -1,0 +1,148 @@
+name: P02 R31 CSS Winner Diagnosis
+on:
+  push:
+    branches: [run/p02-r31-css-winner-diagnosis]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCT_REF: ca8d806b11cfbc8cdb5e5998ef65aa8d64abd238
+      PORT: '18080'
+    steps:
+      - name: Checkout exact P02 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Install isolated browser runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 curl >/dev/null
+          cd product
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build and boot isolated site
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r31"
+          SITE="$RUN_ROOT/site"
+          mkdir -p "$RUN_ROOT"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = '2.5.32'
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          BASE_URL="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          PASSWORD="VF-R31-${GITHUB_RUN_ID}!"; printf '%s' "$PASSWORD" > "$RUN_ROOT/password"
+          curl -fsS -c "$RUN_ROOT/cookie" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$RUN_ROOT/cookie" -c "$RUN_ROOT/cookie" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = '303'
+          echo P02_R31_SITE_READY=PASS
+
+      - name: Diagnose matched display rules with Chromium CDP
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r31"
+          cat > r31.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const base=process.env.BASE_URL,password=process.env.PASSWORD;
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage();
+          await page.goto(base+'/',{waitUntil:'networkidle'});
+          if(await page.locator('[data-open-login]').count()){
+            await page.locator('[data-open-login]').click();
+            await page.locator('#loginForm input[name="password"]').fill(password);
+            await page.locator('#loginSubmit').click();
+            await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));
+          }
+          const fixture=await page.evaluate(async()=>{
+            const s=await (await fetch('/api.php?action=session')).json();
+            const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(a+JSON.stringify(j));return j;};
+            const c=await post('category_save',{name:'R31 CSS Winner',description:'diagnosis',icon:'folder'});
+            const x=await post('content_save',{category_id:c.id,title:'R31 CSS winner diagnosis',content:'# R31\n\n'+('diagnostic paragraph\n\n').repeat(30),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});
+            return {id:x.item?.id||x.id};
+          });
+          if(!fixture.id)throw new Error('fixture id missing');
+          await page.evaluate(async id=>{if(state.contentView!=='list')await setContentView('list');const item=await fetchItem(id,{force:true});renderArticleWorkspace(item,'edit');},fixture.id);
+          await page.waitForSelector('.article-workspace.mode-edit');
+
+          for(const delay of [0,100,300,800]){
+            if(delay)await page.waitForTimeout(delay-(delay===100?0:delay===300?100:300));
+            const sample=await page.evaluate(()=>{
+              const pane=document.querySelector('#notebookListPane'),layout=document.querySelector('#notebookLayout');
+              const cs=getComputedStyle(pane);
+              return {delay:0,layoutClass:layout?.className||'',display:cs.display,visibility:cs.visibility,opacity:cs.opacity,position:cs.position,width:cs.width,transition:cs.transition,animation:cs.animation,inline:pane?.getAttribute('style')||'',hidden:pane?.hidden||false,animations:pane?.getAnimations().map(a=>({playState:a.playState,currentTime:a.currentTime,effect:a.effect?.getTiming?.()}))||[]};
+            });
+            sample.delay=delay;console.log('R31_SAMPLE='+JSON.stringify(sample));
+          }
+
+          const cssom=await page.evaluate(()=>{
+            const pane=document.querySelector('#notebookListPane');
+            const matches=[];const errors=[];
+            const walk=(rules,sheet,condition='')=>{
+              for(const rule of [...rules]){
+                const nextCond=rule.conditionText||condition||'';
+                if(rule.selectorText&&rule.style){
+                  let matched=false;try{matched=pane.matches(rule.selectorText);}catch(e){}
+                  if(matched){
+                    const display=rule.style.getPropertyValue('display');
+                    if(display){matches.push({sheet,condition:nextCond,selector:rule.selectorText,display,priority:rule.style.getPropertyPriority('display'),cssText:String(rule.cssText).slice(0,1200)});}
+                  }
+                }
+                try{if(rule.cssRules)walk(rule.cssRules,sheet,nextCond);}catch(e){errors.push(String(e));}
+              }
+            };
+            for(const sheet of [...document.styleSheets]){try{walk(sheet.cssRules||[],sheet.href||'INLINE','');}catch(e){errors.push((sheet.href||'INLINE')+':'+e);}}
+            const inlineSheets=[...document.querySelectorAll('style')].map((n,i)=>({i,id:n.id||'',text:n.textContent.slice(0,5000)}));
+            const links=[...document.querySelectorAll('link[rel="stylesheet"]')].map(n=>({href:n.href,dataset:{...n.dataset}}));
+            return {matches,errors,inlineSheets,links};
+          });
+          console.log('R31_CSSOM='+JSON.stringify(cssom,null,2));
+
+          const cdp=await context.newCDPSession(page);
+          await cdp.send('DOM.enable');await cdp.send('CSS.enable');
+          const doc=await cdp.send('DOM.getDocument',{depth:-1,pierce:true});
+          const q=await cdp.send('DOM.querySelector',{nodeId:doc.root.nodeId,selector:'#notebookListPane'});
+          if(!q.nodeId)throw new Error('CDP notebook pane missing');
+          const matched=await cdp.send('CSS.getMatchedStylesForNode',{nodeId:q.nodeId});
+          const compact=[];
+          const collect=(arr,origin)=>{for(const entry of arr||[]){const rule=entry.rule||entry;const props=rule.style?.cssProperties||[];const d=props.filter(p=>p.name==='display');if(!d.length)continue;compact.push({origin:rule.origin||origin,selector:(rule.selectorList?.text||rule.selectorList?.selectors?.map(x=>x.text).join(',')||''),styleSheetId:rule.styleSheetId||rule.style?.styleSheetId||'',range:rule.style?.range||null,display:d.map(x=>({value:x.value,important:x.important,disabled:x.disabled,implicit:x.implicit,range:x.range||null})),media:rule.media||[]});}};
+          collect(matched.matchedCSSRules,'matched');
+          collect(matched.inherited?.flatMap(x=>x.matchedCSSRules||[]),'inherited');
+          console.log('R31_CDP_DISPLAY_RULES='+JSON.stringify(compact,null,2));
+          console.log('R31_INLINE_STYLE='+JSON.stringify(matched.inlineStyle||{},null,2));
+          console.log('R31_ATTRIBUTES_STYLE='+JSON.stringify(matched.attributesStyle||{},null,2));
+          console.log('R31_ANIMATIONS='+JSON.stringify(await cdp.send('Animation.getCurrentTime',{id:'x'}).catch(()=>({unsupported:true}))) );
+          console.log('P02_R31_CSS_WINNER_DIAGNOSIS=PASS');
+          await browser.close();
+          JS
+          BASE_URL="http://127.0.0.1:$PORT" PASSWORD="$(cat "$RUN_ROOT/password")" node r31.mjs
+
+      - name: Boundaries
+        if: always()
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r31"; if test -f "$RUN_ROOT/php.pid"; then kill "$(cat "$RUN_ROOT/php.pid")" 2>/dev/null || true; fi
+          echo PRODUCT_WRITE=NO
+          echo MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
