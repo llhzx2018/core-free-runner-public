@@ -1,0 +1,106 @@
+name: P04 Provider Safe Actions Audit
+
+on:
+  push:
+    branches:
+      - audit/p04-provider-safe-actions-20260831
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: f04cec9c573c27296dda7d661b956173107dbfcb
+      EVIDENCE: ${{ github.workspace }}/evidence-p04-provider-safe-actions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify private read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout exact P04 develop source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, fileinfo, sodium, zip, curl, mbstring
+          coverage: none
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Exact source and relevant contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          mkdir -p "$EVIDENCE"
+          printf '%s\n' "$SOURCE" > "$EVIDENCE/source-sha.txt"
+          cd product
+          python scripts/repository-health-gate.py
+          python scripts/check-migrations.py
+          node --check public/assets/v271-unified-shell.js
+          node --check public/assets/v284-long-action-feedback.js
+          node --check public/assets/daily-provider-ux-polish.js
+          node --check public/assets/daily-onboarding.js
+          node --check public/assets/v270-reference-lock.js
+          php tests/unit/ui_zero_data_onboarding_contract.php .
+          php tests/unit/ui_overview_attention_action_dedup_contract.php .
+          cd ..
+          node --check scripts/p04-provider-safe-actions-audit-20260831.mjs
+          php -l scripts/p04-provider-safe-actions-seed-20260831.php
+      - name: Install Fresh Chromium
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Fresh Provider safe-action gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          WEB="$RUNNER_TEMP/p04-provider-safe-actions-runtime"
+          python3 product/scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          PORT=19080
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" SOURCE="$SOURCE" WEB="$WEB" SEED_HELPER="$GITHUB_WORKSPACE/scripts/p04-provider-safe-actions-seed-20260831.php" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-provider-safe-actions-audit-20260831.mjs
+          REPORT="$EVIDENCE/P04_PROVIDER_SAFE_ACTIONS_AUDIT.json"
+          test "$(jq -r '.status' "$REPORT")" = 'PASS'
+          test "$(jq -r '.synthetic_test_data_only' "$REPORT")" = 'true'
+          test "$(jq -r '.browser_intercept_only_for_provider_posts' "$REPORT")" = 'true'
+          test "$(jq -r '.external_provider_api_called' "$REPORT")" = 'false'
+          test "$(jq -r '.production_actions_executed' "$REPORT")" = 'false'
+          test "$(jq -r '.seed.status' "$REPORT")" = 'PASS'
+          test "$(jq '.failures | length' "$REPORT")" -eq 0
+          test "$(jq '.page_errors | length' "$REPORT")" -eq 0
+          test "$(jq '.console_errors | length' "$REPORT")" -eq 0
+          for view in desktop mobile; do
+            test "$(jq -r --arg v "$view" '.views[$v].provider-sync-all.request_delta' "$REPORT")" = '1'
+            test "$(jq -r --arg v "$view" '.views[$v].billing-sync-all.request_delta' "$REPORT")" = '1'
+            test "$(jq -r --arg v "$view" '.views[$v].account_sync.request_delta' "$REPORT")" = '1'
+          done
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-PROVIDER-SAFE-ACTIONS-${{ env.SOURCE }}
+          path: evidence-p04-provider-safe-actions/
+          if-no-files-found: error
+          retention-days: 14
