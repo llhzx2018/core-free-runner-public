@@ -13,7 +13,7 @@ const context=await browser.newContext({viewport:{width:1365,height:900}});
 const page=await context.newPage();
 page.on('pageerror',e=>report.page_errors.push(String(e?.stack||e)));
 page.on('console',m=>{if(m.type()==='error')report.console_errors.push(m.text())});
-const waitList=async(kind)=>{const toolbar=page.locator(`[data-v275-toolbar="${kind}"]`);await toolbar.waitFor({state:'visible',timeout:15000});const input=toolbar.locator('input[type="search"],input[data-v275-query]').first();await input.waitFor({state:'visible',timeout:10000});return{toolbar,input};};
+const waitList=async()=>{const toolbar=page.locator('.v275-list-toolbar').first();await toolbar.waitFor({state:'visible',timeout:15000});const input=toolbar.locator('input[data-v275-query],input[type="search"]').first();await input.waitFor({state:'visible',timeout:10000});return{toolbar,input};};
 const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
 try{
   await page.goto(`${base}/setup.php`,{waitUntil:'domcontentloaded'});
@@ -25,12 +25,11 @@ try{
   const fixture=execFileSync('php',['tests/fixtures/v260-user-task-fixture.php',webRoot],{cwd:productRoot,encoding:'utf8'});
   if(!fixture.includes('P04_V260_USER_TASK_FIXTURE_PASS'))throw new Error('fixture failed');
 
-  // Domain search -> detail -> browser Back.
   await page.goto(`${base}/index.php#domains`,{waitUntil:'domcontentloaded'});
-  let domainList=await waitList('domains');
+  let domainList=await waitList();
   await domainList.input.fill('infra-home');
   await page.waitForTimeout(350);
-  report.domain.before={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count]').innerText().catch(()=>''))};
+  report.domain.before={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count],.v275-list-count').first().innerText().catch(()=>''))};
   const domainAction=page.locator('table.domain-table [data-v270-action="domain"]:visible').first();
   await domainAction.waitFor({state:'visible',timeout:10000});
   const domainId=await domainAction.getAttribute('data-id');
@@ -39,12 +38,11 @@ try{
   report.domain.detail_hash=await page.evaluate(()=>location.hash);
   await page.goBack();
   await page.waitForFunction(()=>location.hash==='#domains',null,{timeout:10000});
-  domainList=await waitList('domains');
+  domainList=await waitList();
   await page.waitForTimeout(350);
-  report.domain.after_browser_back={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count]').innerText().catch(()=>''))};
+  report.domain.after_browser_back={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count],.v275-list-count').first().innerText().catch(()=>''))};
   await page.screenshot({path:`${evidence}/01-domains-after-browser-back.png`,fullPage:true,animations:'disabled'});
 
-  // Domain search -> detail -> in-page breadcrumb.
   await domainList.input.fill('infra-home');
   await page.waitForTimeout(250);
   const domainAction2=page.locator('table.domain-table [data-v270-action="domain"]:visible').first();
@@ -52,16 +50,15 @@ try{
   await page.locator('.v270-breadcrumb').waitFor({state:'visible',timeout:10000});
   await page.locator('.v270-breadcrumb [data-v270-action="goto"]').first().click();
   await page.waitForFunction(()=>location.hash==='#domains',null,{timeout:10000});
-  domainList=await waitList('domains');
+  domainList=await waitList();
   await page.waitForTimeout(300);
-  report.domain.after_breadcrumb={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count]').innerText().catch(()=>''))};
+  report.domain.after_breadcrumb={query:await domainList.input.inputValue(),count:clean(await domainList.toolbar.locator('[data-v275-count],.v275-list-count').first().innerText().catch(()=>''))};
 
-  // Server search -> detail -> browser Back.
   await page.goto(`${base}/index.php#servers`,{waitUntil:'domcontentloaded'});
-  let serverList=await waitList('servers');
+  let serverList=await waitList();
   await serverList.input.fill('v260-edge-01');
   await page.waitForTimeout(300);
-  report.server.before={query:await serverList.input.inputValue(),count:clean(await serverList.toolbar.locator('[data-v275-count]').innerText().catch(()=>''))};
+  report.server.before={query:await serverList.input.inputValue(),count:clean(await serverList.toolbar.locator('[data-v275-count],.v275-list-count').first().innerText().catch(()=>''))};
   const serverAction=page.locator('table.server-table [data-v270-action="server"]:visible').first();
   await serverAction.waitFor({state:'visible',timeout:10000});
   const serverId=await serverAction.getAttribute('data-id');
@@ -70,15 +67,14 @@ try{
   report.server.detail_hash=await page.evaluate(()=>location.hash);
   await page.goBack();
   await page.waitForFunction(()=>location.hash==='#servers',null,{timeout:10000});
-  serverList=await waitList('servers');
+  serverList=await waitList();
   await page.waitForTimeout(350);
-  report.server.after_browser_back={query:await serverList.input.inputValue(),count:clean(await serverList.toolbar.locator('[data-v275-count]').innerText().catch(()=>''))};
+  report.server.after_browser_back={query:await serverList.input.inputValue(),count:clean(await serverList.toolbar.locator('[data-v275-count],.v275-list-count').first().innerText().catch(()=>''))};
   await page.screenshot({path:`${evidence}/02-servers-after-browser-back.png`,fullPage:true,animations:'disabled'});
 
-  // 390px server return behavior.
   await page.setViewportSize({width:390,height:844});
   await page.goto(`${base}/index.php#servers`,{waitUntil:'domcontentloaded'});
-  serverList=await waitList('servers');
+  serverList=await waitList();
   await serverList.input.fill('v260-edge-01');
   await page.waitForTimeout(250);
   const mobileAction=page.locator('.server-card [data-v270-action="server"]:visible').first();
@@ -86,7 +82,7 @@ try{
   await page.waitForFunction(id=>location.hash===`#server/${encodeURIComponent(id)}`,serverId,{timeout:10000});
   await page.goBack();
   await page.waitForFunction(()=>location.hash==='#servers',null,{timeout:10000});
-  serverList=await waitList('servers');
+  serverList=await waitList();
   await page.waitForTimeout(300);
   report.mobile.server_after_back={query:await serverList.input.inputValue(),overflow:await page.evaluate(()=>Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)-window.innerWidth)};
   await page.screenshot({path:`${evidence}/03-servers-mobile-after-back.png`,fullPage:true,animations:'disabled'});
