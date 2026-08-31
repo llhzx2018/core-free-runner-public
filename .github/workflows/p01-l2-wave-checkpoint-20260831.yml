@@ -1,0 +1,207 @@
+name: P01 L2 Wave Integrated Checkpoint
+on:
+  push:
+    branches: [integration/p01-l2-wave-checkpoint-20260831]
+    paths: [.github/workflows/p01-l2-wave-checkpoint-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  checkpoint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE: c798eaea4b6892a2b6d550cb2162d60c6c18c6c6
+      TREE: fe830923287b2d803ebf2dc37082628d02f6d881
+      PRODUCTION_MAIN: 3a60430c3c74688f2db81f2fd08e7e8ecd986fc9
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-l2-checkpoint/evidence
+      PORT: '18487'
+      ADMIN_PASS: P01L2IntegratedCheckpoint
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact develop product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source production-delta and no-schema fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-l2-checkpoint; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$PRODUCTION_MAIN" HEAD)" = "$PRODUCTION_MAIN"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          git -C product diff --name-only "$PRODUCTION_MAIN"...HEAD | sort >"$EVID/delta.txt"
+          cat >"$EVID/expected-delta.txt" <<'EOF'
+          VF_PROJECT.json
+          docs/authority/CURRENT.md
+          docs/evidence/P01_L2_PRODUCT_WAVE_DEVELOP_MERGE_20260831.md
+          docs/handoff/CURRENT_STATE.md
+          src/app/AdminShell.php
+          src/app/FunctionalHome.php
+          src/assets/admin-consolidation.css
+          src/assets/links-admin.js
+          src/assets/workspace-home.css
+          src/browser-helper.php
+          src/links-admin.php
+          src/settings.php
+          src/system.php
+          EOF
+          diff -u "$EVID/expected-delta.txt" "$EVID/delta.txt"
+          ! grep -Eq '^src/(migrations|migration|schema)/' "$EVID/delta.txt"
+          ! grep -Eq '(^|/)VERSION(\.txt)?$' "$EVID/delta.txt"
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check >"$EVID/js-check.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          shell=Path('product/src/app/AdminShell.php').read_text()
+          home=Path('product/src/app/FunctionalHome.php').read_text()
+          helper=Path('product/src/browser-helper.php').read_text()
+          links=Path('product/src/assets/links-admin.js').read_text()
+          css=Path('product/src/assets/admin-consolidation.css').read_text()
+          assert "['key'=>'links','label'=>'网址'" in shell
+          assert "['key'=>'browser','label'=>'浏览器助手'" in shell
+          assert "['key'=>'recovery','label'=>'备份与恢复'" in shell
+          assert "['key'=>'settings','label'=>'设置'" in shell
+          assert "['key'=>'update','label'=>'更新'" in shell
+          assert '这里只放需要处理的事项和最近操作' in home
+          assert '私密待整理' in helper and '打开待整理' in helper
+          assert 'resetFilterSelection' in links
+          assert "if(cat&&selected.size){selected.clear();renderLinks()}" in links
+          assert 'allPending=picked.length===selected.size' in links
+          assert 'allOrganized=picked.length===selected.size' in links
+          assert '.vf-links-batch [hidden]' in css
+          PY
+          printf 'P01_L2_CHECKPOINT_EXACT_SOURCE=PASS\nP01_L2_CHECKPOINT_DELTA=PASS\nP01_L2_CHECKPOINT_NO_SCHEMA_MIGRATION_VERSION_CHANGE=PASS\n' | tee "$EVID/source-fence.txt"
+      - name: Fresh install CLI surface and fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-l2-checkpoint.pid
+          COOKIE=/tmp/p01-l2-checkpoint.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 L2 Integrated Checkpoint' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $a=$repo->createCategory(['name'=>'Checkpoint A','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $b=$repo->createCategory(['name'=>'Checkpoint B','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $organized=$repo->saveLink(null,['category_id'=>$a,'title'=>'Checkpoint Organized','url'=>'https://checkpoint-organized.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $pending=$repo->saveLink(null,['category_id'=>$a,'title'=>'Checkpoint Pending','url'=>'https://checkpoint-pending.example/','is_private'=>1,'is_pending'=>1],'admin');
+          $archived=$repo->saveLink(null,['category_id'=>$b,'title'=>'Checkpoint Archived','url'=>'https://checkpoint-archived.example/','is_private'=>0,'is_pending'=>0],'admin');
+          $trashed=$repo->saveLink(null,['category_id'=>$b,'title'=>'Checkpoint Trashed','url'=>'https://checkpoint-trashed.example/','is_private'=>0,'is_pending'=>0],'admin');
+          $repo->bulkLinks([(int)$archived['id']],'archive');
+          $repo->bulkLinks([(int)$trashed['id']],'delete');
+          foreach(['active'=>2,'archived'=>1,'trashed'=>1] as $state=>$want){$st=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$st->execute([$state]);if((int)$st->fetchColumn()!==$want)exit(11);}
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==1)exit(12);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(13);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(14);
+          echo "P01_L2_CHECKPOINT_SEED=PASS\nP01_L2_CHECKPOINT_SQLITE_PRE=PASS\n";
+          PHP
+          printf 'P01_L2_CHECKPOINT_FRESH_RUNTIME=PASS\nP01_L2_CHECKPOINT_CLI_SURFACE=PASS\n' | tee "$EVID/runtime.txt"
+      - name: Chromium integrated desktop and mobile regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-l2-checkpoint/pw; cd /tmp/p01-l2-checkpoint/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >checkpoint.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18487/';
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:900}});
+            const login=await context.request.post(base+'api.php?action=login',{data:{password:'P01L2IntegratedCheckpoint'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await context.newPage();
+            const overflow=()=>p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
+            const visibleBulk=()=>p.evaluate(()=>[...document.querySelectorAll('#batchBar [data-bulk]')].filter(x=>!!(x.offsetWidth||x.offsetHeight||x.getClientRects().length)).map(x=>x.dataset.bulk));
+            const batchState=()=>p.evaluate(()=>({shown:document.querySelector('#batchBar')?.classList.contains('show')||false,count:document.querySelector('#batchCount')?.textContent?.trim()||'',checked:document.querySelectorAll('[data-select]:checked').length,desktop:{checked:document.querySelector('#selectPage')?.checked||false,indeterminate:document.querySelector('#selectPage')?.indeterminate||false},mobile:{checked:document.querySelector('#selectPageMobile')?.checked||false,indeterminate:document.querySelector('#selectPageMobile')?.indeterminate||false}}));
+            const select=async title=>{const row=p.locator('tr').filter({hasText:title});if(await row.count()!==1)throw Error('row '+title);await row.locator('input[data-select]').check();};
+            const clear=async()=>{for(const x of await p.locator('input[data-select]:checked').all())await x.uncheck();};
+            async function domains(width){
+              const routes=['home.php','start.php','channels.php','watch.php','topics.php'];const out={};
+              for(const route of routes){await p.goto(base+route,{waitUntil:'networkidle'});const nav=await p.locator('.vf-global-domain-nav a').allTextContents();if(nav.map(x=>x.trim()).join('|')!=='首页|导航|频道|影视|专题')throw Error('domain nav '+route+' '+JSON.stringify(nav));let ov=await overflow();if(ov>1)throw Error('domain overflow '+width+' '+route+' '+ov);out[route]={nav,overflow:ov};}
+              return out;
+            }
+            async function home(width){
+              await p.goto(base+'home.php',{waitUntil:'networkidle'});const text=(await p.locator('.vf-home-command').innerText()).trim();if(!text.includes('现在需要关注什么')||!text.includes('最近操作')||!text.includes('这里只放需要处理的事项和最近操作'))throw Error('home contract');for(const banned of ['我的收藏','最近使用','网址分类'])if(text.includes(banned))throw Error('home duplicate '+banned);let ov=await overflow();if(ov>1)throw Error('home overflow '+width);if(width===390)await p.screenshot({path:process.env.EVID+'/home-mobile.png',fullPage:true});return {overflow:ov,text:text.slice(0,300)};
+            }
+            async function adminShell(width){
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});const labels=(await p.locator('[data-vf-nav-group] > .vf-rail-item span').allTextContents()).map(x=>x.trim());const expected=['网址','浏览器助手','备份与恢复','设置','更新'];if(JSON.stringify(labels)!==JSON.stringify(expected))throw Error('admin nav '+JSON.stringify(labels));let ov=await overflow();if(ov>1)throw Error('admin overflow '+width);return {labels,overflow:ov};
+            }
+            async function helper(width){
+              await p.goto(base+'browser-helper.php',{waitUntil:'networkidle'});const body=await p.locator('.vf-admin-page-body').innerText();for(const need of ['一键收集到私密待整理','下载浏览器助手','打开待整理','保存目标','私密待整理','仅保存网址'])if(!body.includes(need))throw Error('helper '+need);let ov=await overflow();if(ov>1)throw Error('helper overflow '+width);if(width===390)await p.screenshot({path:process.env.EVID+'/helper-mobile.png',fullPage:true});return {overflow:ov};
+            }
+            async function links(width){
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+              await select('Checkpoint Organized');let s=await batchState();if(!s.shown||s.checked!==1||!s.desktop.indeterminate||!s.mobile.indeterminate)throw Error('selector sync organized '+JSON.stringify(s));let a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['pending','move','archive','delete']))throw Error('organized actions '+JSON.stringify(a));
+              await clear();await select('Checkpoint Pending');a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['organized','move','archive','delete']))throw Error('pending actions '+JSON.stringify(a));
+              await select('Checkpoint Organized');a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['pending','organized','move','archive','delete']))throw Error('mixed actions '+JSON.stringify(a));
+              await p.locator('#linkSearch').fill('Checkpoint Pending');await p.waitForTimeout(80);s=await batchState();if(s.shown||s.checked!==0)throw Error('filter selection leak '+JSON.stringify(s));
+              await p.locator('#linkSearch').fill('');await select('Checkpoint Organized');await p.evaluate(()=>location.hash='#categories');await p.waitForTimeout(80);s=await batchState();if(s.shown||s.checked!==0)throw Error('mode selection leak '+JSON.stringify(s));await p.evaluate(()=>location.hash='');await p.waitForTimeout(80);s=await batchState();if(s.shown||s.checked!==0)throw Error('mode return leak '+JSON.stringify(s));
+              await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});const pageSel=width===390?'#selectPageMobile':'#selectPage';await p.locator(pageSel).check();s=await batchState();if(s.checked!==1||!s.desktop.checked||!s.mobile.checked)throw Error('pending page select sync '+JSON.stringify(s));a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['organized','move','archive','delete']))throw Error('pending dedicated actions '+JSON.stringify(a));if(!(await p.locator('#stateFilter').isDisabled()))throw Error('pending lifecycle selector enabled');
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#stateFilter').selectOption('archived');await p.waitForTimeout(80);await select('Checkpoint Archived');a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['restore']))throw Error('archived actions '+JSON.stringify(a));
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#stateFilter').selectOption('trashed');await p.waitForTimeout(80);await select('Checkpoint Trashed');a=await visibleBulk();if(JSON.stringify(a)!==JSON.stringify(['restore']))throw Error('trashed actions '+JSON.stringify(a));
+              let ov=await overflow();if(ov>1)throw Error('links overflow '+width);if(width===390)await p.screenshot({path:process.env.EVID+'/links-mobile.png',fullPage:true});return {overflow:ov};
+            }
+            async function run(width){await p.setViewportSize({width,height:844});return {domains:await domains(width),home:await home(width),admin:await adminShell(width),helper:await helper(width),links:await links(width)};}
+            const desktop=await run(1440);const mobile=await run(390);
+            fs.writeFileSync(process.env.EVID+'/browser-state.json',JSON.stringify({desktop,mobile},null,2));
+            await browser.close();console.log('P01_L2_CHECKPOINT_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node checkpoint.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_L2_CHECKPOINT_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final database and checkpoint verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          foreach(['active'=>2,'archived'=>1,'trashed'=>1] as $state=>$want){$st=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$st->execute([$state]);if((int)$st->fetchColumn()!==$want)exit(21);}
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==1)exit(22);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(23);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(24);
+          echo "P01_L2_CHECKPOINT_SQLITE_POST=PASS\n";
+          PHP
+          grep -Fx P01_L2_CHECKPOINT_EXACT_SOURCE=PASS "$EVID/source-fence.txt"
+          grep -Fx P01_L2_CHECKPOINT_DELTA=PASS "$EVID/source-fence.txt"
+          grep -Fx P01_L2_CHECKPOINT_NO_SCHEMA_MIGRATION_VERSION_CHANGE=PASS "$EVID/source-fence.txt"
+          grep -Fx P01_L2_CHECKPOINT_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_L2_CHECKPOINT_CLI_SURFACE=PASS "$EVID/runtime.txt"
+          grep -Fx P01_L2_CHECKPOINT_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_L2_CHECKPOINT_SQLITE_POST=PASS "$EVID/post-db.txt"
+          printf 'P01_L2_INTEGRATED_CHECKPOINT=PASS\nSOURCE=%s\nTREE=%s\nPRODUCTION_MAIN=%s\nSCHEMA=2026082901\nVERSION=2.35.3\nRELEASE=NO\nOWNER_PRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$TREE" "$PRODUCTION_MAIN" | tee "$EVID/verdict.txt"
+      - name: Upload checkpoint evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-l2-integrated-checkpoint-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-l2-checkpoint.pid 2>/dev/null)" 2>/dev/null || true
