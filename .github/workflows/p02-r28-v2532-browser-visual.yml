@@ -1,0 +1,106 @@
+name: P02 R28 V2.5.32 Browser Visual
+on:
+  push:
+    branches: [run/p02-r28-v2532-browser-visual]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCT_REF: ca8d806b11cfbc8cdb5e5998ef65aa8d64abd238
+      EXPECTED_VERSION: '2.5.32'
+      PORT: '18080'
+    steps:
+      - name: Checkout exact P02 develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Install runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y php-cli php-sqlite3 sqlite3 curl >/dev/null
+          cd product
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Build isolated site
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r28"
+          SITE="$RUN_ROOT/site"
+          mkdir -p "$RUN_ROOT" visual-audit
+          bash scripts/build-deploy-tree.sh "$SITE"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = "$EXPECTED_VERSION"
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          BASE_URL="http://127.0.0.1:$PORT"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          PASSWORD="VF-R28-${GITHUB_RUN_ID}!"
+          printf '%s' "$PASSWORD" > "$RUN_ROOT/password"
+          curl -fsS -c "$RUN_ROOT/cookie" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$RUN_ROOT/cookie" -c "$RUN_ROOT/cookie" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = '303'
+          echo P02_R28_SITE_READY=PASS
+
+      - name: Run real Chromium UX flow
+        working-directory: product
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r28"
+          VF_UX_E2E_BASE_URL="http://127.0.0.1:$PORT" VF_UX_E2E_PASSWORD="$(cat "$RUN_ROOT/password")" VF_UX_E2E_VERSION="$EXPECTED_VERSION" node tests/e2e/p02_ux_task_flow.mjs
+
+      - name: Probe and capture converged surfaces
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-r28"
+          cat > r28.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';
+          const base=process.env.BASE_URL,password=process.env.PASSWORD,out='visual-audit';fs.mkdirSync(out,{recursive:true});
+          const browser=await chromium.launch({headless:true});const context=await browser.newContext({viewport:{width:1440,height:900}});const page=await context.newPage();const assert=(v,m)=>{if(!v)throw new Error(m)};const shot=async n=>{await page.waitForTimeout(150);await page.screenshot({path:`${out}/${n}.png`,fullPage:false});console.log('SHOT='+n)};
+          await page.goto(base+'/',{waitUntil:'networkidle'});if(await page.locator('[data-open-login]').count()){await page.locator('[data-open-login]').click();await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();await page.waitForFunction(async()=>Boolean((await (await fetch('/api.php?action=session')).json())?.site?.auth));}
+          const fixture=await page.evaluate(async()=>{const s=await (await fetch('/api.php?action=session')).json();const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify(b)});const j=await r.json();if(!j.ok)throw new Error(a);return j};const c=await post('category_save',{name:'R28 视觉收敛',description:'isolated',icon:'folder'});const ids=[];for(let i=0;i<18;i++){const title=i===0?'这是一个特别长的移动端编辑标题，用来确认标题会自然换行而不是横向被裁掉':'R28 资料 '+String(i).padStart(2,'0');const content=`# ${title}\n\n${('用于检查阅读、编辑、分栏与移动端布局的真实浏览器长文。中文 English 123。\n\n').repeat(28)}`;const x=await post('content_save',{category_id:c.id,title,content,content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});ids.push(x.id)}return {categoryId:c.id,ids}});
+          await page.evaluate(async id=>{if(state.contentView!=='list')await setContentView('list');await selectCategory(id)},fixture.categoryId);await page.waitForFunction(()=>state.loading===false&&document.querySelectorAll('.content-row').length>0);await shot('01-list-desktop');
+          await page.evaluate(id=>openReader(id),fixture.ids[0]);await page.waitForSelector('.reader-page');await shot('02-reader-desktop');await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');
+          const edit=await page.evaluate(()=>{const l=document.querySelector('#notebookLayout'),p=document.querySelector('#notebookListPane'),d=document.querySelector('#notebookDetailScroll');return {classes:l?.className,pane:getComputedStyle(p).display,detail:Math.round(d.getBoundingClientRect().width),innerWidth}});console.log('R28_EDIT='+JSON.stringify(edit));assert(edit.pane==='none','desktop edit title list is still visible');assert(edit.detail>1000,'desktop edit detail width did not reclaim pane');await shot('03-edit-desktop');
+          await page.locator('.workspace-mode-switch [data-workspace-command="split"]').click();await page.waitForSelector('.article-workspace.mode-split');const split=await page.evaluate(()=>({source:Math.round(document.querySelector('.article-source-pane').getBoundingClientRect().width),preview:Math.round(document.querySelector('.article-preview-pane').getBoundingClientRect().width),pane:getComputedStyle(document.querySelector('#notebookListPane')).display}));console.log('R28_SPLIT='+JSON.stringify(split));assert(split.pane==='none','split title list visible');assert(split.source>430&&split.preview>430,'split panes too narrow');await shot('04-split-desktop');
+          await page.evaluate(async()=>setMode('settings'));await page.waitForSelector('.settings-page');await page.locator('[data-settings-section="updates"]').click();await shot('05-settings-desktop');
+          await page.setViewportSize({width:390,height:844});await page.evaluate(async id=>{await setMode('all','active');await openReader(id)},fixture.ids[0]);await page.waitForSelector('.reader-page');await shot('06-reader-mobile');await page.locator('#readerEdit').click();await page.waitForSelector('.article-workspace.mode-edit');await page.waitForTimeout(100);const mobile=await page.evaluate(()=>{const t=document.querySelector('#articleTitleInput'),tb=document.querySelector('.vf-editor-toolbar');return {client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,titleW:Math.round(t.getBoundingClientRect().width),titleScroll:t.scrollWidth,toolbarClient:tb?.clientWidth||0,toolbarScroll:tb?.scrollWidth||0}});console.log('R28_MOBILE_EDIT='+JSON.stringify(mobile));assert(mobile.scroll<=mobile.client+3,'mobile editor page overflow');assert(mobile.titleScroll<=mobile.titleW+3,'long mobile title clips horizontally');assert(mobile.toolbarClient<=390,'toolbar escapes viewport');await shot('07-edit-mobile');
+          await page.evaluate(async()=>setMode('settings'));await page.waitForSelector('.settings-page');await page.locator('[data-settings-section="updates"]').click();await page.waitForTimeout(100);const settings=await page.evaluate(()=>{const n=document.querySelector('.settings-nav'),p=document.querySelector('.settings-panel');return {navH:Math.round(n.getBoundingClientRect().height),panelTop:Math.round(p.getBoundingClientRect().top),client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}});console.log('R28_MOBILE_SETTINGS='+JSON.stringify(settings));assert(settings.navH<80,'mobile settings nav still multi-row');assert(settings.scroll<=settings.client+3,'mobile settings page overflow');await shot('08-settings-mobile');
+          console.log('P02_R28_BROWSER_VISUAL=PASS');await browser.close();
+          JS
+          BASE_URL="http://127.0.0.1:$PORT" PASSWORD="$(cat "$RUN_ROOT/password")" node r28.mjs
+          rm r28.mjs
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: p02-r28-v2532-visual
+          path: product/visual-audit/*.png
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Boundaries
+        if: always()
+        run: |
+          RUN_ROOT="$RUNNER_TEMP/p02-r28"; if test -f "$RUN_ROOT/php.pid"; then kill "$(cat "$RUN_ROOT/php.pid")" 2>/dev/null || true; fi
+          echo PRODUCT_WRITE=NO
+          echo MAIN_WRITE=NO
+          echo TAG_WRITE=NO
+          echo RELEASE_WRITE=NO
+          echo UPDATE_CHANNEL_WRITE=NO
+          echo PRODUCTION_WRITE=NO
