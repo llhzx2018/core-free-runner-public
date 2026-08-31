@@ -1,0 +1,182 @@
+name: P01 Selection State Batch Actions Gate
+on:
+  push:
+    branches: [product/p01-selection-state-actions-gate-20260831]
+    paths: [.github/workflows/p01-selection-state-actions-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: cffe3ef121f9fbb5a50edaa50a7851dda5df8475
+      BASE: 8133e1982417bea1baa77c6e08c93db643f67350
+      TREE: fe830923287b2d803ebf2dc37082628d02f6d881
+      PRODUCT_BLOB: 9ab0ae97843e82ce2e399c921e8f5a51ec54bde4
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-selection-state-actions/evidence
+      PORT: '18485'
+      ADMIN_PASS: P01SelectionStateActionsGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact JS-only scope and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-selection-state-actions; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git -C product diff --name-only "$BASE"...HEAD)" = 'src/assets/links-admin.js'
+          test "$(git -C product rev-parse HEAD:src/assets/links-admin.js)" = "$PRODUCT_BLOB"
+          for f in src/links-admin.php src/assets/admin-consolidation.css src/api.php src/app/Repository.php; do
+            test "$(git -C product rev-parse "$BASE:$f")" = "$(git -C product rev-parse "HEAD:$f")"
+          done
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('product/src/assets/links-admin.js').read_text()
+          assert "allPending=picked.length===selected.size" in s
+          assert "allOrganized=picked.length===selected.size" in s
+          assert "pendingBtn.hidden=allPending" in s
+          assert "organizedBtn.hidden=allOrganized" in s
+          assert "initialView!=='pending'" in s
+          PY
+          node --check product/src/assets/links-admin.js
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          printf 'P01_SELECTION_STATE_ACTIONS_SCOPE=PASS\nP01_SELECTION_STATE_ACTIONS_SERVER_BYTES_UNCHANGED=PASS\n' | tee "$EVID/scope.txt"
+      - name: Fresh install seed and lifecycle fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-selection-state-actions.pid
+          COOKIE=/tmp/p01-selection-state-actions.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Selection State Actions Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);
+          $c=$repo->createCategory(['name'=>'动作状态分类','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $organized=$repo->saveLink(null,['category_id'=>$c,'title'=>'Organized One','url'=>'https://organized-one.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $pending=$repo->saveLink(null,['category_id'=>$c,'title'=>'Pending One','url'=>'https://pending-one.example/','is_private'=>1,'is_pending'=>1],'admin');
+          $archived=$repo->saveLink(null,['category_id'=>$c,'title'=>'Archived One','url'=>'https://archived-one.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $trashed=$repo->saveLink(null,['category_id'=>$c,'title'=>'Trashed One','url'=>'https://trashed-one.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $repo->bulkLinks([(int)$archived['id']],'archive');
+          $repo->bulkLinks([(int)$trashed['id']],'delete');
+          $counts=[];
+          foreach(['active','archived','trashed'] as $state){$st=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$st->execute([$state]);$counts[$state]=(int)$st->fetchColumn();}
+          if($counts!==['active'=>2,'archived'=>1,'trashed'=>1])exit(11);
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==1)exit(12);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(13);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(14);
+          echo "P01_SELECTION_STATE_ACTIONS_SEED=PASS\nP01_SELECTION_STATE_ACTIONS_SQLITE=PASS\n";
+          PHP
+          echo P01_SELECTION_STATE_ACTIONS_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium desktop mobile state semantics and regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-selection-state-actions/pw; cd /tmp/p01-selection-state-actions/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18485/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            const login=await c.request.post(base+'api.php?action=login',{data:{password:'P01SelectionStateActionsGate'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            const visibleActions=()=>p.evaluate(()=>[...document.querySelectorAll('#batchBar [data-bulk]')].filter(x=>!!(x.offsetWidth||x.offsetHeight||x.getClientRects().length)).map(x=>x.dataset.bulk));
+            const state=()=>p.evaluate(()=>({batchShown:document.querySelector('#batchBar')?.classList.contains('show')||false,batchText:document.querySelector('#batchCount')?.textContent?.trim()||'',checked:document.querySelectorAll('[data-select]:checked').length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,hash:location.hash}));
+            const select=async title=>{const row=p.locator('tr').filter({hasText:title});if(await row.count()!==1)throw Error('row '+title);await row.locator('input[data-select]').check();};
+            const clearChecked=async()=>{for(const box of await p.locator('input[data-select]:checked').all())await box.uncheck();};
+            const expectActions=async(label,expected)=>{const got=await visibleActions();if(JSON.stringify(got)!==JSON.stringify(expected))throw Error(label+' '+JSON.stringify(got));return got;};
+            async function activeCases(width){
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+              await select('Organized One');const organized=await expectActions('organized',['pending','move','archive','delete']);
+              if(width===390)await p.screenshot({path:process.env.EVID+'/organized-mobile.png',fullPage:true});
+              await clearChecked();await select('Pending One');const pending=await expectActions('pending',['organized','move','archive','delete']);
+              if(width===390)await p.screenshot({path:process.env.EVID+'/pending-mobile.png',fullPage:true});
+              await select('Organized One');const mixed=await expectActions('mixed',['pending','organized','move','archive','delete']);
+              if(width===390)await p.screenshot({path:process.env.EVID+'/mixed-mobile.png',fullPage:true});
+              let s=await state();if(s.overflow>1)throw Error('active overflow');
+              return {organized,pending,mixed,state:s};
+            }
+            async function pendingView(width){
+              await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});
+              const pageSel=width===390?'#selectPageMobile':'#selectPage';await p.locator(pageSel).check();
+              const actions=await expectActions('pending view',['organized','move','archive','delete']);
+              let s=await state();if(s.checked!==1||s.overflow>1)throw Error('pending view state '+JSON.stringify(s));
+              return {actions,state:s};
+            }
+            async function lifecycle(which,title){
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#stateFilter').selectOption(which);await p.waitForTimeout(100);await select(title);
+              const actions=await expectActions(which,['restore']);let s=await state();if(s.overflow>1)throw Error(which+' overflow');return {actions,state:s};
+            }
+            async function contextRegressions(){
+              await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await select('Organized One');await p.locator('#linkSearch').fill('Pending One');await p.waitForTimeout(80);let filter=await state();if(filter.batchShown||filter.checked!==0)throw Error('filter selection leak '+JSON.stringify(filter));
+              await p.locator('#linkSearch').fill('');await select('Organized One');await p.evaluate(()=>location.hash='#categories');await p.waitForTimeout(80);let categories=await state();if(categories.batchShown||categories.checked!==0)throw Error('mode selection leak '+JSON.stringify(categories));await p.evaluate(()=>location.hash='');await p.waitForTimeout(80);let returned=await state();if(returned.batchShown||returned.checked!==0)throw Error('mode return leak '+JSON.stringify(returned));return {filter,categories,returned};
+            }
+            async function run(width){await p.setViewportSize({width,height:844});return {active:await activeCases(width),pendingView:await pendingView(width),archived:await lifecycle('archived','Archived One'),trashed:await lifecycle('trashed','Trashed One'),contexts:await contextRegressions()};}
+            const desktop=await run(1440),mobile=await run(390);
+            fs.writeFileSync(process.env.EVID+'/states.json',JSON.stringify({desktop,mobile},null,2));
+            await b.close();console.log('P01_SELECTION_STATE_ACTIONS_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_SELECTION_STATE_ACTIONS_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final DB verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          foreach(['active'=>2,'archived'=>1,'trashed'=>1] as $state=>$want){$st=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$st->execute([$state]);if((int)$st->fetchColumn()!==$want)exit(21);}
+          if((int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active' AND is_pending=1")->fetchColumn()!==1)exit(22);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(23);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(24);
+          echo "P01_SELECTION_STATE_ACTIONS_POST_DB=PASS\n";
+          PHP
+          grep -Fx P01_SELECTION_STATE_ACTIONS_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_SELECTION_STATE_ACTIONS_SERVER_BYTES_UNCHANGED=PASS "$EVID/scope.txt"
+          grep -Fx P01_SELECTION_STATE_ACTIONS_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_SELECTION_STATE_ACTIONS_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_SELECTION_STATE_ACTIONS_POST_DB=PASS "$EVID/post-db.txt"
+          printf 'P01_SELECTION_STATE_ACTIONS_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nPRODUCT_BLOB=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" "$PRODUCT_BLOB" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-selection-state-actions-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-selection-state-actions.pid 2>/dev/null)" 2>/dev/null || true
