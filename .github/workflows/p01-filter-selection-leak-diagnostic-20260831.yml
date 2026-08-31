@@ -1,0 +1,87 @@
+name: P01 Filter Selection Leak Diagnostic
+on:
+  push:
+    branches:
+      - diagnostic/p01-filter-selection-leak-20260831
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE: 9d9b573323d11d3b4dc1f6b8a7d9ae3da244761e
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-filter-selection/evidence
+      PORT: 18480
+      ADMIN_PASS: P01FilterSelectionDiag
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact develop truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup and seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-filter-selection; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-filter-selection.pid
+          COOKIE=/tmp/p01-filter-selection.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Filter Selection Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $a=$repo->createCategory(['name'=>'筛选 A','description'=>'','parent_id'=>null,'is_private'=>false]);
+          $b=$repo->createCategory(['name'=>'筛选 B','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $repo->saveLink(null,['category_id'=>$a,'title'=>'Alpha Selected','url'=>'https://alpha-selected.example/','is_private'=>0,'is_pending'=>0],'admin');
+          $repo->saveLink(null,['category_id'=>$b,'title'=>'Beta Visible','url'=>'https://beta-visible.example/','is_private'=>1,'is_pending'=>0],'admin');
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium diagnostic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-filter-selection/pw; cd /tmp/p01-filter-selection/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18480/';
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:390,height:844}});
+          let r=await c.request.post(base+'api.php?action=login',{data:{password:'P01FilterSelectionDiag'}});if(!r.ok()||!(await r.json()).ok)throw Error('login');
+          const p=await c.newPage();await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});
+          const alpha=p.locator('tr').filter({hasText:'Alpha Selected'});await alpha.locator('input[data-select]').check();
+          const before=await p.evaluate(()=>({batch:document.querySelector('#batchCount')?.textContent?.trim(),visibleChecked:document.querySelectorAll('[data-select]:checked').length,batchShown:document.querySelector('#batchBar')?.classList.contains('show')}));
+          await p.locator('#linkSearch').fill('Beta Visible');await p.waitForTimeout(150);
+          const after=await p.evaluate(()=>({batch:document.querySelector('#batchCount')?.textContent?.trim(),visibleChecked:document.querySelectorAll('[data-select]:checked').length,batchShown:document.querySelector('#batchBar')?.classList.contains('show'),visibleRows:[...document.querySelectorAll('#linksBody tr')].map(x=>x.innerText)}));
+          const leak=after.visibleChecked===0 && after.batchShown===true && /1/.test(after.batch||'');
+          fs.writeFileSync(process.env.EVID+'/diagnostic.json',JSON.stringify({before,after,leak},null,2));await p.screenshot({path:process.env.EVID+'/after-filter.png',fullPage:true});
+          console.log('P01_FILTER_SELECTION_LEAK='+String(leak).toUpperCase());console.log(JSON.stringify({before,after}));await b.close();})();
+          JS
+          EVID="$EVID" node diag.cjs | tee "$EVID/diagnostic.txt"
+      - name: Upload evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-filter-selection-leak-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-filter-selection.pid 2>/dev/null)" 2>/dev/null || true
