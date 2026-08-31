@@ -1,0 +1,184 @@
+from pathlib import Path
+import json
+
+CURRENT_SOURCE = '192a6684975138871a2f2539ff9c511f34d3fe59'
+CURRENT_TREE = '94e620562dd71c7134bfa6921bae4b200490eb5a'
+CANDIDATE = '2fbe25c3ffc1ed9c4c911bef05f052d396379031'
+BLOB = '56fbf3bf8447bc571750daf32ad30af6b37bd8a6'
+GATE = 33397418443
+ART = 9759884691
+DIGEST = 'cac1ea8b862dffcccf476d17e27a0e8abfa0ef72eef6749c1662bf29a0098404'
+DIAG = 33392768907
+DIAG_ART = 9758122009
+DIAG_DIGEST = '8cebc71669e433e1c3ffdc742f816018af4e89f103a5c06ab133a16b39b04c21'
+
+section = '''### Mobile links touch-target refinement
+
+PR #149 closes the 390px touch-target defect on `links-admin` and is merged to `develop` only.
+
+```text
+PR: #149 / MERGED
+Exact Product Candidate: 2fbe25c3ffc1ed9c4c911bef05f052d396379031
+Current L2 runtime Product Source: 192a6684975138871a2f2539ff9c511f34d3fe59
+Current L2 runtime Product Tree: 94e620562dd71c7134bfa6921bae4b200490eb5a
+Scope: src/assets/admin-consolidation.css only / +3 -0
+Merged blob: 56fbf3bf8447bc571750daf32ad30af6b37bd8a6
+Diagnostic Run: 33392768907 / DEFECT REPRODUCED
+Diagnostic Artifact: 9758122009
+Diagnostic Digest: sha256:8cebc71669e433e1c3ffdc742f816018af4e89f103a5c06ab133a16b39b04c21
+Authoritative Machine Gate: 33397418443 / PASS
+Evidence Artifact: 9759884691
+Digest: sha256:cac1ea8b862dffcccf476d17e27a0e8abfa0ef72eef6749c1662bf29a0098404
+```
+
+The diagnostic measured `打开 / 编辑 = 31px`, visible batch actions `35px`, and `上一页 / 下一页 = 35px` at 390px while `选择本页 = 40px`, document overflow was `0`, SQLite integrity was `ok`, and FK errors were `0`. The final CSS-only rule is fenced to `links-admin` at `<=768px` and sets these existing buttons to a 40px minimum height. Final Chromium measured Open/Edit, Prev/Next, active visible batch actions and archived Restore at 40px; mobile page-select remained 40px; document overflow remained 0. Page-select, filter-selection, mode-selection, lifecycle hidden-state and state-aware batch-action regressions all PASS. Desktop 1440 did not match the mobile media rule and remained overflow-free. Schema/version are unchanged; Release/Tag/core-updates/Owner Production/Runner main writes are all NO.
+
+'''
+
+p = Path('docs/authority/CURRENT.md')
+s = p.read_text()
+old = '> 状态：`CURRENT / V2.35.3 PRODUCTION CLOSURE PASS / L2 INTEGRATED CHECKPOINT PASS`'
+assert old in s
+s = s.replace(old, '> 状态：`CURRENT / V2.35.3 PRODUCTION CLOSURE PASS / L2 MOBILE TOUCH TARGET PASS`', 1)
+marker = '## Branch Boundary'
+assert marker in s and '### Mobile links touch-target refinement' not in s
+head, tail = s.split(marker, 1)
+head += section
+tail = tail.replace('L2 runtime Product Source = c798eaea4b6892a2b6d550cb2162d60c6c18c6c6', f'L2 runtime Product Source = {CURRENT_SOURCE}')
+tail = tail.replace('L2 runtime Product Tree = fe830923287b2d803ebf2dc37082628d02f6d881', f'L2 runtime Product Tree = {CURRENT_TREE}')
+tail = tail.replace('Continue evidence-driven L2 product optimization from the integrated checkpoint.', 'Continue evidence-driven L2 product optimization from the PR #149 mobile touch-target PASS runtime.')
+tail = tail.replace('The previously suspected post-bulk context issue is now explicitly closed as `PASS / NO CHANGE`, so do not reopen it without new evidence.', 'Post-bulk context, the mobile horizontal-table doubt, and the links-admin touch-target defect are now closed by Machine evidence; do not reopen them without new evidence.')
+p.write_text(head + marker + tail)
+
+p = Path('docs/handoff/CURRENT_STATE.md')
+s = p.read_text()
+for old, new in [
+    ('Current L2 runtime Product Source: c798eaea4b6892a2b6d550cb2162d60c6c18c6c6', f'Current L2 runtime Product Source: {CURRENT_SOURCE}'),
+    ('Current L2 runtime Product Tree: fe830923287b2d803ebf2dc37082628d02f6d881', f'Current L2 runtime Product Tree: {CURRENT_TREE}'),
+    ('L2 Product State: #142-#148 MERGED TO DEVELOP / INTEGRATED MACHINE CHECKPOINT PASS / NOT RELEASED', 'L2 Product State: #142-#149 MERGED TO DEVELOP / MOBILE TOUCH TARGET MACHINE PASS / NOT RELEASED'),
+]:
+    assert old in s
+    s = s.replace(old, new, 1)
+marker = '## CURRENT BOUNDARY'
+assert marker in s and '## L2 DEVELOP · MOBILE TOUCH TARGET REFINEMENT' not in s
+handoff_section = '''## L2 DEVELOP · MOBILE TOUCH TARGET REFINEMENT
+
+```text
+PR: #149 / MERGED
+Exact Product Candidate: 2fbe25c3ffc1ed9c4c911bef05f052d396379031
+Current runtime Product Source: 192a6684975138871a2f2539ff9c511f34d3fe59
+Current runtime Product Tree: 94e620562dd71c7134bfa6921bae4b200490eb5a
+Scope: src/assets/admin-consolidation.css only / +3 -0
+Merged blob: 56fbf3bf8447bc571750daf32ad30af6b37bd8a6
+Diagnostic: 33392768907 / 390px Open/Edit 31px; batch 35px; Prev/Next 35px / DEFECT REPRODUCED
+Diagnostic Artifact: 9758122009
+Diagnostic Digest: sha256:8cebc71669e433e1c3ffdc742f816018af4e89f103a5c06ab133a16b39b04c21
+Authoritative Gate: 33397418443 PASS
+Evidence Artifact: 9759884691
+Digest: sha256:cac1ea8b862dffcccf476d17e27a0e8abfa0ef72eef6749c1662bf29a0098404
+```
+
+At `<=768px`, only links-admin row actions, currently visible batch actions, and Prev/Next receive a 40px minimum height. The final 390px Chromium readback measured all targeted controls at 40px, preserved `选择本页 = 40px`, kept document overflow at 0, and passed page-select / filter / mode / lifecycle / state-aware batch regressions. Desktop 1440 remained outside the mobile rule. SQLite integrity is `ok`, FK is `0`; Schema/version are unchanged and there was no main, Release, Tag, core-updates, Runner main or Owner Production write.
+
+'''
+head, tail = s.split(marker, 1)
+head += handoff_section
+tail = tail.replace('L2 runtime Product Source = c798eaea4b6892a2b6d550cb2162d60c6c18c6c6', f'L2 runtime Product Source = {CURRENT_SOURCE}')
+tail = tail.replace('L2 runtime Product Tree = fe830923287b2d803ebf2dc37082628d02f6d881', f'L2 runtime Product Tree = {CURRENT_TREE}')
+tail = tail.replace('Continue evidence-driven L2 product optimization from the integrated checkpoint.', 'Continue evidence-driven L2 product optimization from the PR #149 mobile touch-target PASS runtime.')
+tail = tail.replace('Post-bulk context is explicitly closed as `PASS / NO PRODUCT CHANGE`, so do not spend another cycle on it without new evidence.', 'Post-bulk context, the mobile horizontal-table doubt and mobile touch targets are explicitly closed by Machine evidence, so do not spend another cycle on them without new evidence.')
+p.write_text(head + marker + tail)
+
+p = Path('docs/evidence/P01_L2_PRODUCT_WAVE_DEVELOP_MERGE_20260831.md')
+s = p.read_text()
+for old, new in [
+    ('Current Product Source on develop: c798eaea4b6892a2b6d550cb2162d60c6c18c6c6', f'Current Product Source on develop: {CURRENT_SOURCE}'),
+    ('Current Product Tree: fe830923287b2d803ebf2dc37082628d02f6d881', f'Current Product Tree: {CURRENT_TREE}'),
+    ('Latest Product PR: #148 / MERGED', 'Latest Product PR: #149 / MERGED'),
+]:
+    assert old in s
+    s = s.replace(old, new, 1)
+marker = '## Post-Merge Blob Readback'
+assert marker in s and '## PR #149 · Mobile Touch Target Refinement' not in s
+ev_section = '''## PR #149 · Mobile Touch Target Refinement
+
+A Fresh Runtime diagnostic reproduced a real mobile operability defect before any Product byte changed. At 390px, Open/Edit were 31px high, visible batch actions 35px, Prev/Next 35px, while mobile page-select was already 40px. Document overflow was 0 and SQLite remained healthy.
+
+```text
+Diagnostic Run: 33392768907 / DEFECT REPRODUCED
+Diagnostic Artifact: 9758122009
+Diagnostic Digest: sha256:8cebc71669e433e1c3ffdc742f816018af4e89f103a5c06ab133a16b39b04c21
+Exact Product Candidate: 2fbe25c3ffc1ed9c4c911bef05f052d396379031
+Scope: src/assets/admin-consolidation.css only / +3 -0
+CSS fence: body[data-vf-page=links-admin] + max-width:768px only
+Target min-height: 40px
+Authoritative Gate: 33397418443 / PASS
+Evidence Artifact: 9759884691
+Digest: sha256:cac1ea8b862dffcccf476d17e27a0e8abfa0ef72eef6749c1662bf29a0098404
+PR: #149 / MERGED TO DEVELOP ONLY
+Develop Product Merge: 192a6684975138871a2f2539ff9c511f34d3fe59
+Current Product Tree: 94e620562dd71c7134bfa6921bae4b200490eb5a
+Merged CSS Blob: 56fbf3bf8447bc571750daf32ad30af6b37bd8a6
+```
+
+Final 390px measurements: Open 40px, Edit 40px, Prev 40px, Next 40px, visible active batch actions (`pending / move / archive / delete`) 40px, archived Restore 40px, and mobile page-select 40px. Document horizontal overflow remained 0. Select-page behavior (4 shown / 4 checked), filter-selection clearing, URL/category mode clearing, lifecycle hidden-state and state-aware batch actions all passed. Chromium 1440 confirmed the mobile media rule was not active and document overflow remained 0. SQLite integrity was `ok`; foreign key errors were `0`. No JS/PHP/API/Schema/Migration/version/main/Release/Tag/core-updates/Owner Production/Runner main mutation occurred.
+
+'''
+head, tail = s.split(marker, 1)
+head += ev_section
+tail = tail.replace('src/assets/admin-consolidation.css 7a0bc6a2968a3c34b3cc9b5878562320f234b070', f'src/assets/admin-consolidation.css {BLOB}', 1)
+old_truth = 'The integrated Product runtime is frozen at source `c798eaea4b6892a2b6d550cb2162d60c6c18c6c6` / tree `fe830923287b2d803ebf2dc37082628d02f6d881` until the next evidence-driven L2 change.'
+assert old_truth in tail
+tail = tail.replace(old_truth, f'The current develop-only Product runtime is source `{CURRENT_SOURCE}` / tree `{CURRENT_TREE}` after PR #149 Machine PASS. It remains unreleased and is not present in Owner Production.', 1)
+p.write_text(head + marker + tail)
+
+p = Path('VF_PROJECT.json')
+d = json.loads(p.read_text())
+d['status'] = 'V2.35.3 PRODUCTION CLOSURE PASS / L2 MOBILE TOUCH TARGET PASS'
+d['current_change'] = {
+    'change_id': 'P01-L2-MOBILE-TOUCH-TARGETS-20260831',
+    'base': 'L2 INTEGRATED CHECKPOINT PASS / DEVELOP AUTHORITY BASE 9603fce323e9906532da6662079f02d4e2c2f44a',
+    'result': 'MOBILE TOUCH TARGET REFINEMENT PASS / MERGED TO DEVELOP / NOT RELEASED',
+    'schema_change': False,
+    'migration': None,
+    'latest_merge_pr': 149,
+    'runtime_product_source': CURRENT_SOURCE,
+    'runtime_product_tree': CURRENT_TREE,
+    'latest_product_blob': BLOB,
+    'machine_gate': GATE,
+    'evidence_artifact': ART,
+    'evidence_artifact_sha256': DIGEST,
+    'owner_production_write': False,
+    'runner_main_write': False,
+}
+d['develop_state'] = 'L2 #142-#149 MERGED / MOBILE TOUCH TARGET PASS / AHEAD OF MAIN / NOT RELEASED'
+d['current_authority'] = f'Owner Production V2.35.3 Closure PASS / main Production Truth / develop runtime source {CURRENT_SOURCE} tree {CURRENT_TREE} / PR #149 Gate {GATE} PASS'
+d['next_action'] = 'Continue evidence-driven L2 product optimization from the PR #149 mobile touch-target PASS runtime. Post-bulk context, the mobile horizontal-table doubt and mobile touch targets are closed unless new evidence appears. Do not promote to main, publish a Release, mutate core-updates or write Owner Production without a separate formal Release Gate.'
+d['l2_mobile_touch_targets'] = {
+    'pr': 149,
+    'diagnostic_run': DIAG,
+    'diagnostic_artifact': DIAG_ART,
+    'diagnostic_artifact_sha256': DIAG_DIGEST,
+    'diagnostic_390': {'open_edit_height_px': 31, 'visible_batch_height_px': 35, 'pager_height_px': 35, 'select_page_height_px': 40, 'document_overflow_px': 0, 'sqlite_integrity': 'ok', 'foreign_key_errors': 0},
+    'product_candidate': CANDIDATE,
+    'product_tree': CURRENT_TREE,
+    'scope': ['src/assets/admin-consolidation.css'],
+    'product_blob': BLOB,
+    'css_scope': 'links-admin <=768px only',
+    'css_min_height_px': 40,
+    'machine_gate': GATE,
+    'evidence_artifact': ART,
+    'evidence_artifact_sha256': DIGEST,
+    'develop_product_merge': CURRENT_SOURCE,
+    'mobile_390': {'open_height_px': 40, 'edit_height_px': 40, 'prev_height_px': 40, 'next_height_px': 40, 'select_page_height_px': 40, 'visible_active_batch_height_px': 40, 'archived_restore_height_px': 40, 'document_overflow_px': 0},
+    'desktop_1440': {'mobile_media_match': False, 'document_overflow_px': 0},
+    'selection_regression': 'PASS',
+    'lifecycle_filter_mode_state_aware_regression': 'PASS',
+    'sqlite_integrity': 'ok',
+    'foreign_key_errors': 0,
+    'state': 'MERGED TO DEVELOP / MACHINE PASS / NOT RELEASED',
+    'main_write': False,
+    'production_write': False,
+    'runner_main_write': False,
+}
+p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + '\n')
