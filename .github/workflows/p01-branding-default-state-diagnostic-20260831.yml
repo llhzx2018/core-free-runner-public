@@ -1,0 +1,80 @@
+name: P01 Branding Default State Diagnostic
+on:
+  push:
+    branches: [diag/p01-branding-sync-e2e-20260831]
+    paths: [.github/workflows/p01-branding-default-state-diagnostic-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE: 7a9e9fd3e2505e85d7aa5781da8b23db7d961a9f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-brand-default/evidence
+      PORT: '18497'
+      ADMIN_PASS: P01BrandDefaultPass
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh setup and repository branding readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-brand-default; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test -z "$(git -C product status --porcelain)"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-brand-default.pid
+          COOKIE=/tmp/p01-brand-default.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Brand Default' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/repository-branding.json"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$r=new VfRepository(vf_db());echo json_encode(['branding'=>$r->getBranding(),'brand_dir'=>defined('VF_BRAND_DIR')?VF_BRAND_DIR:'','brand_files'=>defined('VF_BRAND_DIR')&&is_dir(VF_BRAND_DIR)?array_values(array_diff(scandir(VF_BRAND_DIR),['.','..'])):[]],JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT),"\n";
+          PHP
+      - name: Chromium 390 default-state DOM readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-brand-default/pw; cd /tmp/p01-brand-default/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >diag.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');const base='http://127.0.0.1:18497/';const A=(v,m)=>{if(!v)throw Error(m)};
+          (async()=>{const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:390,height:844}});const lr=await c.request.post(base+'api.php?action=login',{data:{password:'P01BrandDefaultPass'}});A(lr.ok(),'login');const lj=await lr.json();A(lj.ok,'login payload');const boot=await c.request.get(base+'api.php?action=bootstrap');const bj=await boot.json();A(bj.ok,'bootstrap');const p=await c.newPage();p.setDefaultTimeout(8000);await p.goto(base+'settings.php#brand',{waitUntil:'domcontentloaded'});await p.waitForFunction(()=>document.querySelector('#settingsRoot')?.getAttribute('aria-busy')==='false');const dom=await p.evaluate(()=>{function s(id){const e=document.querySelector(id),r=e?.getBoundingClientRect(),cs=e?getComputedStyle(e):null;return e?{hiddenAttr:e.hasAttribute('hidden'),hiddenProp:e.hidden,display:cs.display,visibility:cs.visibility,offsetWidth:e.offsetWidth,offsetHeight:e.offsetHeight,rect:r?{x:r.x,y:r.y,w:r.width,h:r.height}:null,outerHTML:e.outerHTML}:null}return{deleteLogo:s('#deleteLogo'),deleteFavicon:s('#deleteFavicon'),logoPreview:s('#logoPreview'),faviconPreview:s('#faviconPreview'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}});const out={source:process.env.SOURCE,bootstrapBranding:bj.site.branding,dom};fs.writeFileSync(process.env.EVID+'/default-state.json',JSON.stringify(out,null,2));await p.screenshot({path:process.env.EVID+'/settings-default-390.png',fullPage:true});console.log(JSON.stringify(out));await c.close();await b.close();})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          SOURCE="$SOURCE" EVID="$EVID" node diag.cjs | tee "$EVID/browser.txt"
+      - name: SQLite integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();$i=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo 'INTEGRITY='.$i."\nFK=".$fk."\n";if($i!=='ok'||$fk!==0)exit(1);
+          PHP
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-branding-default-state-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-brand-default.pid 2>/dev/null)" 2>/dev/null || true
