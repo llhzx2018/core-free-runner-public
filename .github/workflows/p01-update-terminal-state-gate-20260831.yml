@@ -1,0 +1,122 @@
+name: P01 Online Update Terminal State Gate
+on:
+  push:
+    branches: [task/p01-update-terminal-state-gate-20260831]
+    paths: [.github/workflows/p01-update-terminal-state-gate-20260831.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: de9cd603c20227423093ce6f60f08b64aa4472f0
+      TREE: 9d4a569c4a0aeaeb23d1ac192b32bda6285f4b33
+      BASE: 9619492252cedd804b0b9aaf8e5377430b21eabb
+      ROOT: /tmp/p01-update-terminal
+      EVID: /tmp/p01-update-terminal-evid
+      PORT: '18431'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and one-file fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git -C product diff --name-only "$BASE"...HEAD)" = src/assets/update-core.js
+          test "$(cat product/VERSION)" = '2.35.1'
+          node --check product/src/assets/update-core.js
+          grep -F "isAlreadyLatestError" product/src/assets/update-core.js >/dev/null
+          grep -F "currentAtOrBeyondLatest" product/src/assets/update-core.js >/dev/null
+          echo P01_UPDATE_TERMINAL_SOURCE_FENCE=PASS
+      - name: Fresh V2.35.1 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ROOT" "$EVID" /tmp/p01-update-terminal.cookies
+          mkdir -p "$EVID"
+          cp -a product/src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-update-terminal.pid
+          for i in $(seq 1 60); do curl -fsS -c /tmp/p01-update-terminal.cookies -b /tmp/p01-update-terminal.cookies "http://127.0.0.1:$PORT/setup.php" -o /tmp/p01-update-terminal-setup.html && break; sleep .25; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-update-terminal-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-update-terminal.cookies -b /tmp/p01-update-terminal.cookies -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=Update Terminal Gate' --data-urlencode 'admin_password=UpdateTerminal2026' --data-urlencode 'admin_password_confirm=UpdateTerminal2026' -o /tmp/p01-update-terminal-post.html
+          php "$ROOT/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          echo P01_UPDATE_TERMINAL_FRESH=PASS
+      - name: Chromium terminal-state matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-update-terminal-pw && cd /tmp/p01-update-terminal-pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright'),fs=require('fs');
+          const base='http://127.0.0.1:18431/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            const login=await c.request.post(base+'api.php?action=login',{data:{password:'UpdateTerminal2026'}});if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const read=async p=>p.evaluate(()=>{const b=document.getElementById('installUpdate'),err=document.getElementById('updateError'),steps=document.getElementById('updateSteps'),state=document.getElementById('updateState');return {current:document.getElementById('updateCurrent')?.textContent||'',latest:document.getElementById('updateLatest')?.textContent||'',state:state?.textContent||'',dot:document.getElementById('updateDot')?.className||'',installHidden:!!b?.hidden,installDisabled:!!b?.disabled,installText:b?.textContent||'',error:err?.textContent||'',errorShown:!!err?.classList.contains('show'),stepsHidden:!!steps?.hidden,steps:steps?.textContent||'',overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};});
+
+            const p=await c.newPage();await p.goto(base+'update.php',{waitUntil:'networkidle'});await p.waitForTimeout(300);
+            let m=await read(p);if(m.current!=='V2.35.1'||m.latest!=='V2.35.1'||!m.installHidden||m.errorShown||!m.stepsHidden||!m.state.includes('最新')||m.overflow>1)throw Error('stable-initial '+JSON.stringify(m));
+            for(const theme of ['light','dark']){await p.evaluate(t=>document.documentElement.setAttribute('data-theme',t),theme);await p.waitForTimeout(60);m=await read(p);if(m.overflow>1||!m.installHidden||m.errorShown)throw Error('stable-'+theme+' '+JSON.stringify(m));await p.screenshot({path:`${process.env.EVID}/update-stable-1440-${theme}.png`,fullPage:true});}
+            await p.setViewportSize({width:390,height:844});for(const theme of ['light','dark']){await p.evaluate(t=>document.documentElement.setAttribute('data-theme',t),theme);await p.waitForTimeout(60);m=await read(p);if(m.overflow>1||!m.installHidden||m.errorShown)throw Error('mobile-'+theme+' '+JSON.stringify(m));await p.screenshot({path:`${process.env.EVID}/update-stable-390-${theme}.png`,fullPage:true});}
+
+            await p.setViewportSize({width:1440,height:900});await p.evaluate(()=>{const b=document.getElementById('installUpdate');b.hidden=false;b.disabled=false;b.click();});
+            await p.waitForFunction(()=>document.getElementById('updateState')?.textContent.includes('最新')&&document.getElementById('installUpdate')?.hidden===true,{timeout:15000});await p.waitForTimeout(120);m=await read(p);
+            if(m.current!=='V2.35.1'||m.latest!=='V2.35.1'||!m.installHidden||m.errorShown||!m.stepsHidden||m.state==='更新失败。'||m.steps.includes('更新已停止'))throw Error('noop-reconcile '+JSON.stringify(m));
+            await p.screenshot({path:`${process.env.EVID}/update-noop-reconciled.png`,fullPage:true});
+
+            const f=await c.newPage();await f.route('**/api.php?action=update_prepare',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({ok:false,error:'模拟下载校验失败。'})}));await f.goto(base+'update.php',{waitUntil:'networkidle'});await f.waitForTimeout(180);await f.evaluate(()=>{const b=document.getElementById('installUpdate');b.hidden=false;b.disabled=false;b.click();});await f.waitForFunction(()=>document.getElementById('updateState')?.textContent==='更新失败。',{timeout:10000});m=await read(f);
+            if(!m.errorShown||!m.error.includes('模拟下载校验失败')||m.stepsHidden||!m.steps.includes('更新已停止'))throw Error('true-failure '+JSON.stringify(m));await f.screenshot({path:`${process.env.EVID}/update-true-failure.png`,fullPage:true});
+
+            const a=await c.newPage();await a.route('**/api.php?action=update_status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,status:{current_version:'2.35.1',latest_version:'2.35.2',available:true,can_update:true,reason:'测试可用更新',update_priority:'normal',last_check_at:'2026-08-31T00:00:00Z',history:[]}})}));await a.goto(base+'update.php',{waitUntil:'networkidle'});await a.waitForTimeout(180);m=await read(a);
+            if(m.installHidden||m.installDisabled||m.installText!=='更新到 V2.35.2'||!m.state.includes('可用更新')||m.errorShown)throw Error('available '+JSON.stringify(m));await a.screenshot({path:`${process.env.EVID}/update-available.png`,fullPage:true});
+
+            fs.writeFileSync(process.env.EVID+'/metrics.json',JSON.stringify({stable:await read(p),failure:await read(f),available:await read(a)},null,2));fs.writeFileSync(process.env.EVID+'/verdict.txt',`P01_UPDATE_TERMINAL_STATE=PASS\nSOURCE=${process.env.SOURCE}\n`);await b.close();console.log('P01_UPDATE_TERMINAL_STATE=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" SOURCE="$SOURCE" node gate.cjs 2>&1 | tee "$EVID/result.txt"
+          grep -Fx P01_UPDATE_TERMINAL_STATE=PASS "$EVID/result.txt"
+      - name: Regression and SQLite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface-verify.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          cat >/tmp/p01-update-terminal-dbcheck.php <<'PHP'
+          <?php
+          require '/tmp/p01-update-terminal/app/bootstrap.php';$db=vf_db();if((string)$db->query('PRAGMA integrity_check')->fetchColumn()!=='ok')exit(2);if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(3);echo "P01_UPDATE_TERMINAL_SQLITE=PASS\n";
+          PHP
+          php /tmp/p01-update-terminal-dbcheck.php | tee "$EVID/sqlite.txt" | grep -Fx P01_UPDATE_TERMINAL_SQLITE=PASS
+          echo P01_UPDATE_TERMINAL_REGRESSION=PASS | tee "$EVID/regression.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-update-terminal-state-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-update-terminal.pid 2>/dev/null)" 2>/dev/null || true
