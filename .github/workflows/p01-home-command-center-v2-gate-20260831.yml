@@ -1,0 +1,147 @@
+name: P01 Home Command Center V2 Gate
+on:
+  push:
+    branches: [product/p01-home-command-center-v2-gate-20260831]
+    paths: [.github/workflows/p01-home-command-center-v2-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 353a9037cfc5e16d5e4d282ce4e658511d9558b4
+      BASE: f41802ee8bf21edca28312d82b40e944a83d6069
+      TREE: c1ec0cfe11fe59f0e3c8da80431aced9e66f1399
+      ROOT: /tmp/p01-home-v2/product/src
+      EVID: /tmp/p01-home-v2/evidence
+      COOKIE: /tmp/p01-home-v2.cookies
+      PORT: '18470'
+      ADMIN_PASS: P01HomeV2Gate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-home-v2 "$COOKIE"; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          mapfile -t changed < <(git -C product diff --name-only "$BASE"...HEAD | sort)
+          expected=$'src/app/FunctionalHome.php\nsrc/assets/workspace-home.css'
+          test "$(printf '%s\n' "${changed[@]}")" = "$expected"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -Fx "define('VF_VERSION', '2.35.3');" product/src/app/bootstrap.php >/dev/null
+          jq -e '.production_version=="2.35.3" and .schema_version=="2026082901"' product/VF_PROJECT.json >/dev/null
+          grep -F '现在需要关注什么' product/src/app/FunctionalHome.php >/dev/null
+          grep -F '最近 8 条' product/src/app/FunctionalHome.php >/dev/null
+          grep -F 'vf-home-calm' product/src/app/FunctionalHome.php >/dev/null
+          grep -F 'vf-home-attention-list' product/src/app/FunctionalHome.php >/dev/null
+          ! grep -F 'vf-home-status-grid' product/src/app/FunctionalHome.php
+          ! grep -F 'vf-home-recent-list' product/src/app/FunctionalHome.php
+          ! grep -F 'vf-home-domain-list' product/src/app/FunctionalHome.php
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          echo P01_HOME_V2_SCOPE=PASS | tee "$EVID/scope.txt"
+      - name: Fresh install and runtime verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-home-v2.pid
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Home V2 Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/database.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);echo "P01_HOME_V2_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          for page in home.php surfaces.php start.php channels.php watch.php topics.php; do code=$(curl -sS -o "$EVID/${page%.php}.html" -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$page"); echo "$page=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          echo P01_HOME_V2_FRESH_RUNTIME=PASS | tee -a "$EVID/runtime.txt"
+      - name: Chromium Home responsibility and responsive gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-home-v2/pw; cd /tmp/p01-home-v2/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');
+          const base='http://127.0.0.1:18470/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            let q=await c.request.post(base+'api.php?action=login',{data:{password:'P01HomeV2Gate'}});
+            if(!q.ok()||!(await q.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            await p.goto(base+'home.php',{waitUntil:'networkidle'});
+            const read=()=>p.evaluate(()=>({
+              title:document.querySelector('.vf-home-command-head h1')?.textContent?.trim()||'',
+              focus:document.querySelector('#vfHomeFocusTitle')?.textContent?.trim()||'',
+              activity:document.querySelector('#vfHomeActivityTitle')?.textContent?.trim()||'',
+              calm:!!document.querySelector('.vf-home-calm'),
+              statusGrid:!!document.querySelector('.vf-home-status-grid'),
+              recentList:!!document.querySelector('.vf-home-recent-list'),
+              domainList:!!document.querySelector('.vf-home-domain-list'),
+              duplicateQuickLinks:[...document.querySelectorAll('main a')].filter(a=>/view=(favorite|recent)/.test(a.getAttribute('href')||'')).length,
+              sidebarFavorite:[...document.querySelectorAll('.vf-functional-sidebar a')].some(a=>a.textContent.includes('我的收藏')),
+              sidebarRecent:[...document.querySelectorAll('.vf-functional-sidebar a')].some(a=>a.textContent.includes('最近使用')),
+              domainNav:[...document.querySelectorAll('.vf-global-domain-nav a')].map(a=>a.textContent.trim()),
+              mobileCommand:getComputedStyle(document.querySelector('.vf-home-mobile-command')).display,
+              overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth
+            }));
+            let m=await read();
+            if(m.title!=='首页'||m.focus!=='现在需要关注什么'||m.activity!=='最近操作'||!m.calm||m.statusGrid||m.recentList||m.domainList||m.duplicateQuickLinks!==0||!m.sidebarFavorite||!m.sidebarRecent||!m.domainNav.includes('导航')||!m.domainNav.includes('频道')||!m.domainNav.includes('影视')||!m.domainNav.includes('专题')||m.overflow>1)throw Error('desktop '+JSON.stringify(m));
+            await p.screenshot({path:process.env.EVID+'/home-1440.png',fullPage:true});
+            await p.setViewportSize({width:390,height:844}); await p.waitForTimeout(120);
+            m=await read();
+            if(m.mobileCommand==='none'||m.overflow>1||m.statusGrid||m.recentList||m.domainList)throw Error('mobile '+JSON.stringify(m));
+            await p.screenshot({path:process.env.EVID+'/home-390.png',fullPage:true});
+            await b.close();
+            console.log('P01_HOME_V2_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_HOME_V2_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fx P01_HOME_V2_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_HOME_V2_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_HOME_V2_SQLITE=PASS "$EVID/database.txt"
+          grep -Fx P01_HOME_V2_CHROMIUM=PASS "$EVID/chromium.txt"
+          printf 'P01_HOME_COMMAND_CENTER_V2_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-home-command-center-v2-${{ github.run_id }}
+          path: /tmp/p01-home-v2/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-home-v2.pid 2>/dev/null)" 2>/dev/null || true
