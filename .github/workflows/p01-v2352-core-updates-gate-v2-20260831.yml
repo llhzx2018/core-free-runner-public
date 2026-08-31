@@ -1,0 +1,109 @@
+name: P01 V2.35.2 Core Updates Manifest Gate V2
+
+on:
+  push:
+    branches: [release/p01-v2352-core-updates-gate-20260831]
+    paths: [.github/workflows/p01-v2352-core-updates-gate-v2-20260831.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  gate-promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORE_BASE: a7a601e0880becb78c9835648d06dcda2625b2dc
+      MANIFEST_SOURCE: d9cdc90149be9c04701d6853b60f9c5a3c8a66a7
+      PRODUCT_SOURCE: 3c9239be8bba34637411110f7fdb43f6e494c880
+      RELEASE_ID: '379457325'
+      ASSET_NAME: VF_Start_V2.35.2_UPDATE.zip
+      ASSET_BYTES: '1377507'
+      ASSET_SHA256: 0b518b5393a0fdefdd98924429ef16e2e0f85af366887fa8c8b5cb4b9bc73505
+      EVID: /tmp/p01-v2352-core-updates-v2-evidence
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: zip
+          coverage: none
+
+      - name: Checkout exact core-updates P01 manifest candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.MANIFEST_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: updates
+
+      - name: Validate exact manifest against published Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID/download"
+          cd updates
+          test "$(git rev-parse HEAD)" = "$MANIFEST_SOURCE"
+          test "$(git rev-parse HEAD^)" = "$CORE_BASE"
+          test "$(git diff --name-only "$CORE_BASE" "$MANIFEST_SOURCE")" = 'projects/P01.json'
+          M=projects/P01.json
+          jq -e . "$M" >/dev/null
+          test "$(jq -r .project_id "$M")" = P01
+          test "$(jq -r .component_id "$M")" = APP
+          test "$(jq -r .enabled "$M")" = true
+          test "$(jq -r .current_version "$M")" = 2.35.1
+          test "$(jq -r .target_version "$M")" = 2.35.2
+          test "$(jq -r '.from_versions|join(",")' "$M")" = 2.35.1
+          test "$(jq -r .schema_from "$M")" = 2026082901
+          test "$(jq -r .schema_to "$M")" = 2026082901
+          test "$(jq -r .repository "$M")" = llhzx2018/vf-start
+          test "$(jq -r .release_tag "$M")" = v2.35.2
+          test "$(jq -r .release_id "$M")" = "$RELEASE_ID"
+          test "$(jq -r .product_identity "$M")" = "$PRODUCT_SOURCE"
+          test "$(jq -r .asset_name "$M")" = "$ASSET_NAME"
+          test "$(jq -r .asset_bytes "$M")" = "$ASSET_BYTES"
+          test "$(jq -r .asset_sha256 "$M")" = "$ASSET_SHA256"
+          test "$(jq -r .backup_required "$M")" = true
+          test "$(jq -r .rollback_supported "$M")" = true
+          TAG=$(git ls-remote https://github.com/llhzx2018/vf-start.git refs/tags/v2.35.2 | awk '{print $1}')
+          test "$TAG" = "$PRODUCT_SOURCE"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.35.2 > "$EVID/release.json"
+          test "$(jq -r .id "$EVID/release.json")" = "$RELEASE_ID"
+          test "$(jq -r .tag_name "$EVID/release.json")" = v2.35.2
+          test "$(jq -r .draft "$EVID/release.json")" = false
+          test "$(jq -r .prerelease "$EVID/release.json")" = false
+          jq -e --arg n "$ASSET_NAME" --argjson b "$ASSET_BYTES" --arg d "sha256:$ASSET_SHA256" '.assets[]|select(.name==$n and .size==$b and .digest==$d and .state=="uploaded")' "$EVID/release.json" >/dev/null
+          gh release download v2.35.2 --repo llhzx2018/vf-start --pattern "$ASSET_NAME" --dir "$EVID/download"
+          A="$EVID/download/$ASSET_NAME"
+          test -f "$A"
+          test "$(stat -c %s "$A")" = "$ASSET_BYTES"
+          test "$(sha256sum "$A" | awk '{print $1}')" = "$ASSET_SHA256"
+          unzip -Z1 "$A" | grep -Fx repair-v2.35.2.php >/dev/null
+          unzip -p "$A" repair-v2.35.2.php > "$EVID/repair-v2.35.2.php"
+          php -l "$EVID/repair-v2.35.2.php" >/dev/null
+          php "$EVID/repair-v2.35.2.php" --self-test | tee "$EVID/atomic-self-test.json" | jq -e '.ok==true' >/dev/null
+          printf 'P01_V2352_CORE_UPDATES_MANIFEST_GATE=PASS\nMANIFEST_SOURCE=%s\nPRODUCT_SOURCE=%s\nRELEASE_ID=%s\nASSET_BYTES=%s\nASSET_SHA256=%s\n' "$MANIFEST_SOURCE" "$PRODUCT_SOURCE" "$RELEASE_ID" "$ASSET_BYTES" "$ASSET_SHA256" | tee "$EVID/gate.txt"
+
+      - name: Safe fast-forward core-updates main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd updates
+          BEFORE=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$BEFORE" = "$CORE_BASE"
+          git merge-base --is-ancestor "$CORE_BASE" "$MANIFEST_SOURCE"
+          git push origin "$MANIFEST_SOURCE:refs/heads/main"
+          AFTER=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$AFTER" = "$MANIFEST_SOURCE"
+          printf 'P01_V2352_CORE_UPDATES_PROMOTION=PASS\nCORE_UPDATES_MAIN=%s\nOWNER_PRODUCTION_WRITE=NO\n' "$AFTER" | tee "$EVID/promotion.txt"
+
+      - name: Upload core-updates evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-v2352-core-updates-v2-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
