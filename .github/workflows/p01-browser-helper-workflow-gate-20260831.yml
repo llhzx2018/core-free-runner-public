@@ -1,0 +1,150 @@
+name: P01 Browser Helper Workflow Gate
+on:
+  push:
+    branches: [product/p01-browser-helper-workflow-gate-20260831]
+    paths: [.github/workflows/p01-browser-helper-workflow-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 32ff23a1f580a8e4a8857860420ea4e035f3ef18
+      BASE: fa77d516957058b3a60fa6cc839326c91c5329fa
+      TREE: 6eadccf1ce9cae34486321cf8a60bb07f4a3746b
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-browser-helper/evidence
+      COOKIE: /tmp/p01-browser-helper.cookies
+      PORT: '18472'
+      ADMIN_PASS: P01BrowserHelperGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-browser-helper "$COOKIE"; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          mapfile -t changed < <(git -C product diff --name-only "$BASE"...HEAD | sort)
+          test "$(printf '%s\n' "${changed[@]}")" = 'src/browser-helper.php'
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -Fx "define('VF_VERSION', '2.35.3');" product/src/app/bootstrap.php >/dev/null
+          jq -e '.production_version=="2.35.3" and .schema_version=="2026082901"' product/VF_PROJECT.json >/dev/null
+          grep -F '私密待整理' product/src/browser-helper.php >/dev/null
+          grep -F '仅保存网址' product/src/browser-helper.php >/dev/null
+          grep -F 'links-admin.php?view=pending' product/src/browser-helper.php >/dev/null
+          ! grep -F '系统 → 安全' product/src/browser-helper.php
+          ! grep -F '<span>最近 IP</span>' product/src/browser-helper.php
+          ! grep -F "implode(' · ',(array)(\$state['scopes']" product/src/browser-helper.php
+          test "$(git -C product rev-parse "$BASE:src/assets/browser-helper.js")" = "$(git -C product rev-parse "HEAD:src/assets/browser-helper.js")"
+          test "$(git -C product rev-parse "$BASE:src/browser-gateway.php")" = "$(git -C product rev-parse "HEAD:src/browser-gateway.php")"
+          test "$(git -C product rev-parse "$BASE:src/browser-extension")" = "$(git -C product rev-parse "HEAD:src/browser-extension")"
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets product/src/browser-extension -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          echo P01_BROWSER_HELPER_SCOPE=PASS | tee "$EVID/scope.txt"
+      - name: Fresh install and route verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-browser-helper.pid
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Browser Helper Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/database.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);echo "P01_BROWSER_HELPER_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          for page in browser-helper.php links-admin.php; do code=$(curl -sS -o "$EVID/${page%.php}.html" -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$page"); echo "$page=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          curl -sS -D "$EVID/security.headers" -o /dev/null -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/security.php"
+          tr -d '\r' < "$EVID/security.headers" > "$EVID/security.normalized"
+          test "$(awk 'NR==1{print $2}' "$EVID/security.normalized")" = 302
+          grep -Fqx 'Location: settings.php#account' "$EVID/security.normalized"
+          echo P01_BROWSER_HELPER_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium pending workflow and responsive gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-browser-helper/pw; cd /tmp/p01-browser-helper/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');
+          const base='http://127.0.0.1:18472/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            let q=await c.request.post(base+'api.php?action=login',{data:{password:'P01BrowserHelperGate'}});
+            if(!q.ok()||!(await q.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            await p.goto(base+'browser-helper.php',{waitUntil:'networkidle'});
+            const read=()=>p.evaluate(()=>({
+              title:document.querySelector('.vf-admin-titleblock h1')?.textContent?.trim()||'',
+              body:document.body.innerText,
+              status:[...document.querySelectorAll('.vf-helper-status-list>div')].map(x=>x.innerText.trim()),
+              pendingHref:document.querySelector('a[href="links-admin.php?view=pending"]')?.getAttribute('href')||'',
+              downloadHref:document.querySelector('a[download]')?.getAttribute('href')||'',
+              generate:!!document.getElementById('generateHelperToken'),
+              overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth
+            }));
+            let m=await read();
+            if(m.title!=='浏览器助手'||!m.body.includes('私密待整理')||!m.body.includes('仅保存网址')||m.body.includes('系统 → 安全')||m.body.includes('最近 IP')||m.body.includes('link.save')||m.pendingHref!=='links-admin.php?view=pending'||m.downloadHref!=='VF-Start-Browser-Extension.zip'||!m.generate||m.overflow>1)throw Error('desktop '+JSON.stringify(m));
+            await p.screenshot({path:process.env.EVID+'/browser-helper-1440.png',fullPage:true});
+            await p.locator('a[href="links-admin.php?view=pending"]').click();
+            await p.waitForLoadState('networkidle');
+            if(!p.url().includes('links-admin.php?view=pending'))throw Error('pending navigation '+p.url());
+            await p.goto(base+'browser-helper.php',{waitUntil:'networkidle'});
+            await p.setViewportSize({width:390,height:844}); await p.waitForTimeout(100);
+            m=await read();
+            if(m.overflow>1||!m.body.includes('私密待整理')||!m.body.includes('仅保存网址'))throw Error('mobile '+JSON.stringify(m));
+            await p.screenshot({path:process.env.EVID+'/browser-helper-390.png',fullPage:true});
+            await b.close();
+            console.log('P01_BROWSER_HELPER_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_BROWSER_HELPER_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -Fx P01_BROWSER_HELPER_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_BROWSER_HELPER_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_BROWSER_HELPER_SQLITE=PASS "$EVID/database.txt"
+          grep -Fx P01_BROWSER_HELPER_CHROMIUM=PASS "$EVID/chromium.txt"
+          printf 'P01_BROWSER_HELPER_WORKFLOW_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-browser-helper-workflow-${{ github.run_id }}
+          path: /tmp/p01-browser-helper/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-browser-helper.pid 2>/dev/null)" 2>/dev/null || true
