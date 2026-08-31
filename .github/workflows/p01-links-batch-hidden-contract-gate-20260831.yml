@@ -1,0 +1,165 @@
+name: P01 Links Batch Hidden Contract Gate
+on:
+  push:
+    branches: [product/p01-links-batch-hidden-gate-20260831]
+    paths: [.github/workflows/p01-links-batch-hidden-contract-gate-20260831.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: 8aea6a45cfc1f8ca31091a13748c95c2b2a344ab
+      BASE: 67fa7ed6e73fc8b033fc870b310aed9b4abbd6ec
+      TREE: 3b0847bd90392828d150acf0af254e39c745c6e7
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-batch-hidden/evidence
+      PORT: '18479'
+      ADMIN_PASS: P01BatchHiddenGate
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and CSS-only fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-batch-hidden; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git -C product merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git -C product diff --name-only "$BASE"...HEAD)" = 'src/assets/admin-consolidation.css'
+          test "$(git -C product rev-parse "$BASE:src/assets/links-admin.js")" = "$(git -C product rev-parse "HEAD:src/assets/links-admin.js")"
+          test "$(git -C product rev-parse "$BASE:src/links-admin.php")" = "$(git -C product rev-parse "HEAD:src/links-admin.php")"
+          test "$(git -C product rev-parse "$BASE:src/api.php")" = "$(git -C product rev-parse "HEAD:src/api.php")"
+          test "$(git -C product rev-parse "$BASE:src/app/Repository.php")" = "$(git -C product rev-parse "HEAD:src/app/Repository.php")"
+          test "$(cat product/VERSION)" = 2.35.3
+          test "$(cat product/src/VERSION.txt)" = 2.35.3
+          grep -F 'body[data-vf-admin-shell="server"][data-vf-page="links-admin"] .vf-batchbar [hidden]{display:none!important}' product/src/assets/admin-consolidation.css >/dev/null
+          find product/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >"$EVID/php-lint.txt"
+          find product/src/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          printf 'P01_BATCH_HIDDEN_SCOPE=PASS\nP01_BATCH_HIDDEN_PRODUCT_LOGIC_BYTES_UNCHANGED=PASS\n' | tee "$EVID/scope.txt"
+      - name: Fresh install and seed all lifecycle states
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-batch-hidden.pid
+          COOKIE=/tmp/p01-batch-hidden.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Batch Hidden Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          php "$ROOT/cli/verify.php" | tee "$EVID/verify.txt" | grep -Fx VERIFY_PASS=YES
+          php "$ROOT/cli/surface-verify.php" | tee "$EVID/surface.txt" | grep -Fx CURRENT_DOMAIN_PASS=YES
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$repo=new VfRepository($db);$safety=new VfDataSafety($db);
+          $cat=$repo->createCategory(['name'=>'批量状态测试','description'=>'','parent_id'=>null,'is_private'=>true]);
+          $normal=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Active Normal','url'=>'https://active-normal.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $pending=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Active Pending','url'=>'https://active-pending.example/','is_private'=>1,'is_pending'=>1],'admin');
+          $archived=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Archived Item','url'=>'https://archived-item.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $trashed=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Trashed Item','url'=>'https://trashed-item.example/','is_private'=>1,'is_pending'=>0],'admin');
+          $safety->archiveLink((int)$archived['id'],'gate');
+          $safety->trashLink((int)$trashed['id'],'gate',false);
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);
+          $counts=[];foreach(['active','archived','trashed'] as $state){$q=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$q->execute([$state]);$counts[$state]=(int)$q->fetchColumn();}
+          if($counts['active']!==2||$counts['archived']!==1||$counts['trashed']!==1)exit(13);
+          echo "P01_BATCH_HIDDEN_SEED=PASS\nP01_BATCH_HIDDEN_SQLITE=PASS\n";
+          PHP
+          rm -f "$COOKIE"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' -H 'Accept: application/json' -X POST "http://127.0.0.1:$PORT/api.php?action=login" --data "{\"password\":\"$ADMIN_PASS\"}" | tee "$EVID/login.json" | jq -e '.ok==true' >/dev/null
+          for path in 'links-admin.php' 'links-admin.php?view=pending'; do code=$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/$path"); echo "$path=$code" | tee -a "$EVID/http.txt"; test "$code" = 200; done
+          echo P01_BATCH_HIDDEN_FRESH_RUNTIME=PASS | tee "$EVID/runtime.txt"
+      - name: Chromium four-state visibility contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-batch-hidden/pw; cd /tmp/p01-batch-hidden/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat >gate.cjs <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18479/';
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const c=await b.newContext({viewport:{width:1440,height:900}});
+            const login=await c.request.post(base+'api.php?action=login',{data:{password:'P01BatchHiddenGate'}});
+            if(!login.ok()||!(await login.json()).ok)throw Error('login');
+            const p=await c.newPage();
+            const read=()=>p.evaluate(()=>({
+              state:document.querySelector('#stateFilter')?.value||'',
+              overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+              actions:[...document.querySelectorAll('#batchBar [data-bulk]')].map(x=>({action:x.dataset.bulk,hidden:x.hidden,display:getComputedStyle(x).display,visible:!!(x.offsetWidth||x.offsetHeight||x.getClientRects().length),text:x.textContent.trim()}))
+            }));
+            const selectRow=async title=>{const row=p.locator('tr').filter({hasText:title});await row.waitFor();if(await row.count()!==1)throw Error('row '+title);await row.locator('input[data-select]').check();};
+            const assertActive=m=>{
+              const restore=m.actions.find(x=>x.action==='restore');if(!restore||!restore.hidden||restore.display!=='none'||restore.visible)throw Error('restore active '+JSON.stringify(m));
+              const active=m.actions.filter(x=>x.action!=='restore');if(!active.length||active.some(x=>x.hidden||!x.visible||x.display==='none'))throw Error('active action hidden '+JSON.stringify(m));
+            };
+            const assertRetired=m=>{
+              const restore=m.actions.find(x=>x.action==='restore');if(!restore||restore.hidden||!restore.visible||restore.display==='none')throw Error('restore retired '+JSON.stringify(m));
+              const active=m.actions.filter(x=>x.action!=='restore');if(active.some(x=>!x.hidden||x.visible||x.display!=='none'))throw Error('active visible retired '+JSON.stringify(m));
+            };
+            async function activeNormal(){await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await selectRow('Active Normal');let m=await read();if(m.state!=='active')throw Error('state active');assertActive(m);return m;}
+            async function pending(){await p.goto(base+'links-admin.php?view=pending',{waitUntil:'networkidle'});await selectRow('Active Pending');let m=await read();if(m.state!=='active')throw Error('state pending');assertActive(m);if(m.actions.some(x=>x.action==='pending'))throw Error('pending action resurrected');return m;}
+            async function retired(state,title){await p.goto(base+'links-admin.php',{waitUntil:'networkidle'});await p.locator('#stateFilter').selectOption(state);await selectRow(title);let m=await read();if(m.state!==state)throw Error('state '+state);assertRetired(m);return m;}
+            const desktop={active:await activeNormal(),pending:await pending(),archived:await retired('archived','Archived Item'),trashed:await retired('trashed','Trashed Item')};
+            if(Object.values(desktop).some(x=>x.overflow>1))throw Error('desktop overflow '+JSON.stringify(desktop));
+            await p.screenshot({path:process.env.EVID+'/desktop-trashed.png',fullPage:true});
+            await p.setViewportSize({width:390,height:844});
+            const mobile={active:await activeNormal(),pending:await pending(),archived:await retired('archived','Archived Item'),trashed:await retired('trashed','Trashed Item')};
+            if(Object.values(mobile).some(x=>x.overflow>1))throw Error('mobile overflow '+JSON.stringify(mobile));
+            await p.screenshot({path:process.env.EVID+'/mobile-trashed.png',fullPage:true});
+            fs.writeFileSync(process.env.EVID+'/states.json',JSON.stringify({desktop,mobile},null,2));
+            await b.close();console.log('P01_BATCH_HIDDEN_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          EVID="$EVID" node gate.cjs | tee "$EVID/chromium.txt"
+          grep -Fx P01_BATCH_HIDDEN_CHROMIUM=PASS "$EVID/chromium.txt"
+      - name: Final DB and verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/post-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          $expected=['active'=>2,'archived'=>1,'trashed'=>1];foreach($expected as $state=>$count){$q=$db->prepare('SELECT COUNT(*) FROM links WHERE lifecycle_state=?');$q->execute([$state]);if((int)$q->fetchColumn()!==$count)exit(21);}
+          if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(22);
+          if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(23);
+          echo "P01_BATCH_HIDDEN_POST_DB=PASS\n";
+          PHP
+          grep -Fx P01_BATCH_HIDDEN_SCOPE=PASS "$EVID/scope.txt"
+          grep -Fx P01_BATCH_HIDDEN_PRODUCT_LOGIC_BYTES_UNCHANGED=PASS "$EVID/scope.txt"
+          grep -Fx P01_BATCH_HIDDEN_FRESH_RUNTIME=PASS "$EVID/runtime.txt"
+          grep -Fx P01_BATCH_HIDDEN_CHROMIUM=PASS "$EVID/chromium.txt"
+          grep -Fx P01_BATCH_HIDDEN_POST_DB=PASS "$EVID/post-db.txt"
+          printf 'P01_LINKS_BATCH_HIDDEN_CONTRACT_GATE=PASS\nSOURCE=%s\nBASE=%s\nTREE=%s\nOWNER_PRODUCTION_WRITE=NO\nMAIN_DEVELOP_PRODUCT_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$SOURCE" "$BASE" "$TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-links-batch-hidden-contract-${{ github.run_id }}
+          path: /tmp/p01-batch-hidden/evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-batch-hidden.pid 2>/dev/null)" 2>/dev/null || true
