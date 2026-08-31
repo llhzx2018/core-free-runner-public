@@ -60,7 +60,7 @@ async function probe(name, viewport) {
     return route.continue();
   });
 
-  await p.locator('[data-v270-nav="settings"]').click();
+  await p.locator('[data-v270-nav="settings"]:visible').click();
   await p.waitForFunction(() => location.hash.startsWith('#settings'));
   await p.waitForTimeout(1200);
 
