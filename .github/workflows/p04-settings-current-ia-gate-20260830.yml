@@ -1,0 +1,144 @@
+name: P04 Settings Current IA Exact-Source Gate
+
+on:
+  push:
+    branches:
+      - candidate/p04-settings-current-ia-gate-20260830
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE: 362620fdc5632bb3cbf75464266473b290a3501d
+      BASE_DEVELOP: 72031e6ab2f231511a169b8abcdac6296195e98c
+      TARGET_BRANCH: fix/p04-settings-group-current-ia-20260830
+      EVIDENCE: ${{ github.workspace }}/evidence-settings
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Verify registered private read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'RUNNER_INFRASTRUCTURE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
+
+      - name: Checkout exact P04 settings candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, sodium, zip, mbstring, fileinfo
+          coverage: none
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+
+      - name: Exact source fence and static contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C product rev-parse origin/$TARGET_BRANCH)" = "$CANDIDATE"
+          test "$(git -C product merge-base "$BASE_DEVELOP" "$CANDIDATE")" = "$BASE_DEVELOP"
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.8.11'
+          mapfile -t changed < <(git -C product diff --name-only "$BASE_DEVELOP" "$CANDIDATE")
+          test "${#changed[@]}" -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'public/assets/v280-navigation-simplify.js'
+          printf '%s\n' "${changed[@]}" | grep -Fxq 'tests/unit/ui_contract_v280.php'
+          git -C product diff --quiet "$BASE_DEVELOP" "$CANDIDATE" -- database config src VERSION VF_PROJECT.json public/index.php
+          cd product
+          python3 scripts/repository-health-gate.py
+          python3 scripts/check-migrations.py
+          find src public tests -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          node --check public/assets/v280-navigation-simplify.js
+          node --check public/assets/v2811-human-baseline.js
+          node --check public/assets/daily-ux-polish.js
+          node --check public/assets/daily-server-ux-polish.js
+          node --check public/assets/daily-provider-ux-polish.js
+          php tests/unit/ui_contract_v280.php .
+          php tests/unit/ui_daily_ux_polish_contract.php .
+          php tests/unit/ui_daily_server_ux_polish_contract.php .
+          php tests/unit/ui_daily_provider_ux_polish_contract.php .
+          php tests/unit/maintenance_ui_contract_v288.php .
+          php tests/unit/domain_attention_group_management_ui_v289.php .
+          echo P04_SETTINGS_CURRENT_IA_STATIC_GATE=PASS
+
+      - name: Install browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Fresh-install Settings Current IA browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          WEB="$RUNNER_TEMP/p04-settings-current-ia-runtime"
+          python3 product/scripts/build-release-tree.py "$WEB" >"$EVIDENCE/build.json"
+          test -f "$WEB/assets/v280-navigation-simplify.js"
+          test -f "$WEB/assets/v2811-human-baseline.js"
+          PORT=19049
+          php -d opcache.jit=0 -S "127.0.0.1:$PORT" -t "$WEB" >"$EVIDENCE/php-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 120); do curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break; sleep .1; done
+          EVIDENCE="$EVIDENCE" CANDIDATE="$CANDIDATE" VF_E2E_BASE_URL="http://127.0.0.1:$PORT" node scripts/p04-settings-current-ia-browser-20260830.mjs
+          grep -Fq '"status": "PASS"' "$EVIDENCE/P04_SETTINGS_CURRENT_IA_REPORT.json"
+          if grep -Ev 'JIT is incompatible with third party extensions that override zend_execute_ex\(\)\. JIT disabled\.' "$EVIDENCE/php-server.log" | grep -Eqi 'PHP (Fatal error|Parse error|Warning):|Uncaught (Error|Exception)'; then cat "$EVIDENCE/php-server.log"; exit 1; fi
+          echo P04_SETTINGS_CURRENT_IA_BROWSER_GATE=PASS
+
+      - name: Seal public-safe evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path(os.environ['EVIDENCE']); report=root/'P04_SETTINGS_CURRENT_IA_REPORT.json'
+          payload={
+            'schema':'p04-settings-current-ia-public-evidence/v1',
+            'source_sha':os.environ['CANDIDATE'],
+            'base_develop_sha':os.environ['BASE_DEVELOP'],
+            'private_source_persisted':False,
+            'production_actions_executed':False,
+          }
+          if report.exists():
+              detail=json.loads(report.read_text(encoding='utf-8'))
+              payload.update({'status':detail.get('status'),'desktop':detail.get('desktop'),'navigation':detail.get('navigation'),'mobile':detail.get('mobile'),'page_error_count':len(detail.get('page_errors',[])),'console_error_count':len(detail.get('console_errors',[]))})
+          else: payload['status']='BLOCKED_BEFORE_BROWSER_REPORT'
+          raw=json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(); payload['sha256']=hashlib.sha256(raw).hexdigest()
+          (root/'PUBLIC_EVIDENCE.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          PY
+
+      - name: Upload public-safe evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P04-SETTINGS-CURRENT-IA-${{ env.CANDIDATE }}
+          path: |
+            evidence-settings/PUBLIC_EVIDENCE.json
+            evidence-settings/P04_SETTINGS_CURRENT_IA_REPORT.json
+            evidence-settings/01-settings-desktop-basic.png
+            evidence-settings/02-settings-desktop-update.png
+            evidence-settings/03-settings-mobile-390.png
+          if-no-files-found: warn
+          retention-days: 14
