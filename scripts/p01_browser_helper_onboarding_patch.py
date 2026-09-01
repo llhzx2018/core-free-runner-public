@@ -116,4 +116,4 @@ body[data-vf-page="browser-helper"] .vf-helper-site-card{margin-bottom:10px}
 '''
 if 'browser-helper.php: onboarding is a single' in css:
     raise SystemExit('browser helper css duplicate')
-p.write_text(css.rstrip() + addition + '\n')
+p.write_text(css.rstrip() + addition.rstrip() + '\n')
