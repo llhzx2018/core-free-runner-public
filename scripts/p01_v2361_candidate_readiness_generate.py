@@ -1,5 +1,4 @@
 from pathlib import Path
-import os
 
 T=Path('template/.github/workflows/p01-v2360-candidate-readiness-20260901.yml').read_text().splitlines()
 A=Path('auth/.github/workflows/p01-single-system-auth-formal-gate-r2-20260901.yml').read_text().splitlines()
@@ -19,7 +18,6 @@ def run_block(lines,name):
         body.append(line[10:] if line.startswith('          ') else line)
     return '\n'.join(body)+'\n'
 
-# Exact source fence is intentionally new for this patch.
 exact=r'''set -Eeuo pipefail
 rm -rf "$OUT" "$EVID" "$UPGRADE" "$FRESH"; mkdir -p "$OUT" "$EVID"
 test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE"
@@ -47,41 +45,34 @@ done
 printf 'P01_V2361_EXACT_SOURCE=PASS\nP01_V2361_RUNTIME_DELTA_10=PASS\nP01_V2361_SCHEMA_CHANGE=NO\nP01_V2361_MIGRATION=NONE\nOWNER_PRODUCTION_WRITE=NO\n' | tee "$EVID/boundary.txt"
 '''
 
-# Reuse the already-proven deterministic artifact builder step, with narrowly fenced substitutions.
 build=run_block(T,'Build deterministic candidate artifacts')
-repls=[
-('/tmp/p01-v2360-build.py','/tmp/p01-v2361-build.py'),
-('V2.36.0','V2.36.1'),('V2360','V2361'),('v2360','v2361'),
-("'VF_Start_V2.36.0_UPDATE.zip'","'VF_Start_V2.36.1_UPDATE.zip'"),
-("'repair-v2.36.0.php'","'repair-v2.36.1.php'"),
-("'VF-Start-V2.36.0-FULL.zip'","'VF-Start-V2.36.1-FULL.zip'"),
-("'P01-V2.36.0-CANDIDATE.json'","'P01-V2.36.1-CANDIDATE.json'"),
-]
-for old,new in repls: build=build.replace(old,new)
-# V2.36.0->V2.36.1 patch has no added runtime files; remove the old release-specific additions assertion.
+for old,new in [
+    ('/tmp/p01-v2360-build.py','/tmp/p01-v2361-build.py'),
+    ('V2.36.0','V2.36.1'),('V2360','V2361'),('v2360','v2361'),
+    ("'repair-v2.36.0.php'","'repair-v2.36.1.php'"),
+]:
+    build=build.replace(old,new)
 build=build.replace("required_added={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}\nif not required_added.issubset(set(added)): raise SystemExit('required runtime additions missing '+json.dumps(added))", "if added or removed: raise SystemExit('patch must not add/remove runtime files: '+json.dumps({'added':added,'removed':removed}))")
 
 atomic=run_block(T,'Actual V2.35.3 to V2.36.0 Atomic upgrade')
-atomic=atomic.replace('Actual V2.35.3 to V2.36.0 Atomic upgrade','Actual V2.36.0 to V2.36.1 Atomic upgrade')
-for old,new in [('v2360','v2361'),('V2360','V2361'),('2.35.3','2.36.0'),('2.36.0','2.36.1')]: atomic=atomic.replace(old,new)
-# sequential replacement above turns both versions if applied naively; repair exact semantic anchors.
-atomic=atomic.replace('P01_V2361_TO_V2361_ATOMIC','P01_V2360_TO_V2361_ATOMIC')
-# Previous candidate runtime additions already exist in predecessor; no special existence assertion needed beyond verify/surface.
-for line in ["test -f \"$UPGRADE/app/ResourceCoverCache.php\"; test -f \"$UPGRADE/app/ResourceMetadata.php\"; test -f \"$UPGRADE/resource-cover-refresh.php\"\n"]:
-    atomic=atomic.replace(line,'')
+atomic=atomic.replace('v2360','v2361').replace('V2360','V2361')
+atomic=atomic.replace('2.35.3','__P01_SOURCE_VERSION__').replace('2.36.0','2.36.1').replace('__P01_SOURCE_VERSION__','2.36.0')
+atomic=atomic.replace('P01_V2353_TO_V2361_ATOMIC','P01_V2360_TO_V2361_ATOMIC')
+atomic=atomic.replace('test -f "$UPGRADE/app/ResourceCoverCache.php"; test -f "$UPGRADE/app/ResourceMetadata.php"; test -f "$UPGRADE/resource-cover-refresh.php"\n','')
 
 fresh=run_block(T,'Strict fresh candidate runtime')
-for old,new in [('v2360','v2361'),('V2360','V2361'),('2.36.0','2.36.1')]: fresh=fresh.replace(old,new)
+fresh=fresh.replace('v2360','v2361').replace('V2360','V2361').replace('2.36.0','2.36.1')
 
-# Reuse the proven auth seed/browser gates, but bind them to candidate env and R4 mobile reachability semantics.
 auth_seed=run_block(A,'Fresh Runtime and seed')
 auth_browser=run_block(A,'Chromium auth-state gate')
-for textname in ['auth_seed','auth_browser']:
-    text=locals()[textname].replace('/tmp/p01-single-system-auth-r2','/tmp/p01-v2361-auth').replace('p01-single-system-auth-r2','p01-v2361-auth')
-    locals()[textname]=text
+auth_seed=auth_seed.replace('/tmp/p01-single-system-auth-r2','/tmp/p01-v2361-auth').replace('p01-single-system-auth-r2','p01-v2361-auth')
+auth_browser=auth_browser.replace('/tmp/p01-single-system-auth-r2','/tmp/p01-v2361-auth').replace('p01-single-system-auth-r2','p01-v2361-auth')
 auth_browser=auth_browser.replace("A(t.includes('资源管理')&&t.includes('系统设置'),`admin management labels missing ${route}`);","if(width===1440)A(t.includes('资源管理')&&t.includes('系统设置'),`admin management labels missing ${route}`);")
 auth_browser=auth_browser.replace("A(await visibleCount(p,'a[href=\"links-admin.php\"]')>0,`admin resource management missing ${route}`);A(await visibleCount(p,'a[href=\"settings.php\"]')>0,`admin settings missing ${route}`);","A(await p.locator('a[href=\"links-admin.php\"]').count()>0,`admin resource management DOM missing ${route}`);A(await p.locator('a[href=\"settings.php\"]').count()>0,`admin settings DOM missing ${route}`);if(width===1440){A(await visibleCount(p,'a[href=\"links-admin.php\"]')>0,`admin resource management not visible ${route}`);A(await visibleCount(p,'a[href=\"settings.php\"]')>0,`admin settings not visible ${route}`);}")
 auth_browser=auth_browser.replace("A(t.includes('资源管理')&&t.includes('系统设置'),`old query hides management ${route}`);","A(await p.locator('a[href=\"links-admin.php\"]').count()>0&&await p.locator('a[href=\"settings.php\"]').count()>0,`old query hides management ${route}`);if(width===1440)A(t.includes('资源管理')&&t.includes('系统设置'),`old query hides visible management ${route}`);")
 
 for name,text in [('01-exact.sh',exact),('02-build.sh',build),('03-atomic.sh',atomic),('04-fresh.sh',fresh),('05-auth-seed.sh',auth_seed),('06-auth-browser.sh',auth_browser)]:
-    p=Path('/tmp/p01-v2361-generated')/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text);p.chmod(0o755)
+    p=Path('/tmp/p01-v2361-generated')/name
+    p.parent.mkdir(parents=True,exist_ok=True)
+    p.write_text(text)
+    p.chmod(0o755)
