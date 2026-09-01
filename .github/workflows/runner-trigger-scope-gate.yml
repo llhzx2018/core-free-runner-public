@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      P01_SOURCE: 8aae889db04da744704c4dd57742ea78be6e5862
+      P01_SOURCE: f94fbeb145b1daf8a3c7a6886b808f420d101406
       BASE_URL: http://127.0.0.1:18093
       EVID: /tmp/p01-one-frontend-shell-evidence
       ADMIN_PASSWORD: OneFrontendGate-2026
@@ -67,7 +67,7 @@ jobs:
           path: p01
           persist-credentials: false
 
-      - name: Exact source and syntax
+      - name: Exact source syntax and contract
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -76,11 +76,16 @@ jobs:
           test "$(git rev-parse HEAD)" = "$P01_SOURCE"
           find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l > "$EVID/php-syntax.txt"
           find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check > "$EVID/js-syntax.txt"
-          test "$(git diff --name-only bfbaeb3f751b74c508f919d46d08daf5ca7b166c "$P01_SOURCE" | sort | tr '\n' ' ')" = "src/app/FunctionalWorkspace.php src/index.php src/start.php "
+          test "$(git diff --name-only bfbaeb3f751b74c508f919d46d08daf5ca7b166c "$P01_SOURCE" | sort | tr '\n' ' ')" = "src/app/FunctionalWorkspace.php src/index.php src/start.php src/surface.php "
           grep -F '$vfWorkspaceMode = '\''start'\'';' src/index.php >/dev/null
           grep -F "require __DIR__ . '/index.php';" src/start.php >/dev/null
+          grep -F 'vf_security_headers(true);' src/index.php >/dev/null
+          grep -F 'vf_security_headers(true);' src/surface.php >/dev/null
+          grep -F 'seoHomeTitle' src/app/FunctionalWorkspace.php >/dev/null
+          grep -F 'rel="canonical"' src/app/FunctionalWorkspace.php >/dev/null
+          grep -F 'application/ld+json' src/app/FunctionalWorkspace.php >/dev/null
           if grep -F "frontend-legacy.css" src/index.php >/dev/null; then echo 'legacy frontend still active in index.php' >&2; exit 1; fi
-          printf 'SOURCE=%s\nEXACT_SCOPE=PASS\nSYNTAX=PASS\n' "$P01_SOURCE" > "$EVID/source.txt"
+          printf 'SOURCE=%s\nEXACT_SCOPE=PASS\nSYNTAX=PASS\nONE_FRONTEND_CONTRACT=PASS\n' "$P01_SOURCE" > "$EVID/source.txt"
 
       - name: Fresh install isolated runtime
         shell: bash
@@ -118,7 +123,18 @@ jobs:
           test -f "$DB"
           test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok
           test "$(sqlite3 "$DB" 'pragma foreign_key_check;' | wc -l)" = 0
-          printf 'FRESH_INSTALL=PASS\nINTEGRITY=ok\nFK=0\n' > "$EVID/db.txt"
+
+          curl -fsS -D "$EVID/anonymous-root.headers" -o "$EVID/anonymous-root.html" "$BASE_URL/"
+          grep -Fi 'Content-Security-Policy:' "$EVID/anonymous-root.headers" >/dev/null
+          grep -F '<link rel="canonical"' "$EVID/anonymous-root.html" >/dev/null
+          grep -F '<meta name="description"' "$EVID/anonymous-root.html" >/dev/null
+          grep -F 'application/ld+json' "$EVID/anonymous-root.html" >/dev/null
+          if grep -F 'frontend-legacy.css' "$EVID/anonymous-root.html" >/dev/null; then echo 'legacy frontend rendered' >&2; exit 1; fi
+
+          curl -fsS -D "$EVID/anonymous-channels.headers" -o "$EVID/anonymous-channels.html" "$BASE_URL/channels.php"
+          grep -Fi 'Content-Security-Policy:' "$EVID/anonymous-channels.headers" >/dev/null
+          grep -Fi 'X-Robots-Tag: noindex, nofollow, noarchive' "$EVID/anonymous-channels.headers" >/dev/null
+          printf 'FRESH_INSTALL=PASS\nINTEGRITY=ok\nFK=0\nCSP=PASS\nPUBLIC_START_SEO=PASS\nNON_START_NOINDEX=PASS\n' > "$EVID/db.txt"
 
       - name: Install browser harness
         shell: bash
@@ -161,10 +177,14 @@ jobs:
               context=await browser.new_context(viewport={"width":width,"height":900})
               page=await context.new_page()
               row={}
-              await page.goto(BASE+'/',wait_until='networkidle')
+              response=await page.goto(BASE+'/',wait_until='networkidle')
+              assert response and 'content-security-policy' in {k.lower():v for k,v in response.headers.items()}
               row['anonymous_root']=await visible_nav(page,['导航','频道','影视','专题','登录'])
               assert await page.locator('[data-vf-auth-logout]').count() == 0
               assert await page.locator('#vf-workspace-data').count() == 0
+              assert await page.locator('link[rel="canonical"]').count() == 1
+              assert (await page.locator('meta[name="description"]').get_attribute('content') or '').strip()
+              assert 'index,follow' in ((await page.locator('meta[name="robots"]').get_attribute('content')) or '')
               login=page.locator('.vf-global-domain-nav [data-vf-auth-login]')
               assert await login.is_visible()
               await page.screenshot(path=str(EVID/'screens'/f'{width}-anonymous-root.png'),full_page=False)
@@ -177,6 +197,7 @@ jobs:
               assert await page.locator('.vf-global-domain-nav [data-vf-auth-login]').count() == 0
               assert await page.locator('#vf-workspace-data').count() == 1
               assert await page.locator('.vf-global-domain-nav [data-vf-auth-logout]').is_visible()
+              assert 'noindex' in ((await page.locator('meta[name="robots"]').get_attribute('content')) or '')
               await page.screenshot(path=str(EVID/'screens'/f'{width}-authenticated-root.png'),full_page=False)
 
               await page.goto(BASE+'/home.php',wait_until='networkidle')
@@ -184,7 +205,8 @@ jobs:
               await page.screenshot(path=str(EVID/'screens'/f'{width}-authenticated-home.png'),full_page=False)
 
               for route,label in [('start.php','导航'),('channels.php','频道'),('watch.php','影视'),('topics.php','专题')]:
-                  await page.goto(BASE+'/'+route,wait_until='networkidle')
+                  resp=await page.goto(BASE+'/'+route,wait_until='networkidle')
+                  assert resp and 'content-security-policy' in {k.lower():v for k,v in resp.headers.items()}
                   data=await visible_nav(page,['首页','导航','频道','影视','专题','退出'])
                   active=' '.join((await page.locator('.vf-global-domain-nav a.active').all_inner_texts()))
                   assert label in active,(route,active)
@@ -200,6 +222,7 @@ jobs:
               assert await page.locator('.vf-global-domain-nav [data-vf-auth-logout]').count() == 0
               assert await page.locator('#vf-workspace-data').count() == 0
               assert await page.locator('.vf-global-domain-nav [data-vf-auth-login]').is_visible()
+              assert 'index,follow' in ((await page.locator('meta[name="robots"]').get_attribute('content')) or '')
               await page.screenshot(path=str(EVID/'screens'/f'{width}-logout-root.png'),full_page=False)
               await context.close()
               return row
@@ -224,7 +247,7 @@ jobs:
           python /tmp/p01-one-frontend-gate.py | tee "$EVID/browser.txt"
           test -f "$EVID/browser.json"
           grep -F 'P01_ONE_FRONTEND_BROWSER_GATE=PASS' "$EVID/browser.txt"
-          printf 'P01_ONE_FRONTEND_SHELL_GATE=PASS\nSOURCE=%s\nANON_AUTH_LOGOUT_SAME_SHELL=PASS\nTOP_DOMAIN_NAV=PASS\nWIDTHS=390,1440\nSQLITE=PASS\nOWNER_PRODUCTION_WRITE=NO\n' "$P01_SOURCE" | tee "$EVID/verdict.txt"
+          printf 'P01_ONE_FRONTEND_SHELL_GATE=PASS\nSOURCE=%s\nANON_AUTH_LOGOUT_SAME_SHELL=PASS\nTOP_DOMAIN_NAV=PASS\nWIDTHS=390,1440\nSQLITE=PASS\nCSP=PASS\nPUBLIC_START_SEO=PASS\nOWNER_PRODUCTION_WRITE=NO\n' "$P01_SOURCE" | tee "$EVID/verdict.txt"
 
       - name: Upload P01 gate evidence
         if: always()
