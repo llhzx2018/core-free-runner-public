@@ -1,0 +1,112 @@
+name: P01 Bilibili Cover Embedded Metadata Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-bilibili-cover-embedded-metadata-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-bilibili-meta/evidence
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-bilibili-meta; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+      - name: Single product-like Bilibili request and embedded metadata inspection
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/probe.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $url='https://www.bilibili.com/video/BV1GJ411x7h7/';
+          $safe=vf_safe_remote_url($url,'封面地址');
+          $headers=[];$body='';$overflow=false;$limit=524288;
+          $ch=curl_init((string)$safe['url']);
+          curl_setopt($ch,CURLOPT_FOLLOWLOCATION,false);curl_setopt($ch,CURLOPT_RETURNTRANSFER,false);curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,3);curl_setopt($ch,CURLOPT_TIMEOUT,10);
+          curl_setopt($ch,CURLOPT_USERAGENT,'VF-Start/'.VF_VERSION.' CoverCache');curl_setopt($ch,CURLOPT_HTTPHEADER,['Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1','Accept-Language: zh-CN,zh;q=0.8,en;q=0.5']);
+          curl_setopt($ch,CURLOPT_SSL_VERIFYPEER,true);curl_setopt($ch,CURLOPT_SSL_VERIFYHOST,2);curl_setopt($ch,CURLOPT_ENCODING,'');if((string)$safe['resolve']!=='')curl_setopt($ch,CURLOPT_RESOLVE,[(string)$safe['resolve']]);
+          curl_setopt($ch,CURLOPT_HEADERFUNCTION,static function($h,string $line)use(&$headers):int{$t=trim($line);if($t!==''&&str_contains($t,':')){[$n,$v]=explode(':',$t,2);$headers[strtolower(trim($n))]=trim($v);}return strlen($line);});
+          curl_setopt($ch,CURLOPT_WRITEFUNCTION,static function($h,string $chunk)use(&$body,&$overflow,$limit):int{if(strlen($body)+strlen($chunk)>$limit){$overflow=true;return 0;}$body.=$chunk;return strlen($chunk);});
+          $ok=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);$err=curl_error($ch);curl_close($ch);
+          file_put_contents(getenv('EVID').'/bilibili.html',$body);
+          $generic=VfResourceCoverCache::extractCoverCandidates($body,$url);
+          $patterns=[
+            'og_image'=>'/property=["\x27]og:image["\x27][^>]+content=["\x27]([^"\x27]+)["\x27]/i',
+            'twitter_image'=>'/name=["\x27]twitter:image["\x27][^>]+content=["\x27]([^"\x27]+)["\x27]/i',
+            'jsonld_image'=>'/["\x27](?:image|thumbnailUrl)["\x27]\s*:\s*["\x27]([^"\x27]+)["\x27]/i',
+            'initial_pic'=>'/["\x27]pic["\x27]\s*:\s*["\x27]([^"\x27]+)["\x27]/i',
+            'hdslb_url'=>'~(?:https?:)?\\?/\\?/[^"\x27\\s<>]+hdslb\.com[^"\x27\\s<>]+\.(?:jpg|jpeg|png|webp)[^"\x27\\s<>]*~i'
+          ];
+          $matches=[];
+          foreach($patterns as $name=>$re){$m=[];preg_match_all($re,$body,$m);$vals=$m[1]??$m[0]??[];$matches[$name]=array_values(array_unique(array_slice($vals,0,20)));}
+          $markers=[];foreach(['__INITIAL_STATE__','__NEXT_DATA__','application/ld+json','thumbnailUrl','"pic"','og:image','twitter:image','hdslb.com'] as $needle)$markers[$needle]=substr_count($body,$needle);
+          $report=['status'=>$status,'curl_ok'=>$ok!==false,'curl_error'=>$err,'content_type'=>$headers['content-type']??'','content_length'=>$headers['content-length']??'','bytes'=>strlen($body),'overflow'=>$overflow,'generic_candidates'=>$generic,'markers'=>$markers,'matches'=>$matches];
+          file_put_contents(getenv('EVID').'/report.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));echo json_encode($report,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          if($status!==200||$ok===false||$overflow)exit(3);
+          echo "BILIBILI_SINGLE_RESPONSE_CAPTURE=PASS\n";
+          PHP
+      - name: Classification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/report.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys
+          r=json.load(open(sys.argv[1],encoding='utf-8'))
+          usable=[]
+          for k,v in r['matches'].items():
+              if k not in ('og_image','twitter_image'):
+                  usable += [x for x in v if x]
+          if r['generic_candidates']:
+              c='GENERIC_EXTRACTOR_ALREADY_HAS_CANDIDATE'
+          elif usable:
+              c='PROVIDER_SPECIFIC_EMBEDDED_IMAGE_AVAILABLE'
+          else:
+              c='NO_STABLE_EMBEDDED_IMAGE_IN_200_RESPONSE'
+          print('CLASSIFICATION='+c)
+          print('USABLE_EMBEDDED_COUNT='+str(len(usable)))
+          for k,v in r['matches'].items(): print(k+'='+json.dumps(v,ensure_ascii=False))
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-bilibili-embedded-meta-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
