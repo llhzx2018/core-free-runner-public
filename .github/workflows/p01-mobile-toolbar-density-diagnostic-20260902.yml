@@ -1,0 +1,157 @@
+name: P01 Mobile Search Filter Toolbar Density Diagnostic
+on:
+  push:
+    branches: [tmp/p01-mobile-toolbar-density-diagnostic-20260902]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-mobile-density/evidence
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence and fresh runtime seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-mobile-density; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          php -S 127.0.0.1:18561 -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-mobile-density.pid
+          C=/tmp/p01-mobile-density.cookies
+          for i in $(seq 1 60); do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:18561/setup.php -o "$EVID/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18561/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Mobile Density Diagnostic' \
+            --data-urlencode 'admin_password=P01MobileDensity2026' \
+            --data-urlencode 'admin_password_confirm=P01MobileDensity2026' \
+            -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/Repository.php';
+          require_once getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cats=[];
+          foreach(['工作与效率','开发与技术','AI 与自动化','设计与产品','内容与研究','商业与运营','影音与灵感','长期归档'] as $i=>$name){
+            $cats[]=$repo->createCategory(['name'=>$name,'parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$i]);
+          }
+          for($i=1;$i<=56;$i++){
+            $repo->saveLink(null,['category_id'=>$cats[$i%count($cats)],'title'=>'导航样本 '.$i,'url'=>'https://example.com/start-'.$i,'description'=>'用于移动端密度诊断的真实布局样本','is_private'=>$i%7===0?1:0],'manual');
+          }
+          for($i=1;$i<=36;$i++){
+            $saved=$repo->saveLink(null,['category_id'=>$cats[0],'title'=>'影视样本 '.$i,'url'=>'https://example.org/watch-'.$i,'description'=>'移动端影视筛选诊断','is_private'=>$i%6===0?1:0],'manual');
+            $surface->upsertProfile((int)$saved['id'],['surface'=>'watch','resource_kind'=>$i%3===0?'剧集':'电影','note'=>'','background_friendly'=>0,'media_year'=>(string)(2020+($i%7)),'media_status'=>['want','watching','watched','favorite'][$i%4],'source_kind'=>'remote_url','source_ref'=>'']);
+          }
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());
+          $fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));
+          if($integrity!=='ok'||$fk)exit(3);
+          PHP
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-mobile-density
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+      - name: Measure authenticated mobile layout at 390 and 360
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-mobile-density/measure.cjs <<'JS'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const base='http://127.0.0.1:18561/';
+          const out=process.env.EVID;
+          const sizes=[{w:390,h:844},{w:360,h:800}];
+          const routes=[{name:'start',url:'index.php',first:'.vf-asset-row'},{name:'watch',url:'watch.php',first:'.vf-watch-card'}];
+          const round=n=>Math.round(n*100)/100;
+          function box(el){if(!el)return null;const r=el.getBoundingClientRect(),cs=getComputedStyle(el);return {x:round(r.x),y:round(r.y),w:round(r.width),h:round(r.height),right:round(r.right),bottom:round(r.bottom),scrollWidth:el.scrollWidth,clientWidth:el.clientWidth,display:cs.display,position:cs.position,overflowX:cs.overflowX,flexWrap:cs.flexWrap};}
+          async function metrics(page, route, size){
+            await page.goto(base+route.url,{waitUntil:'networkidle'});
+            return await page.evaluate(({first})=>{
+              const B=(el)=>{if(!el)return null;const r=el.getBoundingClientRect(),cs=getComputedStyle(el);return {x:Math.round(r.x*100)/100,y:Math.round(r.y*100)/100,w:Math.round(r.width*100)/100,h:Math.round(r.height*100)/100,right:Math.round(r.right*100)/100,bottom:Math.round(r.bottom*100)/100,scrollWidth:el.scrollWidth,clientWidth:el.clientWidth,display:cs.display,position:cs.position,overflowX:cs.overflowX,flexWrap:cs.flexWrap};};
+              const tops=(root,sel)=>{const e=document.querySelector(root);if(!e)return[];return [...e.querySelectorAll(sel)].map(x=>Math.round(x.getBoundingClientRect().top*10)/10).filter((v,i,a)=>a.indexOf(v)===i);};
+              const selectors={domain:'.vf-global-domain-nav',command:'.vf-mobile-command-row',head:'.vf-workspace-head',mobileFilters:'.vf-mobile-functional-filters',toolbar:'.vf-workspace-toolbar',toolbarNav:'.vf-workspace-toolbar nav',controls:'.vf-toolbar-controls',first};
+              const boxes={};for(const [k,s] of Object.entries(selectors))boxes[k]=B(document.querySelector(s));
+              return {innerWidth:window.innerWidth,innerHeight:window.innerHeight,docClientWidth:document.documentElement.clientWidth,docScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth,boxes,toolbarNavRows:tops('.vf-workspace-toolbar','nav a'),toolbarControlRows:tops('.vf-toolbar-controls','select,a,label'),mobileFilterRows:tops('.vf-mobile-functional-filters','select'),firstContentDocumentY:boxes.first?Math.round((boxes.first.y+scrollY)*100)/100:null,stickyTop:boxes.toolbar?getComputedStyle(document.querySelector('.vf-workspace-toolbar')).top:null};
+            },{first:route.first});
+          }
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:390,height:844}});
+            const page=await context.newPage();
+            await page.goto(base+'index.php',{waitUntil:'networkidle'});
+            await page.click('[data-vf-auth-login]');
+            await page.fill('[data-vf-auth-dialog] input[name="password"]','P01MobileDensity2026');
+            await Promise.all([page.waitForLoadState('networkidle'),page.click('[data-vf-auth-submit]')]);
+            if(!(await page.locator('[data-vf-auth-logout]').count()))throw new Error('ADMIN_LOGIN_FAILED');
+            const all=[];
+            for(const size of sizes){
+              await page.setViewportSize({width:size.w,height:size.h});
+              for(const route of routes){
+                const m=await metrics(page,route,size);all.push({route:route.name,width:size.w,height:size.h,...m});
+                await page.screenshot({path:`${out}/${route.name}-${size.w}.png`,fullPage:true});
+              }
+            }
+            fs.writeFileSync(`${out}/metrics.json`,JSON.stringify(all,null,2));
+            for(const m of all)console.log('METRIC='+JSON.stringify(m));
+            await browser.close();
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          cd /tmp/p01-mobile-density
+          node measure.cjs | tee "$EVID/metrics.log"
+      - name: Diagnostic classification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/metrics.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys
+          rows=json.load(open(sys.argv[1],encoding='utf-8'))
+          for r in rows:
+              b=r['boxes']; overflow=max(r['docScrollWidth'],r['bodyScrollWidth'])>r['innerWidth']
+              print(f"{r['route']}@{r['width']}: overflow={overflow}; command_h={b['command']['h'] if b['command'] else None}; head_h={b['head']['h'] if b['head'] else None}; filters_h={b['mobileFilters']['h'] if b['mobileFilters'] else None}; toolbar_h={b['toolbar']['h'] if b['toolbar'] else None}; nav_rows={len(r['toolbarNavRows'])}; control_rows={len(r['toolbarControlRows'])}; first_y={b['first']['y'] if b['first'] else None}; sticky_top={r['stickyTop']}")
+          print('DIAGNOSTIC_ONLY=YES')
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nP01_MAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-toolbar-density-${{ github.run_id }}
+          path: /tmp/p01-mobile-density/evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-mobile-density.pid 2>/dev/null)" 2>/dev/null || true
