@@ -1,0 +1,76 @@
+name: P01 Bilibili Fresh Sample Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-bilibili-fresh-sample-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-bilibili-fresh/evidence
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh public sample probe
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/probe.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $url='https://www.bilibili.com/video/BV1MVwizMEjr/';$safe=vf_safe_remote_url($url,'封面地址');$headers=[];$body='';$overflow=false;$limit=524288;
+          $ch=curl_init((string)$safe['url']);curl_setopt($ch,CURLOPT_FOLLOWLOCATION,false);curl_setopt($ch,CURLOPT_RETURNTRANSFER,false);curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,3);curl_setopt($ch,CURLOPT_TIMEOUT,10);curl_setopt($ch,CURLOPT_USERAGENT,'VF-Start/'.VF_VERSION.' CoverCache');curl_setopt($ch,CURLOPT_HTTPHEADER,['Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1','Accept-Language: zh-CN,zh;q=0.8,en;q=0.5']);curl_setopt($ch,CURLOPT_SSL_VERIFYPEER,true);curl_setopt($ch,CURLOPT_SSL_VERIFYHOST,2);curl_setopt($ch,CURLOPT_ENCODING,'');if((string)$safe['resolve']!=='')curl_setopt($ch,CURLOPT_RESOLVE,[(string)$safe['resolve']]);
+          curl_setopt($ch,CURLOPT_HEADERFUNCTION,static function($h,string $line)use(&$headers):int{$t=trim($line);if($t!==''&&str_contains($t,':')){[$n,$v]=explode(':',$t,2);$headers[strtolower(trim($n))]=trim($v);}return strlen($line);});curl_setopt($ch,CURLOPT_WRITEFUNCTION,static function($h,string $chunk)use(&$body,&$overflow,$limit):int{if(strlen($body)+strlen($chunk)>$limit){$overflow=true;return 0;}$body.=$chunk;return strlen($chunk);});$ok=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);$err=curl_error($ch);curl_close($ch);
+          $generic=VfResourceCoverCache::extractCoverCandidates($body,$url);$patterns=['pic'=>'/["\x27]pic["\x27]\s*:\s*["\x27]([^"\x27]+)["\x27]/i','thumb'=>'/["\x27](?:image|thumbnailUrl)["\x27]\s*:\s*["\x27]([^"\x27]+)["\x27]/i','hdslb'=>'~(?:https?:)?//[^"\x27\\s<>]+hdslb\.com[^"\x27\\s<>]+\.(?:jpg|jpeg|png|webp)[^"\x27\\s<>]*~i'];$matches=[];foreach($patterns as $k=>$re){$m=[];preg_match_all($re,$body,$m);$matches[$k]=array_values(array_unique(array_slice($m[1]??$m[0]??[],0,20)));}
+          $r=['url'=>$url,'status'=>$status,'curl_ok'=>$ok!==false,'curl_error'=>$err,'content_type'=>$headers['content-type']??'','bytes'=>strlen($body),'overflow'=>$overflow,'generic_candidates'=>$generic,'markers'=>['initial'=>substr_count($body,'__INITIAL_STATE__'),'jsonld'=>substr_count($body,'application/ld+json'),'pic'=>substr_count($body,'"pic"'),'og'=>substr_count($body,'og:image'),'hdslb'=>substr_count($body,'hdslb.com')],'matches'=>$matches];file_put_contents(getenv('EVID').'/report.json',json_encode($r,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));file_put_contents(getenv('EVID').'/body.html',$body);echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          if($status===200&&$ok!==false&&!$overflow)echo "FRESH_SAMPLE_HTTP_200=YES\n";else echo "FRESH_SAMPLE_HTTP_200=NO\n";
+          PHP
+      - name: Classify
+        shell: bash
+        run: |
+          python3 - "$EVID/report.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys
+          r=json.load(open(sys.argv[1],encoding='utf-8'));embedded=sum(len(v) for v in r['matches'].values())
+          if r['status']==412: c='BILIBILI_ANTI_BOT_412'
+          elif r['status']==200 and r['generic_candidates']: c='GENERIC_CANDIDATE_AVAILABLE'
+          elif r['status']==200 and embedded: c='PROVIDER_SPECIFIC_EMBEDDED_IMAGE_AVAILABLE'
+          elif r['status']==200: c='HTTP_200_NO_STABLE_COVER_METADATA'
+          else: c='OTHER_REMOTE_FAILURE'
+          print('CLASSIFICATION='+c);print('EMBEDDED_MATCHES='+str(embedded))
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-bilibili-fresh-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
