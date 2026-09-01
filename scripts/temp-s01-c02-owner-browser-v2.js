@@ -98,8 +98,12 @@ const assert = (cond, message) => { if (!cond) throw new Error(message); };
   const flowPageId = editUrl.searchParams.get('post');
   assert(flowPageId && /^\d+$/.test(flowPageId), 'Could not derive Downloader flow page id');
   assert(seoHref && seoHref.includes(`post_id=${flowPageId}`), 'SEO link is not bound to the same Downloader flow page');
-  assert(previewHref && previewHref.includes('/m3u8-download-record'), 'Preview link is not the canonical Downloader public route');
-  fs.writeFileSync(path.join(evidence, 'owner-object-links.json'), JSON.stringify({ settingsHref, editHref, seoHref, previewHref, flowPageId }, null, 2) + '\n');
+  assert(previewHref, 'Preview link missing');
+  const expectedPreviewHref = wp('eval', `echo get_permalink(${flowPageId});`);
+  const resolvedPreviewHref = new URL(previewHref, base).href;
+  const resolvedExpectedPreviewHref = new URL(expectedPreviewHref, base).href;
+  assert(resolvedPreviewHref === resolvedExpectedPreviewHref, `Preview link is not the canonical Downloader flow-page permalink: ${resolvedPreviewHref} !== ${resolvedExpectedPreviewHref}`);
+  fs.writeFileSync(path.join(evidence, 'owner-object-links.json'), JSON.stringify({ settingsHref, editHref, seoHref, previewHref, expectedPreviewHref, flowPageId }, null, 2) + '\n');
 
   response = await page.goto(settingsHref, { waitUntil: 'domcontentloaded' });
   assert(response && response.status() === 200, 'Provider settings destination failed');
