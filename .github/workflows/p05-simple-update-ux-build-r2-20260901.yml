@@ -1,0 +1,374 @@
+name: P05 Simple Update UX Hotfix Build R2
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p05-simple-update-ux-build-r2-20260901.yml']
+permissions:
+  contents: read
+jobs:
+  build-hotfix-r2:
+    if: github.event_name == 'pull_request' && github.head_ref == 'tmp/p05-simple-update-ux-build-r2-20260901'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      P05_BASE_MAIN: 8fd6ea22f237eac891bdd0e336947d587560dc75
+      TARGET_BRANCH: hotfix/p05-simple-update-ux-20260901
+    steps:
+      - name: Checkout private P05 hotfix branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.TARGET_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: p05
+      - name: Verify exact hotfix base
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_BASE_MAIN"
+          test "$(cat VERSION)" = '1.2.0'
+          git ls-remote --exit-code origin refs/heads/main | grep -F "$P05_BASE_MAIN" >/dev/null
+          echo 'P05_SIMPLE_UPDATE_BASE=PASS'
+      - name: Apply simple update UX hotfix
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ui = r"""import { useEffect, useMemo, useState } from 'react';
+          import { createPortal } from 'react-dom';
+
+          type Json = Record<string, any>;
+          type UpdateStatus = {
+            currentVersion?: string;
+            channel?: string;
+            updateAvailable?: boolean;
+            updaterReady?: boolean;
+            manifest?: {
+              targetVersion?: string;
+              updateType?: 'ATOMIC' | 'MIGRATION' | 'FULL_ONLY';
+              releasedAt?: string;
+              backupRequired?: boolean;
+              rollbackSupported?: boolean;
+            } | null;
+            execution?: Json | null;
+          };
+
+          async function api(path: string, options: RequestInit = {}) {
+            const response = await fetch(path, {
+              ...options,
+              cache: 'no-store',
+              credentials: 'same-origin',
+              headers: { 'content-type': 'application/json', ...(options.headers ?? {}) },
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(String(body.error ?? `HTTP_${response.status}`));
+            return body as Json;
+          }
+
+          function friendlyError(value: unknown) {
+            const raw = value instanceof Error ? value.message : String(value ?? 'UNKNOWN_ERROR');
+            const map: Record<string, string> = {
+              AUTH_REQUIRED: '当前登录已失效，请重新登录后再操作。',
+              CSRF_REJECTED: '页面安全令牌已失效，请刷新后重试。',
+              ORIGIN_REJECTED: '当前请求来源未通过安全校验。',
+              NO_READY_UPDATE: '当前没有可执行的新版本。',
+              UPDATE_CREDENTIAL_REQUIRED: '更新服务暂时不可用，请稍后重试。',
+              UPDATE_CREDENTIAL_NOT_CONFIGURED: '更新服务暂时不可用，请稍后重试。',
+              CREDENTIAL_REQUIRED: '更新服务暂时不可用，请稍后重试。',
+              UPDATE_CHANNEL_NOT_PUBLISHED: '当前没有可用的新版本。',
+              STEP_UP_REQUIRED: '当前登录状态需要重新确认，请重新登录后再更新。',
+            };
+            return map[raw] ?? '更新没有完成，请稍后重试。';
+          }
+
+          function formatDate(value: unknown) {
+            if (!value) return '';
+            const date = new Date(String(value));
+            if (Number.isNaN(date.getTime())) return '';
+            return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' }).format(date);
+          }
+
+          function channelLabel(status: UpdateStatus | null) {
+            if (!status) return '正在检查';
+            if (status.channel === 'AVAILABLE' && status.updateAvailable) return '发现新版本';
+            if (status.channel === 'UP_TO_DATE') return '已是最新版本';
+            if (status.channel === 'FULL_ONLY') return '需要完整升级';
+            if (status.channel === 'CREDENTIAL_REQUIRED' || status.channel === 'UPDATE_CREDENTIAL_NOT_CONFIGURED') return '暂时无法检查';
+            if (status.channel?.startsWith('BLOCKED_')) return '暂时无法更新';
+            if (status.updateAvailable) return '发现新版本';
+            return '暂时无法确认';
+          }
+
+          export function UpdateShortcut() {
+            const [portalHost, setPortalHost] = useState<Element | null>(null);
+            const [open, setOpen] = useState(false);
+            const [csrf, setCsrf] = useState('');
+            const [status, setStatus] = useState<UpdateStatus | null>(null);
+            const [busy, setBusy] = useState(false);
+            const [checking, setChecking] = useState(false);
+            const [notice, setNotice] = useState('');
+            const [error, setError] = useState('');
+
+            const ensureAuth = async () => {
+              if (csrf) return csrf;
+              const me = await api('/api/auth/me');
+              const token = String(me.csrfToken ?? '');
+              if (!token) throw new Error('CSRF_TOKEN_MISSING');
+              setCsrf(token);
+              return token;
+            };
+
+            const readStatus = async (showBusy = false) => {
+              if (showBusy) setChecking(true);
+              setError('');
+              try {
+                const next = await api('/api/system/update/status') as UpdateStatus;
+                setStatus(next);
+                return next;
+              } catch (e) {
+                if (open) setError(friendlyError(e));
+                return null;
+              } finally {
+                if (showBusy) setChecking(false);
+              }
+            };
+
+            const post = async (path: string, body: unknown) => {
+              const token = await ensureAuth();
+              return api(path, {
+                method: 'POST',
+                headers: { 'x-csrf-token': token },
+                body: JSON.stringify(body),
+              });
+            };
+
+            useEffect(() => {
+              const findHost = () => {
+                const next = document.querySelector('.secondary-nav');
+                setPortalHost(current => current === next ? current : next);
+              };
+              findHost();
+              const observer = new MutationObserver(findHost);
+              observer.observe(document.body, { childList: true, subtree: true });
+              return () => observer.disconnect();
+            }, []);
+
+            useEffect(() => {
+              void readStatus();
+              const timer = window.setInterval(() => void readStatus(), 60_000);
+              return () => window.clearInterval(timer);
+            }, []);
+
+            const canApply = useMemo(() => Boolean(
+              status?.updaterReady
+              && status?.channel === 'AVAILABLE'
+              && status?.updateAvailable
+              && status?.manifest?.updateType !== 'FULL_ONLY'
+            ), [status]);
+
+            const openWorkspace = () => {
+              setOpen(true);
+              setNotice('');
+              setError('');
+              void ensureAuth().catch(e => setError(friendlyError(e)));
+              void readStatus(true);
+            };
+
+            const applyUpdate = async () => {
+              if (!canApply) {
+                setError('当前没有可直接安装的新版本。');
+                return;
+              }
+              setBusy(true);
+              setError('');
+              setNotice('正在准备更新。系统会先自动备份并校验更新包，请不要关闭页面。');
+              try {
+                const result = await post('/api/system/update/apply', {});
+                if (!result.accepted) throw new Error('UPDATE_NOT_ACCEPTED');
+                if (result.completed && result.reloadRequired) {
+                  setNotice('更新完成，正在刷新页面…');
+                  window.setTimeout(() => window.location.reload(), 900);
+                  return;
+                }
+                setNotice('更新已开始，请稍候。');
+                window.setTimeout(() => void readStatus(), 1800);
+              } catch (e) {
+                setNotice('');
+                setError(friendlyError(e));
+                await readStatus();
+              } finally {
+                setBusy(false);
+              }
+            };
+
+            const navButton = <button
+              type="button"
+              className={`vf-update-nav-button ${open ? 'active' : ''} ${status?.updateAvailable ? 'has-update' : ''}`}
+              onClick={openWorkspace}
+            >
+              <span>系统与更新</span>{status?.updateAvailable && <b>有更新</b>}
+            </button>;
+
+            const targetVersion = status?.manifest?.targetVersion;
+            const releasedAt = formatDate(status?.manifest?.releasedAt);
+            const serviceUnavailable = Boolean(status && !status.updateAvailable && status.channel !== 'UP_TO_DATE');
+
+            return <>
+              {portalHost && createPortal(navButton, portalHost)}
+              {open && createPortal(<div className="vf-update-overlay" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget && !busy) setOpen(false); }}>
+                <section className="vf-update-dialog" role="dialog" aria-modal="true" aria-labelledby="vf-update-title">
+                  <header className="vf-update-header">
+                    <div>
+                      <span className="vf-update-eyebrow">P05 · VF SEO</span>
+                      <h2 id="vf-update-title">系统与更新</h2>
+                      <p>检查新版本并安全更新。更新前会自动备份，失败时可回滚。</p>
+                    </div>
+                    <button type="button" className="vf-update-close" disabled={busy} onClick={() => setOpen(false)} aria-label="关闭">×</button>
+                  </header>
+
+                  {notice && <div className="vf-update-notice">{notice}</div>}
+                  {error && <div className="vf-update-error">{error}</div>}
+
+                  <div className="vf-update-summary">
+                    <div><span>当前版本</span><strong>V{status?.currentVersion ?? '—'}</strong></div>
+                    <div><span>最新版本</span><strong>{targetVersion ? `V${targetVersion}` : '—'}</strong></div>
+                    <div><span>状态</span><strong>{checking ? '正在检查' : channelLabel(status)}</strong></div>
+                  </div>
+
+                  {status?.updateAvailable && <section className="vf-update-card vf-update-action-card">
+                    <div className="vf-update-card-title">
+                      <div>
+                        <h3>V{targetVersion} 可用</h3>
+                        <p>{releasedAt ? `${releasedAt} 发布。` : ''}更新前自动创建备份，更新失败时保留回滚能力。</p>
+                      </div>
+                      <span className="vf-update-ready">可更新</span>
+                    </div>
+                    <div className="vf-update-benefits">
+                      <span>自动备份</span><span>完整性校验</span><span>失败可回滚</span>
+                    </div>
+                    <div className="vf-update-actions">
+                      <button className="primary" type="button" disabled={busy || checking || !canApply} onClick={applyUpdate}>{busy ? '正在更新…' : `立即更新到 V${targetVersion ?? ''}`}</button>
+                      <button type="button" className="secondary" disabled={busy || checking} onClick={() => void readStatus(true)}>{checking ? '正在检查…' : '检查更新'}</button>
+                    </div>
+                  </section>}
+
+                  {status?.channel === 'UP_TO_DATE' && !status.updateAvailable && <section className="vf-update-card vf-update-current">
+                    <div><strong>✓ 已是最新版本</strong><span>当前无需更新。</span></div>
+                    <button type="button" className="secondary" disabled={busy || checking} onClick={() => void readStatus(true)}>{checking ? '正在检查…' : '检查更新'}</button>
+                  </section>}
+
+                  {serviceUnavailable && <section className="vf-update-card vf-update-unavailable">
+                    <div>
+                      <h3>暂时无法检查更新</h3>
+                      <p>当前更新服务没有返回可用版本。稍后再试即可，不需要额外配置。</p>
+                    </div>
+                    <button type="button" className="secondary" disabled={busy || checking} onClick={() => void readStatus(true)}>{checking ? '正在检查…' : '重新检查'}</button>
+                  </section>}
+
+                  {!status && !error && <section className="vf-update-card vf-update-loading">正在检查更新…</section>}
+                </section>
+              </div>, document.body)}
+
+              <style>{`
+                .vf-common-launch{display:none!important}
+                .vf-update-nav-button{width:100%;min-height:40px;border-radius:10px;padding:9px 14px;border:1px solid transparent;background:transparent;color:#c6dce0;text-align:left;font:inherit;font-weight:750;display:flex;align-items:center;justify-content:space-between;gap:8px}
+                .vf-update-nav-button:hover,.vf-update-nav-button.active{background:rgba(255,255,255,.06);color:#fff}.vf-update-nav-button.active{background:rgba(19,167,183,.18);border-color:rgba(66,213,226,.22);color:#83eef4}
+                .vf-update-nav-button b{font-size:10px;padding:4px 7px;border-radius:999px;background:#e9a23b;color:#162b31}.vf-update-nav-button.has-update{color:#fff}
+                .vf-update-overlay{position:fixed;inset:0;z-index:130;background:rgba(8,25,31,.52);display:grid;place-items:center;padding:22px;overflow:auto}
+                .vf-update-dialog{width:min(720px,100%);max-height:92vh;overflow:auto;background:#f5f9fa;border:1px solid #c9dde0;border-radius:20px;box-shadow:0 28px 90px rgba(5,24,31,.32);padding:22px;color:#17353c}
+                .vf-update-header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:16px}.vf-update-header h2{font-size:27px;margin:6px 0}.vf-update-header p{margin:0;color:#6a7f85;line-height:1.55}.vf-update-eyebrow{font-size:11px;font-weight:850;letter-spacing:.05em;color:#0d8592}.vf-update-close{border:1px solid #cedfe2;background:#fff;color:#49656c;width:38px;height:38px;border-radius:10px;font-size:22px}
+                .vf-update-notice,.vf-update-error{padding:11px 13px;border-radius:10px;margin:10px 0 14px;font-size:13px;line-height:1.55}.vf-update-notice{background:#e7f7f4;border:1px solid #b7e4dc;color:#17665d}.vf-update-error{background:#fff0ed;border:1px solid #f1c7bf;color:#9a3d2f}
+                .vf-update-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}.vf-update-summary>div,.vf-update-card{background:#fff;border:1px solid #d7e5e7;border-radius:14px}.vf-update-summary>div{padding:13px}.vf-update-summary span{display:block;color:#71878c;font-size:11px;font-weight:700}.vf-update-summary strong{display:block;margin-top:5px;font-size:16px}
+                .vf-update-card{padding:17px;margin-top:11px}.vf-update-card-title{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.vf-update-card-title h3,.vf-update-unavailable h3{margin:0 0 5px;font-size:17px}.vf-update-card-title p,.vf-update-unavailable p{margin:0;color:#6d8186;font-size:12px;line-height:1.6}.vf-update-ready{font-size:10px;font-weight:850;padding:5px 8px;border-radius:999px;white-space:nowrap;background:#e5f6f2;color:#117267}
+                .vf-update-benefits{display:flex;flex-wrap:wrap;gap:7px;margin-top:15px}.vf-update-benefits span{font-size:11px;font-weight:750;padding:6px 9px;border-radius:999px;background:#edf7f8;color:#36636b}
+                .vf-update-actions{display:flex;gap:8px;margin-top:16px}.vf-update-dialog button.primary,.vf-update-dialog button.secondary{border-radius:10px;padding:10px 14px;font:inherit;font-size:12px;font-weight:800}.vf-update-dialog button.primary{border:1px solid #0a8795;background:#0b95a4;color:#fff}.vf-update-dialog button.secondary{border:1px solid #cbdcdf;background:#fff;color:#31565e}.vf-update-dialog button:disabled{opacity:.52;cursor:not-allowed}
+                .vf-update-action-card{border-color:#a9dce1;background:#fbffff}.vf-update-current,.vf-update-unavailable{display:flex;align-items:center;justify-content:space-between;gap:16px}.vf-update-current strong{display:block;color:#226b61}.vf-update-current span{display:block;margin-top:4px;color:#6d8186;font-size:12px}.vf-update-unavailable{border-color:#e2d9c6}.vf-update-loading{color:#6d8186;font-size:13px;text-align:center}
+                @media(max-width:680px){.vf-update-overlay{padding:10px}.vf-update-dialog{padding:16px;border-radius:16px}.vf-update-summary{grid-template-columns:1fr}.vf-update-header h2{font-size:23px}.vf-update-current,.vf-update-unavailable{display:block}.vf-update-current button,.vf-update-unavailable button{margin-top:12px}.vf-update-actions{flex-direction:column}.vf-update-actions button{width:100%}}
+              `}</style>
+            </>;
+          }
+          """
+          lines = ui.splitlines()
+          normalized = [line[10:] if line.startswith('          ') else line for line in lines]
+          Path('src/client/UpdateShortcut.tsx').write_text('\n'.join(normalized).lstrip() + '\n', encoding='utf-8')
+
+          routes = Path('php/src/RuntimeOpsRoutesTrait.php')
+          s = routes.read_text(encoding='utf-8')
+          old = """        if ($path === '/api/system/update/apply' && $method === 'POST') {\n            $sessionState = $this->db->one('SELECT rotated_at FROM sessions WHERE id=:id', ['id' => $session['session_id']]);\n            $rotated = strtotime((string) ($sessionState['rotated_at'] ?? ''));\n            if ($rotated === false || $rotated < time() - $this->config->stepUpWindowSeconds) {\n                $this->json(403, ['ok' => false, 'error' => 'STEP_UP_REQUIRED', 'windowSeconds' => $this->config->stepUpWindowSeconds]);\n                return true;\n            }\n            try {"""
+          new = """        if ($path === '/api/system/update/apply' && $method === 'POST') {\n            try {"""
+          if old not in s:
+              raise SystemExit('UPDATE_APPLY_STEP_UP_ANCHOR_MISSING')
+          routes.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          test = r"""import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import test from 'node:test';
+
+          const ui = readFileSync(new URL('../../src/client/UpdateShortcut.tsx', import.meta.url), 'utf8');
+          const routes = readFileSync(new URL('../../php/src/RuntimeOpsRoutesTrait.php', import.meta.url), 'utf8');
+
+          test('system update UI stays owner-simple and hides update infrastructure', () => {
+            for (const forbidden of ['GitHub', 'core-updates', 'Authority', 'runtime.env', '更新读取凭据', '管理员密码', '技术状态', 'Atomic', 'Schema']) {
+              assert.equal(ui.includes(forbidden), false, `forbidden update UI term leaked: ${forbidden}`);
+            }
+            for (const expected of ['当前版本', '最新版本', '检查更新', '立即更新到', '自动备份', '失败可回滚']) {
+              assert.equal(ui.includes(expected), true, `missing owner-facing update copy: ${expected}`);
+            }
+            assert.match(ui, /status\?\.updaterReady/);
+            assert.match(ui, /status\?\.channel === 'AVAILABLE'/);
+            assert.match(ui, /status\.channel === 'UP_TO_DATE'/);
+            assert.doesNotMatch(ui, /status\?\.credentialConfigured\s*&&/);
+          });
+
+          test('online update uses authenticated session plus origin and csrf without password step-up', () => {
+            const start = routes.indexOf("if ($path === '/api/system/update/apply'");
+            const end = routes.indexOf("if ($path === '/api/system/step-up'", start);
+            assert.ok(start >= 0 && end > start, 'update apply route not found');
+            const applyRoute = routes.slice(start, end);
+            assert.match(applyRoute, /new PhpUpdater/);
+            assert.match(applyRoute, /->apply\(\(string\) \$session\['admin_id'\]\)/);
+            assert.doesNotMatch(applyRoute, /STEP_UP_REQUIRED|rotated_at|stepUpWindowSeconds|password/);
+          });
+          """
+          tlines = test.splitlines()
+          tnorm = [line[10:] if line.startswith('          ') else line for line in tlines]
+          Path('tests/unit/product-simple-update-ux-truth.test.ts').write_text('\n'.join(tnorm).lstrip() + '\n', encoding='utf-8')
+          PY
+          git add php/src/RuntimeOpsRoutesTrait.php src/client/UpdateShortcut.tsx tests/unit/product-simple-update-ux-truth.test.ts
+          git diff --cached --check
+          git diff --cached --name-only | sort > /tmp/changed
+          printf '%s\n' php/src/RuntimeOpsRoutesTrait.php src/client/UpdateShortcut.tsx tests/unit/product-simple-update-ux-truth.test.ts | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/changed
+          echo 'P05_SIMPLE_UPDATE_SCOPE=PASS'
+      - name: Validate hotfix
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          node --import tsx --test tests/unit/product-simple-update-ux-truth.test.ts
+          php -l php/src/RuntimeOpsRoutesTrait.php >/dev/null
+          npm run test:php-product-parity
+          npm test
+          npm run build
+          echo 'P05_SIMPLE_UPDATE_VALIDATION=PASS'
+      - name: Commit and push private hotfix
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git commit -m 'fix(P05): simplify owner update experience'
+          test "$(git rev-list --count "$P05_BASE_MAIN"..HEAD)" = 1
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          echo "P05_SIMPLE_UPDATE_SOURCE=$(git rev-parse HEAD)"
+          echo "P05_SIMPLE_UPDATE_TREE=$(git rev-parse HEAD^{tree})"
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
