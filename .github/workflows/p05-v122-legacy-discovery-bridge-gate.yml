@@ -1,0 +1,249 @@
+name: P05 V1.2.2 Legacy Discovery Bridge Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-v122-legacy-discovery-bridge-gate.yml'
+      - 'scripts/P05_V1.2.2_LEGACY_DISCOVERY_BRIDGE.php'
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-gate:
+    if: github.head_ref == 'tmp/p05-v122-legacy-discovery-bridge-gate-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      P05_V122_SOURCE: 04e4b8546357301e90b6ab7d9b50907369ea58eb
+      BRIDGE_FILE: P05_V1.2.2_LEGACY_DISCOVERY_BRIDGE.php
+      TEST_PASSWORD: Bridge-Test-Password-2026-Only
+    steps:
+      - name: Checkout exact disposable bridge candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate bridge static safety boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l "scripts/$BRIDGE_FILE" >/dev/null
+          grep -Fq "const P05_BRIDGE_FROM = '1.2.2';" "scripts/$BRIDGE_FILE"
+          grep -Fq "const P05_BRIDGE_TARGET = '1.2.3';" "scripts/$BRIDGE_FILE"
+          grep -Fq 'sodium_crypto_box_seal_open' "scripts/$BRIDGE_FILE"
+          grep -Fq -- '->saveCredential($token)' "scripts/$BRIDGE_FILE"
+          grep -Fq -- '->create($adminId)' "scripts/$BRIDGE_FILE"
+          grep -Fq -- '->verifyRun(' "scripts/$BRIDGE_FILE"
+          ! grep -Fq -- '->apply(' "scripts/$BRIDGE_FILE"
+          ! grep -Eq "file_put_contents\([^\n]*VERSION|rename\([^\n]*VERSION|unlink\([^\n]*VERSION" "scripts/$BRIDGE_FILE"
+          ! grep -Eq 'migration|migrate\.php|ALTER TABLE|CREATE TABLE|DROP TABLE' "scripts/$BRIDGE_FILE"
+          ! grep -Eq 'localStorage|sessionStorage|document\.cookie' "scripts/$BRIDGE_FILE"
+          echo P05_LEGACY_BRIDGE_STATIC_BOUNDARY=PASS
+
+      - name: Install PHP runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip >/dev/null
+          php -r 'foreach(["pdo_sqlite","curl","sodium"] as $e){if(!extension_loaded($e)){fwrite(STDERR,"missing:$e\n");exit(2);}} if(!class_exists("ZipArchive")){exit(3);}'
+          echo P05_LEGACY_BRIDGE_RUNTIME=PASS
+
+      - name: Checkout exact P05 v1.2.2 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 04e4b8546357301e90b6ab7d9b50907369ea58eb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: p05
+
+      - name: Prepare isolated v1.2.2 format-3 runtime
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_V122_SOURCE"
+          test "$(cat VERSION)" = '1.2.2'
+          INSTANCE_ID='11223344556677889900aabbccddeeff'
+          STORAGE="../.vfseo-data-${INSTANCE_ID}"
+          ENV_PATH="${STORAGE}/config/runtime.env"
+          mkdir -p "$STORAGE/config" "$STORAGE/data" "$STORAGE/backups"
+          chmod 700 "$STORAGE" "$STORAGE/config" "$STORAGE/data" "$STORAGE/backups"
+          cat > "$ENV_PATH" <<'ENV'
+          APP_ENV=development
+          VF_DATABASE_PROVIDER=sqlite
+          VF_TRUST_PROXY=true
+          VF_SECURE_COOKIES=false
+          VF_REQUIRE_HTTPS=false
+          VF_DISPLAY_TIMEZONE=Asia/Shanghai
+          VF_LOCALE=zh-CN
+          ENV
+          chmod 600 "$ENV_PATH"
+          cat > VF_INSTALL_INSTANCE.json <<'JSON'
+          {
+            "project": "P05",
+            "product": "VF SEO",
+            "installed": true,
+            "siteInstanceId": "11223344556677889900aabbccddeeff",
+            "storageSlug": ".vfseo-data-11223344556677889900aabbccddeeff",
+            "installedAt": "2026-09-02T00:00:00Z",
+            "format": 3
+          }
+          JSON
+          chmod 600 VF_INSTALL_INSTANCE.json
+          php php/bin/migrate.php >/dev/null
+          P05_TEST_PASSWORD="$TEST_PASSWORD" php <<'PHP'
+          <?php
+          require 'php/src/SiteInstance.php';
+          require 'php/src/RuntimePaths.php';
+          require 'php/src/Config.php';
+          require 'php/src/Database.php';
+          require 'php/src/Security.php';
+          $root=getcwd();
+          $c=VfSeo\PhpRuntime\Config::load($root);
+          $db=new VfSeo\PhpRuntime\Database($c->sqlitePath,$c->sqliteBusyTimeoutMs);
+          $id=VfSeo\PhpRuntime\Security::uuid();
+          $hash=VfSeo\PhpRuntime\Security::hashPassword((string)getenv('P05_TEST_PASSWORD'));
+          $db->execute('INSERT INTO admins(id,username,password_hash) VALUES(:id,:u,:p)',['id'=>$id,'u'=>'bridge-owner','p'=>$hash]);
+          $project=VfSeo\PhpRuntime\Security::uuid();
+          $db->execute('INSERT INTO projects(id,name,description) VALUES(:id,:n,:d)',['id'=>$project,'n'=>'Bridge Preservation Marker','d'=>'must remain byte-equivalent']);
+          echo "P05_BRIDGE_FIXTURE=PASS\n";
+          PHP
+          cp ../scripts/$BRIDGE_FILE ./$BRIDGE_FILE
+          php -l "$BRIDGE_FILE" >/dev/null
+          echo P05_LEGACY_BRIDGE_ISOLATED_RUNTIME=PASS
+
+      - name: Execute admin-auth backup and sealed relay against live authority
+        working-directory: p05
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          SERVER_LOG="$RUNNER_TEMP/p05-bridge-server.log"
+          php -S 127.0.0.1:18080 -t . >"$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+          cleanup(){ kill "$SERVER_PID" 2>/dev/null || true; rm -f VF_INSTALL_INSTANCE.json "$BRIDGE_FILE"; rm -rf ../.vfseo-data-11223344556677889900aabbccddeeff; }
+          trap cleanup EXIT
+          sleep 1
+
+          HTML="$RUNNER_TEMP/p05-bridge.html"
+          curl --fail --silent --show-error http://127.0.0.1:18080/$BRIDGE_FILE -o "$HTML"
+          grep -Fq '接通后台更新服务' "$HTML"
+          CSRF=$(python3 - "$HTML" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="csrf" value="([0-9a-f]{48})"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl --fail --silent --show-error \
+            -H 'Origin: http://127.0.0.1:18080' \
+            --data-urlencode "csrf=$CSRF" \
+            --data-urlencode "password=$TEST_PASSWORD" \
+            http://127.0.0.1:18080/$BRIDGE_FILE -o "$HTML"
+          grep -Fq '恢复点已通过' "$HTML"
+
+          INFO="$RUNNER_TEMP/p05-bridge-info.json"
+          curl --fail --silent --show-error "http://127.0.0.1:18080/$BRIDGE_FILE?relay=info" -o "$INFO"
+          python3 - "$INFO" <<'PY'
+          import base64,json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['ok'] is True and d['status']=='ready'
+          assert d['project_id']=='P05'
+          assert d['current_version']=='1.2.2' and d['target_version']=='1.2.3'
+          assert len(base64.b64decode(d['public_key_b64'],validate=True))==32
+          assert len(d['nonce'])==48
+          print('P05_LEGACY_BRIDGE_RELAY_IDENTITY=PASS')
+          PY
+
+          P05_INFO="$INFO" php -r '
+            $info=json_decode(file_get_contents(getenv("P05_INFO")),true,32,JSON_THROW_ON_ERROR);
+            $pk=base64_decode((string)$info["public_key_b64"],true);
+            $token=(string)getenv("READ_TOKEN");
+            if(!is_string($pk)||strlen($pk)!==SODIUM_CRYPTO_BOX_PUBLICKEYBYTES||$token==="") exit(2);
+            $sealed=sodium_crypto_box_seal($token,$pk);
+            $payload=json_encode(["nonce"=>(string)$info["nonce"],"sealed_token_b64"=>base64_encode($sealed)],JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);
+            file_put_contents(getenv("RUNNER_TEMP")."/p05-bridge-token.json",$payload,LOCK_EX);
+          '
+          RESPONSE="$RUNNER_TEMP/p05-bridge-relay.json"
+          curl --fail --silent --show-error \
+            -H 'Content-Type: application/json' \
+            --data-binary "@$RUNNER_TEMP/p05-bridge-token.json" \
+            "http://127.0.0.1:18080/$BRIDGE_FILE?relay=token" -o "$RESPONSE"
+          python3 - "$RESPONSE" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['ok'] is True and d['status']=='success'
+          assert d['channel']=='AVAILABLE' and d['updater_ready'] is True
+          assert d['current_version']=='1.2.2' and d['target_version']=='1.2.3'
+          assert d['formal_upgrade_executed'] is False
+          print('P05_LEGACY_BRIDGE_SEALED_RELAY=PASS')
+          PY
+          sleep 1
+          test ! -e "$BRIDGE_FILE"
+          ! grep -Fq "$READ_TOKEN" "$SERVER_LOG"
+          ! grep -Fq "$READ_TOKEN" "$HTML"
+          ! grep -Fq "$READ_TOKEN" "$INFO"
+          ! grep -Fq "$READ_TOKEN" "$RESPONSE"
+          rm -f "$RUNNER_TEMP/p05-bridge-token.json" "$RESPONSE" "$INFO" "$HTML"
+          echo P05_LEGACY_BRIDGE_PLAINTEXT_SECRET_EXPOSURE=0
+
+      - name: Verify AVAILABLE stop boundary and preservation
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat VERSION)" = '1.2.2'
+          php <<'PHP'
+          <?php
+          require 'php/src/SiteInstance.php';
+          require 'php/src/RuntimePaths.php';
+          require 'php/src/Config.php';
+          require 'php/src/Database.php';
+          require 'php/src/Security.php';
+          require 'php/src/Backup.php';
+          require 'php/src/CoreUpdates/UpdateCore.php';
+          require 'php/src/CoreUpdates/GitHubClient.php';
+          require 'php/src/PhpUpdater.php';
+          $root=getcwd();
+          $c=VfSeo\PhpRuntime\Config::load($root);
+          $db=new VfSeo\PhpRuntime\Database($c->sqlitePath,$c->sqliteBusyTimeoutMs);
+          $b=new VfSeo\PhpRuntime\Backup($db,$c);
+          $u=new VfSeo\PhpRuntime\PhpUpdater($c,$b);
+          $s=$u->status();
+          if(($s['channel']??'')!=='AVAILABLE'||($s['updateAvailable']??false)!==true||($s['updaterReady']??false)!==true||(string)($s['manifest']['targetVersion']??'')!=='1.2.3') exit(10);
+          $schema=$db->one('SELECT schema_identity,schema_version FROM schema_metadata WHERE singleton=1');
+          if(($schema['schema_identity']??'')!=='VF-SEO-SCHEMA@1'||(int)($schema['schema_version']??0)!==1) exit(11);
+          $p=$db->one('SELECT name,description FROM projects WHERE name=:n',['n'=>'Bridge Preservation Marker']);
+          if(($p['description']??'')!=='must remain byte-equivalent') exit(12);
+          $run=$db->one("SELECT id FROM backup_runs WHERE state='COMPLETE' ORDER BY started_at DESC LIMIT 1");
+          if(!is_array($run)||($b->verifyRun((string)$run['id'])['ok']??false)!==true) exit(13);
+          echo "P05_LEGACY_BRIDGE_AVAILABLE=PASS\n";
+          echo "P05_LEGACY_BRIDGE_SCHEMA_PRESERVED=PASS\n";
+          echo "P05_LEGACY_BRIDGE_BUSINESS_PRESERVED=PASS\n";
+          echo "P05_LEGACY_BRIDGE_BACKUP_VERIFIED=PASS\n";
+          PHP
+          ENV_PATH='../.vfseo-data-11223344556677889900aabbccddeeff/config/runtime.env'
+          test "$(stat -c '%a' "$ENV_PATH")" = '600'
+          grep -q '^VF_PRIVATE_READ_TOKEN=' "$ENV_PATH"
+          echo P05_LEGACY_BRIDGE_STOP_AT_READY_FOR_AUTHORIZED_UPGRADE=PASS
+          echo P05_LEGACY_BRIDGE_FORMAL_UPGRADE_EXECUTED=0
+          echo P05_LEGACY_BRIDGE_PRODUCTION_WRITE=0
+
+      - name: Seal bridge candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          sha256sum "scripts/$BRIDGE_FILE"
+          wc -c < "scripts/$BRIDGE_FILE"
+          echo P05_V122_LEGACY_DISCOVERY_BRIDGE_GATE=PASS
