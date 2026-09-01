@@ -1,0 +1,151 @@
+name: P01 Anonymous Grid Alignment Fix Gate
+on:
+  push:
+    branches: [tmp/p01-anonymous-grid-alignment-20260901]
+    paths:
+      - .github/workflows/p01-anonymous-grid-alignment-20260901.yml
+permissions:
+  contents: read
+  actions: read
+jobs:
+  fix-and-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BASE: c7a1c6e9ab6321ec07bc00a3e778661faaefb4ae
+      PRODUCT_BRANCH: product/p01-anonymous-grid-alignment-20260901
+      PORT: '18631'
+      ADMIN_PASS: P01AnonymousGridAlignmentGate
+      EVID: /tmp/p01-anonymous-grid-evidence
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - name: Checkout exact runner harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ${{ github.sha }}
+          path: runner
+      - name: Checkout exact product branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCT_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Apply one-file anonymous grid correction
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$(git ls-remote origin refs/heads/develop | awk '{print $1}')" = "$BASE"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/assets/workspace-domain-nav.css')
+          s=p.read_text(encoding='utf-8')
+          marker='/* P01 anonymous grid alignment: remove admin-only select column when logged out. */'
+          assert marker not in s
+          block=r'''
+
+/* P01 anonymous grid alignment: remove admin-only select column when logged out. */
+.vf-asset-row:not(:has(> .vf-asset-select)){grid-template-columns:36px minmax(0,1fr) auto}
+.surface-start .vf-asset-row:not(:has(> .vf-asset-select)){grid-template-columns:32px minmax(0,1fr) auto}
+.surface-channels .vf-asset-row:not(:has(> .vf-asset-select)){grid-template-columns:52px minmax(0,1fr) auto}
+.vf-asset-card:not(:has(> .vf-asset-select)){grid-template-columns:38px minmax(0,1fr)}
+.vf-asset-card:not(:has(> .vf-asset-select)) .vf-asset-meta{grid-column:1/-1}
+@media(max-width:760px){
+  .surface-start .vf-asset-row:not(:has(> .vf-asset-select)){grid-template-columns:32px minmax(0,1fr) auto}
+  .surface-channels .vf-asset-row:not(:has(> .vf-asset-select)){grid-template-columns:46px minmax(0,1fr) auto}
+}
+'''
+          p.write_text(s.rstrip()+block+'\n',encoding='utf-8')
+          PY
+          test "$(git diff --name-only)" = "src/assets/workspace-domain-nav.css"
+          grep -F 'vf-asset-row:not(:has(> .vf-asset-select))' src/assets/workspace-domain-nav.css >/dev/null
+          grep -F 'vf-asset-card:not(:has(> .vf-asset-select))' src/assets/workspace-domain-nav.css >/dev/null
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add src/assets/workspace-domain-nav.css
+          git commit -m 'fix(P01): align anonymous resource grids'
+          CANDIDATE=$(git rev-parse HEAD)
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git diff --name-only "$BASE"..HEAD)" = "src/assets/workspace-domain-nav.css"
+          git push origin HEAD:"$PRODUCT_BRANCH"
+          echo "CANDIDATE=$CANDIDATE" >> "$GITHUB_ENV"
+      - name: Static exact-source gate
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git diff --name-only "$BASE"..HEAD)" = "src/assets/workspace-domain-nav.css"
+          test "$(git ls-remote origin refs/heads/$PRODUCT_BRANCH | awk '{print $1}')" = "$CANDIDATE"
+          test "$(git ls-remote origin refs/heads/develop | awk '{print $1}')" = "$BASE"
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-anonymous-grid-php.txt
+      - name: Fresh install and seed public domain data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$EVID" /tmp/p01-anon.cookies; mkdir -p "$EVID/screens"
+          ROOT="$GITHUB_WORKSPACE/product/src"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-anonymous-grid.pid
+          for i in $(seq 1 60); do curl -fsS -c /tmp/p01-anon.cookies -b /tmp/p01-anon.cookies "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c /tmp/p01-anon.cookies -b /tmp/p01-anon.cookies -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Anonymous Grid Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';require getenv('ROOT').'/app/SurfaceRepository.php';
+          $d=vf_db();$r=new VfRepository($d);$s=new VfSurfaceRepository($d);
+          $cat=$r->createCategory(['name'=>'公开测试分类','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($title,$url)use($r,$cat){return (int)$r->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'用于匿名布局宽度验证','is_private'=>0],'manual')['id'];};
+          for($i=1;$i<=8;$i++)$save('公开导航资源完整标题 '.$i,'https://example.com/public-start-'.$i);
+          for($i=1;$i<=6;$i++){$id=$save('公开频道资源完整标题 '.$i,'https://www.youtube.com/@public-channel-'.$i);$s->upsertProfile($id,['surface'=>'channels','resource_kind'=>'频道']);}
+          for($i=1;$i<=4;$i++){$id=$save('公开影视资源完整标题 '.$i,'https://example.com/public-watch-'.$i);$s->upsertProfile($id,['surface'=>'watch','resource_kind'=>'电影']);}
+          for($i=1;$i<=4;$i++){$id=$save('公开专题资源完整标题 '.$i,'https://example.com/public-topic-'.$i);$s->upsertProfile($id,['surface'=>'topics','resource_kind'=>'专题']);}
+          if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(11);
+          if($d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(12);
+          echo "P01_ANONYMOUS_GRID_SEED=PASS\n";
+          PHP
+      - name: Install browser harness
+        run: |
+          python -m pip install --disable-pip-version-check --quiet playwright==1.55.0
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1; then python -m playwright install chromium; fi
+          python -m py_compile runner/scripts/p01_anonymous_grid_gate.py
+      - name: Anonymous vs authenticated real-browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python runner/scripts/p01_anonymous_grid_gate.py | tee "$EVID/browser.txt"
+          grep -Fx P01_ANONYMOUS_GRID_BROWSER=PASS "$EVID/browser.txt"
+      - name: Final verdict
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git diff --name-only "$BASE"..HEAD)" = "src/assets/workspace-domain-nav.css"
+          test "$(git ls-remote origin refs/heads/develop | awk '{print $1}')" = "$BASE"
+          printf 'P01_ANONYMOUS_GRID_ALIGNMENT=PASS\nBASE=%s\nCANDIDATE=%s\nSCOPE=src/assets/workspace-domain-nav.css\nWIDTHS=390,1319,1440\nANONYMOUS_START_LIST=PASS\nANONYMOUS_START_CARDS=PASS\nANONYMOUS_CHANNELS=PASS\nAUTHENTICATED_GRID=PASS\nLOGOUT_RECHECK=PASS\nWATCH_TOPICS_OVERFLOW=PASS\nSQLITE=PASS\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\n' "$BASE" "$CANDIDATE" | tee "$EVID/verdict.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-anonymous-grid-alignment-${{ github.run_id }}
+          path: /tmp/p01-anonymous-grid-evidence
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-anonymous-grid.pid 2>/dev/null)" 2>/dev/null || true
