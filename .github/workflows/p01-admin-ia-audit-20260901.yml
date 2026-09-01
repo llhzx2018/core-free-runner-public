@@ -1,0 +1,108 @@
+name: P01 Admin IA Audit
+on:
+  push:
+    branches: [temp/p01-admin-ia-audit-20260901]
+    paths:
+      - .github/workflows/p01-admin-ia-audit-20260901.yml
+      - scripts/p01-admin-ia-static-audit.py
+      - scripts/p01-admin-ia-browser.cjs
+      - scripts/p01-admin-ia-summarize.py
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SOURCE: bfbaeb3f751b74c508f919d46d08daf5ca7b166c
+      RUNTIME_TREE: f6ec50d94dd5023050ccf1aedc3df879603cb5db
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-admin-ia-audit
+      PORT: '18841'
+      ADMIN_PASS: P01AdminIA2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout runner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner
+      - name: Checkout exact P01 develop truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and static inventory
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$EVID"; mkdir -p "$EVID/screens"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product rev-parse HEAD:src)" = "$RUNTIME_TREE"
+          test "$(git -C product rev-parse origin/develop)" = "$SOURCE"
+          printf 'SOURCE=%s\nTREE=%s\nRUNTIME_TREE=%s\n' "$SOURCE" "$(git -C product rev-parse HEAD^{tree})" "$RUNTIME_TREE" | tee "$EVID/source.txt"
+          python3 runner/scripts/p01-admin-ia-static-audit.py "$ROOT" "$EVID/static.json" | tee "$EVID/static.txt"
+      - name: Fresh runtime setup and representative data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-admin-ia-audit.pid
+          C="$EVID/setup.cookies"
+          for i in $(seq 1 60); do curl -fsS -c "$C" -b "$C" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Admin IA Audit' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db();$r=new VfRepository($db);
+          $c1=$r->createCategory(['name'=>'工作','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>1]);
+          $c2=$r->createCategory(['name'=>'私人','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>2]);
+          $rows=[
+            [$c1,'示例公开','https://example.com/a',0],[$c1,'示例重复一','https://example.com/dup',0],[$c1,'示例重复二','https://example.com/dup',0],
+            [$c2,'示例私人','https://example.com/private',1],[$c1,'待检查一','https://example.invalid/health-a',0],[$c1,'待检查二','https://example.invalid/health-b',0]
+          ];
+          foreach($rows as [$c,$t,$u,$p])$r->saveLink(null,['category_id'=>$c,'title'=>$t,'url'=>$u,'description'=>'后台 IA 审计样本','tags'=>'audit','is_private'=>$p],'manual');
+          $platform=VfPlatform::boot($db);file_put_contents(getenv('ROOT').'/data/plugin-status-audit.json',json_encode($platform->catalog()->status(),JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
+          echo "ADMIN_IA_SEED=PASS\n";
+          PHP
+          cp "$ROOT/data/plugin-status-audit.json" "$EVID/plugin-status.json" || true
+      - name: Chromium admin page and discoverability audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; export CHROME
+          mkdir -p /tmp/p01-admin-ia-pw; cd /tmp/p01-admin-ia-pw
+          npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          NODE_PATH=/tmp/p01-admin-ia-pw/node_modules SOURCE="$SOURCE" PORT="$PORT" EVID="$EVID" ADMIN_PASS="$ADMIN_PASS" CHROME="$CHROME" node "$GITHUB_WORKSPACE/runner/scripts/p01-admin-ia-browser.cjs" | tee "$EVID/browser.txt"
+          grep -Fx P01_ADMIN_IA_BROWSER_AUDIT=PASS "$EVID/browser.txt"
+      - name: Summarize and database gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner/scripts/p01-admin-ia-summarize.py "$EVID" | tee "$EVID/summary-console.txt"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/db.txt"
+          <?php require getenv('ROOT').'/app/bootstrap.php';$d=vf_db();$i=strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn());$fk=$d->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC);if($i!=='ok'||$fk)exit(1);echo "INTEGRITY=ok\nFK=0\n";
+          PHP
+          printf 'P01_ADMIN_IA_AUDIT=PASS\nSOURCE=%s\nRUNTIME_TREE=%s\nPRODUCT_WRITE=NO\nMAIN_WRITE=NO\nOWNER_PRODUCTION_WRITE=NO\n' "$SOURCE" "$RUNTIME_TREE" | tee "$EVID/verdict.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-admin-ia-audit-${{ github.run_id }}
+          path: /tmp/p01-admin-ia-audit
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-admin-ia-audit.pid 2>/dev/null)" 2>/dev/null || true
