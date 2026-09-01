@@ -1,0 +1,130 @@
+name: P01 Mobile Context Path Box Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-mobile-context-path-box-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE: 839329a10b2dc036114a76ae8f7ca576664bfe02
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-context-box/evidence
+      PW: /tmp/p01-context-box/pw
+      PORT: '18553'
+      ADMIN_PASS: P01ContextBox2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence and fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-context-box; mkdir -p "$EVID" "$PW"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"; test "$REMOTE" = "$SOURCE"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE" | tee "$EVID/source.txt"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-context-box.pid
+          COOKIE=/tmp/p01-context-box.cookies
+          for i in $(seq 1 60); do if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Context Box Diagnostic' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+      - name: Seed long nested category fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/dataset.txt"
+          <?php
+          declare(strict_types=1);
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db(); $repo=new VfRepository($db); $count=0; $target=0;
+          $roots=['工作与生产力工具集合','内容创作与媒体资源收藏','开发运维与基础设施服务','财务支付与网络业务资源'];
+          foreach($roots as $ri=>$rootName){
+            $root=$repo->createCategory(['name'=>$rootName.' · 长名称根分类 '.($ri+1),'parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$ri]); $count++;
+            for($ci=1;$ci<=3;$ci++){
+              $child=$repo->createCategory(['name'=>'子分类 '.$ci.' · 跨平台服务与长期收藏资源','parent_id'=>$root,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$ci]); $count++;
+              for($gi=1;$gi<=2;$gi++){
+                $name=($ri===3&&$ci===2&&$gi===2?'支付结算与虚拟卡长期资源':'深层分类 '.$gi.' · 真实工作流与参考资料').' · 超长分类名称';
+                $grand=$repo->createCategory(['name'=>$name,'parent_id'=>$child,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$gi]); $count++;
+                $repo->saveLink(null,['category_id'=>$grand,'title'=>'分类样本 '.$count,'url'=>'https://example.com/context-box-'.$count,'description'=>'','is_private'=>0],'manual');
+                if($ri===3&&$ci===2&&$gi===2)$target=$grand;
+              }
+            }
+          }
+          echo "CATEGORY_COUNT=$count\nTARGET=$target\n";
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn()); $fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));
+          echo "INTEGRITY=$integrity\nFK=$fk\n"; if($target<=0||$integrity!=='ok'||$fk!==0) exit(2);
+          PHP
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PW"; npm init -y >/dev/null 2>&1; npm install --silent playwright@1.55.0; npx playwright install chromium
+      - name: Measure overflow hierarchy at 390 and 360
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TARGET=$(awk -F= '/^TARGET=/{print $2}' "$EVID/dataset.txt")
+          cat > "$PW/diag.mjs" <<'JS'
+          import { chromium } from 'playwright'; import fs from 'fs';
+          const base=`http://127.0.0.1:${process.env.PORT}`, target=process.env.TARGET, out=process.env.EVID;
+          const browser=await chromium.launch({headless:true}); const reports=[];
+          for(const width of [390,360]){
+            const page=await browser.newPage({viewport:{width,height:844}}); const errors=[]; page.on('pageerror',e=>errors.push(String(e)));
+            const response=await page.goto(`${base}/start.php?category=${target}`,{waitUntil:'networkidle',timeout:30000});
+            const report=await page.evaluate(()=>{
+              const vw=document.documentElement.clientWidth;
+              const info=(el)=>{if(!el)return null;const r=el.getBoundingClientRect(),c=getComputedStyle(el);return {tag:el.tagName.toLowerCase(),cls:el.className||'',text:(el.textContent||'').trim().slice(0,90),x:+r.x.toFixed(2),w:+r.width.toFixed(2),right:+r.right.toFixed(2),scrollWidth:el.scrollWidth,clientWidth:el.clientWidth,display:c.display,boxSizing:c.boxSizing,minWidth:c.minWidth,maxWidth:c.maxWidth,flex:c.flex,flexShrink:c.flexShrink,overflow:c.overflow,overflowX:c.overflowX,whiteSpace:c.whiteSpace,paddingLeft:c.paddingLeft,paddingRight:c.paddingRight,borderLeft:c.borderLeftWidth,borderRight:c.borderRightWidth};};
+              const chip=document.querySelector('.vf-context-path-chip');
+              const ancestors=[]; let a=chip; while(a&&ancestors.length<8){ancestors.push(info(a));a=a.parentElement;}
+              const children=chip?[...chip.children].map(info):[];
+              const offenders=[...document.querySelectorAll('body *')].map(el=>({el,r:el.getBoundingClientRect()})).filter(x=>x.r.right>vw+.5||x.r.left<-.5).sort((x,y)=>y.r.right-x.r.right).slice(0,30).map(x=>info(x.el));
+              return {vw,docScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth,ancestors,children,offenders};
+            });
+            report.width=width; report.http=response?.status()||0; report.pageErrors=errors; reports.push(report);
+            console.log(JSON.stringify(report)); await page.screenshot({path:`${out}/box-${width}.png`,fullPage:false}); await page.close();
+            if(report.http!==200||errors.length||report.docScrollWidth<=report.vw) process.exit(3);
+          }
+          fs.writeFileSync(`${out}/report.json`,JSON.stringify(reports,null,2)); await browser.close(); console.log('P01_CONTEXT_BOX_DIAGNOSTIC=PASS_REPRODUCED');
+          JS
+          cd "$PW"; PORT="$PORT" TARGET="$TARGET" EVID="$EVID" node diag.mjs | tee "$EVID/machine.txt"
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"; test "$REMOTE" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-mobile-context-box-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-context-box.pid 2>/dev/null)" 2>/dev/null || true
