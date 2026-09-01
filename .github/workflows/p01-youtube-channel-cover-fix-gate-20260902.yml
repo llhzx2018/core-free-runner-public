@@ -1,0 +1,197 @@
+name: P01 YouTube Channel Cover Metadata Fix Gate
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-youtube-channel-cover-fix-gate-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 1190cb655ed392ea57a2d921b4447b5ccc7b880b
+      PRODUCT_BRANCH: fix/p01-youtube-channel-cover-metadata-20260902
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-youtube-channel-cover-fix/evidence
+      PORT: '18544'
+      ADMIN_PASS: P01YoutubeCover2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and concurrency fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-youtube-channel-cover-fix; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE_DEVELOP="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE_DEVELOP" | tee "$EVID/source.txt"
+          test "$REMOTE_DEVELOP" = "$SOURCE"
+          test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-before.sha256"
+          php -l product/src/app/ResourceCoverCache.php | tee "$EVID/php-lint-base.txt"
+      - name: Fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-youtube-channel-cover-fix.pid
+          COOKIE=/tmp/p01-youtube-channel-cover-fix.cookies
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi
+            sleep .25
+          done
+          test -s "$EVID/setup.html"
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 YouTube Cover Fix Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/fresh-db.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          $db=vf_db(); echo 'INSTALLED='.(vf_is_installed()?'YES':'NO')."\n"; echo 'INTEGRITY='.strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())."\n"; if(!vf_is_installed()) exit(1);
+          PHP
+      - name: Baseline must reproduce real YouTube channel failure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/baseline.txt"
+          <?php
+          declare(strict_types=1);
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db(); $repo=new VfRepository($db); $surfaceRepo=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'YouTube Channel Baseline','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $id=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>'YouTube Official Channel','url'=>'https://www.youtube.com/@YouTube','description'=>'','is_private'=>0],'manual')['id'];
+          $surfaceRepo->upsertProfile($id,['surface'=>'channels','resource_kind'=>'频道','media_year'=>'']);
+          $r=(new VfResourceCoverCache($db))->refreshOne($id,true);
+          file_put_contents(getenv('EVID').'/baseline.json',json_encode(['id'=>$id,'result'=>$r],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          echo 'BASELINE_SUCCESS='.(($r['success']??false)?'YES':'NO')."\n";
+          echo 'BASELINE_ERROR='.(string)($r['error']??'')."\n";
+          echo 'BASELINE_ID='.$id."\n";
+          if(!empty($r['success'])) { fwrite(STDERR,"BASELINE_UNEXPECTEDLY_SUCCEEDED\n"); exit(2); }
+          PHP
+      - name: Apply one-file targeted candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('product/src/app/ResourceCoverCache.php')
+          s=p.read_text(encoding='utf-8')
+          old="""        $candidates = $this->directCandidates($url);\n        try {\n            $page = $this->fetchFollowing($url, 524288, 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1');\n"""
+          new="""        $candidates = $this->directCandidates($url);\n        $pageMaxBytes = (string)$provider['code'] === 'youtube' && $candidates === [] ? 3 * 1024 * 1024 : 524288;\n        try {\n            $page = $this->fetchFollowing($url, $pageMaxBytes, 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1');\n"""
+          if s.count(old)!=1: raise SystemExit(f'PATCH_ANCHOR_COUNT={s.count(old)}')
+          p.write_text(s.replace(old,new),encoding='utf-8')
+          PY
+          php -l product/src/app/ResourceCoverCache.php | tee "$EVID/php-lint-candidate.txt"
+          git -C product diff --check
+          git -C product diff -- src/app/ResourceCoverCache.php | tee "$EVID/candidate.diff"
+          mapfile -t CHANGED < <(git -C product diff --name-only)
+          test "${#CHANGED[@]}" -eq 1
+          test "${CHANGED[0]}" = 'src/app/ResourceCoverCache.php'
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-after.sha256"
+          diff -u "$EVID/authority-before.sha256" "$EVID/authority-after.sha256"
+          grep -Fq "3 * 1024 * 1024 : 524288" product/src/app/ResourceCoverCache.php
+      - name: Candidate real-web and boundary gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/candidate.txt"
+          <?php
+          declare(strict_types=1);
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db(); $repo=new VfRepository($db); $surfaceRepo=new VfSurfaceRepository($db);
+          $baseline=json_decode((string)file_get_contents(getenv('EVID').'/baseline.json'),true); $channelId=(int)$baseline['id'];
+          $started=microtime(true); $channel=(new VfResourceCoverCache($db))->refreshOne($channelId,true); $elapsed=round(microtime(true)-$started,3);
+          echo 'CHANNEL_SUCCESS='.(($channel['success']??false)?'YES':'NO')." elapsed={$elapsed}s provider=".(string)($channel['providerLabel']??'')."\n";
+          echo 'CHANNEL_SOURCE='.(string)($channel['source']??'')."\n";
+          if(empty($channel['success'])) { echo 'CHANNEL_ERROR='.(string)($channel['error']??'')."\n"; exit(3); }
+          if(!str_contains((string)($channel['source']??''),'googleusercontent.com')) { fwrite(STDERR,"CHANNEL_SOURCE_NOT_GOOGLEUSERCONTENT\n"); exit(4); }
+
+          $cat=$repo->createCategory(['name'=>'Cover Candidate Controls','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $videoId=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>'YouTube Video Control','url'=>'https://www.youtube.com/watch?v=dQw4w9WgXcQ','description'=>'','is_private'=>0],'manual')['id'];
+          $surfaceRepo->upsertProfile($videoId,['surface'=>'channels','resource_kind'=>'频道','media_year'=>'']);
+          $video=(new VfResourceCoverCache($db))->refreshOne($videoId,true);
+          echo 'VIDEO_SUCCESS='.(($video['success']??false)?'YES':'NO')." source=".(string)($video['source']??'')."\n";
+          if(empty($video['success']) || !str_contains((string)($video['source']??''),'i.ytimg.com')) exit(5);
+
+          $controlId=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>'No Cover Control','url'=>'https://example.com/','description'=>'','is_private'=>0],'manual')['id'];
+          $surfaceRepo->upsertProfile($controlId,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'']);
+          $control=(new VfResourceCoverCache($db))->refreshOne($controlId,true);
+          echo 'CONTROL_SUCCESS='.(($control['success']??false)?'YES':'NO')." error=".(string)($control['error']??'')."\n";
+          if(!empty($control['success'])) exit(6);
+
+          $seen=[];
+          $fetcher=function(string $url,int $maxBytes,string $accept) use (&$seen): array { $seen[]=['url'=>$url,'max'=>$maxBytes,'accept'=>$accept]; return ['status'=>200,'contentType'=>'text/html','body'=>'<html><head><title>none</title></head></html>','url'=>$url]; };
+          $genericId=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>'Generic Limit Control','url'=>'https://example.org/movie','description'=>'','is_private'=>0],'manual')['id'];
+          $surfaceRepo->upsertProfile($genericId,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'']);
+          (new VfResourceCoverCache($db,$fetcher))->refreshOne($genericId,true);
+          $first=$seen[0]??[]; echo 'GENERIC_PAGE_MAX='.(int)($first['max']??0)."\n";
+          if((int)($first['max']??0)!==524288) exit(7);
+
+          $seenYoutube=[];
+          $ytFetcher=function(string $url,int $maxBytes,string $accept) use (&$seenYoutube): array { $seenYoutube[]=['url'=>$url,'max'=>$maxBytes,'accept'=>$accept]; return ['status'=>200,'contentType'=>'text/html','body'=>'<html><head><title>none</title></head></html>','url'=>$url]; };
+          $ytLimitId=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>'YouTube Limit Control','url'=>'https://www.youtube.com/@GoogleDevelopers','description'=>'','is_private'=>0],'manual')['id'];
+          $surfaceRepo->upsertProfile($ytLimitId,['surface'=>'channels','resource_kind'=>'频道','media_year'=>'']);
+          (new VfResourceCoverCache($db,$ytFetcher))->refreshOne($ytLimitId,true);
+          $ytFirst=$seenYoutube[0]??[]; echo 'YOUTUBE_CHANNEL_PAGE_MAX='.(int)($ytFirst['max']??0)."\n";
+          if((int)($ytFirst['max']??0)!==3145728) exit(8);
+
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn()); $fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));
+          echo "INTEGRITY=$integrity\nFK=$fk\n"; if($integrity!=='ok'||$fk!==0) exit(9);
+          file_put_contents(getenv('EVID').'/candidate.json',json_encode(['channel'=>$channel,'video'=>$video,'control'=>$control,'generic_seen'=>$seen,'youtube_seen'=>$seenYoutube],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          echo "P01_YOUTUBE_CHANNEL_COVER_FIX_GATE=PASS\n";
+          PHP
+      - name: Commit and push isolated Product branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REMOTE_DEVELOP="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          test "$REMOTE_DEVELOP" = "$SOURCE"
+          test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          git -C product config user.name VictorForge
+          git -C product config user.email llhzx2018@gmail.com
+          git -C product switch -c "$PRODUCT_BRANCH"
+          git -C product add src/app/ResourceCoverCache.php
+          test "$(git -C product diff --cached --name-only)" = 'src/app/ResourceCoverCache.php'
+          git -C product commit -m 'fix(P01): recover YouTube channel cover metadata'
+          CANDIDATE="$(git -C product rev-parse HEAD)"
+          printf 'CANDIDATE=%s\nPARENT=%s\nBRANCH=%s\n' "$CANDIDATE" "$(git -C product rev-parse HEAD^)" "$PRODUCT_BRANCH" | tee "$EVID/staging.txt"
+          test "$(git -C product rev-parse HEAD^)" = "$SOURCE"
+          git -C product push origin "HEAD:refs/heads/$PRODUCT_BRANCH"
+          test "$(git -C product ls-remote origin refs/heads/$PRODUCT_BRANCH | awk '{print $1}')" = "$CANDIDATE"
+          printf 'PRODUCT_BRANCH_PUSH=PASS\nDEVELOP_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee -a "$EVID/staging.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-youtube-channel-cover-fix-gate-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-youtube-channel-cover-fix.pid 2>/dev/null)" 2>/dev/null || true
