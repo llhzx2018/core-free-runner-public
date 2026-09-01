@@ -1,0 +1,165 @@
+name: P01 Real-Web Cover Coverage Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-cover-coverage-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 1190cb655ed392ea57a2d921b4447b5ccc7b880b
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-cover-coverage/evidence
+      PORT: '18542'
+      ADMIN_PASS: P01CoverCoverage2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and fresh develop fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-cover-coverage; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE_DEVELOP="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE_DEVELOP" | tee "$EVID/source.txt"
+          test "$REMOTE_DEVELOP" = "$SOURCE"
+          php -l product/src/app/ResourceCoverCache.php | tee "$EVID/php-lint.txt"
+          php -l product/src/app/SurfaceRepository.php | tee -a "$EVID/php-lint.txt"
+          php -l product/src/resource-cover-refresh.php | tee -a "$EVID/php-lint.txt"
+      - name: Fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-cover-coverage.pid
+          COOKIE=/tmp/p01-cover-coverage.cookies
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi
+            sleep .25
+          done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Cover Coverage Diagnostic' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "$EVID/setup-post.html"
+          test -f "$ROOT/private/data.sqlite3"
+      - name: Real-web coverage matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/summary.txt"
+          <?php
+          declare(strict_types=1);
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+
+          $db = vf_db();
+          $repo = new VfRepository($db);
+          $surfaceRepo = new VfSurfaceRepository($db);
+          $category = $repo->createCategory(['name'=>'Real Web Cover Matrix','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+
+          $matrix = [
+            ['key'=>'youtube_video','surface'=>'channels','kind'=>'频道','url'=>'https://www.youtube.com/watch?v=dQw4w9WgXcQ','expect'=>'success'],
+            ['key'=>'youtube_short','surface'=>'channels','kind'=>'频道','url'=>'https://youtu.be/dQw4w9WgXcQ','expect'=>'success'],
+            ['key'=>'youtube_channel','surface'=>'channels','kind'=>'频道','url'=>'https://www.youtube.com/@YouTube','expect'=>'observe'],
+            ['key'=>'bilibili_video','surface'=>'channels','kind'=>'频道','url'=>'https://www.bilibili.com/video/BV1GJ411x7h7','expect'=>'observe'],
+            ['key'=>'imdb_movie','surface'=>'watch','kind'=>'电影','url'=>'https://www.imdb.com/title/tt0111161/','expect'=>'observe'],
+            ['key'=>'douban_movie','surface'=>'watch','kind'=>'电影','url'=>'https://movie.douban.com/subject/1292052/','expect'=>'observe'],
+            ['key'=>'no_cover_control','surface'=>'watch','kind'=>'电影','url'=>'https://example.com/','expect'=>'failure'],
+          ];
+
+          $cache = new VfResourceCoverCache($db);
+          $rows = [];
+          foreach ($matrix as $case) {
+              $id = (int)$repo->saveLink(null, [
+                  'category_id'=>$category,
+                  'title'=>'Coverage '.$case['key'],
+                  'url'=>$case['url'],
+                  'description'=>'',
+                  'is_private'=>0,
+              ], 'manual')['id'];
+              $surfaceRepo->upsertProfile($id, [
+                  'surface'=>$case['surface'],
+                  'resource_kind'=>$case['kind'],
+                  'media_year'=>'',
+              ]);
+              $started = microtime(true);
+              try {
+                  $result = $cache->refreshOne($id, true);
+              } catch (Throwable $e) {
+                  $result = ['id'=>$id,'success'=>false,'error'=>$e->getMessage()];
+              }
+              $elapsed = round(microtime(true)-$started, 3);
+              $row = [
+                  'key'=>$case['key'],
+                  'surface'=>$case['surface'],
+                  'kind'=>$case['kind'],
+                  'url'=>$case['url'],
+                  'expect'=>$case['expect'],
+                  'elapsed_seconds'=>$elapsed,
+                  'success'=>(bool)($result['success'] ?? false),
+                  'cached'=>(bool)($result['cached'] ?? false),
+                  'provider'=>(string)($result['provider'] ?? ''),
+                  'provider_label'=>(string)($result['providerLabel'] ?? ''),
+                  'source'=>(string)($result['source'] ?? ''),
+                  'error'=>(string)($result['error'] ?? ''),
+                  'cover'=>(array)($result['cover'] ?? []),
+              ];
+              $rows[] = $row;
+              echo strtoupper($case['key']).'=' . ($row['success'] ? 'SUCCESS' : 'FAILURE') . ' elapsed=' . $elapsed . 's provider=' . $row['provider_label'] . ($row['error'] !== '' ? ' error=' . $row['error'] : '') . "\n";
+          }
+
+          file_put_contents(getenv('EVID').'/coverage.json', json_encode($rows, JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          $byKey=[]; foreach($rows as $r){$byKey[$r['key']]=$r;}
+          if (empty($byKey['youtube_video']['success'])) { fwrite(STDERR,"DIRECT_YOUTUBE_VIDEO_EXPECTED_SUCCESS=FAIL\n"); exit(2); }
+          if (empty($byKey['youtube_short']['success'])) { fwrite(STDERR,"DIRECT_YOUTUBE_SHORT_EXPECTED_SUCCESS=FAIL\n"); exit(3); }
+          if (!empty($byKey['no_cover_control']['success'])) { fwrite(STDERR,"NO_COVER_CONTROL_EXPECTED_FAILURE=FAIL\n"); exit(4); }
+          $integrity = strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());
+          $fk = count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));
+          echo "INTEGRITY=$integrity\nFK=$fk\n";
+          if ($integrity !== 'ok' || $fk !== 0) exit(5);
+          echo "P01_REAL_WEB_COVER_DIAGNOSTIC=PASS\n";
+          PHP
+      - name: Product checkout remains clean
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product diff --check
+          test -z "$(git -C product status --porcelain --untracked-files=no)"
+          printf 'TRACKED_PRODUCT_MUTATION=NO\nP01_REF_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-cover-coverage-diagnostic-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-cover-coverage.pid 2>/dev/null)" 2>/dev/null || true
