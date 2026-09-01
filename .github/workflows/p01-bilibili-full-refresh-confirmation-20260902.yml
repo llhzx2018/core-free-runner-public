@@ -1,0 +1,76 @@
+name: P01 Bilibili Full Refresh Confirmation
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-bilibili-full-refresh-confirmation-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-bilibili-full/evidence
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh install and full Bilibili refresh
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-bilibili-full;mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          php -S 127.0.0.1:18559 -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-bilibili-full.pid
+          C=/tmp/p01-bilibili-full.cookies
+          for i in $(seq 1 60);do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:18559/setup.php -o "$EVID/setup.html";then break;fi;sleep .25;done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18559/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Bilibili Full Refresh' --data-urlencode 'admin_password=P01Bilibili2026' --data-urlencode 'admin_password_confirm=P01Bilibili2026' -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/result.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';require_once getenv('ROOT').'/app/Repository.php';require_once getenv('ROOT').'/app/SurfaceRepository.php';require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);$cover=new VfResourceCoverCache($db);$cat=$repo->createCategory(['name'=>'Bilibili Full Confirmation','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $url='https://www.bilibili.com/video/BV1MVwizMEjr/';$saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Bilibili Fresh Sample','url'=>$url,'description'=>'','is_private'=>0],'manual');$id=(int)$saved['id'];$surface->upsertProfile($id,['surface'=>'watch','resource_kind'=>'电影','note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);
+          $t=microtime(true);$r=$cover->refreshOne($id,true);$r['elapsed_ms']=(int)round((microtime(true)-$t)*1000);echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";file_put_contents(getenv('EVID').'/result.json',json_encode($r,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          $asset=array_values(array_filter($surface->allAssets(true),fn($a)=>(int)$a['id']===$id))[0]??[];echo 'PROJECTION='.json_encode(['provider'=>$asset['provider']??'','cover_url'=>$asset['cover_url']??'','cover_source'=>$asset['cover_source']??''],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$integrity FK=$fk\n";
+          if(empty($r['success'])||($r['provider']??'')!=='bilibili'||empty($r['source'])||empty($r['cover_url'])||($r['width']??0)<100||($r['height']??0)<100||$integrity!=='ok'||$fk)exit(3);echo "BILIBILI_FULL_REFRESH=PASS\n";
+          PHP
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-bilibili-full-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-bilibili-full.pid 2>/dev/null)" 2>/dev/null || true
