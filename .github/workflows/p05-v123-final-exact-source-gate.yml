@@ -1,4 +1,4 @@
-name: P05 V1.2.3 Final Exact Source Gate
+name: P05 V1.2.3 Final Exact Source Gate R2
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   final-exact-source:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -35,6 +35,7 @@ jobs:
           ref: 45f81677c206476013ed1d543ab661356107800c
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Bind exact source and five-file Version Lock
         shell: bash
@@ -81,13 +82,14 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Complete engineering regression
+      - name: Complete engineering and security regression
         shell: bash
         env:
           DATABASE_URL: postgresql://vf_seo:vf_seo@127.0.0.1:5432/vf_seo
         run: |
           set -Eeuo pipefail
           npm ci
+          npm run release:source:gate
           npm run lint
           npm run typecheck
           npm run migrate
@@ -96,16 +98,47 @@ jobs:
           npm run build
           npm run source:gate
           npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
 
-      - name: PHP runtime and release gates
+      - name: Install PHP release runtime modules
         shell: bash
         run: |
           set -Eeuo pipefail
-          php -v
-          php tests/php/runtime_compat_gate.php
-          php tests/php/release_package_gate.php
-          if [ -f tests/php/real_fresh_install_gate.php ]; then php tests/php/real_fresh_install_gate.php; fi
-          if [ -f tests/php/security_gate.php ]; then php tests/php/security_gate.php; fi
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip php-curl sqlite3
+          php -r 'foreach(["pdo_sqlite","curl"] as $e){if(!extension_loaded($e))exit(1);} if(!class_exists("ZipArchive"))exit(1);'
+
+      - name: PHP CloudPanel browser and formal staging gates
+        shell: bash
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -Eeuo pipefail
+          npm run php:lint
+          php php/tests/security-interop.php
+          bash php/tests/http-smoke.sh
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+          VF_RELEASE_SOURCE_SHA='45f81677c206476013ed1d543ab661356107800c' npm run build:php-release
+          npm run php:release:gate
+          S=build/vf-seo-php-release
+          test "$(cat "$S/VERSION")" = '1.2.3'
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test -f "$S/php/src/PhpUpdater.php"
+          test -f "$S/php/src/CoreUpdates/UpdateCore.php"
+          test -f "$S/php/bin/init-update-service.php"
+          grep -F 'core-updates:llhzx2018/core-updates/projects/P05.json' "$S/PHP_RELEASE_MANIFEST.json" >/dev/null
+          ! grep -F 'core-free-runner-public' "$S/PHP_RELEASE_MANIFEST.json"
+          bash php/tests/cloudpanel-root-smoke.sh "$S"
+          VF_INSTALL_ROOT="$S" bash php/tests/browser-install-smoke.sh
+          VF_INSTALL_ROOT="$S" python3 php/tests/browser-install-e2e.py
+          VF_INSTALL_ROOT="$S" bash php/tests/cloudpanel-fpm-real-install-smoke.sh
           echo P05_V123_FINAL_EXACT_SOURCE=PASS
           echo P05_EXACT_SHA=45f81677c206476013ed1d543ab661356107800c
           echo P05_EXACT_TREE=b858117477fd1cb41fb53a62da6bdebfa26ad21f
