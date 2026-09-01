@@ -1,0 +1,310 @@
+name: P02 V2.5.32 Formal Release
+on:
+  push:
+    branches:
+      - run/p02-v2532-release
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      SEALED_SHA: 978548735263e10ab5e084fa0d8e67a600a5cad3
+      SEALED_TREE: 8a04d5e481520e6a21900c29997e7430ae3150d8
+      OLD_MAIN: 6a43f76308f6ba3e4fd675d121ba9fe7be7f3ddd
+      VERSION: 2.5.32
+      SOURCE_VERSION: 2.5.31
+      TAG: v2.5.32
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout sealed P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 978548735263e10ab5e084fa0d8e67a600a5cad3
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: product
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install release runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y zip unzip >/dev/null
+
+      - name: Prepare reusable live Authority reader
+        run: |
+          cat > /tmp/p02_live_authority.py <<'PY'
+          import argparse,base64,json,os,urllib.error,urllib.request
+          ap=argparse.ArgumentParser()
+          ap.add_argument('--dev',required=True);ap.add_argument('--main',required=True)
+          ap.add_argument('--p02-target',required=True);ap.add_argument('--candidate-state',required=True)
+          ap.add_argument('--tag',choices=['absent','present'],required=True)
+          ap.add_argument('--release',choices=['absent','present'],required=True)
+          a=ap.parse_args();token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          H={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          def req(url):
+              r=urllib.request.Request(url,headers=H)
+              try:
+                  with urllib.request.urlopen(r) as x:return x.status,json.load(x)
+              except urllib.error.HTTPError as e:
+                  if e.code==404:return 404,None
+                  raise
+          def get(url):
+              s,x=req(url);assert s==200,(url,s);return x
+          def content(repo,path,ref):
+              x=get(f'https://api.github.com/repos/{repo}/contents/{path}?ref={ref}')
+              return base64.b64decode(x['content']).decode('utf-8'),x['sha']
+          dev=get('https://api.github.com/repos/llhzx2018/vf-library/branches/develop')['commit']['sha']
+          main=get('https://api.github.com/repos/llhzx2018/vf-library/branches/main')['commit']['sha']
+          version,_=content('llhzx2018/vf-library','VERSION','develop')
+          sm,_=content('llhzx2018/vf-library','SOURCE_MANIFEST.json','develop');sm=json.loads(sm)
+          smtxt,_=content('llhzx2018/vf-library','SOURCE_MANIFEST.txt','develop')
+          cand,_=content('llhzx2018/vf-library','docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','develop');cand=json.loads(cand)
+          index,_=content('llhzx2018/vf-library','public/index.php','develop')
+          runner=get('https://api.github.com/repos/llhzx2018/core-free-runner-public/branches/main')['commit']
+          updates=get('https://api.github.com/repos/llhzx2018/core-updates/branches/main')['commit']['sha']
+          p02,p02sha=content('llhzx2018/core-updates','projects/P02.json','main');p02=json.loads(p02)
+          assert dev==a.dev,(dev,a.dev);assert main==a.main,(main,a.main)
+          assert version.strip()=='2.5.32';assert sm['version']=='2.5.32' and sm['schema']==2401 and sm['runtime_source_file_count']==67
+          assert 'RUNTIME_SOURCE_FILES  67' in smtxt
+          assert cand['candidate_version']=='2.5.32' and cand['candidate_state']==a.candidate_state
+          assert '/assets/favicon-settings.js' in index and '/assets/scratch-tabs.js' in index
+          assert runner['sha']=='e569c491506e2a367d01a18cfa89a234a22abb79' and runner['commit']['tree']['sha']=='9d4f71422cbdaf58b615087dd2685f52a57e8dee'
+          assert p02['target_version']==a.p02_target,(p02['target_version'],a.p02_target)
+          ts,_=req('https://api.github.com/repos/llhzx2018/vf-library/git/ref/tags/v2.5.32')
+          rs,_=req('https://api.github.com/repos/llhzx2018/vf-library/releases/tags/v2.5.32')
+          assert (ts==200)==(a.tag=='present'),(ts,a.tag)
+          assert (rs==200)==(a.release=='present'),(rs,a.release)
+          open('/tmp/p02-live-authority.json','w').write(json.dumps({'develop':dev,'main':main,'version':version.strip(),'runtime_sources':67,'runner_main':runner['sha'],'runner_tree':runner['commit']['tree']['sha'],'core_updates_main':updates,'p02_target':p02['target_version'],'p02_blob_sha':p02sha,'candidate_state':cand['candidate_state'],'tag_http':ts,'release_http':rs},indent=2))
+          print(open('/tmp/p02-live-authority.json').read());print('P02_RELEASE_LIVE_AUTHORITY_10_OF_10=PASS')
+          PY
+
+      - name: Verify sealed source and build deterministic formal assets
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SEALED_SHA"
+          test "$(git show -s --format=%T HEAD)" = "$SEALED_TREE"
+          test "$(tr -d '\r\n' < VERSION)" = "$VERSION"
+          test -z "$(git status --porcelain)"
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          for t in tests/unit/*.mjs; do node "$t"; done
+          python3 - <<'PY'
+          import json
+          c=json.load(open('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json'))
+          assert c['candidate_state']=='PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE'
+          assert c['candidate_packaging_verified'] is True and c['owner_test_requested'] is True
+          assert c['final_acceptance']['machine_acceptance']=='PASS'
+          assert c['final_acceptance']['owner_experience']=='PENDING'
+          PY
+          rm -rf build/release-a build/release-b
+          python3 scripts/build-candidate.py --out build/release-a --source-version 2.5.31 --source-commit "$SEALED_SHA" --source-tree "$SEALED_TREE" --source-ref develop >/tmp/candidate-a.json
+          python3 scripts/build-candidate.py --out build/release-b --source-version 2.5.31 --source-commit "$SEALED_SHA" --source-tree "$SEALED_TREE" --source-ref develop >/tmp/candidate-b.json
+          python3 - <<'PY'
+          from pathlib import Path
+          import datetime as dt,hashlib,json,os,subprocess,zipfile,shutil,stat
+          ROOT=Path.cwd();A=ROOT/'build/release-a';B=ROOT/'build/release-b'
+          def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+          def compare_dirs(a,b):
+              na=sorted(p.name for p in a.iterdir() if p.is_file());nb=sorted(p.name for p in b.iterdir() if p.is_file());assert na==nb,(na,nb)
+              for n in na:assert digest(a/n)==digest(b/n),(n,digest(a/n),digest(b/n))
+          compare_dirs(A,B);print('P02_RELEASE_CANDIDATE_DOUBLE_BUILD=PASS')
+          commit=os.environ['SEALED_SHA'];tree=os.environ['SEALED_TREE'];ver='2.5.32';src='2.5.31'
+          stamp_s=subprocess.check_output(['git','show','-s','--format=%cI',commit],text=True).strip();d=dt.datetime.fromisoformat(stamp_s.replace('Z','+00:00')).astimezone(dt.timezone.utc);stamp=(d.year,d.month,d.day,d.hour,d.minute,d.second)
+          notes=f'''# VF Library V{ver}\n\nV2.5.32 completes the current product-optimization convergence cycle. It consolidates Reader/Edit/Split task continuity, search return context, mobile workflow continuity, Scratch tab ownership and overflow behavior, native Library-model ownership, semantic favicon ownership, and cleanup of retired runtime assets.\n\nMachine acceptance includes full unit/integration contracts, full maintenance, deterministic packaging, real V2.5.31 → V2.5.32 Atomic data-preserving upgrade, attachment/backup/SQLite integrity checks, post-upgrade Chromium, whole-site desktop + 390px visual review, and Scratch overflow/exit proof.\n\nSchema remains 2401; no schema migration. Existing V2.5.31 sites must use UPDATE/Atomic. FULL is fresh-install only. OWNER explicitly authorized publication before the post-release real-use test; human experience remains a separate post-release gate.\n'''
+          def meta(p):return {'path':p.name,'bytes':p.stat().st_size,'sha256':digest(p)}
+          def zwrite(z,name,data,mode=0o644):
+              i=zipfile.ZipInfo(name,stamp);i.compress_type=zipfile.ZIP_DEFLATED;i.external_attr=(stat.S_IFREG|mode)<<16;z.writestr(i,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          def formalize(srcdir,out):
+              shutil.rmtree(out,ignore_errors=True);out.mkdir(parents=True)
+              shutil.copy2(srcdir/f'VF_Library_V{ver}_UPDATE_CANDIDATE.zip',out/f'VF_Library_V{ver}_UPDATE.zip')
+              shutil.copy2(srcdir/f'VF_Library_V{ver}_SOURCE_CANDIDATE.zip',out/f'VF_Library_V{ver}_SOURCE.zip')
+              repair_bytes=(srcdir/f'repair-v{src}-to-v{ver}-candidate.php').read_bytes();repair=out/f'repair-v{src}-to-v{ver}.php';repair.write_bytes(repair_bytes)
+              atomic=out/f'VF_Library_V{ver}_ATOMIC.zip'
+              with zipfile.ZipFile(atomic,'w') as z:zwrite(z,repair.name,repair_bytes)
+              fullsrc=srcdir/f'VF_Library_V{ver}_FULL_CANDIDATE.zip';full=out/f'VF_Library_V{ver}_FULL.zip'
+              with zipfile.ZipFile(fullsrc,'r') as zin,zipfile.ZipFile(full,'w') as zout:
+                  for info in sorted(zin.infolist(),key=lambda x:x.filename):
+                      data=zin.read(info.filename);name=info.filename;mode=(info.external_attr>>16)&0o777 or 0o644
+                      if name=='DEPLOY-HERE.txt':data=f'VF Library V{ver} FORMAL CLEAN FULL\n\nFresh install only. Existing sites MUST use UPDATE/Atomic.\n'.encode()
+                      elif name=='FULL-PACKAGE-NOTES.txt':data=f'VF Library V{ver}\nSchema 2401\nBuild: FORMAL_CLEAN_FULL\nBusiness seed: NONE\nPrivate runtime data: NONE\nGit/test/evidence files: NONE\n'.encode()
+                      elif name=='release-manifest.json':
+                          x=json.loads(data);x['release_state']='FORMAL_RELEASE';x['build_flavor']='FORMAL_CLEAN_FULL';x['source_ref']='v2.5.32';x['install_contract']['existing_site_update']='UPDATE/Atomic only';data=(json.dumps(x,ensure_ascii=False,indent=2)+'\n').encode()
+                      zwrite(zout,name,data,mode)
+              note=out/f'VF_Library_V{ver}_RELEASE_NOTES.md';note.write_text(notes,encoding='utf-8')
+              primary=[out/f'VF_Library_V{ver}_SOURCE.zip',full,out/f'VF_Library_V{ver}_UPDATE.zip',atomic,repair,note]
+              update=out/f'VF_Library_V{ver}_UPDATE.zip';identity=hashlib.sha1((commit+'|'+tree+'|'+digest(update)).encode()).hexdigest()
+              manifest={'schema':'vf-release-manifest/3.0','release_id':f'P02-VF-LIBRARY-{ver}','version':ver,'revision':1,'product_identity':identity,'source':{'repository':'llhzx2018/vf-library','formal_tag':'v2.5.32','release_commit':commit,'source_tree':tree},'build':{'build_time':stamp_s,'schema':2401,'runtime_source_files':67,'deterministic':True},'artifacts':[dict(meta(p),type=('SOURCE' if 'SOURCE.zip' in p.name else 'FULL' if 'FULL.zip' in p.name else 'UPDATE' if 'UPDATE.zip' in p.name else 'ATOMIC' if 'ATOMIC.zip' in p.name else 'REPAIR' if p.suffix=='.php' else 'RELEASE_NOTES')) for p in primary],'compatibility':{'supported_from':[src],'source_schema':2401,'target_schema':2401,'schema_migration':False,'full_existing_site_overwrite':False},'acceptance':{'machine':'PASS','core_exact_sha_run_id':33418679568,'visual_scratch_run_id':33419719401,'real_atomic_upgrade':'PASS','data_preservation':'PASS','post_upgrade_chromium':'PASS','whole_site_visual':'PASS','owner_post_release_experience':'PENDING'},'publication':{'owner_authorization':'EXPLICIT_2026-08-31_RELEASE_THEN_TEST','main_target':commit,'tag':'v2.5.32','update_channel_target':'2.5.32'}}
+              mf=out/f'VF_Library_V{ver}_RELEASE_MANIFEST.json';mf.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+              targets=primary+[mf];sums=out/'SHA256SUMS.txt';sums.write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(targets,key=lambda x:x.name)),encoding='utf-8')
+              return identity,meta(update),[p.name for p in targets+[sums]]
+          FA=Path('/tmp/p02-release-formal-a');FB=Path('/tmp/p02-release-formal-b');ia,ua,names=formalize(A,FA);ib,ub,_=formalize(B,FB);compare_dirs(FA,FB);assert ia==ib and ua==ub
+          print('P02_RELEASE_FORMAL_DOUBLE_BUILD=PASS')
+          Path('/tmp/p02-release-meta.json').write_text(json.dumps({'product_identity':ia,'update':ua,'assets':names,'notes':notes},ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+          rm -rf build/release-a build/release-b
+          test -z "$(git status --porcelain)"
+
+      - name: Live-read Authority before main promotion
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$OLD_MAIN" --p02-target 2.5.31 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag absent --release absent
+
+      - name: Promote exact sealed source to main
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git config --global url."https://x-access-token:${VF_RELEASE_WRITE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git push origin "$SEALED_SHA:refs/heads/main"
+          test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$SEALED_SHA"
+          echo P02_V2532_MAIN_PROMOTION=PASS
+
+      - name: Live-read Authority before formal tag
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.31 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag absent --release absent
+
+      - name: Create and push formal tag
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git tag -a "$TAG" "$SEALED_SHA" -m "VF Library V2.5.32"
+          git push origin "refs/tags/$TAG:refs/tags/$TAG"
+          test -n "$(git ls-remote origin "refs/tags/$TAG")"
+          echo P02_V2532_FORMAL_TAG=PASS
+
+      - name: Live-read Authority before GitHub Release
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.31 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag present --release absent
+
+      - name: Create formal GitHub Release
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,urllib.request
+          meta=json.load(open('/tmp/p02-release-meta.json'));token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          payload={'tag_name':'v2.5.32','target_commitish':os.environ['SEALED_SHA'],'name':'VF Library V2.5.32','body':meta['notes'],'draft':False,'prerelease':False,'make_latest':'true'}
+          r=urllib.request.Request('https://api.github.com/repos/llhzx2018/vf-library/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+          with urllib.request.urlopen(r) as x:release=json.load(x)
+          assert release['tag_name']=='v2.5.32' and release['draft'] is False and release['prerelease'] is False
+          open('/tmp/p02-release.json','w').write(json.dumps(release,indent=2))
+          print('P02_V2532_GITHUB_RELEASE_CREATED='+str(release['id']))
+          PY
+
+      - name: Upload formal Release assets with live-read before every write
+        run: |
+          set -Eeuo pipefail
+          RELEASE_ID="$(python3 -c 'import json;print(json.load(open("/tmp/p02-release.json"))["id"])')"
+          for f in /tmp/p02-release-formal-a/*; do
+            python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.31 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag present --release present >/tmp/pre-asset-authority.log
+            name="$(basename "$f")"
+            encoded="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$name")"
+            case "$name" in *.zip) ct=application/zip;; *.json) ct=application/json;; *.md) ct='text/markdown';; *.php) ct=application/x-php;; *) ct=text/plain;; esac
+            code="$(curl -sS -o /tmp/upload.json -w '%{http_code}' -X POST -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H "Content-Type: $ct" --data-binary "@$f" "https://uploads.github.com/repos/llhzx2018/vf-library/releases/$RELEASE_ID/assets?name=$encoded")"
+            test "$code" = 201 || { cat /tmp/upload.json; exit 31; }
+            echo "P02_RELEASE_ASSET_UPLOADED=$name"
+          done
+
+      - name: Live-read Authority before update-channel publication
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.31 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag present --release present
+
+      - name: Publish V2.5.32 to P02 update channel
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.request,datetime
+          token=os.environ['VF_RELEASE_WRITE_TOKEN'];meta=json.load(open('/tmp/p02-release-meta.json'));release=json.load(open('/tmp/p02-release.json'));live=json.load(open('/tmp/p02-live-authority.json'))
+          u=meta['update'];notes='P02 · VF Library V2.5.32 正式更新：支持 V2.5.31 → V2.5.32，Schema 2401 不变、无迁移。完成 Reader/Edit/Split、搜索返回、移动端连续性、Scratch、Library Model/Favicon ownership 与退休 runtime 清理收敛；真实 Atomic 数据保留升级、附件/备份/SQLite、post-upgrade Chromium、全站 desktop/390px 与 Scratch 专项均已通过。OWNER 已明确授权先发布后进行真实使用测试。'
+          manifest={'schema_version':'1.0','project_id':'P02','component_id':'APP','enabled':True,'current_version':'2.5.31','target_version':'2.5.32','update_type':'ATOMIC','from_versions':['2.5.31'],'schema_from':'2401','schema_to':'2401','repository':'llhzx2018/vf-library','release_tag':'v2.5.32','release_id':release['id'],'product_identity':meta['product_identity'],'asset_name':'VF_Library_V2.5.32_UPDATE.zip','asset_bytes':u['bytes'],'asset_sha256':u['sha256'],'backup_required':True,'rollback_supported':True,'released_at':release['published_at'],'notes':notes}
+          payload={'message':'release(P02): publish V2.5.32 update manifest','content':base64.b64encode((json.dumps(manifest,ensure_ascii=False,indent=2)+'\n').encode()).decode(),'sha':live['p02_blob_sha'],'branch':'main'}
+          r=urllib.request.Request('https://api.github.com/repos/llhzx2018/core-updates/contents/projects/P02.json',data=json.dumps(payload).encode(),method='PUT',headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
+          with urllib.request.urlopen(r) as x:out=json.load(x)
+          print('P02_V2532_UPDATE_CHANNEL_COMMIT='+out['commit']['sha'])
+          PY
+
+      - name: Live-read published channel before governance closure
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.32 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag present --release present
+
+      - name: Build governance-only release closure commit
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,os
+          cpath=Path('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json');c=json.loads(cpath.read_text())
+          c['candidate_state']='FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST'
+          c['formal_main_version']='2.5.32';c['formal_main_tag']='v2.5.32'
+          c['owner_test_requested']=True;c['owner_test_policy']='POST_RELEASE_OWNER_REAL_USE';c['next_gate']='OWNER_POST_RELEASE_REAL_USE_TEST'
+          c['release_prep_allowed']=False;c['formal_release_created']=True;c['update_channel_change_allowed']=False;c['production_write']=False
+          r=json.load(open('/tmp/p02-release.json'));m=json.load(open('/tmp/p02-release-meta.json'))
+          c['release']={'tag':'v2.5.32','release_id':r['id'],'published_at':r['published_at'],'source_commit':os.environ['SEALED_SHA'],'source_tree':os.environ['SEALED_TREE'],'product_identity':m['product_identity'],'update_asset':m['update'],'update_channel':'PUBLISHED','owner_post_release_test':'PENDING'}
+          c['final_acceptance']['release_boundary']='FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST'
+          cpath.write_text(json.dumps(c,ensure_ascii=False,indent=2)+'\n')
+          replacements={
+          'tests/unit/p02_candidate_version_identity_contract.mjs':[
+          ("if(candidate.release_prep_allowed!==false||candidate.formal_release_created!==false||candidate.update_channel_change_allowed!==false||candidate.production_write!==false)throw new Error('release boundary must remain closed');if(candidate.candidate_state!=='PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE'||candidate.owner_test_requested!==true||candidate.owner_test_policy!=='FINAL_OWNER_EXPERIENCE_AFTER_PRODUCT_CONVERGENCE'||candidate.next_gate!=='OWNER_FINAL_EXPERIENCE_TEST')throw new Error('converged owner experience gate mismatch');","if(candidate.release_prep_allowed!==false||candidate.formal_release_created!==true||candidate.update_channel_change_allowed!==false||candidate.production_write!==false)throw new Error('post-release boundary mismatch');if(candidate.candidate_state!=='FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST'||candidate.owner_test_requested!==true||candidate.owner_test_policy!=='POST_RELEASE_OWNER_REAL_USE'||candidate.next_gate!=='OWNER_POST_RELEASE_REAL_USE_TEST')throw new Error('post-release owner experience gate mismatch');")],
+          'tests/unit/p02_owner_preview_handoff_contract.mjs':[("assert.equal(candidate.next_gate,'OWNER_FINAL_EXPERIENCE_TEST');","assert.equal(candidate.next_gate,'OWNER_POST_RELEASE_REAL_USE_TEST');")],
+          'tests/unit/p02_release_readiness_owner_preview_contract.mjs':[("assert.equal(candidate.owner_test_policy,'FINAL_OWNER_EXPERIENCE_AFTER_PRODUCT_CONVERGENCE');assert.equal(candidate.release_prep_allowed,false);","assert.equal(candidate.owner_test_policy,'POST_RELEASE_OWNER_REAL_USE');assert.equal(candidate.release_prep_allowed,false);assert.equal(candidate.formal_release_created,true);")],
+          'tests/unit/p02_v2532_product_convergence_seal_contract.mjs':[
+          ("assert.equal(c.candidate_state,'PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE');","assert.equal(c.candidate_state,'FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST');"),
+          ("assert.equal(c.owner_test_policy,'FINAL_OWNER_EXPERIENCE_AFTER_PRODUCT_CONVERGENCE');","assert.equal(c.owner_test_policy,'POST_RELEASE_OWNER_REAL_USE');"),
+          ("assert.equal(c.next_gate,'OWNER_FINAL_EXPERIENCE_TEST');","assert.equal(c.next_gate,'OWNER_POST_RELEASE_REAL_USE_TEST');"),
+          ("assert.equal(c.release_prep_allowed,false);assert.equal(c.formal_release_created,false);assert.equal(c.update_channel_change_allowed,false);assert.equal(c.production_write,false);","assert.equal(c.release_prep_allowed,false);assert.equal(c.formal_release_created,true);assert.equal(c.update_channel_change_allowed,false);assert.equal(c.production_write,false);")]
+          }
+          for name,pairs in replacements.items():
+              p=Path(name);s=p.read_text()
+              for old,new in pairs:assert s.count(old)==1,(name,old);s=s.replace(old,new)
+              p.write_text(s)
+          ev=Path('docs/evidence/P02_V2532_FORMAL_RELEASE_20260831.md');ev.write_text(f'''# P02 · VF Library V2.5.32 Formal Release\n\nStatus: `PUBLISHED / AWAITING_OWNER_POST_RELEASE_REAL_USE`\n\n- Formal tag: `v2.5.32`\n- Release ID: `{r['id']}`\n- Release source commit: `{os.environ['SEALED_SHA']}`\n- Release source tree: `{os.environ['SEALED_TREE']}`\n- Update asset: `VF_Library_V2.5.32_UPDATE.zip`\n- Update SHA256: `{m['update']['sha256']}`\n- Product identity: `{m['product_identity']}`\n- Update channel: `2.5.31 → 2.5.32`\n- Schema: `2401 → 2401`\n- OWNER authorization: explicit publish-then-test instruction on 2026-08-31.\n- OWNER post-release real-use: `PENDING`.\n- Production runtime write by this release workflow: `NO`.\n''')
+          Path('tests/unit/p02_v2532_formal_release_contract.mjs').write_text("""import assert from 'node:assert/strict';\nimport fs from 'node:fs';\nconst c=JSON.parse(fs.readFileSync('docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json','utf8'));const e=fs.readFileSync('docs/evidence/P02_V2532_FORMAL_RELEASE_20260831.md','utf8');\nassert.equal(c.candidate_state,'FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST');assert.equal(c.formal_main_version,'2.5.32');assert.equal(c.formal_main_tag,'v2.5.32');assert.equal(c.formal_release_created,true);assert.equal(c.release.tag,'v2.5.32');assert.equal(c.release.update_channel,'PUBLISHED');assert.equal(c.release.owner_post_release_test,'PENDING');assert.equal(c.production_write,false);assert.match(e,/PUBLISHED \/ AWAITING_OWNER_POST_RELEASE_REAL_USE/);console.log('P02_V2532_FORMAL_RELEASE_CONTRACT=PASS');\n""")
+          PY
+          git diff --exit-code "$SEALED_SHA" -- public src VERSION SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          for t in tests/unit/*.mjs; do node "$t"; done
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add docs/authority/P02_DEVELOP_CANDIDATE_IDENTITY.json docs/evidence/P02_V2532_FORMAL_RELEASE_20260831.md tests/unit/p02_candidate_version_identity_contract.mjs tests/unit/p02_owner_preview_handoff_contract.mjs tests/unit/p02_release_readiness_owner_preview_contract.mjs tests/unit/p02_v2532_product_convergence_seal_contract.mjs tests/unit/p02_v2532_formal_release_contract.mjs
+          git commit -m "governance(P02): record V2.5.32 formal release"
+          echo "CLOSURE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "CLOSURE_TREE=$(git show -s --format=%T HEAD)" >> "$GITHUB_ENV"
+          echo P02_V2532_RELEASE_CLOSURE_LOCAL=PASS
+
+      - name: Live-read Authority before develop closure write
+        run: python3 /tmp/p02_live_authority.py --dev "$SEALED_SHA" --main "$SEALED_SHA" --p02-target 2.5.32 --candidate-state PRODUCT_OPTIMIZATION_CONVERGED_AWAITING_OWNER_EXPERIENCE --tag present --release present
+
+      - name: Publish governance closure to develop
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git push origin "$CLOSURE_SHA:refs/heads/develop"
+          test "$(git ls-remote origin refs/heads/develop | awk '{print $1}')" = "$CLOSURE_SHA"
+          echo P02_V2532_RELEASE_CLOSURE_DEVELOP=PASS
+
+      - name: Live-read Authority before main closure write
+        run: python3 /tmp/p02_live_authority.py --dev "$CLOSURE_SHA" --main "$SEALED_SHA" --p02-target 2.5.32 --candidate-state FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST --tag present --release present
+
+      - name: Publish governance closure to main
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          git push origin "$CLOSURE_SHA:refs/heads/main"
+          test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$CLOSURE_SHA"
+          echo P02_V2532_RELEASE_CLOSURE_MAIN=PASS
+
+      - name: Final published readback
+        run: |
+          set -Eeuo pipefail
+          python3 /tmp/p02_live_authority.py --dev "$CLOSURE_SHA" --main "$CLOSURE_SHA" --p02-target 2.5.32 --candidate-state FORMAL_RELEASE_PUBLISHED_AWAITING_OWNER_POST_RELEASE_TEST --tag present --release present
+          python3 - <<'PY'
+          import json,os,urllib.request
+          token=os.environ['VF_RELEASE_WRITE_TOKEN'];H={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          def get(url):
+              with urllib.request.urlopen(urllib.request.Request(url,headers=H)) as x:return json.load(x)
+          rel=get('https://api.github.com/repos/llhzx2018/vf-library/releases/tags/v2.5.32')
+          assets={a['name']:a for a in rel['assets']};meta=json.load(open('/tmp/p02-release-meta.json'))
+          assert set(meta['assets'])<=set(assets),(meta['assets'],sorted(assets))
+          u=assets['VF_Library_V2.5.32_UPDATE.zip'];assert u['size']==meta['update']['bytes'];assert u.get('digest') in (None,'sha256:'+meta['update']['sha256'])
+          print('P02_V2532_FORMAL_RELEASE_READBACK=PASS')
+          print('P02_V2532_PRODUCTION_RUNTIME_WRITE=NO')
+          PY
