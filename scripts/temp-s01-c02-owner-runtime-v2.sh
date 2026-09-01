@@ -102,7 +102,7 @@ npm install --no-save playwright@1.58.2 >/dev/null
 npx playwright install --with-deps chromium >/dev/null
 
 export WP_ADMIN_PASSWORD_FILE=/tmp/vf-s01-owner-admin.pass
-node "$GITHUB_WORKSPACE/runner/scripts/temp-s01-c02-owner-browser-v2.js"
+NODE_PATH=/tmp/vf-s01-owner-playwright/node_modules node "$GITHUB_WORKSPACE/runner/scripts/temp-s01-c02-owner-browser-v2.js"
 jq -e '.result=="PASS" and .opsOnlyProviderMissing=="PASS" and .m3u8ActivationSchemaCollision=="ABSENT_WITH_EPHEMERAL_NAMESPACE_PATCH" and .ownerRepairPostRedirectReadback=="PASS" and .sameProductObjectLinks=="PASS" and .publicShortcodeRuntime=="PASS" and .admin390Usability=="PASS"' "$EVIDENCE_DIR/owner-browser-gate.json" >/dev/null
 
 # Verify both platform and M3U8 namespaced tables coexist after activation.
