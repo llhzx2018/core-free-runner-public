@@ -1,0 +1,112 @@
+import json
+from pathlib import Path
+
+project=Path('VF_PROJECT.json')
+data=json.loads(project.read_text(encoding='utf-8'))
+data['current_change']={
+  'change_id':'P01-SINGLE-SYSTEM-AUTH-MODEL-RESTORE-20260901',
+  'base':'develop 388f8f75777fc131e47ef7dc7a136ff2cb7d8cc9',
+  'result':'SINGLE FRONTEND AUTH MODEL RESTORED / ANONYMOUS PUBLIC ONLY / AUTHENTICATED PUBLIC+PRIVATE+MANAGEMENT / MERGED TO DEVELOP / NOT RELEASED',
+  'schema_change':False,'migration':None,'latest_merge_pr':166,
+  'runtime_product_source':'2b60b27c1e5cb53f841e9e7f0c8e521bacba1030',
+  'runtime_product_tree':'9788bdf228f3bd7e140a89f7881ce1b01c43f154',
+  'repository_tree':'8375f6274d6f8cdc6e0a0ee2f71a8745f2047d1a',
+  'latest_product_candidate':'e0faf773a6f7643974dc0f08b653b19669f9908d',
+  'machine_gate':33471511064,'evidence_artifact':9786687777,
+  'evidence_artifact_sha256':'c5d59b936a2bff252b7d2d021b2183c692d5c10f0d82be89a8c2cacd0d556a54',
+  'browser_gate':'390 + 1440 / PASS','sqlite_integrity_fk':'PASS',
+  'auth_model':'ONE FRONTEND; ANONYMOUS=PUBLIC ONLY; AUTHENTICATED=PUBLIC+PRIVATE+MANAGEMENT',
+  'management_entry':['links-admin.php','settings.php'],
+  'dual_view_model':'REVERTED / NOT PRODUCT CONTRACT',
+  'supersedes_change':'P01-L2-ADMIN-PUBLIC-VIEW-STATE-20260901',
+  'main_write':False,'production_write':False,'runner_main_write':False
+}
+data['develop_state']='V2.36.0 PRODUCTION CLOSURE PASS / SINGLE-SYSTEM AUTH MODEL RESTORED ON DEVELOP / NOT RELEASED'
+data['current_authority']='Owner Production V2.36.0 / Published Latest V2.36.0 / Develop restores single-system auth model'
+data['next_action']='Continue P01 L2 Product Optimization from the restored single-system auth model on develop. If shipping this correction, use a separately authorized patch release; do not write Production automatically.'
+data.setdefault('authority',{})['current_l2_develop_evidence']='docs/evidence/P01_SINGLE_SYSTEM_AUTH_MODEL_RESTORE_20260901.md'
+project.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+
+block='''<!-- P01_SINGLE_SYSTEM_AUTH_MODEL_RESTORE -->
+## 单一前台登录模型恢复 · 2026-09-01
+
+- Product correction：PR `#166` 已合并到 `develop`。
+- Current develop Product Source：`2b60b27c1e5cb53f841e9e7f0c8e521bacba1030`。
+- Runtime Tree：`9788bdf228f3bd7e140a89f7881ce1b01c43f154`。
+- 正式产品模型：**一个前台，不存在管理员版/公开版两套视角。**
+- 未登录：只读取公开资源；私人资源不可见；管理入口不可见。
+- 已登录：同一前台同时读取公开 + 私人资源，并出现管理能力。
+- 管理入口：`☷ 资源管理 → links-admin.php`、`⚙ 系统设置 → settings.php`。
+- 已撤销：`管理员视角 / 公开视角 / 查看公开版 / 返回管理 / public_view / preview_return`。
+- 被撤销的旧变更：`P01-L2-ADMIN-PUBLIC-VIEW-STATE-20260901`，仅作为历史证据保留，不再代表 Product Contract。
+- Formal Gate：`33471511064` = **PASS**；Artifact `9786687777`；Digest `sha256:c5d59b936a2bff252b7d2d021b2183c692d5c10f0d82be89a8c2cacd0d556a54`。
+- 390 / 1440、匿名隐私、登录后公开+私人、管理入口、旧参数失效、PHP、SQLite/FK：全部 PASS。
+- Schema / Migration / Version：**UNCHANGED**。
+- `main` / Owner Production：仍为已闭环的 V2.36.0；本修正当前 **DEVELOP ONLY / NOT RELEASED**。
+
+> 以下旧段落保留历史证据；如与本段冲突，以本段为 Current Product Authority。
+
+'''
+for f,title in [('docs/authority/CURRENT.md','# P01 · VF Start · Current Authority\n\n'),('docs/handoff/CURRENT_STATE.md','# CURRENT STATE · P01 VF Start\n\n')]:
+    p=Path(f); txt=p.read_text(encoding='utf-8')
+    if 'P01_SINGLE_SYSTEM_AUTH_MODEL_RESTORE' not in txt:
+        if not txt.startswith(title): raise SystemExit('unexpected heading '+f)
+        txt=title+block+txt[len(title):]
+    p.write_text(txt.rstrip()+'\n',encoding='utf-8')
+
+evidence=Path('docs/evidence/P01_SINGLE_SYSTEM_AUTH_MODEL_RESTORE_20260901.md')
+evidence.write_text('''# P01 · Single-System Auth Model Restore · 2026-09-01
+
+## Owner Product Rule
+
+VF Start 只有一个前台：
+
+- 未登录：公开资源可见，私人资源不可见，管理入口不可见。
+- 已登录：同一前台同时显示公开与私人资源，并提供管理能力。
+- 管理入口固定为 `☷ 资源管理` (`links-admin.php`) 与 `⚙ 系统设置` (`settings.php`)。
+- 不存在独立的“管理员视角 / 公开视角”产品模式。
+
+## Correction
+
+错误变更 `aeee995f8a4b10f330938151bbc05b9fe5c74e82` 引入了 `public_view / preview_return` 及双视角状态 UI。该设计被 Owner 判定为把一个系统人为拆成两套视角。
+
+PR #166 精准反向撤销该提交，不回退频道、影视、Provider 分离或自动封面缓存等其他 V2.36.0 功能。
+
+```text
+Base develop: 388f8f75777fc131e47ef7dc7a136ff2cb7d8cc9
+Correction candidate: e0faf773a6f7643974dc0f08b653b19669f9908d
+Correction merge: 2b60b27c1e5cb53f841e9e7f0c8e521bacba1030
+Repository tree: 8375f6274d6f8cdc6e0a0ee2f71a8745f2047d1a
+Runtime tree: 9788bdf228f3bd7e140a89f7881ce1b01c43f154
+Changed files: 8
+Schema/Migration/Version: unchanged
+```
+
+## Formal Machine Gate
+
+```text
+Run: 33471511064
+Result: PASS
+Artifact: 9786687777
+Digest: sha256:c5d59b936a2bff252b7d2d021b2183c692d5c10f0d82be89a8c2cacd0d556a54
+```
+
+Validated on Fresh Runtime at 390px and 1440px:
+
+- anonymous public visibility PASS
+- anonymous private isolation PASS
+- anonymous visible management entry absent PASS
+- authenticated public + private visibility PASS
+- authenticated management entry present PASS
+- old `public_view / preview_return` parameters do not change auth, data projection, or UI PASS
+- dual-view labels/controls absent PASS
+- PHP syntax PASS
+- SQLite integrity `ok`
+- foreign keys `0`
+
+## Authority Result
+
+`P01-L2-ADMIN-PUBLIC-VIEW-STATE-20260901` is **SUPERSEDED / REVERTED** and is not the current Product Contract.
+
+Current correction is merged to `develop` only. V2.36.0 Production remains unchanged until a separately authorized patch release.
+''',encoding='utf-8')
