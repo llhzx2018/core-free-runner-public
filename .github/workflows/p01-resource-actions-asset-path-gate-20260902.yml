@@ -1,0 +1,154 @@
+name: P01 Resource Actions Asset Path Gate
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-resource-actions-asset-path-gate-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 16ae45d9a12adf596b9f45c12ee65b4350b82f9c
+      PRODUCT_BRANCH: fix/p01-resource-actions-asset-path-20260902
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-resource-actions-path/evidence
+      PW: /tmp/p01-resource-actions-path/pw
+      PORT: '18547'
+      ADMIN_PASS: P01AssetPath2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and concurrency fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-resource-actions-path; mkdir -p "$EVID" "$PW"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE" | tee "$EVID/source.txt"
+          test "$REMOTE" = "$SOURCE"
+          test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-before.sha256"
+          grep -Fxq '@import url("resource-actions.css");' product/src/assets/resource-media.css
+          grep -Fq "vf_asset_url('assets/resource-media.css')" product/src/app/FunctionalWorkspace.php
+          if grep -Fq "vf_asset_url('assets/resource-actions.css')" product/src/app/FunctionalWorkspace.php; then echo 'BASELINE_EXPLICIT_ACTIONS_LINK_UNEXPECTED'; exit 2; fi
+      - name: Fresh setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-resource-actions-path.pid
+          COOKIE=/tmp/p01-resource-actions-path.cookies
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi
+            sleep .25
+          done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Asset Path Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          curl -fsS "http://127.0.0.1:$PORT/channels.php" -o "$EVID/baseline-channels.html"
+          grep -Fq 'asset.php?file=resource-media.css&amp;v=2.36.4' "$EVID/baseline-channels.html"
+          if grep -Fq 'asset.php?file=resource-actions.css' "$EVID/baseline-channels.html"; then echo 'BASELINE_ACTIONS_LINK_UNEXPECTED'; exit 3; fi
+          curl -sS -D "$EVID/baseline-root-actions.headers" -o "$EVID/baseline-root-actions.body" "http://127.0.0.1:$PORT/resource-actions.css"
+          curl -fsS -D "$EVID/asset-actions.headers" -o "$EVID/asset-actions.css" "http://127.0.0.1:$PORT/asset.php?file=resource-actions.css&v=2.36.4"
+          grep -qi '^Content-Type: text/css' "$EVID/asset-actions.headers"
+          grep -Fq '.vf-functional-workspace .vf-asset-actions' "$EVID/asset-actions.css"
+          echo 'BASELINE_RELATIVE_IMPORT=REPRODUCED' | tee "$EVID/baseline.txt"
+      - name: Apply two-file asset-path candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          css=Path('product/src/assets/resource-media.css')
+          s=css.read_text(encoding='utf-8')
+          old='@import url("resource-actions.css");\n'
+          if s.count(old)!=1: raise SystemExit(f'CSS_IMPORT_COUNT={s.count(old)}')
+          css.write_text(s.replace(old,'',1),encoding='utf-8')
+
+          php=Path('product/src/app/FunctionalWorkspace.php')
+          p=php.read_text(encoding='utf-8')
+          anchor='<link rel="stylesheet" href="<?=vf_fw_h(vf_asset_url(\'assets/resource-media.css\'))?>"><link rel="stylesheet" href="<?=vf_fw_h(vf_asset_url(\'assets/workspace-domain-nav.css\'))?>">'
+          repl='<link rel="stylesheet" href="<?=vf_fw_h(vf_asset_url(\'assets/resource-media.css\'))?>"><link rel="stylesheet" href="<?=vf_fw_h(vf_asset_url(\'assets/resource-actions.css\'))?>"><link rel="stylesheet" href="<?=vf_fw_h(vf_asset_url(\'assets/workspace-domain-nav.css\'))?>">'
+          if p.count(anchor)!=1: raise SystemExit(f'PHP_ANCHOR_COUNT={p.count(anchor)}')
+          php.write_text(p.replace(anchor,repl,1),encoding='utf-8')
+          PY
+          php -l product/src/app/FunctionalWorkspace.php | tee "$EVID/php-lint.txt"
+          git -C product diff --check
+          git -C product diff -- src/app/FunctionalWorkspace.php src/assets/resource-media.css | tee "$EVID/candidate.diff"
+          mapfile -t CHANGED < <(git -C product diff --name-only)
+          test "${#CHANGED[@]}" -eq 2
+          printf '%s\n' "${CHANGED[@]}" | grep -Fxq 'src/app/FunctionalWorkspace.php'
+          printf '%s\n' "${CHANGED[@]}" | grep -Fxq 'src/assets/resource-media.css'
+          ! grep -Fq '@import url("resource-actions.css")' product/src/assets/resource-media.css
+          grep -Fq "vf_asset_url('assets/resource-actions.css')" product/src/app/FunctionalWorkspace.php
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-after.sha256"
+          diff -u "$EVID/authority-before.sha256" "$EVID/authority-after.sha256"
+      - name: Browser candidate must load canonical asset URL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PW"; npm init -y >/dev/null 2>&1; npm install --silent playwright@1.55.0; npx playwright install chromium >/dev/null
+          cat > "$PW/check.mjs" <<'JS'
+          import { chromium } from 'playwright'; import fs from 'fs';
+          const browser=await chromium.launch({headless:true}); const page=await browser.newPage({viewport:{width:390,height:844}});
+          const requests=[],consoleErrors=[],pageErrors=[];
+          page.on('request',r=>requests.push(new URL(r.url()).pathname+new URL(r.url()).search));
+          page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text())}); page.on('pageerror',e=>pageErrors.push(String(e)));
+          const response=await page.goto(`http://127.0.0.1:${process.env.PORT}/channels.php`,{waitUntil:'networkidle',timeout:30000});
+          const metrics=await page.evaluate(()=>({scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth,links:[...document.querySelectorAll('link[rel="stylesheet"]')].map(x=>x.getAttribute('href'))}));
+          await page.screenshot({path:`${process.env.EVID}/candidate-mobile.png`,fullPage:true});
+          const badRoot=requests.filter(x=>x==='/resource-actions.css'); const good=requests.filter(x=>x.startsWith('/asset.php?file=resource-actions.css'));
+          const mimeErrors=consoleErrors.filter(x=>x.includes('resource-actions.css')||x.includes('MIME type'));
+          const report={status:response?.status()||0,requests,consoleErrors,pageErrors,metrics,badRoot,good,mimeErrors}; fs.writeFileSync(`${process.env.EVID}/browser.json`,JSON.stringify(report,null,2)); console.log(JSON.stringify(report));
+          await browser.close();
+          if(report.status!==200||badRoot.length!==0||good.length<1||mimeErrors.length!==0||pageErrors.length!==0||metrics.scrollWidth>metrics.clientWidth)process.exit(4);
+          console.log('P01_RESOURCE_ACTIONS_ASSET_PATH_BROWSER=PASS');
+          JS
+          PORT="$PORT" EVID="$EVID" node "$PW/check.mjs" | tee "$EVID/browser.txt"
+          curl -fsS "http://127.0.0.1:$PORT/channels.php" -o "$EVID/candidate-channels.html"
+          grep -Fq 'asset.php?file=resource-actions.css&amp;v=2.36.4' "$EVID/candidate-channels.html"
+      - name: Commit and push isolated Product branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"; test "$REMOTE" = "$SOURCE"
+          test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          git -C product config user.name VictorForge; git -C product config user.email llhzx2018@gmail.com
+          git -C product switch -c "$PRODUCT_BRANCH"
+          git -C product add src/app/FunctionalWorkspace.php src/assets/resource-media.css
+          test "$(git -C product diff --cached --name-only | wc -l)" -eq 2
+          git -C product commit -m 'fix(P01): load resource actions CSS through asset authority'
+          CANDIDATE="$(git -C product rev-parse HEAD)"; test "$(git -C product rev-parse HEAD^)" = "$SOURCE"
+          git -C product push origin "HEAD:refs/heads/$PRODUCT_BRANCH"
+          test "$(git -C product ls-remote origin refs/heads/$PRODUCT_BRANCH | awk '{print $1}')" = "$CANDIDATE"
+          printf 'CANDIDATE=%s\nPARENT=%s\nBRANCH=%s\nPRODUCT_BRANCH_PUSH=PASS\nDEVELOP_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$CANDIDATE" "$SOURCE" "$PRODUCT_BRANCH" | tee "$EVID/staging.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-resource-actions-asset-path-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-resource-actions-path.pid 2>/dev/null)" 2>/dev/null || true
