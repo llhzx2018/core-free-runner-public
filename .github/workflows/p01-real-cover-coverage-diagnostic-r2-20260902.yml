@@ -1,0 +1,129 @@
+name: P01 Real Cover Coverage Diagnostic R2
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-real-cover-coverage-diagnostic-r2-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: 63916e73ac8a925a0b6d538b85d923db2f906794
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-real-cover-r2/evidence
+      PW: /tmp/p01-real-cover-r2/pw
+      PORT: '18556'
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fence and setup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-real-cover-r2; mkdir -p "$EVID" "$PW"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-real-cover-r2.pid
+          COOKIE=/tmp/p01-real-cover-r2.cookies
+          for i in $(seq 1 60); do if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Real Cover R2' --data-urlencode 'admin_password=P01RealCover2026' --data-urlencode 'admin_password_confirm=P01RealCover2026' -o "$EVID/setup-post.html"
+      - name: Real network cover refresh
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/refresh.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/Repository.php';
+          require_once getenv('ROOT').'/app/SurfaceRepository.php';
+          require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);$cover=new VfResourceCoverCache($db);
+          $cat=$repo->createCategory(['name'=>'Real Cover Diagnostic','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $samples=[
+            ['youtube-video','watch','YouTube Video','https://www.youtube.com/watch?v=dQw4w9WgXcQ','电影'],
+            ['youtube-channel','channels','Google Developers Channel','https://www.youtube.com/@GoogleDevelopers','频道'],
+            ['bilibili-video','watch','Bilibili Video','https://www.bilibili.com/video/BV1GJ411x7h7/','电影'],
+            ['apple-podcast','channels','Apple Podcast','https://podcasts.apple.com/us/podcast/the-daily/id1200361736','播客'],
+            ['wikipedia-film','watch','Wikipedia Film','https://en.wikipedia.org/wiki/Interstellar_(film)','电影'],
+            ['no-cover','channels','No Cover Example','https://example.com/','频道']
+          ];
+          $rows=[];
+          foreach($samples as [$key,$domain,$title,$url,$kind]){
+            $saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'real cover diagnostic','is_private'=>0],'manual');$id=(int)$saved['id'];
+            $surface->upsertProfile($id,['surface'=>$domain,'resource_kind'=>$kind,'note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);
+            $t=microtime(true);try{$r=$cover->refreshOne($id,true);}catch(Throwable $e){$r=['id'=>$id,'success'=>false,'error'=>$e->getMessage()];}
+            $r+=['key'=>$key,'domain'=>$domain,'title'=>$title,'url'=>$url];$r['elapsed_ms']=(int)round((microtime(true)-$t)*1000);$rows[]=$r;echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          }
+          file_put_contents(getenv('EVID').'/refresh.json',json_encode($rows,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          $assets=$surface->allAssets(true);$projection=[];foreach($assets as $a){if(in_array((string)$a['title'],array_column($samples,2),true))$projection[]=['id'=>$a['id'],'title'=>$a['title'],'surface'=>$a['surface'],'provider'=>$a['provider'],'cover_url'=>$a['cover_url']??'','cover_source'=>$a['cover_source']??''];}
+          file_put_contents(getenv('EVID').'/projection.json',json_encode($projection,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$integrity\nFK=$fk\n";if($integrity!=='ok'||$fk)exit(3);
+          $by=[];foreach($rows as $r)$by[$r['key']]=$r;
+          if(empty($by['youtube-video']['success']))exit(4);
+          if(empty($by['youtube-channel']['success']))exit(5);
+          PHP
+      - name: Install browser
+        if: success()
+        shell: bash
+        run: cd "$PW" && npm init -y >/dev/null 2>&1 && npm install --silent playwright@1.55.0 && npx playwright install chromium
+      - name: Public fallback UI readback
+        if: success()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$PW/ui.mjs" <<'JS'
+          import {chromium} from 'playwright';import fs from 'fs';
+          const base=`http://127.0.0.1:${process.env.PORT}`,out=process.env.EVID,b=await chromium.launch({headless:true}),reports=[];
+          for(const route of ['channels.php','watch.php']){const p=await b.newPage({viewport:{width:390,height:900}}),ce=[],pe=[];p.on('console',m=>{if(m.type()==='error')ce.push(m.text())});p.on('pageerror',e=>pe.push(String(e)));const res=await p.goto(`${base}/${route}`,{waitUntil:'networkidle',timeout:30000});await p.waitForTimeout(250);const r=await p.evaluate(()=>{const imgs=[...document.images].map(i=>({src:i.getAttribute('src')||'',nw:i.naturalWidth,complete:i.complete}));return {doc:document.documentElement.scrollWidth,vw:document.documentElement.clientWidth,text:document.body.innerText,imgs,broken:imgs.filter(x=>x.src&&x.complete&&x.nw===0)}});Object.assign(r,{route,http:res?.status()||0,consoleErrors:ce,pageErrors:pe});reports.push(r);await p.screenshot({path:`${out}/${route.replace('.php','')}-390.png`,fullPage:true});console.log(JSON.stringify({route,http:r.http,doc:r.doc,vw:r.vw,broken:r.broken.length,ce,pe}));if(r.http!==200||r.doc>r.vw||r.broken.length||pe.length)process.exit(6);if(route==='channels.php'&&(!r.text.includes('Google Developers Channel')||!r.text.includes('No Cover Example')))process.exit(7);if(route==='watch.php'&&!r.text.includes('YouTube Video'))process.exit(8);await p.close();}
+          fs.writeFileSync(`${out}/ui.json`,JSON.stringify(reports,null,2));await b.close();console.log('P01_REAL_COVER_UI=PASS');
+          JS
+          cd "$PW";PORT="$PORT" EVID="$EVID" node ui.mjs | tee "$EVID/ui.txt"
+      - name: Coverage summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$EVID/refresh.json" ]; then python3 - "$EVID/refresh.json" <<'PY' | tee "$EVID/coverage.txt"
+          import json,sys
+          rows=json.load(open(sys.argv[1],encoding='utf-8'));print('TOTAL=%d SUCCESS=%d FAILURE=%d'%(len(rows),sum(bool(r.get('success')) for r in rows),sum(not r.get('success') for r in rows)))
+          for r in rows: print('%s|%s|%s|%sms|%s'%(r['key'],'PASS' if r.get('success') else 'FAIL',r.get('provider',''),r.get('elapsed_ms',''),r.get('source',r.get('error',''))))
+          PY
+          fi
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-real-cover-r2-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-real-cover-r2.pid 2>/dev/null)" 2>/dev/null || true
