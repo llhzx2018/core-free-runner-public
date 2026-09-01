@@ -1,0 +1,129 @@
+name: P01 Cover Fallback Visual Gate R2
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-cover-fallback-visual-gate-r2-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  visual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE: 16ae45d9a12adf596b9f45c12ee65b4350b82f9c
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-cover-fallback-visual-r2/evidence
+      PW: /tmp/p01-cover-fallback-visual-r2/pw
+      PORT: '18546'
+      ADMIN_PASS: P01CoverFallback2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-cover-fallback-visual-r2; mkdir -p "$EVID" "$PW"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE" | tee "$EVID/source.txt"
+          test "$REMOTE" = "$SOURCE"
+      - name: Fresh setup and visual dataset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-cover-fallback-visual-r2.pid
+          COOKIE=/tmp/p01-cover-fallback-visual-r2.cookies
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html"; then break; fi
+            sleep .25
+          done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read(); m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Cover Fallback Visual R2' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/dataset.txt"
+          <?php
+          declare(strict_types=1);
+          require getenv('ROOT').'/app/bootstrap.php'; require getenv('ROOT').'/app/ResourceCoverCache.php'; require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db(); $repo=new VfRepository($db); $surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'Visual Coverage','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $items=[
+            ['title'=>'YouTube 官方频道 · 自动封面成功','url'=>'https://www.youtube.com/@YouTube','surface'=>'channels','kind'=>'频道','desc'=>'真实自动封面对照组'],
+            ['title'=>'Bilibili 频道 · 无封面回退','url'=>'https://www.bilibili.com/','surface'=>'channels','kind'=>'频道','desc'=>'无封面时应保持完整卡片'],
+            ['title'=>'肖申克的救赎 · IMDb 无封面回退','url'=>'https://www.imdb.com/title/tt0111161/','surface'=>'watch','kind'=>'电影','desc'=>'电影卡片 fallback 对照','year'=>'1994'],
+            ['title'=>'霸王别姬 · 豆瓣无封面回退','url'=>'https://movie.douban.com/subject/1291546/','surface'=>'watch','kind'=>'电影','desc'=>'中文电影卡片 fallback 对照','year'=>'1993'],
+            ['title'=>'示例影片 · 无封面控制组','url'=>'https://example.com/movie','surface'=>'watch','kind'=>'电影','desc'=>'完全无元数据控制组','year'=>'2026'],
+          ]; $ids=[];
+          foreach($items as $i){$id=(int)$repo->saveLink(null,['category_id'=>$cat,'title'=>$i['title'],'url'=>$i['url'],'description'=>$i['desc'],'is_private'=>0],'manual')['id'];$surface->upsertProfile($id,['surface'=>$i['surface'],'resource_kind'=>$i['kind'],'media_year'=>$i['year']??'']);$ids[$i['title']]=$id;}
+          $r=(new VfResourceCoverCache($db))->refreshOne($ids['YouTube 官方频道 · 自动封面成功'],true);
+          echo 'YOUTUBE_COVER_SUCCESS='.(($r['success']??false)?'YES':'NO')."\nYOUTUBE_COVER_SOURCE=".(string)($r['source']??'')."\n"; if(empty($r['success'])) exit(2);
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn()); $fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC)); echo "INTEGRITY=$integrity\nFK=$fk\n"; if($integrity!=='ok'||$fk!==0) exit(3);
+          PHP
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$PW"; npm init -y >/dev/null 2>&1; npm install --silent playwright@1.55.0; npx playwright install chromium
+      - name: Desktop and mobile visual readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$PW/visual.mjs" <<'JS'
+          import { chromium } from 'playwright'; import fs from 'fs';
+          const base=`http://127.0.0.1:${process.env.PORT}`,out=process.env.EVID;
+          const browser=await chromium.launch({headless:true});
+          const cases=[
+            {name:'channels-desktop',url:'/channels.php',w:1440,h:1000,expected:['YouTube 官方频道 · 自动封面成功','Bilibili 频道 · 无封面回退']},
+            {name:'channels-mobile',url:'/channels.php',w:390,h:844,expected:['YouTube 官方频道 · 自动封面成功','Bilibili 频道 · 无封面回退']},
+            {name:'watch-desktop',url:'/watch.php',w:1440,h:1000,expected:['肖申克的救赎 · IMDb 无封面回退','霸王别姬 · 豆瓣无封面回退','示例影片 · 无封面控制组']},
+            {name:'watch-mobile',url:'/watch.php',w:390,h:844,expected:['肖申克的救赎 · IMDb 无封面回退','霸王别姬 · 豆瓣无封面回退','示例影片 · 无封面控制组']},
+          ]; const report=[];
+          for(const c of cases){
+            const page=await browser.newPage({viewport:{width:c.w,height:c.h}}),consoleErrors=[],pageErrors=[];
+            page.on('pageerror',e=>pageErrors.push(String(e))); page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text())});
+            const response=await page.goto(base+c.url,{waitUntil:'networkidle',timeout:30000});
+            const metrics=await page.evaluate(()=>{
+              const boxes=s=>[...document.querySelectorAll(s)].map(e=>{const r=e.getBoundingClientRect();return {class:e.className,x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height),text:(e.innerText||'').trim().slice(0,100),hasImg:!!e.querySelector('img')};});
+              return {bodyText:document.body.innerText,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth,brokenImages:[...document.images].filter(i=>i.complete&&i.naturalWidth===0).map(i=>i.currentSrc||i.src),cards:boxes('.vf-asset-card,.vf-watch-card'),posters:boxes('.vf-watch-poster,.vf-asset-icon')};
+            });
+            const missing=c.expected.filter(x=>!metrics.bodyText.includes(x)); const item={...c,status:response?.status()||0,horizontalOverflow:metrics.scrollWidth>metrics.clientWidth,brokenImages:metrics.brokenImages,missing,pageErrors,consoleErrors,cards:metrics.cards,posters:metrics.posters}; report.push(item);
+            await page.screenshot({path:`${out}/${c.name}.png`,fullPage:true}); console.log(JSON.stringify(item));
+            if(item.status!==200||item.horizontalOverflow||item.brokenImages.length||item.missing.length||item.pageErrors.length){await browser.close();process.exit(4);} await page.close();
+          }
+          fs.writeFileSync(`${out}/visual-report.json`,JSON.stringify(report,null,2)); await browser.close(); console.log('P01_COVER_FALLBACK_VISUAL_MACHINE_GATE_R2=PASS');
+          JS
+          cd "$PW"; PORT="$PORT" EVID="$EVID" node visual.mjs | tee "$EVID/visual-machine.txt"
+      - name: Product boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product diff --check; test -z "$(git -C product status --porcelain --untracked-files=no)"
+          printf 'TRACKED_PRODUCT_MUTATION=NO\nP01_REF_WRITE=NO\nRUNNER_MAIN_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-cover-fallback-visual-r2-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-cover-fallback-visual-r2.pid 2>/dev/null)" 2>/dev/null || true
