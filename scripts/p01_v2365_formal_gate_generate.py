@@ -67,11 +67,11 @@ for old,new in [
     ('2.35.3','__SOURCE_VERSION__'),('2.36.0','2.36.5'),('__SOURCE_VERSION__','2.36.4'),
 ]: build=build.replace(old,new)
 build=build.replace("required={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}\nif not required.issubset(set(added)): raise SystemExit('formal additions missing '+json.dumps(added))", "if added or removed: raise SystemExit('formal runtime add/remove fence failed '+json.dumps({'added':added,'removed':removed}))")
+build=build.replace('FORMAL_ARTIFACT_GATE_PASS_PENDING_RUNTIME','FORMAL_ARTIFACT_GATE_PASS')
 
 atomic=run_block(T,'Actual formal V2.35.3 to V2.36.0 upgrade')
 for old,new in [('p01-v2360','p01-v2365'),('P01_V2360','P01_V2365')]: atomic=atomic.replace(old,new)
 atomic=atomic.replace('2.35.3','__SOURCE_VERSION__').replace('2.36.0','2.36.5').replace('__SOURCE_VERSION__','2.36.4')
-atomic=atomic.replace('P01_V2364_TO_V2365','P01_V2364_TO_V2365')
 
 for name,text in [('01-exact.sh',exact),('02-build.sh',build),('03-atomic.sh',atomic)]:
     p=Path('/tmp/p01-v2365-formal-generated')/name
