@@ -35,5 +35,28 @@ for old, new in replacements:
     text = text.replace(old, new, 1)
 
 path.write_text(text, encoding="utf-8")
+
+mu_dir = wp_path / "wp-content/mu-plugins"
+mu_dir.mkdir(parents=True, exist_ok=True)
+mu_path = mu_dir / "s01-admin-post-phase-tracer.php"
+mu_path.write_text(r'''<?php
+if (!defined('ABSPATH')) { exit; }
+$vfS01Uri = (string)($_SERVER['REQUEST_URI'] ?? '');
+if (strpos($vfS01Uri, '/wp-admin/admin-post.php') === false) { return; }
+$vfS01Log = static function(string $phase): void {
+    $method = (string)($_SERVER['REQUEST_METHOD'] ?? '');
+    $postAction = isset($_POST['action']) && !is_array($_POST['action']) ? (string)$_POST['action'] : '';
+    $requestAction = isset($_REQUEST['action']) && !is_array($_REQUEST['action']) ? (string)$_REQUEST['action'] : '';
+    error_log('S01_HTTP_PHASE:' . $phase . ':' . sprintf('%.6f', microtime(true)) . ':METHOD=' . $method . ':POST_ACTION=' . $postAction . ':REQUEST_ACTION=' . $requestAction);
+};
+$vfS01Log('MU_FILE');
+foreach (['muplugins_loaded','plugins_loaded','setup_theme','after_setup_theme','init','wp_loaded','admin_init','shutdown'] as $vfS01Hook) {
+    add_action($vfS01Hook, static function() use ($vfS01Log, $vfS01Hook): void { $vfS01Log(strtoupper($vfS01Hook)); }, -99999);
+}
+add_action('admin_post_vf_ops_s01_m3u8_initialize', static function() use ($vfS01Log): void { $vfS01Log('ADMIN_POST_PRE_DISPATCH'); }, -99999);
+''', encoding="utf-8")
+
 print("S01_HTTP_HANDLER_INSTRUMENTATION=PASS")
 print(path)
+print("S01_HTTP_BOOTSTRAP_PHASE_TRACER=PASS")
+print(mu_path)
