@@ -49,7 +49,7 @@ build=run_block(T,'Build deterministic candidate artifacts')
 for old,new in [
     ('/tmp/p01-v2360-build.py','/tmp/p01-v2361-build.py'),
     ('V2.36.0','V2.36.1'),('V2360','V2361'),('v2360','v2361'),
-    ("'repair-v2.36.0.php'","'repair-v2.36.1.php'"),
+    ('repair-v2.36.0.php','repair-v2.36.1.php'),
 ]:
     build=build.replace(old,new)
 build=build.replace("required_added={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}\nif not required_added.issubset(set(added)): raise SystemExit('required runtime additions missing '+json.dumps(added))", "if added or removed: raise SystemExit('patch must not add/remove runtime files: '+json.dumps({'added':added,'removed':removed}))")
