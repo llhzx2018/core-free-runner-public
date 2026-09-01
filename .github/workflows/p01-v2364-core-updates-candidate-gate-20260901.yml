@@ -1,0 +1,92 @@
+name: P01 V2.36.4 Core Updates Candidate Gate
+on:
+  push:
+    branches: [release/p01-v2364-candidate-20260901]
+    paths: [.github/workflows/p01-v2364-core-updates-candidate-gate-20260901.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORE_BASE: 0a700ad89ca1d2d6e05ccca3d7005afb8769f112
+      MANIFEST_SOURCE: 135f66c4eca08819840001f28dcd89869770085c
+      PRODUCT_SOURCE: 6b321422bce5a834521786d8233149c7624aa014
+      STAGE_RUN: '33525391618'
+      STAGE_ARTIFACT: '9807439090'
+      STAGE_DIGEST: sha256:6d7eb4cb33e983b0aa1ee87b88dfb96d86aa0de4471d7cd611ef609b9b4e02f5
+      REMOTE_TRUTH_RUN: '33525222295'
+      RELEASE_ID: '380614937'
+      ASSET_NAME: VF_Start_V2.36.4_UPDATE.zip
+      ASSET_BYTES: '1237066'
+      ASSET_SHA256: ebb746554c95abb9f2fa77ce8ac6f41c280016c66e03f331149fd1d93370958b
+      EVID: /tmp/p01-v2364-core-updates-candidate-evidence
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: zip
+          coverage: none
+      - name: Runner prerequisite fence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          for run in "$STAGE_RUN" "$REMOTE_TRUTH_RUN"; do test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/$run --jq .conclusion)" = success; done
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/$STAGE_RUN/artifacts --jq ".artifacts[] | select(.id==$STAGE_ARTIFACT) | .digest")" = "$STAGE_DIGEST"
+      - name: Checkout exact core-updates candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.MANIFEST_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: updates
+      - name: Validate candidate against published V2.36.4
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$EVID"; mkdir -p "$EVID/download"
+          cd updates
+          test "$(git rev-parse HEAD)" = "$MANIFEST_SOURCE"
+          test "$(git rev-parse HEAD^)" = "$CORE_BASE"
+          test "$(git diff --name-only "$CORE_BASE" "$MANIFEST_SOURCE")" = projects/P01.json
+          M=projects/P01.json
+          jq -e '.schema_version=="1.0" and .project_id=="P01" and .component_id=="APP" and .enabled==true and .current_version=="2.36.3" and .target_version=="2.36.4" and .update_type=="ATOMIC" and .from_versions==["2.36.3"] and .schema_from=="2026082901" and .schema_to=="2026082901" and .repository=="llhzx2018/vf-start" and .release_tag=="v2.36.4" and .release_id==380614937 and .product_identity=="6b321422bce5a834521786d8233149c7624aa014" and .asset_name=="VF_Start_V2.36.4_UPDATE.zip" and .asset_bytes==1237066 and .asset_sha256=="ebb746554c95abb9f2fa77ce8ac6f41c280016c66e03f331149fd1d93370958b" and .backup_required==true and .rollback_supported==true and .released_at=="2026-09-01T15:17:48Z" and .minimum_php=="8.0.0"' "$M" >/dev/null
+          TAG=$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.36.4 --jq .object.sha)
+          test "$TAG" = "$PRODUCT_SOURCE"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.36.4 > "$EVID/release.json"
+          test "$(jq -r .id "$EVID/release.json")" = "$RELEASE_ID"
+          test "$(jq -r .tag_name "$EVID/release.json")" = v2.36.4
+          test "$(jq -r .draft "$EVID/release.json")" = false
+          test "$(jq -r .prerelease "$EVID/release.json")" = false
+          jq -e --arg n "$ASSET_NAME" --argjson b "$ASSET_BYTES" --arg d "sha256:$ASSET_SHA256" '.assets[]|select(.name==$n and .size==$b and .digest==$d and .state=="uploaded")' "$EVID/release.json" >/dev/null
+          gh release download v2.36.4 --repo llhzx2018/vf-start --pattern "$ASSET_NAME" --dir "$EVID/download"
+          A="$EVID/download/$ASSET_NAME"; test -f "$A"
+          test "$(stat -c %s "$A")" = "$ASSET_BYTES"
+          test "$(sha256sum "$A" | awk '{print $1}')" = "$ASSET_SHA256"
+          unzip -Z1 "$A" | grep -Fx repair-v2.36.4.php >/dev/null
+          unzip -p "$A" repair-v2.36.4.php > "$EVID/repair-v2.36.4.php"
+          php -l "$EVID/repair-v2.36.4.php" >/dev/null
+          grep -F "public const SOURCE_VERSION='2.36.3';" "$EVID/repair-v2.36.4.php" >/dev/null
+          grep -F "public const TARGET_VERSION='2.36.4';" "$EVID/repair-v2.36.4.php" >/dev/null
+          grep -F "public const TARGET_SCHEMA='2026082901';" "$EVID/repair-v2.36.4.php" >/dev/null
+          php "$EVID/repair-v2.36.4.php" --self-test | tee "$EVID/atomic-self-test.json" | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          REMOTE_MAIN=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          test "$REMOTE_MAIN" = "$CORE_BASE"
+          git show "$CORE_BASE:projects/P01.json" > "$EVID/live-P01-before.json"
+          jq -e '.current_version=="2.36.2" and .target_version=="2.36.3" and .from_versions==["2.36.2"] and .release_tag=="v2.36.3" and .release_id==380449563 and .product_identity=="718e043e3715ef7b21849bc08634fca89bf92c1f" and .asset_name=="VF_Start_V2.36.3_UPDATE.zip" and .asset_bytes==1236976 and .asset_sha256=="7110d0e232ce7dec521b4e76148441d06376a02124249d68237b774f2d33447d"' "$EVID/live-P01-before.json" >/dev/null
+          printf 'P01_V2364_CORE_UPDATES_CANDIDATE_GATE=PASS\nMANIFEST_SOURCE=%s\nCORE_UPDATES_MAIN_BEFORE=%s\nPRODUCT_SOURCE=%s\nRELEASE_ID=%s\nASSET=%s\nASSET_BYTES=%s\nASSET_SHA256=%s\nSUPPORTED_FROM=2.36.3\nTARGET=2.36.4\nSCHEMA_CHANGE=NO\nREMOTE_UPDATE_SELF_TEST=PASS\nCORE_UPDATES_MAIN_WRITE=NO\nOWNER_PRODUCTION_WRITE=NO\n' "$MANIFEST_SOURCE" "$REMOTE_MAIN" "$PRODUCT_SOURCE" "$RELEASE_ID" "$ASSET_NAME" "$ASSET_BYTES" "$ASSET_SHA256" | tee "$EVID/verdict.txt"
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-v2364-core-updates-candidate-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 90
