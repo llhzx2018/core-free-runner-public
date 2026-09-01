@@ -37,3 +37,194 @@ jobs:
         env:
           VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: python scripts/check_estate_anti_drift.py --live
+
+  p01-one-frontend-shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      P01_SOURCE: 8aae889db04da744704c4dd57742ea78be6e5862
+      BASE_URL: http://127.0.0.1:18093
+      EVID: /tmp/p01-one-frontend-shell-evidence
+      ADMIN_PASSWORD: OneFrontendGate-2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: p01
+          persist-credentials: false
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID/screens"
+          cd p01
+          test "$(git rev-parse HEAD)" = "$P01_SOURCE"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l > "$EVID/php-syntax.txt"
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check > "$EVID/js-syntax.txt"
+          test "$(git diff --name-only bfbaeb3f751b74c508f919d46d08daf5ca7b166c "$P01_SOURCE" | sort | tr '\n' ' ')" = "src/app/FunctionalWorkspace.php src/index.php src/start.php "
+          grep -F '$vfWorkspaceMode = '\''start'\'';' src/index.php >/dev/null
+          grep -F "require __DIR__ . '/index.php';" src/start.php >/dev/null
+          if grep -F "frontend-legacy.css" src/index.php >/dev/null; then echo 'legacy frontend still active in index.php' >&2; exit 1; fi
+          printf 'SOURCE=%s\nEXACT_SCOPE=PASS\nSYNTAX=PASS\n' "$P01_SOURCE" > "$EVID/source.txt"
+
+      - name: Fresh install isolated runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-one-frontend-runtime
+          cp -a p01/src /tmp/p01-one-frontend-runtime
+          cd /tmp/p01-one-frontend-runtime
+          php -S 127.0.0.1:18093 -t . > "$EVID/server.log" 2>&1 &
+          echo $! > "$EVID/server.pid"
+          for i in $(seq 1 40); do
+            if curl -fsS -c "$EVID/setup.cookies" -b "$EVID/setup.cookies" "$BASE_URL/setup.php" -o "$EVID/setup.html"; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-one-frontend-shell-evidence/setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c "$EVID/setup.cookies" -b "$EVID/setup.cookies" -X POST "$BASE_URL/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF One Frontend Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASSWORD" \
+            -o "$EVID/setup-post.html"
+          test -f app/.runtime.php
+          php cli/verify.php | tee "$EVID/verify.txt"
+          grep -Fx 'VERIFY_PASS=YES' "$EVID/verify.txt"
+          php cli/surface-verify.php | tee "$EVID/surface.txt"
+          grep -Fx 'CURRENT_DOMAIN_PASS=YES' "$EVID/surface.txt"
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          test -f "$DB"
+          test "$(sqlite3 "$DB" 'pragma integrity_check;')" = ok
+          test "$(sqlite3 "$DB" 'pragma foreign_key_check;' | wc -l)" = 0
+          printf 'FRESH_INSTALL=PASS\nINTEGRITY=ok\nFK=0\n' > "$EVID/db.txt"
+
+      - name: Install browser harness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m pip install --disable-pip-version-check --quiet playwright==1.55.0
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+            python -m playwright install chromium
+          fi
+
+      - name: Anonymous login logout same-shell browser gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-one-frontend-gate.py <<'PY'
+          import asyncio, json, os, shutil
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+
+          BASE=os.environ['BASE_URL']
+          PASSWORD=os.environ['ADMIN_PASSWORD']
+          EVID=Path(os.environ['EVID'])
+          results={"source":os.environ['P01_SOURCE'],"widths":{}}
+
+          async def visible_nav(page, expected):
+              nav=page.locator('.vf-global-domain-nav')
+              await nav.wait_for(state='visible')
+              box=await nav.bounding_box()
+              assert box and box['height'] >= 30 and box['y'] <= 1, box
+              text=' '.join((await nav.inner_text()).split())
+              for value in expected:
+                  assert value in text, (value,text)
+              assert await page.locator('body.vf-functional-workspace').count() == 1
+              assert await page.locator('#app.app-shell').count() == 0
+              dims=await page.evaluate('() => ({sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth})')
+              assert dims['sw'] <= dims['cw'] + 1, dims
+              return {"text":text,"box":box,"overflow":dims}
+
+          async def run_width(browser,width):
+              context=await browser.new_context(viewport={"width":width,"height":900})
+              page=await context.new_page()
+              row={}
+              await page.goto(BASE+'/',wait_until='networkidle')
+              row['anonymous_root']=await visible_nav(page,['导航','频道','影视','专题','登录'])
+              assert await page.locator('[data-vf-auth-logout]').count() == 0
+              assert await page.locator('#vf-workspace-data').count() == 0
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-anonymous-root.png'),full_page=False)
+
+              await page.locator('[data-vf-auth-login]').first.click()
+              await page.locator('[data-vf-auth-dialog] input[name="password"]').fill(PASSWORD)
+              async with page.expect_navigation(wait_until='networkidle'):
+                  await page.locator('[data-vf-auth-submit]').click()
+              row['authenticated_root']=await visible_nav(page,['首页','导航','频道','影视','专题','退出'])
+              assert await page.locator('[data-vf-auth-login]').count() == 0
+              assert await page.locator('#vf-workspace-data').count() == 1
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-authenticated-root.png'),full_page=False)
+
+              await page.goto(BASE+'/home.php',wait_until='networkidle')
+              row['authenticated_home']=await visible_nav(page,['首页','导航','频道','影视','专题','退出'])
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-authenticated-home.png'),full_page=False)
+
+              for route,label in [('start.php','导航'),('channels.php','频道'),('watch.php','影视'),('topics.php','专题')]:
+                  await page.goto(BASE+'/'+route,wait_until='networkidle')
+                  data=await visible_nav(page,['首页','导航','频道','影视','专题','退出'])
+                  active=' '.join((await page.locator('.vf-global-domain-nav a.active').all_inner_texts()))
+                  assert label in active,(route,active)
+                  row['admin_'+route]=data
+
+              await page.goto(BASE+'/',wait_until='networkidle')
+              await visible_nav(page,['退出'])
+              async with page.expect_navigation(wait_until='networkidle'):
+                  await page.locator('[data-vf-auth-logout]').first.click()
+              row['logout_root']=await visible_nav(page,['导航','频道','影视','专题','登录'])
+              assert await page.locator('[data-vf-auth-logout]').count() == 0
+              assert await page.locator('#vf-workspace-data').count() == 0
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-logout-root.png'),full_page=False)
+              await context.close()
+              return row
+
+          async def main():
+              async with async_playwright() as p:
+                  exe=shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+                  kwargs={"headless":True,"args":["--no-sandbox"]}
+                  if exe: kwargs['executable_path']=exe
+                  browser=await p.chromium.launch(**kwargs)
+                  try:
+                      for width in (390,1440):
+                          results['widths'][str(width)]=await run_width(browser,width)
+                  finally:
+                      await browser.close()
+              results['verdict']='PASS'
+              (EVID/'browser.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
+              print('P01_ONE_FRONTEND_BROWSER_GATE=PASS')
+
+          asyncio.run(main())
+          PY
+          python /tmp/p01-one-frontend-gate.py | tee "$EVID/browser.txt"
+          test -f "$EVID/browser.json"
+          grep -F 'P01_ONE_FRONTEND_BROWSER_GATE=PASS' "$EVID/browser.txt"
+          printf 'P01_ONE_FRONTEND_SHELL_GATE=PASS\nSOURCE=%s\nANON_AUTH_LOGOUT_SAME_SHELL=PASS\nTOP_DOMAIN_NAV=PASS\nWIDTHS=390,1440\nSQLITE=PASS\nOWNER_PRODUCTION_WRITE=NO\n' "$P01_SOURCE" | tee "$EVID/verdict.txt"
+
+      - name: Upload P01 gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-one-frontend-shell-${{ github.run_id }}
+          path: /tmp/p01-one-frontend-shell-evidence
+          if-no-files-found: warn
+          retention-days: 90
