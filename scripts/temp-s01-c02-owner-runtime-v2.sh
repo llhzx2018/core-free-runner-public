@@ -111,7 +111,9 @@ for table in wp_vf_m3u8_capabilities wp_vf_m3u8_capability_contracts wp_vf_m3u8_
   grep -Fxq "$table" "$EVIDENCE_DIR/all-vf-tables-after-m3u8.txt"
 done
 
-wp eval --path="$WP_PATH" 'echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[],"ownerState"=>function_exists("vf_ops_s01_m3u8_owner_state_v1")?vf_ops_s01_m3u8_owner_state_v1():[]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);' > "$EVIDENCE_DIR/final-runtime-readback.json"
+# WP-CLI has no S01 page/action request context, so explicitly load the lightweight
+# workbench before final owner-state readback. This does not alter product runtime.
+wp eval --path="$WP_PATH" 'require_once VF_OPS_SERVICE_DIR . "s01/tool-workbench.php"; echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[],"ownerState"=>function_exists("vf_ops_s01_m3u8_owner_state_v1")?vf_ops_s01_m3u8_owner_state_v1():[]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);' > "$EVIDENCE_DIR/final-runtime-readback.json"
 jq -e '.ops=="1.21.791" and .m3u8=="1.25.3" and .theme=="1.35.8" and .readiness.status=="PASS" and .ownerState.status=="PASS"' "$EVIDENCE_DIR/final-runtime-readback.json" >/dev/null
 
 if [ -f "$WP_PATH/wp-content/debug.log" ]; then
