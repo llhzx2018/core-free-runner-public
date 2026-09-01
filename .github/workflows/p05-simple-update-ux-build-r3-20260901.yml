@@ -1,0 +1,111 @@
+name: P05 Simple Update UX Hotfix Build R3
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p05-simple-update-ux-build-r3-20260901.yml']
+permissions:
+  contents: read
+jobs:
+  build-hotfix-r3:
+    if: github.event_name == 'pull_request' && github.head_ref == 'tmp/p05-simple-update-ux-build-r3-20260901'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout runner authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          path: runner
+      - name: Checkout private P05 hotfix branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: hotfix/p05-simple-update-ux-20260901
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: p05
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+      - name: Verify exact hotfix base
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '8fd6ea22f237eac891bdd0e336947d587560dc75'
+          git ls-remote --exit-code origin refs/heads/main | grep -F '8fd6ea22f237eac891bdd0e336947d587560dc75' >/dev/null
+          test "$(cat VERSION)" = '1.2.0'
+      - name: Reuse exact R2 Product mutation and update stale contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C runner fetch origin refs/heads/tmp/p05-simple-update-ux-build-r2-20260901:refs/remotes/origin/p05-simple-update-r2
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          text=subprocess.check_output([
+            'git','-C','runner','show',
+            'origin/p05-simple-update-r2:.github/workflows/p05-simple-update-ux-build-r2-20260901.yml'
+          ], text=True)
+          section=text[text.index('      - name: Apply simple update UX hotfix'):]
+          section=section[section.index('        run: |\n')+len('        run: |\n'):]
+          section=section[:section.index('      - name: Validate hotfix')]
+          lines=[]
+          for line in section.splitlines():
+              if line.startswith('          '):
+                  lines.append(line[10:])
+              elif not line.strip():
+                  lines.append('')
+              else:
+                  raise SystemExit('UNEXPECTED_R2_RUN_INDENT')
+          Path('/tmp/p05-r2-apply.sh').write_text('\n'.join(lines)+'\n')
+          PY
+          (cd p05 && bash /tmp/p05-r2-apply.sh)
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('p05/tests/contract/backend-online-update-v2.test.ts')
+          s=p.read_text()
+          old="""  assert.ok(updateUi.includes('凭据属于服务器私有 Runtime 配置'));\n  assert.ok(updateUi.includes('无需再次输入管理员密码'));"""
+          new="""  for (const forbidden of ['GitHub', 'core-updates', 'runtime.env', '更新读取凭据', '管理员密码', '技术状态']) {\n    assert.equal(updateUi.includes(forbidden), false, `owner update UI leaked infrastructure concept: ${forbidden}`);\n  }\n  assert.ok(updateUi.includes('检查新版本并安全更新'));\n  assert.ok(updateUi.includes('自动备份'));\n  assert.ok(updateUi.includes('失败可回滚'));\n  assert.ok(updateUi.includes(\"status?.channel === 'AVAILABLE'\"));\n  assert.ok(updateUi.includes(\"status?.channel === 'UP_TO_DATE'\"));"""
+          if old not in s:
+              raise SystemExit('STALE_UPDATE_CONTRACT_ANCHOR_MISSING')
+          p.write_text(s.replace(old,new,1))
+          PY
+          cd p05
+          git add php/src/RuntimeOpsRoutesTrait.php src/client/UpdateShortcut.tsx tests/unit/product-simple-update-ux-truth.test.ts tests/contract/backend-online-update-v2.test.ts
+          git diff --cached --check
+          git diff --cached --name-only | sort > /tmp/changed
+          printf '%s\n' php/src/RuntimeOpsRoutesTrait.php src/client/UpdateShortcut.tsx tests/contract/backend-online-update-v2.test.ts tests/unit/product-simple-update-ux-truth.test.ts | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/changed
+          echo 'P05_SIMPLE_UPDATE_R3_SCOPE=PASS'
+      - name: Validate Product hotfix R3
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          node --import tsx --test tests/unit/product-simple-update-ux-truth.test.ts
+          node --import tsx --test tests/contract/backend-online-update-v2.test.ts
+          php -l php/src/RuntimeOpsRoutesTrait.php >/dev/null
+          npm run test:php-product-parity
+          npm test
+          npm run build
+          echo 'P05_SIMPLE_UPDATE_R3_VALIDATION=PASS'
+      - name: Commit and push private hotfix
+        working-directory: p05
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git commit -m 'fix(P05): simplify owner update experience'
+          test "$(git rev-list --count 8fd6ea22f237eac891bdd0e336947d587560dc75..HEAD)" = 1
+          git push origin HEAD:refs/heads/hotfix/p05-simple-update-ux-20260901
+          echo "P05_SIMPLE_UPDATE_SOURCE=$(git rev-parse HEAD)"
+          echo "P05_SIMPLE_UPDATE_TREE=$(git rev-parse HEAD^{tree})"
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
