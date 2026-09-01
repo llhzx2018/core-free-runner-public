@@ -1,0 +1,75 @@
+name: P05 V1.2.2 Unified Update Sealed Relay
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/p05-v122-unified-update-sealed-relay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    if: github.head_ref == 'relay/p05-v122-unified-update-20260902'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      BRIDGE_URL: https://seo.kewaro.com/P05_V1.2.2_TO_UNIFIED_UPDATE_BRIDGE.php
+    steps:
+      - name: Verify registered shared private read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          php -r 'if(!extension_loaded("sodium")) exit(2);'
+          echo 'P05_RELAY_SHARED_TOKEN=PASS'
+
+      - name: Read Production bridge ephemeral public key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          INFO="$(curl -fsS --connect-timeout 10 --max-time 20 "$BRIDGE_URL?relay=info")"
+          printf '%s' "$INFO" > /tmp/bridge-info.json
+          php -r '$v=json_decode(file_get_contents($argv[1]),true,32,JSON_THROW_ON_ERROR);if(($v["status"]??"")!=="WAITING_RELAY"||($v["sourceVersion"]??"")!=="1.2.2"||($v["targetVersion"]??"")!=="1.2.3"||empty($v["publicKey"])||!preg_match("/^[a-f0-9]{48}$/",(string)($v["nonce"]??"")))exit(1);' /tmp/bridge-info.json
+          PUBLIC_KEY="$(php -r '$v=json_decode(file_get_contents($argv[1]),true,32,JSON_THROW_ON_ERROR);echo $v["publicKey"];' /tmp/bridge-info.json)"
+          NONCE="$(php -r '$v=json_decode(file_get_contents($argv[1]),true,32,JSON_THROW_ON_ERROR);echo $v["nonce"];' /tmp/bridge-info.json)"
+          echo "PUBLIC_KEY=$PUBLIC_KEY" >> "$GITHUB_ENV"
+          echo "NONCE=$NONCE" >> "$GITHUB_ENV"
+          echo 'P05_RELAY_EPHEMERAL_KEY=PASS'
+
+      - name: Seal and deliver shared token without Production session
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SEALED="$(php -r '$pk=base64_decode(getenv("PUBLIC_KEY"),true);$t=getenv("VF_PRIVATE_READ_TOKEN");if(!is_string($pk)||$pk===""||!is_string($t)||$t==="")exit(2);echo base64_encode(sodium_crypto_box_seal($t,$pk));')"
+          test -n "$SEALED"
+          PAYLOAD="$(php -r 'echo json_encode(["nonce"=>getenv("NONCE"),"sealed"=>$argv[1]],JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);' "$SEALED")"
+          RESPONSE="$(curl -fsS --connect-timeout 10 --max-time 60 -H 'Content-Type: application/json' --data "$PAYLOAD" "$BRIDGE_URL?relay=deliver")"
+          printf '%s' "$RESPONSE" > /tmp/bridge-ready.json
+          php -r '$v=json_decode(file_get_contents($argv[1]),true,32,JSON_THROW_ON_ERROR);if(($v["status"]??"")!=="READY"||($v["targetVersion"]??"")!=="1.2.3")exit(1);' /tmp/bridge-ready.json
+          unset SEALED PAYLOAD RESPONSE
+          echo 'P05_SEALED_TOKEN_RELAY=PASS'
+          echo 'P05_RELAY_PLAINTEXT_TOKEN_PRINTED=NO'
+          echo 'P05_RELAY_PRODUCTION_SESSION_USED=NO'
+
+      - name: Confirm Production remains v1.2.2 before formal backend update
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS --connect-timeout 10 --max-time 20 https://seo.kewaro.com/api/health > /tmp/health.json
+          php -r '$v=json_decode(file_get_contents($argv[1]),true,32,JSON_THROW_ON_ERROR);if(($v["ok"]??false)!==true||($v["version"]??"")!=="1.2.2")exit(1);' /tmp/health.json
+          echo 'P05_RELAY_FORMAL_UPGRADE_EXECUTED=0'
+
+      - name: Cleanup one-time bridge after READY window
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sleep 12
+          PAYLOAD="$(php -r 'echo json_encode(["nonce"=>getenv("NONCE")],JSON_THROW_ON_ERROR);')"
+          RESPONSE="$(curl -fsS --connect-timeout 10 --max-time 30 -H 'Content-Type: application/json' --data "$PAYLOAD" "$BRIDGE_URL?relay=cleanup")"
+          php -r '$v=json_decode($argv[1],true,32,JSON_THROW_ON_ERROR);if(($v["status"]??"")!=="CLEANED")exit(1);' "$RESPONSE"
+          echo 'P05_ONE_TIME_BRIDGE_CLEANUP=PASS'
+          echo 'P05_RELAY_RUNTIME_SECRET_WRITE=PASS'
+          echo 'P05_RELAY_FORMAL_PRODUCT_UPGRADE_WRITE=0'
