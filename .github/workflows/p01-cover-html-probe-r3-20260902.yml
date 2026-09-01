@@ -1,0 +1,107 @@
+name: P01 Cover HTML Failure Probe R3
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-cover-html-probe-r3-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: 1190cb655ed392ea57a2d921b4447b5ccc7b880b
+      EVID: /tmp/p01-cover-html-r3
+    steps:
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source and fresh develop fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$EVID"; mkdir -p "$EVID/bodies" "$EVID/headers"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          REMOTE="$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$REMOTE" | tee "$EVID/source.txt"
+          test "$REMOTE" = "$SOURCE"
+      - name: Probe real pages with product and browser user agents
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PRODUCT_UA='VF-Start/2.36.4 CoverCache'
+          BROWSER_UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
+          cat > "$EVID/urls.tsv" <<'EOF'
+          youtube_channel	https://www.youtube.com/@YouTube
+          bilibili_video	https://www.bilibili.com/video/BV1GJ411x7h7
+          imdb_movie	https://www.imdb.com/title/tt0111161/
+          douban_movie	https://movie.douban.com/subject/1292052/
+          EOF
+          : > "$EVID/curl.tsv"
+          while IFS=$'\t' read -r key url; do
+            for mode in product browser; do
+              if [ "$mode" = product ]; then ua="$PRODUCT_UA"; else ua="$BROWSER_UA"; fi
+              body="$EVID/bodies/${key}-${mode}.html"
+              hdr="$EVID/headers/${key}-${mode}.txt"
+              set +e
+              meta=$(curl -sS -L --max-redirs 3 --connect-timeout 3 --max-time 10 --compressed \
+                -A "$ua" -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1' \
+                -D "$hdr" -o "$body" \
+                -w '%{http_code}\t%{content_type}\t%{url_effective}\t%{size_download}' "$url")
+              rc=$?
+              set -e
+              bytes=$(wc -c < "$body" 2>/dev/null || echo 0)
+              printf '%s\t%s\t%s\t%s\t%s\n' "$key" "$mode" "$rc" "$bytes" "$meta" >> "$EVID/curl.tsv"
+            done
+          done < "$EVID/urls.tsv"
+          cat "$EVID/curl.tsv"
+      - name: Analyze metadata in first 512 KiB and full body
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID" <<'PY'
+          import json,re,sys
+          from pathlib import Path
+          root=Path(sys.argv[1]); out=[]
+          pat=re.compile(r'<meta\b[^>]*(?:property|name)\s*=\s*["\'](?:og:image(?::secure_url)?|twitter:image(?::src)?)["\'][^>]*>',re.I)
+          titlepat=re.compile(r'<title[^>]*>(.*?)</title>',re.I|re.S)
+          for p in sorted((root/'bodies').glob('*.html')):
+              data=p.read_bytes()
+              text=data.decode('utf-8','ignore')
+              first=data[:524288].decode('utf-8','ignore')
+              full=pat.findall(text); firstm=pat.findall(first)
+              title=titlepat.search(text)
+              row={
+                  'probe':p.stem,
+                  'bytes':len(data),
+                  'over_512k':len(data)>524288,
+                  'metadata_first_512k_count':len(firstm),
+                  'metadata_full_count':len(full),
+                  'metadata_first_512k_samples':[x[:500] for x in firstm[:4]],
+                  'title':re.sub(r'\s+',' ',title.group(1)).strip()[:240] if title else '',
+                  'looks_challenge':bool(re.search(r'captcha|verify you are human|access denied|unusual traffic|robot|challenge',text,re.I)),
+              }
+              out.append(row)
+              print(f"{row['probe']} bytes={row['bytes']} over512={row['over_512k']} firstMeta={row['metadata_first_512k_count']} fullMeta={row['metadata_full_count']} challenge={row['looks_challenge']} title={row['title']}")
+          (root/'analysis.json').write_text(json.dumps(out,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - name: Product boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product diff --check
+          test -z "$(git -C product status --porcelain --untracked-files=no)"
+          printf 'TRACKED_PRODUCT_MUTATION=NO\nP01_REF_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-cover-html-probe-r3-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
