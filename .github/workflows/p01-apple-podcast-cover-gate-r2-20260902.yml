@@ -1,0 +1,126 @@
+name: P01 Apple Podcasts Cover Gate R2
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-apple-podcast-cover-gate-r2-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: 63916e73ac8a925a0b6d538b85d923db2f906794
+      PRODUCT_BRANCH: fix/p01-apple-podcast-cover-metadata-20260902
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-apple-cover-r2/evidence
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-apple-cover-r2;mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          grep -Fq '$pageMaxBytes = (string)$provider['"'"'code'"'"'] === '"'"'youtube'"'"' && $candidates === [] ? 3 * 1024 * 1024 : 524288;' product/src/app/ResourceCoverCache.php
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-before.sha256"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\nPRODUCT_BRANCH_ABSENT=YES\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+      - name: Fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:18558 -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-apple-cover-r2.pid
+          C=/tmp/p01-apple-cover-r2.cookies
+          for i in $(seq 1 60);do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:18558/setup.php -o "$EVID/setup.html";then break;fi;sleep .25;done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18558/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Apple Cover R2' --data-urlencode 'admin_password=P01AppleCover2026' --data-urlencode 'admin_password_confirm=P01AppleCover2026' -o "$EVID/setup-post.html"
+      - name: Baseline fixture must stop at 512K
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/baseline.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';require_once getenv('ROOT').'/app/Repository.php';require_once getenv('ROOT').'/app/SurfaceRepository.php';require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);$cat=$repo->createCategory(['name'=>'Apple Baseline','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);$saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Apple Baseline','url'=>'https://podcasts.apple.com/us/podcast/test/id1','description'=>'','is_private'=>0],'manual');$id=(int)$saved['id'];$surface->upsertProfile($id,['surface'=>'channels','resource_kind'=>'播客','note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);
+          $calls=[];$html='<meta property="og:image" content="https://cdn.example.com/apple.jpg">'.str_repeat('A',1400000);$fetcher=static function(string $url,int $maxBytes,string $accept)use(&$calls,$html):array{$calls[]=['url'=>$url,'maxBytes'=>$maxBytes];if(str_contains($url,'podcasts.apple.com'))return ['status'=>200,'contentType'=>'text/html','body'=>$html,'url'=>$url];throw new RuntimeException('FIXTURE_IMAGE_REACHED');};$r=(new VfResourceCoverCache($db,$fetcher))->refreshOne($id,true);echo json_encode(['result'=>$r,'calls'=>$calls],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          if(($calls[0]['maxBytes']??0)!==524288||count($calls)!==1||($r['error']??'')!=='页面没有提供可用的封面图片。')exit(3);echo "BASELINE_APPLE_512K=REPRODUCED\n";
+          PHP
+      - name: Apply one-file page limit candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('product/src/app/ResourceCoverCache.php');s=p.read_text(encoding='utf-8')
+          old="$pageMaxBytes = (string)$provider['code'] === 'youtube' && $candidates === [] ? 3 * 1024 * 1024 : 524288;"
+          new="$pageMaxBytes = match ((string)$provider['code']) {\n            'youtube' => $candidates === [] ? 3 * 1024 * 1024 : 524288,\n            'apple-podcasts' => 2 * 1024 * 1024,\n            default => 524288,\n        };"
+          if s.count(old)!=1:raise SystemExit(f'ANCHOR={s.count(old)}')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          php -l product/src/app/ResourceCoverCache.php;git -C product diff --check;git -C product diff -- src/app/ResourceCoverCache.php | tee "$EVID/candidate.diff"
+          sha256sum product/VERSION product/VF_PROJECT.json > "$EVID/authority-after.sha256";diff -u "$EVID/authority-before.sha256" "$EVID/authority-after.sha256"
+          git -C product add -- src/app/ResourceCoverCache.php;mapfile -t F < <(git -C product diff --cached --name-only);test "${#F[@]}" -eq 1;test "${F[0]}" = src/app/ResourceCoverCache.php
+      - name: Deterministic candidate must reach extracted artwork
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/candidate-fixture.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';require_once getenv('ROOT').'/app/Repository.php';require_once getenv('ROOT').'/app/SurfaceRepository.php';require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);$cat=$repo->createCategory(['name'=>'Apple Candidate','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>10]);$saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Apple Candidate','url'=>'https://podcasts.apple.com/us/podcast/test/id2','description'=>'','is_private'=>0],'manual');$id=(int)$saved['id'];$surface->upsertProfile($id,['surface'=>'channels','resource_kind'=>'播客','note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);
+          $calls=[];$html='<meta property="og:image" content="https://cdn.example.com/apple.jpg">'.str_repeat('A',1400000);$fetcher=static function(string $url,int $maxBytes,string $accept)use(&$calls,$html):array{$calls[]=['url'=>$url,'maxBytes'=>$maxBytes];if(str_contains($url,'podcasts.apple.com'))return ['status'=>200,'contentType'=>'text/html','body'=>$html,'url'=>$url];throw new RuntimeException('FIXTURE_IMAGE_REACHED');};$r=(new VfResourceCoverCache($db,$fetcher))->refreshOne($id,true);echo json_encode(['result'=>$r,'calls'=>$calls],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          if(($calls[0]['maxBytes']??0)!==2097152||count($calls)!==2||!str_contains((string)($calls[1]['url']??''),'cdn.example.com/apple.jpg')||!str_contains((string)($r['error']??''),'FIXTURE_IMAGE_REACHED'))exit(4);echo "DETERMINISTIC_APPLE=PASS\n";
+          PHP
+      - name: Fresh real Apple and YouTube confirmation
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/real-network.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';require_once getenv('ROOT').'/app/Repository.php';require_once getenv('ROOT').'/app/SurfaceRepository.php';require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);$cover=new VfResourceCoverCache($db);$cat=$repo->createCategory(['name'=>'Real Confirm','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>20]);$samples=[['apple','Apple Real','https://podcasts.apple.com/us/podcast/the-daily/id1200361736','播客'],['youtube','YT Real','https://www.youtube.com/@GoogleDevelopers','频道']];$rows=[];foreach($samples as [$key,$title,$url,$kind]){$saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'','is_private'=>0],'manual');$id=(int)$saved['id'];$surface->upsertProfile($id,['surface'=>'channels','resource_kind'=>$kind,'note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);$r=$cover->refreshOne($id,true);$r['key']=$key;$rows[]=$r;echo json_encode($r,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";}file_put_contents(getenv('EVID').'/real-network.json',json_encode($rows,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));$by=[];foreach($rows as $r)$by[$r['key']]=$r;if(empty($by['apple']['success'])||($by['apple']['provider']??'')!=='apple-podcasts')exit(5);if(empty($by['youtube']['success'])||($by['youtube']['provider']??'')!=='youtube')exit(6);$integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$integrity FK=$fk\n";if($integrity!=='ok'||$fk)exit(7);echo "REAL_NETWORK=PASS\n";
+          PHP
+      - name: Commit and push isolated Product branch only after PASS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE";test -z "$(git -C product ls-remote --heads origin refs/heads/$PRODUCT_BRANCH)"
+          git -C product config user.name VictorForge;git -C product config user.email llhzx2018@gmail.com;git -C product commit -m 'fix(P01): recover Apple Podcasts cover metadata'
+          CANDIDATE=$(git -C product rev-parse HEAD);test "$(git -C product rev-parse HEAD^)" = "$SOURCE";mapfile -t F < <(git -C product diff-tree --no-commit-id --name-only -r "$CANDIDATE");test "${#F[@]}" -eq 1;test "${F[0]}" = src/app/ResourceCoverCache.php
+          git -C product push origin "HEAD:refs/heads/$PRODUCT_BRANCH";test "$(git -C product ls-remote origin refs/heads/$PRODUCT_BRANCH | awk '{print $1}')" = "$CANDIDATE"
+          printf 'CANDIDATE=%s\nP01_REF_WRITE=PRODUCT_BRANCH_ONLY\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' "$CANDIDATE" | tee "$EVID/push.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-apple-cover-r2-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-apple-cover-r2.pid 2>/dev/null)" 2>/dev/null || true
