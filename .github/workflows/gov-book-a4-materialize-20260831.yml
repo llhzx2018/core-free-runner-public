@@ -1,4 +1,4 @@
-name: GOV-BOOK A2 B2 Exact Reader Source Adoption 20260901
+name: GOV-BOOK Six-Book Exact Audit 20260901
 
 on:
   push:
@@ -16,181 +16,110 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  adopt-reader-source:
+  audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      TARGET_DEVELOP_SHA: 963f922167b0da01fe7711592142ba2b39004603
+      TARGET_DEVELOP_SHA: ed448c97a703676e4354fd60a75a9d49cb9addcd
       TARGET_MAIN_SHA: e89b0b98dd657e19187940e859fe9e5161df750e
-      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Require registered write capability
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test -n "$VF_RELEASE_WRITE_TOKEN"
-          echo 'VF_RELEASE_WRITE_CAPABILITY=PASS'
-
       - name: Checkout exact GOV-BOOK develop
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: llhzx2018/gov-book
           ref: ${{ env.TARGET_DEVELOP_SHA }}
-          token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: true
+          persist-credentials: false
           fetch-depth: 0
-          path: gov-book
 
-      - name: Hard-lock main and develop before source adoption
-        working-directory: gov-book
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git fetch origin main develop
-          ACTUAL_MAIN="$(git rev-parse origin/main)"
-          ACTUAL_DEVELOP="$(git rev-parse origin/develop)"
-          echo "ACTUAL_MAIN=$ACTUAL_MAIN"
-          echo "ACTUAL_DEVELOP=$ACTUAL_DEVELOP"
-          test "$ACTUAL_MAIN" = "$TARGET_MAIN_SHA"
-          test "$ACTUAL_DEVELOP" = "$TARGET_DEVELOP_SHA"
-          echo 'LIVE_AUTHORITY_GATE=PASS'
-
-      - name: Recover A2 and B2 frozen Reader Source bytes
-        working-directory: gov-book
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          python3 - <<'PY'
-          import hashlib, json, pathlib, zipfile
-
-          root = pathlib.Path('.')
-          catalog = json.loads((root/'BOOK_CATALOG.json').read_text(encoding='utf-8'))
-          by_id = {b['book_id']: b for b in catalog['books'] if b.get('book_version')}
-
-          def sha256_bytes(data): return hashlib.sha256(data).hexdigest()
-          def sha256_file(path):
-              h=hashlib.sha256()
-              with path.open('rb') as f:
-                  for chunk in iter(lambda:f.read(1024*1024), b''):
-                      h.update(chunk)
-              return h.hexdigest()
-
-          changed=[]
-          for book_id in ['A2','B2']:
-              b=by_id[book_id]
-              ver=b['book_version']
-              base=root/'books'/book_id/'versions'/ver
-              manifest=json.loads((base/'SOURCE_MANIFEST.json').read_text(encoding='utf-8'))
-              assert manifest['qualification'] == b['qualification']
-              zip_path=root/b['download_path']
-              assert zip_path.exists(), (book_id,'DOWNLOAD_ZIP_MISSING')
-              assert sha256_file(zip_path)==b['delivery_sha256']==manifest['artifact_sha256'], (book_id,'DOWNLOAD_ZIP_SHA_MISMATCH')
-              with zipfile.ZipFile(zip_path) as z:
-                  assert z.testzip() is None, (book_id,'DOWNLOAD_ZIP_CRC_FAIL')
-                  members=[n for n in z.namelist() if not n.endswith('/')]
-                  for item in manifest['files']:
-                      assert len(item['sha256']) == 64, (book_id,item['path'],'INVALID_MANIFEST_SHA_LENGTH')
-                      rel=item['path']
-                      exact=[]
-                      for n in members:
-                          if n==rel or n.endswith('/'+rel):
-                              data=z.read(n)
-                              if len(data)==item['size_bytes'] and sha256_bytes(data)==item['sha256']:
-                                  exact.append((n,data))
-                      assert exact, (book_id,rel,'NO_EXACT_ZIP_MEMBER')
-                      selected_name,selected_data=sorted(exact,key=lambda x:(len(x[0]),x[0]))[0]
-                      target=base/'reader'/pathlib.PurePosixPath(rel)
-                      before=target.read_bytes() if target.exists() else None
-                      if before != selected_data:
-                          target.parent.mkdir(parents=True,exist_ok=True)
-                          target.write_bytes(selected_data)
-                          changed.append(str(target))
-                      assert target.stat().st_size==item['size_bytes']
-                      assert sha256_file(target)==item['sha256']
-                      print('SOURCE_ENTRY_EXACT='+json.dumps({
-                          'book_id':book_id,'path':rel,'matching_members':len(exact),
-                          'selected':selected_name,'changed':before!=selected_data,'sha256':item['sha256']
-                      },ensure_ascii=False,separators=(',',':')))
-              print(book_id+'_WORKTREE_FULL_READER_SOURCE_EXACT=PASS')
-          print('READER_SOURCE_WORKTREE_CHANGED_COUNT='+str(len(changed)))
-          print('PRODUCT_CORRECTION=NO')
-          PY
-
-      - name: Stage only allowed source paths and verify staged Git blobs exact
-        working-directory: gov-book
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          git add -f -- \
-            books/A2/versions/v0.9.0/reader \
-            books/B2/versions/v1.0.0/reader
-          python3 - <<'PY'
-          import hashlib,json,pathlib,subprocess
-          root=pathlib.Path('.')
-          changed=subprocess.check_output(['git','-c','core.quotepath=false','diff','--cached','--name-only','-z']).decode('utf-8').split('\0')
-          changed=[p for p in changed if p]
-          assert changed, 'NO_STAGED_CHANGE'
-          allowed_prefixes=(
-              'books/A2/versions/v0.9.0/reader/',
-              'books/B2/versions/v1.0.0/reader/',
-          )
-          for p in changed:
-              assert p.startswith(allowed_prefixes), ('UNEXPECTED_STAGED_PATH',p)
-          print('STAGED_CHANGED_PATHS='+json.dumps(changed,ensure_ascii=False,separators=(',',':')))
-
-          for book_id,ver in [('A2','v0.9.0'),('B2','v1.0.0')]:
-              manifest_path=f'books/{book_id}/versions/{ver}/SOURCE_MANIFEST.json'
-              if book_id=='A4':
-                  manifest_bytes=subprocess.check_output(['git','show',':'+manifest_path])
-                  manifest=json.loads(manifest_bytes.decode('utf-8'))
-              else:
-                  manifest=json.loads(pathlib.Path(manifest_path).read_text(encoding='utf-8'))
-              for item in manifest['files']:
-                  path=f"books/{book_id}/versions/{ver}/reader/{item['path']}"
-                  blob=subprocess.check_output(['git','show',':'+path])
-                  assert len(blob)==item['size_bytes'],(book_id,item['path'],'STAGED_BLOB_SIZE')
-                  assert hashlib.sha256(blob).hexdigest()==item['sha256'],(book_id,item['path'],'STAGED_BLOB_SHA')
-              print(book_id+'_STAGED_GIT_BLOB_MANIFEST_EXACT=PASS')
-          PY
-
-      - name: Re-lock authority then commit develop only
-        working-directory: gov-book
+      - name: Lock live refs
         shell: bash
         run: |
           set -Eeuo pipefail
           git fetch origin main develop
           test "$(git rev-parse origin/main)" = "$TARGET_MAIN_SHA"
           test "$(git rev-parse origin/develop)" = "$TARGET_DEVELOP_SHA"
-          git config user.name 'VF Public Runner'
-          git config user.email 'runner@users.noreply.github.com'
-          git commit -m 'content(book): adopt exact Reader Source from verified downloads'
-          git push origin HEAD:develop
+          echo 'LIVE_GIT_AUTHORITY_GATE=PASS'
 
-      - name: Remote Git-blob exact readback for A2 and B2 manifests
-        working-directory: gov-book
+      - name: Audit six exact ZIPs manifests and Git blobs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess, zipfile
+
+          root=pathlib.Path('.')
+          catalog=json.loads((root/'BOOK_CATALOG.json').read_text(encoding='utf-8'))
+          books=[b for b in catalog['books'] if b.get('book_version')]
+          assert [b['book_id'] for b in books] == ['A1','A2','A3','A4','B1','B2']
+          expected_qualification={
+              'A1':'PASS','A2':'PARTIAL','A3':'PARTIAL',
+              'A4':'PARTIAL','B1':'PASS','B2':'PASS'
+          }
+
+          def sha(data):
+              return hashlib.sha256(data).hexdigest()
+
+          for b in books:
+              book_id=b['book_id']
+              ver=b['book_version']
+              assert b['qualification']==expected_qualification[book_id]
+              zip_path=root/b['download_path']
+              zip_bytes=zip_path.read_bytes()
+              assert sha(zip_bytes)==b['delivery_sha256'],(book_id,'ZIP_SHA')
+              with zipfile.ZipFile(zip_path) as z:
+                  assert z.testzip() is None,(book_id,'ZIP_CRC')
+                  names=[n for n in z.namelist() if not n.endswith('/')]
+                  for n in names:
+                      p=pathlib.PurePosixPath(n)
+                      assert not p.is_absolute() and '..' not in p.parts,(book_id,'UNSAFE_ZIP_MEMBER',n)
+
+                  base=root/'books'/book_id/'versions'/ver
+                  manifest_path=base/'SOURCE_MANIFEST.json'
+                  manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
+                  assert manifest['artifact_sha256']==b['delivery_sha256'],(book_id,'MANIFEST_ARTIFACT_SHA')
+                  assert manifest['qualification']==b['qualification'],(book_id,'MANIFEST_QUALIFICATION')
+                  entries=manifest['files']
+                  manifest_paths=[x['path'] for x in entries]
+                  assert len(manifest_paths)==len(set(manifest_paths)),(book_id,'DUPLICATE_MANIFEST_PATH')
+                  reader=base/'reader'
+                  actual_paths=sorted(str(p.relative_to(reader)).replace('\\','/') for p in reader.rglob('*') if p.is_file())
+                  assert sorted(manifest_paths)==actual_paths,(book_id,'MANIFEST_READER_PATH_SET')
+
+                  for item in entries:
+                      rel=item['path']
+                      git_path=f"books/{book_id}/versions/{ver}/reader/{rel}"
+                      blob=subprocess.check_output(['git','show',f'HEAD:{git_path}'])
+                      assert len(blob)==item['size_bytes'],(book_id,rel,'GIT_BLOB_SIZE')
+                      assert sha(blob)==item['sha256'],(book_id,rel,'GIT_BLOB_SHA')
+                      matching=[]
+                      for n in names:
+                          if n==rel or n.endswith('/'+rel):
+                              data=z.read(n)
+                              if len(data)==item['size_bytes'] and sha(data)==item['sha256']:
+                                  matching.append(n)
+                      assert matching,(book_id,rel,'NO_EXACT_ZIP_MEMBER')
+                  print('SIX_BOOK_ENTRY_EXACT='+json.dumps({
+                      'book_id':book_id,'version':ver,'qualification':b['qualification'],
+                      'zip_sha256':b['delivery_sha256'],'manifest_files':len(entries)
+                  },ensure_ascii=False,separators=(',',':')))
+
+          assert catalog['books'][2]['qualification']=='PARTIAL'
+          assert catalog['books'][3]['qualification']=='PARTIAL'
+          print('REMOTE_DOWNLOAD_EXACT=PASS_6_OF_6')
+          print('FULL_READER_SOURCE_EXACT=PASS_6_OF_6')
+          print('SIX_BOOK_SOURCE_MANIFEST_GIT_BLOB_AUDIT=PASS')
+          print('A3_QUALIFICATION=PARTIAL_UNCHANGED')
+          print('A4_QUALIFICATION=PARTIAL_UNCHANGED')
+          print('PRODUCT_CORRECTION=NO')
+          print('OWNER_PREVIEW_RUNTIME_APPLICABILITY=N/A_BOOK_REPOSITORY_CLOSURE')
+          PY
+
+      - name: Confirm main stayed frozen
         shell: bash
         run: |
           set -Eeuo pipefail
           git fetch origin main develop
-          REMOTE_MAIN="$(git rev-parse origin/main)"
-          REMOTE_DEVELOP="$(git rev-parse origin/develop)"
-          test "$REMOTE_MAIN" = "$TARGET_MAIN_SHA"
-          python3 - <<'PY'
-          import hashlib,json,subprocess
-          for book_id,ver in [('A2','v0.9.0'),('B2','v1.0.0')]:
-              manifest_path=f'books/{book_id}/versions/{ver}/SOURCE_MANIFEST.json'
-              manifest_bytes=subprocess.check_output(['git','show','origin/develop:'+manifest_path])
-              manifest=json.loads(manifest_bytes.decode('utf-8'))
-              for item in manifest['files']:
-                  path=f"books/{book_id}/versions/{ver}/reader/{item['path']}"
-                  blob=subprocess.check_output(['git','show','origin/develop:'+path])
-                  assert len(blob)==item['size_bytes'],(book_id,item['path'],'REMOTE_BLOB_SIZE')
-                  assert hashlib.sha256(blob).hexdigest()==item['sha256'],(book_id,item['path'],'REMOTE_BLOB_SHA')
-              print(book_id+'_REMOTE_FULL_READER_SOURCE_EXACT=PASS')
-          PY
-          echo "GOV_BOOK_DEVELOP_RESULT=$REMOTE_DEVELOP"
+          test "$(git rev-parse origin/main)" = "$TARGET_MAIN_SHA"
+          test "$(git rev-parse origin/develop)" = "$TARGET_DEVELOP_SHA"
           echo 'MAIN_UNCHANGED=PASS'
-          echo 'A3_QUALIFICATION=PARTIAL_UNCHANGED'
-          echo 'A4_QUALIFICATION=PARTIAL_UNCHANGED'
-          echo 'PRODUCT_CORRECTION=NO'
-          echo 'STATUS_DOCS_CHANGED=NO'
+          echo 'AUDIT_MODE=READ_ONLY'
