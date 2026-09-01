@@ -1,0 +1,132 @@
+name: P01 Provider Cover Metadata Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-provider-cover-metadata-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE: 63916e73ac8a925a0b6d538b85d923db2f906794
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-provider-cover-meta/evidence
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-provider-cover-meta; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+      - name: Probe product-like page fetch at 512K and 4M
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/probe.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+
+          function probeFetch(string $url, int $maxBytes): array {
+              $current=$url; $hops=[];
+              for($redirects=0;$redirects<=3;$redirects++){
+                  $safe=vf_safe_remote_url($current,'封面地址');
+                  $headers=[];$body='';$overflow=false;
+                  $ch=curl_init((string)$safe['url']);
+                  curl_setopt($ch,CURLOPT_FOLLOWLOCATION,false);
+                  curl_setopt($ch,CURLOPT_RETURNTRANSFER,false);
+                  curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,3);
+                  curl_setopt($ch,CURLOPT_TIMEOUT,10);
+                  curl_setopt($ch,CURLOPT_USERAGENT,'VF-Start/'.VF_VERSION.' CoverCache');
+                  curl_setopt($ch,CURLOPT_HTTPHEADER,['Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1','Accept-Language: zh-CN,zh;q=0.8,en;q=0.5']);
+                  curl_setopt($ch,CURLOPT_SSL_VERIFYPEER,true);curl_setopt($ch,CURLOPT_SSL_VERIFYHOST,2);curl_setopt($ch,CURLOPT_ENCODING,'');
+                  if((string)$safe['resolve']!=='')curl_setopt($ch,CURLOPT_RESOLVE,[(string)$safe['resolve']]);
+                  curl_setopt($ch,CURLOPT_HEADERFUNCTION,static function($handle,string $line)use(&$headers):int{$t=trim($line);if($t!==''&&str_contains($t,':')){[$n,$v]=explode(':',$t,2);$headers[strtolower(trim($n))]=trim($v);}return strlen($line);});
+                  curl_setopt($ch,CURLOPT_WRITEFUNCTION,static function($handle,string $chunk)use(&$body,&$overflow,$maxBytes):int{if(strlen($body)+strlen($chunk)>$maxBytes){$overflow=true;return 0;}$body.=$chunk;return strlen($chunk);});
+                  $ok=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);$err=curl_error($ch);curl_close($ch);
+                  $hop=['url'=>(string)$safe['url'],'status'=>$status,'content_type'=>(string)($headers['content-type']??''),'content_length'=>(string)($headers['content-length']??''),'location'=>(string)($headers['location']??''),'bytes'=>strlen($body),'overflow'=>$overflow,'curl_ok'=>$ok!==false,'curl_error'=>$err];
+                  $hops[]=$hop;
+                  if($ok===false)return ['ok'=>false,'final_url'=>(string)$safe['url'],'body'=>$body,'hops'=>$hops,'error'=>$overflow?'REMOTE_BODY_LIMIT':($err?:'CURL_FAILED')];
+                  if($status>=300&&$status<400&&!empty($headers['location'])){$current=VfResourceCoverCache::resolveUrl((string)$safe['url'],(string)$headers['location']);if($current==='')return ['ok'=>false,'body'=>$body,'hops'=>$hops,'error'=>'BAD_REDIRECT'];continue;}
+                  return ['ok'=>$status>=200&&$status<300,'final_url'=>(string)$safe['url'],'body'=>$body,'hops'=>$hops,'error'=>$status>=200&&$status<300?'':'HTTP_'.$status];
+              }
+              return ['ok'=>false,'body'=>'','hops'=>$hops,'error'=>'TOO_MANY_REDIRECTS'];
+          }
+
+          $targets=[
+              'bilibili'=>['https://www.bilibili.com/video/BV1GJ411x7h7/',524288,4194304],
+              'apple'=>['https://podcasts.apple.com/us/podcast/the-daily/id1200361736',524288,4194304],
+          ];
+          $all=[];
+          foreach($targets as $key=>$spec){
+              [$url,$small,$large]=$spec;
+              foreach(['small'=>$small,'large'=>$large] as $label=>$limit){
+                  try{$r=probeFetch($url,$limit);}catch(Throwable $e){$r=['ok'=>false,'body'=>'','hops'=>[],'error'=>'EXCEPTION: '.$e->getMessage()];}
+                  $body=(string)($r['body']??'');$final=(string)($r['final_url']??$url);
+                  $candidates=$body!==''?VfResourceCoverCache::extractCoverCandidates($body,$final):[];
+                  $meta=[];
+                  if($body!==''&&preg_match_all('/<(meta|link)\b[^>]*(?:og:image|twitter:image|image_src)[^>]*>/i',$body,$m))$meta=array_slice($m[0],0,10);
+                  $summary=['provider'=>$key,'mode'=>$label,'limit'=>$limit,'ok'=>(bool)($r['ok']??false),'error'=>(string)($r['error']??''),'hops'=>$r['hops']??[],'body_bytes'=>strlen($body),'candidate_count'=>count($candidates),'candidates'=>array_slice($candidates,0,10),'meta_snippets'=>$meta,'contains_og_image'=>stripos($body,'og:image')!==false,'contains_twitter_image'=>stripos($body,'twitter:image')!==false,'contains_image_src'=>stripos($body,'image_src')!==false];
+                  $all[]=$summary;echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+                  file_put_contents(getenv('EVID').'/'.$key.'-'.$label.'.html',substr($body,0,min(strlen($body),1048576)));
+              }
+          }
+          file_put_contents(getenv('EVID').'/report.json',json_encode($all,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          PHP
+      - name: Classify likely cause
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/report.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys
+          rows=json.load(open(sys.argv[1],encoding='utf-8'))
+          by={}
+          for r in rows: by.setdefault(r['provider'],{})[r['mode']]=r
+          for provider,m in by.items():
+              s,l=m['small'],m['large']
+              if (not s['ok']) and s['error']=='REMOTE_BODY_LIMIT' and l['ok'] and l['candidate_count']>0:
+                  cause='PAGE_LIMIT_BLOCKS_METADATA'
+              elif s['ok'] and s['candidate_count']==0 and l['candidate_count']==0:
+                  cause='NO_SUPPORTED_META_IN_RESPONSE'
+              elif s['ok'] and s['candidate_count']>0:
+                  cause='EXTRACTOR_HAS_CANDIDATE_CHECK_IMAGE_FETCH_NEXT'
+              elif (not s['ok']) and (not l['ok']):
+                  cause='REMOTE_FETCH_FAILURE_OR_ANTIBOT'
+              else:
+                  cause='MIXED_REQUIRES_REVIEW'
+              print(f'{provider}={cause}')
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-provider-cover-metadata-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
