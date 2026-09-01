@@ -1,0 +1,149 @@
+name: P01 Bilibili Fetch Stage Diagnostic
+on:
+  push:
+    branches: [tmp/p01-cover-coverage-diagnostic-20260902]
+    paths: [.github/workflows/p01-bilibili-fetch-stage-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-bilibili-stage/evidence
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence and fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-bilibili-stage; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+          php -S 127.0.0.1:18560 -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-bilibili-stage.pid
+          C=/tmp/p01-bilibili-stage.cookies
+          for i in $(seq 1 60); do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:18560/setup.php -o "$EVID/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18560/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Bilibili Fetch Stage' --data-urlencode 'admin_password=P01BilibiliStage2026' --data-urlencode 'admin_password_confirm=P01BilibiliStage2026' -o "$EVID/setup-post.html"
+      - name: Instrument refreshOne real fetch sequence
+        shell: bash
+        env:
+          EVID: ${{ env.EVID }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/result.txt"
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/Repository.php';
+          require_once getenv('ROOT').'/app/SurfaceRepository.php';
+          require_once getenv('ROOT').'/app/ResourceCoverCache.php';
+
+          $logPath=getenv('EVID').'/fetch-sequence.jsonl';
+          $calls=[];
+          $fetcher=static function(string $url,int $maxBytes,string $accept)use(&$calls,$logPath):array{
+              $safe=vf_safe_remote_url($url,'封面地址');
+              $headers=[];$body='';$overflow=false;
+              $ch=curl_init((string)$safe['url']);
+              curl_setopt($ch,CURLOPT_FOLLOWLOCATION,false);
+              curl_setopt($ch,CURLOPT_RETURNTRANSFER,false);
+              curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,3);
+              curl_setopt($ch,CURLOPT_TIMEOUT,7);
+              curl_setopt($ch,CURLOPT_USERAGENT,'VF-Start/'.VF_VERSION.' CoverCache');
+              curl_setopt($ch,CURLOPT_HTTPHEADER,['Accept: '.$accept,'Accept-Language: zh-CN,zh;q=0.8,en;q=0.5']);
+              curl_setopt($ch,CURLOPT_SSL_VERIFYPEER,true);curl_setopt($ch,CURLOPT_SSL_VERIFYHOST,2);curl_setopt($ch,CURLOPT_ENCODING,'');
+              if((string)$safe['resolve']!=='')curl_setopt($ch,CURLOPT_RESOLVE,[(string)$safe['resolve']]);
+              curl_setopt($ch,CURLOPT_HEADERFUNCTION,static function($h,string $line)use(&$headers):int{$t=trim($line);if($t!==''&&str_contains($t,':')){[$n,$v]=explode(':',$t,2);$headers[strtolower(trim($n))]=trim($v);}return strlen($line);});
+              curl_setopt($ch,CURLOPT_WRITEFUNCTION,static function($h,string $chunk)use(&$body,&$overflow,$maxBytes):int{if(strlen($body)+strlen($chunk)>$maxBytes){$overflow=true;return 0;}$body.=$chunk;return strlen($chunk);});
+              $ok=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);$err=curl_error($ch);curl_close($ch);
+              $isHtml=str_contains(strtolower((string)($headers['content-type']??'')),'html')||str_contains($accept,'text/html');
+              $candidates=$isHtml&&$body!==''?VfResourceCoverCache::extractCoverCandidates($body,(string)$safe['url']):[];
+              $mime='';$dims=null;
+              if($body!==''){
+                  if(class_exists('finfo')){$fi=new finfo(FILEINFO_MIME_TYPE);$mime=strtolower((string)$fi->buffer($body));}
+                  $size=@getimagesizefromstring($body);if(is_array($size))$dims=[(int)$size[0],(int)$size[1]];
+              }
+              $entry=['call'=>count($calls)+1,'requested_url'=>$url,'safe_url'=>(string)$safe['url'],'max_bytes'=>$maxBytes,'accept'=>$accept,'status'=>$status,'content_type'=>(string)($headers['content-type']??''),'location'=>(string)($headers['location']??''),'bytes'=>strlen($body),'overflow'=>$overflow,'curl_ok'=>$ok!==false,'curl_error'=>$err,'detected_mime'=>$mime,'dimensions'=>$dims,'candidate_count'=>count($candidates),'candidates'=>array_slice($candidates,0,6),'markers'=>['og_image'=>substr_count($body,'og:image'),'initial_state'=>substr_count($body,'__INITIAL_STATE__'),'hdslb'=>substr_count($body,'hdslb.com')]];
+              $calls[]=$entry;file_put_contents($logPath,json_encode($entry,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n",FILE_APPEND);echo 'FETCH='.json_encode($entry,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+              if($ok===false){if($overflow)throw new RuntimeException('远程响应体超过大小限制。');throw new RuntimeException('远程请求失败：'.($err!==''?$err:'未知错误'));}
+              return ['status'=>$status,'location'=>(string)($headers['location']??''),'contentType'=>(string)($headers['content-type']??''),'body'=>$body,'url'=>(string)$safe['url']];
+          };
+
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'Bilibili Fetch Stage','parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $url='https://www.bilibili.com/video/BV1MVwizMEjr/';
+          $saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>'Bilibili Fetch Stage Sample','url'=>$url,'description'=>'','is_private'=>0],'manual');$id=(int)$saved['id'];
+          $surface->upsertProfile($id,['surface'=>'watch','resource_kind'=>'电影','note'=>'','background_friendly'=>0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>'']);
+          $t=microtime(true);$result=(new VfResourceCoverCache($db,$fetcher))->refreshOne($id,true);$elapsed=(int)round((microtime(true)-$t)*1000);
+          $projection=array_values(array_filter($surface->allAssets(true),fn($a)=>(int)$a['id']===$id))[0]??[];
+          $summary=['result'=>$result,'elapsed_ms'=>$elapsed,'call_count'=>count($calls),'calls'=>$calls,'projection'=>['provider'=>$projection['provider']??'','cover_url'=>$projection['cover_url']??'','cover_source'=>$projection['cover_source']??'']];
+          file_put_contents(getenv('EVID').'/summary.json',json_encode($summary,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+          echo 'SUMMARY='.json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));echo "INTEGRITY=$integrity FK=$fk\n";if($integrity!=='ok'||$fk)exit(3);
+          echo "BILIBILI_FETCH_STAGE_DIAGNOSTIC=COMPLETE\n";
+          PHP
+      - name: Classify failure stage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/summary.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys
+          s=json.load(open(sys.argv[1],encoding='utf-8'));calls=s['calls'];result=s['result']
+          if not calls:
+              c='NO_NETWORK_CALL'
+          elif calls[0]['status']!=200 or calls[0]['candidate_count']==0:
+              c='PAGE_STAGE_REMOTE_VARIABILITY_OR_ANTIBOT'
+          elif len(calls)==1:
+              c='PAGE_HAS_CANDIDATE_BUT_IMAGE_STAGE_NOT_REACHED'
+          else:
+              image=calls[1:]
+              if any(x['status']>=200 and x['status']<300 and (x.get('dimensions') or '').__class__ is list for x in image):
+                  c='IMAGE_FETCH_REACHED_VALID_IMAGE_CHECK_PRODUCT_RESULT'
+              elif any(x['status']<200 or x['status']>=300 or not x['curl_ok'] for x in image):
+                  c='IMAGE_CDN_REMOTE_FAILURE'
+              else:
+                  c='IMAGE_RESPONSE_INVALID_OR_UNSUPPORTED'
+          print('CLASSIFICATION='+c)
+          print('RESULT_SUCCESS='+str(bool(result.get('success')))
+          print('CALL_COUNT='+str(len(calls)))
+          for x in calls: print('CALL_%s status=%s bytes=%s type=%s mime=%s dims=%s candidates=%s url=%s'%(x['call'],x['status'],x['bytes'],x['content_type'],x['detected_mime'],x['dimensions'],x['candidate_count'],x['requested_url']))
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nMAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-bilibili-fetch-stage-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-bilibili-stage.pid 2>/dev/null)" 2>/dev/null || true
