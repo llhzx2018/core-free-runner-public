@@ -1,0 +1,125 @@
+name: P01 Scroll Sticky Diagnostic
+on:
+  push:
+    branches: [release/p01-v2362-candidate-20260901]
+    paths: [.github/workflows/p01-scroll-sticky-diagnostic-20260901.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SOURCE: 4ec93adad93977a519675b55806866c896bad09f
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-scroll-sticky-diagnostic
+      PORT: '18821'
+      ADMIN_PASS: P01ScrollDiag2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout exact develop truth
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh runtime and long-page seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$EVID"; mkdir -p "$EVID/screens"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          printf 'SOURCE=%s\nTREE=%s\nRUNTIME_TREE=%s\n' "$SOURCE" "$(git -C product rev-parse HEAD^{tree})" "$(git -C product rev-parse HEAD:src)" | tee "$EVID/source.txt"
+          grep -RniE 'position[[:space:]]*:[[:space:]]*(sticky|fixed)|z-index|overflow' "$ROOT/assets" --include='*.css' > "$EVID/css-position-overflow.txt" || true
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-scroll-sticky.pid
+          C="$EVID/setup.cookies"
+          for i in $(seq 1 60); do curl -fsS -c "$C" -b "$C" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Scroll Diagnostic' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php'; require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$r=new VfRepository($db);$s=new VfSurfaceRepository($db);
+          $cats=[];for($c=1;$c<=8;$c++)$cats[]=$r->createCategory(['name'=>'滚动分类'.$c,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$c]);
+          $save=function($title,$url,$cat,$private=0)use($r){return (int)$r->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'滚动诊断长页面内容','tags'=>'scroll diagnostic','is_private'=>$private],'manual')['id'];};
+          for($i=1;$i<=96;$i++)$save('导航测试 '.$i,'https://example.com/start-'.$i,$cats[$i%count($cats)],0);
+          for($i=1;$i<=48;$i++){ $id=$save('频道测试 '.$i,'https://www.youtube.com/@scroll-channel-'.$i,$cats[$i%count($cats)],0);$s->upsertProfile($id,['surface'=>'channels','resource_kind'=>'频道']); }
+          for($i=1;$i<=48;$i++){ $id=$save('影视测试 '.$i,'https://example.com/watch-'.$i,$cats[$i%count($cats)],0);$s->upsertProfile($id,['surface'=>'watch','resource_kind'=>'电影','media_year'=>(string)(2000+$i%26)]); }
+          for($i=1;$i<=40;$i++){ $id=$save('专题测试 '.$i,'https://example.com/topic-'.$i,$cats[$i%count($cats)],0);$s->upsertProfile($id,['surface'=>'topics','resource_kind'=>'专题']); }
+          echo "LONG_PAGE_SEED=PASS\n";
+          PHP
+      - name: Chromium scroll geometry diagnostic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"
+          mkdir -p /tmp/p01-scroll-pw; cd /tmp/p01-scroll-pw
+          npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          cat > diag.cjs <<'JS'
+          const {chromium}=require('playwright-core'),fs=require('fs'),path=require('path');
+          const base=`http://127.0.0.1:${process.env.PORT}/`,E=process.env.EVID,pass=process.env.ADMIN_PASS;
+          const routes=['start.php','channels.php','watch.php','topics.php'];
+          const ident=e=>{let s=e.tagName.toLowerCase();if(e.id)s+='#'+e.id;if(e.classList?.length)s+='.'+[...e.classList].slice(0,4).join('.');return s};
+          const snap=()=>[...document.querySelectorAll('body *')].map(e=>{const c=getComputedStyle(e);if(!['sticky','fixed'].includes(c.position))return null;const r=e.getBoundingClientRect(),p=e.parentElement?getComputedStyle(e.parentElement):null;return{id:ident(e),position:c.position,top:c.top,bottom:c.bottom,z:c.zIndex,bg:c.backgroundColor,rect:{x:r.x,y:r.y,w:r.width,h:r.height,b:r.bottom},parentOverflow:p?`${p.overflow}/${p.overflowY}/${p.overflowX}`:''}}).filter(Boolean);
+          const overlaps=()=>{const S=[...document.querySelectorAll('body *')].filter(e=>['sticky','fixed'].includes(getComputedStyle(e).position)&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0);const C=[...document.querySelectorAll('input,select,button,a,.vf-workspace-card,.vf-asset-card,.vf-resource-card,.card')].filter(e=>!S.includes(e)&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0);let out=[];for(const s of S){const a=s.getBoundingClientRect();for(const c of C){const b=c.getBoundingClientRect(),ix=Math.max(0,Math.min(a.right,b.right)-Math.max(a.left,b.left)),iy=Math.max(0,Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));if(ix*iy>80)out.push({sticky:ident(s),content:ident(c),area:Math.round(ix*iy),stickyBg:getComputedStyle(s).backgroundColor,stickyZ:getComputedStyle(s).zIndex});if(out.length>80)return out}}return out};
+          (async()=>{const b=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});const result={source:process.env.SOURCE,widths:{}};
+            for(const width of [390,1440]){const ctx=await b.newContext({viewport:{width,height:width===390?844:900}});const req=ctx.request;let q=await req.post(base+'api.php?action=login',{data:{password:pass}});if(!q.ok()||!(await q.json()).ok)throw Error('login failed');const p=await ctx.newPage();result.widths[width]={};
+              for(const route of routes){await p.goto(base+route,{waitUntil:'domcontentloaded'});await p.waitForTimeout(250);const max=await p.evaluate(()=>Math.max(0,document.documentElement.scrollHeight-innerHeight));const ys=[0,Math.min(180,max),Math.round(max*.45),Math.round(max*.8)].filter((v,i,a)=>a.indexOf(v)===i);const rows=[];
+                for(let i=0;i<ys.length;i++){await p.evaluate(y=>scrollTo(0,y),ys[i]);await p.waitForTimeout(140);const data=await p.evaluate(()=>({y:scrollY,scrollHeight:document.documentElement.scrollHeight,clientHeight:innerHeight,overflowX:document.documentElement.scrollWidth-document.documentElement.clientWidth,sticky:snap(),overlaps:overlaps()}));rows.push(data);await p.screenshot({path:path.join(E,'screens',`${width}-${route.replace('.php','')}-${i}.png`),fullPage:false});}
+                result.widths[width][route]=rows;
+              }await ctx.close();}
+            fs.writeFileSync(path.join(E,'geometry.json'),JSON.stringify(result,null,2));await b.close();console.log('P01_SCROLL_STICKY_DIAGNOSTIC=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          # inject browser helpers into page context through addInitScript-compatible global functions
+          python3 - <<'PY'
+          p='/tmp/p01-scroll-pw/diag.cjs';s=open(p).read();s=s.replace("const routes=['start.php'", "const routes=['start.php'")
+          s=s.replace("const snap=()=>[...document.querySelectorAll", "const browserFns=()=>{window.ident=e=>{let s=e.tagName.toLowerCase();if(e.id)s+='#'+e.id;if(e.classList?.length)s+='.'+[...e.classList].slice(0,4).join('.');return s};window.snap="+snap_js+";window.overlaps="+over_js+"};\nconst snap=()=>[...document.querySelectorAll") if False else s
+          open(p,'w').write(s)
+          PY
+          # define helpers directly in each evaluate call via init script
+          cat > helpers.js <<'JS'
+          window.ident=e=>{let s=e.tagName.toLowerCase();if(e.id)s+='#'+e.id;if(e.classList?.length)s+='.'+[...e.classList].slice(0,4).join('.');return s};
+          window.snap=()=>[...document.querySelectorAll('body *')].map(e=>{const c=getComputedStyle(e);if(!['sticky','fixed'].includes(c.position))return null;const r=e.getBoundingClientRect(),p=e.parentElement?getComputedStyle(e.parentElement):null;return{id:ident(e),position:c.position,top:c.top,bottom:c.bottom,z:c.zIndex,bg:c.backgroundColor,rect:{x:r.x,y:r.y,w:r.width,h:r.height,b:r.bottom},parentOverflow:p?`${p.overflow}/${p.overflowY}/${p.overflowX}`:''}}).filter(Boolean);
+          window.overlaps=()=>{const S=[...document.querySelectorAll('body *')].filter(e=>['sticky','fixed'].includes(getComputedStyle(e).position)&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0);const C=[...document.querySelectorAll('input,select,button,a,.vf-workspace-card,.vf-asset-card,.vf-resource-card,.card')].filter(e=>!S.includes(e)&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0);let out=[];for(const s of S){const a=s.getBoundingClientRect();for(const c of C){const b=c.getBoundingClientRect(),ix=Math.max(0,Math.min(a.right,b.right)-Math.max(a.left,b.left)),iy=Math.max(0,Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));if(ix*iy>80)out.push({sticky:ident(s),content:ident(c),area:Math.round(ix*iy),stickyBg:getComputedStyle(s).backgroundColor,stickyZ:getComputedStyle(s).zIndex});if(out.length>80)return out}}return out};
+          JS
+          # patch page creation to install helpers before navigation
+          python3 - <<'PY'
+          p='diag.cjs';s=open(p).read();s=s.replace("const p=await ctx.newPage();result.widths[width]={};", "const p=await ctx.newPage();await p.addInitScript({path:'helpers.js'});result.widths[width]={};")
+          open(p,'w').write(s)
+          PY
+          SOURCE="$SOURCE" PORT="$PORT" EVID="$EVID" ADMIN_PASS="$ADMIN_PASS" CHROME="$CHROME" node diag.cjs | tee "$EVID/browser.txt"
+          grep -Fx P01_SCROLL_STICKY_DIAGNOSTIC=PASS "$EVID/browser.txt"
+      - name: Summarize geometry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/geometry.json" <<'PY' | tee "$EVID/summary.txt"
+          import json,sys
+          d=json.load(open(sys.argv[1]));print('P01_SCROLL_GEOMETRY_SUMMARY')
+          for w,routes in d['widths'].items():
+            for r,rows in routes.items():
+              ids=sorted({x['id'] for row in rows for x in row['sticky']});ovs=sum(len(row['overlaps']) for row in rows);ox=max(row['overflowX'] for row in rows);print(f'{w} {r} sticky={ids} overlaps={ovs} overflowX={ox}')
+          PY
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-scroll-sticky-diagnostic-${{ github.run_id }}
+          path: /tmp/p01-scroll-sticky-diagnostic
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        run: kill "$(cat /tmp/p01-scroll-sticky.pid 2>/dev/null)" 2>/dev/null || true
