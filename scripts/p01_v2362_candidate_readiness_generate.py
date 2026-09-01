@@ -56,7 +56,7 @@ for old,new in [
     ('repair-v2.36.0.php','repair-v2.36.2.php'),
 ]:
     build=build.replace(old,new)
-build=build.replace("required_added={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}\nif not required_added.issubset(set(added)): raise SystemExit('required runtime additions missing '+json.dumps(added))", "if added or removed: raise SystemExit('patch must not add/remove runtime files: '+json.dumps({'added':added,'removed':removed}))")
+build=build.replace("required_added={'app/ResourceCoverCache.php','app/ResourceMetadata.php','resource-cover-refresh.php'}\nif not required_added.issubset(set(added)): raise SystemExit('required runtime additions missing '+json.dumps(added))", "if set(added)!={'assets/auth-controls.js'} or removed: raise SystemExit('unexpected patch runtime boundary: '+json.dumps({'added':added,'removed':removed}))")
 
 atomic=run_block(T,'Actual V2.35.3 to V2.36.0 Atomic upgrade')
 atomic=atomic.replace('v2360','v2362').replace('V2360','V2362')
