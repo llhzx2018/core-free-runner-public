@@ -1,0 +1,174 @@
+name: P01 Single System Auth Formal Gate
+on:
+  push:
+    branches:
+      - temp/p01-single-system-auth-model-20260901
+    paths:
+      - .github/workflows/p01-single-system-auth-formal-gate-20260901.yml
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE: e0faf773a6f7643974dc0f08b653b19669f9908d
+      BASE: 388f8f75777fc131e47ef7dc7a136ff2cb7d8cc9
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-single-system-auth/evidence
+      PORT: 18551
+      ADMIN_PASS: P01SingleSystemAuth2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: e0faf773a6f7643974dc0f08b653b19669f9908d
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+
+      - name: Exact source and dual-view removal fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-single-system-auth; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          actual="$(git -C product diff --name-only "$BASE..$SOURCE" | sort | tr '\n' ' ')"
+          expected='src/api.php src/app/FunctionalWorkspace.php src/app/FunctionalWorkspaceCore.php src/app/FunctionalWorkspaceShell.php src/assets/frontend.css src/assets/workspace-domain-nav.css src/index.php src/start.php '
+          test "$actual" = "$expected"
+          test "$(git -C product rev-list --count "$BASE..$SOURCE")" = 1
+          for needle in public_view preview_return vf_fw_public_preview_requested vf-global-view-state vf-view-state 管理员视角 公开视角; do
+            ! git -C product grep -n -F "$needle" -- src/api.php src/app/FunctionalWorkspace.php src/app/FunctionalWorkspaceCore.php src/app/FunctionalWorkspaceShell.php src/assets/frontend.css src/assets/workspace-domain-nav.css src/index.php src/start.php
+          done
+          for f in "$ROOT/api.php" "$ROOT/app/FunctionalWorkspace.php" "$ROOT/app/FunctionalWorkspaceCore.php" "$ROOT/app/FunctionalWorkspaceShell.php" "$ROOT/index.php" "$ROOT/start.php"; do php -l "$f"; done | tee "$EVID/php-lint.txt"
+          git -C product diff --check "$BASE..$SOURCE"
+          printf 'SOURCE=%s\nBASE=%s\nTREE=%s\nRUNTIME_TREE=%s\n' "$SOURCE" "$BASE" "$(git -C product rev-parse HEAD^{tree})" "$(git -C product rev-parse HEAD:src)" | tee "$EVID/source.txt"
+
+      - name: Fresh Runtime and seed public private resources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-single-system-auth.pid
+          COOKIE=/tmp/p01-single-system-auth.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Single System Auth Gate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" \
+            --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "$EVID/setup-post.html"
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'登录模型门禁','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($title,$url,$private)use($repo,$cat){return (int)$repo->saveLink(null,['category_id'=>$cat,'title'=>$title,'url'=>$url,'description'=>'','is_private'=>$private],'manual')['id'];};
+          $ids=[];
+          $ids['public_start']=$save('门禁公开导航','https://example.com/public-start',0);
+          $ids['private_start']=$save('门禁私人导航','https://example.com/private-start',1);
+          $ids['public_channel']=$save('门禁公开频道','https://www.youtube.com/@public-channel',0);
+          $ids['private_channel']=$save('门禁私人频道','https://www.youtube.com/@private-channel',1);
+          $ids['public_watch']=$save('门禁公开电影','https://example.com/public-watch',0);
+          $ids['private_watch']=$save('门禁私人电影','https://example.com/private-watch',1);
+          $surface->upsertProfile($ids['public_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['private_channel'],['surface'=>'channels','resource_kind'=>'频道']);
+          $surface->upsertProfile($ids['public_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026']);
+          $surface->upsertProfile($ids['private_watch'],['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2025']);
+          file_put_contents(getenv('EVID').'/ids.json',json_encode($ids,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));
+          echo "SEED=PASS\n";
+          PHP
+
+      - name: Chromium single-system login model gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; export CHROME
+          mkdir -p /tmp/p01-single-system-auth/pw; cd /tmp/p01-single-system-auth/pw
+          npm init -y >/dev/null 2>&1; npm install playwright-core@1.55.0 >/dev/null 2>&1
+          cat > gate.cjs <<'JS'
+          const {chromium}=require('playwright-core'),fs=require('fs');
+          const base=`http://127.0.0.1:${process.env.PORT}/`,E=process.env.EVID;
+          const A=(v,m)=>{if(!v)throw Error(m)};
+          const routes={
+            'start.php':['门禁公开导航','门禁私人导航'],
+            'channels.php':['门禁公开频道','门禁私人频道'],
+            'watch.php':['门禁公开电影','门禁私人电影']
+          };
+          async function text(p){return (await p.locator('body').innerText()).replace(/\s+/g,' ')}
+          async function login(ctx){const r=await ctx.request.post(base+'api.php?action=login',{data:{password:process.env.ADMIN_PASS}});A(r.ok(),'login http');const j=await r.json();A(j.ok===true,'login json')}
+          async function noOverflow(p,label){const d=await p.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);A(d===0,`${label} overflow ${d}`)}
+          (async()=>{
+            const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME,args:['--no-sandbox']});
+            const out={source:process.env.SOURCE,widths:{}};
+            for(const width of [390,1440]){
+              const height=width===390?844:900;
+              const anon=await browser.newContext({viewport:{width,height}});const q=await anon.newPage();out.widths[width]={anonymous:{},admin:{}};
+              for(const [route,[pub,priv]] of Object.entries(routes)){
+                await q.goto(base+route,{waitUntil:'domcontentloaded'});await q.waitForTimeout(250);const t=await text(q);
+                A(t.includes(pub),`anon public missing ${route}`);A(!t.includes(priv),`anon private leak ${route}`);
+                A(!t.includes('资源管理'),`anon resource management leaked ${route}`);A(!t.includes('系统设置'),`anon settings leaked ${route}`);
+                A(await q.locator('a[href="links-admin.php"]').count()===0,`anon management link ${route}`);A(await q.locator('a[href="settings.php"]').count()===0,`anon settings link ${route}`);
+                A(!t.includes('管理员视角')&&!t.includes('公开视角')&&!t.includes('查看公开版')&&!t.includes('返回管理'),`anon dual-view UI ${route}`);
+                await noOverflow(q,`anon ${route} ${width}`);out.widths[width].anonymous[route]='PASS';
+              }
+              const anonBoot=await q.evaluate(async()=>await (await fetch('/api.php?action=bootstrap&public_view=1')).json());A(anonBoot.site.auth===false,'anon public_view altered auth');
+              await anon.close();
+
+              const admin=await browser.newContext({viewport:{width,height}});await admin.route('**/resource-cover-refresh.php',r=>r.fulfill({status:200,contentType:'application/json',body:'{"ok":true,"processed":0,"results":[]}'}));await login(admin);const p=await admin.newPage();
+              for(const [route,[pub,priv]] of Object.entries(routes)){
+                await p.goto(base+route,{waitUntil:'domcontentloaded'});await p.waitForTimeout(250);let t=await text(p);
+                A(t.includes(pub),`admin public missing ${route}`);A(t.includes(priv),`admin private missing ${route}`);
+                A(t.includes('资源管理')&&t.includes('系统设置'),`admin management labels missing ${route}`);
+                A(await p.locator('a[href="links-admin.php"]').count()>0,`admin management link missing ${route}`);A(await p.locator('a[href="settings.php"]').count()>0,`admin settings link missing ${route}`);
+                A(!t.includes('管理员视角')&&!t.includes('公开视角')&&!t.includes('查看公开版')&&!t.includes('返回管理'),`admin dual-view UI ${route}`);
+                await noOverflow(p,`admin ${route} ${width}`);out.widths[width].admin[route]='PASS';
+
+                await p.goto(base+route+'?public_view=1&preview_return='+route.replace('.php',''),{waitUntil:'domcontentloaded'});await p.waitForTimeout(200);t=await text(p);
+                A(t.includes(pub)&&t.includes(priv),`legacy public_view still changes admin data ${route}`);
+                A(t.includes('资源管理')&&t.includes('系统设置'),`legacy public_view hides management ${route}`);
+                A(!t.includes('管理员视角')&&!t.includes('公开视角')&&!t.includes('查看公开版')&&!t.includes('返回管理'),`legacy public_view revives dual UI ${route}`);
+              }
+              const adminBoot=await p.evaluate(async()=>await (await fetch('/api.php?action=bootstrap&public_view=1')).json());A(adminBoot.site.auth===true,'admin public_view changed auth');A(typeof adminBoot.csrf==='string'&&adminBoot.csrf.length>10,'admin csrf missing');
+              await admin.close();
+            }
+            fs.writeFileSync(`${E}/gate.json`,JSON.stringify({...out,verdict:'PASS'},null,2));
+            await browser.close();console.log('SINGLE_SYSTEM_AUTH_GATE=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          NODE_PATH=/tmp/p01-single-system-auth/pw/node_modules node gate.cjs
+
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DB="$ROOT/storage/data.sqlite"
+          test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = 'ok'
+          test -z "$(sqlite3 "$DB" 'PRAGMA foreign_key_check;')"
+          printf 'INTEGRITY=ok\nFK=0\n' | tee "$EVID/db.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-single-system-auth-gate-${{ github.run_id }}
+          path: /tmp/p01-single-system-auth/evidence
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-single-system-auth.pid 2>/dev/null)" 2>/dev/null || true
