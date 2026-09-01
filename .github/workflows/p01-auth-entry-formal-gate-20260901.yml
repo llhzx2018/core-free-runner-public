@@ -1,0 +1,117 @@
+name: P01 Auth Entry Formal Gate
+on:
+  push:
+    branches: [temp/p01-auth-entry-fix-20260901]
+    paths:
+      - .github/workflows/p01-auth-entry-formal-gate-20260901.yml
+      - scripts/p01-auth-entry-browser-gate.cjs
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE: 9b354d5db93b4c81930014331e055611decdbbf8
+      BASE: e29e5f56ad74cb98841d01764d73b680bd8913ba
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-auth-entry-formal/evidence
+      PORT: '18571'
+      ADMIN_PASS: P01AuthEntry2026
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - name: Checkout runner
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: runner
+      - name: Checkout exact Product candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Exact source fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          actual="$(git -C product diff --name-only "$BASE..$SOURCE" | sort | tr '\n' ' ')"
+          expected='src/app/FunctionalWorkspaceShell.php src/assets/auth-controls.js src/assets/workspace-rebaseline.css '
+          test "$actual" = "$expected"
+          test "$(git -C product rev-list --count "$BASE..$SOURCE")" = 2
+          test "$(tr -d '\r\n' < "$ROOT/VERSION.txt")" = 2.36.1
+          php -l "$ROOT/app/FunctionalWorkspaceShell.php" >/dev/null
+          node --check "$ROOT/assets/auth-controls.js"
+          git -C product diff --check "$BASE..$SOURCE"
+          grep -F 'data-vf-auth-login' "$ROOT/app/FunctionalWorkspaceShell.php" >/dev/null
+          grep -F 'data-vf-auth-logout' "$ROOT/app/FunctionalWorkspaceShell.php" >/dev/null
+          grep -F 'vf-global-auth-action' "$ROOT/app/FunctionalWorkspaceShell.php" >/dev/null
+          for needle in '管理员视角' '公开视角' '查看公开版' '返回管理' public_view preview_return; do
+            ! grep -R -F "$needle" "$ROOT/app/FunctionalWorkspaceShell.php" "$ROOT/assets/auth-controls.js"
+          done
+          printf 'SOURCE=%s\nTREE=%s\nRUNTIME_TREE=%s\n' "$SOURCE" "$(git -C product rev-parse HEAD^{tree})" "$(git -C product rev-parse HEAD:src)" | tee "$EVID/source.txt"
+      - name: Fresh Runtime and seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:$PORT -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-auth-entry-formal.pid
+          COOKIE=/tmp/p01-auth-entry-formal.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$PORT/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$PORT/setup.php" --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Auth Entry Formal Gate' --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php'; require getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$r=new VfRepository($db);$s=new VfSurfaceRepository($db);$cat=$r->createCategory(['name'=>'认证入口门禁','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($t,$u,$p)use($r,$cat){return (int)$r->saveLink(null,['category_id'=>$cat,'title'=>$t,'url'=>$u,'description'=>'','is_private'=>$p],'manual')['id'];};
+          $a=$save('门禁公开导航','https://example.com/public-start',0);$b=$save('门禁私人导航','https://example.com/private-start',1);
+          $c1=$save('门禁公开频道','https://www.youtube.com/@public-channel',0);$c2=$save('门禁私人频道','https://www.youtube.com/@private-channel',1);
+          $w1=$save('门禁公开电影','https://example.com/public-watch',0);$w2=$save('门禁私人电影','https://example.com/private-watch',1);
+          $s->upsertProfile($c1,['surface'=>'channels','resource_kind'=>'频道']);$s->upsertProfile($c2,['surface'=>'channels','resource_kind'=>'频道']);
+          $s->upsertProfile($w1,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026']);$s->upsertProfile($w2,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2025']);
+          echo "SEED=PASS\n";
+          PHP
+      - name: Chromium visible login logout gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"; test -n "$CHROME"; export CHROME
+          mkdir -p /tmp/p01-auth-entry-formal/pw; cd /tmp/p01-auth-entry-formal/pw
+          npm init -y >/dev/null 2>&1
+          npm install playwright-core@1.55.0 >/dev/null 2>&1
+          NODE_PATH=/tmp/p01-auth-entry-formal/pw/node_modules SOURCE="$SOURCE" PORT="$PORT" EVID="$EVID" ADMIN_PASS="$ADMIN_PASS" CHROME="$CHROME" node "$GITHUB_WORKSPACE/runner/scripts/p01-auth-entry-browser-gate.cjs"
+      - name: SQLite integrity and FK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$ROOT" EVID="$EVID" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';$db=vf_db();
+          $integrity=(string)$db->query('PRAGMA integrity_check')->fetchColumn();$fk=$db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC);
+          if($integrity!=='ok'||count($fk)!==0){fwrite(STDERR,'DB gate failed');exit(1);}file_put_contents(getenv('EVID').'/db.txt',"INTEGRITY=ok\nFK=0\n");echo "DB_GATE=PASS\n";
+          PHP
+          echo 'P01_AUTH_ENTRY_FORMAL_GATE=PASS'
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-auth-entry-formal-${{ github.run_id }}
+          path: /tmp/p01-auth-entry-formal/evidence
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-auth-entry-formal.pid 2>/dev/null)" 2>/dev/null || true
