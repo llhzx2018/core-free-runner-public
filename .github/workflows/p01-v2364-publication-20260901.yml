@@ -1,0 +1,154 @@
+name: P01 V2.36.4 Publication
+on:
+  push:
+    branches: [release/p01-v2364-candidate-20260901]
+    paths: [.github/workflows/p01-v2364-publication-20260901.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FORMAL_SOURCE: 6b321422bce5a834521786d8233149c7624aa014
+      FORMAL_TREE: 86c01bf1b5ee7c3ad3954e6ab9485734cb744d05
+      RUNTIME_TREE: e1ee914a6d9e61bac7931b1f5363a8c7e24e925a
+      MAIN_EXPECTED: 8fedb0d1dab25d23e598029bd39c0cbea50916b0
+      DEVELOP_EXPECTED: 48da73b3d69279de507d21c9f095094f5b8948da
+      COMPOSITE_TREE: 0c790c1580078813c47e5c0f56f1ced9bd3d66cc
+      FORMAL_RUN: '33520819304'
+      FORMAL_ARTIFACT: p01-v2364-formal-artifacts-r4-33520819304
+      FORMAL_ARTIFACT_ID: '9805594341'
+      FORMAL_DIGEST: sha256:3fd26ca5c07f43955566466501b8f2232e80974f96588ff5a01d19963c03ac4f
+      STRICT_RUN: '33521577888'
+      STAGING_RUN: '33523864431'
+      PROMOTION_RUN: '33524444884'
+      DOWNLOAD: /tmp/p01-v2364-publish-download
+      ROUNDTRIP: /tmp/p01-v2364-release-roundtrip
+      EVID: /tmp/p01-v2364-publication-evidence
+    steps:
+      - name: Download exact Formal Artifact R4 bytes
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.FORMAL_ARTIFACT }}
+          path: ${{ env.DOWNLOAD }}
+          repository: llhzx2018/core-free-runner-public
+          run-id: ${{ env.FORMAL_RUN }}
+          github-token: ${{ github.token }}
+      - name: Checkout exact formal source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.FORMAL_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: p01
+      - name: Publish exact tag and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          RUNNER_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVID"; rm -rf "$ROUNDTRIP"; mkdir -p "$ROUNDTRIP"
+
+          FULL=$(find "$DOWNLOAD" -type f -name 'VF-Start-V2.36.4-FULL.zip' -print -quit)
+          test -n "$FULL"
+          PACK=$(dirname "$FULL")
+          find "$PACK" -maxdepth 1 -type f -printf '%f\n' | sort | tee "$EVID/formal-pack-files.txt"
+          test "$(find "$PACK" -maxdepth 1 -type f | wc -l)" = 8
+
+          for run in "$FORMAL_RUN" "$STRICT_RUN" "$STAGING_RUN" "$PROMOTION_RUN"; do
+            test "$(GH_TOKEN="$RUNNER_TOKEN" gh api repos/llhzx2018/core-free-runner-public/actions/runs/$run --jq .conclusion)" = success
+          done
+          LIVE_DIGEST=$(GH_TOKEN="$RUNNER_TOKEN" gh api repos/llhzx2018/core-free-runner-public/actions/runs/$FORMAL_RUN/artifacts --jq ".artifacts[] | select(.id==$FORMAL_ARTIFACT_ID) | .digest")
+          test "$LIVE_DIGEST" = "$FORMAL_DIGEST"
+
+          cd "$GITHUB_WORKSPACE/p01"
+          test "$(git rev-parse HEAD)" = "$FORMAL_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$FORMAL_TREE"
+          test "$(git rev-parse HEAD:src)" = "$RUNTIME_TREE"
+          MAIN=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          DEV=$(git ls-remote origin refs/heads/develop | awk '{print $1}')
+          test "$MAIN" = "$MAIN_EXPECTED"
+          test "$DEV" = "$DEVELOP_EXPECTED"
+          git fetch origin "$MAIN" "$DEV" --quiet
+          test "$(git rev-parse "$MAIN^{tree}")" = "$COMPOSITE_TREE"
+          test "$(git rev-parse "$DEV^{tree}")" = "$COMPOSITE_TREE"
+          test "$(git rev-parse "$MAIN:src")" = "$RUNTIME_TREE"
+          test "$(git rev-parse "$DEV:src")" = "$RUNTIME_TREE"
+          git merge-base --is-ancestor "$FORMAL_SOURCE" "$MAIN"
+          for f in docs/authority/CURRENT.md docs/evidence/P01_V2.36.3_OWNER_PRODUCTION_CLOSURE_20260901.md docs/evidence/P01_V2.36.3_RELEASE_CLOSURE_20260901.md docs/handoff/CURRENT_STATE.md; do
+            test "$(git rev-parse "$MAIN:$f")" = "$(git rev-parse "$DEV:$f")"
+          done
+          git show "$MAIN:VF_PROJECT.json" > /tmp/main-vf.json
+          git show "$FORMAL_SOURCE:VF_PROJECT.json" > /tmp/formal-vf.json
+          python3 - <<'PY'
+          import json
+          M=json.load(open('/tmp/main-vf.json'))
+          F=json.load(open('/tmp/formal-vf.json'))
+          assert M['production_version']=='2.36.3'
+          assert M['working_version']=='2.36.4'
+          assert M['target_release_version']=='2.36.4'
+          assert M['schema_version']=='2026082901'
+          assert M['v2_36_4_candidate_gate']['state']=='PASS'
+          assert M['v2_36_4_release_candidate']['version']=='2.36.4'
+          assert M['owner_production_closure_evidence']['version']=='2.36.3'
+          assert M['v2_36_3_release_chain']['result']=='PASS'
+          for k in ('current_production_evidence','current_formal_release_evidence','current_l2_develop_evidence'):
+              F['authority'][k]=M['authority'][k]
+          F['owner_production_closure_evidence']=M['owner_production_closure_evidence']
+          F['v2_36_3_release_chain']=M['v2_36_3_release_chain']
+          assert M == F
+          PY
+          if git ls-remote --exit-code --tags origin refs/tags/v2.36.4 >/dev/null 2>&1; then echo UNEXPECTED_TAG; exit 20; fi
+          if gh api repos/llhzx2018/vf-start/releases/tags/v2.36.4 >/dev/null 2>&1; then echo UNEXPECTED_RELEASE; exit 21; fi
+
+          cd "$PACK"
+          sha256sum -c SHA256SUMS.txt | tee "$EVID/sha256-check.txt"
+          test -f P01-V2.36.4-FORMAL-METADATA.json
+          jq -e '.formal_source=="6b321422bce5a834521786d8233149c7624aa014" and .formal_tree=="86c01bf1b5ee7c3ad3954e6ab9485734cb744d05" and .runtime_tree=="e1ee914a6d9e61bac7931b1f5363a8c7e24e925a" and .version=="2.36.4" and .source_version=="2.36.3" and .schema=="2026082901" and .migration==null and .owner_production_write==false' P01-V2.36.4-FORMAL-METADATA.json >/dev/null
+          test "$(sha256sum VF-Start-V2.36.4-FULL.zip | awk '{print $1}')" = 552e3a0dc4de3e782de27dfa71943ca69a28ee5169b4aed33a221a45704c6a24
+          test "$(stat -c %s VF-Start-V2.36.4-FULL.zip)" = 587272
+          test "$(sha256sum VF_Start_V2.36.4_UPDATE.zip | awk '{print $1}')" = ebb746554c95abb9f2fa77ce8ac6f41c280016c66e03f331149fd1d93370958b
+          test "$(stat -c %s VF_Start_V2.36.4_UPDATE.zip)" = 1237066
+          test "$(sha256sum repair-v2.36.4.php | awk '{print $1}')" = cdd7cefb0a4361f7e65fc2849156355e9b5a78401a862e9f74a9c64f817c44ee
+          test "$(stat -c %s repair-v2.36.4.php)" = 3592809
+          grep -F "public const SOURCE_VERSION='2.36.3';" repair-v2.36.4.php >/dev/null
+          grep -F "public const TARGET_VERSION='2.36.4';" repair-v2.36.4.php >/dev/null
+          grep -F "public const TARGET_SCHEMA='2026082901';" repair-v2.36.4.php >/dev/null
+          cp SHA256SUMS.txt "$EVID/prepublish-SHA256SUMS.txt"
+
+          cd "$GITHUB_WORKSPACE/p01"
+          git push origin "$FORMAL_SOURCE:refs/tags/v2.36.4"
+          TAG=$(git ls-remote --tags origin refs/tags/v2.36.4 | awk '{print $1}')
+          test "$TAG" = "$FORMAL_SOURCE"
+          gh release create v2.36.4 "$PACK"/* --repo llhzx2018/vf-start --verify-tag --title 'VF Start V2.36.4' --notes 'V2.36.4 是 V2.36.3 的 Patch Release：修复共享匿名资源页在未登录状态下仍继承管理员选择列 Grid 模板、但实际没有选择框节点而导致的卡片列错位问题。ONE FRONTEND 模型保持不变：未登录只显示公开内容与登录入口，登录后在同一前台显示公开 + 私人内容和管理/退出入口。Formal Strict Fresh 已覆盖 390 / 1319 / 1440 三档，并验证匿名 → 登录 → 退出状态。Schema 仍为 2026082901，无 Migration。Candidate Readiness 33518274633 PASS；Formal Artifact R4 33520819304 PASS；Strict Fresh R2 33521577888 PASS；Composite Staging R8 33523864431 PASS；Main Promotion 33524444884 PASS。Owner Production 不由 Assistant 写入。'
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.36.4 > "$EVID/release.json"
+          test "$(jq -r .tag_name "$EVID/release.json")" = v2.36.4
+          test "$(jq -r .target_commitish "$EVID/release.json")" = v2.36.4
+          test "$(jq -r .draft "$EVID/release.json")" = false
+          test "$(jq -r .prerelease "$EVID/release.json")" = false
+          test "$(jq '.assets|length' "$EVID/release.json")" = 8
+          test "$(git ls-remote --tags origin refs/tags/v2.36.4 | awk '{print $1}')" = "$FORMAL_SOURCE"
+
+          gh release download v2.36.4 --repo llhzx2018/vf-start --dir "$ROUNDTRIP"
+          for f in "$PACK"/*; do
+            n=$(basename "$f")
+            test -f "$ROUNDTRIP/$n"
+            test "$(sha256sum "$f" | awk '{print $1}')" = "$(sha256sum "$ROUNDTRIP/$n" | awk '{print $1}')"
+            test "$(stat -c %s "$f")" = "$(stat -c %s "$ROUNDTRIP/$n")"
+          done
+          RELEASE_ID=$(jq -r .id "$EVID/release.json")
+          PUBLISHED_AT=$(jq -r .published_at "$EVID/release.json")
+          jq -r '.assets[] | [.name,.size,(.digest//"")] | @tsv' "$EVID/release.json" | sort > "$EVID/release-assets.tsv"
+          printf 'P01_V2364_PUBLICATION=PASS\nTAG=%s\nRELEASE_ID=%s\nPUBLISHED_AT=%s\nFULL_BYTES=587272\nFULL_SHA256=552e3a0dc4de3e782de27dfa71943ca69a28ee5169b4aed33a221a45704c6a24\nUPDATE_ASSET=VF_Start_V2.36.4_UPDATE.zip\nUPDATE_BYTES=1237066\nUPDATE_SHA256=ebb746554c95abb9f2fa77ce8ac6f41c280016c66e03f331149fd1d93370958b\nREPAIR_BYTES=3592809\nREPAIR_SHA256=cdd7cefb0a4361f7e65fc2849156355e9b5a78401a862e9f74a9c64f817c44ee\nFORMAL_SOURCE=%s\nFORMAL_TREE=%s\nRUNTIME_TREE=%s\nMAIN=%s\nDEVELOP=%s\nCOMPOSITE_TREE=%s\nFORMAL_ARTIFACT_ID=%s\nFORMAL_ARTIFACT_DIGEST=%s\nSTRICT_FRESH_R2_RUN=%s\nMAIN_PROMOTION_RUN=%s\nOWNER_PRODUCTION_WRITE=NO\nCORE_UPDATES_WRITE=NO\n' "$TAG" "$RELEASE_ID" "$PUBLISHED_AT" "$FORMAL_SOURCE" "$FORMAL_TREE" "$RUNTIME_TREE" "$MAIN" "$DEV" "$COMPOSITE_TREE" "$FORMAL_ARTIFACT_ID" "$FORMAL_DIGEST" "$STRICT_RUN" "$PROMOTION_RUN" | tee "$EVID/verdict.txt"
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-v2364-publication-${{ github.run_id }}
+          path: ${{ env.EVID }}
+          if-no-files-found: error
+          retention-days: 90
