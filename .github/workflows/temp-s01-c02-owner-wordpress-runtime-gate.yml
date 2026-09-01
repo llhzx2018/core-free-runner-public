@@ -1,0 +1,348 @@
+name: TEMP S01-C02 Owner WordPress Runtime Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-owner-wordpress-runtime-gate-20260901
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c02-owner-wordpress-runtime-gate
+  cancel-in-progress: false
+
+jobs:
+  owner-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_s01_owner
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      OPS_SHA: 1fa6ac391b908ccbb7db62412bab17fac5ae0d40
+      M3U8_SHA: 2e636cf580b77116c02048b19b36894b0295851b
+      THEME_SHA: a293009567c932310d19a310a8ea6361a2ef71c8
+      WP_VERSION: 7.0.2
+      WP_PATH: /tmp/vf-s01-owner-wp
+      WP_URL: http://127.0.0.1:8080
+      WP_ADMIN_USER: owner
+      EVIDENCE_DIR: /tmp/vf-s01-owner-evidence
+
+    steps:
+      - name: Checkout exact Ops recovery source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops
+
+      - name: Checkout exact M3U8 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: m3u8
+
+      - name: Checkout exact Theme source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: theme
+
+      - name: Lock exact three-component source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "1.21.791"
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = "1.25.3"
+          test "$(tr -d '\r\n' < theme/VERSION)" = "1.35.8"
+          grep -Fq 'vf_ops_s01_tool_workbench_render_v1' ops/includes/s01/tool-workbench.php
+          grep -Fq "'route'=>'m3u8-download-record'" m3u8/src/includes/first-run.php
+          mkdir -p "$EVIDENCE_DIR"
+          cat > "$EVIDENCE_DIR/source.env" <<EOF
+          OPS_SHA=$OPS_SHA
+          M3U8_SHA=$M3U8_SHA
+          THEME_SHA=$THEME_SHA
+          EXACT_THREE_COMPONENT_SOURCE=PASS
+          RELEASE_WRITE=NO
+          TAG_WRITE=NO
+          CORE_UPDATES_WRITE=NO
+          PRODUCTION_WRITE=NO
+          EOF
+
+      - name: Build isolated WordPress MariaDB runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y php-cli php-mysql php-curl php-zip php-mbstring php-xml php-gd unzip curl jq mariadb-client rsync
+          php -r 'if(PHP_VERSION_ID<80200)exit(1);foreach(["mysqli","curl","zip","json","openssl"] as $e)if(!extension_loaded($e)){fwrite(STDERR,"MISSING:$e\n");exit(1);}'
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp
+          sudo mv /tmp/wp /usr/local/bin/wp
+          mkdir -p "$WP_PATH"
+          for i in $(seq 1 30); do mariadb-admin ping -h127.0.0.1 -P3306 -uvf -pvf --silent && break; sleep 1; done
+          mariadb-admin ping -h127.0.0.1 -P3306 -uvf -pvf --silent
+          wp core download --path="$WP_PATH" --version="$WP_VERSION" --force
+          wp config create --path="$WP_PATH" --dbname=vf_s01_owner --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          ADMIN_PASS="$(php -r 'echo bin2hex(random_bytes(24));')"
+          umask 077
+          printf '%s' "$ADMIN_PASS" > /tmp/vf-s01-owner-admin.pass
+          wp core install --path="$WP_PATH" --url="$WP_URL" --title='VF S01 Owner Runtime' --admin_user="$WP_ADMIN_USER" --admin_password="$ADMIN_PASS" --admin_email='owner@example.invalid' --skip-email
+          { php -v | head -n1; wp core version --path="$WP_PATH"; mariadb --version; } > "$EVIDENCE_DIR/environment.txt"
+
+      - name: Materialize exact component sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/plugins/vf-ops" "$WP_PATH/wp-content/plugins/vf-tool-m3u8" "$WP_PATH/wp-content/themes/vf-tools-theme"
+          rsync -a --delete --exclude='.git' ops/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          rsync -a --delete m3u8/src/ "$WP_PATH/wp-content/plugins/vf-tool-m3u8/"
+          rsync -a --delete theme/src/ "$WP_PATH/wp-content/themes/vf-tools-theme/"
+          test -f "$WP_PATH/wp-content/plugins/vf-ops/vf-ops.php"
+          test -f "$WP_PATH/wp-content/plugins/vf-tool-m3u8/vf-tool-m3u8.php"
+          test -f "$WP_PATH/wp-content/themes/vf-tools-theme/style.css"
+          grep -Eq '^ \* Version: 1\.21\.791$' "$WP_PATH/wp-content/plugins/vf-ops/vf-ops.php"
+          grep -Eq '^ \* Version: 1\.25\.3$' "$WP_PATH/wp-content/plugins/vf-tool-m3u8/vf-tool-m3u8.php"
+          grep -Eq '^Version:[[:space:]]*1\.35\.8$' "$WP_PATH/wp-content/themes/vf-tools-theme/style.css"
+
+      - name: Activate Ops only and start HTTP runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp plugin install simply-static --path="$WP_PATH" --activate
+          wp plugin activate vf-ops --path="$WP_PATH"
+          wp eval --path="$WP_PATH" 'if(!defined("VF_OPS_VERSION")||VF_OPS_VERSION!=="1.21.791")exit(2);echo "OPS_ONLY=PASS\n";' > "$EVIDENCE_DIR/ops-only.txt"
+          nohup wp server --path="$WP_PATH" --host=127.0.0.1 --port=8080 > "$EVIDENCE_DIR/wp-server.log" 2>&1 &
+          for i in $(seq 1 30); do curl -fsS "$WP_URL/wp-login.php" >/dev/null && break; sleep 1; done
+          curl -fsS "$WP_URL/wp-login.php" >/dev/null
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vf-s01-owner-playwright
+          cd /tmp/vf-s01-owner-playwright
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Browser OWNER golden path and provider repair
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD_FILE: /tmp/vf-s01-owner-admin.pass
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/vf-s01-owner-playwright/owner-gate.js <<'NODE'
+          const { chromium } = require('playwright');
+          const { execFileSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+
+          const wpPath = process.env.WP_PATH;
+          const base = process.env.WP_URL;
+          const evidence = process.env.EVIDENCE_DIR;
+          const adminPass = fs.readFileSync(process.env.WP_ADMIN_PASSWORD_FILE, 'utf8').trim();
+          const wp = (...args) => execFileSync('wp', [...args, `--path=${wpPath}`], { encoding: 'utf8' }).trim();
+          const assert = (cond, message) => { if (!cond) throw new Error(message); };
+
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+            const page = await context.newPage();
+            const pageErrors = [];
+            page.on('pageerror', e => pageErrors.push(String(e)));
+
+            await page.goto(`${base}/wp-login.php`, { waitUntil: 'domcontentloaded' });
+            await page.locator('#user_login').fill(process.env.WP_ADMIN_USER);
+            await page.locator('#user_pass').fill(adminPass);
+            await Promise.all([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+              page.locator('#wp-submit').click(),
+            ]);
+
+            // 1) Ops-only: canonical owner entry exists and fails closed when Provider is absent.
+            let response = await page.goto(`${base}/wp-admin/admin.php?page=vf-toolsite-tools`, { waitUntil: 'networkidle' });
+            assert(response && response.status() === 200, 'Ops OWNER tools page did not return HTTP 200');
+            assert(await page.getByRole('heading', { name: '工具', exact: true }).count() === 1, 'OWNER 工具 heading missing');
+            assert(await page.getByText('需要安装或启用 M3U8', { exact: true }).count() >= 1, 'Provider-missing state not rendered');
+            assert(await page.getByRole('link', { name: '打开插件管理' }).count() === 1, 'Provider-missing next action missing');
+            await page.screenshot({ path: path.join(evidence, '01-ops-provider-missing.png'), fullPage: true });
+
+            // 2) Add exact Theme + M3U8 sources. Fresh activation may initialize automatically.
+            wp('theme', 'activate', 'vf-tools-theme');
+            wp('plugin', 'activate', 'vf-tool-m3u8');
+            const identity = wp('eval', 'echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[]],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);');
+            fs.writeFileSync(path.join(evidence, 'fresh-three-component-readback.json'), identity + '\n');
+            const fresh = JSON.parse(identity);
+            assert(fresh.ops === '1.21.791', 'Ops runtime version mismatch');
+            assert(fresh.m3u8 === '1.25.3', 'M3U8 runtime version mismatch');
+            assert(fresh.theme === '1.35.8', 'Theme runtime version mismatch');
+            assert(fresh.readiness && fresh.readiness.primaryPageId > 0, 'Fresh M3U8 activation did not produce a primary product page');
+
+            // 3) Create a reversible Provider-owned readiness gap in the isolated test database only.
+            const damaged = wp('eval', '$s=get_option(vf_m3u8_settings_option_name(),[]);$s=is_array($s)?$s:[];$e=(array)($s["enabledTools"]??[]);$s["enabledTools"]=array_values(array_filter($e,static fn($id)=>$id!=="downloader"));update_option(vf_m3u8_settings_option_name(),$s,false);echo json_encode(vf_m3u8_first_run_readiness(),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);');
+            fs.writeFileSync(path.join(evidence, 'damaged-readiness.json'), damaged + '\n');
+            const damagedState = JSON.parse(damaged);
+            assert(damagedState.status === 'FAIL', 'Reversible Provider readiness gap did not fail readiness');
+            assert((damagedState.enabledToolCount || 0) < 11, 'Downloader removal did not reduce enabled tool count');
+
+            // 4) OWNER workbench must surface repair, and clicking it must call Provider initialize + redirect + reread.
+            response = await page.goto(`${base}/wp-admin/admin.php?page=vf-toolsite-tools`, { waitUntil: 'networkidle' });
+            assert(response && response.status() === 200, 'OWNER workbench after Provider activation did not return 200');
+            assert(await page.getByText('需要初始化', { exact: true }).count() >= 1, 'OWNER workbench did not expose initialization state');
+            const repair = page.getByRole('button', { name: '初始化 / 修复' });
+            assert(await repair.count() === 1, 'OWNER repair button missing');
+            await page.screenshot({ path: path.join(evidence, '02-owner-repair-needed.png'), fullPage: true });
+            await Promise.all([
+              page.waitForURL(/vf_s01_action=pass/, { waitUntil: 'networkidle' }),
+              repair.click(),
+            ]);
+            assert(await page.getByText('正常', { exact: true }).count() >= 1, 'OWNER repair did not return PASS state');
+            assert(await page.getByText(/初始化\/修复已完成/).count() >= 1, 'OWNER repair success notice missing');
+
+            const repaired = wp('eval', 'echo json_encode(vf_m3u8_first_run_readiness(),JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);');
+            fs.writeFileSync(path.join(evidence, 'repaired-readiness.json'), repaired + '\n');
+            const repairedState = JSON.parse(repaired);
+            assert(repairedState.status === 'PASS', 'Provider readiness did not return PASS after OWNER repair');
+            assert(repairedState.enabledToolCount === 11, 'OWNER repair did not restore all 11 tools');
+
+            // 5) The four daily actions must resolve around the same Downloader flow page.
+            const settingsHref = await page.getByRole('link', { name: '工具设置' }).getAttribute('href');
+            const editHref = await page.getByRole('link', { name: '页面与内容' }).getAttribute('href');
+            const seoHref = await page.getByRole('link', { name: 'SEO', exact: true }).getAttribute('href');
+            const previewHref = await page.getByRole('link', { name: '预览工具' }).getAttribute('href');
+            assert(settingsHref && settingsHref.includes('page=vf-tool-m3u8-tools') && settingsHref.includes('tab=settings'), 'Tool settings link is not Provider settings');
+            assert(editHref && editHref.includes('/wp-admin/post.php?post='), 'Page/content link is not the WordPress flow page editor');
+            const editUrl = new URL(editHref, base);
+            const flowPageId = editUrl.searchParams.get('post');
+            assert(flowPageId && /^\d+$/.test(flowPageId), 'Could not derive Downloader flow page id');
+            assert(seoHref && seoHref.includes(`post_id=${flowPageId}`), 'SEO link is not bound to the same Downloader flow page');
+            assert(previewHref && previewHref.includes('/m3u8-download-record'), 'Preview link is not the canonical Downloader public route');
+            fs.writeFileSync(path.join(evidence, 'owner-object-links.json'), JSON.stringify({ settingsHref, editHref, seoHref, previewHref, flowPageId }, null, 2) + '\n');
+
+            // Resolve admin destinations without mutating product state.
+            response = await page.goto(settingsHref, { waitUntil: 'domcontentloaded' });
+            assert(response && response.status() === 200, 'Provider settings destination failed');
+            response = await page.goto(editHref, { waitUntil: 'domcontentloaded' });
+            assert(response && response.status() === 200, 'Flow page editor destination failed');
+            response = await page.goto(seoHref, { waitUntil: 'domcontentloaded' });
+            assert(response && response.status() === 200, 'Ops SEO destination failed');
+
+            // 6) Public preview must execute the shortcode and render the real unified product flow.
+            response = await page.goto(previewHref, { waitUntil: 'networkidle' });
+            assert(response && response.status() === 200, 'Public Downloader preview failed');
+            assert(await page.locator('[data-vf-product-flow="download-record"]').count() >= 1, 'Unified Downloader runtime root missing from public page');
+            assert(await page.locator('[data-vf-entry-input]').count() >= 1, 'Downloader runtime input missing');
+            const bodyText = await page.locator('body').innerText();
+            assert(!bodyText.includes('[vf_m3u8_download_record_entry]'), 'Raw Downloader shortcode leaked instead of executing');
+            await page.screenshot({ path: path.join(evidence, '03-public-downloader-preview.png'), fullPage: true });
+
+            // 7) Narrow admin usability: owner card and primary actions remain in viewport without severe horizontal overflow.
+            await page.setViewportSize({ width: 390, height: 844 });
+            response = await page.goto(`${base}/wp-admin/admin.php?page=vf-toolsite-tools`, { waitUntil: 'networkidle' });
+            assert(response && response.status() === 200, '390px OWNER workbench failed');
+            assert(await page.getByRole('heading', { name: '工具', exact: true }).count() === 1, '390px OWNER heading missing');
+            assert(await page.getByText('M3U8 Downloader', { exact: true }).count() >= 1, '390px Downloader product object missing');
+            const overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth);
+            assert(overflow <= 40, `390px severe horizontal overflow: ${overflow}px`);
+            await page.screenshot({ path: path.join(evidence, '04-owner-workbench-390.png'), fullPage: true });
+
+            const result = {
+              result: 'PASS',
+              opsOnlyProviderMissing: 'PASS',
+              exactThreeComponentRuntime: 'PASS',
+              reversibleProviderGap: 'PASS',
+              ownerRepairPostRedirectReadback: 'PASS',
+              sameProductObjectLinks: 'PASS',
+              publicShortcodeRuntime: 'PASS',
+              admin390Usability: 'PASS',
+              flowPageId,
+              pageErrors,
+            };
+            fs.writeFileSync(path.join(evidence, 'owner-browser-gate.json'), JSON.stringify(result, null, 2) + '\n');
+            await browser.close();
+          })().catch(async err => {
+            fs.writeFileSync(path.join(evidence, 'owner-browser-gate-error.txt'), String(err && err.stack || err) + '\n');
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
+          cd /tmp/vf-s01-owner-playwright
+          node owner-gate.js
+          jq -e '.result=="PASS" and .opsOnlyProviderMissing=="PASS" and .ownerRepairPostRedirectReadback=="PASS" and .sameProductObjectLinks=="PASS" and .publicShortcodeRuntime=="PASS" and .admin390Usability=="PASS"' "$EVIDENCE_DIR/owner-browser-gate.json" >/dev/null
+
+      - name: Final runtime readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp eval --path="$WP_PATH" 'echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[],"ownerState"=>function_exists("vf_ops_s01_m3u8_owner_state_v1")?vf_ops_s01_m3u8_owner_state_v1():[]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);' > "$EVIDENCE_DIR/final-runtime-readback.json"
+          jq -e '.ops=="1.21.791" and .m3u8=="1.25.3" and .theme=="1.35.8" and .readiness.status=="PASS" and .ownerState.status=="PASS"' "$EVIDENCE_DIR/final-runtime-readback.json" >/dev/null
+          cat > "$EVIDENCE_DIR/S01_C02_OWNER_WORDPRESS_RUNTIME_GATE.txt" <<EOF
+          S01_C02_OWNER_WORDPRESS_RUNTIME_GATE=PASS
+          OPS_SHA=$OPS_SHA
+          M3U8_SHA=$M3U8_SHA
+          THEME_SHA=$THEME_SHA
+          WORDPRESS=$WP_VERSION
+          MARIADB=11.4
+          OPS_ONLY_PROVIDER_MISSING=PASS
+          THREE_COMPONENT_RUNTIME=PASS
+          OWNER_REPAIR_POST_REDIRECT_READBACK=PASS
+          SAME_PRODUCT_OBJECT_LINKS=PASS
+          PUBLIC_DOWNLOADER_SHORTCODE_RUNTIME=PASS
+          ADMIN_390_USABILITY=PASS
+          RELEASE_WRITE=NO
+          TAG_WRITE=NO
+          CORE_UPDATES_WRITE=NO
+          PRODUCTION_WRITE=NO
+          PRIVATE_SOURCE_PERSISTED=NO
+          OWNER_HUMAN_ACCEPTANCE=PENDING
+          EOF
+          rm -f /tmp/vf-s01-owner-admin.pass
+
+      - name: Upload public-safe runtime evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+        with:
+          name: s01-c02-owner-wordpress-runtime-gate-${{ github.run_id }}
+          path: |
+            /tmp/vf-s01-owner-evidence/S01_C02_OWNER_WORDPRESS_RUNTIME_GATE.txt
+            /tmp/vf-s01-owner-evidence/environment.txt
+            /tmp/vf-s01-owner-evidence/fresh-three-component-readback.json
+            /tmp/vf-s01-owner-evidence/damaged-readiness.json
+            /tmp/vf-s01-owner-evidence/repaired-readiness.json
+            /tmp/vf-s01-owner-evidence/owner-object-links.json
+            /tmp/vf-s01-owner-evidence/owner-browser-gate.json
+            /tmp/vf-s01-owner-evidence/final-runtime-readback.json
+            /tmp/vf-s01-owner-evidence/01-ops-provider-missing.png
+            /tmp/vf-s01-owner-evidence/02-owner-repair-needed.png
+            /tmp/vf-s01-owner-evidence/03-public-downloader-preview.png
+            /tmp/vf-s01-owner-evidence/04-owner-workbench-390.png
+            /tmp/vf-s01-owner-evidence/owner-browser-gate-error.txt
+            /tmp/vf-s01-owner-evidence/wp-server.log
+          if-no-files-found: warn
+          retention-days: 14
