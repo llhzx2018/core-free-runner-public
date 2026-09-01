@@ -50,10 +50,25 @@ $vfS01Log = static function(string $phase): void {
     error_log('S01_HTTP_PHASE:' . $phase . ':' . sprintf('%.6f', microtime(true)) . ':METHOD=' . $method . ':POST_ACTION=' . $postAction . ':REQUEST_ACTION=' . $requestAction);
 };
 $vfS01Log('MU_FILE');
+add_filter('option_active_plugins', static function($plugins) use ($vfS01Log) {
+    $vfS01Log('ACTIVE_PLUGINS=' . implode(',', array_map('strval', (array)$plugins)));
+    return $plugins;
+}, -99999);
 foreach (['muplugins_loaded','plugins_loaded','setup_theme','after_setup_theme','init','wp_loaded','admin_init','shutdown'] as $vfS01Hook) {
     add_action($vfS01Hook, static function() use ($vfS01Log, $vfS01Hook): void { $vfS01Log(strtoupper($vfS01Hook)); }, -99999);
 }
 add_action('admin_post_vf_ops_s01_m3u8_initialize', static function() use ($vfS01Log): void { $vfS01Log('ADMIN_POST_PRE_DISPATCH'); }, -99999);
+register_shutdown_function(static function() use ($vfS01Log): void {
+    $last = error_get_last();
+    $vfS01Log('PHP_SHUTDOWN_LAST_ERROR=' . ($last ? json_encode($last, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) : 'NONE'));
+    $pluginFiles = [];
+    foreach (get_included_files() as $file) {
+        if (strpos($file, '/wp-content/plugins/') !== false || strpos($file, '/wp-content/mu-plugins/') !== false) {
+            $pluginFiles[] = $file;
+        }
+    }
+    $vfS01Log('PHP_SHUTDOWN_INCLUDED_PLUGINS=' . implode('|', $pluginFiles));
+});
 ''', encoding="utf-8")
 
 print("S01_HTTP_HANDLER_INSTRUMENTATION=PASS")
