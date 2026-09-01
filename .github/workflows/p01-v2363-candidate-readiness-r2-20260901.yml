@@ -1,0 +1,200 @@
+name: P01 V2.36.3 Candidate Readiness R2
+on:
+  push:
+    branches: [release/p01-v2363-candidate-20260901]
+    paths: [.github/workflows/p01-v2363-candidate-readiness-r2-20260901.yml]
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CANDIDATE: d49a2a2be8c6c0386e03b0c880f1e6024396e4e0
+      CANDIDATE_TREE: 44f62c6eb02d6d4354d33813f9cf3423b295a61c
+      CANDIDATE_RUNTIME_TREE: 820724b585cb59864211f77c4fb33537b2345029
+      SOURCE: 4fd25a5ce4383dc456e755fc2e031a861d6ff655
+      SOURCE_TREE: 0f0e5329098ad5a87a4a72dbd368c88d7a44b339
+      SOURCE_RUNTIME_TREE: 55bc3143df6ca4e8e66b3e8d3e0f01b3ec343424
+      VERSION: 2.36.3
+      SOURCE_VERSION: 2.36.2
+      SCHEMA: '2026082901'
+      OUT: /tmp/p01-v2363-candidate-artifacts
+      EVID: /tmp/p01-v2363-candidate-evidence
+      UPGRADE: /tmp/p01-v2363-upgrade
+      FRESH: /tmp/p01-v2363-fresh
+      AUTHROOT: /tmp/p01-v2363-auth/runtime
+      BASE_URL: http://127.0.0.1:18576
+      ADMIN_PASS: P01V2363OneFrontend2026
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.11'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: release/p01-v2363-candidate-20260901
+          path: runner
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 0fe72c7981f5f2b6ddd51bf4cfa5d6c014c9b0d3
+          path: template
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: candidate
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.36.2
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: production
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: agent/p01-22121-formal-artifact-gate-20260819
+          path: proven
+      - name: Generate fenced gates
+        run: python3 runner/scripts/p01_v2363_candidate_readiness_generate.py
+      - name: Exact source runtime authority fence
+        run: bash /tmp/p01-v2363-generated/01-exact.sh
+      - name: Build deterministic candidate artifacts
+        run: bash /tmp/p01-v2363-generated/02-build.sh
+      - name: Actual V2.36.2 to V2.36.3 Atomic upgrade
+        run: bash /tmp/p01-v2363-generated/03-atomic.sh
+      - name: Strict fresh candidate runtime
+        run: bash /tmp/p01-v2363-generated/04-fresh.sh
+      - name: Fresh ONE FRONTEND runtime and seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v2363-auth; mkdir -p /tmp/p01-v2363-auth "$EVID/screens"
+          cp -a candidate/src "$AUTHROOT"
+          php -S 127.0.0.1:18576 -t "$AUTHROOT" >"$EVID/auth-server.log" 2>&1 & echo $! >/tmp/p01-v2363-auth.pid
+          COOKIE=/tmp/p01-v2363-auth/setup.cookies
+          for i in $(seq 1 60); do curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE_URL/setup.php" -o "$EVID/setup.html" && break; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -L -c "$COOKIE" -b "$COOKIE" -X POST "$BASE_URL/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 V2.36.3 Candidate' \
+            --data-urlencode "admin_password=$ADMIN_PASS" --data-urlencode "admin_password_confirm=$ADMIN_PASS" \
+            -o "$EVID/setup-post.html"
+          AUTHROOT="$AUTHROOT" php <<'PHP' | tee "$EVID/seed.txt"
+          <?php
+          require getenv('AUTHROOT').'/app/bootstrap.php'; require getenv('AUTHROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$r=new VfRepository($db);$s=new VfSurfaceRepository($db);
+          $cat=$r->createCategory(['name'=>'V2363门禁分类','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $save=function($t,$u,$p)use($r,$cat){return (int)$r->saveLink(null,['category_id'=>$cat,'title'=>$t,'url'=>$u,'description'=>'','is_private'=>$p],'manual')['id'];};
+          $save('门禁公开导航','https://example.com/public-start',0);$save('门禁私人导航','https://example.com/private-start',1);
+          for($i=1;$i<=80;$i++)$save('滚动门禁公开资源 '.str_pad((string)$i,3,'0',STR_PAD_LEFT),'https://example.com/scroll-'.$i,0);
+          $c1=$save('门禁公开频道','https://www.youtube.com/@public-channel-v2363',0);$c2=$save('门禁私人频道','https://www.youtube.com/@private-channel-v2363',1);
+          $w1=$save('门禁公开电影','https://example.com/public-watch-v2363',0);$w2=$save('门禁私人电影','https://example.com/private-watch-v2363',1);
+          $t1=$save('门禁公开专题','https://example.com/public-topic-v2363',0);$t2=$save('门禁私人专题','https://example.com/private-topic-v2363',1);
+          $s->upsertProfile($c1,['surface'=>'channels','resource_kind'=>'频道']);$s->upsertProfile($c2,['surface'=>'channels','resource_kind'=>'频道']);
+          $s->upsertProfile($w1,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2026']);$s->upsertProfile($w2,['surface'=>'watch','resource_kind'=>'电影','media_year'=>'2025']);
+          $s->upsertProfile($t1,['surface'=>'topics','resource_kind'=>'专题']);$s->upsertProfile($t2,['surface'=>'topics','resource_kind'=>'专题']);
+          echo "SEED=PASS\n";
+          PHP
+      - name: Install browser harness
+        run: |
+          python -m pip install --disable-pip-version-check --quiet playwright==1.55.0
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then python -m playwright install chromium; fi
+      - name: ONE FRONTEND privacy sticky CSP SEO browser gate R2
+        shell: bash
+        run: |
+          cat > /tmp/p01-v2363-browser-r2.py <<'PY'
+          import asyncio,json,os,shutil
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+          BASE=os.environ['BASE_URL']; PASSWORD=os.environ['ADMIN_PASS']; EVID=Path(os.environ['EVID'])
+          results={'source':os.environ['CANDIDATE'],'widths':{}}
+          async def shell(page,expected,route):
+              nav=page.locator('.vf-global-domain-nav');await nav.wait_for(state='visible');text=' '.join((await nav.inner_text()).split())
+              for x in expected:assert x in text,(route,x,text)
+              assert await page.locator('body.vf-functional-workspace').count()==1
+              assert await page.locator('#app.app-shell').count()==0
+              d=await page.evaluate('() => ({sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth})');assert d['sw']<=d['cw']+1,(route,d)
+              return {'nav':text,'overflow':d}
+          async def asset_count(page,title):
+              return await page.locator('article[data-asset-row]').filter(has_text=title).count()
+          async def run_width(browser,width):
+              ctx=await browser.new_context(viewport={'width':width,'height':900});page=await ctx.new_page();row={}
+              resp=await page.goto(BASE+'/',wait_until='networkidle');assert resp and resp.ok
+              h={k.lower():v for k,v in (await resp.all_headers()).items()};assert 'content-security-policy' in h
+              assert await page.locator('link[rel="canonical"]').count()==1;assert await page.locator('meta[name="description"]').count()==1
+              row['anonymous']=await shell(page,['导航','频道','影视','专题','登录'],'/')
+              assert await page.locator('#vf-workspace-data').count()==0;assert await asset_count(page,'门禁私人导航')==0
+              login=page.locator('.vf-global-domain-nav [data-vf-auth-login]');assert await login.is_visible();await page.screenshot(path=str(EVID/'screens'/f'{width}-anonymous.png'))
+              await login.click();await page.locator('[data-vf-auth-dialog] input[name="password"]').fill(PASSWORD)
+              async with page.expect_navigation(wait_until='networkidle'):await page.locator('[data-vf-auth-submit]').click()
+              row['authenticated']=await shell(page,['首页','导航','频道','影视','专题','退出'],'authenticated-root');assert await page.locator('#vf-workspace-data').count()==1
+              await page.goto(BASE+'/?q=门禁私人导航',wait_until='networkidle');assert await asset_count(page,'门禁私人导航')==1
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-authenticated.png'))
+              routes=[('home.php','首页',None),('start.php','导航','门禁私人导航'),('channels.php','频道','门禁私人频道'),('watch.php','影视','门禁私人电影'),('topics.php','专题','门禁私人专题')]
+              for route,label,private_title in routes:
+                  r=await page.goto(BASE+'/'+route,wait_until='networkidle');assert r and r.ok
+                  hs={k.lower():v for k,v in (await r.all_headers()).items()};assert 'content-security-policy' in hs
+                  row[route]=await shell(page,['首页','导航','频道','影视','专题','退出'],route)
+                  active=' '.join(await page.locator('.vf-global-domain-nav a.active').all_inner_texts());assert label in active,(route,active)
+                  if private_title:
+                      await page.goto(BASE+'/'+route+'?q='+private_title,wait_until='networkidle');assert await asset_count(page,private_title)==1,(route,private_title)
+              await page.goto(BASE+'/start.php',wait_until='networkidle');toolbar=page.locator('.vf-workspace-toolbar');await toolbar.wait_for(state='visible')
+              bg=await toolbar.evaluate('el=>getComputedStyle(el).backgroundColor');assert bg not in ('transparent','rgba(0, 0, 0, 0)'),bg
+              await page.evaluate('window.scrollTo(0,700)');await page.wait_for_timeout(150);sy=await page.evaluate('window.scrollY');assert sy>0
+              box=await toolbar.bounding_box();assert box and box['y']>=0,box;row['sticky']={'background':bg,'box':box,'scrollY':sy};await page.screenshot(path=str(EVID/'screens'/f'{width}-sticky.png'))
+              await page.goto(BASE+'/',wait_until='networkidle');logout=page.locator('.vf-global-domain-nav [data-vf-auth-logout]');assert await logout.is_visible()
+              async with page.expect_navigation(wait_until='networkidle'):await logout.click()
+              row['logout']=await shell(page,['导航','频道','影视','专题','登录'],'logout');assert await page.locator('#vf-workspace-data').count()==0
+              await page.goto(BASE+'/?q=门禁私人导航',wait_until='networkidle');assert await asset_count(page,'门禁私人导航')==0
+              ch=await page.goto(BASE+'/channels.php',wait_until='networkidle');assert ch and ch.ok;assert await asset_count(page,'门禁私人频道')==0
+              robots=(await page.locator('meta[name="robots"]').get_attribute('content') or '').lower();assert 'noindex' in robots
+              await page.screenshot(path=str(EVID/'screens'/f'{width}-logout.png'));await ctx.close();return row
+          async def main():
+              async with async_playwright() as p:
+                  exe=shutil.which('google-chrome') or shutil.which('google-chrome-stable') or shutil.which('chromium') or shutil.which('chromium-browser');kw={'headless':True,'args':['--no-sandbox']}
+                  if exe:kw['executable_path']=exe
+                  b=await p.chromium.launch(**kw)
+                  try:
+                      for w in (390,1440):results['widths'][str(w)]=await run_width(b,w)
+                  finally:await b.close()
+              results['verdict']='PASS';(EVID/'browser-r2.json').write_text(json.dumps(results,ensure_ascii=False,indent=2));print('P01_V2363_ONE_FRONTEND_BROWSER_R2=PASS')
+          asyncio.run(main())
+          PY
+          python /tmp/p01-v2363-browser-r2.py | tee "$EVID/browser-r2.txt"
+          grep -F 'P01_V2363_ONE_FRONTEND_BROWSER_R2=PASS' "$EVID/browser-r2.txt"
+      - name: Final SQLite and release boundary
+        shell: bash
+        run: |
+          AUTHROOT="$AUTHROOT" EVID="$EVID" php <<'PHP'
+          <?php
+          require getenv('AUTHROOT').'/app/bootstrap.php';$db=vf_db();if(strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn())!=='ok')exit(1);if($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC))exit(2);file_put_contents(getenv('EVID').'/final-db.txt',"INTEGRITY=ok\nFK=0\n");echo "P01_V2363_SQLITE=PASS\n";
+          PHP
+          printf 'P01_V2363_CANDIDATE_READINESS_R2=PASS\nSOURCE=%s\nTREE=%s\nRUNTIME_TREE=%s\nPREDECESSOR=%s\nSCHEMA=%s\nATOMIC_2362_TO_2363=PASS\nONE_FRONTEND=PASS\nSTICKY=PASS\nCSP=PASS\nSEO_METADATA=PASS\nPRIVACY_RESULT_ROWS=PASS\nSQLITE=PASS\nOWNER_PRODUCTION_WRITE=NO\n' "$CANDIDATE" "$CANDIDATE_TREE" "$CANDIDATE_RUNTIME_TREE" "$SOURCE" "$SCHEMA" | tee "$EVID/verdict-r2.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-v2363-candidate-readiness-r2-${{ github.run_id }}
+          path: |
+            /tmp/p01-v2363-candidate-evidence
+            /tmp/p01-v2363-candidate-artifacts
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stop servers
+        if: always()
+        run: |
+          kill "$(cat /tmp/p01-v2363-upgrade.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/p01-v2363-fresh.pid 2>/dev/null)" 2>/dev/null || true
+          kill "$(cat /tmp/p01-v2363-auth.pid 2>/dev/null)" 2>/dev/null || true
