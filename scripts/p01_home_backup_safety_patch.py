@@ -108,5 +108,5 @@ styles = css.read_text(encoding='utf-8').rstrip() + r'''
 .vf-home-safety-status>i{color:var(--ws-teal);font-style:normal;font-size:10px;font-weight:750;white-space:nowrap}
 .vf-home-safety-status:hover{border-color:color-mix(in srgb,var(--ws-teal) 34%,var(--ws-line));background:var(--ws-soft)}
 @media(max-width:760px){.vf-home-safety-status{grid-template-columns:1fr auto}.vf-home-safety-status>small{grid-column:1/-1;white-space:normal;line-height:1.4}.vf-home-safety-status>i{grid-column:2;grid-row:1}}
-''' + '\n'
-css.write_text(styles, encoding='utf-8')
+'''
+css.write_text(styles.rstrip() + '\n', encoding='utf-8')
