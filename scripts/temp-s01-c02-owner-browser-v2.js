@@ -40,23 +40,24 @@ const assert = (cond, message) => { if (!cond) throw new Error(message); };
   assert(await page.getByRole('link', { name: '打开插件管理' }).count() === 1, 'Provider-missing next action missing');
   await page.screenshot({ path: path.join(evidence, '01-ops-provider-missing.png'), fullPage: true });
 
-  // B. Activate exact Theme and the ephemeral namespace-patched M3U8 source.
+  // B. Activate exact Theme and the formal C03 private-schema recovery source.
   wpLogged('theme-activation.log', 'theme', 'activate', 'vf-tools-theme');
   const activationLog = wpLogged('m3u8-activation.log', 'plugin', 'activate', 'vf-tool-m3u8');
   const collisionPattern = /(Duplicate key name|Duplicate entry|Unknown column|doesn't exist|WordPress database error)/i;
   assert(!collisionPattern.test(activationLog), `M3U8 activation still shows schema/seed collision: ${activationLog}`);
 
-  const identity = wp('eval', 'echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"tables"=>function_exists("vf_tools_m3u8_v6_table_names")?vf_tools_m3u8_v6_table_names():[],"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[]],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);');
+  const identity = wp('eval', 'echo json_encode(["ops"=>defined("VF_OPS_VERSION")?VF_OPS_VERSION:"","m3u8"=>defined("VF_TOOL_M3U8_VERSION")?VF_TOOL_M3U8_VERSION:"","theme"=>wp_get_theme()->get("Version"),"schema"=>function_exists("vf_tools_m3u8_v6_schema_version")?vf_tools_m3u8_v6_schema_version():"","migration"=>function_exists("vf_tools_m3u8_v6_private_schema_migration_option")?get_option(vf_tools_m3u8_v6_private_schema_migration_option(),[]):[],"tables"=>function_exists("vf_tools_m3u8_v6_table_names")?vf_tools_m3u8_v6_table_names():[],"readiness"=>function_exists("vf_m3u8_first_run_readiness")?vf_m3u8_first_run_readiness():[]],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);');
   fs.writeFileSync(path.join(evidence, 'fresh-three-component-readback.json'), identity + '\n');
   const fresh = JSON.parse(identity);
   assert(fresh.ops === '1.21.791', 'Ops runtime version mismatch');
   assert(fresh.m3u8 === '1.25.3', 'M3U8 runtime version mismatch');
   assert(fresh.theme === '1.35.8', 'Theme runtime version mismatch');
+  assert(fresh.schema === '1.3.0', `M3U8 schema version mismatch: ${fresh.schema}`);
+  assert(fresh.migration && fresh.migration.status === 'PASS', 'C03 private-schema migration marker missing');
+  assert(fresh.migration.sourceMode === 'INCOMPATIBLE_SHARED_PLATFORM_TABLES_IGNORED', `Ops tables were not classified as platform-owned shared tables: ${fresh.migration.sourceMode}`);
   assert(fresh.readiness && fresh.readiness.primaryPageId > 0, 'Fresh M3U8 activation did not produce a primary product page');
   for (const [key, table] of Object.entries(fresh.tables || {})) {
-    if (['capabilities','capability_contracts','pipelines','pipeline_revisions','pipeline_steps','pipeline_edges','runtime_bundles','runtime_bundle_assets'].includes(key)) {
-      assert(String(table).includes('vf_m3u8_'), `Overlapping Provider table was not isolated: ${key}=${table}`);
-    }
+    assert(String(table).includes('vf_m3u8_'), `Provider table was not isolated: ${key}=${table}`);
   }
 
   // C. Runner-only reversible fault injection through the real settings envelope.
@@ -133,9 +134,11 @@ const assert = (cond, message) => { if (!cond) throw new Error(message); };
 
   fs.writeFileSync(path.join(evidence, 'owner-browser-gate.json'), JSON.stringify({
     result: 'PASS',
-    diagnosticMode: 'EPHEMERAL_M3U8_PROVIDER_TABLE_NAMESPACE',
+    diagnosticMode: 'C03_PRIVATE_SCHEMA_RECOVERY_SOURCE',
     opsOnlyProviderMissing: 'PASS',
-    m3u8ActivationSchemaCollision: 'ABSENT_WITH_EPHEMERAL_NAMESPACE_PATCH',
+    m3u8ActivationSchemaCollision: 'ABSENT_WITH_C03_PRIVATE_SCHEMA',
+    schemaVersion: fresh.schema,
+    migrationSourceMode: fresh.migration.sourceMode,
     reversibleProviderGap: 'PASS',
     ownerRepairPostRedirectReadback: 'PASS',
     sameProductObjectLinks: 'PASS',
