@@ -1,0 +1,134 @@
+name: P01 Admin Unified Scroll Diagnostic
+on:
+  push:
+    branches: [tmp/p01-admin-scroll-unified-diagnostic-20260902]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE: 747ff511c175b4e35bf35cba30fa5a494fca8617
+      ROOT: ${{ github.workspace }}/product/src
+      EVID: /tmp/p01-admin-scroll/evidence
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,openssl,fileinfo,mbstring
+          coverage: none
+      - name: Checkout exact P01 develop
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh runtime and mixed surface seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-admin-scroll; mkdir -p "$EVID"
+          test "$(git -C product rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          php -S 127.0.0.1:18562 -t "$ROOT" >"$EVID/server.log" 2>&1 & echo $! >/tmp/p01-admin-scroll.pid
+          C=/tmp/p01-admin-scroll.cookies
+          for i in $(seq 1 60); do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:18562/setup.php -o "$EVID/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 - "$EVID/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:18562/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Admin Scroll Diagnostic' --data-urlencode 'admin_password=P01Scroll2026' --data-urlencode 'admin_password_confirm=P01Scroll2026' -o "$EVID/setup-post.html"
+          ROOT="$ROOT" php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require_once getenv('ROOT').'/app/bootstrap.php';
+          require_once getenv('ROOT').'/app/Repository.php';
+          require_once getenv('ROOT').'/app/SurfaceRepository.php';
+          $db=vf_db();$repo=new VfRepository($db);$surface=new VfSurfaceRepository($db);
+          $cats=[];foreach(['工作','开发','AI','设计','内容','商业','影音','归档'] as $i=>$name)$cats[]=$repo->createCategory(['name'=>$name,'parent_id'=>null,'description'=>'','icon'=>'','is_private'=>0,'sort_order'=>$i]);
+          for($i=1;$i<=90;$i++)$repo->saveLink(null,['category_id'=>$cats[$i%8],'title'=>'导航 '.$i,'url'=>'https://example.com/start-'.$i,'description'=>'统一滚动诊断','is_private'=>$i%9===0?1:0],'manual');
+          foreach(['channels'=>'频道','watch'=>'影视','topics'=>'专题'] as $domain=>$label){
+            for($i=1;$i<=90;$i++){
+              $saved=$repo->saveLink(null,['category_id'=>$cats[$i%8],'title'=>$label.' '.$i,'url'=>'https://example.org/'.$domain.'-'.$i,'description'=>'统一滚动诊断','is_private'=>$i%10===0?1:0],'manual');
+              $profile=['surface'=>$domain,'resource_kind'=>$label,'note'=>'','background_friendly'=>$domain==='channels'&&$i%3===0?1:0,'media_year'=>'','media_status'=>'','source_kind'=>'remote_url','source_ref'=>''];
+              if($domain==='watch'){$profile['resource_kind']=$i%3===0?'剧集':'电影';$profile['media_year']=(string)(2019+$i%8);$profile['media_status']=['want','watching','watched','favorite'][$i%4];}
+              if($domain==='topics')$profile['resource_kind']=$i%2===0?'课程':'指南';
+              $surface->upsertProfile((int)$saved['id'],$profile);
+            }
+          }
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());$fk=count($db->query('PRAGMA foreign_key_check')->fetchAll(PDO::FETCH_ASSOC));if($integrity!=='ok'||$fk)exit(3);
+          PHP
+          printf 'SOURCE=%s\nREMOTE_DEVELOP=%s\n' "$SOURCE" "$SOURCE" | tee "$EVID/source.txt"
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd /tmp/p01-admin-scroll
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+      - name: Measure top mid deep across four surfaces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-admin-scroll/measure.cjs <<'JS'
+          const { chromium }=require('playwright');const fs=require('fs');
+          const base='http://127.0.0.1:18562/',out=process.env.EVID;
+          const routes=[['start','index.php','.vf-workspace-list'],['channels','channels.php','.vf-workspace-list'],['watch','watch.php','.vf-watch-grid'],['topics','topics.php','.vf-topic-grid']];
+          const sizes=[{name:'desktop',w:1440,h:900},{name:'mobile',w:390,h:844}];
+          const rnd=n=>Math.round(n*100)/100;
+          const rect=e=>{if(!e)return null;const r=e.getBoundingClientRect();return{x:rnd(r.x),y:rnd(r.y),w:rnd(r.width),h:rnd(r.height),right:rnd(r.right),bottom:rnd(r.bottom)}};
+          (async()=>{const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1440,height:900}});const page=await ctx.newPage();
+            await page.goto(base+'index.php',{waitUntil:'networkidle'});await page.locator('[data-vf-auth-login]:visible').first().click();await page.fill('[data-vf-auth-dialog] input[name="password"]','P01Scroll2026');await page.click('[data-vf-auth-submit]');await page.waitForLoadState('networkidle');await page.locator('[data-vf-auth-logout]:visible').first().waitFor({state:'visible'});
+            const rows=[];
+            for(const size of sizes){await page.setViewportSize({width:size.w,height:size.h});for(const [name,url,contentSel] of routes){await page.goto(base+url+'?per=100',{waitUntil:'networkidle'});const max=await page.evaluate(()=>Math.max(0,document.documentElement.scrollHeight-innerHeight));const states=[['top',0],['mid',Math.round(max/2)],['deep',max]];for(const [state,y] of states){await page.evaluate(y=>scrollTo(0,y),y);await page.waitForTimeout(120);const m=await page.evaluate(({name,state,contentSel})=>{const toolbar=document.querySelector('.vf-workspace-toolbar'),domain=document.querySelector('.vf-global-domain-nav'),topbar=document.querySelector('.vf-app-topbar'),content=document.querySelector(contentSel);const R=e=>{if(!e)return null;const r=e.getBoundingClientRect();return{x:Math.round(r.x*100)/100,y:Math.round(r.y*100)/100,w:Math.round(r.width*100)/100,h:Math.round(r.height*100)/100,right:Math.round(r.right*100)/100,bottom:Math.round(r.bottom*100)/100}};const tr=R(toolbar),cr=R(content),cs=toolbar?getComputedStyle(toolbar):null;const cx=tr?Math.min(innerWidth-2,Math.max(1,tr.x+tr.w/2)):1;const inside=tr?document.elementFromPoint(cx,Math.max(1,tr.y+2)):null;const below=tr?document.elementFromPoint(cx,Math.min(innerHeight-2,tr.bottom+2)):null;return{route:name,state,scrollY:Math.round(scrollY),innerWidth,innerHeight,docScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth,toolbar:tr,domain:R(domain),topbar:R(topbar),content:cr,toolbarTop:cs?cs.top:null,toolbarPosition:cs?cs.position:null,toolbarBackground:cs?cs.backgroundColor:null,toolbarZ:cs?cs.zIndex:null,insideClass:inside?inside.className:'',belowClass:below?below.className:'',insideInToolbar:!!(toolbar&&inside&&toolbar.contains(inside)),belowInToolbar:!!(toolbar&&below&&toolbar.contains(below))};},{name,state,contentSel});rows.push({viewport:size.name,width:size.w,...m});await page.screenshot({path:`${out}/${name}-${size.name}-${state}.png`,fullPage:false});}}}
+            fs.writeFileSync(out+'/metrics.json',JSON.stringify(rows,null,2));rows.forEach(x=>console.log('SCROLL='+JSON.stringify(x)));await browser.close();
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          cd /tmp/p01-admin-scroll && node measure.cjs | tee "$EVID/metrics.log"
+      - name: Classify consistency
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$EVID/metrics.json" <<'PY' | tee "$EVID/classification.txt"
+          import json,sys,collections
+          rows=json.load(open(sys.argv[1],encoding='utf-8'))
+          hard=[]
+          for r in rows:
+              overflow=max(r['docScrollWidth'],r['bodyScrollWidth'])>r['innerWidth']
+              transparent=r['toolbarBackground'] in ('transparent','rgba(0, 0, 0, 0)')
+              if overflow: hard.append(f"{r['route']}@{r['viewport']}:{r['state']}:horizontal-overflow")
+              if r['state']!='top' and transparent: hard.append(f"{r['route']}@{r['viewport']}:{r['state']}:transparent-sticky")
+              if r['state']!='top' and not r['insideInToolbar']: hard.append(f"{r['route']}@{r['viewport']}:{r['state']}:toolbar-hit-test-fail")
+          for viewport in ('desktop','mobile'):
+              for state in ('mid','deep'):
+                  s=[r for r in rows if r['viewport']==viewport and r['state']==state]
+                  tops=[r['toolbar']['y'] for r in s]; lefts=[r['toolbar']['x'] for r in s]
+                  print(f"{viewport}/{state}: top_range={max(tops)-min(tops):.2f}; left_range={max(lefts)-min(lefts):.2f}; backgrounds={sorted(set(r['toolbarBackground'] for r in s))}")
+          print('HARD_ISSUES='+str(len(hard)));[print('ISSUE='+x) for x in hard]
+          print('DIAGNOSTIC_VERDICT=' + ('PASS_NO_HARD_SCROLL_DEFECT' if not hard else 'REVIEW_REQUIRED'))
+          if hard: raise SystemExit(3)
+          PY
+      - name: Boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product ls-remote origin refs/heads/develop | awk '{print $1}')" = "$SOURCE"
+          printf 'P01_REF_WRITE=NO\nP01_MAIN_WRITE=NO\nPRODUCTION_WRITE=NO\nRUNNER_MAIN_WRITE=NO\n' | tee "$EVID/boundary.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-admin-unified-scroll-${{ github.run_id }}
+          path: /tmp/p01-admin-scroll/evidence
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop server
+        if: always()
+        shell: bash
+        run: kill "$(cat /tmp/p01-admin-scroll.pid 2>/dev/null)" 2>/dev/null || true
