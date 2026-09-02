@@ -1,0 +1,206 @@
+name: P05 Owner Language Consistency Browser
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-owner-language-consistency-browser.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-owner-language-consistency:
+    if: github.event.pull_request.head.ref == 'test/p05-owner-language-consistency-browser-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout exact P05 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: e5e688c149baa24a9feb614bb995e1224289e844
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'e5e688c149baa24a9feb614bb995e1224289e844'
+          test "$(git rev-parse HEAD^{tree})" = '68400b5b9b92868c5c75eaacb476746807b98a5c'
+          test "$(cat VERSION)" = '1.2.3'
+          grep -Fq '增长机会' src/client/ProductSiteViews.tsx
+          grep -Fq '暂无可验证搜索数据' src/client/ProductSiteViews.tsx
+          grep -Fq '未知不等于 0' src/client/ProductSiteViews.tsx
+          grep -Fq "item.subjectType" src/client/ProductSiteViews.tsx
+          grep -Fq "item.evidence?.landingPageId" src/client/ProductSiteViews.tsx
+          echo 'P05_OWNER_LANGUAGE_CONSISTENCY_EXACT_SOURCE=PASS'
+
+      - name: Setup Node 24 and build
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Focused truth and build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          node --import tsx --test \
+            tests/unit/product-opportunity-window-truth.test.ts \
+            tests/unit/product-opportunity-evidence-truth.test.ts \
+            tests/unit/product-opportunity-query-drilldown-truth.test.ts \
+            tests/unit/product-aeo-window-truth.test.ts \
+            tests/unit/product-aeo-blocker-page-evidence-truth.test.ts \
+            tests/unit/product-search-query-evidence-routing-truth.test.ts
+          npm run typecheck
+          npm run build
+
+      - name: Browser verify Opportunities Search and AEO Owner language
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='OwnerLanguageConsistency-2026!' npm run bootstrap:admin
+          PORT=18193 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-language-consistency-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, shutil, subprocess, sys, time, urllib.request, urllib.error
+          BASE='http://127.0.0.1:18193'; DRIVER_PORT=9520; PASSWORD='OwnerLanguageConsistency-2026!'
+          def fail(msg): print('P05_OWNER_LANGUAGE_CONSISTENCY_BROWSER=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(method,url,payload=None,headers=None,timeout=25):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(url,data=data,method=method,headers=headers or {})
+              if data is not None: req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=timeout) as r: raw=r.read().decode()
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:500]}')
+              return json.loads(raw) if raw else {}
+          def wait_http(url,timeout=25):
+              end=time.time()+timeout
+              while time.time()<end:
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception: time.sleep(.15)
+              fail('server not ready '+url)
+          def wd(method,path,payload=None):
+              r=http(method,f'http://127.0.0.1:{DRIVER_PORT}{path}',payload); v=r.get('value')
+              if isinstance(v,dict) and v.get('error'): fail(f"webdriver {v.get('error')}: {v.get('message')}")
+              return r
+          def sv(s,m,p,payload=None): return wd(m,f'/session/{s}{p}',payload)['value']
+          def eid(v): return v['element-6066-11e4-a52e-4f735466cecf']
+          def find(s,css): return eid(sv(s,'POST','/element',{'using':'css selector','value':css}))
+          def text(s,e): return str(sv(s,'GET',f'/element/{e}/text'))
+          def surface(s): return text(s,find(s,'.p05v2-content'))
+          def send(s,e,value):
+              sv(s,'POST',f'/element/{e}/clear',{})
+              sv(s,'POST',f'/element/{e}/value',{'text':value,'value':list(value)})
+          def execute(s,script): return sv(s,'POST','/execute/sync',{'script':script,'args':[]})
+          def wait(pred,label,timeout=25):
+              end=time.time()+timeout; last=None
+              while time.time()<end:
+                  try:
+                      last=pred()
+                      if last:return last
+                  except Exception as e:last=repr(e)
+                  time.sleep(.15)
+              fail(f'timeout {label}: {last!r}')
+          def click_text(s,label):
+              js='''const label=%s;const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===label);if(!b||b.disabled)return false;b.click();return true;''' % json.dumps(label,ensure_ascii=False)
+              return bool(execute(s,js))
+          def choose_site(s,label):
+              js='''const label=%s;const sel=document.querySelector('.p05v2-site-context select');if(!sel)return false;const opt=[...sel.options].find(o=>o.textContent.trim()===label);if(!opt)return false;sel.value=opt.value;sel.dispatchEvent(new Event('change',{bubbles:true}));return true;''' % json.dumps(label,ensure_ascii=False)
+              return bool(execute(s,js))
+          def assert_surface(name,value,required,forbidden):
+              missing=[x for x in required if x not in value]
+              leaked=[x for x in forbidden if x in value]
+              if missing: fail(name+' missing '+json.dumps(missing,ensure_ascii=False))
+              if leaked: fail(name+' leaked '+json.dumps(leaked,ensure_ascii=False))
+              print('P05_OWNER_LANGUAGE_'+name+'=PASS')
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome: fail('Chrome/ChromeDriver unavailable')
+          log=open('/tmp/p05-language-consistency-chromedriver.log','wb')
+          proc=subprocess.Popen([driver,f'--port={DRIVER_PORT}','--allowed-ips=127.0.0.1'],stdout=log,stderr=subprocess.STDOUT)
+          session=None
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DRIVER_PORT}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              v=r['value']; session=str(v.get('sessionId') or r.get('sessionId') or '')
+              if not session: fail('missing webdriver session')
+              sv(session,'POST','/url',{'url':BASE+'/'})
+              wait(lambda: execute(session,"return !!document.querySelector(\"input[autocomplete='username']\")"),'login form')
+              send(session,find(session,"input[autocomplete='username']"),'owner')
+              send(session,find(session,"input[autocomplete='current-password']"),PASSWORD)
+              click_text(session,'登录') or fail('login button missing')
+              wait(lambda: 'Site Portfolio' in surface(session),'portfolio')
+              wait(lambda: '载入 Demo Dataset →' in surface(session),'demo load action')
+              click_text(session,'载入 Demo Dataset →') or fail('demo load button missing')
+              wait(lambda: 'Kewaro AI' in surface(session) and 'WordPress Lab' in surface(session),'demo sites',30)
+              choose_site(session,'Kewaro AI') or fail('Kewaro AI select unavailable')
+              wait(lambda: 'Kewaro AI · 概览' in surface(session),'Kewaro AI overview')
+
+              click_text(session,'机会') or fail('Opportunities nav unavailable')
+              wait(lambda: '机会不是告警' in surface(session),'Opportunities surface')
+              opp=surface(session)
+              assert_surface('OPPORTUNITIES',opp,
+                  ['增长机会','机会不是告警','前 12 条','查看依据','下一步：'],
+                  ['GROWTH QUEUE','Search Opportunity','Opportunity 清单','subjectType','sourceState','lifecycleState','OWNER ACTION','查看结构化证据'])
+
+              click_text(session,'搜索表现') or fail('Search nav unavailable')
+              wait(lambda: '逐日搜索表现' in surface(session) or '暂无可验证搜索数据' in surface(session),'Search surface')
+              search=surface(session)
+              assert_surface('SEARCH',search,
+                  ['搜索数据','搜索数据只能说明发生了什么'],
+                  ['SEARCH OBSERVATION','Search Observation','QUERY DIMENSION','canonical Page ID','Change Evidence','Data Source 与','OWNER ACTION'])
+
+              click_text(session,'AI / AEO') or fail('AI/AEO nav unavailable')
+              wait(lambda: '可验证准备度' in surface(session),'AEO surface')
+              aeo=surface(session)
+              assert_surface('AEO',aeo,
+                  ['AI / AEO 数据','技术准备度','未知不等于 0','AI / AEO 机会'],
+                  ['AI OBSERVATION','Provider 状态未确认','当前 Authority','UNKNOWN ≠ ZERO','TECHNICAL READINESS','Page Authority 读取失败','Technical blocker','canonical Page ID','AEO OPPORTUNITIES','Growth Queue','OWNER ACTION'])
+              print('P05_OWNER_LANGUAGE_CONSISTENCY_BROWSER=PASS')
+          finally:
+              if session:
+                  try: wd('DELETE',f'/session/{session}')
+                  except Exception: pass
+              proc.terminate()
+              try: proc.wait(timeout=5)
+              except Exception: proc.kill()
+              log.close()
+          PY
+
+      - name: Read-only exact boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'e5e688c149baa24a9feb614bb995e1224289e844'
+          test "$(git rev-parse HEAD^{tree})" = '68400b5b9b92868c5c75eaacb476746807b98a5c'
+          test -z "$(git status --porcelain)"
+          echo 'P05_PRODUCT_WRITE=0'
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
