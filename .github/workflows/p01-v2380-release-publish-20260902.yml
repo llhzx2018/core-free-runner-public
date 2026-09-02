@@ -1,0 +1,114 @@
+name: P01 V2.38.0 Release Publish
+on:
+  push:
+    branches: [release/p01-v2380-projects-20260902]
+    paths: [.github/workflows/p01-v2380-release-publish-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      AUTHORITY_SOURCE: 64ff0068ca8a3d231b1be83610b104b1c9d8611d
+      MAIN_PROMOTION: c880a2a0f6427fcb712e9a14d30bed232137c82f
+      MAIN_TREE: fad086c9c6310fd4653952f3842c5bbbcddb3e15
+      ARTIFACT_RUN: '33624500734'
+      ARTIFACT_ID: '9844226572'
+      ARTIFACT_DIGEST: 'sha256:4ca6b6d8c9d5acc25720cd56868828a6111261552b685be28ab403d666c4941a'
+      STRICT_FRESH_ID: '9844249936'
+      STRICT_FRESH_DIGEST: 'sha256:bb21dac2aa15f4fca7e8b6adc35d2e87f3a73dd337963100d0af6551f998f82a'
+      PRE_RELEASE_RUN: '33624790665'
+    steps:
+      - name: Download exact private frozen artifact through Release Write authority
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/main --jq .object.sha)" = "$MAIN_PROMOTION"
+          test "$(gh api repos/llhzx2018/vf-start/git/commits/$MAIN_PROMOTION --jq .tree.sha)" = "$MAIN_TREE"
+          test "$(gh api repos/llhzx2018/vf-start/git/commits/$AUTHORITY_SOURCE --jq .tree.sha)" = "$MAIN_TREE"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.38.0 --jq .object.sha)" = "$AUTHORITY_SOURCE"
+          if gh api repos/llhzx2018/vf-start/releases/tags/v2.38.0 >/dev/null 2>&1; then echo 'release unexpectedly exists' >&2; exit 21; fi
+          test "$(gh api repos/llhzx2018/vf-start/actions/runs/$ARTIFACT_RUN --jq .conclusion)" = success
+          test "$(gh api repos/llhzx2018/vf-start/actions/runs/$PRE_RELEASE_RUN --jq .conclusion)" = success
+          META="$(gh api repos/llhzx2018/vf-start/actions/artifacts/$ARTIFACT_ID)"
+          test "$(jq -r .workflow_run.id <<<"$META")" = "$ARTIFACT_RUN"
+          test "$(jq -r .digest <<<"$META")" = "$ARTIFACT_DIGEST"
+          test "$(jq -r .expired <<<"$META")" = false
+          SMETA="$(gh api repos/llhzx2018/vf-start/actions/artifacts/$STRICT_FRESH_ID)"
+          test "$(jq -r .digest <<<"$SMETA")" = "$STRICT_FRESH_DIGEST"
+          test "$(jq -r .expired <<<"$SMETA")" = false
+          rm -rf /tmp/v2380-publish; mkdir -p /tmp/v2380-publish/unpacked /tmp/v2380-publish/readback
+          gh api repos/llhzx2018/vf-start/actions/artifacts/$ARTIFACT_ID/zip > /tmp/v2380-publish/artifact.zip
+          test "$(sha256sum /tmp/v2380-publish/artifact.zip | awk '{print $1}')" = "${ARTIFACT_DIGEST#sha256:}"
+          unzip -q /tmp/v2380-publish/artifact.zip -d /tmp/v2380-publish/unpacked
+          FULL="$(find /tmp/v2380-publish/unpacked -type f -name 'VF-Start-V2.38.0-FULL.zip' -print -quit)"
+          test -n "$FULL"; ASSETS="$(dirname "$FULL")"; echo "ASSETS=$ASSETS" >> "$GITHUB_ENV"
+          cat >/tmp/v2380-expected-assets.txt <<'EOF'
+          P01-V2.38.0-FORMAL.json
+          P01-V2.38.0-RELEASE-NOTES.md
+          VF-Start-V2.38.0-FULL.zip
+          VF-Start-V2.38.0-FULL.zip.sha256
+          VF_Start_V2.38.0_UPDATE.zip
+          VF_Start_V2.38.0_UPDATE.zip.sha256
+          repair-v2.38.0.php
+          repair-v2.38.0.php.sha256
+          EOF
+          sed -i 's/^          //' /tmp/v2380-expected-assets.txt
+          find "$ASSETS" -maxdepth 1 -type f -printf '%f\n' | sort >/tmp/v2380-actual-assets.txt
+          diff -u /tmp/v2380-expected-assets.txt /tmp/v2380-actual-assets.txt
+          (cd "$ASSETS" && sha256sum -c VF-Start-V2.38.0-FULL.zip.sha256 && sha256sum -c VF_Start_V2.38.0_UPDATE.zip.sha256 && sha256sum -c repair-v2.38.0.php.sha256)
+          jq -e '.status=="FORMAL_ARTIFACT_PASS" and .version=="2.38.0" and .source_version=="2.37.5" and .formal_source=="64ff0068ca8a3d231b1be83610b104b1c9d8611d" and .runtime_tree=="f469522e21e5e9f3cf068fd1825a2275ef974691" and .schema=="2026082901" and .schema_change==false and .migration==null' "$ASSETS/P01-V2.38.0-FORMAL.json" >/dev/null
+          sha256sum "$ASSETS"/* | sort > /tmp/v2380-original-assets.sha256
+          echo P01_V2380_RELEASE_INPUT=PASS
+      - name: Draft release, upload 8 frozen assets, byte-readback, publish stable
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BODY="$(cat "$ASSETS/P01-V2.38.0-RELEASE-NOTES.md")"
+          jq -n --arg tag 'v2.38.0' --arg name 'VF Start V2.38.0' --arg body "$BODY" '{tag_name:$tag,target_commitish:"main",name:$name,body:$body,draft:true,prerelease:false}' > /tmp/v2380-create-release.json
+          REL="$(gh api -X POST repos/llhzx2018/vf-start/releases --input /tmp/v2380-create-release.json)"
+          RID="$(jq -r .id <<<"$REL")"; test "$RID" != null; test -n "$RID"
+          printf '%s\n' "$REL" > /tmp/v2380-draft.json
+          for f in "$ASSETS"/*; do
+            n="$(basename "$f")"
+            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'Content-Type: application/octet-stream' --data-binary @"$f" "https://uploads.github.com/repos/llhzx2018/vf-start/releases/$RID/assets?name=$n" >/tmp/v2380-upload.json
+            test "$(jq -r .name /tmp/v2380-upload.json)" = "$n"
+          done
+          REL="$(gh api repos/llhzx2018/vf-start/releases/$RID)"
+          test "$(jq -r .draft <<<"$REL")" = true
+          test "$(jq '.assets|length' <<<"$REL")" = 8
+          while IFS= read -r n; do
+            AID="$(jq -r --arg n "$n" '.assets[]|select(.name==$n)|.id' <<<"$REL")"
+            test -n "$AID"
+            curl -L --fail-with-body --silent --show-error -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/llhzx2018/vf-start/releases/assets/$AID" -o "/tmp/v2380-publish/readback/$n"
+            cmp "$ASSETS/$n" "/tmp/v2380-publish/readback/$n"
+          done < /tmp/v2380-expected-assets.txt
+          sha256sum /tmp/v2380-publish/readback/* | sed 's#/tmp/v2380-publish/readback/##' | sort > /tmp/v2380-readback-assets.sha256
+          sed "s#$ASSETS/##" /tmp/v2380-original-assets.sha256 | sort > /tmp/v2380-original-normalized.sha256
+          diff -u /tmp/v2380-original-normalized.sha256 /tmp/v2380-readback-assets.sha256
+          jq -n '{draft:false,prerelease:false}' >/tmp/v2380-publish.json
+          REL="$(gh api -X PATCH repos/llhzx2018/vf-start/releases/$RID --input /tmp/v2380-publish.json)"
+          test "$(jq -r .draft <<<"$REL")" = false
+          test "$(jq -r .prerelease <<<"$REL")" = false
+          test "$(jq -r .tag_name <<<"$REL")" = v2.38.0
+          test "$(jq '.assets|length' <<<"$REL")" = 8
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.38.0 --jq .object.sha)" = "$AUTHORITY_SOURCE"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/heads/main --jq .object.sha)" = "$MAIN_PROMOTION"
+          jq '{id,tag_name,name,draft,prerelease,published_at,assets:[.assets[]|{name,size,id,digest}]}' <<<"$REL" | tee /tmp/v2380-release.json
+          printf 'P01_V2380_RELEASE_PUBLISH=PASS\nRELEASE_ID=%s\nTAG=v2.38.0\nTAG_SOURCE=%s\nMAIN_PROMOTION=%s\nASSETS=8\nFROZEN_ARTIFACT_ID=%s\nSTRICT_FRESH_ID=%s\nREBUILD=NO\nOWNER_PRODUCTION_WRITE=NO\nKEWARO_DELETE=NO\n' "$RID" "$AUTHORITY_SOURCE" "$MAIN_PROMOTION" "$ARTIFACT_ID" "$STRICT_FRESH_ID" | tee /tmp/v2380-release-verdict.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-v2380-release-publish-${{ github.run_id }}
+          path: |
+            /tmp/v2380-release.json
+            /tmp/v2380-release-verdict.txt
+            /tmp/v2380-draft.json
+            /tmp/v2380-readback-assets.sha256
+          if-no-files-found: warn
+          retention-days: 90
