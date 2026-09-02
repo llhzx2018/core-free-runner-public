@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+cd product
+python3 - <<'PY'
+from pathlib import Path
+
+p=Path('src/app/ResourceCoverCache.php')
+s=p.read_text(encoding='utf-8')
+start=s.index('    public static function extractCoverCandidates(string $html, string $baseUrl): array\n')
+end=s.index('    private static function attributes(string $tag): array\n', start)
+method=r'''    public static function extractCoverCandidates(string $html, string $baseUrl): array
+    {
+        $ranked = [];
+        $push = static function (string $value, int $score) use (&$ranked, $baseUrl): void {
+            $resolved = self::resolveUrl($baseUrl, $value);
+            if ($resolved === '') return;
+            if (!isset($ranked[$resolved]) || $score > $ranked[$resolved]) $ranked[$resolved] = $score;
+        };
+
+        if (preg_match_all('/<(meta|link)\b[^>]*>/i', $html, $matches)) {
+            foreach ($matches[0] as $tag) {
+                $attrs = self::attributes($tag);
+                $property = strtolower(trim((string)($attrs['property'] ?? $attrs['name'] ?? '')));
+                $rel = strtolower(trim((string)($attrs['rel'] ?? '')));
+                $value = trim((string)($attrs['content'] ?? $attrs['href'] ?? ''));
+                if ($value === '') continue;
+                $score = 0;
+                if ($property === 'og:image:secure_url') $score = 1100;
+                elseif ($property === 'og:image') $score = 1050;
+                elseif ($property === 'twitter:image' || $property === 'twitter:image:src') $score = 950;
+                elseif (str_contains($rel, 'image_src')) $score = 850;
+                if ($score > 0) $push($value, $score);
+            }
+        }
+
+        if (preg_match_all('/<script\b[^>]*type\s*=\s*(?:"application\/ld\+json"|\'application\/ld\+json\')[^>]*>(.*?)<\/script>/is', $html, $scripts)) {
+            $walk = null;
+            $walk = static function ($node, string $key = '') use (&$walk, $push): void {
+                if (is_string($node)) {
+                    $name = strtolower($key);
+                    if ($name === 'image') $push($node, 900);
+                    elseif ($name === 'thumbnailurl') $push($node, 880);
+                    return;
+                }
+                if (!is_array($node)) return;
+                foreach ($node as $childKey => $child) $walk($child, is_string($childKey) ? $childKey : $key);
+            };
+            foreach ($scripts[1] as $json) {
+                $decoded = json_decode(html_entity_decode((string)$json, ENT_QUOTES | ENT_HTML5, 'UTF-8'), true);
+                if (is_array($decoded)) $walk($decoded);
+            }
+        }
+
+        if (preg_match_all('/<img\b[^>]*>/i', $html, $images)) {
+            foreach ($images[0] as $tag) {
+                $attrs = self::attributes($tag);
+                $semantic = strtolower(trim(implode(' ', [
+                    (string)($attrs['class'] ?? ''),
+                    (string)($attrs['id'] ?? ''),
+                    (string)($attrs['alt'] ?? ''),
+                ])));
+                $positive = preg_match('/(?:poster|cover|thumb|pic|vod|video|lazy)/i', $semantic) === 1;
+                $negative = preg_match('/(?:logo|avatar|qrcode|qr-code|wechat|banner|advert|\bicon\b)/i', $semantic) === 1;
+                $bonus = $positive ? 120 : 0;
+                if ($negative && !$positive) $bonus -= 420;
+                $sources = [
+                    'data-original' => 920,
+                    'data-src' => 880,
+                    'data-lazy-src' => 860,
+                    'data-url' => 820,
+                    'src' => 520,
+                ];
+                foreach ($sources as $name => $baseScore) {
+                    $value = trim((string)($attrs[$name] ?? ''));
+                    if ($value === '') continue;
+                    $score = $baseScore + $bonus;
+                    if ($name === 'src' && preg_match('/\.(?:gif|svg)(?:[?#]|$)/i', $value)) $score -= 260;
+                    if ($score > 0) $push($value, $score);
+                }
+            }
+        }
+
+        arsort($ranked, SORT_NUMERIC);
+        return array_keys($ranked);
+    }
+
+'''
+s=s[:start]+method+s[end:]
+p.write_text(s,encoding='utf-8')
+
+p=Path('src/assets/workspace.js')
+s=p.read_text(encoding='utf-8')
+old='const coverRetryKey=(id)=>`vf-cover-retry:${id}`;'
+new='const coverRetryKey=(id)=>`vf-cover-retry:v2:${id}`;'
+if old not in s:
+    raise SystemExit('retry key anchor missing')
+p.write_text(s.replace(old,new,1),encoding='utf-8')
+PY
+
+php -l src/app/ResourceCoverCache.php
+node --check src/assets/workspace.js
+git diff --check
+test "$(git diff --name-only | sort | paste -sd, -)" = "src/app/ResourceCoverCache.php,src/assets/workspace.js"
+
+cat >/tmp/cover-test.html <<'HTML'
+<html><head><meta property="og:image" content="/og.jpg"></head><body>
+<img class="logo" src="/logo.png">
+<img class="lazyload vod-pic" src="/loading.gif" data-original="/upload/vod/poster.jpg">
+</body></html>
+HTML
+php -r "require 'src/app/ResourceCoverCache.php'; \$c=VfResourceCoverCache::extractCoverCandidates(file_get_contents('/tmp/cover-test.html'),'https://example.com/detail/1.html'); if(\$c[0]!=='https://example.com/og.jpg') exit(11); if(!in_array('https://example.com/upload/vod/poster.jpg',\$c,true)) exit(12); echo implode(PHP_EOL,\$c),PHP_EOL;"
+
+cat >/tmp/lazy-only.html <<'HTML'
+<img class="img-responsive" src="/brand.png">
+<img class="lazyload" src="/loading.gif" data-original="/upload/vod/real-poster.jpg">
+<img class="icon" src="/favicon.ico">
+HTML
+php -r "require 'src/app/ResourceCoverCache.php'; \$c=VfResourceCoverCache::extractCoverCandidates(file_get_contents('/tmp/lazy-only.html'),'https://example.com/detail/1.html'); if(\$c[0]!=='https://example.com/upload/vod/real-poster.jpg') {var_export(\$c); exit(13);} echo 'LAZY_POSTER_FIRST=PASS'.PHP_EOL;"
+
+PAGE='https://xiaoheimi.cc/index.php/vod/detail/id/220543.html'
+curl --fail --silent --show-error --location --max-time 20 \
+  -A 'VF-Start/2.37.0 CoverCache' \
+  -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1' "$PAGE" -o /tmp/page.html
+php -r "require 'src/app/ResourceCoverCache.php'; \$c=VfResourceCoverCache::extractCoverCandidates(file_get_contents('/tmp/page.html'),'$PAGE'); if(!isset(\$c[0]) || !str_contains(\$c[0],'/upload/vod/')) {var_export(\$c); exit(21);} file_put_contents('/tmp/poster-url.txt',\$c[0]); echo 'FIRST='.\$c[0].PHP_EOL;"
+POSTER="$(cat /tmp/poster-url.txt)"
+curl --fail --silent --show-error --location --max-time 20 \
+  -A 'VF-Start/2.37.0 CoverCache' \
+  -H 'Accept: image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.1' "$POSTER" -o /tmp/poster.bin
+test "$(stat -c%s /tmp/poster.bin)" -ge 64
+test "$(stat -c%s /tmp/poster.bin)" -le 2097152
+file --mime-type -b /tmp/poster.bin | grep -Eq '^image/(jpeg|png|webp)$'
+printf 'REAL_TEMPLATE_PAGE=PASS\nREAL_POSTER_FETCH=PASS\n' | tee /tmp/real-verdict.txt
+
+test "$(cat VERSION)" = 2.37.0
+test "$(cat src/VERSION.txt)" = 2.37.0
+git config user.name VictorForge
+git config user.email llhzx2018@gmail.com
+git add src/app/ResourceCoverCache.php src/assets/workspace.js
+test "$(git diff --cached --name-only | sort | paste -sd, -)" = "src/app/ResourceCoverCache.php,src/assets/workspace.js"
+git commit -m 'fix: hydrate lazy-loaded watch covers'
+git push origin HEAD:"$PRODUCT_BRANCH"
+printf 'R1=HARNESS_ONLY_WORKFLOW_CONFIG\nBASE=%s\nCANDIDATE=%s\nFILES=2\nSCHEMA_CHANGE=NO\nVERSION_CHANGE=NO\nPRODUCTION_WRITE=NO\n' "$BASE" "$(git rev-parse HEAD)" | tee /tmp/verdict.txt
