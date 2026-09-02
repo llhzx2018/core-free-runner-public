@@ -1,0 +1,101 @@
+name: P05 First Impression Observation Context
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-first-impression-observation-context.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.pull_request.head.ref == 'test/p05-first-impression-browser-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 163d60f04f01bb0bd38b36de9723cb18053549c9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Build and diagnose rendered Overview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '163d60f04f01bb0bd38b36de9723cb18053549c9'
+          npm ci
+          npm run build
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='FirstImpression-2026!' npm run bootstrap:admin
+          PORT=18197 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-context-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, shutil, subprocess, sys, time, urllib.request, urllib.error
+          BASE='http://127.0.0.1:18197'; DP=9524; PASSWORD='FirstImpression-2026!'; NEEDLE='Observation / Evidence'
+          def http(method,url,payload=None):
+              data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(url,data=data,method=method)
+              if data is not None:req.add_header('Content-Type','application/json')
+              with urllib.request.urlopen(req,timeout=25) as r:
+                  raw=r.read().decode(); return json.loads(raw) if raw else {}
+          def wait_http(url):
+              for _ in range(200):
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              raise SystemExit('server not ready')
+          def wd(m,p,d=None):return http(m,f'http://127.0.0.1:{DP}{p}',d)
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); s=''
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--window-size=1440,1000']}}}})
+              s=r['value']['sessionId']
+              def sv(m,p,d=None):return wd(m,f'/session/{s}{p}',d)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
+              def text():return str(js("return document.querySelector('.p05v2-content')?.innerText || ''"))
+              def wait(pred,label,limit=300):
+                  for _ in range(limit):
+                      v=pred()
+                      if v:return v
+                      time.sleep(.1)
+                  raise SystemExit('timeout '+label)
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):
+                  sv('POST',f'/element/{e}/clear',{}); sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js('''const x=%s;const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;'''%json.dumps(label,ensure_ascii=False)))
+              sv('POST','/url',{'url':BASE+'/'})
+              wait(lambda: js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
+              send(find("input[autocomplete='username']"),'owner'); send(find("input[autocomplete='current-password']"),PASSWORD); click('登录')
+              wait(lambda:'载入演示数据 →' in text(),'demo load'); click('载入演示数据 →')
+              wait(lambda:all(x in text() for x in ['Kewaro Guide','今日优先','今天先看谁']),'portfolio',400)
+              ok=js('''const s=document.querySelector('.p05v2-site-context select');const o=[...s.options].find(x=>x.textContent.trim()==='Kewaro Guide');if(!o)return false;s.value=o.value;s.dispatchEvent(new Event('change',{bubbles:true}));return true;''')
+              if not ok:raise SystemExit('Kewaro Guide missing')
+              ov=wait(lambda:text() if all(x in text() for x in ['发生了什么','为什么可能变化','下一步应该做什么','只看支持判断的数据']) else '', 'overview',400)
+              idx=ov.find(NEEDLE)
+              if idx<0:
+                  print('P05_OBSERVATION_CONTEXT=NOT_FOUND')
+              else:
+                  lo=max(0,idx-220); hi=min(len(ov),idx+len(NEEDLE)+220)
+                  print('P05_OBSERVATION_CONTEXT_BEGIN')
+                  print(ov[lo:hi].replace('\n','\\n'))
+                  print('P05_OBSERVATION_CONTEXT_END')
+                  print('P05_OBSERVATION_CONTEXT_INDEX='+str(idx))
+          finally:
+              if s:
+                  try:wd('DELETE',f'/session/{s}')
+                  except Exception:pass
+              proc.terminate()
+          PY
