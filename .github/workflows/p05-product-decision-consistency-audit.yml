@@ -1,0 +1,237 @@
+name: P05 Product Decision Consistency Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-product-decision-consistency-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: github.event.pull_request.head.ref == 'test/p05-decision-consistency-audit-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+
+    steps:
+      - name: Verify private read capability
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+
+      - name: Checkout exact P05 current main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 1e251008b7c9708bee2ac297b592409bdc019bf8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '1e251008b7c9708bee2ac297b592409bdc019bf8'
+          test "$(cat VERSION)" = '1.2.3'
+          grep -q "decisionOrder: \['DATA_PROBLEM', 'TECHNICAL_ISSUE', 'DECLINE', 'OPPORTUNITY', 'HEALTHY'\]" src/server/product-optimization.ts
+          grep -q "const nextActions: Json\[\] = growthOpportunities.slice(0, 5)" src/server/product-optimization.ts
+          grep -q "P05_DEMO_V1" src/server/demo-dataset-bundle.ts
+          echo 'P05_DECISION_AUDIT_EXACT_SOURCE=PASS'
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build exact Product runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - name: Real-use Demo decision matrix
+        shell: bash
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -Eeuo pipefail
+          createdb -h 127.0.0.1 -U postgres vf_seo_matrix
+          export MATRIX_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/vf_seo_matrix'
+          DATABASE_URL="$MATRIX_DATABASE_URL" npm run migrate
+          DATABASE_URL="$MATRIX_DATABASE_URL" VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='DecisionMatrixPass-2026!' npm run bootstrap:admin
+          DATABASE_URL="$MATRIX_DATABASE_URL" PORT=18190 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-decision-matrix-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, shutil, subprocess, sys, time, urllib.request, urllib.error
+
+          BASE='http://127.0.0.1:18190'
+          DRIVER_PORT=9517
+          PASSWORD='DecisionMatrixPass-2026!'
+
+          def fail(msg):
+              print('P05_DECISION_MATRIX=FAIL '+msg, file=sys.stderr)
+              raise SystemExit(1)
+
+          def http(method, url, payload=None, headers=None):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(url,data=data,method=method,headers=headers or {})
+              if data is not None: req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=20) as r:
+                      raw=r.read().decode()
+              except urllib.error.HTTPError as e:
+                  fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:500]}')
+              return json.loads(raw) if raw else {}
+
+          def wait_http(url, timeout=25):
+              end=time.time()+timeout
+              while time.time()<end:
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500: return
+                  except Exception: time.sleep(.15)
+              fail('server not ready '+url)
+
+          def wd(method,path,payload=None):
+              r=http(method,f'http://127.0.0.1:{DRIVER_PORT}{path}',payload)
+              v=r.get('value')
+              if isinstance(v,dict) and v.get('error'): fail(f"webdriver {v.get('error')}: {v.get('message')}")
+              return r
+
+          def sv(session,method,path,payload=None): return wd(method,f'/session/{session}{path}',payload)['value']
+          def eid(v): return v['element-6066-11e4-a52e-4f735466cecf']
+          def find(session,css): return eid(sv(session,'POST','/element',{'using':'css selector','value':css}))
+          def text(session,el): return str(sv(session,'GET',f'/element/{el}/text'))
+          def body(session): return text(session,find(session,'body'))
+          def send(session,el,value):
+              sv(session,'POST',f'/element/{el}/clear',{})
+              sv(session,'POST',f'/element/{el}/value',{'text':value,'value':list(value)})
+          def execute(session,script): return sv(session,'POST','/execute/sync',{'script':script,'args':[]})
+          def nav(session,url): sv(session,'POST','/url',{'url':url})
+          def wait(pred,label,timeout=25):
+              end=time.time()+timeout; last=None
+              while time.time()<end:
+                  try:
+                      last=pred()
+                      if last: return last
+                  except Exception as e: last=repr(e)
+                  time.sleep(.15)
+              fail(f'timeout {label}: {last!r}')
+          def has(session,s): return s in body(session)
+          def click_text(session,label):
+              js='''const label=%s; const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===label); if(!b)return false; b.click(); return true;''' % json.dumps(label,ensure_ascii=False)
+              return bool(execute(session,js))
+
+          driver=shutil.which('chromedriver')
+          chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome: fail('Chrome/ChromeDriver unavailable')
+          driver_log=open('/tmp/p05-decision-matrix-chromedriver.log','wb')
+          chromedriver=subprocess.Popen([driver,f'--port={DRIVER_PORT}','--allowed-ips=127.0.0.1'],stdout=driver_log,stderr=subprocess.STDOUT)
+          session=None
+          try:
+              wait_http(BASE+'/api/health')
+              wait_http(f'http://127.0.0.1:{DRIVER_PORT}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              v=r['value']; session=str(v.get('sessionId') or r.get('sessionId') or '')
+              if not session: fail('missing webdriver session')
+              nav(session,BASE+'/')
+              wait(lambda: has(session,'VF SEO'),'login screen')
+              send(session,find(session,"input[autocomplete='username']"),'owner')
+              send(session,find(session,"input[autocomplete='current-password']"),PASSWORD)
+              click_text(session,'登录') or fail('login button missing')
+              wait(lambda: has(session,'Site Portfolio'),'portfolio')
+              wait(lambda: '载入 Demo Dataset →' in body(session),'demo load action')
+              click_text(session,'载入 Demo Dataset →') or fail('demo load button missing')
+              wait(lambda: all(x in body(session) for x in ['Kewaro Tools','Kewaro Start','Kewaro Guide','Kewaro AI','WordPress Lab']),'five demo sites',30)
+
+              cookies=sv(session,'GET','/cookie')
+              cookie_header='; '.join(f"{c['name']}={c['value']}" for c in cookies)
+              headers={'Cookie':cookie_header}
+              sites=http('GET',BASE+'/api/product/sites',headers=headers)
+              items=sites.get('items') or []
+              if len(items)!=5: fail(f'expected 5 sites got {len(items)}')
+              print('P05_DECISION_ORDER='+json.dumps(sites.get('decisionOrder'),ensure_ascii=False))
+              print('P05_PORTFOLIO_MATRIX_BEGIN')
+              violations=[]
+              status_counts={}
+              for item in items:
+                  name=str(item.get('name'))
+                  code=str((item.get('status') or {}).get('code'))
+                  status_counts[code]=status_counts.get(code,0)+1
+                  top=(item.get('topOpportunity') or {})
+                  overview=http('GET',BASE+'/api/product/overview/'+str(item.get('id')),headers=headers)
+                  attention=overview.get('attention') or []
+                  actions=overview.get('nextActions') or []
+                  first=actions[0] if actions else {}
+                  print(json.dumps({
+                      'name':name,
+                      'status':code,
+                      'statusReason':(item.get('status') or {}).get('reason'),
+                      'topOpportunityType':top.get('opportunityType'),
+                      'attentionFirstKind':(attention[0] or {}).get('kind') if attention else None,
+                      'attentionFirstTitle':(attention[0] or {}).get('title') if attention else None,
+                      'nextBestKind':first.get('kind'),
+                      'nextBestTitle':first.get('title'),
+                  },ensure_ascii=False))
+                  if code=='NEEDS_ATTENTION':
+                      if not attention:
+                          violations.append(f'{name}: NEEDS_ATTENTION but attention empty')
+                      if str(first.get('kind'))!='FIX':
+                          violations.append(f"{name}: NEEDS_ATTENTION but nextBest={first.get('kind')} / {first.get('title')}")
+                  if code=='DATA_PROBLEM':
+                      if not attention or str((attention[0] or {}).get('kind'))!='DATA':
+                          violations.append(f'{name}: DATA_PROBLEM but first attention is not DATA')
+                      if str(first.get('kind'))!='FIX':
+                          violations.append(f"{name}: DATA_PROBLEM but nextBest={first.get('kind')} / {first.get('title')}")
+              print('P05_PORTFOLIO_MATRIX_END')
+              print('P05_STATUS_COUNTS='+json.dumps(status_counts,ensure_ascii=False,sort_keys=True))
+              if violations:
+                  for x in violations: print('P05_DECISION_CONSISTENCY_VIOLATION='+x, file=sys.stderr)
+                  fail(f'{len(violations)} blocker-priority violations')
+              print('P05_DECISION_MATRIX=PASS')
+          finally:
+              if session:
+                  try: wd('DELETE',f'/session/{session}')
+                  except Exception: pass
+              chromedriver.terminate()
+              try: chromedriver.wait(timeout=5)
+              except Exception: chromedriver.kill()
+              driver_log.close()
+          PY
+
+      - name: Assert read-only audit boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '1e251008b7c9708bee2ac297b592409bdc019bf8'
+          test -z "$(git status --porcelain)"
+          echo 'P05_PRODUCT_WRITE=0'
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
