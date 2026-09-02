@@ -3,13 +3,16 @@ name: Public Runner Current Self Test
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/runner-selftest-current.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: public-runner-current-selftest-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -76,3 +79,198 @@ jobs:
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
+
+  p05-readability-browser:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/p05-readability-browser-v125-20260903'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_EXACT_SHA: f72fc0e1be172f21528ea8eddfaf629e5dfe3c75
+      P05_EXACT_TREE: 6afb88aabe9db95a51fc12afa0b81988a81c9bb0
+    steps:
+      - name: Checkout exact P05 readability candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact candidate and readability scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test "$(cat VERSION)" = '1.2.4'
+          git diff --check HEAD^ HEAD
+          files="$(git diff --name-only HEAD^ HEAD)"
+          test "$files" = 'src/client/product-site-views.css'
+          grep -Fq 'v1.2.5 readability baseline' src/client/product-site-views.css
+          grep -Fq '.p05v2-nav button,.p05v2-secondary button,.p05v2-logout{font-size:14px' src/client/product-site-views.css
+          grep -Fq '.p05v2-header h1{font-size:30px' src/client/product-site-views.css
+          grep -Fq '.p05v2-site-main strong{font-size:16px' src/client/product-site-views.css
+          grep -Fq '.p05v2-fact>strong{font-size:18px' src/client/product-site-views.css
+          echo P05_READABILITY_EXACT_SOURCE=PASS
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='Readability-2026!' npm run bootstrap:admin
+
+      - name: Real Chrome desktop and mobile readability journey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p05-readability
+          PORT=18225 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-readability/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import base64,json,shutil,subprocess,sys,time,urllib.request,urllib.error,pathlib
+          BASE='http://127.0.0.1:18225'; DP=9541; PASSWORD='Readability-2026!'; OUT=pathlib.Path('/tmp/p05-readability')
+          def fail(msg):
+              print('P05_READABILITY_BROWSER=FAIL '+msg,file=sys.stderr)
+              try: print((OUT/'server.log').read_text()[-5000:],file=sys.stderr)
+              except Exception: pass
+              raise SystemExit(1)
+          def http(m,u,p=None,timeout=30):
+              d=None if p is None else json.dumps(p).encode(); r=urllib.request.Request(u,data=d,method=m)
+              if d is not None:r.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(r,timeout=timeout) as x:
+                      raw=x.read().decode(); return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {u}: {e.read().decode(errors="replace")[:500]}')
+          def wait_http(u):
+              for _ in range(300):
+                  try:
+                      with urllib.request.urlopen(u,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              fail('not ready '+u)
+          def wd(m,p,d=None):
+              r=http(m,f'http://127.0.0.1:{DP}{p}',d); v=r.get('value')
+              if isinstance(v,dict) and v.get('error'):fail(f"webdriver {v.get('error')}: {v.get('message')}")
+              return r
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome:fail('Chrome unavailable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); s=''
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              s=str(r['value'].get('sessionId') or r.get('sessionId') or '')
+              if not s:fail('missing webdriver session')
+              def sv(m,p,d=None):return wd(m,f'/session/{s}{p}',d)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
+              def content():return str(js("return document.querySelector('.p05v2-content')?.innerText || ''"))
+              def wait(fn,label,n=400):
+                  last=None
+                  for _ in range(n):
+                      try:
+                          last=fn()
+                          if last:return last
+                      except Exception as e:last=repr(e)
+                      time.sleep(.1)
+                  fail(f'timeout {label}: {last!r}')
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):sv('POST',f'/element/{e}/clear',{});sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js('''const x=%s;const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;'''%json.dumps(label,ensure_ascii=False)))
+              def px(css):
+                  v=js('''const e=document.querySelector(%s);if(!e)return null;return parseFloat(getComputedStyle(e).fontSize);'''%json.dumps(css))
+                  return None if v is None else float(v)
+              def require_px(css,minpx,label):
+                  v=px(css)
+                  if v is None or v+1e-6<minpx:fail(f'{label} font-size {v} < {minpx}')
+                  print(f'P05_READABILITY_{label}={v}px')
+              def screenshot(path):
+                  raw=sv('GET','/screenshot'); (OUT/path).write_bytes(base64.b64decode(raw))
+              sv('POST','/url',{'url':BASE+'/'})
+              wait(lambda:js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
+              send(find("input[autocomplete='username']"),'owner');send(find("input[autocomplete='current-password']"),PASSWORD);click('登录') or fail('login')
+              wait(lambda:content() if '载入演示数据 →' in content() else '', 'empty portfolio')
+              click('载入演示数据 →') or fail('demo load')
+              wait(lambda:content() if all(x in content() for x in ['Kewaro Start','Kewaro Guide','WordPress Lab']) else '', 'portfolio')
+              require_px('.p05v2-nav button',14,'NAV')
+              require_px('.p05v2-header h1',30,'H1')
+              require_px('.p05v2-header p',14,'HEADER_COPY')
+              require_px('.p05v2-site-main strong',16,'SITE_TITLE')
+              require_px('.p05v2-site-main span',12,'SITE_META')
+              require_px('.p05v2-fact > span',11,'FACT_LABEL')
+              require_px('.p05v2-fact > strong',18,'FACT_VALUE')
+              require_px('.p05v2-site-action p',12,'ACTION_COPY')
+              require_px('.p05v2-site-action button',13,'ACTION_BUTTON')
+              desktop=js("return {sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth,sidebar:document.querySelector('.p05v2-sidebar')?.getBoundingClientRect().width||0};")
+              if desktop['sw']>desktop['cw']+1:fail('desktop horizontal overflow '+repr(desktop))
+              if desktop['sidebar']<255:fail('desktop sidebar too narrow '+repr(desktop))
+              screenshot('desktop-portfolio.png')
+              click('进入网站 →') or fail('enter site')
+              wait(lambda:content() if '今天先看谁' not in content() and '下一步' in content() else '', 'site overview')
+              require_px('.p05v2-section-head h2',20,'SECTION_H2')
+              if js("return !!document.querySelector('.p05v2-action p')"):require_px('.p05v2-action p',12,'OVERVIEW_ACTION_COPY')
+              click('关键词') or fail('keywords nav')
+              wait(lambda:js("return !!document.querySelector('.p05v2-object-workspace')"),'keyword workspace')
+              require_px('.p05v2-object-list button strong',13,'OBJECT_LIST_TITLE')
+              require_px('.p05v2-object-list button span',11,'OBJECT_LIST_META')
+              screenshot('desktop-keywords.png')
+              sv('POST','/window/rect',{'x':0,'y':0,'width':390,'height':844})
+              time.sleep(.4)
+              mobile=js("return {sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth,body:document.body.scrollWidth,nav:parseFloat(getComputedStyle(document.querySelector('.p05v2-nav button')).fontSize)};")
+              if mobile['sw']>mobile['cw']+1 or mobile['body']>mobile['cw']+1:fail('mobile horizontal overflow '+repr(mobile))
+              if mobile['nav']<15:fail('mobile nav font too small '+repr(mobile))
+              screenshot('mobile-keywords.png')
+              print('P05_READABILITY_DESKTOP_OVERFLOW=0')
+              print('P05_READABILITY_MOBILE_OVERFLOW=0')
+              print('P05_READABILITY_BROWSER=PASS')
+          finally:
+              if s:
+                  try:wd('DELETE',f'/session/{s}')
+                  except Exception:pass
+              proc.terminate()
+          PY
+
+      - name: Upload readability screenshots
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p05-readability-browser-${{ github.run_id }}
+          path: /tmp/p05-readability/*.png
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Read-only exact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test -z "$(git status --porcelain)"
+          echo P05_PRODUCT_SOURCE_WRITE=0
+          echo P05_RELEASE_WRITE=0
+          echo P05_PRODUCTION_WRITE=0
