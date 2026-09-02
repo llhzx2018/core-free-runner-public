@@ -1,0 +1,178 @@
+name: TEMP S01-C03 1.25.7 Production Hardblock Native Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - '.github/workflows/temp-s01-c03-1.25.7-production-hardblock-native-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOURCE_SHA: 4f516d48cadd93b7143f201f196d923ad112f34a
+      CANDIDATE_SHA: d65dafcad0e442e23e74eb2458996452089d6221
+      EXPECTED_PACKAGE_BYTES: '3529415'
+      EXPECTED_PACKAGE_SHA256: b89aa824834193410a9f534c6cdc72ebf606124ee0c718932b04dc8c5f98e74f
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/s01-c03-1.25.7-production-hardblock
+    steps:
+      - name: Checkout exact 1.25.6 current harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact 1.25.7 Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Install exact formal package builder in workspace only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          cat > source/tests/wp-update/build_packages_current.py <<'PY'
+          #!/usr/bin/env python3
+          from pathlib import Path
+          import argparse,hashlib,json,os,zipfile
+          FIXED_TIME=(2026,9,2,0,0,0)
+          def formal_zip(src,out):
+              files={p.relative_to(src).as_posix():p.read_bytes() for p in src.rglob('*') if p.is_file() and not p.is_symlink()};files=dict(sorted(files.items()))
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files.items():
+                      zi=zipfile.ZipInfo('vf-tool-m3u8/'+rel,FIXED_TIME);zi.compress_type=zipfile.ZIP_DEFLATED;zi.external_attr=0o100644<<16;z.writestr(zi,data)
+              if zipfile.ZipFile(out).testzip() is not None: raise SystemExit('zip corruption')
+              return files
+          def is_runtime(rel):
+              parts=rel.replace('\\','/').split('/');low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): return False
+              if len(parts)==1:return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+          def authority(src):
+              rows=[]
+              for p in sorted((x for x in src.rglob('*') if x.is_file()),key=lambda p:p.relative_to(src).as_posix()):
+                  rel=p.relative_to(src).as_posix()
+                  if is_runtime(rel):rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+              return {'file_count':len(rows),'fingerprint_sha256':hashlib.sha256(''.join(f'{p}\0{h}\n' for p,h in rows).encode()).hexdigest()}
+          def meta(src,out,version):
+              f=formal_zip(src,out);return {'version':version,'file':out.name,'files':len(f),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime':authority(src)}
+          ap=argparse.ArgumentParser();ap.add_argument('--repo',required=True);ap.add_argument('--out',required=True);a=ap.parse_args();repo=Path(a.repo);out=Path(a.out);out.mkdir(parents=True,exist_ok=True)
+          result={'source':meta(repo/'src',out/'vf-tools-m3u8_V1.25.6.zip','1.25.6'),'target':meta(Path(os.environ['VF_EXACT_TARGET_SRC']),out/'vf-tools-m3u8_V1.25.7-fixture.zip','1.25.7')}
+          (out/'package-meta-current.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+          PY
+          python3 -m py_compile source/tests/wp-update/build_packages_current.py
+
+      - name: Patch current harness to exact Production hard-block state in workspace only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('source/tests/wp-update/run_current.sh');s=p.read_text()
+          anchor="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 13 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_pipelines WHERE owner_provider_key='vf.m3u8';\")\" == 11 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_provider_fixtures WHERE provider_key='vf.m3u8';\")\" == 3 ]]\n\nwpcli option update vf_private_update_credential_v1 \"$TOKEN\" >/dev/null\n"""
+          injected="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 13 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_pipelines WHERE owner_provider_key='vf.m3u8';\")\" == 11 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_provider_fixtures WHERE provider_key='vf.m3u8';\")\" == 3 ]]\n\n# Reproduce Owner-observed Production classifier exactly: all private tables exist but\n# are empty/unmigrated, while an incompatible legacy table retains vf.m3u8 rows.\nfor t in \"${TABLES[@]}\"; do sql \"TRUNCATE TABLE ${t};\" >/dev/null; done\nwpcli option delete vf_tools_m3u8_v6_private_schema_migration >/dev/null 2>&1 || true\nsql \"DROP TABLE IF EXISTS wp_vf_capabilities; CREATE TABLE wp_vf_capabilities (id BIGINT UNSIGNED NOT NULL, provider_key VARCHAR(191) NOT NULL, legacy_payload VARCHAR(191) NOT NULL, PRIMARY KEY(id)); INSERT INTO wp_vf_capabilities(id,provider_key,legacy_payload) VALUES (4242,'vf.m3u8','PRODUCTION-LEGACY-SENTINEL');\" >/dev/null\nLEGACY_ROWS_BEFORE=\"$(sql \"SELECT CONCAT(COUNT(*),'|',MIN(id),'|',MAX(id),'|',GROUP_CONCAT(CONCAT(provider_key,':',legacy_payload) ORDER BY id SEPARATOR ',')) FROM wp_vf_capabilities;\")\"\nLEGACY_SCHEMA_BEFORE=\"$(sql \"SELECT GROUP_CONCAT(CONCAT(ORDINAL_POSITION,':',COLUMN_NAME,':',COLUMN_TYPE,':',IS_NULLABLE) ORDER BY ORDINAL_POSITION SEPARATOR '|') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='vf_test' AND TABLE_NAME='wp_vf_capabilities';\")\"\n[[ \"$LEGACY_ROWS_BEFORE\" == '1|4242|4242|vf.m3u8:PRODUCTION-LEGACY-SENTINEL' ]]\n[[ \"$(sql \"SELECT SUM(TABLE_ROWS) FROM information_schema.TABLES WHERE TABLE_SCHEMA='vf_test' AND TABLE_NAME LIKE 'wp_vf_m3u8_%';\")\" == 0 ]]\nwpcli eval 'require_once WP_PLUGIN_DIR.\"/vf-tool-m3u8/includes/v6-provider-schema-repair-admin.php\"; echo wp_json_encode(vf_tools_m3u8_v6_schema_repair_diagnostics());' >\"$OUT/hardblock-before.json\"\npython3 - \"$OUT/hardblock-before.json\" <<'PY2'\nimport json,sys\nd=json.load(open(sys.argv[1]));assert d['code']=='INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS';assert d['status']=='BLOCKED';assert d['repairAllowed'] is False;assert d['missingTables']==[];assert d['privateRowsTotal']==0\nPY2\n\nwpcli option update vf_private_update_credential_v1 \"$TOKEN\" >/dev/null\n"""
+          if s.count(anchor)!=1: raise SystemExit(f'initial anchor count={s.count(anchor)}')
+          s=s.replace(anchor,injected,1)
+          success="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 13 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_pipelines WHERE owner_provider_key='vf.m3u8';\")\" == 11 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_provider_fixtures WHERE provider_key='vf.m3u8';\")\" == 3 ]]\n[[ \"$(wpcli eval 'echo wp_next_scheduled(\"vf_m3u8_fixture_cron\") ? \"YES\" : \"NO\";' | tr -d '\\r')\" == YES ]]\n"""
+          success2="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 0 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_pipelines WHERE owner_provider_key='vf.m3u8';\")\" == 0 ]]\n[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_provider_fixtures WHERE provider_key='vf.m3u8';\")\" == 0 ]]\n[[ \"$(sql \"SELECT CONCAT(COUNT(*),'|',MIN(id),'|',MAX(id),'|',GROUP_CONCAT(CONCAT(provider_key,':',legacy_payload) ORDER BY id SEPARATOR ',')) FROM wp_vf_capabilities;\")\" == \"$LEGACY_ROWS_BEFORE\" ]]\n[[ \"$(sql \"SELECT GROUP_CONCAT(CONCAT(ORDINAL_POSITION,':',COLUMN_NAME,':',COLUMN_TYPE,':',IS_NULLABLE) ORDER BY ORDINAL_POSITION SEPARATOR '|') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='vf_test' AND TABLE_NAME='wp_vf_capabilities';\")\" == \"$LEGACY_SCHEMA_BEFORE\" ]]\nwpcli eval 'require_once WP_PLUGIN_DIR.\"/vf-tool-m3u8/includes/v6-provider-schema-repair-admin.php\"; echo wp_json_encode(vf_tools_m3u8_v6_schema_repair_diagnostics());' >\"$OUT/hardblock-after-update.json\"\npython3 - \"$OUT/hardblock-after-update.json\" <<'PY2'\nimport json,sys\nd=json.load(open(sys.argv[1]));assert d['code']=='INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS';assert d['repairAllowed'] is False;assert d['privateRowsTotal']==0\nPY2\n[[ \"$(wpcli eval 'echo wp_next_scheduled(\"vf_m3u8_fixture_cron\") ? \"YES\" : \"NO\";' | tr -d '\\r')\" == YES ]]\n"""
+          if s.count(success)!=1: raise SystemExit(f'success anchor count={s.count(success)}')
+          s=s.replace(success,success2,1)
+          rec="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 13 ]]\nVF_FIXTURE_MODE=state wpcli eval-file wp-content/wp-update-fixture-current.php >\"$OUT/recovery-state-after.json\"\n"""
+          rec2="""[[ \"$(sql \"SELECT COUNT(*) FROM wp_vf_m3u8_capabilities WHERE provider_key='vf.m3u8';\")\" == 0 ]]\n[[ \"$(sql \"SELECT CONCAT(COUNT(*),'|',MIN(id),'|',MAX(id),'|',GROUP_CONCAT(CONCAT(provider_key,':',legacy_payload) ORDER BY id SEPARATOR ',')) FROM wp_vf_capabilities;\")\" == \"$LEGACY_ROWS_BEFORE\" ]]\nVF_FIXTURE_MODE=state wpcli eval-file wp-content/wp-update-fixture-current.php >\"$OUT/recovery-state-after.json\"\n"""
+          if s.count(rec)!=1: raise SystemExit(f'recovery anchor count={s.count(rec)}')
+          s=s.replace(rec,rec2,1)
+          end="""[[ -s \"$OUT/frontend-shortcode.html\" ]]\n! grep -Eqi 'fatal error|critical error|uncaught exception' \"$OUT/frontend-shortcode.html\"\n\npython3 - \"$OUT/package-meta.json\""""
+          end2="""[[ -s \"$OUT/frontend-shortcode.html\" ]]\n! grep -Eqi 'fatal error|critical error|uncaught exception' \"$OUT/frontend-shortcode.html\"\n[[ \"$(sql \"SELECT CONCAT(COUNT(*),'|',MIN(id),'|',MAX(id),'|',GROUP_CONCAT(CONCAT(provider_key,':',legacy_payload) ORDER BY id SEPARATOR ',')) FROM wp_vf_capabilities;\")\" == \"$LEGACY_ROWS_BEFORE\" ]]\n[[ \"$(sql \"SELECT GROUP_CONCAT(CONCAT(ORDINAL_POSITION,':',COLUMN_NAME,':',COLUMN_TYPE,':',IS_NULLABLE) ORDER BY ORDINAL_POSITION SEPARATOR '|') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='vf_test' AND TABLE_NAME='wp_vf_capabilities';\")\" == \"$LEGACY_SCHEMA_BEFORE\" ]]\nwpcli eval 'require_once WP_PLUGIN_DIR.\"/vf-tool-m3u8/includes/v6-provider-schema-repair-admin.php\"; echo wp_json_encode(vf_tools_m3u8_v6_schema_repair_diagnostics());' >\"$OUT/hardblock-final.json\"\npython3 - \"$OUT/hardblock-final.json\" <<'PY2'\nimport json,sys\nd=json.load(open(sys.argv[1]));assert d['code']=='INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS';assert d['repairAllowed'] is False;assert d['privateRowsTotal']==0\nPY2\n\npython3 - \"$OUT/package-meta.json\""""
+          if s.count(end)!=1: raise SystemExit(f'end anchor count={s.count(end)}')
+          s=s.replace(end,end2,1)
+          p.write_text(s)
+          PY
+          bash -n source/tests/wp-update/run_current.sh
+          echo 'PRODUCTION_HARDBLOCK_HARNESS_PATCH=PASS'
+
+      - name: Run exact Native Update against Production-like hard-block
+        shell: bash
+        env:
+          GITHUB_WORKSPACE_PRIVATE: ${{ github.workspace }}/source
+          VF_UPDATE_EVIDENCE_DIR: ${{ env.EVIDENCE_DIR }}
+          VF_EXACT_TARGET_SRC: ${{ github.workspace }}/candidate/src
+          VF_EXACT_TARGET_SHA: ${{ env.CANDIDATE_SHA }}
+          PRODUCT_SHA: ${{ env.CANDIDATE_SHA }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          bash source/tests/wp-update/run_current.sh
+          python3 - "$EVIDENCE_DIR/package-meta.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1]))['target']
+          assert m['files']==550
+          assert m['bytes']==3529415
+          assert m['sha256']=='b89aa824834193410a9f534c6cdc72ebf606124ee0c718932b04dc8c5f98e74f'
+          assert m['runtime']['file_count']==548
+          PY
+          echo 'PRODUCTION_HARDBLOCK_EXACT_NATIVE_UPDATE=PASS'
+
+      - name: Seal hard-block compatibility evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f "$EVIDENCE_DIR/hardblock-before.json"
+          test -f "$EVIDENCE_DIR/hardblock-after-update.json"
+          test -f "$EVIDENCE_DIR/hardblock-final.json"
+          for f in hardblock-before.json hardblock-after-update.json hardblock-final.json; do
+            jq -e '.code=="INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS" and .status=="BLOCKED" and .repairAllowed==false and .privateRowsTotal==0' "$EVIDENCE_DIR/$f" >/dev/null
+          done
+          jq -e '.result=="PASS" and .checks.plugin_upgrader_success=="PASS" and .checks.stateful_recovery=="PASS" and .checks.post_update_verify_recovery=="PASS"' "$EVIDENCE_DIR/result.json" >/dev/null
+          cat > "$EVIDENCE_DIR/HARDBLOCK_GATE_SEAL.txt" <<EOF
+          S01_C03_1_25_7_PRODUCTION_HARDBLOCK_NATIVE_GATE=PASS
+          SOURCE_SHA=$SOURCE_SHA
+          CANDIDATE_SHA=$CANDIDATE_SHA
+          DIAGNOSTIC_BEFORE=INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS
+          DIAGNOSTIC_AFTER_UPDATE=INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS
+          DIAGNOSTIC_AFTER_RECOVERY=INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS
+          LEGACY_PROVIDER_ROWS_PRESERVED=PASS
+          LEGACY_SCHEMA_PRESERVED=PASS
+          PRIVATE_SCHEMA_REPAIR_TRIGGERED=NO
+          PRIVATE_ROWS_TOTAL=0
+          EXACT_PACKAGE_BYTES=$EXPECTED_PACKAGE_BYTES
+          EXACT_PACKAGE_SHA256=$EXPECTED_PACKAGE_SHA256
+          WORDPRESS=7.1
+          MARIADB=11.4
+          PLUGIN_UPGRADER=PASS
+          STATEFUL_RECOVERY=PASS
+          POST_VERIFY_FAILURE_RECOVERY=PASS
+          PRODUCTION_WRITE=NO
+          EOF
+          cat "$EVIDENCE_DIR/HARDBLOCK_GATE_SEAL.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-1.25.7-production-hardblock-native-gate-${{ github.run_id }}
+          path: ${{ env.EVIDENCE_DIR }}/
+          if-no-files-found: error
+          retention-days: 14
