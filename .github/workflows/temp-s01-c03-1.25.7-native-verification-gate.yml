@@ -1,0 +1,218 @@
+name: TEMP S01-C03 1.25.7 Native Verification Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - '.github/workflows/temp-s01-c03-1.25.7-native-verification-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      MAIN_SHA: 595f5b65ee1eb4ad75ed3a880a733e1f765060ed
+      HARNESS_SHA: 4f516d48cadd93b7143f201f196d923ad112f34a
+      CANDIDATE_SHA: d65dafcad0e442e23e74eb2458996452089d6221
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/s01-c03-1.25.7-native-verification
+    steps:
+      - name: Checkout exact 1.25.6 current harness source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.HARNESS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 5
+
+      - name: Checkout exact 1.25.7 candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 5
+
+      - name: Assert exact lineage scope and identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C source rev-parse HEAD)" = "$HARNESS_SHA"
+          test "$(git -C source rev-parse HEAD~3)" = "$MAIN_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C candidate rev-parse HEAD^)" = "$HARNESS_SHA"
+          git -C source diff --name-only "$MAIN_SHA" "$HARNESS_SHA" | LC_ALL=C sort > /tmp/harness-files.txt
+          cat > /tmp/harness-expected.txt <<'EOF'
+          tests/wp-update/build_packages_current.py
+          tests/wp-update/run_current.sh
+          tests/wp-update/wp_fixture_current.php
+          EOF
+          diff -u /tmp/harness-expected.txt /tmp/harness-files.txt
+          test -z "$(git -C source diff --name-only "$MAIN_SHA" "$HARNESS_SHA" -- src)"
+          git -C candidate diff --name-only "$HARNESS_SHA" "$CANDIDATE_SHA" | LC_ALL=C sort > /tmp/release-files.txt
+          printf '%s\n' VERSION src/PACKAGE_PROFILE.json src/plugin-manifest.json src/vf-tool-m3u8.php | LC_ALL=C sort > /tmp/release-expected.txt
+          diff -u /tmp/release-expected.txt /tmp/release-files.txt
+          test "$(git -C candidate diff --numstat "$HARNESS_SHA" "$CANDIDATE_SHA" | awk '{a+=$1;d+=$2} END{print a ":" d}')" = '11:11'
+          git -C candidate diff --check "$HARNESS_SHA" "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < candidate/VERSION)" = '1.25.7'
+          grep -Fq ' * Version: 1.25.7' candidate/src/vf-tool-m3u8.php
+          grep -Fq "define('VF_TOOL_M3U8_VERSION', '1.25.7')" candidate/src/vf-tool-m3u8.php
+          grep -Fq "define('VF_TOOL_M3U8_ROUND', 'R231')" candidate/src/vf-tool-m3u8.php
+          grep -Fq "return 'R231_NATIVE_UPDATE_VERIFICATION';" candidate/src/vf-tool-m3u8.php
+          php -r 'require "candidate/src/includes/v6-provider-schema.php"; if(vf_tools_m3u8_v6_schema_version()!=="1.3.0") exit(1);'
+          php candidate/tests/unit/schema-repair-contract.php | tee "$EVIDENCE_DIR/schema-repair-contract.txt"
+          php candidate/tests/unit/update-schema-authority-contract.php | tee "$EVIDENCE_DIR/update-schema-authority-contract.txt"
+          php candidate/tests/unit/bootstrap-upgrade-contract.php | tee "$EVIDENCE_DIR/bootstrap-upgrade-contract.txt"
+          find candidate/src -type f -name '*.php' -print0 | sort -z | xargs -0 -n1 php -l > "$EVIDENCE_DIR/candidate-php-lint.txt"
+          echo 'EXACT_LINEAGE_SCOPE_IDENTITY=PASS'
+
+      - name: Replace synthetic builder with exact formal candidate builder in workspace only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > source/tests/wp-update/build_packages_current.py <<'PY'
+          #!/usr/bin/env python3
+          from pathlib import Path
+          import argparse,hashlib,json,os,zipfile
+
+          SOURCE_VERSION='1.25.6'
+          TARGET_VERSION='1.25.7'
+          FIXED_TIME=(2026,9,2,0,0,0)
+
+          def formal_zip(src:Path,out:Path):
+              files={p.relative_to(src).as_posix():p.read_bytes() for p in src.rglob('*') if p.is_file() and not p.is_symlink()}
+              files=dict(sorted(files.items()))
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files.items():
+                      zi=zipfile.ZipInfo(f'vf-tool-m3u8/{rel}',FIXED_TIME)
+                      zi.compress_type=zipfile.ZIP_DEFLATED
+                      zi.external_attr=0o100644<<16
+                      z.writestr(zi,data)
+              if zipfile.ZipFile(out).testzip() is not None: raise SystemExit('zip corruption')
+              return files
+
+          def is_runtime(rel:str):
+              parts=rel.replace('\\','/').split('/');low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): return False
+              if len(parts)==1: return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+
+          def authority(src:Path):
+              rows=[]
+              for p in sorted((x for x in src.rglob('*') if x.is_file()),key=lambda p:p.relative_to(src).as_posix()):
+                  rel=p.relative_to(src).as_posix()
+                  if is_runtime(rel): rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+              canonical=''.join(f'{p}\0{h}\n' for p,h in rows).encode()
+              return {'file_count':len(rows),'fingerprint_sha256':hashlib.sha256(canonical).hexdigest()}
+
+          def meta(src:Path,out:Path,version:str):
+              files=formal_zip(src,out)
+              return {'version':version,'file':out.name,'files':len(files),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime':authority(src)}
+
+          ap=argparse.ArgumentParser();ap.add_argument('--repo',required=True);ap.add_argument('--out',required=True);args=ap.parse_args()
+          repo=Path(args.repo);out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
+          target_src=Path(os.environ['VF_EXACT_TARGET_SRC'])
+          source=meta(repo/'src',out/'vf-tools-m3u8_V1.25.6.zip',SOURCE_VERSION)
+          target=meta(target_src,out/'vf-tools-m3u8_V1.25.7-fixture.zip',TARGET_VERSION)
+          result={'source':source,'target':target,'target_semantics':'EXACT_FORMAL_CANDIDATE_BYTES','target_candidate_sha':os.environ['VF_EXACT_TARGET_SHA']}
+          (out/'package-meta-current.json').write_text(json.dumps(result,indent=2)+'\n')
+          print(json.dumps(result,indent=2))
+          PY
+          python3 -m py_compile source/tests/wp-update/build_packages_current.py
+          echo 'WORKSPACE_EXACT_BUILDER=PASS'
+
+      - name: Run exact 1.25.6 to exact 1.25.7 WordPress Native Update E2E
+        shell: bash
+        env:
+          GITHUB_WORKSPACE_PRIVATE: ${{ github.workspace }}/source
+          VF_UPDATE_EVIDENCE_DIR: ${{ env.EVIDENCE_DIR }}
+          VF_EXACT_TARGET_SRC: ${{ github.workspace }}/candidate/src
+          VF_EXACT_TARGET_SHA: ${{ env.CANDIDATE_SHA }}
+          PRODUCT_SHA: ${{ env.CANDIDATE_SHA }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -Eeuo pipefail
+          bash source/tests/wp-update/run_current.sh
+          python3 - "$EVIDENCE_DIR/package-meta.json" "$EVIDENCE_DIR/exact-package-seal.json" <<'PY'
+          import json,sys
+          m=json.load(open(sys.argv[1])); t=m['target']; s=m['source']
+          assert s['version']=='1.25.6' and t['version']=='1.25.7'
+          assert t['files']==550, t
+          assert t['runtime']['file_count']==548, t
+          out={'source':s,'target':t,'exact_candidate_package':'PASS','candidate_sha':'d65dafcad0e442e23e74eb2458996452089d6221'}
+          json.dump(out,open(sys.argv[2],'w'),indent=2)
+          print('PACKAGE_FILES='+str(t['files']))
+          print('PACKAGE_BYTES='+str(t['bytes']))
+          print('PACKAGE_SHA256='+t['sha256'])
+          print('RUNTIME_FILES='+str(t['runtime']['file_count']))
+          print('RUNTIME_FINGERPRINT='+t['runtime']['fingerprint_sha256'])
+          PY
+          grep -Fq 'CURRENT_NATIVE_UPDATE_CONTRACT_1.25.6_TO_1.25.7' "$EVIDENCE_DIR/result.json"
+          echo 'EXACT_1_25_6_TO_EXACT_1_25_7_PLUGIN_UPGRADER=PASS'
+
+      - name: Seal Formal Native Verification Pre-Release Gate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f "$EVIDENCE_DIR/result.json"
+          jq -e '.result=="PASS" and .source_version=="1.25.6" and .target_fixture=="1.25.7" and .schema=="1.3.0" and .wordpress=="7.1" and .mariadb=="11.4" and .checks.plugin_upgrader_success=="PASS" and .checks.stateful_recovery=="PASS" and .checks.post_update_verify_recovery=="PASS" and .checks.admin_runtime=="PASS" and .checks.frontend_runtime=="PASS"' "$EVIDENCE_DIR/result.json" >/dev/null
+          jq -e '.exact_candidate_package=="PASS" and .candidate_sha=="d65dafcad0e442e23e74eb2458996452089d6221" and .target.files==550 and .target.runtime.file_count==548' "$EVIDENCE_DIR/exact-package-seal.json" >/dev/null
+          PACKAGE_BYTES=$(jq -r '.target.bytes' "$EVIDENCE_DIR/exact-package-seal.json")
+          PACKAGE_SHA=$(jq -r '.target.sha256' "$EVIDENCE_DIR/exact-package-seal.json")
+          RUNTIME_FP=$(jq -r '.target.runtime.fingerprint_sha256' "$EVIDENCE_DIR/exact-package-seal.json")
+          cat > "$EVIDENCE_DIR/S01_C03_1_25_7_NATIVE_VERIFICATION_PRE_RELEASE_GATE.txt" <<EOF
+          S01_C03_1_25_7_NATIVE_VERIFICATION_PRE_RELEASE_GATE=PASS
+          MAIN_SHA=$MAIN_SHA
+          CURRENT_HARNESS_SHA=$HARNESS_SHA
+          CANDIDATE_SHA=$CANDIDATE_SHA
+          VERSION=1.25.7
+          ROUND=R231
+          INSTALL_MARKER=R231_NATIVE_UPDATE_VERIFICATION
+          PROVIDER_SCHEMA=1.3.0
+          WORDPRESS=7.1
+          MARIADB=11.4
+          EXACT_HARNESS_SCOPE=PASS
+          EXACT_RELEASE_IDENTITY_4_FILES_11_11=PASS
+          EXACT_1_25_6_TO_EXACT_1_25_7_PLUGIN_UPGRADER=PASS
+          PRIVATE_ASSET_FAIL_CLOSED_MATRIX=PASS
+          STATEFUL_RECOVERY=PASS
+          POST_UPDATE_VERIFY_RECOVERY=PASS
+          ADMIN_FRONTEND_RUNTIME=PASS
+          PACKAGE_FILES=550
+          PACKAGE_BYTES=$PACKAGE_BYTES
+          PACKAGE_SHA256=$PACKAGE_SHA
+          RUNTIME_FILES=548
+          RUNTIME_FINGERPRINT=$RUNTIME_FP
+          MAIN_PROMOTION=NO
+          TAG_WRITE=NO
+          GITHUB_RELEASE_WRITE=NO
+          CORE_UPDATES_WRITE=NO
+          PRODUCTION_WRITE=NO
+          NEW_RUNNER=NO
+          NEW_SECRET=NO
+          NEW_SSH=NO
+          EOF
+          cat "$EVIDENCE_DIR/S01_C03_1_25_7_NATIVE_VERIFICATION_PRE_RELEASE_GATE.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-1.25.7-native-verification-gate-${{ github.run_id }}
+          path: ${{ env.EVIDENCE_DIR }}/
+          if-no-files-found: error
+          retention-days: 14
