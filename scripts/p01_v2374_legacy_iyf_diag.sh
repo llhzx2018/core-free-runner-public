@@ -21,7 +21,7 @@ for ip in "${PAGE_IPS[@]}"; do
     -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139 Safari/537.36' \
     -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1' \
     -o "$out" -w '%{http_code}' 'https://www.iyf.tv/play/MRcWYmJRueF' || true)
-  og=$(grep -Eio '<meta[^>]+(?:property|name)=["'"']og:image["'"'][^>]*>' "$out" 2>/dev/null | head -1 || true)
+  og=$(grep -io 'og:image' "$out" 2>/dev/null | head -1 || true)
   printf 'PAGE_EDGE ip=%s http=%s bytes=%s og=%s\n' "$ip" "$code" "$(wc -c < "$out" 2>/dev/null || echo 0)" "${og:+yes}" | tee -a "$EVID/page-edges.txt"
 done
 mapfile -t STATIC_IPS < <(getent ahostsv4 static.iyf.tv 2>/dev/null | awk '{print $1}' | sort -u)
