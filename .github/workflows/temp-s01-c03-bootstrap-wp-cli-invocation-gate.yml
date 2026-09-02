@@ -1,0 +1,240 @@
+name: TEMP S01-C03 Bootstrap WP-CLI Invocation Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - .github/workflows/temp-s01-c03-bootstrap-wp-cli-invocation-gate.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c03-bootstrap-wp-cli-invocation-gate
+  cancel-in-progress: true
+
+env:
+  BASE_SHA: 2551f1f0a4045012eea5759169cd96d07aab8215
+  BOOTSTRAP_SHA: c0d46b8a1f024fcea3de7ee35a980e89149e08c3
+  TARGET_SHA: 72d2a1ca9400a3a3530a90974758b7135a7039d2
+  WP_VERSION: '7.1'
+  WP_PATH: /tmp/vf-s01-bootstrap-cli-wp
+  EVIDENCE_DIR: /tmp/vf-s01-bootstrap-cli-evidence
+  PACKAGE_DIR: /tmp/vf-s01-bootstrap-cli-packages
+  V1254_ASSET_ID: '540225036'
+  V1254_BYTES: '3524539'
+  V1254_SHA256: 797ee12ea864219880792d7c23530d1df15a609f6792f7bb5fa79361fbbe1c84
+
+jobs:
+  bootstrap-cli-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_s01_bootstrap_cli
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout exact bootstrap candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.BOOTSTRAP_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: bootstrap
+
+      - name: Checkout provisional 1.25.6 target identity
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: target
+
+      - name: Provision PHP 8.3
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.3'
+          extensions: mysqli,curl,zip,mbstring,xml,json,openssl
+          coverage: none
+
+      - name: Exact candidate boundary and static contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR" "$PACKAGE_DIR"
+          test "$(git -C bootstrap rev-parse HEAD)" = "$BOOTSTRAP_SHA"
+          test "$(git -C bootstrap merge-base "$BASE_SHA" "$BOOTSTRAP_SHA")" = "$BASE_SHA"
+          test "$(git -C bootstrap rev-parse origin/main)" = "$BASE_SHA"
+          git -C bootstrap diff --name-only "$BASE_SHA" "$BOOTSTRAP_SHA" | LC_ALL=C sort > /tmp/actual.txt
+          printf '%s\n' scripts/s01-c03-bootstrap-upgrade-1254.php tests/unit/bootstrap-upgrade-contract.php | LC_ALL=C sort > /tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/actual.txt
+          git -C bootstrap diff --check "$BASE_SHA" "$BOOTSTRAP_SHA"
+          php -l bootstrap/scripts/s01-c03-bootstrap-upgrade-1254.php
+          php -l bootstrap/tests/unit/bootstrap-upgrade-contract.php
+          php bootstrap/tests/unit/bootstrap-upgrade-contract.php | tee "$EVIDENCE_DIR/static-contract.txt"
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = '1.25.6'
+          printf '%s\n' "base=$BASE_SHA" "bootstrap_candidate=$BOOTSTRAP_SHA" "target_identity=$TARGET_SHA" > "$EVIDENCE_DIR/identity.txt"
+
+      - name: Build deterministic provisional 1.25.6 target package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,zipfile
+          from pathlib import Path
+          root=Path('target/src'); out=Path('/tmp/vf-s01-bootstrap-cli-packages'); ev=Path('/tmp/vf-s01-bootstrap-cli-evidence')
+          files={p.relative_to(root).as_posix():p.read_bytes() for p in root.rglob('*') if p.is_file() and not p.is_symlink()}
+          files=dict(sorted(files.items())); assert len(files)==550, len(files)
+          zpath=out/'vf-tools-m3u8_V1.25.6.zip'
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,data in files.items():
+                  zi=zipfile.ZipInfo(f'vf-tool-m3u8/{rel}',(2026,9,2,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,data)
+          with zipfile.ZipFile(zpath) as z:
+              assert z.testzip() is None
+              assert len([i for i in z.infolist() if not i.is_dir()])==550
+          audit={'bytes':zpath.stat().st_size,'sha256':hashlib.sha256(zpath.read_bytes()).hexdigest(),'files':550}
+          (ev/'target-package.json').write_text(json.dumps(audit,indent=2)+'\n')
+          print(json.dumps(audit))
+          PY
+
+      - name: Download official v1.25.4 release asset
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OLDZIP="$PACKAGE_DIR/vf-tools-m3u8_V1.25.4.zip"
+          curl -fsSL -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/llhzx2018/vf-tools-m3u8/releases/assets/$V1254_ASSET_ID" -o "$OLDZIP"
+          test "$(stat -c%s "$OLDZIP")" = "$V1254_BYTES"
+          test "$(sha256sum "$OLDZIP" | awk '{print $1}')" = "$V1254_SHA256"
+
+      - name: Install WordPress 7.1 and official v1.25.4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp && sudo mv /tmp/wp /usr/local/bin/wp
+          for i in $(seq 1 30); do mysqladmin ping -h127.0.0.1 -P3306 -uvf -pvf --silent >/dev/null 2>&1 && break; sleep 1; done
+          mysqladmin ping -h127.0.0.1 -P3306 -uvf -pvf --silent
+          rm -rf "$WP_PATH"
+          wp core download --path="$WP_PATH" --version="$WP_VERSION" --force
+          wp config create --path="$WP_PATH" --dbname=vf_s01_bootstrap_cli --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          wp config set FS_METHOD direct --path="$WP_PATH"
+          wp core install --path="$WP_PATH" --url=http://127.0.0.1:8087 --title='VF S01 Bootstrap CLI Gate' --admin_user=owner --admin_password='gate-only-bootstrap' --admin_email=owner@example.invalid --skip-email
+          wp plugin install "$PACKAGE_DIR/vf-tools-m3u8_V1.25.4.zip" --path="$WP_PATH" --activate --force
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$WP_PATH" | tr -d '\r')" = '1.25.4'
+          wp plugin is-active vf-tool-m3u8 --path="$WP_PATH"
+          test "$(wp option get vf_tools_m3u8_v6_schema_version --path="$WP_PATH" | tr -d '\r')" = '1.3.0'
+
+      - name: Seal pre-bootstrap source and schema state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/vf-schema-fingerprint.php <<'PHP'
+          <?php
+          $tables=function_exists('vf_tools_m3u8_v6_table_names')?vf_tools_m3u8_v6_table_names():[];
+          if(count($tables)!==14){exit(2);} ksort($tables,SORT_STRING); global $wpdb; $p=['tables'=>[],'options'=>[]];
+          foreach($tables as $k=>$t){$c=$wpdb->get_row('SHOW CREATE TABLE `'.str_replace('`','``',$t).'`',ARRAY_N);$r=$wpdb->get_results('SELECT * FROM `'.str_replace('`','``',$t).'`',ARRAY_A);usort($r,static fn($a,$b)=>strcmp(wp_json_encode($a),wp_json_encode($b)));$p['tables'][$k]=['name'=>$t,'create'=>$c,'rows'=>$r];}
+          $p['options']['schema_version']=get_option('vf_tools_m3u8_v6_schema_version',null);$p['options']['migration']=get_option('vf_tools_m3u8_v6_private_schema_migration',null);$j=wp_json_encode($p,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);echo hash('sha256',$j),"\n";
+          PHP
+          cat > /tmp/source-fp.py <<'PY'
+          import hashlib,sys
+          from pathlib import Path
+          root=Path(sys.argv[1]); files={p.relative_to(root).as_posix():p.read_bytes() for p in root.rglob('*') if p.is_file() and not p.is_symlink()}; files=dict(sorted(files.items())); print(hashlib.sha256(''.join(f'{k}\0{hashlib.sha256(v).hexdigest()}\n' for k,v in files.items()).encode()).hexdigest())
+          PY
+          wp eval-file /tmp/vf-schema-fingerprint.php --path="$WP_PATH" > "$EVIDENCE_DIR/schema-before.sha256"
+          python3 /tmp/source-fp.py "$WP_PATH/wp-content/plugins/vf-tool-m3u8" > "$EVIDENCE_DIR/source-before.sha256"
+
+      - name: Real WP-CLI positional verify-only must be zero mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NEWZIP="$PACKAGE_DIR/vf-tools-m3u8_V1.25.6.zip"
+          NEWBYTES="$(jq -r .bytes "$EVIDENCE_DIR/target-package.json")"
+          NEWSHA="$(jq -r .sha256 "$EVIDENCE_DIR/target-package.json")"
+          wp --path="$WP_PATH" eval-file "$GITHUB_WORKSPACE/bootstrap/scripts/s01-c03-bootstrap-upgrade-1254.php" "zip=$NEWZIP" "sha256=$NEWSHA" "bytes=$NEWBYTES" "target=1.25.6" "verify-only" | tee "$EVIDENCE_DIR/verify-only.txt"
+          grep -Fq 'bootstrap preflight PASS' "$EVIDENCE_DIR/verify-only.txt"
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$WP_PATH" | tr -d '\r')" = '1.25.4'
+          wp eval-file /tmp/vf-schema-fingerprint.php --path="$WP_PATH" > "$EVIDENCE_DIR/schema-after-verify.sha256"
+          python3 /tmp/source-fp.py "$WP_PATH/wp-content/plugins/vf-tool-m3u8" > "$EVIDENCE_DIR/source-after-verify.sha256"
+          cmp "$EVIDENCE_DIR/schema-before.sha256" "$EVIDENCE_DIR/schema-after-verify.sha256"
+          cmp "$EVIDENCE_DIR/source-before.sha256" "$EVIDENCE_DIR/source-after-verify.sha256"
+
+      - name: Fault injection after quarantine must rollback source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NEWZIP="$PACKAGE_DIR/vf-tools-m3u8_V1.25.6.zip"; NEWBYTES="$(jq -r .bytes "$EVIDENCE_DIR/target-package.json")"; NEWSHA="$(jq -r .sha256 "$EVIDENCE_DIR/target-package.json")"
+          cp "$GITHUB_WORKSPACE/bootstrap/scripts/s01-c03-bootstrap-upgrade-1254.php" /tmp/bootstrap-fault.php
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/bootstrap-fault.php'); s=p.read_text(); needle='            self::assert_target_readback($pluginDir, $target, $activeBefore, $networkBefore);'; repl="            throw new RuntimeException('GATE_FAULT_AFTER_SOURCE_PROMOTION');\n"+needle; assert s.count(needle)==1; p.write_text(s.replace(needle,repl))
+          PY
+          set +e
+          wp --path="$WP_PATH" eval-file /tmp/bootstrap-fault.php "zip=$NEWZIP" "sha256=$NEWSHA" "bytes=$NEWBYTES" "target=1.25.6" > "$EVIDENCE_DIR/fault.txt" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -Fq 'GATE_FAULT_AFTER_SOURCE_PROMOTION' "$EVIDENCE_DIR/fault.txt"
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$WP_PATH" | tr -d '\r')" = '1.25.4'
+          wp plugin is-active vf-tool-m3u8 --path="$WP_PATH"
+          wp eval-file /tmp/vf-schema-fingerprint.php --path="$WP_PATH" > "$EVIDENCE_DIR/schema-after-fault.sha256"
+          python3 /tmp/source-fp.py "$WP_PATH/wp-content/plugins/vf-tool-m3u8" > "$EVIDENCE_DIR/source-after-fault.sha256"
+          cmp "$EVIDENCE_DIR/schema-before.sha256" "$EVIDENCE_DIR/schema-after-fault.sha256"
+          cmp "$EVIDENCE_DIR/source-before.sha256" "$EVIDENCE_DIR/source-after-fault.sha256"
+
+      - name: Real WP-CLI positional bootstrap success and schema no-write
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NEWZIP="$PACKAGE_DIR/vf-tools-m3u8_V1.25.6.zip"; NEWBYTES="$(jq -r .bytes "$EVIDENCE_DIR/target-package.json")"; NEWSHA="$(jq -r .sha256 "$EVIDENCE_DIR/target-package.json")"
+          wp --path="$WP_PATH" eval-file "$GITHUB_WORKSPACE/bootstrap/scripts/s01-c03-bootstrap-upgrade-1254.php" "zip=$NEWZIP" "sha256=$NEWSHA" "bytes=$NEWBYTES" "target=1.25.6" | tee "$EVIDENCE_DIR/bootstrap-success.txt"
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$WP_PATH" | tr -d '\r')" = '1.25.6'
+          wp plugin is-active vf-tool-m3u8 --path="$WP_PATH"
+          wp eval-file /tmp/vf-schema-fingerprint.php --path="$WP_PATH" > "$EVIDENCE_DIR/schema-after-success.sha256"
+          cmp "$EVIDENCE_DIR/schema-before.sha256" "$EVIDENCE_DIR/schema-after-success.sha256"
+          test "$(wp option get vf_s01_c03_runtime_authority_v1 --format=json --path="$WP_PATH" | jq -r .version)" = '1.25.6'
+          grep -Fq 'Provider Schema was not mutated' "$EVIDENCE_DIR/bootstrap-success.txt"
+
+      - name: Seal candidate gate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'S01_C03_BOOTSTRAP_WP_CLI_INVOCATION_GATE=PASS' \
+            "BASE_SHA=$BASE_SHA" \
+            "BOOTSTRAP_SHA=$BOOTSTRAP_SHA" \
+            "TARGET_SHA=$TARGET_SHA" \
+            'WP=7.1' \
+            'MARIADB=11.4' \
+            'VERIFY_ONLY_ZERO_MUTATION=PASS' \
+            'FAULT_ROLLBACK=PASS' \
+            'SUCCESS_BOOTSTRAP=PASS' \
+            'SCHEMA_NO_WRITE=PASS' > "$EVIDENCE_DIR/FINAL_EVIDENCE.txt"
+          cat "$EVIDENCE_DIR/FINAL_EVIDENCE.txt"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-bootstrap-wp-cli-invocation-${{ github.run_id }}
+          path: /tmp/vf-s01-bootstrap-cli-evidence
+          if-no-files-found: error
+          retention-days: 14
