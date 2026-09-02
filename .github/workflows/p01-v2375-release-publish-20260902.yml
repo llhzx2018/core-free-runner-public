@@ -1,0 +1,90 @@
+name: P01 V2.37.5 Release Publish
+on:
+  push:
+    branches: [release/p01-v2375-hotfix-20260902]
+    paths: [.github/workflows/p01-v2375-release-publish-20260902.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FORMAL_SOURCE: cefda28149dbf29164adc8ebfa57edacad122474
+      ARTIFACT_RUN: '33610944516'
+      ARTIFACT_ID: '9838945578'
+      STRICT_RUN: '33611166304'
+      MAIN_PROMOTION_RUN: '33611315179'
+    steps:
+      - name: Download exact frozen assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for run in "$ARTIFACT_RUN" "$STRICT_RUN" "$MAIN_PROMOTION_RUN"; do
+            test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/$run --jq .conclusion)" = success
+          done
+          META="$(gh api repos/llhzx2018/core-free-runner-public/actions/artifacts/$ARTIFACT_ID)"
+          test "$(jq -r .workflow_run.id <<<"$META")" = "$ARTIFACT_RUN"
+          test "$(jq -r .digest <<<"$META")" = 'sha256:1e59c22ec9d2175d901b01c11e3084dc6dd9dcaf552de602768a2dc2d34158b8'
+          mkdir -p /tmp/v2375-publish
+          gh api repos/llhzx2018/core-free-runner-public/actions/artifacts/$ARTIFACT_ID/zip > /tmp/v2375-publish/artifact.zip
+          test "$(sha256sum /tmp/v2375-publish/artifact.zip | awk '{print $1}')" = '1e59c22ec9d2175d901b01c11e3084dc6dd9dcaf552de602768a2dc2d34158b8'
+          unzip -q /tmp/v2375-publish/artifact.zip -d /tmp/v2375-publish/unpacked
+          FULL="$(find /tmp/v2375-publish/unpacked -type f -name 'VF-Start-V2.37.5-FULL.zip' -print -quit)"
+          test -n "$FULL"; ASSETS="$(dirname "$FULL")"; echo "ASSETS=$ASSETS" >> "$GITHUB_ENV"
+          test "$(find "$ASSETS" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 8
+          (cd "$ASSETS" && sha256sum -c VF-Start-V2.37.5-FULL.zip.sha256 && sha256sum -c VF_Start_V2.37.5_UPDATE.zip.sha256 && sha256sum -c repair-v2.37.5.php.sha256)
+      - name: Create tag, draft release, upload, verify, publish stable
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAIN_SHA="$(gh api repos/llhzx2018/vf-start/git/ref/heads/main --jq .object.sha)"
+          test "$MAIN_SHA" = "$FORMAL_SOURCE"
+          if TAG_SHA="$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.37.5 --jq .object.sha 2>/dev/null)"; then
+            test "$TAG_SHA" = "$FORMAL_SOURCE"
+          else
+            jq -n --arg ref 'refs/tags/v2.37.5' --arg sha "$FORMAL_SOURCE" '{ref:$ref,sha:$sha}' >/tmp/create-tag.json
+            gh api -X POST repos/llhzx2018/vf-start/git/refs --input /tmp/create-tag.json >/tmp/tag.json
+            test "$(jq -r .object.sha /tmp/tag.json)" = "$FORMAL_SOURCE"
+          fi
+          if gh api repos/llhzx2018/vf-start/releases/tags/v2.37.5 >/dev/null 2>&1; then echo 'release unexpectedly exists' >&2; exit 21; fi
+          BODY="$(cat "$ASSETS/P01-V2.37.5-RELEASE-NOTES.md")"
+          jq -n --arg tag 'v2.37.5' --arg name 'VF Start V2.37.5' --arg body "$BODY" '{tag_name:$tag,target_commitish:"main",name:$name,body:$body,draft:true,prerelease:false}' > /tmp/create-release.json
+          REL="$(gh api -X POST repos/llhzx2018/vf-start/releases --input /tmp/create-release.json)"
+          RID="$(jq -r .id <<<"$REL")"; test "$RID" != null; test -n "$RID"
+          printf '%s\n' "$REL" > /tmp/v2375-draft.json
+          for f in "$ASSETS"/*; do
+            n="$(basename "$f")"
+            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'Content-Type: application/octet-stream' --data-binary @"$f" "https://uploads.github.com/repos/llhzx2018/vf-start/releases/$RID/assets?name=$n" >/tmp/upload.json
+            test "$(jq -r .name /tmp/upload.json)" = "$n"
+          done
+          REL="$(gh api repos/llhzx2018/vf-start/releases/$RID)"
+          test "$(jq -r .draft <<<"$REL")" = true
+          test "$(jq '.assets|length' <<<"$REL")" = 8
+          UPDATE_ID="$(jq -r '.assets[]|select(.name=="VF_Start_V2.37.5_UPDATE.zip")|.id' <<<"$REL")"
+          test -n "$UPDATE_ID"
+          curl -L --fail-with-body --silent --show-error -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/llhzx2018/vf-start/releases/assets/$UPDATE_ID" -o /tmp/release-update.zip
+          test "$(sha256sum /tmp/release-update.zip | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$ASSETS/VF_Start_V2.37.5_UPDATE.zip.sha256")"
+          test "$(stat -c%s /tmp/release-update.zip)" = "$(stat -c%s "$ASSETS/VF_Start_V2.37.5_UPDATE.zip")"
+          jq -n '{draft:false,prerelease:false}' >/tmp/publish.json
+          REL="$(gh api -X PATCH repos/llhzx2018/vf-start/releases/$RID --input /tmp/publish.json)"
+          test "$(jq -r .draft <<<"$REL")" = false
+          test "$(jq -r .prerelease <<<"$REL")" = false
+          test "$(jq '.assets|length' <<<"$REL")" = 8
+          jq '{id,tag_name,name,draft,prerelease,published_at,assets:[.assets[]|{name,size,id,digest}]}' <<<"$REL" | tee /tmp/v2375-release.json
+          printf 'P01_V2375_RELEASE_PUBLISH=PASS\nRELEASE_ID=%s\nTAG=v2.37.5\nSOURCE=%s\nASSETS=8\nFROZEN_ARTIFACT_ID=%s\nSTRICT_RUN=%s\nREBUILD=NO\nOWNER_PRODUCTION_WRITE=NO\n' "$RID" "$FORMAL_SOURCE" "$ARTIFACT_ID" "$STRICT_RUN" | tee /tmp/v2375-release-verdict.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-v2375-release-publish-${{ github.run_id }}
+          path: |
+            /tmp/v2375-release.json
+            /tmp/v2375-release-verdict.txt
+            /tmp/v2375-draft.json
+          if-no-files-found: warn
+          retention-days: 90
