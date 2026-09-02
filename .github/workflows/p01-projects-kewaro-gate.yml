@@ -1,0 +1,229 @@
+name: P01 Projects Kewaro Merge Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-projects-kewaro-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-projects-gate:
+    if: github.event.pull_request.head.ref == 'test/p01-projects-kewaro-gate-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 1f50ee2893de28447c6f0d53764649e0fac906d5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Exact source and change boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '1f50ee2893de28447c6f0d53764649e0fac906d5'
+          test "$(git rev-parse HEAD^{tree})" = '09daffc2d2a942b58c431d96a15fe27b47fe3fb8'
+          test "$(cat VERSION)" = '2.37.5'
+          git diff --name-only e3667582fd467bc64789f8087f195e5714f2a3e6..HEAD | sort >/tmp/p01-projects-files.txt
+          printf '%s\n' \
+            src/assets/auth-controls.js \
+            src/assets/workspace-projects.css \
+            src/projects.php | sort >/tmp/p01-projects-expected.txt
+          diff -u /tmp/p01-projects-expected.txt /tmp/p01-projects-files.txt
+          grep -Fq "link.textContent='项目'" src/assets/auth-controls.js
+          grep -Fq "link.href='projects.php'" src/assets/auth-controls.js
+          grep -Fq "'id' => 'P03'" src/projects.php
+          grep -Fq "'id' => 'P06'" src/projects.php
+          grep -Fq '已正式退役' src/projects.php
+          ! grep -Fq 'https://forge.kewaro.com/' src/projects.php
+          ! grep -Fq 'https://press.kewaro.com/' src/projects.php
+          echo P01_PROJECTS_EXACT_SOURCE=PASS
+          echo P01_PROJECTS_CHANGE_BOUNDARY=PASS
+
+      - name: Syntax and existing seed regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v
+          node --version
+          php -l src/projects.php
+          node --check src/assets/auth-controls.js
+          php src/cli/verify.php | tee /tmp/p01-projects-seed.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-projects-seed.txt
+          echo P01_PROJECTS_SYNTAX=PASS
+          echo P01_PROJECTS_SEED_REGRESSION=PASS
+
+      - name: Runtime auth and projects page
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-projects-runtime
+          COOKIE=/tmp/p01-projects.cookies
+          PORT=18401
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-projects-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          BASE="http://127.0.0.1:$PORT"
+          for i in $(seq 1 40); do
+            if curl -fsS "$BASE/setup.php" -o /tmp/p01-projects-setup.html; then break; fi
+            sleep .25
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-projects-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Projects Gate' \
+            --data-urlencode 'admin_password=P01Projects!Gate' \
+            --data-urlencode 'admin_password_confirm=P01Projects!Gate' \
+            -o /tmp/p01-projects-setup-post.html
+
+          curl -sS -D /tmp/p01-projects-anon.headers -o /dev/null "$BASE/projects.php"
+          grep -Eq '^HTTP/.* 302' /tmp/p01-projects-anon.headers
+          grep -Eiq '^Location: index\.php' /tmp/p01-projects-anon.headers
+          echo P01_PROJECTS_ANON_BOUNDARY=PASS
+
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' \
+            -X POST "$BASE/api.php?action=login" --data '{"password":"P01Projects!Gate"}' \
+            | tee /tmp/p01-projects-login.json | jq -e '.ok==true' >/dev/null
+          curl -fsS -b "$COOKIE" "$BASE/projects.php" -o /tmp/p01-projects.html
+          grep -Fq '<title>项目 · VF Start</title>' /tmp/p01-projects.html
+          grep -Fq 'id="vfProjectsTitle">项目</h1>' /tmp/p01-projects.html
+          grep -Fq '>P01<' /tmp/p01-projects.html
+          grep -Fq '>P02<' /tmp/p01-projects.html
+          grep -Fq '>P04<' /tmp/p01-projects.html
+          grep -Fq '>P05<' /tmp/p01-projects.html
+          grep -Fq '>P03<' /tmp/p01-projects.html
+          grep -Fq '>P06<' /tmp/p01-projects.html
+          grep -Fq '已退役' /tmp/p01-projects.html
+          echo P01_PROJECTS_RUNTIME=PASS
+
+      - name: Browser nav, project page and mobile overflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-projects-browser
+          PORT=18402
+          DP=9528
+          rm -rf "$ROOT"
+          cp -a src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-projects-browser-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          BASE="http://127.0.0.1:$PORT"
+          curl -fsS "$BASE/setup.php" -o /tmp/p01-projects-browser-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-projects-browser-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -X POST "$BASE/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Projects Browser Gate' \
+            --data-urlencode 'admin_password=P01Projects!Browser' \
+            --data-urlencode 'admin_password_confirm=P01Projects!Browser' \
+            -o /tmp/p01-projects-browser-setup-post.html
+
+          python3 - <<'PY'
+          import json, shutil, subprocess, sys, time, urllib.request, urllib.error
+          BASE='http://127.0.0.1:18402'; DP=9528
+          def fail(msg): print('P01_PROJECTS_BROWSER=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(method,url,payload=None):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(url,data=data,method=method)
+              if data is not None:req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=20) as r:
+                      raw=r.read().decode(); return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:300]}')
+          def wait_http(url):
+              for _ in range(160):
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              fail('not ready '+url)
+          def wd(method,path,payload=None):
+              out=http(method,f'http://127.0.0.1:{DP}{path}',payload)
+              value=out.get('value')
+              if isinstance(value,dict) and value.get('error'): fail(f"webdriver {value.get('error')}: {value.get('message')}")
+              return out
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome: fail('Chrome unavailable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT)
+          session=''
+          try:
+              wait_http(BASE+'/index.php'); wait_http(f'http://127.0.0.1:{DP}/status')
+              res=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              session=str(res['value'].get('sessionId') or res.get('sessionId') or '')
+              if not session: fail('missing session')
+              def sv(method,path,payload=None): return wd(method,f'/session/{session}{path}',payload)['value']
+              def js(script): return sv('POST','/execute/sync',{'script':script,'args':[]})
+              def async_js(script): return sv('POST','/execute/async',{'script':script,'args':[]})
+              def nav(url): sv('POST','/url',{'url':url})
+              def wait(fn,label,n=220):
+                  last=None
+                  for _ in range(n):
+                      try:
+                          last=fn()
+                          if last:return last
+                      except Exception as exc:last=repr(exc)
+                      time.sleep(.1)
+                  fail(f'timeout {label}: {last!r}')
+              nav(BASE+'/index.php')
+              wait(lambda: js('return document.readyState==="complete"'),'index ready')
+              login=async_js("""const done=arguments[arguments.length-1];fetch('api.php?action=login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'P01Projects!Browser'})}).then(r=>r.json()).then(done).catch(e=>done({ok:false,error:String(e)}));""")
+              if not isinstance(login,dict) or not login.get('ok'): fail('browser login '+repr(login))
+              nav(BASE+'/home.php')
+              navtext=wait(lambda: str(js("return document.querySelector('.vf-global-domain-nav-inner')?.innerText || ''")) if '项目' in str(js("return document.querySelector('.vf-global-domain-nav-inner')?.innerText || ''")) else '', 'projects nav')
+              for label in ['首页','导航','频道','影视','专题','项目','退出']:
+                  if label not in navtext: fail('nav missing '+label)
+              href=str(js("return document.querySelector('[data-vf-projects-nav]')?.getAttribute('href') || ''"))
+              if href!='projects.php': fail('projects href '+href)
+              nav(BASE+'/projects.php')
+              title=wait(lambda: str(js("return document.querySelector('#vfProjectsTitle')?.textContent?.trim() || ''")),'projects title')
+              if title!='项目': fail('projects title '+title)
+              retired=str(js("return document.querySelector('.vf-retired-list')?.innerText || ''"))
+              for label in ['P03','VF Forge','P06','VF Press','已退役']:
+                  if label not in retired: fail('retired missing '+label)
+              active=str(js("return document.querySelector('[data-vf-projects-nav]')?.classList.contains('active') || false"))
+              if active.lower()!='true': fail('projects nav not active')
+              sv('POST','/window/rect',{'width':390,'height':844}); time.sleep(.3)
+              overflow=int(js("return Math.max(document.documentElement.scrollWidth,document.body?document.body.scrollWidth:0)-document.documentElement.clientWidth"))
+              if overflow!=0: fail(f'horizontal overflow={overflow}')
+              print('P01_PROJECTS_NAV_ORDER=PASS')
+              print('P01_PROJECTS_RETIRED_BOUNDARY=PASS')
+              print('P01_PROJECTS_MOBILE_OVERFLOW=0')
+              print('P01_PROJECTS_BROWSER=PASS')
+          finally:
+              if session:
+                  try: wd('DELETE',f'/session/{session}')
+                  except Exception: pass
+              proc.terminate()
+          PY
+
+      - name: Final read-only boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '1f50ee2893de28447c6f0d53764649e0fac906d5'
+          test "$(git rev-parse HEAD^{tree})" = '09daffc2d2a942b58c431d96a15fe27b47fe3fb8'
+          test -z "$(git status --porcelain)"
+          echo P01_PROJECTS_RELEASE_WRITE=0
+          echo P01_PROJECTS_PRODUCTION_WRITE=0
+          echo P01_PROJECTS_KEWARO_MERGE_GATE=PASS
