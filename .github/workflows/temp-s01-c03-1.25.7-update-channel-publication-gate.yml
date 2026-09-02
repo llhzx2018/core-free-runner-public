@@ -1,0 +1,220 @@
+name: TEMP S01-C03 1.25.7 Update Channel Publication Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - '.github/workflows/temp-s01-c03-1.25.7-update-channel-publication-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORE_BASE_SHA: 1a348b943f82bd16aa5c80f795100c22aaa69ffb
+      CORE_CANDIDATE_SHA: 6317c6ff4ee1e637d371e2a1fb2f68e551f31fed
+      PRODUCT_SHA: d65dafcad0e442e23e74eb2458996452089d6221
+      RELEASE_ID: '381509993'
+      ASSET_ID: '541636052'
+      ASSET_NAME: vf-tools-m3u8_V1.25.7.zip
+      ASSET_BYTES: '3529415'
+      ASSET_SHA256: b89aa824834193410a9f534c6cdc72ebf606124ee0c718932b04dc8c5f98e74f
+      RUNTIME_FILES: '548'
+      RUNTIME_FINGERPRINT: 7bde6451615364b809937b7fc02b9e09f2e69db52302b018a6ed94e73900b399
+      NATIVE_GATE_RUN: '33669707762'
+      NATIVE_GATE_ARTIFACT: '9862047963'
+      NATIVE_GATE_DIGEST: sha256:3ccd7c4a28a1329ebc793d12a92a0a99724ecc35db678e9eb5a8a5965919cc50
+      HARDBLOCK_GATE_RUN: '33670455746'
+      HARDBLOCK_GATE_ARTIFACT: '9862336441'
+      HARDBLOCK_GATE_DIGEST: sha256:db08c1b13f45656ddf89aa87d533a91d8fa5cf0c0ee0b4359f20de0c0dc05b46
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/s01-c03-1.25.7-update-channel
+    steps:
+      - name: Checkout exact core-updates Candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: core
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Checkout exact 1.25.7 product source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert exact publication scope and manifest contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C core rev-parse HEAD)" = "$CORE_CANDIDATE_SHA"
+          test "$(git -C core rev-parse HEAD^)" = "$CORE_BASE_SHA"
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          git -C core diff --name-only "$CORE_BASE_SHA" "$CORE_CANDIDATE_SHA" > "$EVIDENCE_DIR/changed-files.txt"
+          test "$(cat "$EVIDENCE_DIR/changed-files.txt")" = 'projects/S01-C03.json'
+          M=core/projects/S01-C03.json
+          jq -e --arg sha "$ASSET_SHA256" --arg fp "$RUNTIME_FINGERPRINT" --argjson bytes "$ASSET_BYTES" --argjson rf "$RUNTIME_FILES" '
+            .schema_version=="wp-component-1.0" and
+            .project_id=="S01" and .component_id=="S01-C03" and .component_type=="PLUGIN" and
+            .package_id=="vf-tools-m3u8" and .package_slug=="vf-tool-m3u8" and
+            .plugin_file=="vf-tool-m3u8/vf-tool-m3u8.php" and
+            .enabled==true and .target_version=="1.25.7" and
+            (.from_versions==["1.25.6"]) and
+            .repository=="llhzx2018/vf-tools-m3u8" and .release_tag=="v1.25.7" and
+            .asset_name=="vf-tools-m3u8_V1.25.7.zip" and .asset_bytes==$bytes and .asset_sha256==$sha and
+            .schema_from=="1.3.0" and .schema_to=="1.3.0" and
+            .minimum_wordpress=="6.5" and .minimum_php=="8.2" and
+            .backup_required==true and .rollback_supported==true and
+            .runtime_contract=="VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1" and
+            .runtime_files==$rf and .runtime_file_count==$rf and
+            .runtime_fingerprint==$fp and .runtime_fingerprint_sha256==$fp
+          ' "$M" >/dev/null
+          ! jq -e '.from_versions | index("1.25.4")' "$M" >/dev/null
+          ! jq -e '.from_versions | index("1.25.5")' "$M" >/dev/null
+          grep -Fq 'INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS' "$M"
+          grep -Fq 'Provider Schema diagnosis/repair remains a separate explicit OWNER action' "$M"
+          test "$(tr -d '\r\n' < product/VERSION)" = '1.25.7'
+          grep -Fq "define('VF_TOOL_M3U8_ROUND', 'R231')" product/src/vf-tool-m3u8.php
+          grep -Fq "return 'R231_NATIVE_UPDATE_VERIFICATION';" product/src/vf-tool-m3u8.php
+          php -r 'define("ABSPATH", __DIR__); require "product/src/includes/v6-provider-schema.php"; if(vf_tools_m3u8_v6_schema_version()!=="1.3.0") exit(1);'
+          php product/tests/unit/update-schema-authority-contract.php > "$EVIDENCE_DIR/update-schema-authority-contract.txt"
+          php product/tests/unit/schema-repair-contract.php > "$EVIDENCE_DIR/schema-repair-contract.txt"
+          php product/tests/unit/bootstrap-upgrade-contract.php > "$EVIDENCE_DIR/bootstrap-upgrade-contract.txt"
+          echo 'EXACT_SCOPE_MANIFEST_CONTRACT=PASS'
+
+      - name: Validate Candidate with exact 1.25.7 updater validator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/validate-manifest.php" <<'PHP'
+          <?php
+          define('ABSPATH', __DIR__ . '/');
+          class WP_Error {
+              private string $code; private string $message;
+              public function __construct($code='',$message=''){ $this->code=(string)$code; $this->message=(string)$message; }
+              public function get_error_code(){ return $this->code; }
+              public function get_error_message(){ return $this->message; }
+          }
+          function is_wp_error($v){ return $v instanceof WP_Error; }
+          require getenv('PRODUCT_ROOT') . '/src/includes/update/class-vf-m3u8-update-contract-v1.php';
+          require getenv('PRODUCT_ROOT') . '/src/includes/update/class-vf-m3u8-update-source-v1.php';
+          $m=json_decode(file_get_contents(getenv('MANIFEST_PATH')),true);
+          if(!is_array($m)){fwrite(STDERR,"manifest json invalid\n");exit(1);}
+          $source=new VF_M3U8_Update_Source_V1('1.25.6');
+          $r=$source->validate_manifest($m);
+          if(is_wp_error($r)){fwrite(STDERR,$r->get_error_code()."\n");exit(1);}
+          $bad=$m; $bad['schema_from']='1.2.0'; $bad['schema_to']='1.2.0';
+          $r=$source->validate_manifest($bad);
+          if(!is_wp_error($r)||$r->get_error_code()!=='vf_m3u8_update_schema_change_blocked'){fwrite(STDERR,"stale schema did not fail closed\n");exit(1);}
+          echo "EXACT_UPDATER_VALIDATOR=PASS\n";
+          PHP
+          PRODUCT_ROOT="$GITHUB_WORKSPACE/product" MANIFEST_PATH="$GITHUB_WORKSPACE/core/projects/S01-C03.json" php "$RUNNER_TEMP/validate-manifest.php" | tee "$EVIDENCE_DIR/updater-validator.txt"
+
+      - name: Verify exact GitHub Release and actual asset bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          repo=llhzx2018/vf-tools-m3u8
+          gh api "repos/$repo/git/ref/tags/v1.25.7" > "$EVIDENCE_DIR/tag.json"
+          jq -e --arg sha "$PRODUCT_SHA" '.object.type=="commit" and .object.sha==$sha' "$EVIDENCE_DIR/tag.json" >/dev/null
+          gh api "repos/$repo/releases/tags/v1.25.7" > "$EVIDENCE_DIR/release.json"
+          jq -e --argjson rid "$RELEASE_ID" --argjson aid "$ASSET_ID" --arg name "$ASSET_NAME" --arg digest "sha256:$ASSET_SHA256" --argjson bytes "$ASSET_BYTES" '
+            .id==$rid and .tag_name=="v1.25.7" and .target_commitish=="d65dafcad0e442e23e74eb2458996452089d6221" and .draft==false and .prerelease==false and
+            ([.assets[] | select(.id==$aid and .name==$name and .size==$bytes and .digest==$digest)] | length)==1
+          ' "$EVIDENCE_DIR/release.json" >/dev/null
+          gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$ASSET_ID" > "$RUNNER_TEMP/$ASSET_NAME"
+          test "$(stat -c%s "$RUNNER_TEMP/$ASSET_NAME")" = "$ASSET_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/$ASSET_NAME" | awk '{print $1}')" = "$ASSET_SHA256"
+          test "$(unzip -Z1 "$RUNNER_TEMP/$ASSET_NAME" | wc -l | tr -d ' ')" = '550'
+          rm -rf "$RUNNER_TEMP/pkg" && mkdir -p "$RUNNER_TEMP/pkg"
+          unzip -q "$RUNNER_TEMP/$ASSET_NAME" -d "$RUNNER_TEMP/pkg"
+          test -f "$RUNNER_TEMP/pkg/vf-tool-m3u8/vf-tool-m3u8.php"
+          grep -Fq ' * Version: 1.25.7' "$RUNNER_TEMP/pkg/vf-tool-m3u8/vf-tool-m3u8.php"
+          python3 - "$RUNNER_TEMP/pkg/vf-tool-m3u8" "$RUNTIME_FILES" "$RUNTIME_FINGERPRINT" "$EVIDENCE_DIR/runtime.json" <<'PY'
+          from pathlib import Path
+          import hashlib,json,sys
+          root=Path(sys.argv[1]);expected_n=int(sys.argv[2]);expected_fp=sys.argv[3]
+          def is_runtime(rel):
+              parts=rel.replace('\\','/').split('/');low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): return False
+              if len(parts)==1: return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+          rows=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()),key=lambda p:p.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if is_runtime(rel): rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canonical=''.join(f'{p}\0{h}\n' for p,h in rows).encode()
+          fp=hashlib.sha256(canonical).hexdigest()
+          assert len(rows)==expected_n,(len(rows),expected_n)
+          assert fp==expected_fp,(fp,expected_fp)
+          json.dump({'runtime_files':len(rows),'runtime_fingerprint_sha256':fp},open(sys.argv[4],'w'),indent=2)
+          PY
+          echo 'ACTUAL_RELEASE_ASSET=PASS'
+
+      - name: Verify prior exact Native and Production-hardblock evidence identities
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/llhzx2018/core-free-runner-public/actions/artifacts/$NATIVE_GATE_ARTIFACT" > "$EVIDENCE_DIR/native-gate-artifact.json"
+          jq -e --arg name "s01-c03-1.25.7-native-verification-gate-$NATIVE_GATE_RUN" --arg digest "$NATIVE_GATE_DIGEST" '.name==$name and .digest==$digest and .expired==false' "$EVIDENCE_DIR/native-gate-artifact.json" >/dev/null
+          gh api "repos/llhzx2018/core-free-runner-public/actions/artifacts/$HARDBLOCK_GATE_ARTIFACT" > "$EVIDENCE_DIR/hardblock-gate-artifact.json"
+          jq -e --arg name "s01-c03-1.25.7-production-hardblock-native-gate-$HARDBLOCK_GATE_RUN" --arg digest "$HARDBLOCK_GATE_DIGEST" '.name==$name and .digest==$digest and .expired==false' "$EVIDENCE_DIR/hardblock-gate-artifact.json" >/dev/null
+          echo 'PRIOR_GATE_EVIDENCE_IDENTITY=PASS'
+
+      - name: Seal Publication Gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$EVIDENCE_DIR/S01_C03_1_25_7_UPDATE_CHANNEL_PUBLICATION_GATE.txt" <<EOF
+          S01_C03_1_25_7_UPDATE_CHANNEL_PUBLICATION_GATE=PASS
+          CORE_BASE_SHA=$CORE_BASE_SHA
+          CORE_CANDIDATE_SHA=$CORE_CANDIDATE_SHA
+          PRODUCT_SHA=$PRODUCT_SHA
+          TARGET_VERSION=1.25.7
+          FROM_VERSIONS=1.25.6_ONLY
+          PRE_1_25_6_NATIVE_SOURCE_ALLOWED=NO
+          PROVIDER_SCHEMA=1.3.0_TO_1.3.0
+          RELEASE_ID=$RELEASE_ID
+          ASSET_ID=$ASSET_ID
+          ASSET_NAME=$ASSET_NAME
+          ASSET_BYTES=$ASSET_BYTES
+          ASSET_SHA256=$ASSET_SHA256
+          RUNTIME_FILES=$RUNTIME_FILES
+          RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT
+          EXACT_UPDATER_VALIDATOR=PASS
+          ACTUAL_RELEASE_ASSET=PASS
+          PRODUCTION_HARDBLOCK_COMPATIBILITY_EVIDENCE=PASS
+          PROVIDER_SCHEMA_REPAIR=NO
+          OPS_INITIALIZE_REPAIR=NO
+          PRODUCTION_WRITE=NO
+          NEW_RUNNER=NO
+          NEW_SECRET=NO
+          NEW_SSH=NO
+          EOF
+          cat "$EVIDENCE_DIR/S01_C03_1_25_7_UPDATE_CHANNEL_PUBLICATION_GATE.txt"
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-1.25.7-update-channel-publication-gate-${{ github.run_id }}
+          path: ${{ env.EVIDENCE_DIR }}/
+          if-no-files-found: error
+          retention-days: 14
