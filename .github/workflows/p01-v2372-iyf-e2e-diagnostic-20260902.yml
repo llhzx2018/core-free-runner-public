@@ -1,0 +1,125 @@
+name: P01 V2.37.2 IYF Cover E2E Diagnostic
+on:
+  push:
+    branches: [diag/p01-v2372-iyf-e2e-20260902]
+    paths: [.github/workflows/p01-v2372-iyf-e2e-diagnostic-20260902.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo
+          coverage: none
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-start
+          ref: 6f09d59e3ecc0ed54b9a3ae6e3fc6ba22b109ea1
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: product
+      - name: Fresh install exact V2.37.2 main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 6f09d59e3ecc0ed54b9a3ae6e3fc6ba22b109ea1
+          test "$(cat product/VERSION)" = 2.37.2
+          rm -rf /tmp/p01-iyf-e2e && cp -a product/src /tmp/p01-iyf-e2e
+          php -S 127.0.0.1:18501 -t /tmp/p01-iyf-e2e >/tmp/p01-iyf-server.log 2>&1 &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          COOKIE=/tmp/p01-iyf.cookies
+          for i in $(seq 1 80); do curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18501/setup.php -o /tmp/p01-iyf-setup.html && break; sleep .25; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-iyf-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18501/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=IYF E2E' \
+            --data-urlencode 'admin_password=IYFE2E!2026' \
+            --data-urlencode 'admin_password_confirm=IYFE2E!2026' >/tmp/p01-iyf-setup-post.html
+          kill "$PID"; trap - EXIT
+      - name: Seed real-shape IYF watch rows and execute refreshOne
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-iyf-e2e php <<'PHP' | tee /tmp/p01-iyf-refresh.jsonl
+          <?php
+          require getenv('ROOT').'/app/bootstrap.php';
+          require getenv('ROOT').'/app/SurfaceRepository.php';
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          $db=vf_db(); $repo=new VfRepository($db); $surface=new VfSurfaceRepository($db);
+          $cat=$repo->createCategory(['name'=>'IYF E2E','description'=>'','is_private'=>false]);
+          $urls=[
+            'https://www.iyf.tv/play/kr8SspeNzb3',
+            'https://www.iyf.tv/play/MRcWYmJRueF',
+            'https://mview.iyf.tv/play/27Qr2mVwuzJ',
+          ];
+          foreach($urls as $i=>$url){
+            $id=$repo->saveLink(null,['category_id'=>$cat,'title'=>'IYF '.($i+1),'url'=>$url,'description'=>'','tags'=>'iyf','is_private'=>true,'is_favorite'=>false],'manual');
+            $surface->upsertProfile((int)$id,['surface'=>'watch','resource_kind'=>'电影']);
+            $stmt=$db->prepare('SELECT id,url,is_pending,sensitive_detected,url_protected FROM links WHERE id=?');$stmt->execute([(int)$id]);$row=$stmt->fetch(PDO::FETCH_ASSOC);
+            try{$res=(new VfResourceCoverCache($db))->refreshOne((int)$id,true);}catch(Throwable $e){$res=['id'=>(int)$id,'success'=>false,'thrown'=>$e->getMessage()];}
+            $stmt=$db->prepare("SELECT link_id,file_name,original_name,mime_type,byte_size,width,height FROM resource_asset_files WHERE link_id=? AND asset_kind='cover'");$stmt->execute([(int)$id]);$cover=$stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            echo json_encode(['row'=>$row,'result'=>$res,'cover'=>$cover],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),"\n";
+          }
+          PHP
+      - name: Inspect actual IYF first candidate MIME independent of VF validation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-iyf-e2e
+          : > /tmp/p01-iyf-posters.tsv
+          : > /tmp/p01-iyf-mimes.tsv
+          for token in kr8SspeNzb3 MRcWYmJRueF 27Qr2mVwuzJ; do
+            W="https://www.iyf.tv/play/$token"
+            curl -fsSL --max-time 20 -A 'VF-Start/2.37.2 CoverCache' "$W" -o "/tmp/$token.html"
+            POSTER=$(ROOT="$ROOT" W="$W" TOKEN="$token" php <<'PHP'
+          <?php
+          require getenv('ROOT').'/app/ResourceCoverCache.php';
+          $html=file_get_contents('/tmp/'.getenv('TOKEN').'.html');
+          $c=VfResourceCoverCache::extractCoverCandidates($html,getenv('W'));
+          echo $c[0] ?? '';
+          PHP
+            )
+            printf '%s\t%s\n' "$token" "$POSTER" | tee -a /tmp/p01-iyf-posters.tsv
+            if [ -n "$POSTER" ]; then
+              curl -fsSL --max-time 20 -A 'VF-Start/2.37.2 CoverCache' "$POSTER" -o "/tmp/$token.poster"
+              printf '%s\t' "$token" | tee -a /tmp/p01-iyf-mimes.tsv
+              file --mime-type -b "/tmp/$token.poster" | tee -a /tmp/p01-iyf-mimes.tsv
+            fi
+          done
+      - name: Verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat /tmp/p01-iyf-refresh.jsonl
+          cat /tmp/p01-iyf-posters.tsv
+          cat /tmp/p01-iyf-mimes.tsv
+          python3 - <<'PY'
+          import json
+          rows=[json.loads(x) for x in open('/tmp/p01-iyf-refresh.jsonl',encoding='utf-8') if x.strip().startswith('{')]
+          assert len(rows)==3
+          ok=sum(1 for x in rows if x['result'].get('success') and x.get('cover'))
+          print(f'P01_IYF_E2E_SUCCESS_COUNT={ok}/3')
+          print('P01_IYF_E2E=PASS' if ok==3 else 'P01_IYF_E2E=FAIL_REPRODUCED')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: p01-v2372-iyf-e2e-${{ github.run_id }}
+          path: |
+            /tmp/p01-iyf-refresh.jsonl
+            /tmp/p01-iyf-posters.tsv
+            /tmp/p01-iyf-mimes.tsv
+            /tmp/p01-iyf-server.log
+          if-no-files-found: warn
+          retention-days: 30
