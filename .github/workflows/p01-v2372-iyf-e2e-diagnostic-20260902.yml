@@ -47,7 +47,7 @@ jobs:
             --data-urlencode 'admin_password=IYFE2E!2026' \
             --data-urlencode 'admin_password_confirm=IYFE2E!2026' >/tmp/p01-iyf-setup-post.html
           kill "$PID"; trap - EXIT
-      - name: Seed real-shape IYF watch rows and execute refreshOne
+      - name: Seed three distinct real-shape IYF watch rows and execute refreshOne
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -64,12 +64,18 @@ jobs:
             'https://mview.iyf.tv/play/27Qr2mVwuzJ',
           ];
           foreach($urls as $i=>$url){
-            $id=$repo->saveLink(null,['category_id'=>$cat,'title'=>'IYF '.($i+1),'url'=>$url,'description'=>'','tags'=>'iyf','is_private'=>true,'is_favorite'=>false],'manual');
-            $surface->upsertProfile((int)$id,['surface'=>'watch','resource_kind'=>'电影']);
-            $stmt=$db->prepare('SELECT id,url,is_pending,sensitive_detected,url_protected FROM links WHERE id=?');$stmt->execute([(int)$id]);$row=$stmt->fetch(PDO::FETCH_ASSOC);
-            try{$res=(new VfResourceCoverCache($db))->refreshOne((int)$id,true);}catch(Throwable $e){$res=['id'=>(int)$id,'success'=>false,'thrown'=>$e->getMessage()];}
-            $stmt=$db->prepare("SELECT link_id,file_name,original_name,mime_type,byte_size,width,height FROM resource_asset_files WHERE link_id=? AND asset_kind='cover'");$stmt->execute([(int)$id]);$cover=$stmt->fetch(PDO::FETCH_ASSOC) ?: null;
-            echo json_encode(['row'=>$row,'result'=>$res,'cover'=>$cover],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),"\n";
+            $saved=$repo->saveLink(null,['category_id'=>$cat,'title'=>'IYF '.($i+1),'url'=>$url,'description'=>'','tags'=>'iyf','is_private'=>true,'is_favorite'=>false],'manual');
+            $id=(int)($saved['id'] ?? 0); if($id<=0) throw new RuntimeException('seed id missing');
+            $surface->upsertProfile($id,['surface'=>'watch','resource_kind'=>'电影']);
+            $stmt=$db->prepare('SELECT id,url,is_pending,sensitive_detected,url_protected FROM links WHERE id=?');$stmt->execute([$id]);$row=$stmt->fetch(PDO::FETCH_ASSOC);
+            try{$first=(new VfResourceCoverCache($db))->refreshOne($id,true);}catch(Throwable $e){$first=['id'=>$id,'success'=>false,'thrown'=>$e->getMessage()];}
+            $stmt=$db->prepare("SELECT link_id,file_name,original_name,mime_type,byte_size,width,height FROM resource_asset_files WHERE link_id=? AND asset_kind='cover'");$stmt->execute([$id]);$firstCover=$stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            $second=null;$secondCover=$firstCover;
+            if(!($first['success'] ?? false)){
+              try{$second=(new VfResourceCoverCache($db))->refreshOne($id,true);}catch(Throwable $e){$second=['id'=>$id,'success'=>false,'thrown'=>$e->getMessage()];}
+              $stmt->execute([$id]);$secondCover=$stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            }
+            echo json_encode(['row'=>$row,'first'=>$first,'first_cover'=>$firstCover,'second'=>$second,'second_cover'=>$secondCover],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),"\n";
           }
           PHP
       - name: Inspect actual IYF first candidate MIME independent of VF validation
@@ -108,14 +114,17 @@ jobs:
           import json
           rows=[json.loads(x) for x in open('/tmp/p01-iyf-refresh.jsonl',encoding='utf-8') if x.strip().startswith('{')]
           assert len(rows)==3
-          ok=sum(1 for x in rows if x['result'].get('success') and x.get('cover'))
-          print(f'P01_IYF_E2E_SUCCESS_COUNT={ok}/3')
-          print('P01_IYF_E2E=PASS' if ok==3 else 'P01_IYF_E2E=FAIL_REPRODUCED')
+          assert len({x['row']['id'] for x in rows})==3
+          first_ok=sum(1 for x in rows if x['first'].get('success') and x.get('first_cover'))
+          eventual_ok=sum(1 for x in rows if (x['first'].get('success') and x.get('first_cover')) or ((x.get('second') or {}).get('success') and x.get('second_cover')))
+          print(f'P01_IYF_FIRST_ATTEMPT={first_ok}/3')
+          print(f'P01_IYF_EVENTUAL_TWO_ATTEMPTS={eventual_ok}/3')
+          print('P01_IYF_FIRST_ATTEMPT=PASS' if first_ok==3 else 'P01_IYF_FIRST_ATTEMPT=FAIL_REPRODUCED')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: p01-v2372-iyf-e2e-${{ github.run_id }}
+          name: p01-v2372-iyf-e2e-r2-${{ github.run_id }}
           path: |
             /tmp/p01-iyf-refresh.jsonl
             /tmp/p01-iyf-posters.tsv
