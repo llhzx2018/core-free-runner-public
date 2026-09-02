@@ -5,6 +5,37 @@ EVID=/tmp/p01-v2374-legacy-iyf-evidence
 rm -rf "$ROOT" "$EVID"
 mkdir -p "$EVID"
 cp -a product/src "$ROOT"
+
+# Record DNS order and independently probe every IPv4 edge for the exact legacy page.
+{
+  echo '=== getent www.iyf.tv ==='
+  getent ahosts www.iyf.tv || true
+  echo '=== getent static.iyf.tv ==='
+  getent ahosts static.iyf.tv || true
+} | tee "$EVID/dns.txt"
+mapfile -t PAGE_IPS < <(getent ahostsv4 www.iyf.tv 2>/dev/null | awk '{print $1}' | sort -u)
+: > "$EVID/page-edges.txt"
+for ip in "${PAGE_IPS[@]}"; do
+  out="$EVID/page-${ip//:/_}.html"
+  code=$(curl -L -sS --max-time 15 --resolve "www.iyf.tv:443:$ip" \
+    -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139 Safari/537.36' \
+    -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.1' \
+    -o "$out" -w '%{http_code}' 'https://www.iyf.tv/play/MRcWYmJRueF' || true)
+  og=$(grep -Eio '<meta[^>]+(?:property|name)=["'"']og:image["'"'][^>]*>' "$out" 2>/dev/null | head -1 || true)
+  printf 'PAGE_EDGE ip=%s http=%s bytes=%s og=%s\n' "$ip" "$code" "$(wc -c < "$out" 2>/dev/null || echo 0)" "${og:+yes}" | tee -a "$EVID/page-edges.txt"
+done
+mapfile -t STATIC_IPS < <(getent ahostsv4 static.iyf.tv 2>/dev/null | awk '{print $1}' | sort -u)
+: > "$EVID/static-edges.txt"
+for ip in "${STATIC_IPS[@]}"; do
+  out="$EVID/static-${ip//:/_}.bin"
+  meta=$(curl -sS --max-time 15 --resolve "static.iyf.tv:443:$ip" \
+    -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139 Safari/537.36' \
+    -H 'Accept: image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8,*/*;q=0.1' \
+    -o "$out" -w '%{http_code}|%{content_type}|%{size_download}' \
+    'https://static.iyf.tv/upload/video/201912091636023668662.gif' || true)
+  printf 'STATIC_EDGE ip=%s meta=%s\n' "$ip" "$meta" | tee -a "$EVID/static-edges.txt"
+done
+
 php -S 127.0.0.1:18641 -t "$ROOT" >"$EVID/server.log" 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
