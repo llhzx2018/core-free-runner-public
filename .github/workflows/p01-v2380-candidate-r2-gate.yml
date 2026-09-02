@@ -1,0 +1,123 @@
+name: P01 V2.38.0 Projects Candidate R2 Readiness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v2380-candidate-r2-gate.yml'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  candidate-r2:
+    if: github.event.pull_request.head.ref == 'test/p01-v2380-projects-candidate-r2-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact R2 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 869178a4c8144a0760ea489936c4bde5efa989d2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Exact source and version fences
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '869178a4c8144a0760ea489936c4bde5efa989d2'
+          test "$(git rev-parse HEAD^{tree})" = '8e14b48deab267ab6e8d60ba4778db563b34c61b'
+          test "$(cat VERSION)" = '2.38.0'
+          test "$(cat src/VERSION.txt)" = '2.38.0'
+          test "$(cat VERSION)" = "$(cat src/VERSION.txt)"
+          git rev-parse --verify 'refs/tags/v2.37.5^{commit}' >/dev/null
+          ! git show-ref --verify --quiet refs/tags/v2.38.0
+          git diff --name-only 00216560e47a6b8e629ee8b03f63462d02d18c7b..HEAD | sort >/tmp/r2-stage.txt
+          printf '%s\n' VERSION docs/evidence/P01_V2.38.0_PROJECTS_WORKSPACE_RELEASE_CANDIDATE_R2_20260902.md src/VERSION.txt | sort >/tmp/r2-stage-expected.txt
+          diff -u /tmp/r2-stage-expected.txt /tmp/r2-stage.txt
+          git diff --name-only e3667582fd467bc64789f8087f195e5714f2a3e6..HEAD | sort >/tmp/r2-release.txt
+          printf '%s\n' VERSION docs/evidence/P01_V2.38.0_PROJECTS_WORKSPACE_RELEASE_CANDIDATE_R2_20260902.md src/VERSION.txt src/assets/auth-controls.js src/assets/workspace-projects.css src/projects.php | sort >/tmp/r2-release-expected.txt
+          diff -u /tmp/r2-release-expected.txt /tmp/r2-release.txt
+          git diff --name-status v2.37.5..HEAD -- src | sort >/tmp/r2-runtime.txt
+          printf '%s\n' 'A	src/assets/workspace-projects.css' 'A	src/projects.php' 'M	src/VERSION.txt' 'M	src/assets/auth-controls.js' | sort >/tmp/r2-runtime-expected.txt
+          diff -u /tmp/r2-runtime-expected.txt /tmp/r2-runtime.txt
+          git diff --name-only 2a43090dc77b5ffa76a75538f2b57c33f2aefc1f..HEAD -- src | sort >/tmp/r2-vs-r1-runtime.txt
+          printf '%s\n' src/VERSION.txt >/tmp/r2-vs-r1-runtime-expected.txt
+          diff -u /tmp/r2-vs-r1-runtime-expected.txt /tmp/r2-vs-r1-runtime.txt
+          php -l src/projects.php
+          node --check src/assets/auth-controls.js
+          php src/cli/verify.php | tee /tmp/r2-seed.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/r2-seed.txt
+          echo P01_V2380_R2_EXACT_SOURCE=PASS
+          echo P01_V2380_R2_ROOT_RUNTIME_VERSION_FENCE=PASS
+          echo P01_V2380_R2_STAGE_BOUNDARY=PASS
+          echo P01_V2380_R2_RELEASE_BOUNDARY=PASS
+          echo P01_V2380_R2_RUNTIME_BOUNDARY=PASS
+
+      - name: Fresh install and runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT=/tmp/p01-v2380-r2-runtime
+          COOKIE=/tmp/p01-v2380-r2.cookies
+          PORT=18421
+          rm -rf "$ROOT" "$COOKIE"
+          cp -a src "$ROOT"
+          php -S 127.0.0.1:$PORT -t "$ROOT" >/tmp/p01-v2380-r2-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          BASE="http://127.0.0.1:$PORT"
+          ready=0
+          for i in $(seq 1 40); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "$BASE/setup.php" -o /tmp/r2-setup.html; then ready=1; break; fi
+            sleep .25
+          done
+          test "$ready" = 1
+          CSRF=$(grep -oP 'name="setup_csrf"\s+value="\K[^"]+' /tmp/r2-setup.html | head -1)
+          test -n "$CSRF"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$BASE/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=V2380 R2 Gate' \
+            --data-urlencode 'admin_password=P01V2380!R2' \
+            --data-urlencode 'admin_password_confirm=P01V2380!R2' \
+            -o /tmp/r2-setup-post.html
+          curl -sS -D /tmp/r2-anon.headers -o /dev/null "$BASE/projects.php"
+          grep -Eq '^HTTP/.* 302' /tmp/r2-anon.headers
+          grep -Eiq '^Location: index\.php' /tmp/r2-anon.headers
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' \
+            -X POST "$BASE/api.php?action=login" --data '{"password":"P01V2380!R2"}' \
+            | jq -e '.ok==true' >/dev/null
+          curl -fsS -b "$COOKIE" "$BASE/projects.php" -o /tmp/r2-projects.html
+          grep -Fq '<title>项目 · VF Start</title>' /tmp/r2-projects.html
+          grep -Fq 'id="vfProjectsTitle">项目</h1>' /tmp/r2-projects.html
+          for id in P01 P02 P03 P04 P05 P06; do grep -Fq ">$id<" /tmp/r2-projects.html; done
+          grep -Fq '已正式退役' /tmp/r2-projects.html
+          echo P01_V2380_R2_FRESH_INSTALL=PASS
+          echo P01_V2380_R2_AUTH_RUNTIME=PASS
+
+      - name: Transfer prior browser evidence only across VERSION text delta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/33619097529 --jq .conclusion)" = success
+          test "$(git diff --name-only 2a43090dc77b5ffa76a75538f2b57c33f2aefc1f..HEAD -- src | tr -d '\r')" = 'src/VERSION.txt'
+          echo P01_V2380_R2_BROWSER_EVIDENCE_TRANSFER=PASS
+          echo P01_V2380_R2_BROWSER_SOURCE_RUN=33619097529
+
+      - name: Final read-only boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '869178a4c8144a0760ea489936c4bde5efa989d2'
+          test -z "$(git status --porcelain)"
+          echo P01_V2380_R2_MAIN_WRITE=0
+          echo P01_V2380_R2_RELEASE_WRITE=0
+          echo P01_V2380_R2_PRODUCTION_WRITE=0
+          echo P01_V2380_R2_CANDIDATE_READINESS=PASS
