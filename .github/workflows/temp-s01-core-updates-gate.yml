@@ -1,0 +1,82 @@
+name: TEMP S01-C03 1.25.5 Update Channel Runtime Identity
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - '.github/workflows/temp-s01-core-updates-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c03-1255-update-channel
+  cancel-in-progress: true
+
+jobs:
+  runtime-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      M3U8_SHA: d7b67319ae3c0b077d39d0f84df3facd38a2c44d
+      M3U8_ASSET_SHA256: f2dc1c720370ee6a7316e5e9ca99db0901d25b94b45a6e675724045759728399
+      M3U8_ASSET_BYTES: '3529023'
+    steps:
+      - name: Checkout exact released M3U8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: v1.25.5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: m3u8
+
+      - name: Compute exact runtime fingerprint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('m3u8/src')
+          files={p.relative_to(root).as_posix():p.read_bytes() for p in root.rglob('*') if p.is_file() and not p.is_symlink()}
+          canon=b''.join(p.encode()+b'\0'+hashlib.sha256(b).hexdigest().encode()+b'\n' for p,b in sorted(files.items()))
+          out={
+            'status':'PASS',
+            'm3u8_sha':'d7b67319ae3c0b077d39d0f84df3facd38a2c44d',
+            'runtime_files':len(files),
+            'runtime_fingerprint_sha256':hashlib.sha256(canon).hexdigest()
+          }
+          assert out['runtime_files']==550
+          Path('/tmp/s01-c03-1255-runtime-identity.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(json.dumps(out,indent=2))
+          PY
+
+      - name: Validate formal GitHub Release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rel="$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/v1.25.5)"
+          test "$(jq -r '.target_commitish' <<<"$rel")" = "$M3U8_SHA"
+          test "$(jq -r '.draft,.prerelease' <<<"$rel" | tr '\n' ' ')" = "false false "
+          id="$(jq -r '.assets[] | select(.name=="vf-tools-m3u8_V1.25.5.zip") | .id' <<<"$rel")"
+          test -n "$id"
+          test "$(jq -r '.assets[] | select(.name=="vf-tools-m3u8_V1.25.5.zip") | .size' <<<"$rel")" = "$M3U8_ASSET_BYTES"
+          digest="$(jq -r '.assets[] | select(.name=="vf-tools-m3u8_V1.25.5.zip") | .digest // empty' <<<"$rel")"
+          [ -z "$digest" ] || test "$digest" = "sha256:$M3U8_ASSET_SHA256"
+          gh api -H 'Accept: application/octet-stream' "repos/llhzx2018/vf-tools-m3u8/releases/assets/$id" > /tmp/m3u8.zip
+          test "$(stat -c%s /tmp/m3u8.zip)" = "$M3U8_ASSET_BYTES"
+          test "$(sha256sum /tmp/m3u8.zip | awk '{print $1}')" = "$M3U8_ASSET_SHA256"
+          echo 'RELEASE_ASSET_IDENTITY=PASS'
+
+      - name: Upload public-safe identity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c03-1255-runtime-identity-${{ github.run_id }}
+          path: /tmp/s01-c03-1255-runtime-identity.json
+          retention-days: 14
