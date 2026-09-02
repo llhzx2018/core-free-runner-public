@@ -15,6 +15,7 @@ old = "function numberOrNull(value: unknown): number | null { if (value === null
 new = "function fmt(value: unknown, digits = 0) { const n = observedNumber(value); return n == null ? '—' : new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(n); }\nfunction pct(value: unknown) { const n = observedNumber(value); return n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`; }"
 assert old in text, 'Product numeric parser anchor missing'
 text = text.replace(old, new, 1)
+text = text.replace('numberOrNull(', 'observedNumber(')
 assert 'numberOrNull(' not in text
 product.write_text(text)
 
