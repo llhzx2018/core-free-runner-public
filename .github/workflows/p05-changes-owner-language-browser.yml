@@ -1,0 +1,189 @@
+name: P05 Changes Owner Language Browser
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-changes-owner-language-browser.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-changes-owner-language:
+    if: github.event.pull_request.head.ref == 'test/p05-changes-owner-language-browser-20260902'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout exact P05 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: 12e151ce09e194128234017feaf52441a5c90fb8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '12e151ce09e194128234017feaf52441a5c90fb8'
+          test "$(git rev-parse HEAD^{tree})" = '576b28887ab49ff603ce66262133ff484b555e8f'
+          test "$(cat VERSION)" = '1.2.3'
+          grep -Fq '记录改动' src/client/ProductChangesWorkspace.tsx
+          grep -Fq '改动前后' src/client/ProductChangesWorkspace.tsx
+          grep -Fq '只记录改动后发生了什么，不会自动认定这些变化由本次改动导致' src/client/ProductChangesWorkspace.tsx
+          grep -Fq '仅为候选解释，不代表因果' src/client/ProductChangesWorkspace.tsx
+          grep -Fq "source: 'MANUAL', observationState: 'OBSERVING'" src/client/ProductChangesWorkspace.tsx
+          grep -Fq 'openPage(pageId)' src/client/ProductChangesWorkspace.tsx
+          grep -Fq 'openQuery(row.subjectId.trim())' src/client/ProductChangesWorkspace.tsx
+          echo 'P05_CHANGES_OWNER_LANGUAGE_EXACT_SOURCE=PASS'
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Focused truth and build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          node --import tsx --test \
+            tests/unit/product-change-analysis.test.ts \
+            tests/unit/product-changes-record-observe-truth.test.ts \
+            tests/unit/product-changes-why-query-evidence-truth.test.ts
+          npm run typecheck
+          npm run build
+
+      - name: Browser verify Changes Owner language and non-causal truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='ChangesOwnerLanguage-2026!' npm run bootstrap:admin
+          PORT=18195 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-changes-language-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, shutil, subprocess, sys, time, urllib.request, urllib.error
+          BASE='http://127.0.0.1:18195'; DRIVER_PORT=9522; PASSWORD='ChangesOwnerLanguage-2026!'
+          def fail(msg): print('P05_CHANGES_OWNER_LANGUAGE_BROWSER=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(method,url,payload=None,headers=None,timeout=25):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(url,data=data,method=method,headers=headers or {})
+              if data is not None: req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=timeout) as r: raw=r.read().decode()
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:500]}')
+              return json.loads(raw) if raw else {}
+          def wait_http(url,timeout=25):
+              end=time.time()+timeout
+              while time.time()<end:
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception: time.sleep(.15)
+              fail('server not ready '+url)
+          def wd(method,path,payload=None):
+              r=http(method,f'http://127.0.0.1:{DRIVER_PORT}{path}',payload); v=r.get('value')
+              if isinstance(v,dict) and v.get('error'): fail(f"webdriver {v.get('error')}: {v.get('message')}")
+              return r
+          def sv(s,m,p,payload=None): return wd(m,f'/session/{s}{p}',payload)['value']
+          def eid(v): return v['element-6066-11e4-a52e-4f735466cecf']
+          def find(s,css): return eid(sv(s,'POST','/element',{'using':'css selector','value':css}))
+          def send(s,e,value):
+              sv(s,'POST',f'/element/{e}/clear',{})
+              sv(s,'POST',f'/element/{e}/value',{'text':value,'value':list(value)})
+          def execute(s,script): return sv(s,'POST','/execute/sync',{'script':script,'args':[]})
+          def surface(s): return str(execute(s,"return document.querySelector('.p05v2-content')?.innerText || ''"))
+          def wait(pred,label,timeout=25):
+              end=time.time()+timeout; last=None
+              while time.time()<end:
+                  try:
+                      last=pred()
+                      if last:return last
+                  except Exception as e:last=repr(e)
+                  time.sleep(.15)
+              fail(f'timeout {label}: {last!r}')
+          def click_text(s,label):
+              js='''const label=%s;const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===label);if(!b||b.disabled)return false;b.click();return true;''' % json.dumps(label,ensure_ascii=False)
+              return bool(execute(s,js))
+          def choose_site(s,label):
+              js='''const label=%s;const sel=document.querySelector('.p05v2-site-context select');if(!sel)return false;const opt=[...sel.options].find(o=>o.textContent.trim()===label);if(!opt)return false;sel.value=opt.value;sel.dispatchEvent(new Event('change',{bubbles:true}));return true;''' % json.dumps(label,ensure_ascii=False)
+              return bool(execute(s,js))
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome: fail('Chrome/ChromeDriver unavailable')
+          log=open('/tmp/p05-changes-language-chromedriver.log','wb')
+          proc=subprocess.Popen([driver,f'--port={DRIVER_PORT}','--allowed-ips=127.0.0.1'],stdout=log,stderr=subprocess.STDOUT)
+          session=None
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DRIVER_PORT}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              v=r['value']; session=str(v.get('sessionId') or r.get('sessionId') or '')
+              if not session: fail('missing webdriver session')
+              sv(session,'POST','/url',{'url':BASE+'/'})
+              wait(lambda: execute(session,"return !!document.querySelector(\"input[autocomplete='username']\")"),'login form')
+              send(session,find(session,"input[autocomplete='username']"),'owner')
+              send(session,find(session,"input[autocomplete='current-password']"),PASSWORD)
+              click_text(session,'登录') or fail('login button missing')
+              wait(lambda: 'Site Portfolio' in surface(session),'portfolio')
+              wait(lambda: '载入 Demo Dataset →' in surface(session),'demo load action')
+              click_text(session,'载入 Demo Dataset →') or fail('demo load button missing')
+              wait(lambda: 'Kewaro Guide' in surface(session) and 'WordPress Lab' in surface(session),'demo sites',30)
+              choose_site(session,'Kewaro Guide') or fail('Kewaro Guide select unavailable')
+              wait(lambda: 'Kewaro Guide · 概览' in surface(session),'Kewaro Guide overview')
+              click_text(session,'变更') or fail('Changes nav unavailable')
+              text=wait(lambda: surface(session) if '记录一次真正值得观察的改动' in surface(session) and '哪次改动之后发生了什么' in surface(session) else '', 'Changes surface')
+              required=['记录改动','保存后进入持续观察','不会自动认定这些变化由本次改动导致','改动前后','不代表“这些变化由这次改动导致”','可能原因','仅为候选解释，不代表因果']
+              forbidden=['RECORD → OBSERVE','CHANGE EFFECT OBSERVATION','WHY / EVIDENCE','Change Authority','MANUAL + OBSERVING','Page Authority','Page ID','canonical Change event','changed_at','causal=false','OBSERVING ·','Page identity unavailable']
+              missing=[x for x in required if x not in text]; leaked=[x for x in forbidden if x in text]
+              if missing: fail('missing '+json.dumps(missing,ensure_ascii=False))
+              if leaked: fail('leaked '+json.dumps(leaked,ensure_ascii=False))
+              if '打开精确关键词证据 →' in text:
+                  click_text(session,'打开精确关键词证据 →') or fail('exact Query evidence action not clickable')
+                  wait(lambda: '当前关键词' in surface(session),'exact Query drilldown')
+                  click_text(session,'变更') or fail('return Changes nav unavailable')
+                  wait(lambda: '记录一次真正值得观察的改动' in surface(session),'Changes after Query drilldown')
+              print('P05_CHANGES_OWNER_LANGUAGE_BROWSER=PASS')
+          finally:
+              if session:
+                  try: wd('DELETE',f'/session/{session}')
+                  except Exception: pass
+              proc.terminate()
+              try: proc.wait(timeout=5)
+              except Exception: proc.kill()
+              log.close()
+          PY
+
+      - name: Read-only exact boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '12e151ce09e194128234017feaf52441a5c90fb8'
+          test "$(git rev-parse HEAD^{tree})" = '576b28887ab49ff603ce66262133ff484b555e8f'
+          test -z "$(git status --porcelain)"
+          echo 'P05_PRODUCT_WRITE=0'
+          echo 'P05_RELEASE_WRITE=0'
+          echo 'P05_PRODUCTION_WRITE=0'
