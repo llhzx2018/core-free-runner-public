@@ -1,0 +1,142 @@
+name: P05 V1.2.4 Final Exact Source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p05-v124-final-exact-source-20260903.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  final-exact-source:
+    if: github.event_name == 'pull_request' && github.head_ref == 'tmp/p05-v124-final-exact-source-20260903'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vf_seo
+          POSTGRES_USER: vf_seo
+          POSTGRES_PASSWORD: vf_seo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vf_seo -d vf_seo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout exact merged v1.2.4 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: f752c13b44fb624924926a49197ebe9519ec3f28
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind exact merged source and release lock
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'f752c13b44fb624924926a49197ebe9519ec3f28'
+          test "$(git rev-parse HEAD^{tree})" = '33c67dedfc25143c9e675c97dec903a8ef1c4134'
+          test "$(git rev-parse HEAD^1)" = '1c8b5a5a8d571cef6c70919579150a59e4a649f1'
+          test "$(git rev-parse HEAD^2)" = '39fd625dcf79a58f7882a57c292568d76066b5a1'
+          files="$(git diff --name-only HEAD^1 HEAD | sort | tr '\n' ' ')"
+          echo "P05_V124_VERSION_LOCK_FILES=$files"
+          test "$files" = 'VERSION VF_PROJECT.json docs/authority/RELEASE_V1.2.4_CANDIDATE.md package.json src/client/ProductApp.tsx '
+          test "$(cat VERSION)" = '1.2.4'
+          node -e "const p=require('./package.json'); if(p.version!=='1.2.4') process.exit(1)"
+          git diff --exit-code HEAD^1 HEAD -- package-lock.json
+          git diff --check HEAD^1 HEAD
+
+      - name: Verify release authority boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          p=json.load(open('VF_PROJECT.json'))
+          assert p['version']=='1.2.4'
+          assert p['production_version']=='1.2.3'
+          assert p['formal_release']=='v1.2.3'
+          assert p['release_authorization']=='OWNER_AUTHORIZED_V1.2.4 / EXECUTION_PENDING'
+          assert p['production_deployment_authorization']=='PENDING_OWNER_BACKEND_UPDATE_AFTER_V1.2.4_PUBLICATION'
+          assert p['authority']['release_candidate']=='docs/authority/RELEASE_V1.2.4_CANDIDATE.md'
+          PY
+          grep -F 'P05 · VF SEO · v1.2.4' src/client/ProductApp.tsx >/dev/null
+          test -f php/bin/init-update-service.php
+          grep -F 'VF_PRIVATE_READ_TOKEN' php/bin/init-update-service.php >/dev/null
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Complete engineering and security regression
+        shell: bash
+        env:
+          DATABASE_URL: postgresql://vf_seo:vf_seo@127.0.0.1:5432/vf_seo
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run release:source:gate
+          npm run lint
+          npm run typecheck
+          npm run migrate
+          npm run verify:schema
+          npm run test
+          npm run build
+          npm run source:gate
+          npm run scope:gate
+          npm run dependency:gate
+          npm audit --audit-level=high
+          npm run security:gate
+
+      - name: Install PHP release runtime modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip php-curl sqlite3
+          php -r 'foreach(["pdo_sqlite","curl"] as $e){if(!extension_loaded($e))exit(1);} if(!class_exists("ZipArchive"))exit(1);'
+
+      - name: PHP CloudPanel browser and formal staging gates
+        shell: bash
+        env:
+          APP_ENV: test
+          VF_DATABASE_PROVIDER: sqlite
+          VF_SECURE_COOKIES: 'false'
+          VF_REQUIRE_HTTPS: 'false'
+          VF_ADMIN_USERNAME: admin
+          VF_ADMIN_PASSWORD: php-ci-portable-password-123
+        run: |
+          set -Eeuo pipefail
+          npm run php:lint
+          php php/tests/security-interop.php
+          bash php/tests/http-smoke.sh
+          bash php/tests/cloudpanel-fpm-home-cache-smoke.sh
+          VF_RELEASE_SOURCE_SHA='f752c13b44fb624924926a49197ebe9519ec3f28' npm run build:php-release
+          npm run php:release:gate
+          S=build/vf-seo-php-release
+          test "$(cat "$S/VERSION")" = '1.2.4'
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test -f "$S/php/src/PhpUpdater.php"
+          test -f "$S/php/src/CoreUpdates/UpdateCore.php"
+          test -f "$S/php/bin/init-update-service.php"
+          grep -F 'core-updates:llhzx2018/core-updates/projects/P05.json' "$S/PHP_RELEASE_MANIFEST.json" >/dev/null
+          ! grep -F 'core-free-runner-public' "$S/PHP_RELEASE_MANIFEST.json"
+          bash php/tests/cloudpanel-root-smoke.sh "$S"
+          VF_INSTALL_ROOT="$S" bash php/tests/browser-install-smoke.sh
+          VF_INSTALL_ROOT="$S" python3 php/tests/browser-install-e2e.py
+          VF_INSTALL_ROOT="$S" bash php/tests/cloudpanel-fpm-real-install-smoke.sh
+          echo P05_V124_FINAL_EXACT_SOURCE=PASS
+          echo P05_EXACT_SHA=f752c13b44fb624924926a49197ebe9519ec3f28
+          echo P05_EXACT_TREE=33c67dedfc25143c9e675c97dec903a8ef1c4134
+          echo P05_RELEASE_WRITE=0
+          echo P05_PRODUCTION_WRITE=0
