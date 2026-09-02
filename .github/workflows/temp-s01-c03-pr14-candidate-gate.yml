@@ -1,0 +1,200 @@
+name: TEMP S01-C03 PR14 Formal Candidate Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-release-prep-gate-20260902
+    paths:
+      - '.github/workflows/temp-s01-c03-pr14-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c03-pr14-candidate-gate-20260902
+  cancel-in-progress: true
+
+env:
+  M3U8_SHA: 3b0935f00c5c0ea456a9ca7313c4d4e4d85a298b
+  BASE_SHA: e0bae05a97b5f1369ce1233438b3baed13ac503e
+  EVIDENCE_DIR: /tmp/s01-c03-pr14-candidate-evidence
+
+jobs:
+  candidate-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact S01-C03 PR14 Candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: m3u8
+
+      - name: Verify exact Candidate identity and diff boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(git -C m3u8 merge-base "$BASE_SHA" "$M3U8_SHA")" = "$BASE_SHA"
+          mapfile -t changed < <(git -C m3u8 diff --name-only "$BASE_SHA" "$M3U8_SHA")
+          expected=(
+            'src/includes/v6-provider-schema-repair-admin.php'
+            'src/vf-tool-m3u8.php'
+            'tests/unit/schema-repair-contract.php'
+          )
+          test "${#changed[@]}" -eq "${#expected[@]}"
+          for i in "${!expected[@]}"; do test "${changed[$i]}" = "${expected[$i]}"; done
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = '1.25.4'
+          grep -Fq ' * Version: 1.25.4' m3u8/src/vf-tool-m3u8.php
+          grep -Fq "define('VF_TOOL_M3U8_ROUND', 'R228')" m3u8/src/vf-tool-m3u8.php
+          printf '%s\n' "M3U8_SHA=$M3U8_SHA" "BASE_SHA=$BASE_SHA" "DIFF_PATHS=${changed[*]}" > "$EVIDENCE_DIR/identity.txt"
+
+      - name: PHP syntax and static recovery contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v | tee "$EVIDENCE_DIR/php-version.txt"
+          php -l m3u8/src/includes/v6-provider-schema-repair-admin.php | tee "$EVIDENCE_DIR/lint-repair.txt"
+          php -l m3u8/tests/unit/schema-repair-contract.php | tee "$EVIDENCE_DIR/lint-contract.txt"
+          php -l m3u8/src/vf-tool-m3u8.php | tee "$EVIDENCE_DIR/lint-loader.txt"
+          php m3u8/tests/unit/schema-repair-contract.php | tee "$EVIDENCE_DIR/static-contract.txt"
+
+      - name: Execute diagnostic-first recovery behavior matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/s01-c03-schema-recovery-behavior.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('ABSPATH', '/tmp/wp/');
+          $state = [];
+          $removed = [];
+          function is_admin(): bool { return true; }
+          function current_user_can(string $cap): bool { return true; }
+          function add_action(string $hook, $callback, int $priority = 10, int $accepted_args = 1): bool { return true; }
+          function remove_action(string $hook, $callback, int $priority = 10): bool {
+              global $removed; $removed[] = [$hook, $callback, $priority]; return true;
+          }
+          function vf_tools_m3u8_v6_schema_version(): string { return '1.3.0'; }
+          function vf_tools_m3u8_v6_private_schema_migration_option(): string { return 'vf_tools_m3u8_v6_private_schema_migration'; }
+          function vf_tools_m3u8_v6_table_names(): array {
+              $keys = ['capabilities','capability_contracts','pipelines','pipeline_revisions','pipeline_steps','pipeline_edges','fixtures','fixture_revisions','fixture_runs','runtime_bundles','runtime_bundle_assets','operation_runs','snapshots','snapshot_items'];
+              $out=[]; foreach($keys as $k){$out[$k]='wp_vf_m3u8_'.$k;} return $out;
+          }
+          function vf_tools_m3u8_v6_table_exists(string $table): bool { global $state; return $state['exists'][$table] ?? true; }
+          function vf_tools_m3u8_v6_table_row_counts(array $tables): array {
+              global $state; $out=[]; foreach($tables as $k=>$table){$out[$k]=(int)($state['counts'][$k] ?? 0);} return $out;
+          }
+          function vf_tools_m3u8_v6_private_schema_migration_complete(): bool { global $state; return (bool)($state['marker'] ?? false); }
+          function vf_tools_m3u8_v6_schema_ready(): bool { global $state; return (bool)($state['ready'] ?? false); }
+          function vf_tools_m3u8_v6_any_legacy_table_exists(): bool { global $state; return (bool)($state['legacyPresent'] ?? false); }
+          function vf_tools_m3u8_v6_legacy_schema_compatible(): bool { global $state; return (bool)($state['legacyCompat'] ?? false); }
+          function vf_tools_m3u8_v6_incompatible_legacy_has_m3u8_rows(): bool { global $state; return (bool)($state['legacyRows'] ?? false); }
+          function get_option(string $name, $default = false) {
+              global $state;
+              if ($name === 'vf_tools_m3u8_v6_private_schema_migration') {
+                  return !empty($state['marker']) ? ['status'=>'PASS','migrationVersion'=>'1.0.0'] : [];
+              }
+              if ($name === 'vf_tools_m3u8_v6_schema_version') return (string)($state['stored'] ?? '');
+              return $default;
+          }
+          require getenv('GITHUB_WORKSPACE') . '/m3u8/src/includes/v6-provider-schema-repair-admin.php';
+          function reset_state(array $overrides = []): void {
+              global $state, $removed;
+              $state = array_merge([
+                  'exists'=>[], 'counts'=>[], 'marker'=>false, 'ready'=>false,
+                  'legacyPresent'=>false, 'legacyCompat'=>true, 'legacyRows'=>false, 'stored'=>''
+              ], $overrides);
+              $removed = [];
+          }
+          function must(bool $condition, string $message): void {
+              if (!$condition) { fwrite(STDERR, "FAIL: $message\n"); exit(1); }
+          }
+          function check_guard_removed(bool $expected, string $label): void {
+              global $removed;
+              vf_tools_m3u8_v6_schema_repair_guard_implicit_upgrade();
+              $actual = count($removed) > 0;
+              must($actual === $expected, "$label implicit-upgrade guard mismatch");
+              if ($actual) {
+                  must($removed[0][0] === 'admin_init', "$label wrong hook");
+                  must($removed[0][1] === 'vf_tools_m3u8_v6_schema_maybe_upgrade', "$label wrong callback");
+                  must($removed[0][2] === -1100, "$label wrong priority");
+              }
+          }
+
+          reset_state(['marker'=>true,'ready'=>true,'stored'=>'1.3.0']);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='READY' && $d['ready']===true && $d['repairAllowed']===false, 'READY classification');
+          check_guard_removed(false, 'READY');
+
+          reset_state(['counts'=>['capabilities'=>2],'legacyCompat'=>true]);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='PRIVATE_NAMESPACE_NONEMPTY_WITHOUT_CURRENT_PASS_MARKER', 'markerless private-data classification');
+          must($d['repairAllowed']===false, 'markerless private-data must block repair');
+          check_guard_removed(true, 'MARKERLESS_PRIVATE');
+
+          reset_state(['legacyPresent'=>true,'legacyCompat'=>false,'legacyRows'=>true]);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='INCOMPATIBLE_LEGACY_SCHEMA_WITH_PROVIDER_ROWS', 'incompatible legacy classification');
+          must($d['repairAllowed']===false, 'incompatible legacy must block repair');
+          check_guard_removed(true, 'INCOMPATIBLE_LEGACY');
+
+          $tables = vf_tools_m3u8_v6_table_names();
+          $first = reset($tables);
+          reset_state(['exists'=>[$first=>false]]);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='PRIVATE_SCHEMA_TABLES_MISSING', 'missing-table classification');
+          must($d['repairAllowed']===true, 'safe missing-table state should allow explicit repair');
+          check_guard_removed(true, 'MISSING_TABLE');
+
+          reset_state(['marker'=>false,'ready'=>false,'legacyCompat'=>true]);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='MIGRATION_MARKER_NOT_READY' && $d['repairAllowed']===true, 'empty marker-not-ready classification');
+
+          reset_state(['marker'=>true,'ready'=>true,'stored'=>'1.2.0']);
+          $d = vf_tools_m3u8_v6_schema_repair_diagnostics();
+          must($d['code']==='SCHEMA_VERSION_OPTION_STALE' && $d['repairAllowed']===true, 'stale schema option classification');
+          check_guard_removed(true, 'STALE_VERSION');
+
+          echo "S01-C03 PR14 diagnostic-first behavior matrix PASS\n";
+          PHP
+          php -l /tmp/s01-c03-schema-recovery-behavior.php | tee "$EVIDENCE_DIR/lint-behavior-harness.txt"
+          php /tmp/s01-c03-schema-recovery-behavior.php | tee "$EVIDENCE_DIR/behavior-matrix.txt"
+
+      - name: Seal Candidate Gate evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$EVIDENCE_DIR/S01_C03_PR14_FORMAL_CANDIDATE_GATE.txt" <<EOF
+          S01_C03_PR14_FORMAL_CANDIDATE_GATE=PASS
+          M3U8_SHA=$M3U8_SHA
+          BASE_SHA=$BASE_SHA
+          PR=14
+          VERSION=1.25.4
+          ROUND=R228
+          EXACT_IDENTITY=PASS
+          DIFF_BOUNDARY=PASS
+          PHP_LINT=PASS
+          STATIC_RECOVERY_CONTRACT=PASS
+          DIAGNOSTIC_BEHAVIOR_MATRIX=PASS
+          PRODUCTION_WRITE=NO
+          MAIN_PROMOTION=NO
+          RELEASE_WRITE=NO
+          NEW_RUNNER=NO
+          NEW_SECRET=NO
+          NEW_SSH=NO
+          EOF
+
+      - name: Upload public-safe Candidate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-pr14-formal-candidate-gate-${{ github.run_id }}
+          path: /tmp/s01-c03-pr14-candidate-evidence/
+          if-no-files-found: warn
+          retention-days: 14
