@@ -3,13 +3,16 @@ name: Public Runner Current Self Test
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/runner-selftest-current.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: public-runner-current-selftest-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -18,11 +21,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout public runner control repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 1
           persist-credentials: false
-
       - name: Hosted runner allocation proof
         shell: bash
         run: |
@@ -32,7 +34,6 @@ jobs:
           php -v || true
           python3 --version
           echo 'PUBLIC_RUNNER_ALLOCATION=PASS'
-
       - name: Verify main push came from merged PR
         if: github.event_name == 'push'
         shell: bash
@@ -40,17 +41,13 @@ jobs:
           VF_PUSH_SHA: ${{ github.sha }}
         run: |
           set -Eeuo pipefail
-          python3 scripts/check_main_push_provenance.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$VF_PUSH_SHA"
+          python3 scripts/check_main_push_provenance.py --repository "$GITHUB_REPOSITORY" --sha "$VF_PUSH_SHA"
           echo 'MAIN_PUSH_PROVENANCE=PASS' >> "$GITHUB_ENV"
-
       - name: Verify Git Estate anti-drift
         env:
           VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         shell: bash
         run: python3 scripts/check_estate_anti_drift.py --live
-
       - name: Build public-safe receipt
         shell: bash
         run: |
@@ -68,11 +65,194 @@ jobs:
           MAIN_WRITE=NO
           USER_MANUAL_EXECUTION_REQUIRED=NO
           EOF
-
       - name: Upload public-safe receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: public-runner-current-selftest-${{ github.run_id }}
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
+
+  p05-mobile-secondary-tools-browser:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/p05-mobile-secondary-tools-browser-20260903'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_BASE_SHA: ceab6fd82c33c9f8259c5baa5f11c96bfeec4e7c
+      P05_EXACT_SHA: e035bfd90b7fe484d3f44f002b83857a9d0dd24c
+      P05_EXACT_TREE: c2260fb1ca06ca13f975c3aa956753daa15cbc90
+    steps:
+      - name: Checkout exact P05 mobile-secondary candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 3
+
+      - name: Verify exact candidate and scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test "$(cat VERSION)" = '1.2.4'
+          git cat-file -e "$P05_BASE_SHA^{commit}"
+          git diff --check "$P05_BASE_SHA" HEAD
+          mapfile -t changed < <(git diff --name-only "$P05_BASE_SHA" HEAD | sort)
+          expected=('src/client/product-site-views.css' 'tests/unit/product-mobile-secondary-nav-width-truth.test.ts')
+          test "${#changed[@]}" -eq 2
+          for i in 0 1; do test "${changed[$i]}" = "${expected[$i]}"; done
+          grep -Fq '.p05v2-secondary button{flex:0 0 auto;width:auto;' src/client/product-site-views.css
+          echo P05_MOBILE_SECONDARY_EXACT_SOURCE=PASS
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='SecondaryFit-2026!' npm run bootstrap:admin
+
+      - name: Real Chrome desktop and forced-390 secondary-tools journey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p05-mobile-secondary-tools
+          PORT=18230 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-mobile-secondary-tools/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import base64,json,pathlib,shutil,subprocess,sys,time,urllib.error,urllib.request
+          BASE='http://127.0.0.1:18230'; DP=9546; PASSWORD='SecondaryFit-2026!'; OUT=pathlib.Path('/tmp/p05-mobile-secondary-tools')
+          EXPECTED={'全局搜索','系统更新','系统维护'}
+          def fail(msg): print('P05_MOBILE_SECONDARY_BROWSER=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(method,url,payload=None,timeout=30):
+              data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(url,data=data,method=method)
+              if data is not None:req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=timeout) as r:
+                      raw=r.read().decode(); return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:500]}')
+          def wait_http(url):
+              for _ in range(300):
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              fail('not ready '+url)
+          def wd(method,path,payload=None):
+              result=http(method,f'http://127.0.0.1:{DP}{path}',payload); value=result.get('value')
+              if isinstance(value,dict) and value.get('error'):fail(f"webdriver {value.get('error')}: {value.get('message')}")
+              return result
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome:fail('Chrome unavailable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); session=''
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              session=str(r['value'].get('sessionId') or r.get('sessionId') or '')
+              if not session:fail('missing session')
+              def sv(method,path,payload=None):return wd(method,f'/session/{session}{path}',payload)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
+              def wait(fn,label,n=400):
+                  last=None
+                  for _ in range(n):
+                      try:
+                          last=fn()
+                          if last:return last
+                      except Exception as e:last=repr(e)
+                      time.sleep(.1)
+                  fail(f'timeout {label}: {last!r}')
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):sv('POST',f'/element/{e}/clear',{});sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js('''const x=%s;const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;'''%json.dumps(label,ensure_ascii=False)))
+              def shot(name):(OUT/name).write_bytes(base64.b64decode(sv('GET','/screenshot')))
+              def secondary():
+                  return js('''
+                    const sec=document.querySelector('.p05v2-secondary'); const nav=document.querySelector('.p05v2-nav');
+                    const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};
+                    const buttons=[...sec.querySelectorAll('button')].map(b=>({text:b.textContent.trim(),rect:rect(b),width:getComputedStyle(b).width,flex:getComputedStyle(b).flex,display:getComputedStyle(b).display}));
+                    return {innerWidth,innerHeight,docClientWidth:document.documentElement.clientWidth,docScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth,sec:{rect:rect(sec),clientWidth:sec.clientWidth,scrollWidth:sec.scrollWidth,overflowX:getComputedStyle(sec).overflowX,display:getComputedStyle(sec).display},nav:{clientWidth:nav.clientWidth,scrollWidth:nav.scrollWidth,overflowX:getComputedStyle(nav).overflowX,display:getComputedStyle(nav).display},buttons};
+                  ''')
+              def assert_tools(label,mobile=False):
+                  x=secondary(); labels={b['text'] for b in x['buttons']}
+                  if labels!=EXPECTED:fail(f'{label} secondary labels {labels!r}')
+                  if x['docScrollWidth']>x['docClientWidth']+1 or x['bodyScrollWidth']>x['docClientWidth']+1:fail(f'{label} document overflow {x!r}')
+                  if mobile:
+                      if x['innerWidth']>400 or x['docClientWidth']>400:fail(f'MOBILE not truly forced to 390 {x!r}')
+                      if x['sec']['display']!='flex':fail(f'MOBILE secondary not flex {x!r}')
+                      if x['sec']['scrollWidth']>x['sec']['clientWidth']+1:fail(f'MOBILE secondary still scrolls {x!r}')
+                      if x['nav']['overflowX']!='auto' or x['nav']['scrollWidth']<=x['nav']['clientWidth']+1:fail(f'MOBILE workspace nav no longer intentionally scrollable {x!r}')
+                      left=x['sec']['rect']['left']; right=x['sec']['rect']['right']
+                      for b in x['buttons']:
+                          if b['rect']['left']<left-1 or b['rect']['right']>right+1:fail(f'MOBILE button outside secondary {b!r} sec={x["sec"]!r}')
+                  print(f'P05_MOBILE_SECONDARY_{label}_TOOLS=3')
+                  print(f'P05_MOBILE_SECONDARY_{label}_DOCUMENT_OVERFLOW=0')
+                  if mobile:
+                      print('P05_MOBILE_SECONDARY_MOBILE_TRUE_VIEWPORT=PASS')
+                      print('P05_MOBILE_SECONDARY_MOBILE_SCROLLWIDTH_FITS=PASS')
+                      print('P05_MOBILE_SECONDARY_MOBILE_MAIN_NAV_SCROLL_PRESERVED=PASS')
+                  return x
+              sv('POST','/url',{'url':BASE+'/'})
+              wait(lambda:js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
+              send(find("input[autocomplete='username']"),'owner');send(find("input[autocomplete='current-password']"),PASSWORD);click('登录') or fail('login')
+              wait(lambda:'载入演示数据 →' in str(js("return document.querySelector('.p05v2-content')?.innerText||''")),'demo ready');click('载入演示数据 →') or fail('demo load')
+              wait(lambda:js("return document.querySelectorAll('.p05v2-site-row').length") == 5,'portfolio')
+              wait(lambda:set(js("return [...document.querySelectorAll('.p05v2-secondary button')].map(b=>b.textContent.trim())"))==EXPECTED,'secondary portals')
+              sv('POST','/window/rect',{'x':0,'y':0,'width':1440,'height':1000});time.sleep(.5);js('window.scrollTo(0,0);return true')
+              assert_tools('DESKTOP',False);shot('desktop-secondary-tools.png')
+              sv('POST','/window/rect',{'x':0,'y':0,'width':390,'height':844});time.sleep(.8);js('window.scrollTo(0,0);return true');time.sleep(.2)
+              assert_tools('MOBILE',True);shot('mobile-secondary-tools.png')
+              print('P05_MOBILE_SECONDARY_BROWSER=PASS')
+          finally:
+              if session:
+                  try:wd('DELETE',f'/session/{session}')
+                  except Exception:pass
+              proc.terminate()
+          PY
+
+      - name: Upload secondary-tools screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p05-mobile-secondary-tools-browser-${{ github.run_id }}
+          path: /tmp/p05-mobile-secondary-tools/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Read-only exact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test -z "$(git status --porcelain)"
+          echo P05_PRODUCT_SOURCE_WRITE=0
+          echo P05_RELEASE_WRITE=0
+          echo P05_PRODUCTION_WRITE=0
