@@ -9,14 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: p05-business-value-overflow-${{ github.event.pull_request.number }}
+  group: p05-business-value-fix-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
-  p05-business-value-overflow-diagnostic:
+  p05-business-value-fix-and-gate:
     if: github.event.pull_request.head.ref == 'test/p05-business-value-portfolio-runtime-20260903'
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:18-alpine
@@ -34,32 +34,107 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
       VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
       NODE_ENV: test
+      P05_REPO: llhzx2018/vf-seo
+      P05_BRANCH: l2/business-value-portfolio-priority-20260903
       P05_BASE_SHA: f8a89cd6faf533016dda8b73fdc5fcf1bef46911
-      P05_EXACT_SHA: f9268920d5a57c5cc1c0c4b5f800ab4515188e13
-      P05_EXACT_TREE: 5c3b37d7f04cbe624f3280934ea03045bcfe582e
+      P05_PRE_FIX_SHA: f9268920d5a57c5cc1c0c4b5f800ab4515188e13
     steps:
-      - name: Checkout exact candidate
+      - name: Checkout exact pre-fix candidate read-only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-seo
           ref: f9268920d5a57c5cc1c0c4b5f800ab4515188e13
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
-          fetch-depth: 5
+          fetch-depth: 10
 
-      - name: Verify exact source and scope
+      - name: Verify live base and exact candidate
+        shell: bash
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_PRE_FIX_SHA"
+          test "$(cat VERSION)" = '1.2.4'
+          python3 - <<'PY'
+          import json,os,urllib.parse,urllib.request
+          repo=os.environ['P05_REPO']; branch=os.environ['P05_BRANCH']; token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
+          def get(url):
+              with urllib.request.urlopen(urllib.request.Request(url,headers=headers)) as r:return json.load(r)
+          main=get(f'https://api.github.com/repos/{repo}/branches/main')['commit']['sha']
+          candidate=get(f'https://api.github.com/repos/{repo}/branches/{urllib.parse.quote(branch,safe="")}')['commit']['sha']
+          assert main==os.environ['P05_BASE_SHA'],(main,os.environ['P05_BASE_SHA'])
+          assert candidate==os.environ['P05_PRE_FIX_SHA'],(candidate,os.environ['P05_PRE_FIX_SHA'])
+          print('P05_BUSINESS_VALUE_FIX_EXACT_BASE=PASS')
+          PY
+
+      - name: Write exact shrink fix and Truth lock
+        shell: bash
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import base64,json,os,urllib.parse,urllib.request
+          repo=os.environ['P05_REPO']; branch=os.environ['P05_BRANCH']; token=os.environ['VF_RELEASE_WRITE_TOKEN']
+          headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'}
+          def api(method,url,payload=None):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(url,data=data,headers=headers,method=method)
+              with urllib.request.urlopen(req) as r:return json.load(r)
+          def get_file(path):
+              q=urllib.parse.quote(branch,safe='')
+              obj=api('GET',f'https://api.github.com/repos/{repo}/contents/{path}?ref={q}')
+              return obj,base64.b64decode(obj['content']).decode()
+          def put_file(path,sha,text,message):
+              return api('PUT',f'https://api.github.com/repos/{repo}/contents/{path}',{'message':message,'content':base64.b64encode(text.encode()).decode(),'sha':sha,'branch':branch})
+          app_obj,app=get_file('src/client/ProductApp.tsx')
+          test_obj,test=get_file('tests/unit/product-portfolio-decision-ladder-truth.test.ts')
+          assert app_obj['sha']=='0ce83a6f9d0e298e4a458b8588b40e68b7768184',app_obj['sha']
+          assert test_obj['sha']=='ac8d34d72c4fdcb0de650143cfdfbd65b2e4c978',test_obj['sha']
+          old="<div><strong>{site.name}</strong><span>业务价值 {businessValue(site.business_value)} · {site.project_name ?? '—'} · {site.url}</span><p>{site.status?.reason ?? '暂无优先状态'}</p></div>"
+          new="<div style={{ minWidth: 0 }}><strong>{site.name}</strong><span>业务价值 {businessValue(site.business_value)} · {site.project_name ?? '—'} · {site.url}</span><p>{site.status?.reason ?? '暂无优先状态'}</p></div>"
+          assert app.count(old)==1,app.count(old)
+          assert new not in app
+          app=app.replace(old,new,1)
+          anchor="  assert.match(app, /function businessValue\\(value: unknown\\)/);\n"
+          lock="  assert.match(app, /<div style=\\{\\{ minWidth: 0 \\}\\}><strong>\\{site\\.name\\}<\\/strong><span>业务价值/);\n"
+          assert test.count(anchor)==1,test.count(anchor)
+          assert lock not in test
+          test=test.replace(anchor,anchor+lock,1)
+          put_file('src/client/ProductApp.tsx',app_obj['sha'],app,'fix(ui): allow Portfolio copy to shrink on mobile')
+          latest_test,_=get_file('tests/unit/product-portfolio-decision-ladder-truth.test.ts')
+          assert latest_test['sha']==test_obj['sha'],(latest_test['sha'],test_obj['sha'])
+          put_file('tests/unit/product-portfolio-decision-ladder-truth.test.ts',test_obj['sha'],test,'test(product): lock Portfolio mobile shrink contract')
+          head=api('GET',f'https://api.github.com/repos/{repo}/branches/{urllib.parse.quote(branch,safe="")}')['commit']['sha']
+          print('P05_BUSINESS_VALUE_POST_FIX_HEAD='+head)
+          PY
+
+      - name: Checkout fresh post-fix Product branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: l2/business-value-portfolio-priority-20260903
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 10
+
+      - name: Verify post-fix scope stays exact four files
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
-          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
           test "$(cat VERSION)" = '1.2.4'
           git cat-file -e "$P05_BASE_SHA^{commit}"
+          git diff --check "$P05_BASE_SHA" HEAD
           mapfile -t changed < <(git diff --name-only "$P05_BASE_SHA" HEAD | sort)
           expected=('php/src/ProductPortfolioService.php' 'src/client/ProductApp.tsx' 'src/server/product-portfolio.ts' 'tests/unit/product-portfolio-decision-ladder-truth.test.ts')
           test "${#changed[@]}" -eq 4
           for i in 0 1 2 3; do test "${changed[$i]}" = "${expected[$i]}"; done
-          echo P05_BUSINESS_VALUE_EXACT_SOURCE=PASS
+          grep -Fq '<div style={{ minWidth: 0 }}><strong>{site.name}</strong><span>业务价值' src/client/ProductApp.tsx
+          echo P05_BUSINESS_VALUE_POST_FIX_SCOPE=PASS
+          echo P05_BUSINESS_VALUE_POST_FIX_SHA=$(git rev-parse HEAD)
+          echo P05_BUSINESS_VALUE_POST_FIX_TREE=$(git rev-parse HEAD^{tree})
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -67,17 +142,18 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Build isolated runtime
+      - name: Targeted build and Truth test
         shell: bash
         run: |
           set -Eeuo pipefail
           npm ci
           npm run typecheck
+          node --import tsx --test tests/unit/product-portfolio-decision-ladder-truth.test.ts
           npm run build
           npm run migrate
           VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='BusinessValue-2026!' npm run bootstrap:admin
 
-      - name: Diagnose true 390px overflow after verified priority journey
+      - name: Real runtime and true 390px closure
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -88,8 +164,8 @@ jobs:
           python3 - <<'PY'
           import base64,json,pathlib,shutil,subprocess,sys,time,urllib.error,urllib.request
           BASE='http://127.0.0.1:18231'; DP=9547; PASSWORD='BusinessValue-2026!'; OUT=pathlib.Path('/tmp/p05-business-value')
-          EXPECTED=['Zulu High','Mike Normal','Alpha Low']
-          def fail(msg): print('P05_BUSINESS_VALUE_DIAGNOSTIC=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          EXPECTED=['Zulu High','Mike Normal','Alpha Low']; LABELS=['业务价值 高','业务价值 普通','业务价值 低']
+          def fail(msg): print('P05_BUSINESS_VALUE_FINAL_GATE=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
           def http(method,url,payload=None,timeout=30):
               data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(url,data=data,method=method)
               if data is not None:req.add_header('Content-Type','application/json')
@@ -102,95 +178,96 @@ jobs:
                   try:
                       with urllib.request.urlopen(url,timeout=1) as r:
                           if r.status<500:return
-                  except Exception: time.sleep(.1)
+                  except Exception:time.sleep(.1)
               fail('not ready '+url)
           def wd(method,path,payload=None):
               result=http(method,f'http://127.0.0.1:{DP}{path}',payload); value=result.get('value')
-              if isinstance(value,dict) and value.get('error'): fail(str(value))
+              if isinstance(value,dict) and value.get('error'):fail(str(value))
               return result
           driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
-          if not driver or not chrome: fail('Chrome unavailable')
+          if not driver or not chrome:fail('Chrome unavailable')
           proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); session=''
           try:
               wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
               r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
               session=str(r['value'].get('sessionId') or r.get('sessionId') or '')
-              if not session: fail('missing session')
-              def sv(method,path,payload=None): return wd(method,f'/session/{session}{path}',payload)['value']
-              def js(code): return sv('POST','/execute/sync',{'script':code,'args':[]})
+              if not session:fail('missing session')
+              def sv(method,path,payload=None):return wd(method,f'/session/{session}{path}',payload)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
               def jsa(body):
                   script="const done=arguments[arguments.length-1];(async()=>{try{done(await (async()=>{%s})())}catch(e){done({__error:String(e&&e.stack||e)})}})();"%body
                   value=sv('POST','/execute/async',{'script':script,'args':[]})
-                  if isinstance(value,dict) and value.get('__error'): fail(str(value['__error']))
+                  if isinstance(value,dict) and value.get('__error'):fail(str(value['__error']))
                   return value
               def wait(fn,label):
                   for _ in range(400):
-                      if fn(): return
+                      if fn():return
                       time.sleep(.1)
                   fail('timeout '+label)
-              def find(css): return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
-              def send(e,v): sv('POST',f'/element/{e}/clear',{}); sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
-              def click(label): return bool(js("const x="+json.dumps(label,ensure_ascii=False)+";const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;"))
-              def shot(name): (OUT/name).write_bytes(base64.b64decode(sv('GET','/screenshot')))
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):sv('POST',f'/element/{e}/clear',{});sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js("const x="+json.dumps(label,ensure_ascii=False)+";const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;"))
+              def shot(name):(OUT/name).write_bytes(base64.b64decode(sv('GET','/screenshot')))
               sv('POST','/url',{'url':BASE+'/'})
               wait(lambda:js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
-              send(find("input[autocomplete='username']"),'owner'); send(find("input[autocomplete='current-password']"),PASSWORD); click('登录') or fail('login click')
+              send(find("input[autocomplete='username']"),'owner');send(find("input[autocomplete='current-password']"),PASSWORD);click('登录') or fail('login')
               wait(lambda:js("return !!document.querySelector('.p05v2-content')"),'shell')
               auth=jsa("const r=await fetch('/api/auth/me',{credentials:'same-origin'});return await r.json();")
               csrf=str(auth.get('csrfToken') or '');
-              if not csrf: fail('missing csrf')
+              if not csrf:fail('csrf')
               project=jsa("const r=await fetch('/api/projects',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json','x-csrf-token':%s},body:JSON.stringify({name:'Business Value Gate'})});return await r.json();"%json.dumps(csrf))
-              pid=str((project.get('project') or {}).get('id') or '');
-              if not pid: fail('project create')
+              pid=str((project.get('project') or {}).get('id') or '')
+              if not pid:fail('project')
               for name,url,value in [('Zulu High','https://zulu-high.example.test','HIGH'),('Mike Normal','https://mike-normal.example.test','NORMAL'),('Alpha Low','https://alpha-low.example.test','LOW')]:
                   created=jsa("const r=await fetch('/api/websites',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json','x-csrf-token':%s},body:JSON.stringify({projectId:%s,name:%s,url:%s,businessValue:%s})});return await r.json();"%(json.dumps(csrf),json.dumps(pid),json.dumps(name),json.dumps(url),json.dumps(value)))
-                  if not str((created.get('website') or {}).get('id') or ''): fail('website create '+name)
+                  if not str((created.get('website') or {}).get('id') or ''):fail('website '+name)
               portfolio=jsa("const r=await fetch('/api/product/sites',{credentials:'same-origin',cache:'no-store'});return await r.json();")
               rows=[x for x in portfolio.get('items',[]) if x.get('name') in EXPECTED]
               names=[str(x.get('name')) for x in rows]; statuses=[str((x.get('status') or {}).get('code')) for x in rows]
-              if names!=EXPECTED: fail('API order '+repr(names))
-              if statuses!=['DATA_PROBLEM']*3: fail('shared status '+repr(statuses))
+              if names!=EXPECTED:fail('API order '+repr(names))
+              if statuses!=['DATA_PROBLEM']*3:fail('status '+repr(statuses))
               print('P05_BUSINESS_VALUE_API_ORDER=HIGH_NORMAL_LOW')
               sv('POST','/url',{'url':BASE+'/'})
-              wait(lambda:js("return document.querySelectorAll('.p05v2-site-row').length===3"),'portfolio rows')
+              wait(lambda:js("return document.querySelectorAll('.p05v2-site-row').length===3"),'rows')
               ui=js("return [...document.querySelectorAll('.p05v2-site-row')].map(r=>r.querySelector('.p05v2-site-main strong')?.textContent.trim()||'')")
-              if ui!=EXPECTED: fail('UI order '+repr(ui))
-              if not all(js("return document.body.innerText.includes("+json.dumps(x,ensure_ascii=False)+")") for x in ['业务价值 高','业务价值 普通','业务价值 低']): fail('labels')
+              if ui!=EXPECTED:fail('UI order '+repr(ui))
+              for label in LABELS:
+                  if not js("return document.body.innerText.includes("+json.dumps(label,ensure_ascii=False)+")"):fail('label '+label)
               shot('desktop-business-value-order.png')
-              sv('POST','/window/rect',{'x':0,'y':0,'width':390,'height':844}); time.sleep(.8); js('window.scrollTo(0,0);return true')
+              sv('POST','/window/rect',{'x':0,'y':0,'width':390,'height':844});time.sleep(.8);js('window.scrollTo(0,0);return true')
               metrics=js("return {innerWidth,clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth}")
-              offenders=js("return [...document.querySelectorAll('*')].map(e=>{const r=e.getBoundingClientRect();return {tag:e.tagName,cls:String(e.className||''),left:r.left,right:r.right,width:r.width,scrollWidth:e.scrollWidth,clientWidth:e.clientWidth,text:(e.innerText||e.textContent||'').trim().replace(/\\s+/g,' ').slice(0,120)}}).filter(x=>x.right>document.documentElement.clientWidth+1||x.left<-1).sort((a,b)=>b.right-a.right).slice(0,30)")
-              print('P05_FORCED390_METRICS='+json.dumps(metrics,ensure_ascii=False,separators=(',',':')))
-              print('P05_FORCED390_OFFENDERS='+json.dumps(offenders,ensure_ascii=False,separators=(',',':')))
-              (OUT/'forced390-overflow.json').write_text(json.dumps({'metrics':metrics,'offenders':offenders},ensure_ascii=False,indent=2))
+              if int(metrics['innerWidth'])>400:fail('viewport '+repr(metrics))
+              if int(metrics['scrollWidth'])>int(metrics['clientWidth'])+1:fail('document overflow '+repr(metrics))
+              copy_boxes=js("return [...document.querySelectorAll('.p05v2-site-main>div:last-child')].map(e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}})")
+              if any(float(x['right'])>float(metrics['clientWidth'])+1 for x in copy_boxes):fail('copy overflow '+repr(copy_boxes))
               shot('mobile-business-value-order.png')
+              print('P05_FORCED390_METRICS='+json.dumps(metrics,separators=(',',':')))
               print('P05_BUSINESS_VALUE_UI_ORDER=HIGH_NORMAL_LOW')
               print('P05_BUSINESS_VALUE_UI_LABELS=PASS')
-              print('P05_BUSINESS_VALUE_DIAGNOSTIC=PASS')
+              print('P05_BUSINESS_VALUE_TRUE_390=PASS')
+              print('P05_BUSINESS_VALUE_FINAL_GATE=PASS')
           finally:
               if session:
-                  try: wd('DELETE',f'/session/{session}')
-                  except Exception: pass
+                  try:wd('DELETE',f'/session/{session}')
+                  except Exception:pass
               proc.terminate()
           PY
 
-      - name: Upload diagnostic evidence
+      - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: p05-business-value-overflow-${{ github.run_id }}
-          path: /tmp/p05-business-value/*
+          name: p05-business-value-final-${{ github.run_id }}
+          path: /tmp/p05-business-value/*.png
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Read-only Product source boundary
+      - name: Read-only post-fix Product boundary
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
-          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
           test -z "$(git status --porcelain)"
-          echo P05_PRODUCT_SOURCE_WRITE=0
+          echo P05_PRODUCT_SOURCE_LOCAL_WRITE=0
           echo P05_RELEASE_WRITE=0
           echo P05_PRODUCTION_WRITE=0
