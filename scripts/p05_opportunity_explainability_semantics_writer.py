@@ -62,7 +62,6 @@ def exact_state_gate():
 
 
 def transform_node(text: str) -> str:
-    # Preserve the actual Query identity in derived evidence. Landing page remains a separate target fact.
     old1 = "evidence: { impressions, ctr, position, previousPosition: row.previousPosition ?? null, landingPageId: row.landingPageId ?? null, landingPage: row.landingPage ?? null },"
     new1 = "evidence: { query: row.query, impressions, ctr, position, previousPosition: row.previousPosition ?? null, landingPageId: row.landingPageId ?? null, landingPage: row.landingPage ?? null },"
     assert text.count(old1) == 2, text.count(old1)
@@ -73,7 +72,6 @@ def transform_node(text: str) -> str:
         "evidence: { query: row.query, impressions, ctr, position, previousPosition: row.previousPosition ?? null, movement, landingPageId: row.landingPageId ?? null, landingPage: row.landingPage ?? null },",
         'node recovery query evidence',
     )
-
     old = """  const subjectType = String(item.subjectType ?? '').toUpperCase();
   const target = typeof item.target === 'string' && item.target.trim() ? ` · ${item.target.trim()}` : '';
   const subject = subjectType === 'QUERY' ? `关键词${target}` : subjectType === 'PAGE' ? `页面${target}` : '网站';
@@ -99,7 +97,8 @@ def transform_node(text: str) -> str:
   const confidence = scalarEvidence(evidence.confidence) ?? '未声明（不推测）';
 """
     text = once(text, old, new, 'node truthful subject and freshness')
-    assert 'item.lastSeenAt ?? null' not in text[text.index('function opportunityExplainability'):text.index('export function deriveSearchOpportunities')]
+    helper = text[text.index('function opportunityExplainability'):text.index('export function deriveSearchOpportunities')]
+    assert "const freshness = item.kind === 'SEARCH' ? searchSource.freshness : item.lastSeenAt ?? null;" not in helper
     return text
 
 
@@ -107,7 +106,6 @@ def transform_php(text: str) -> str:
     old = "'evidence' => ['impressions' => (int) ($row['impressions'] ?? 0), 'ctr' => $row['ctr'] ?? null, 'position' => $row['position'] ?? null, 'previousPosition' => $row['previousPosition'] ?? null, 'movement' => $row['movement'] ?? null, 'landingPageId' => $row['landingPageId'] ?? null, 'landingPage' => $row['landingPage'] ?? null]"
     new = "'evidence' => ['query' => $row['query'] ?? null, 'impressions' => (int) ($row['impressions'] ?? 0), 'ctr' => $row['ctr'] ?? null, 'position' => $row['position'] ?? null, 'previousPosition' => $row['previousPosition'] ?? null, 'movement' => $row['movement'] ?? null, 'landingPageId' => $row['landingPageId'] ?? null, 'landingPage' => $row['landingPage'] ?? null]"
     text = once(text, old, new, 'php derived query evidence')
-
     old2 = """        $subjectType = strtoupper((string) ($item['subjectType'] ?? ''));
         $target = is_string($item['target'] ?? null) && trim((string) $item['target']) !== '' ? ' · ' . trim((string) $item['target']) : '';
         $subject = $subjectType === 'QUERY' ? '关键词' . $target : ($subjectType === 'PAGE' ? '页面' . $target : '网站');
@@ -132,7 +130,7 @@ def transform_php(text: str) -> str:
 """
     text = once(text, old2, new2, 'php truthful subject and freshness')
     helper = text[text.index('private static function opportunityExplainability'):text.index('private static function portfolioStatus')]
-    assert "$item['lastSeenAt'] ?? null" not in helper
+    assert "$freshness = ($item['kind'] ?? '') === 'SEARCH' ? ($searchSource['freshness'] ?? null) : ($item['lastSeenAt'] ?? null);" not in helper
     return text
 
 
@@ -140,18 +138,16 @@ def transform_test(text: str) -> str:
     text = text.replace("evidence: { impressions: 420, position: 6.4 },", "evidence: { query: 'example query', impressions: 420, position: 6.4 },", 1)
     text = text.replace("subject: '关键词 · https://example.com/landing',", "subject: '关键词：example query',", 1)
     text = text.replace("{ key: 'subject', label: '作用对象', value: '关键词 · https://example.com/landing' },", "{ key: 'subject', label: '作用对象', value: '关键词：example query' },", 1)
-
     marker = "  assert.match(phpService, /'firstSeenAt' => isset\\(\\$row\\['first_seen_at'\\]\\)/);\n});"
-    addition = """  assert.match(nodeService, /evidence: \{ query: row\.query,/);
+    addition = r"""  assert.match(nodeService, /evidence: \{ query: row\.query,/);
   assert.match(phpService, /'evidence' => \['query' => \$row\['query'\]/);
   assert.match(nodeService, /query \? `关键词：\$\{query\}` : '关键词（名称未声明）'/);
   assert.match(phpService, /'关键词：' \. \$query/);
   const nodeExplain = nodeService.slice(nodeService.indexOf('function opportunityExplainability'), nodeService.indexOf('export function deriveSearchOpportunities'));
   const phpExplain = phpService.slice(phpService.indexOf('private static function opportunityExplainability'), phpService.indexOf('private static function portfolioStatus'));
-  for (const source of [nodeExplain, phpExplain]) {
-    assert.ok(source.includes('未声明（不推测）'));
-    assert.equal(source.includes('lastSeenAt ?? null'), false);
-  }
+  for (const source of [nodeExplain, phpExplain]) assert.ok(source.includes('未声明（不推测）'));
+  assert.equal(nodeExplain.includes("const freshness = item.kind === 'SEARCH' ? searchSource.freshness : item.lastSeenAt ?? null;"), false);
+  assert.equal(phpExplain.includes("$freshness = ($item['kind'] ?? '') === 'SEARCH' ? ($searchSource['freshness'] ?? null) : ($item['lastSeenAt'] ?? null);"), false);
 """
     assert marker in text
     text = text.replace(marker, addition + marker, 1)
@@ -169,7 +165,6 @@ def write_files():
     for path, fn in transforms.items():
         transformed[path] = fn(Path(path).read_text())
     print('P05_OPPORTUNITY_EXPLAINABILITY_SEMANTICS_CONSTRUCT=PASS')
-
     for path in transforms:
         current = get(f'https://api.github.com/repos/{REPO}/contents/{path}?ref={q}')
         assert current['sha'] == EXPECTED_BLOBS[path], (path, current['sha'], EXPECTED_BLOBS[path])
