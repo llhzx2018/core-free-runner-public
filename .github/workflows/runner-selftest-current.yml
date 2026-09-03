@@ -3,13 +3,16 @@ name: Public Runner Current Self Test
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/runner-selftest-current.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: public-runner-current-selftest-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -76,3 +79,189 @@ jobs:
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
+
+  p05-owner-first-overview-browser:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/p05-owner-first-overview-browser-20260903'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_EXACT_SHA: 30055bf94bfd5c937007c44db94ed0c9337bd860
+      P05_EXACT_TREE: ca6772fbb44e8c48f2bc16a19e116b6d568459e9
+    steps:
+      - name: Checkout exact P05 Owner-first candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify exact candidate and scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test "$(cat VERSION)" = '1.2.4'
+          git diff --check HEAD^ HEAD
+          test "$(git diff --name-only HEAD^ HEAD)" = 'src/client/ProductApp.tsx'
+          grep -Fq '先看哪里需要处理和下一步，再核对变化、证据与可能原因。' src/client/ProductApp.tsx
+          echo P05_OWNER_FIRST_EXACT_SOURCE=PASS
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='Readability-2026!' npm run bootstrap:admin
+
+      - name: Real Chrome Owner-first overview journey
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p05-owner-first-overview
+          PORT=18226 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-owner-first-overview/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import base64,json,shutil,subprocess,sys,time,urllib.request,urllib.error,pathlib
+          BASE='http://127.0.0.1:18226'; DP=9542; PASSWORD='Readability-2026!'; OUT=pathlib.Path('/tmp/p05-owner-first-overview')
+          ORDER=['哪里坏了 / 需要处理','下一步应该做什么','发生了什么','只看支持判断的数据','为什么可能变化','最近改动与后续观察']
+          def fail(msg): print('P05_OWNER_FIRST_BROWSER=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(m,u,p=None,timeout=30):
+              d=None if p is None else json.dumps(p).encode(); r=urllib.request.Request(u,data=d,method=m)
+              if d is not None:r.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(r,timeout=timeout) as x:
+                      raw=x.read().decode(); return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {u}: {e.read().decode(errors="replace")[:500]}')
+          def wait_http(u):
+              for _ in range(300):
+                  try:
+                      with urllib.request.urlopen(u,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              fail('not ready '+u)
+          def wd(m,p,d=None):
+              r=http(m,f'http://127.0.0.1:{DP}{p}',d); v=r.get('value')
+              if isinstance(v,dict) and v.get('error'):fail(f"webdriver {v.get('error')}: {v.get('message')}")
+              return r
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome:fail('Chrome unavailable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); s=''
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1440,1000']}}}})
+              s=str(r['value'].get('sessionId') or r.get('sessionId') or '')
+              if not s:fail('missing webdriver session')
+              def sv(m,p,d=None):return wd(m,f'/session/{s}{p}',d)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
+              def content():return str(js("return document.querySelector('.p05v2-content')?.innerText || ''"))
+              def wait(fn,label,n=400):
+                  last=None
+                  for _ in range(n):
+                      try:
+                          last=fn()
+                          if last:return last
+                      except Exception as e:last=repr(e)
+                      time.sleep(.1)
+                  fail(f'timeout {label}: {last!r}')
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):sv('POST',f'/element/{e}/clear',{});sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js('''const x=%s;const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;'''%json.dumps(label,ensure_ascii=False)))
+              def shot(name):(OUT/name).write_bytes(base64.b64decode(sv('GET','/screenshot')))
+              def read_layout():
+                  return js('''
+                    const wanted=%s;
+                    const hs=[...document.querySelectorAll('.p05v2-content h2')];
+                    const texts=hs.map(e=>e.textContent.trim());
+                    const pos={};
+                    for(const name of wanted){
+                      const h=hs.find(e=>e.textContent.trim()===name);
+                      if(!h){pos[name]=null;continue;}
+                      const section=h.closest('section') || h.parentElement;
+                      const r=section.getBoundingClientRect();
+                      pos[name]={top:r.top,bottom:r.bottom};
+                    }
+                    return {texts,pos,sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth,body:document.body.scrollWidth,viewport:innerHeight};
+                  '''%json.dumps(ORDER,ensure_ascii=False))
+              def assert_owner_first(label,require_first_visible):
+                  x=read_layout(); texts=x['texts']; missing=[name for name in ORDER if name not in texts]
+                  if missing:fail(f'{label} missing headings {missing!r}; headings={texts!r}')
+                  idx=[texts.index(name) for name in ORDER]
+                  if idx != sorted(idx) or len(set(idx)) != len(idx):fail(f'{label} DOM order {idx!r}; headings={texts!r}')
+                  p=x['pos']
+                  if not (p[ORDER[0]]['top'] < p[ORDER[2]]['top'] < p[ORDER[3]]['top'] < p[ORDER[4]]['top']):fail(f'{label} visual order {p!r}')
+                  if x['sw']>x['cw']+1 or x['body']>x['cw']+1:fail(f'{label} horizontal overflow {x!r}')
+                  if require_first_visible and p[ORDER[0]]['top']>=x['viewport']:fail(f'{label} Owner action not in first viewport {x!r}')
+                  print(f'P05_OWNER_FIRST_{label}_DOM_ORDER=PASS')
+                  print(f'P05_OWNER_FIRST_{label}_VISUAL_ORDER=PASS')
+                  return x
+              sv('POST','/url',{'url':BASE+'/'})
+              wait(lambda:js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
+              send(find("input[autocomplete='username']"),'owner'); send(find("input[autocomplete='current-password']"),PASSWORD); click('登录') or fail('login')
+              wait(lambda:'载入演示数据 →' in content(),'empty portfolio'); click('载入演示数据 →') or fail('demo load')
+              wait(lambda:all(x in content() for x in ['Kewaro Start','Kewaro Guide','WordPress Lab']),'portfolio')
+              click('进入网站 →') or fail('enter site')
+              wait(lambda:'哪里坏了 / 需要处理' in content() and '为什么可能变化' in content(),'overview')
+              js('window.scrollTo(0,0); return true'); time.sleep(.3)
+              assert_owner_first('DESKTOP',True)
+              shot('desktop-overview.png')
+              sv('POST','/window/rect',{'x':0,'y':0,'width':390,'height':844}); time.sleep(.6); js('window.scrollTo(0,0); return true'); time.sleep(.2)
+              assert_owner_first('MOBILE',True)
+              shot('mobile-overview.png')
+              print('P05_OWNER_FIRST_DESKTOP_OVERFLOW=0')
+              print('P05_OWNER_FIRST_MOBILE_OVERFLOW=0')
+              print('P05_OWNER_FIRST_BROWSER=PASS')
+          finally:
+              if s:
+                  try:wd('DELETE',f'/session/{s}')
+                  except Exception:pass
+              proc.terminate()
+          PY
+
+      - name: Upload Owner-first overview screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p05-owner-first-overview-browser-${{ github.run_id }}
+          path: /tmp/p05-owner-first-overview/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Read-only exact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test -z "$(git status --porcelain)"
+          echo P05_PRODUCT_SOURCE_WRITE=0
+          echo P05_RELEASE_WRITE=0
+          echo P05_PRODUCTION_WRITE=0
