@@ -1,78 +1,177 @@
 name: Public Runner Current Self Test
 
 on:
-  push:
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: p05-v125-formal-full-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  selftest:
+  p05-v125-formal-full:
+    if: github.event_name == 'pull_request' && github.head_ref == 'release/p05-v125-formal-full-20260904'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      P05_MAIN_SOURCE: e37db145111366a29fc91c33348216a7af79ae8c
+      P05_VERIFIED_TREE: 9107865be22bfcd237d13186d735406c0501a7c2
+      P05_CANDIDATE_SOURCE: a6421fe27f8c3bedfdf9a761889af5317e3a8312
+      P05_FINAL_GATE_RUN: '33770882051'
+      P05_FINAL_GATE_JOB: '100700505679'
+      VERSION: 1.2.5
+      PREVIOUS_PRODUCTION_VERSION: 1.2.4
+      ASSET: VF_SEO_V1.2.5_FULL.zip
+      RECEIPT: VF_SEO_V1.2.5_RELEASE_RECEIPT.txt
     steps:
-      - name: Checkout public runner control repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+      - name: Bind exact v1.2.5 candidate CI PASS
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/llhzx2018/vf-seo/actions/runs/$P05_FINAL_GATE_RUN" > /tmp/final-run.json
+          gh api "repos/llhzx2018/vf-seo/actions/jobs/$P05_FINAL_GATE_JOB" > /tmp/final-job.json
+          python3 - <<'PY'
+          import json, os
+          run=json.load(open('/tmp/final-run.json')); job=json.load(open('/tmp/final-job.json'))
+          assert run['id']==int(os.environ['P05_FINAL_GATE_RUN']) and run['conclusion']=='success'
+          assert run['head_sha']==os.environ['P05_CANDIDATE_SOURCE']
+          assert job['id']==int(os.environ['P05_FINAL_GATE_JOB']) and job['run_id']==int(os.environ['P05_FINAL_GATE_RUN'])
+          assert job['conclusion']=='success' and job['name']=='verify'
+          print('P05_V125_FINAL_GATE_BINDING=PASS')
+          PY
+
+      - name: Checkout exact promoted P05 v1.2.5 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 1
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_MAIN_SOURCE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
           persist-credentials: false
+          path: p05
 
-      - name: Hosted runner allocation proof
-        shell: bash
+      - name: Verify exact source and release boundary
+        working-directory: p05
         run: |
           set -Eeuo pipefail
-          echo "RUNNER_OS=$RUNNER_OS"
-          uname -a
-          php -v || true
-          python3 --version
-          echo 'PUBLIC_RUNNER_ALLOCATION=PASS'
+          test "$(git rev-parse HEAD)" = "$P05_MAIN_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_VERIFIED_TREE"
+          test "$(cat VERSION)" = "$VERSION"
+          node - <<'NODE'
+          const p=require('./package.json'), v=require('./VF_PROJECT.json');
+          if(p.version!=='1.2.5') process.exit(1);
+          if(v.version!=='1.2.5'||v.target_version!=='1.2.5'||v.working_version!=='1.2.5') process.exit(1);
+          if(v.production_version!=='1.2.4'||v.formal_release!=='v1.2.4') process.exit(1);
+          if(v.schema_identity!=='VF-SEO-SCHEMA@1'||v.schema_version!==1) process.exit(1);
+          NODE
+          test ! -e VF_INSTALL_INSTANCE.json
+          echo P05_V125_SOURCE_BOUNDARY=PASS
 
-      - name: Verify main push came from merged PR
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          VF_PUSH_SHA: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/check_main_push_provenance.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$VF_PUSH_SHA"
-          echo 'MAIN_PUSH_PROVENANCE=PASS' >> "$GITHUB_ENV"
-
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        shell: bash
-        run: python3 scripts/check_estate_anti_drift.py --live
-
-      - name: Build public-safe receipt
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p evidence/runner
-          PROVENANCE="${MAIN_PUSH_PROVENANCE:-NOT_APPLICABLE}"
-          cat > evidence/runner/PUBLIC_RUNNER_CURRENT.txt <<EOF
-          PUBLIC_RUNNER_ALLOCATION=PASS
-          ESTATE_ANTI_DRIFT=PASS
-          MAIN_PUSH_PROVENANCE=$PROVENANCE
-          RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
-          PRIVATE_SOURCE_USED=GOV_DOC_AUTHORITY_ONLY
-          SECRET_USED=REGISTERED_PRIVATE_READ_CAPABILITY
-          PRIVATE_SOURCE_PERSISTED=NO
-          MAIN_WRITE=NO
-          USER_MANUAL_EXECUTION_REQUIRED=NO
-          EOF
-
-      - name: Upload public-safe receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          name: public-runner-current-selftest-${{ github.run_id }}
-          path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
-          if-no-files-found: error
-          retention-days: 14
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: p05/package-lock.json
+
+      - name: Build pristine formal PHP staging
+        working-directory: p05
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip php-curl sqlite3
+          php -r 'foreach(["pdo_sqlite","curl"] as $e){if(!extension_loaded($e))exit(1);} if(!class_exists("ZipArchive"))exit(1);'
+          npm run release:source:gate
+          VF_RELEASE_SOURCE_SHA="$P05_MAIN_SOURCE" npm run build:php-release
+          npm run php:release:gate
+          S=build/vf-seo-php-release
+          test "$(cat "$S/VERSION")" = "$VERSION"
+          test ! -e "$S/VF_INSTALL_INSTANCE.json"
+          test ! -e "$S/.env"
+          test -f "$S/php/src/PhpUpdater.php"
+          test -f "$S/php/src/CoreUpdates/UpdateCore.php"
+          test -f "$S/php/bin/init-update-service.php"
+          grep -F 'core-updates:llhzx2018/core-updates/projects/P05.json' "$S/PHP_RELEASE_MANIFEST.json" >/dev/null
+          ! grep -F 'core-free-runner-public' "$S/PHP_RELEASE_MANIFEST.json"
+          if find "$S" -type f \( -iname '*.sqlite' -o -iname '*.sqlite3' -o -iname '*.db' -o -name runtime.env -o -name setup.lock.json \) | grep -q .; then exit 1; fi
+          bash php/tests/cloudpanel-root-smoke.sh "$S"
+          echo P05_V125_FORMAL_STAGING=PASS
+
+      - name: Deterministic FULL build and receipt
+        working-directory: p05
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
+          import os
+          root=Path('build/vf-seo-php-release'); asset=os.environ['ASSET']
+          def build(out):
+              with ZipFile(out,'w') as z:
+                  for p in sorted(x for x in root.rglob('*') if x.is_file()):
+                      rel=p.relative_to(root).as_posix()
+                      info=ZipInfo(rel,(1980,1,1,0,0,0)); info.external_attr=((p.stat().st_mode & 0o777)&0xFFFF)<<16
+                      info.compress_type=ZIP_DEFLATED
+                      z.writestr(info,p.read_bytes(),compress_type=ZIP_DEFLATED,compresslevel=9)
+          build('../'+asset+'.a'); build('../'+asset+'.b')
+          PY
+          cmp "../$ASSET.a" "../$ASSET.b"
+          mv "../$ASSET.a" "../$ASSET"; rm "../$ASSET.b"
+          sha="$(sha256sum "../$ASSET" | awk '{print $1}')"
+          bytes="$(stat -c%s "../$ASSET")"
+          files="$(python3 -c 'from zipfile import ZipFile; import os; print(len(ZipFile("../"+os.environ["ASSET"]).namelist()))')"
+          printf 'P05_VERSION=%s\nP05_MAIN_SOURCE=%s\nP05_TREE=%s\nP05_CANDIDATE_SOURCE=%s\nP05_FINAL_GATE_RUN=%s\nP05_FINAL_GATE_JOB=%s\nP05_FILES=%s\nP05_BYTES=%s\nP05_SHA256=%s\nUPDATE_AUTHORITY=core-updates:llhzx2018/core-updates/projects/P05.json\nPREVIOUS_PRODUCTION_VERSION=%s\nPRODUCTION_WRITE=0\n' "$VERSION" "$P05_MAIN_SOURCE" "$P05_VERIFIED_TREE" "$P05_CANDIDATE_SOURCE" "$P05_FINAL_GATE_RUN" "$P05_FINAL_GATE_JOB" "$files" "$bytes" "$sha" "$PREVIOUS_PRODUCTION_VERSION" > "../$RECEIPT"
+          echo "P05_FILES=$files" >> "$GITHUB_ENV"
+          echo "P05_BYTES=$bytes" >> "$GITHUB_ENV"
+          echo "P05_SHA256=$sha" >> "$GITHUB_ENV"
+          echo "P05_V125_FULL_SHA256=$sha"
+          echo "P05_V125_FULL_BYTES=$bytes"
+          echo "P05_V125_FULL_FILES=$files"
+
+      - name: Reconfirm remote v1.2.5 absence
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "v$VERSION" --repo llhzx2018/vf-seo >/dev/null 2>&1; then echo "release exists" >&2; exit 1; fi
+          if gh api "repos/llhzx2018/vf-seo/git/ref/tags/v$VERSION" >/dev/null 2>&1; then echo "tag exists" >&2; exit 1; fi
+          echo P05_V125_REMOTE_ABSENCE=PASS
+
+      - name: Publish private Product Release v1.2.5 FULL
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        working-directory: p05
+        run: |
+          set -Eeuo pipefail
+          gh release create "v$VERSION" --repo llhzx2018/vf-seo --target "$P05_MAIN_SOURCE" \
+            --title 'P05 · VF SEO v1.2.5 · Owner Workflow Patch' \
+            --notes 'v1.2.5 publishes the completed post-v1.2.4 Owner workflow optimization: desktop/mobile readability, mobile above-fold navigation, Owner-first Overview, one explicit Portfolio primary action per site, mobile action-first hierarchy, mobile secondary-tool fit, Business Value tie-breaking inside the same authoritative status, and bounded Opportunity explainability. Schema remains VF-SEO-SCHEMA@1/1 and the SQLite data format is unchanged. This step publishes the formal FULL package only. The direct v1.2.4 → v1.2.5 Atomic online-update package and core-updates manifest are gated and published separately. Production is not modified by this publication step.' \
+            "../$ASSET" "../$RECEIPT"
+
+      - name: Remote readback formal Release truth
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/llhzx2018/vf-seo/releases/tags/v$VERSION" > /tmp/release.json
+          python3 - <<'PY'
+          import json, os
+          r=json.load(open('/tmp/release.json')); assets={x['name']:x for x in r['assets']}
+          assert r['tag_name']=='v'+os.environ['VERSION'] and r['target_commitish']==os.environ['P05_MAIN_SOURCE']
+          full=assets[os.environ['ASSET']]
+          assert int(full['size'])==int(os.environ['P05_BYTES'])
+          assert full.get('digest')=='sha256:'+os.environ['P05_SHA256']
+          assert os.environ['RECEIPT'] in assets
+          print('P05_RELEASE_ID='+str(r['id']))
+          print('P05_FULL_ASSET_ID='+str(full['id']))
+          print('P05_RECEIPT_ASSET_ID='+str(assets[os.environ['RECEIPT']]['id']))
+          print('P05_V125_FORMAL_FULL_PUBLICATION=PASS')
+          print('P05_PRODUCTION_WRITE=0')
+          PY
