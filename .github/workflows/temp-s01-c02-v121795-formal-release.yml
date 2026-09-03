@@ -1,0 +1,224 @@
+name: TEMP S01-C02 Ops 1.21.795 Formal Release
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121795-formal-release-20260903
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_COMMIT: 0397b2524049b9b382f760f7b31e36ff66d908f1
+  TARGET_TREE: 03088243772d49e89b161d33351ff28ea1d68307
+  BASE_RELEASE_COMMIT: 60c9d1e37b2605c9e1b6ec421f0b18a27152506b
+  BASE_ASSET_BYTES: '3185141'
+  BASE_ASSET_SHA256: f672e8a17edb5abde632c90a1ac778f2192f8160aa6f650f4afe4d85e5846527
+  UPGRADE_GATE_RUN: '33790613790'
+  VERSION: 1.21.795
+  TAG: v1.21.795
+  RELEASE_NAME: VF Tools Ops V1.21.795
+  ASSET_NAME: vf-tools-ops_V1.21.795.zip
+  EVIDENCE_DIR: /tmp/s01-c02-v121795-formal-release
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Credential presence gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'RELEASE_CREDENTIALS=PASS'
+
+      - name: Verify prior WordPress upgrade gate PASS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          JSON="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/core-free-runner-public/actions/runs/${UPGRADE_GATE_RUN}")"
+          test "$(jq -r '.status' <<<"$JSON")" = completed
+          test "$(jq -r '.conclusion' <<<"$JSON")" = success
+          test "$(jq -r '.head_sha' <<<"$JSON")" = cdddf5835d973c712444ea9e1a2f4cd77f8c5911
+          printf '%s\n' "$JSON" > "$EVIDENCE_DIR/upgrade-gate-run.json"
+          echo 'WORDPRESS_UPGRADE_GATE=PASS'
+
+      - name: Checkout exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 0397b2524049b9b382f760f7b31e36ff66d908f1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+
+      - name: Verify exact source identity and bounded diff
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.795' ops/vf-ops.php
+          MAIN_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/branches/main")"
+          test "$(jq -r '.commit.sha' <<<"$MAIN_JSON")" = "$TARGET_COMMIT"
+          git -C ops diff --name-only 22c39a988755defb71edd2b23b7777cfb8166b55 "$TARGET_COMMIT" | sort > "$EVIDENCE_DIR/changed-files.txt"
+          cat > /tmp/expected-files.txt <<'EOF'
+          .github/phase3/v121795-backup-provider-policy-contract.php
+          VERSION
+          includes/plugins-governance/contract.php
+          includes/plugins-governance/migration.php
+          vf-ops.php
+          EOF
+          diff -u /tmp/expected-files.txt "$EVIDENCE_DIR/changed-files.txt"
+          echo 'SOURCE_IDENTITY_AND_SCOPE=PASS'
+
+      - name: Run focused source contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l ops/includes/plugins-governance/contract.php
+          php -l ops/includes/plugins-governance/migration.php
+          php -l ops/vf-ops.php
+          php -l ops/.github/phase3/v121795-backup-provider-policy-contract.php
+          php ops/.github/phase3/v121795-backup-provider-policy-contract.php | tee "$EVIDENCE_DIR/provider-policy-contract.txt"
+          grep -Fxq 'PASS_V121795_BACKUP_PROVIDER_POLICY_RECONCILIATION' "$EVIDENCE_DIR/provider-policy-contract.txt"
+          echo 'FOCUSED_SOURCE_CONTRACTS=PASS'
+
+      - name: Prove deterministic packaging against released 1.21.794
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C ops archive --format=zip --prefix=vf-ops/ "$BASE_RELEASE_COMMIT" > /tmp/base.zip
+          test "$(stat -c %s /tmp/base.zip)" = "$BASE_ASSET_BYTES"
+          test "$(sha256sum /tmp/base.zip | awk '{print $1}')" = "$BASE_ASSET_SHA256"
+          unzip -tq /tmp/base.zip >/dev/null
+          echo 'PACKAGING_CALIBRATION_1_21_794=PASS'
+
+      - name: Build and verify exact 1.21.795 artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C ops archive --format=zip --prefix=vf-ops/ "$TARGET_COMMIT" > "/tmp/$ASSET_NAME"
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          BYTES="$(stat -c %s "/tmp/$ASSET_NAME")"
+          SHA="$(sha256sum "/tmp/$ASSET_NAME" | awk '{print $1}')"
+          python3 - <<'PY' > "$EVIDENCE_DIR/runtime-identity.json"
+          import hashlib, json, os, zipfile
+          p='/tmp/'+os.environ['ASSET_NAME']
+          files={}
+          with zipfile.ZipFile(p) as z:
+              for n in z.namelist():
+                  if n.endswith('/'):
+                      continue
+                  if not n.startswith('vf-ops/'):
+                      raise SystemExit('unexpected root: '+n)
+                  rel=n[len('vf-ops/'):]
+                  if rel:
+                      files[rel]=z.read(n)
+          if 'vf-ops.php' not in files or 'VERSION' not in files:
+              raise SystemExit('required runtime file missing')
+          h=hashlib.sha256()
+          for rel,b in sorted(files.items()):
+              h.update(rel.encode()); h.update(b'\0'); h.update(hashlib.sha256(b).hexdigest().encode()); h.update(b'\n')
+          print(json.dumps({'runtime_files':len(files),'runtime_fingerprint':h.hexdigest()},indent=2))
+          PY
+          RUNTIME_FILES="$(jq -r '.runtime_files' "$EVIDENCE_DIR/runtime-identity.json")"
+          RUNTIME_FP="$(jq -r '.runtime_fingerprint' "$EVIDENCE_DIR/runtime-identity.json")"
+          printf '{"target_commit":"%s","target_tree":"%s","version":"%s","asset_name":"%s","asset_bytes":%s,"asset_sha256":"%s","runtime_files":%s,"runtime_fingerprint":"%s","upgrade_gate_run":%s}\n' "$TARGET_COMMIT" "$TARGET_TREE" "$VERSION" "$ASSET_NAME" "$BYTES" "$SHA" "$RUNTIME_FILES" "$RUNTIME_FP" "$UPGRADE_GATE_RUN" > "$EVIDENCE_DIR/artifact-identity.json"
+          cat "$EVIDENCE_DIR/artifact-identity.json"
+          echo "ASSET_BYTES=$BYTES" >> "$GITHUB_ENV"
+          echo "ASSET_SHA256=$SHA" >> "$GITHUB_ENV"
+          echo "RUNTIME_FILES=$RUNTIME_FILES" >> "$GITHUB_ENV"
+          echo "RUNTIME_FP=$RUNTIME_FP" >> "$GITHUB_ENV"
+          echo 'EXACT_RELEASE_ARTIFACT=PASS'
+
+      - name: Verify release absence
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(curl -sS -o /tmp/tag.json -w '%{http_code}' -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/ref/tags/${TAG}")" = 404
+          test "$(curl -sS -o /tmp/release.json -w '%{http_code}' -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases/tags/${TAG}")" = 404
+          echo 'RELEASE_ABSENCE=PASS'
+
+      - name: Create exact tag and release
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg ref "refs/tags/${TAG}" --arg sha "$TARGET_COMMIT" '{ref:$ref,sha:$sha}' >/tmp/tag-create.json
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/refs" --data-binary @/tmp/tag-create.json >/tmp/tag-created.json
+          test "$(jq -r '.object.sha' /tmp/tag-created.json)" = "$TARGET_COMMIT"
+          cat > /tmp/release-body.md <<EOF
+          VF Tools Ops V1.21.795 closes the recognized backup-provider governance gap observed in Production.
+
+          - Preserves explicit plugin governance policies, including VF Tool JD.gg MUST_KEEP.
+          - Adds policy reconciliation only for recognized backup providers such as WPvivid when previously unregistered.
+          - Invalidates stale plugin governance evidence after schema migration so fresh inventory/audit is required.
+          - Performs no automatic plugin activation, deactivation, deletion, M3U8 migration, or seed-HOLD release.
+          - WordPress 7.1 / MariaDB 11.4 upgrade Gate: ${UPGRADE_GATE_RUN} PASS.
+          - Source commit: ${TARGET_COMMIT}.
+          - Asset SHA256: ${ASSET_SHA256}.
+          - Runtime files: ${RUNTIME_FILES}.
+          - Runtime fingerprint: ${RUNTIME_FP}.
+          - Production upgrade is NOT executed by this GitHub Release.
+          EOF
+          jq -n --arg tag "$TAG" --arg name "$RELEASE_NAME" --rawfile body /tmp/release-body.md '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}' >/tmp/release-create.json
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases" --data-binary @/tmp/release-create.json >/tmp/release-created.json
+          RID="$(jq -r '.id' /tmp/release-created.json)"
+          test -n "$RID"; test "$RID" != null
+          echo "RELEASE_ID=$RID" >> "$GITHUB_ENV"
+
+      - name: Upload exact tested artifact
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H 'Content-Type: application/zip' "https://uploads.github.com/repos/${TARGET_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${ASSET_NAME}" --data-binary "@/tmp/$ASSET_NAME" >/tmp/asset-created.json
+          AID="$(jq -r '.id' /tmp/asset-created.json)"
+          test -n "$AID"; test "$AID" != null
+          test "$(jq -r '.name' /tmp/asset-created.json)" = "$ASSET_NAME"
+          test "$(jq -r '.size' /tmp/asset-created.json)" = "$ASSET_BYTES"
+          echo "ASSET_ID=$AID" >> "$GITHUB_ENV"
+
+      - name: Remote release exact readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/git/ref/tags/${TAG}")"
+          REL_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/releases/tags/${TAG}")"
+          test "$(jq -r '.object.sha' <<<"$TAG_JSON")" = "$TARGET_COMMIT"
+          test "$(jq -r '.id' <<<"$REL_JSON")" = "$RELEASE_ID"
+          test "$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' <<<"$REL_JSON")" = "$ASSET_ID"
+          test "$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' <<<"$REL_JSON")" = "$ASSET_BYTES"
+          jq -n --arg tag "$TAG" --arg commit "$TARGET_COMMIT" --argjson release_id "$RELEASE_ID" --argjson asset_id "$ASSET_ID" --argjson asset_bytes "$ASSET_BYTES" --arg asset_sha256 "$ASSET_SHA256" --argjson runtime_files "$RUNTIME_FILES" --arg runtime_fingerprint "$RUNTIME_FP" --argjson upgrade_gate_run "$UPGRADE_GATE_RUN" '{status:"PASS",tag:$tag,source_commit:$commit,release_id:$release_id,asset_id:$asset_id,asset_bytes:$asset_bytes,asset_sha256:$asset_sha256,runtime_files:$runtime_files,runtime_fingerprint:$runtime_fingerprint,upgrade_gate_run:$upgrade_gate_run,production_write:0}' > "$EVIDENCE_DIR/release-readback.json"
+          cat "$EVIDENCE_DIR/release-readback.json"
+          echo 'FORMAL_RELEASE_REMOTE_READBACK=PASS'
+
+      - name: Upload public-safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v121795-formal-release-${{ github.run_id }}
+          path: /tmp/s01-c02-v121795-formal-release/
+          if-no-files-found: warn
+          retention-days: 30
