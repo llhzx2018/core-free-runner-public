@@ -1,0 +1,241 @@
+name: TEMP S01-C02 Ops 1.21.795 WordPress Upgrade Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121795-wordpress-upgrade-gate-20260903
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c02-v121795-wordpress-upgrade-gate-20260903
+  cancel-in-progress: true
+
+jobs:
+  wordpress-upgrade-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_ops_gate
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      OPS_BASE_SHA: 60c9d1e37b2605c9e1b6ec421f0b18a27152506b
+      OPS_CANDIDATE_SHA: 0397b2524049b9b382f760f7b31e36ff66d908f1
+      WP_VERSION: '7.1'
+      WP_PATH: /tmp/vf-ops-v121795-wp
+      WP_URL: http://127.0.0.1:8080
+      EVIDENCE_DIR: /tmp/vf-ops-v121795-upgrade-evidence
+    steps:
+      - name: Checkout released 1.21.794 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 60c9d1e37b2605c9e1b6ec421f0b18a27152506b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-base
+
+      - name: Checkout exact 1.21.795 develop candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 0397b2524049b9b382f760f7b31e36ff66d908f1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-candidate
+
+      - name: Verify exact source identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C ops-base rev-parse HEAD)" = "$OPS_BASE_SHA"
+          test "$(git -C ops-candidate rev-parse HEAD)" = "$OPS_CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops-base/VERSION)" = '1.21.794'
+          test "$(tr -d '\r\n' < ops-candidate/VERSION)" = '1.21.795'
+          grep -Fq "'schemaVersion'=>'1.2.0'" ops-base/includes/plugins-governance/contract.php
+          grep -Fq "'schemaVersion'=>'1.2.1'" ops-candidate/includes/plugins-governance/contract.php
+          php -l ops-candidate/includes/plugins-governance/contract.php
+          php -l ops-candidate/includes/plugins-governance/migration.php
+          php -l ops-candidate/.github/phase3/v121795-backup-provider-policy-contract.php
+          php ops-candidate/.github/phase3/v121795-backup-provider-policy-contract.php | tee "$EVIDENCE_DIR/standalone-contract.txt"
+          grep -Fxq 'PASS_V121795_BACKUP_PROVIDER_POLICY_RECONCILIATION' "$EVIDENCE_DIR/standalone-contract.txt"
+
+      - name: Install WordPress 7.1 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-mysql php-curl php-zip php-mbstring php-xml php-gd unzip curl jq mariadb-client rsync >/dev/null
+          php -r 'if(PHP_VERSION_ID<80200)exit(1);foreach(["mysqli","curl","zip","json","openssl"] as $e)if(!extension_loaded($e)){fwrite(STDERR,"MISSING:$e\n");exit(1);}'
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp
+          sudo mv /tmp/wp /usr/local/bin/wp
+          mkdir -p "$WP_PATH"
+          wp core download --path="$WP_PATH" --version="$WP_VERSION" --force
+          wp config create --path="$WP_PATH" --dbname=vf_ops_gate --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          wp core install --path="$WP_PATH" --url="$WP_URL" --title='VF Ops 1.21.795 Upgrade Gate' --admin_user=owner --admin_password='gate-only-not-production' --admin_email='owner@example.invalid' --skip-email
+          { php -v | head -n1; wp core version --path="$WP_PATH"; mariadb --version; } | tee "$EVIDENCE_DIR/environment.txt"
+          test "$(wp core version --path="$WP_PATH")" = "$WP_VERSION"
+
+      - name: Establish realistic 1.21.794 policy baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/plugins/vf-ops" "$WP_PATH/wp-content/plugins/vf-tool-jdgg"
+          rsync -a --delete --exclude='.git' ops-base/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          cat > "$WP_PATH/wp-content/plugins/vf-tool-jdgg/vf-tool-jdgg.php" <<'PHP'
+          <?php
+          /**
+           * Plugin Name: VF Tool JD.gg Gate Fixture
+           * Version: 3.2.9
+           */
+          if (!defined('ABSPATH')) { exit; }
+          PHP
+          wp plugin install simply-static --path="$WP_PATH" --activate
+          wp plugin activate vf-tool-jdgg --path="$WP_PATH"
+          wp plugin activate vf-ops --path="$WP_PATH"
+          wp eval --path="$WP_PATH" '
+            $state=vf_ops_lifecycle_state_v121377();
+            if(($state["installed_version"]??"")!=="1.21.794") {fwrite(STDERR,"BASE_LIFECYCLE_VERSION_MISMATCH\n");exit(2);} 
+            $c=ops_plugins_readback();
+            if(($c["schemaVersion"]??"")!=="1.2.0") {fwrite(STDERR,"BASE_GOVERNANCE_SCHEMA_MISMATCH\n");exit(3);} 
+            $rows=(array)$c["allowedCombination"];
+            $found=false;
+            foreach($rows as &$row){
+              if(($row["pluginSlug"]??"")==="vf-tool-jdgg"){
+                $row["status"]="REQUIRED";
+                $row["versionPolicy"]="PINNED";
+                $row["dataOwner"]="vf-tool-jdgg";
+                $row["replacementComponent"]="";
+                $row["removalGate"]="PROHIBITED";
+                $found=true;
+              }
+            }
+            unset($row);
+            if(!$found){fwrite(STDERR,"JDGG_BASE_POLICY_MISSING\n");exit(4);} 
+            $raw=["allowedCombination"=>$rows,"updatePolicy"=>$c["updatePolicy"],"auditRetentionDays"=>$c["auditRetentionDays"]];
+            $v=vf_ops_plugins_validate_v121464($raw);
+            if(empty($v["ok"])){fwrite(STDERR,"BASE_POLICY_VALIDATION_FAILED\n");exit(5);} 
+            $next=array_merge($c,$v["value"]);
+            $next["schemaVersion"]="1.2.0";
+            $next["revision"]=3;
+            $next["updatedAt"]=vf_ops_plugins_now_v121464();
+            $next["updatedBy"]=1;
+            $next["configHash"]=vf_ops_plugins_hash_v121464(vf_ops_plugins_business_v121464($next));
+            update_option("vf_ops_plugins",$next,false);
+            foreach(["vf_ops_plugins_inventory_evidence_v1","vf_ops_plugins_dependency_audit_v1","vf_ops_plugins_operation_state_v1","vf_ops_plugins_activation_backups_v1","vf_ops_plugins_runtime_evidence_v1","vf_ops_plugins_deletion_authorization_v1"] as $name) delete_option($name);
+            $read=ops_plugins_readback();
+            if(($read["revision"]??0)!==3 || ($read["schemaVersion"]??"")!=="1.2.0" || !hash_equals($next["configHash"],$read["configHash"]??"")){fwrite(STDERR,"BASE_POLICY_READBACK_FAILED\n");exit(6);} 
+            echo json_encode(["installedVersion"=>$state["installed_version"],"schemaVersion"=>$read["schemaVersion"],"revision"=>$read["revision"],"configHash"=>$read["configHash"]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);' > "$EVIDENCE_DIR/base-policy.json"
+          jq -e '.installedVersion=="1.21.794" and .schemaVersion=="1.2.0" and .revision==3' "$EVIDENCE_DIR/base-policy.json" >/dev/null
+
+      - name: Reproduce Production WPvivid P1 on 1.21.794
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp plugin install wpvivid-backuprestore --path="$WP_PATH" --activate
+          wp eval --path="$WP_PATH" 'delete_site_transient("update_plugins");$c=ops_plugins_readback();$r=vf_ops_refresh_plugin_inventory((int)$c["revision"],(string)$c["configHash"]);$ev=(array)($r["evidence"]??[]);$matches=array_values(array_filter((array)($ev["issues"]??[]),fn($x)=>(($x["pluginSlug"]??"")==="wpvivid-backuprestore"&&($x["code"]??"")==="PLUGIN_NOT_IN_POLICY")));echo json_encode(["refreshOk"=>!empty($r["ok"]),"status"=>$r["status"]??"","p1IssueCount"=>count($matches),"wpvividActive"=>is_plugin_active("wpvivid-backuprestore/wpvivid-backuprestore.php"),"policyRevision"=>$ev["policyRevision"]??0,"pluginCount"=>$r["pluginCount"]??0],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);' > "$EVIDENCE_DIR/pre-upgrade-p1.json"
+          jq -e '.refreshOk==true and .status=="PARTIAL" and .p1IssueCount==1 and .wpvividActive==true and .policyRevision==3' "$EVIDENCE_DIR/pre-upgrade-p1.json" >/dev/null
+
+      - name: Upgrade exact runtime to 1.21.795 and execute lifecycle migration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          before_plugins="$(wp option get active_plugins --path="$WP_PATH" --format=json | jq -cS '.')"
+          printf '%s\n' "$before_plugins" > "$EVIDENCE_DIR/active-plugins-before.json"
+          rsync -a --delete --exclude='.git' ops-candidate/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          wp eval --path="$WP_PATH" '$r=vf_ops_lifecycle_apply_version_v121377("formal_upgrade_gate");echo json_encode($r,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);if(empty($r["ok"]))exit(7);' > "$EVIDENCE_DIR/lifecycle-upgrade.json"
+          jq -e '.ok==true and (.status=="upgraded" or .status=="current") and .state.installed_version=="1.21.795" and .state.previous_version=="1.21.794" and .plugins.ok==true' "$EVIDENCE_DIR/lifecycle-upgrade.json" >/dev/null
+          after_plugins="$(wp option get active_plugins --path="$WP_PATH" --format=json | jq -cS '.')"
+          printf '%s\n' "$after_plugins" > "$EVIDENCE_DIR/active-plugins-after.json"
+          test "$before_plugins" = "$after_plugins"
+          wp plugin is-active vf-ops --path="$WP_PATH"
+          wp plugin is-active vf-tool-jdgg --path="$WP_PATH"
+          wp plugin is-active wpvivid-backuprestore --path="$WP_PATH"
+          wp plugin is-active simply-static --path="$WP_PATH"
+
+      - name: Verify policy migration and fresh inventory closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp eval --path="$WP_PATH" '
+            $c=ops_plugins_readback();$map=[];foreach((array)$c["allowedCombination"] as $row)$map[$row["pluginSlug"]]=$row;
+            $jd=$map["vf-tool-jdgg"]??[];$wpvivid=$map["wpvivid-backuprestore"]??[];
+            $migration=get_option("vf_ops_plugins_migration_v1",[]);
+            $stale=[];foreach(["vf_ops_plugins_inventory_evidence_v1","vf_ops_plugins_dependency_audit_v1","vf_ops_plugins_operation_state_v1","vf_ops_plugins_activation_backups_v1","vf_ops_plugins_runtime_evidence_v1","vf_ops_plugins_deletion_authorization_v1"] as $name)if(get_option($name,null)!==null)$stale[]=$name;
+            echo json_encode(["schemaVersion"=>$c["schemaVersion"]??"","revision"=>$c["revision"]??0,"wpvivid"=>$wpvivid,"jdgg"=>$jd,"migration"=>$migration,"staleEvidenceStillPresent"=>$stale],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);' > "$EVIDENCE_DIR/post-migration-policy.json"
+          jq -e '.schemaVersion=="1.2.1" and .revision==4 and .wpvivid.status=="SITE_AUDIT_REQUIRED" and .wpvivid.versionPolicy=="MANUAL" and .wpvivid.dataOwner=="WPvivid Backup Plugin" and .wpvivid.removalGate=="AUDIT_REQUIRED" and .jdgg.status=="REQUIRED" and .jdgg.versionPolicy=="PINNED" and .jdgg.dataOwner=="vf-tool-jdgg" and .jdgg.removalGate=="PROHIBITED" and .migration.recognizedProviderPoliciesAdded==["wpvivid-backuprestore"] and (.staleEvidenceStillPresent|length)==0' "$EVIDENCE_DIR/post-migration-policy.json" >/dev/null
+
+          wp eval --path="$WP_PATH" 'delete_site_transient("update_plugins");$c=ops_plugins_readback();$r=vf_ops_refresh_plugin_inventory((int)$c["revision"],(string)$c["configHash"]);$ev=(array)($r["evidence"]??[]);$issues=(array)($ev["issues"]??[]);$wp=array_values(array_filter((array)($ev["rows"]??[]),fn($x)=>(($x["pluginSlug"]??"")==="wpvivid-backuprestore")));echo json_encode(["ok"=>!empty($r["ok"]),"status"=>$r["status"]??"","policyRevision"=>$ev["policyRevision"]??0,"issueCount"=>count($issues),"wpvividRows"=>$wp],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);' > "$EVIDENCE_DIR/post-upgrade-inventory.json"
+          jq -e '.ok==true and .status=="PASS" and .policyRevision==4 and .issueCount==0 and (.wpvividRows|length)==1 and .wpvividRows[0].enabledState=="ACTIVE" and .wpvividRows[0].policy.dataOwner=="WPvivid Backup Plugin"' "$EVIDENCE_DIR/post-upgrade-inventory.json" >/dev/null
+
+      - name: Run dependency audit and recovery-provider readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp eval --path="$WP_PATH" '$c=ops_plugins_readback();$r=vf_ops_run_plugin_dependency_audit((int)$c["revision"],(string)$c["configHash"]);echo json_encode(["ok"=>!empty($r["ok"]),"status"=>$r["status"]??"","code"=>$r["code"]??"","candidateCount"=>$r["candidateCount"]??-1,"deletionAuthorized"=>!empty($r["deletionAuthorized"]),"sourceScanComplete"=>!empty($r["evidence"]["sourceScanComplete"]),"filesScanned"=>$r["filesScanned"]??0,"finalOnlinePass"=>$r["evidence"]["finalOnlinePass"]??""],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);' > "$EVIDENCE_DIR/dependency-audit.json"
+          jq -e '.ok==true and .status=="PASS" and .code=="DEPENDENCY_AUDIT_COMPLETE" and .candidateCount==0 and .deletionAuthorized==false and .sourceScanComplete==true and .finalOnlinePass=="NO"' "$EVIDENCE_DIR/dependency-audit.json" >/dev/null
+          wp eval --path="$WP_PATH" '$i=vf_ops_recovery_backup_provider_inventory_v121728();echo json_encode($i,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES);' > "$EVIDENCE_DIR/recovery-provider-inventory.json"
+          jq -e '.wpvivid==true and .updraftplus==false and .activePluginCount==1 and .multipleBackupPlugins==false' "$EVIDENCE_DIR/recovery-provider-inventory.json" >/dev/null
+
+      - name: Verify no destructive plugin operation and seal gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cmp "$EVIDENCE_DIR/active-plugins-before.json" "$EVIDENCE_DIR/active-plugins-after.json"
+          if grep -REn --include='*.php' 'deactivate_plugins\(|delete_plugins\(' ops-candidate/includes/plugins-governance/contract.php ops-candidate/includes/plugins-governance/migration.php; then
+            echo 'DESTRUCTIVE_PLUGIN_OPERATION_IN_MIGRATION' >&2
+            exit 1
+          fi
+          cat > "$EVIDENCE_DIR/S01_C02_V121795_WORDPRESS_UPGRADE_GATE.txt" <<EOF
+          S01_C02_V121795_WORDPRESS_UPGRADE_GATE=PASS
+          WORDPRESS=7.1
+          MARIADB=11.4
+          BASE_OPS_SHA=$OPS_BASE_SHA
+          BASE_OPS_VERSION=1.21.794
+          CANDIDATE_OPS_SHA=$OPS_CANDIDATE_SHA
+          CANDIDATE_OPS_VERSION=1.21.795
+          GOVERNANCE_SCHEMA_FROM=1.2.0
+          GOVERNANCE_SCHEMA_TO=1.2.1
+          POLICY_REVISION_FROM=3
+          POLICY_REVISION_TO=4
+          PRE_UPGRADE_WPVIVID_P1=REPRODUCED
+          WPVIVID_POLICY_AUTO_RECONCILE=PASS
+          WPVIVID_OWNER=WPvivid Backup Plugin
+          JDGG_OWNER_MUST_KEEP_PRESERVED=PASS
+          FRESH_INVENTORY_P0_P1=0_0
+          DEPENDENCY_AUDIT=PASS
+          REMOVAL_CANDIDATES=0
+          DELETION_AUTHORIZED=NO
+          RECOVERY_PROVIDER_WPVIVID_ACTIVE=PASS
+          ACTIVE_PLUGIN_SET_PRESERVED=PASS
+          AUTOMATIC_DEACTIVATION=NO
+          AUTOMATIC_DELETION=NO
+          PRODUCTION_WRITE=NO
+          FINAL_ONLINE_PASS=NO
+          EOF
+
+      - name: Upload public-safe upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v121795-wordpress-upgrade-gate-${{ github.run_id }}
+          path: /tmp/vf-ops-v121795-upgrade-evidence/
+          if-no-files-found: warn
+          retention-days: 14
