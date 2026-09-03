@@ -3,13 +3,16 @@ name: Public Runner Current Self Test
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/runner-selftest-current.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: public-runner-current-selftest-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -76,3 +79,170 @@ jobs:
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
+
+  p05-mobile-sidebar-layout-diagnostic:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/p05-mobile-sidebar-layout-diagnostic-20260903'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vf_seo
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/vf_seo
+      VF_MASTER_KEY_BASE64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      NODE_ENV: test
+      P05_EXACT_SHA: ceab6fd82c33c9f8259c5baa5f11c96bfeec4e7c
+      P05_EXACT_TREE: dba1a7f161aa7e9ed43a1b4181773a92ee0e3d53
+    steps:
+      - name: Checkout exact P05 current main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-seo
+          ref: ${{ env.P05_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify exact current source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test "$(cat VERSION)" = '1.2.4'
+          test -z "$(git status --porcelain)"
+          echo P05_MOBILE_SIDEBAR_DIAGNOSTIC_EXACT_SOURCE=PASS
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Build exact current source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci
+          npm run typecheck
+          npm run build
+          npm run migrate
+          VF_ADMIN_USERNAME=owner VF_ADMIN_PASSWORD='SidebarDiagnostic-2026!' npm run bootstrap:admin
+
+      - name: Real Chrome 390 computed-layout diagnostic
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p05-mobile-sidebar-diagnostic
+          PORT=18229 VF_SECURE_COOKIES=false VF_REQUIRE_HTTPS=false node dist/src/server/index.js >/tmp/p05-mobile-sidebar-diagnostic/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import base64,json,pathlib,shutil,subprocess,sys,time,urllib.error,urllib.request
+          BASE='http://127.0.0.1:18229'; DP=9545; PASSWORD='SidebarDiagnostic-2026!'; OUT=pathlib.Path('/tmp/p05-mobile-sidebar-diagnostic')
+          def fail(msg): print('P05_MOBILE_SIDEBAR_DIAGNOSTIC=FAIL '+msg,file=sys.stderr); raise SystemExit(1)
+          def http(method,url,payload=None,timeout=30):
+              data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(url,data=data,method=method)
+              if data is not None:req.add_header('Content-Type','application/json')
+              try:
+                  with urllib.request.urlopen(req,timeout=timeout) as r:
+                      raw=r.read().decode(); return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e: fail(f'http {e.code} {url}: {e.read().decode(errors="replace")[:400]}')
+          def wait_http(url):
+              for _ in range(300):
+                  try:
+                      with urllib.request.urlopen(url,timeout=1) as r:
+                          if r.status<500:return
+                  except Exception:time.sleep(.1)
+              fail('not ready '+url)
+          def wd(method,path,payload=None):
+              result=http(method,f'http://127.0.0.1:{DP}{path}',payload); value=result.get('value')
+              if isinstance(value,dict) and value.get('error'):fail(f"webdriver {value.get('error')}: {value.get('message')}")
+              return result
+          driver=shutil.which('chromedriver'); chrome=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+          if not driver or not chrome:fail('Chrome unavailable')
+          proc=subprocess.Popen([driver,f'--port={DP}','--allowed-ips=127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT); session=''
+          try:
+              wait_http(BASE+'/api/health'); wait_http(f'http://127.0.0.1:{DP}/status')
+              r=wd('POST','/session',{'capabilities':{'alwaysMatch':{'browserName':'chrome','goog:chromeOptions':{'binary':chrome,'args':['--headless=new','--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=390,844']}}}})
+              session=str(r['value'].get('sessionId') or r.get('sessionId') or '')
+              if not session:fail('missing session')
+              def sv(method,path,payload=None):return wd(method,f'/session/{session}{path}',payload)['value']
+              def js(code):return sv('POST','/execute/sync',{'script':code,'args':[]})
+              def wait(fn,label):
+                  last=None
+                  for _ in range(400):
+                      try:
+                          last=fn()
+                          if last:return last
+                      except Exception as e:last=repr(e)
+                      time.sleep(.1)
+                  fail(f'timeout {label}: {last!r}')
+              def find(css):return sv('POST','/element',{'using':'css selector','value':css})['element-6066-11e4-a52e-4f735466cecf']
+              def send(e,v):sv('POST',f'/element/{e}/clear',{});sv('POST',f'/element/{e}/value',{'text':v,'value':list(v)})
+              def click(label):return bool(js('''const x=%s;const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===x);if(!b||b.disabled)return false;b.click();return true;'''%json.dumps(label,ensure_ascii=False)))
+              sv('POST','/url',{'url':BASE+'/'})
+              wait(lambda:js("return !!document.querySelector(\"input[autocomplete='username']\")"),'login')
+              send(find("input[autocomplete='username']"),'owner');send(find("input[autocomplete='current-password']"),PASSWORD);click('登录') or fail('login click')
+              wait(lambda:'载入演示数据 →' in str(js("return document.querySelector('.p05v2-content')?.innerText||''")),'demo ready');click('载入演示数据 →') or fail('demo click')
+              wait(lambda:js("return document.querySelectorAll('.p05v2-site-row').length") == 5,'portfolio')
+              js("window.scrollTo(0,0); const s=document.querySelector('.p05v2-sidebar'); if(s)s.scrollLeft=0; return true")
+              time.sleep(.3)
+              diag=js(r'''
+                const sidebar=document.querySelector('.p05v2-sidebar');
+                const nav=document.querySelector('.p05v2-nav');
+                const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}};
+                const cs=e=>{const s=getComputedStyle(e);return {display:s.display,flexDirection:s.flexDirection,gridTemplateColumns:s.gridTemplateColumns,overflow:s.overflow,overflowX:s.overflowX,overflowY:s.overflowY,width:s.width,minWidth:s.minWidth,position:s.position}};
+                const rules=[];
+                for(const sheet of [...document.styleSheets]){
+                  let rs=[];try{rs=[...sheet.cssRules]}catch(e){continue}
+                  const walk=(items,media='')=>{for(const rule of items){if(rule.cssRules){walk([...rule.cssRules],rule.conditionText||media)}else if((rule.selectorText||'').includes('p05v2-sidebar')||(rule.selectorText||'').includes('p05v2-nav')){rules.push({href:sheet.href||'inline',media,selector:rule.selectorText,css:rule.cssText})}}};
+                  walk(rs,'');
+                }
+                return {
+                  viewport:{innerWidth,innerHeight,scrollX,scrollY,docClientWidth:document.documentElement.clientWidth,docScrollWidth:document.documentElement.scrollWidth,bodyScrollWidth:document.body.scrollWidth},
+                  sidebar:{rect:rect(sidebar),style:cs(sidebar),clientWidth:sidebar.clientWidth,scrollWidth:sidebar.scrollWidth,clientHeight:sidebar.clientHeight,scrollHeight:sidebar.scrollHeight,scrollLeft:sidebar.scrollLeft},
+                  children:[...sidebar.children].map(e=>({tag:e.tagName,className:e.className,text:(e.textContent||'').trim().slice(0,80),rect:rect(e),style:cs(e)})),
+                  nav:{rect:rect(nav),style:cs(nav),clientWidth:nav.clientWidth,scrollWidth:nav.scrollWidth,buttons:[...nav.querySelectorAll('button')].map(e=>({text:e.textContent.trim(),rect:rect(e),style:cs(e)}))},
+                  matchingRules:rules
+                };
+              ''')
+              print('P05_MOBILE_SIDEBAR_LAYOUT_JSON='+json.dumps(diag,ensure_ascii=False,separators=(',',':')))
+              (OUT/'mobile-sidebar.png').write_bytes(base64.b64decode(sv('GET','/screenshot')))
+              print('P05_MOBILE_SIDEBAR_DIAGNOSTIC=PASS')
+          finally:
+              if session:
+                  try:wd('DELETE',f'/session/{session}')
+                  except Exception:pass
+              proc.terminate()
+          PY
+
+      - name: Upload mobile sidebar diagnostic screenshot
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p05-mobile-sidebar-diagnostic-${{ github.run_id }}
+          path: /tmp/p05-mobile-sidebar-diagnostic/mobile-sidebar.png
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Read-only exact boundary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P05_EXACT_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$P05_EXACT_TREE"
+          test -z "$(git status --porcelain)"
+          echo P05_PRODUCT_SOURCE_WRITE=0
+          echo P05_RELEASE_WRITE=0
+          echo P05_PRODUCTION_WRITE=0
