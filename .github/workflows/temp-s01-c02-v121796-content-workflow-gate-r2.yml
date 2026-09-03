@@ -1,0 +1,147 @@
+name: TEMP S01-C02 Ops 1.21.796 Content Workflow Gate R2
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121796-content-workflow-gate-r2-20260903
+    paths:
+      - '.github/workflows/temp-s01-c02-v121796-content-workflow-gate-r2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  content-workflow-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_ops_gate
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      OPS_BASE_SHA: 0397b2524049b9b382f760f7b31e36ff66d908f1
+      OPS_CANDIDATE_SHA: a5b0b44265ccdcd0afac38b4e529c8fec35b0a17
+      WP_VERSION: '7.1'
+      WP_PATH: /tmp/vf-ops-v121796-wp
+      EVIDENCE_DIR: /tmp/vf-ops-v121796-evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-base
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-candidate
+      - name: Verify source and standalone regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C ops-base rev-parse HEAD)" = "$OPS_BASE_SHA"
+          test "$(git -C ops-candidate rev-parse HEAD)" = "$OPS_CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops-base/VERSION)" = '1.21.795'
+          test "$(tr -d '\r\n' < ops-candidate/VERSION)" = '1.21.796'
+          php -l ops-candidate/includes/content-workflow/contract.php
+          php -l ops-candidate/includes/content-workflow/repository.php
+          php -l ops-candidate/includes/content-workflow/migration.php
+          php -l ops-candidate/.github/phase3/v121796-content-workflow-contract-reconciliation.php
+          php ops-candidate/.github/phase3/v121796-content-workflow-contract-reconciliation.php | tee "$EVIDENCE_DIR/standalone.txt"
+          grep -Fxq 'PASS_V121796_CONTENT_WORKFLOW_CONTRACT_RECONCILIATION' "$EVIDENCE_DIR/standalone.txt"
+      - name: Install WordPress 7.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-mysql php-curl php-zip php-mbstring php-xml php-gd unzip curl jq mariadb-client rsync >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp && sudo mv /tmp/wp /usr/local/bin/wp
+          mkdir -p "$WP_PATH"
+          wp core download --path="$WP_PATH" --version="$WP_VERSION" --force
+          wp config create --path="$WP_PATH" --dbname=vf_ops_gate --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          wp core install --path="$WP_PATH" --url=http://127.0.0.1:8080 --title='VF Gate' --admin_user=owner --admin_password='gate-only-not-production' --admin_email=owner@example.invalid --skip-email
+          test "$(wp core version --path="$WP_PATH")" = '7.1'
+          mariadb -h127.0.0.1 -P3306 -uvf -pvf -Nse 'SELECT VERSION()' vf_ops_gate | tee "$EVIDENCE_DIR/mariadb.txt"
+          grep -q '^11\.4\.' "$EVIDENCE_DIR/mariadb.txt"
+      - name: Build stale 1.21.795 baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/plugins/vf-ops"
+          rsync -a --delete --exclude='.git' ops-base/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          wp plugin activate vf-ops --path="$WP_PATH"
+          wp eval --path="$WP_PATH" '
+            $c=ops_content_readback();
+            $families=array_values(array_filter((array)$c["corePageRegistry"],fn($r)=>(string)($r["templateId"]??"")!=="tool"));
+            foreach($families as &$r){$r["languages"]=["en"];} unset($r);
+            $wanted=["draft","refining","seo_review","ready_to_publish","online_valid","offline"];
+            $states=[]; foreach((array)$c["workflowStates"] as $r){if(in_array((string)($r["key"]??""),$wanted,true))$states[]=$r;}
+            if(count($families)!==10||count($states)!==6) exit(2);
+            $c["schemaVersion"]="1.1.0";$c["revision"]=7;$c["corePageRegistry"]=$families;$c["workflowStates"]=$states;
+            $c["configHash"]=vf_ops_content_workflow_hash_any_v121456(vf_ops_content_workflow_business_payload_v121456($c));
+            update_option("vf_ops_content",$c,false);delete_option("vf_ops_content_scan_evidence_v1");
+            $p=wp_insert_post(["post_title"=>"Existing fixture","post_content"=>str_repeat("word ",140),"post_status"=>"publish","post_type"=>"page","post_name"=>"existing-fixture"]);
+            update_post_meta($p,"_vf_ops_workflow_status","needs_update");update_option("vf_gate_fixture_post_id",$p,false);
+            echo json_encode(["families"=>count($families),"states"=>count($states),"post"=>$p]);' > "$EVIDENCE_DIR/base.json"
+          jq -e '.families==10 and .states==6 and .post>0' "$EVIDENCE_DIR/base.json" >/dev/null
+          wp option get vf_ops_plugins --path="$WP_PATH" --format=json | jq -cS . > "$EVIDENCE_DIR/plugins-before.json"
+      - name: Reproduce provider and state false blockers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/mu-plugins"
+          cat > "$WP_PATH/wp-content/mu-plugins/vf-provider.php" <<'PHP'
+          <?php
+          add_filter('vf_toolsite_admin_validation_targets',static function($rows){$rows=is_array($rows)?$rows:[];for($i=1;$i<=11;$i++){$rows[]=['id'=>'vf-tool-m3u8:gate-'.$i,'label'=>'Gate '.$i,'path'=>'/m3u8-gate-'.$i.'/','shortcode'=>'gate_'.$i,'module'=>'gate-'.$i];}return $rows;},20,2);
+          PHP
+          wp eval --path="$WP_PATH" '
+            $c=ops_content_readback();$mounts=vf_ops_content_workflow_tool_mounts_v121456();$missing=0;foreach($mounts as $m){$r=vf_ops_content_workflow_scan_tool_mount_v121456($m,$c);if(($r["status"]??"")==="FAIL")$missing++;}
+            $p=(int)get_option("vf_gate_fixture_post_id",0);$r=vf_ops_content_workflow_scan_row_v121456($p,$c);$state=count(array_filter((array)$r["issues"],fn($x)=>(($x["code"]??"")==="WORKFLOW_STATE_VALID")));
+            echo json_encode(["families"=>count($c["corePageRegistry"]),"states"=>count($c["workflowStates"]),"mounts"=>count($mounts),"missing"=>$missing,"state"=>$state]);' > "$EVIDENCE_DIR/pre.json"
+          jq -e '.families==10 and .states==6 and .mounts==11 and .missing==11 and .state==1' "$EVIDENCE_DIR/pre.json" >/dev/null
+      - name: Upgrade to exact 1.21.796 and verify closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rsync -a --delete --exclude='.git' ops-candidate/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          wp eval --path="$WP_PATH" '$r=vf_ops_lifecycle_apply_version_v121377("gate");echo json_encode($r,JSON_UNESCAPED_SLASHES);if(empty($r["ok"]))exit(7);' > "$EVIDENCE_DIR/upgrade.json"
+          jq -e '.ok==true and .state.installed_version=="1.21.796" and .state.previous_version=="1.21.795" and .content_workflow.migration.status=="MIGRATED"' "$EVIDENCE_DIR/upgrade.json" >/dev/null
+          wp eval --path="$WP_PATH" '
+            $c=ops_content_readback();$m=get_option("vf_ops_content_migration_v1",[]);$mounts=vf_ops_content_workflow_tool_mounts_v121456();$missing=0;foreach($mounts as $x){$r=vf_ops_content_workflow_scan_tool_mount_v121456($x,$c);if(($r["status"]??"")==="FAIL")$missing++;}
+            $p=(int)get_option("vf_gate_fixture_post_id",0);$meta=(string)get_post_meta($p,"_vf_ops_workflow_status",true);$r=vf_ops_content_workflow_scan_row_v121456($p,$c);$state=count(array_filter((array)$r["issues"],fn($x)=>(($x["code"]??"")==="WORKFLOW_STATE_VALID")));
+            echo json_encode(["schema"=>$c["schemaVersion"],"revision"=>$c["revision"],"families"=>count($c["corePageRegistry"]),"states"=>count($c["workflowStates"]),"missing"=>$missing,"meta"=>$meta,"state"=>$state,"marker"=>$m,"scanExists"=>get_option("vf_ops_content_scan_evidence_v1",null)!==null]);' > "$EVIDENCE_DIR/post.json"
+          jq -e '.schema=="1.2.0" and .revision==8 and .families==21 and .states==14 and .missing==0 and .meta=="needs_update" and .state==0 and .marker.postMetaWrites==0 and .marker.m3u8Writes==0 and .scanExists==false' "$EVIDENCE_DIR/post.json" >/dev/null
+          wp option get vf_ops_plugins --path="$WP_PATH" --format=json | jq -cS . > "$EVIDENCE_DIR/plugins-after.json"
+          cmp "$EVIDENCE_DIR/plugins-before.json" "$EVIDENCE_DIR/plugins-after.json"
+          before="$(wp eval --path="$WP_PATH" 'echo (int)ops_content_readback()["revision"];')"
+          wp eval --path="$WP_PATH" '$r=vf_ops_lifecycle_apply_version_v121377("gate-rerun");if(empty($r["ok"])||($r["status"]??"")!=="current")exit(8);'
+          after="$(wp eval --path="$WP_PATH" 'echo (int)ops_content_readback()["revision"];')"
+          test "$before" = "$after" && test "$after" = 8
+          echo PASS_V121796_WORDPRESS_CONTENT_WORKFLOW_GATE | tee "$EVIDENCE_DIR/final.txt"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v121796-content-workflow-gate-r2
+          path: /tmp/vf-ops-v121796-evidence/
+          if-no-files-found: warn
+          retention-days: 14
