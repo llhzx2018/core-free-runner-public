@@ -1,0 +1,167 @@
+name: P01 V2.46.3 Production Hotfix Candidate Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-v2463-hotfix-candidate-gate-20260905.yml
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_SHA: de967f5257c8dbf05018a0eac280a9f3f7d48b0a
+      OWNER_V2461: 87edfd46ad61afba23b6998f4d0ccd9a8eabc5ad
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl, fileinfo, gd
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.OWNER_V2461 }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: owner-v2461
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact base and local version bind
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C owner-v2461 rev-parse HEAD)" = "$OWNER_V2461"
+          test "$(cat candidate/VERSION)" = '2.46.2'
+          test "$(cat candidate/src/VERSION.txt)" = '2.46.2'
+          grep -Fxq "define('VF_VERSION', '2.46.2');" candidate/src/app/bootstrap.php
+          printf '2.46.3\n' > candidate/VERSION
+          printf '2.46.3\n' > candidate/src/VERSION.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('candidate/src/app/bootstrap.php')
+          s=p.read_text(encoding='utf-8')
+          old="define('VF_VERSION', '2.46.2');"
+          new="define('VF_VERSION', '2.46.3');"
+          assert s.count(old)==1
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          test "$(cat candidate/VERSION)" = '2.46.3'
+          test "$(cat candidate/src/VERSION.txt)" = '2.46.3'
+          grep -Fxq "define('VF_VERSION', '2.46.3');" candidate/src/app/bootstrap.php
+          mapfile -t changed < <(git -C candidate diff --name-only | sort)
+          test "${#changed[@]}" = '3'
+          test "${changed[0]}" = 'VERSION'
+          test "${changed[1]}" = 'src/VERSION.txt'
+          test "${changed[2]}" = 'src/app/bootstrap.php'
+          echo P01_V2463_CANDIDATE_BIND=PASS
+
+      - name: Frozen product contracts and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tests=(
+            tests/unit/consolidated_product_acceptance_contract.php
+            tests/unit/public_global_nav_contract.php
+            tests/unit/workspace_nine_entry_source_contract.php
+            tests/unit/workspace_view_catalog_contract.php
+            tests/unit/course_experience_source_contract.php
+            tests/unit/tool_home_source_contract.php
+            tests/unit/tool_task_intent_contract.php
+            tests/unit/tool_scene_detail_contract.php
+            tests/unit/tool_scene_detail_source_contract.php
+            tests/unit/software_workspace_contract.php
+            tests/unit/software_workspace_source_contract.php
+            tests/unit/topic_project_approved_contract.php
+            tests/unit/topic_project_approved_source_contract.php
+            tests/unit/project_signals_contract.php
+            tests/unit/project_signals_source_contract.php
+            tests/unit/quick_open_global_contract.php
+            tests/unit/primary_open_semantics_contract.php
+          )
+          for t in "${tests[@]}"; do (cd candidate && php "$t"); done
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V2463_CANDIDATE_CONTRACTS=PASS
+
+      - name: Fresh install V2.46.3 same schema
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=/tmp/p01-v2463-fresh; E=/tmp/p01-v2463-evidence
+          rm -rf "$F" "$E"; mkdir -p "$E"; cp -a candidate/src "$F"
+          php -S 127.0.0.1:19681 -t "$F" >"$E/server.log" 2>&1 & PID=$!; trap 'kill $PID 2>/dev/null || true' EXIT
+          C="$E/cookies"
+          for i in $(seq 1 80); do if curl -fsS -c "$C" -b "$C" http://127.0.0.1:19681/setup.php -o "$E/setup.html"; then break; fi; sleep .25; done
+          CSRF=$(python3 -c "import re; s=open('$E/setup.html',encoding='utf-8').read(); m=re.search(r'name=\"setup_csrf\"\s+value=\"([^\"]+)\"',s); assert m; print(m.group(1))")
+          curl -fsS -c "$C" -b "$C" -X POST http://127.0.0.1:19681/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=V2463 Gate' --data-urlencode 'admin_password=GatePassword-2463' --data-urlencode 'admin_password_confirm=GatePassword-2463' -o "$E/setup-post.html"
+          F="$F" php -r 'require getenv("F")."/app/bootstrap.php"; $d=vf_db(); if(VF_VERSION!=="2.46.3") exit(1); if((string)$d->query("SELECT COALESCE(MAX(version),\"\") FROM schema_migrations WHERE status=\"success\"")->fetchColumn()!=="2026090401") exit(2); if(strtolower((string)$d->query("PRAGMA integrity_check")->fetchColumn())!=="ok") exit(3); echo "P01_V2463_FRESH=PASS\n";'
+          php "$F/cli/verify.php" | grep -Fx VERIFY_PASS=YES
+          php "$F/cli/surface-verify.php" | grep -Fx MULTI_SURFACE_PASS=YES
+          kill "$PID"; trap - EXIT
+
+      - name: V2.46.2 cached fingerprint to V2.46.3 anti-replay path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v2463-replay-check.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('VF_ROOT','/tmp/p01-replay-root');
+          define('VF_PRIVATE_ROOT','/tmp/p01-replay-private');
+          if(!function_exists('vf_write_storage_guards')){function vf_write_storage_guards(string $dir):void{}}
+          if(!function_exists('vf_clean_text')){function vf_clean_text(string $value,int $max=600):string{return mb_substr(trim($value),0,$max);}}
+          final class VfMigrationRunner{public function __construct(private PDO $db){} public function schemaState():array{return ['current_head'=>'2026090401'];}}
+          require getcwd().'/owner-v2461/src/app/UpdateManager.php';
+          $pdo=new PDO('sqlite::memory:');
+          $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+          $pdo->exec('CREATE TABLE update_state(state_key TEXT PRIMARY KEY,state_value TEXT NOT NULL DEFAULT "",updated_at TEXT NOT NULL DEFAULT "")');
+          $put=$pdo->prepare('INSERT INTO update_state(state_key,state_value,updated_at) VALUES(?,?,?)');
+          $put->execute(['highest_verified_release_version','2.46.2',gmdate('c')]);
+          $put->execute(['highest_verified_release_manifest_sha256',str_repeat('a',64),gmdate('c')]);
+          $manifest=[
+            'schema_version'=>'1.0','project_id'=>'P01','component_id'=>'APP','enabled'=>true,
+            'current_version'=>'2.46.1','target_version'=>'2.46.3','update_type'=>'ATOMIC','from_versions'=>['2.46.1'],
+            'schema_from'=>'2026090401','schema_to'=>'2026090401','repository'=>'llhzx2018/vf-start',
+            'release_tag'=>'v2.46.3','release_id'=>123,'product_identity'=>str_repeat('b',40),
+            'asset_name'=>'VF_Start_V2.46.3_UPDATE.zip','asset_bytes'=>123456,'asset_sha256'=>str_repeat('c',64),
+            'backup_required'=>true,'rollback_supported'=>true,'released_at'=>'2026-09-05T00:00:00Z','minimum_php'=>'8.0.0'
+          ];
+          $m=new VfUpdateManager($pdo,[
+            'root'=>'/tmp/p01-replay-root','private_root'=>'/tmp/p01-replay-private','current_version'=>'2.46.1',
+            'manifest_fetcher'=>static fn(string $r,string $p,string $ref):array=>$manifest,
+            'capabilities'=>['curl'=>true,'zip'=>true],'randomizer'=>static fn(int $a,int $b):int=>0,
+          ]);
+          $result=$m->check(true);
+          if(($result['ok']??false)!==true||($result['latest_version']??'')!=='2.46.3'||($result['available']??false)!==true||($result['can_update']??false)!==true){throw new RuntimeException(json_encode($result));}
+          $q=$pdo->prepare('SELECT state_value FROM update_state WHERE state_key=?'); $q->execute(['highest_verified_release_version']);
+          if((string)$q->fetchColumn()!=='2.46.3') throw new RuntimeException('highest version did not advance');
+          echo "P01_V2463_ANTI_REPLAY_PATH=PASS\n";
+          PHP
+          php /tmp/p01-v2463-replay-check.php
+
+      - name: Candidate Gate PASS
+        run: echo P01_V2463_PRODUCTION_HOTFIX_CANDIDATE=PASS
