@@ -1,0 +1,82 @@
+name: TEMP S01-C02 Ops 1.21.807 Candidate Gate
+on:
+  push:
+    branches: [temp/s01-c02-v121807-candidate-gate-20260904]
+    paths: ['.github/workflows/temp-s01-c02-v121807-candidate-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_COMMIT: 55021d167ff3f561e1d49d894b52c517c4697674
+      TARGET_TREE: abbd52f6356c9011b1e0b04884afa1ac2a0a91bb
+      BASE_COMMIT: 30c458d2b3993b9abe028165951fd66108ad3af3
+      VERSION: 1.21.807
+      ASSET_NAME: vf-tools-ops_V1.21.807.zip
+    steps:
+      - name: Checkout exact develop candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify identity scope and source acceptance contract
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          DEV_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/branches/develop")"
+          MAIN_JSON="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/branches/main")"
+          test "$(jq -r .commit.sha <<<"$DEV_JSON")" = "$TARGET_COMMIT"
+          test "$(jq -r .commit.sha <<<"$MAIN_JSON")" = "$BASE_COMMIT"
+          git -C ops diff --name-only "$BASE_COMMIT" "$TARGET_COMMIT" | sort >/tmp/changed.txt
+          printf '%s\n' '.github/phase3/v121807-source-acceptance-boundary-classification.php' 'VERSION' 'VF_PROJECT.json' 'includes/acceptance-o11/source-acceptance-product.php' 'vf-ops.php' | sort >/tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/changed.txt
+          find ops -path 'ops/.git' -prune -o -type f -name '*.php' -print0 | xargs -0 -n 1 php -l >/tmp/php-lint.txt
+          php ops/.github/phase3/v121806-avatar-endpoint-classification.php | tee /tmp/avatar.txt
+          grep -Fxq PASS_V121806_AVATAR_ENDPOINT_CLASSIFICATION /tmp/avatar.txt
+          php ops/.github/phase3/v121807-source-acceptance-boundary-classification.php | tee /tmp/focused.txt
+          grep -Fxq PASS_V121807_SOURCE_ACCEPTANCE_BOUNDARY_CLASSIFICATION /tmp/focused.txt
+          jq -e '.production_version=="1.21.806" and .working_version=="1.21.807" and .candidate_version=="1.21.807"' ops/VF_PROJECT.json >/dev/null
+          ! git -C ops diff "$BASE_COMMIT" "$TARGET_COMMIT" -- includes/acceptance-o11/source-acceptance-product.php | grep -E '^\+.*(update_post_meta|delete_post_meta|wp_delete_post|DROP TABLE|TRUNCATE TABLE|vf_m3u8_)'
+          echo SOURCE_IDENTITY_SCOPE_CONTRACT=PASS
+      - name: Build deterministic candidate artifact and emit authority
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          import re,hashlib,zipfile,json,os
+          from pathlib import Path
+          root=Path('ops'); files={}
+          def ok(rel):
+            p=rel.as_posix(); parts=p.split('/')
+            if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+            if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+            if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+            return parts[0] in {'includes','assets','languages','config'}
+          for s in root.rglob('*'):
+            if s.is_file() and not s.is_symlink():
+              r=s.relative_to(root)
+              if ok(r): files[r.as_posix()]=s.read_bytes()
+          files=dict(sorted(files.items())); fp=hashlib.sha256()
+          for r,b in files.items(): fp.update((r+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/'+os.environ['ASSET_NAME'])
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+            for r,b in files.items():
+              i=zipfile.ZipInfo('vf-ops/'+r,(2026,9,4,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          m={'asset_bytes':z.stat().st_size,'asset_sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'runtime_files':len(files),'runtime_fingerprint':fp.hexdigest()}
+          print('ARTIFACT_AUTHORITY='+json.dumps(m,separators=(',',':')))
+          PY
+          unzip -tq "/tmp/release/$ASSET_NAME" >/dev/null
+          unzip -p "/tmp/release/$ASSET_NAME" vf-ops/includes/acceptance-o11/source-acceptance-product.php | grep -Fq 'vf_ops_source_acceptance_robots_blocks_public_v121807'
+          unzip -p "/tmp/release/$ASSET_NAME" vf-ops/includes/acceptance-o11/source-acceptance-product.php | grep -Fq 'vf_ops_source_acceptance_not_found_document_v121807'
+          echo PASS_V121807_CANDIDATE_GATE
