@@ -1,0 +1,115 @@
+name: TEMP S01-C02 Ops 1.21.809 Build
+on:
+  push:
+    branches: [temp/s01-c02-v121809-build-20260904]
+    paths: ['.github/workflows/temp-s01-c02-v121809-build.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      REPO: llhzx2018/vf-tools-ops
+      BRANCH: fix/s01-static-batch-label-compat-v121809
+      BASE: e827f42117002024b37c85b498eb8790c05110bf
+    steps:
+      - name: Patch exact 1.21.808 source
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$R"; test -n "$W"
+          git clone -q --branch "$BRANCH" "https://x-access-token:${R}@github.com/${REPO}.git" ops
+          cd ops
+          test "$(git rev-parse HEAD)" = "$BASE"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('includes/site-release/s01-static-boundary-reconciler.php')
+          s=p.read_text()
+          old="""/** V1.21.808 recoverable batch shape: S01 static-only scope, never content/component work. */
+function vf_ops_s01_static_boundary_batch_recoverable_v121808(array $batch): bool {
+    if (!$batch) { return false; }
+    $types = array_values(array_unique(array_map('sanitize_key', (array)($batch['change_types'] ?? []))));
+    sort($types, SORT_STRING);
+    $label = trim((string)($batch['label'] ?? ''));
+    $status = sanitize_key((string)($batch['status'] ?? ''));
+    return str_starts_with($label, 'S01 Static Candidate')
+        && $types === ['static_artifact']
+        && empty($batch['post_ids'])
+        && empty($batch['component_intent_ids'])
+        && in_array($status, ['draft','locked','package_attached','deployed_pending_acceptance'], true);
+}
+"""
+          new="""/** V1.21.809: accept only proven current/legacy static-orchestrator label families. */
+function vf_ops_s01_static_boundary_label_recoverable_v121809(string $label): bool {
+    $label = trim($label);
+    return str_starts_with($label, 'S01 Static Candidate')
+        || str_starts_with($label, '静态产物 ')
+        || str_starts_with($label, '静态发布 ');
+}
+
+/** Static-only scope remains mandatory; label compatibility never relaxes content/component safety. */
+function vf_ops_s01_static_boundary_batch_recoverable_v121808(array $batch): bool {
+    if (!$batch) { return false; }
+    $types = array_values(array_unique(array_map('sanitize_key', (array)($batch['change_types'] ?? []))));
+    sort($types, SORT_STRING);
+    $label = trim((string)($batch['label'] ?? ''));
+    $status = sanitize_key((string)($batch['status'] ?? ''));
+    return vf_ops_s01_static_boundary_label_recoverable_v121809($label)
+        && $types === ['static_artifact']
+        && empty($batch['post_ids'])
+        && empty($batch['component_intent_ids'])
+        && in_array($status, ['draft','locked','package_attached','deployed_pending_acceptance'], true);
+}
+"""
+          if s.count(old)!=1:
+              raise SystemExit('predicate anchor mismatch')
+          p.write_text(s.replace(old,new))
+
+          p=Path('vf-ops.php'); s=p.read_text()
+          replacements=[
+              (' * Version: 1.21.808',' * Version: 1.21.809'),
+              ("VF_OPS_VERSION', '1.21.808'","VF_OPS_VERSION', '1.21.809'"),
+              ("VF_OPS_ROUND', 'STATIC-RECONCILER-RECOVERY-V1'","VF_OPS_ROUND', 'STATIC-BATCH-LABEL-COMPAT-V1'"),
+          ]
+          for a,b in replacements:
+              if s.count(a)!=1: raise SystemExit('version anchor mismatch: '+a)
+              s=s.replace(a,b)
+          p.write_text(s)
+          Path('VERSION').write_text('1.21.809\n')
+
+          test=Path('.github/phase3/v121809-static-batch-label-compat.php')
+          test.write_text(r'''<?php
+          if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
+          if (!function_exists('sanitize_key')) {
+              function sanitize_key($key): string { return strtolower(preg_replace('/[^a-z0-9_\-]/i','',(string)$key)); }
+          }
+          require __DIR__ . '/../../includes/site-release/s01-static-boundary-reconciler.php';
+          function must_v121809(bool $ok,string $message): void { if(!$ok){fwrite(STDERR,"FAIL: $message\n");exit(1);} }
+          function batch_v121809(string $label,array $types=['static_artifact'],array $posts=[],array $intents=[],string $status='locked'): array {
+              return ['id'=>'b1','label'=>$label,'status'=>$status,'change_types'=>$types,'post_ids'=>$posts,'component_intent_ids'=>$intents];
+          }
+          must_v121809(vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('S01 Static Candidate Closure')),'current S01 label');
+          must_v121809(vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态产物 source-example 2026-09-04 20:00')),'legacy artifact label');
+          must_v121809(vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态发布 2026-09-04 20:00')),'legacy publish label');
+          must_v121809(!vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('Other Project Static')),'unproven label must block');
+          must_v121809(!vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态发布 2026-09-04 20:00',['content','static_artifact'])),'content type must block');
+          must_v121809(!vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态发布 2026-09-04 20:00',['static_artifact'],[42])),'post scope must block');
+          must_v121809(!vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态发布 2026-09-04 20:00',['static_artifact'],[],['intent-1'])),'component intent must block');
+          must_v121809(!vf_ops_s01_static_boundary_batch_recoverable_v121808(batch_v121809('静态发布 2026-09-04 20:00',['static_artifact'],[],[],'online_passed')),'closed status must block');
+          echo "PASS_V121809_STATIC_BATCH_LABEL_COMPAT\n";
+          ''')
+          PY
+          php .github/phase3/v121809-static-batch-label-compat.php | grep -Fxq PASS_V121809_STATIC_BATCH_LABEL_COMPAT
+          git diff --check
+          git status --short
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add VERSION vf-ops.php includes/site-release/s01-static-boundary-reconciler.php .github/phase3/v121809-static-batch-label-compat.php
+          git commit -m 'fix(S01-C02): accept proven legacy static batch labels'
+          git remote set-url origin "https://x-access-token:${W}@github.com/${REPO}.git"
+          git push -q origin "HEAD:${BRANCH}"
+          echo BUILD_V121809=PASS
