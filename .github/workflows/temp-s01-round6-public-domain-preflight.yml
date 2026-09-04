@@ -1,0 +1,82 @@
+name: TEMP S01 Round6 Public Domain Preflight
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121798-production-readback-20260903
+    paths:
+      - '.github/workflows/temp-s01-round6-public-domain-preflight.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  public-domain-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Probe source current public and final hosts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y dnsutils jq >/dev/null
+          mkdir -p /tmp/evidence
+          {
+            echo '=== DNS ilovem3u8.com ==='
+            dig +short ilovem3u8.com A || true
+            dig +short ilovem3u8.com AAAA || true
+            dig +short ilovem3u8.com CNAME || true
+            echo '=== DNS www.ilovem3u8.com ==='
+            dig +short www.ilovem3u8.com A || true
+            dig +short www.ilovem3u8.com AAAA || true
+            dig +short www.ilovem3u8.com CNAME || true
+          } | tee /tmp/evidence/dns.txt
+
+          python3 - <<'PY'
+          import json, subprocess, pathlib
+          urls = [
+            'https://www3.m3u8.one/',
+            'https://www3.m3u8.one/robots.txt',
+            'https://www3.m3u8.one/sitemap_index.xml',
+            'https://ilovem3u8.pages.dev/',
+            'https://ilovem3u8.pages.dev/robots.txt',
+            'https://ilovem3u8.pages.dev/sitemap.xml',
+            'https://ilovem3u8.pages.dev/sitemap_index.xml',
+            'https://ilovem3u8.com/',
+            'https://ilovem3u8.com/robots.txt',
+            'https://ilovem3u8.com/sitemap.xml',
+            'https://ilovem3u8.com/sitemap_index.xml',
+            'https://www.ilovem3u8.com/',
+          ]
+          rows=[]
+          for u in urls:
+            p=subprocess.run(['curl','-kLsS','--max-time','25','--retry','1','-o','/tmp/body','-D','/tmp/headers','-w','%{http_code}\t%{url_effective}\t%{content_type}\t%{size_download}\t%{remote_ip}',u],capture_output=True,text=True)
+            parts=(p.stdout.strip().split('\t')+['','','','',''])[:5]
+            body=pathlib.Path('/tmp/body').read_bytes() if pathlib.Path('/tmp/body').exists() else b''
+            headers=pathlib.Path('/tmp/headers').read_text(errors='replace') if pathlib.Path('/tmp/headers').exists() else ''
+            lower=body[:120000].lower()
+            rows.append({
+              'url':u,'curl_rc':p.returncode,'http':parts[0],'effective':parts[1],'content_type':parts[2],
+              'bytes':parts[3],'remote_ip':parts[4],
+              'has_html_title':b'<title' in lower,'has_robots_user_agent':b'user-agent:' in lower,
+              'has_sitemap_xml':b'<urlset' in lower or b'<sitemapindex' in lower,
+              'server': next((x.split(':',1)[1].strip() for x in headers.splitlines() if x.lower().startswith('server:')), ''),
+              'cf_ray': next((x.split(':',1)[1].strip() for x in headers.splitlines() if x.lower().startswith('cf-ray:')), ''),
+              'location': next((x.split(':',1)[1].strip() for x in headers.splitlines()[::-1] if x.lower().startswith('location:')), ''),
+              'stderr':p.stderr.strip()[:500],
+            })
+          pathlib.Path('/tmp/evidence/http.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+
+          jq -c '.[] | {url,http,effective,content_type,bytes,remote_ip,server,cf_ray,location,has_html_title,has_robots_user_agent,has_sitemap_xml,curl_rc}' /tmp/evidence/http.json
+          echo PUBLIC_DOMAIN_PREFLIGHT=COMPLETE
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-round6-public-domain-preflight
+          path: /tmp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
