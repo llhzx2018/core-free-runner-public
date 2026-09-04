@@ -1,0 +1,148 @@
+name: TEMP S01-C02 Ops 1.21.804 Static Boundary Reconciler Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121804-static-boundary-reconciler-gate-20260904
+    paths:
+      - '.github/workflows/temp-s01-c02-v121804-static-boundary-reconciler-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPS_BASE_SHA: 3d30c5e0f9a8dd5af9d3842adbba71976812307e
+      OPS_CANDIDATE_SHA: 0697671830a948ee0665c2e8b41d5105afe9f647
+      OPS_CANDIDATE_TREE: 92385e986739bacde7d88a99aa85d94bfc01a956
+      ARTIFACT: /tmp/vf-tools-ops_V1.21.804.zip
+    steps:
+      - name: Checkout exact base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: base
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: candidate
+
+      - name: Verify exact source boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C base rev-parse HEAD)" = "$OPS_BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$OPS_CANDIDATE_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$OPS_CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < base/VERSION)" = 1.21.803
+          test "$(tr -d '\r\n' < candidate/VERSION)" = 1.21.804
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          def files(root):
+              out={}
+              for p in Path(root).rglob('*'):
+                  if p.is_file() and '.git' not in p.parts:
+                      out[p.relative_to(root).as_posix()]=hashlib.sha256(p.read_bytes()).hexdigest()
+              return out
+          a,b=files('base'),files('candidate')
+          changed=sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))
+          expected=sorted([
+              '.github/phase3/v121804-static-boundary-reconciler.php',
+              'VERSION',
+              'includes/site-release/s01-static-boundary-reconciler.php',
+              'vf-ops.php',
+          ])
+          print('CHANGED_FILES=',changed)
+          assert changed==expected,(changed,expected)
+          PY
+          cmp base/includes/s01/tool-workbench.php candidate/includes/s01/tool-workbench.php
+          cmp base/includes/site-release/final-domain-authority.php candidate/includes/site-release/final-domain-authority.php
+          cmp base/includes/site-release/s01-static-candidate-readiness.php candidate/includes/site-release/s01-static-candidate-readiness.php
+          cmp base/includes/plugins-governance/inventory-readback-compat-v121794.php candidate/includes/plugins-governance/inventory-readback-compat-v121794.php
+          echo EXACT_BOUNDED_SOURCE=PASS
+
+      - name: Run reconciler contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l candidate/vf-ops.php
+          php -l candidate/includes/site-release/s01-static-boundary-reconciler.php
+          php -l candidate/.github/phase3/v121804-static-boundary-reconciler.php
+          php candidate/.github/phase3/v121804-static-boundary-reconciler.php | tee /tmp/reconciler.txt
+          grep -Fxq PASS_V121804_STATIC_BOUNDARY_RECONCILER /tmp/reconciler.txt
+          grep -Fq "Version: 1.21.804" candidate/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.804" candidate/vf-ops.php
+          grep -Fq "s01-static-boundary-reconciler.php" candidate/vf-ops.php
+          echo SOURCE_CONTRACT=PASS
+
+      - name: Build deterministic release artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re, hashlib, zipfile, json, os
+          from pathlib import Path
+          root=Path('candidate'); files={}
+          def ok(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          for src in root.rglob('*'):
+              if src.is_file() and not src.is_symlink():
+                  rel=src.relative_to(root)
+                  if ok(rel): files[rel.as_posix()]=src.read_bytes()
+          files=dict(sorted(files.items()))
+          assert len(files)==898,len(files)
+          assert 'includes/site-release/s01-static-boundary-reconciler.php' in files
+          fp=hashlib.sha256()
+          for rel,b in files.items(): fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          zpath=Path(os.environ['ARTIFACT'])
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,b in files.items():
+                  zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,4,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+          meta={
+              'target_commit':os.environ['OPS_CANDIDATE_SHA'],
+              'target_tree':os.environ['OPS_CANDIDATE_TREE'],
+              'version':'1.21.804',
+              'asset_name':'vf-tools-ops_V1.21.804.zip',
+              'asset_bytes':zpath.stat().st_size,
+              'asset_sha256':hashlib.sha256(zpath.read_bytes()).hexdigest(),
+              'runtime_files':len(files),
+              'runtime_fingerprint':fp.hexdigest(),
+          }
+          Path('/tmp/artifact-identity.json').write_text(json.dumps(meta,indent=2)+'\n')
+          print(json.dumps(meta,indent=2))
+          PY
+          unzip -tq "$ARTIFACT" >/dev/null
+          unzip -Z1 "$ARTIFACT" | grep -Fxq 'vf-ops/includes/site-release/s01-static-boundary-reconciler.php'
+          unzip -p "$ARTIFACT" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.804'
+          echo DETERMINISTIC_ARTIFACT=PASS
+
+      - name: Verify protected production boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -Eq 'update_post_meta|delete_post_meta|wp_delete_post|DROP TABLE|TRUNCATE TABLE' candidate/includes/site-release/s01-static-boundary-reconciler.php
+          ! grep -Eq 'm3u8.*(write|repair|reset|drop|delete)|seed.*(release|disable)|wpvivid.*(remove|delete)|jd\.gg.*(remove|delete)' candidate/includes/site-release/s01-static-boundary-reconciler.php
+          grep -Fq "is_admin()" candidate/includes/site-release/s01-static-boundary-reconciler.php
+          grep -Fq "current_user_can('manage_options')" candidate/includes/site-release/s01-static-boundary-reconciler.php
+          grep -Fq "['static_artifact']" candidate/includes/site-release/s01-static-boundary-reconciler.php
+          grep -Fq "finalOnlinePass'=>'NO'" candidate/includes/site-release/s01-static-boundary-reconciler.php
+          echo PROTECTED_BOUNDARIES=PASS
+          echo PASS_V121804_STATIC_BOUNDARY_RECONCILER_GATE
