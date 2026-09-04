@@ -1,0 +1,165 @@
+name: TEMP S01-C02 Ops 1.21.799 Domain Authority Gate R4
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121799-domain-authority-gate-20260903
+    paths:
+      - '.github/workflows/temp-s01-c02-v121799-domain-authority-gate-r4.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  domain-authority-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_ops_gate
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      OPS_PROD_SHA: ac7dc58d877473a8124f2478466470d3c59cd018
+      OPS_798_SHA: c22d766338245d5dfac49a485129614c85001ee7
+      OPS_CANDIDATE_SHA: 4a04c70ba20ba7407230c8121aa6e5f11ac29743
+      OPS_CANDIDATE_TREE: 05107a744a61c1566ce783c5135192ad2b07e6e2
+      WP_PATH: /tmp/vf-ops-v121799-wp
+      EVIDENCE_DIR: /tmp/vf-ops-v121799-evidence-r4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_798_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-798
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_PROD_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops-prod
+
+      - name: Verify exact source scope and 1.21.799 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C ops-candidate rev-parse HEAD)" = "$OPS_CANDIDATE_SHA"
+          test "$(git -C ops-candidate rev-parse HEAD^{tree})" = "$OPS_CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < ops-prod/VERSION)" = 1.21.797
+          test "$(tr -d '\r\n' < ops-798/VERSION)" = 1.21.798
+          test "$(tr -d '\r\n' < ops-candidate/VERSION)" = 1.21.799
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          def files(root):
+              out={}
+              for p in Path(root).rglob('*'):
+                  if p.is_file() and '.git' not in p.parts:
+                      out[p.relative_to(root).as_posix()]=hashlib.sha256(p.read_bytes()).hexdigest()
+              return out
+          a,b=files('ops-798'),files('ops-candidate')
+          changed=sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))
+          expected=sorted(['.github/phase3/v121799-final-domain-authority.php','VERSION','includes/cf-static-downloads/inspect.php','includes/site-release/final-domain-authority.php','vf-ops.php'])
+          Path('/tmp/vf-ops-v121799-evidence-r4/changed-files.txt').write_text('\n'.join(changed)+'\n')
+          assert changed==expected,(changed,expected)
+          PY
+          cmp ops-798/includes/seo-data/keyword-authority-closure-service.php ops-candidate/includes/seo-data/keyword-authority-closure-service.php
+          cmp ops-798/includes/seo-data/keyword-planner-bridge-service.php ops-candidate/includes/seo-data/keyword-planner-bridge-service.php
+          cmp ops-798/includes/s01/tool-workbench.php ops-candidate/includes/s01/tool-workbench.php
+          cmp ops-798/includes/plugins-governance/inventory-readback-compat-v121794.php ops-candidate/includes/plugins-governance/inventory-readback-compat-v121794.php
+          php -l ops-candidate/vf-ops.php
+          php -l ops-candidate/includes/site-release/final-domain-authority.php
+          php -l ops-candidate/includes/cf-static-downloads/inspect.php
+          php ops-candidate/.github/phase3/v121799-final-domain-authority.php | tee "$EVIDENCE_DIR/standalone.txt"
+          grep -Fxq PASS_V121799_FINAL_DOMAIN_AUTHORITY "$EVIDENCE_DIR/standalone.txt"
+
+      - name: Install WordPress 7.1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-mysql php-curl php-zip php-mbstring php-xml php-gd unzip curl jq mariadb-client rsync >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp && sudo mv /tmp/wp /usr/local/bin/wp
+          mkdir -p "$WP_PATH"
+          wp core download --path="$WP_PATH" --version=7.1 --force
+          wp config create --path="$WP_PATH" --dbname=vf_ops_gate --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          wp core install --path="$WP_PATH" --url=http://127.0.0.1:8080 --title='VF Gate' --admin_user=owner --admin_password='gate-only-not-production' --admin_email=owner@example.invalid --skip-email
+          test "$(wp core version --path="$WP_PATH")" = 7.1
+          mariadb -h127.0.0.1 -P3306 -uvf -pvf -Nse 'SELECT VERSION()' vf_ops_gate | tee "$EVIDENCE_DIR/mariadb.txt"
+          grep -q '^11\.4\.' "$EVIDENCE_DIR/mariadb.txt"
+
+      - name: Seed exact 1.21.797 legacy persisted state without loading write UI runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/plugins/vf-ops"
+          rsync -a --delete --exclude=.git ops-prod/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          wp plugin activate vf-ops --path="$WP_PATH"
+          wp eval --path="$WP_PATH" '
+            wp_set_current_user(1);$life=vf_ops_lifecycle_apply_version_v121377("v121799-prod-baseline");if(empty($life["ok"]))exit(2);
+            $sr=vf_ops_site_release_readback_v121453();$sr["publicBaseUrl"]="https://www.ilovem3u8.com";$sr["previewBaseUrl"]="https://ilovem3u8.pages.dev";$sr["configHash"]=vf_ops_site_release_hash_v121453($sr);update_option("vf_ops_site_release",$sr,false);
+            update_option("vf_toolsite_cf_static_release_records_v1",["status"=>"PASS","cf_public_base_url"=>"https://www.ilovem3u8.com","freeze_decision"=>"PASS","post_upload_home_result"=>"PASS","post_upload_sitemap_result"=>"PASS","integrity_result"=>"PASS","online_batch_id"=>"old-batch","online_evidence_sha256"=>str_repeat("a",64),"note"=>"legacy host fixture"],false);
+            $read=vf_ops_site_release_readback_v121453();$st=get_option("vf_toolsite_cf_static_release_records_v1",[]);echo json_encode(["installed"=>$life["state"]["installed_version"]??"","revision"=>$read["revision"],"publicBaseUrl"=>$read["publicBaseUrl"],"static"=>$st,"writeRuntimeLoaded"=>function_exists("vf_ops_save_site_release_transaction")]);' > "$EVIDENCE_DIR/baseline.json"
+          cat "$EVIDENCE_DIR/baseline.json"
+          jq -e '.installed=="1.21.797" and .publicBaseUrl=="https://www.ilovem3u8.com" and .static.cf_public_base_url=="https://www.ilovem3u8.com" and .static.status=="PASS" and .static.freeze_decision=="PASS" and .writeRuntimeLoaded==false' "$EVIDENCE_DIR/baseline.json" >/dev/null
+          wp option get vf_ops_plugins --path="$WP_PATH" --format=json | jq -cS . > "$EVIDENCE_DIR/plugins-before.json"
+
+      - name: Direct upgrade 1.21.797 to 1.21.799 from lightweight admin runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rsync -a --delete --exclude=.git ops-candidate/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          wp eval --path="$WP_PATH" '
+            wp_set_current_user(1);$life=vf_ops_lifecycle_apply_version_v121377("v121799-direct-upgrade");if(empty($life["ok"]))exit(4);
+            $writeBefore=function_exists("vf_ops_save_site_release_transaction");$pre=vf_ops_s01_domain_authority_state_v121799();do_action("admin_init");$writeAfter=function_exists("vf_ops_save_site_release_transaction");$post=vf_ops_s01_domain_authority_state_v121799();$last=$GLOBALS["vf_ops_s01_domain_authority_last_v121799"]??[];$static=get_option("vf_toolsite_cf_static_release_records_v1",[]);$invalid=get_option("vf_ops_site_release_evidence_invalidation_v1",[]);
+            echo json_encode(["installed"=>$life["state"]["installed_version"]??"","previous"=>$life["state"]["previous_version"]??"","writeBefore"=>$writeBefore,"writeAfter"=>$writeAfter,"pre"=>$pre,"post"=>$post,"last"=>$last,"static"=>$static,"invalid"=>$invalid]);' > "$EVIDENCE_DIR/upgrade.json"
+          cat "$EVIDENCE_DIR/upgrade.json"
+          jq -e '.installed=="1.21.799" and .previous=="1.21.797" and .writeBefore==false and .writeAfter==true and .pre.status=="RECONCILIATION_PENDING" and .post.status=="CURRENT" and .post.authorityFinalHost=="https://ilovem3u8.com" and .post.configuredPublicBaseUrl=="https://ilovem3u8.com" and .post.authorityMatch==true and .last.ok==true and .last.staticReleaseRecord.ok==true and .last.staticReleaseRecord.status=="RECONCILED" and .static.cf_public_base_url=="https://ilovem3u8.com" and .static.status=="NOT_VERIFIED" and .static.freeze_decision=="NOT_VERIFIED" and .static.online_batch_id=="" and .static.online_evidence_sha256=="" and .invalid.status=="INVALIDATED" and .invalid.finalOnlinePass=="NO"' "$EVIDENCE_DIR/upgrade.json" >/dev/null
+          jq -e '(.requires|index("regenerate_static_zip"))!=null and (.requires|index("rerun_static_precheck"))!=null and (.requires|index("rerun_online_acceptance"))!=null' <<<"$(jq -c '.invalid' "$EVIDENCE_DIR/upgrade.json")" >/dev/null
+          wp option get vf_ops_plugins --path="$WP_PATH" --format=json | jq -cS . > "$EVIDENCE_DIR/plugins-after.json"
+          cmp "$EVIDENCE_DIR/plugins-before.json" "$EVIDENCE_DIR/plugins-after.json"
+
+      - name: Verify idempotence REST inspector and unexpected-host fail closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wp eval --path="$WP_PATH" '
+            wp_set_current_user(1);$before=vf_ops_site_release_readback_v121453();do_action("admin_init");$after=vf_ops_site_release_readback_v121453();require_once WP_PLUGIN_DIR."/vf-ops/includes/cf-static-downloads/inspect.php";$inspect=vf_toolsite_cf_release_inspect_default_public_base_url_v11520("https://preview123.ilovem3u8.pages.dev");do_action("rest_api_init");$req=new WP_REST_Request("GET","/vf-ops/v1/s01-domain-authority");$resp=rest_do_request($req);echo json_encode(["beforeRevision"=>$before["revision"],"afterRevision"=>$after["revision"],"inspect"=>$inspect,"restStatus"=>$resp->get_status(),"rest"=>$resp->get_data()]);' > "$EVIDENCE_DIR/idempotent.json"
+          jq -e '.beforeRevision==.afterRevision and .inspect=="https://ilovem3u8.com" and .restStatus==200 and .rest.pluginVersion=="1.21.799" and .rest.status=="CURRENT" and .rest.authorityFinalHost=="https://ilovem3u8.com" and .rest.configuredPublicBaseUrl=="https://ilovem3u8.com" and .rest.authorityMatch==true' "$EVIDENCE_DIR/idempotent.json" >/dev/null
+          wp eval --path="$WP_PATH" '
+            wp_set_current_user(1);$before=vf_ops_site_release_readback_v121453();$before["publicBaseUrl"]="https://example.invalid";$before["configHash"]=vf_ops_site_release_hash_v121453($before);update_option("vf_ops_site_release",$before,false);$rev=vf_ops_site_release_readback_v121453()["revision"];$result=vf_ops_s01_reconcile_final_domain_authority_v121799("conflict");$after=vf_ops_site_release_readback_v121453();echo json_encode(["rev"=>$rev,"result"=>$result,"after"=>$after]);' > "$EVIDENCE_DIR/conflict.json"
+          jq -e '.result.ok==false and .result.status=="CONFLICTING_PUBLIC_BASE" and .after.publicBaseUrl=="https://example.invalid" and .after.revision==.rev' "$EVIDENCE_DIR/conflict.json" >/dev/null
+          ! grep -Eq 'vf_m3u8_|wp_update_post\(|update_post_meta\(|delete_post_meta\(|seed_hold|WPvivid|JD\.gg' ops-candidate/includes/site-release/final-domain-authority.php
+          grep -Fq '"final_public_host": "https://ilovem3u8.com"' ops-candidate/VF_PROJECT.json
+          echo PASS_V121799_WORDPRESS_DIRECT_1_21_797_TO_1_21_799_DOMAIN_AUTHORITY_GATE_R4 | tee "$EVIDENCE_DIR/final.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v121799-domain-authority-gate-r4
+          path: /tmp/vf-ops-v121799-evidence-r4/
+          if-no-files-found: warn
+          retention-days: 14
