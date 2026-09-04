@@ -1,0 +1,81 @@
+name: TEMP S01-C02 Ops 1.21.806 Candidate Gate
+on:
+  push:
+    branches: [temp/s01-c02-v121806-candidate-gate-20260904]
+    paths: ['.github/workflows/temp-s01-c02-v121806-candidate-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_COMMIT: 30c458d2b3993b9abe028165951fd66108ad3af3
+      TARGET_TREE: 5d26b8b94113103b7d013f614c7a3c9a01da7925
+      BASE_COMMIT: d533ad1226bd074fa4c275b55d544651c94d6dd8
+      VERSION: 1.21.806
+      ASSET_NAME: vf-tools-ops_V1.21.806.zip
+    steps:
+      - name: Checkout exact promoted source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify identity scope and focused contract
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$TARGET_COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          for b in main develop; do
+            J="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${TARGET_REPOSITORY}/branches/$b")"
+            test "$(jq -r .commit.sha <<<"$J")" = "$TARGET_COMMIT"
+          done
+          git -C ops diff --name-only "$BASE_COMMIT" "$TARGET_COMMIT" | sort >/tmp/changed.txt
+          printf '%s\n' '.github/phase3/v121806-avatar-endpoint-classification.php' 'VERSION' 'includes/cf-release/checker-inspect-parts/03-links.php' 'vf-ops.php' | sort >/tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/changed.txt
+          php -l ops/vf-ops.php
+          php -l ops/includes/cf-release/checker-inspect-parts/03-links.php
+          php -l ops/.github/phase3/v121806-avatar-endpoint-classification.php
+          php ops/.github/phase3/v121806-avatar-endpoint-classification.php | tee /tmp/focused.txt
+          grep -Fxq PASS_V121806_AVATAR_ENDPOINT_CLASSIFICATION /tmp/focused.txt
+          grep -Fq "add_action('admin_bar_menu', 'vf_ops_bootstrap_admin_bar_menu_v121334', 85);" ops/vf-ops.php
+          ! grep -Eq 'update_option|delete_option|update_post_meta|delete_post_meta|wp_delete_post|DROP TABLE|TRUNCATE TABLE' ops/includes/cf-release/checker-inspect-parts/03-links.php
+          echo SOURCE_IDENTITY_SCOPE_CONTRACT=PASS
+      - name: Build deterministic release artifact and emit authority
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          import re,hashlib,zipfile,json,os
+          from pathlib import Path
+          root=Path('ops'); files={}
+          def ok(rel):
+            p=rel.as_posix(); parts=p.split('/')
+            if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+            if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+            if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+            return parts[0] in {'includes','assets','languages','config'}
+          for s in root.rglob('*'):
+            if s.is_file() and not s.is_symlink():
+              r=s.relative_to(root)
+              if ok(r): files[r.as_posix()]=s.read_bytes()
+          files=dict(sorted(files.items())); fp=hashlib.sha256()
+          for r,b in files.items(): fp.update((r+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/'+os.environ['ASSET_NAME'])
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+            for r,b in files.items():
+              i=zipfile.ZipInfo('vf-ops/'+r,(2026,9,4,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          m={'asset_bytes':z.stat().st_size,'asset_sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'runtime_files':len(files),'runtime_fingerprint':fp.hexdigest()}
+          print('ARTIFACT_AUTHORITY='+json.dumps(m,separators=(',',':')))
+          PY
+          unzip -tq "/tmp/release/$ASSET_NAME" >/dev/null
+          unzip -p "/tmp/release/$ASSET_NAME" vf-ops/includes/cf-release/checker-inspect-parts/03-links.php | grep -Fq "^/avatar/[a-f0-9]{32,64}"
+          echo PASS_V121806_CANDIDATE_GATE
