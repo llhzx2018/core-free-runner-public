@@ -1,0 +1,172 @@
+name: P01 V2.46.1 Final V2.46.2 Online Readiness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-v2462-v2461-final-online-readiness-20260905.yml
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      CORE_REF: release/p01-v2462-canonical-update-channel-20260905
+      OWNER_REF: 87edfd46ad61afba23b6998f4d0ccd9a8eabc5ad
+      FORMAL_SOURCE: aba9c59fb8b759a3b6e41e820c5fc0e093207004
+      CANONICAL_ASSET: VF_Start_V2.46.2_UPDATE.zip
+      CANONICAL_ID: '544987544'
+      CANONICAL_BYTES: '1609621'
+      CANONICAL_SHA: 64e652d1688eab4a1737a10cd30376d4b463cf101e8b31677ff1859e1625c9d0
+      LEGACY_ASSET: VF_Start_V2.46.2_UPDATE_FROM_V2.46.0.zip
+      LEGACY_ID: '544930491'
+      LEGACY_BYTES: '1618854'
+      LEGACY_SHA: ea1862d85fd9c82f7e55b5e0c0e65728600072bb11aec04bf79469c8e9579ceb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, curl, zip, mbstring, openssl, fileinfo
+          coverage: none
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_REF }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: core
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.OWNER_REF }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: owner
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source and manifest identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C owner rev-parse HEAD)" = "$OWNER_REF"
+          test "$(cat owner/VERSION)" = '2.46.1'
+          test "$(cat owner/src/VERSION.txt)" = '2.46.1'
+          python3 - <<'PY'
+          import json,os
+          p=json.load(open('core/projects/P01.json',encoding='utf-8'))
+          expected={
+            'schema_version':'1.0','project_id':'P01','component_id':'APP','enabled':True,
+            'current_version':'2.46.1','target_version':'2.46.2','update_type':'ATOMIC',
+            'from_versions':['2.46.1'],'schema_from':'2026090401','schema_to':'2026090401',
+            'repository':'llhzx2018/vf-start','release_tag':'v2.46.2','release_id':383023846,
+            'product_identity':os.environ['FORMAL_SOURCE'],'asset_name':os.environ['CANONICAL_ASSET'],
+            'asset_bytes':int(os.environ['CANONICAL_BYTES']),'asset_sha256':os.environ['CANONICAL_SHA'],
+            'backup_required':True,'rollback_supported':True,'minimum_php':'8.0.0'
+          }
+          for k,v in expected.items(): assert p.get(k)==v,(k,p.get(k),v)
+          print('P01_FINAL_MANIFEST_IDENTITY=PASS')
+          PY
+          grep -Fq "\$expectedAsset = 'VF_Start_V' . \$target . '_UPDATE.zip';" owner/src/app/UpdateManager.php
+          grep -Fq "更新清单不是 P01 正式 UPDATE Asset。" owner/src/app/UpdateManager.php
+          echo P01_V2461_STRICT_CLIENT_SOURCE=PASS
+
+      - name: Exact V2.46.1 UpdateManager check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-owner-client-check.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('VF_ROOT', '/tmp/p01-owner-root');
+          define('VF_PRIVATE_ROOT', '/tmp/p01-owner-private');
+          if (!function_exists('vf_write_storage_guards')) { function vf_write_storage_guards(string $dir): void {} }
+          if (!function_exists('vf_clean_text')) { function vf_clean_text(string $value, int $max=600): string { return mb_substr(trim($value),0,$max); } }
+          final class VfMigrationRunner {
+              public function __construct(private PDO $db) {}
+              public function schemaState(): array { return ['current_head'=>'2026090401']; }
+          }
+          require getcwd() . '/owner/src/app/UpdateManager.php';
+          $manifest=json_decode(file_get_contents(getcwd().'/core/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $pdo=new PDO('sqlite::memory:');
+          $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+          $pdo->exec('CREATE TABLE update_state(state_key TEXT PRIMARY KEY,state_value TEXT NOT NULL DEFAULT "",updated_at TEXT NOT NULL DEFAULT "")');
+          $manager=new VfUpdateManager($pdo,[
+              'root'=>'/tmp/p01-owner-root',
+              'private_root'=>'/tmp/p01-owner-private',
+              'current_version'=>'2.46.1',
+              'manifest_fetcher'=>static fn(string $repo,string $path,string $ref): array => $manifest,
+              'capabilities'=>['curl'=>true,'zip'=>true],
+              'randomizer'=>static fn(int $min,int $max): int => 0,
+          ]);
+          $result=$manager->check(true);
+          if (($result['ok']??false)!==true) throw new RuntimeException('check not ok');
+          if (($result['current_version']??'')!=='2.46.1') throw new RuntimeException('current mismatch');
+          if (($result['latest_version']??'')!=='2.46.2') throw new RuntimeException('latest mismatch');
+          if (($result['available']??false)!==true || ($result['can_update']??false)!==true) throw new RuntimeException('not directly updatable: '.($result['reason']??''));
+          if (($result['requirements']['source_allowed']??false)!==true) throw new RuntimeException('source not allowed');
+          if (($result['requirements']['schema']['ok']??false)!==true) throw new RuntimeException('schema blocked');
+          echo "P01_EXACT_V2461_UPDATE_MANAGER_CHECK=PASS\n";
+          PHP
+          php /tmp/p01-owner-client-check.php
+
+      - name: Exact GitHub Release asset identity and bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.46.2 > /tmp/release.json
+          jq -e --arg s "$FORMAL_SOURCE" '.id==383023846 and .tag_name=="v2.46.2" and .target_commitish==$s and .draft==false and .prerelease==false and (.assets|length)==9' /tmp/release.json >/dev/null
+          jq -e --argjson id "$CANONICAL_ID" --arg n "$CANONICAL_ASSET" --argjson b "$CANONICAL_BYTES" --arg d "sha256:$CANONICAL_SHA" '.assets[]|select(.id==$id)|.name==$n and .size==$b and .digest==$d' /tmp/release.json >/dev/null
+          jq -e --argjson id "$LEGACY_ID" --arg n "$LEGACY_ASSET" --argjson b "$LEGACY_BYTES" --arg d "sha256:$LEGACY_SHA" '.assets[]|select(.id==$id)|.name==$n and .size==$b and .digest==$d' /tmp/release.json >/dev/null
+          rm -rf /tmp/p01-canonical; mkdir -p /tmp/p01-canonical
+          gh release download v2.46.2 --repo llhzx2018/vf-start --pattern "$CANONICAL_ASSET" --dir /tmp/p01-canonical
+          test "$(stat -c %s "/tmp/p01-canonical/$CANONICAL_ASSET")" = "$CANONICAL_BYTES"
+          test "$(sha256sum "/tmp/p01-canonical/$CANONICAL_ASSET" | awk '{print $1}')" = "$CANONICAL_SHA"
+          test "$(unzip -Z1 "/tmp/p01-canonical/$CANONICAL_ASSET" | wc -l | tr -d ' ')" = '1'
+          test "$(unzip -Z1 "/tmp/p01-canonical/$CANONICAL_ASSET")" = 'repair-v2.46.2.php'
+          unzip -p "/tmp/p01-canonical/$CANONICAL_ASSET" repair-v2.46.2.php >/tmp/repair-v2.46.2.php
+          grep -Fq "public const SOURCE_VERSION='2.46.1';" /tmp/repair-v2.46.2.php
+          grep -Fq "public const TARGET_VERSION='2.46.2';" /tmp/repair-v2.46.2.php
+          grep -Fq "public const SOURCE_SCHEMA='2026090401';" /tmp/repair-v2.46.2.php
+          grep -Fq "public const TARGET_SCHEMA='2026090401';" /tmp/repair-v2.46.2.php
+          php /tmp/repair-v2.46.2.php --self-test | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          echo P01_CANONICAL_RELEASE_ASSET=PASS
+
+      - name: Update Core regression and source behavior
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find core/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php core/update-core/php/tests/run.php
+          cat >/tmp/p01-core-behavior.php <<'PHP'
+          <?php
+          require 'core/update-core/php/src/UpdateAdapter.php';
+          require 'core/update-core/php/src/UpdateCore.php';
+          $m=json_decode(file_get_contents('core/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $c=new CoreUpdates\UpdateCore('P01','APP');
+          $cases=[
+            ['2.46.1','2026090401','AVAILABLE'],
+            ['2.46.0','2026090401','BLOCKED_SOURCE_VERSION'],
+            ['2.46.1','2026090301','BLOCKED_SCHEMA'],
+            ['2.46.2','2026090401','UP_TO_DATE'],
+          ];
+          foreach($cases as [$v,$s,$want]){
+              $got=$c->check($v,$s,$m)['status'];
+              if($got!==$want){fwrite(STDERR,"$v/$s expected $want got $got\n"); exit(1);}
+          }
+          echo "P01_FINAL_UPDATE_CORE_BEHAVIOR=PASS\n";
+          PHP
+          php /tmp/p01-core-behavior.php
+
+      - name: Final online readiness PASS
+        run: echo P01_V2461_TO_V2462_FINAL_ONLINE_READINESS=PASS
