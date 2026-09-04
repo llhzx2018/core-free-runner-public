@@ -1,0 +1,99 @@
+name: TEMP S01-C02 Ops 1.21.810 Recovery Hardening
+on:
+  push:
+    branches: [temp/s01-c02-v121809-production-readback-20260904]
+    paths: ['.github/workflows/temp-s01-c02-v121810-hardening.yml']
+permissions:
+  contents: read
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      REPO: llhzx2018/vf-tools-ops
+      BRANCH: fix/s01-static-source-pointer-recovery-v121810
+      BASE: 554156ea76356aa88ea3b0934837dea38bf13756
+    steps:
+      - name: Harden exact recovery scope
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q --branch "$BRANCH" "https://x-access-token:${R}@github.com/${REPO}.git" ops
+          test "$(git -C ops rev-parse HEAD)" = "$BASE"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('ops/includes/site-release/s01-static-boundary-reconciler.php')
+          s=p.read_text()
+          old="""    if (!function_exists('current_user_can') || !current_user_can('manage_options')) {
+                  return ['status'=>'NOT_RUN','code'=>'MANAGE_OPTIONS_REQUIRED'];
+              }
+
+              $optionKey = function_exists('vf_toolsite_cf_release_option_key') ? (string)vf_toolsite_cf_release_option_key() : 'vf_toolsite_cf_static_release_records_v1';"""
+          new="""    if (!function_exists('current_user_can') || !current_user_can('manage_options')) {
+                  return ['status'=>'NOT_RUN','code'=>'MANAGE_OPTIONS_REQUIRED'];
+              }
+              $project = function_exists('vf_ops_s01_project_authority_v121799') ? (array)vf_ops_s01_project_authority_v121799() : [];
+              if ((string)($project['project_id'] ?? '') !== 'S01' || (string)($project['component_id'] ?? '') !== 'S01-C02') {
+                  vf_ops_s01_static_source_pointer_recovery_store_v121810('not_recovered','PROJECT_AUTHORITY_MISMATCH');
+                  return ['status'=>'NOT_RECOVERED','code'=>'PROJECT_AUTHORITY_MISMATCH'];
+              }
+              $domain = function_exists('vf_ops_s01_domain_authority_state_v121799') ? (array)vf_ops_s01_domain_authority_state_v121799() : [];
+              if ((string)($domain['status'] ?? '') !== 'CURRENT' || (string)($domain['authorityFinalHost'] ?? '') !== 'https://ilovem3u8.com') {
+                  vf_ops_s01_static_source_pointer_recovery_store_v121810('not_recovered','DOMAIN_AUTHORITY_NOT_CURRENT');
+                  return ['status'=>'NOT_RECOVERED','code'=>'DOMAIN_AUTHORITY_NOT_CURRENT'];
+              }
+
+              $optionKey = function_exists('vf_toolsite_cf_release_option_key') ? (string)vf_toolsite_cf_release_option_key() : 'vf_toolsite_cf_static_release_records_v1';"""
+          if s.count(old)!=1: raise SystemExit('authority anchor mismatch')
+          s=s.replace(old,new)
+          old2="""    if ($activeSource !== '' && is_file($activeSource) && is_readable($activeSource)) {
+                  vf_ops_s01_static_source_pointer_recovery_store_v121810('current','CURRENT_SOURCE_AVAILABLE','current_active_job',1);
+                  return ['status'=>'PASS','code'=>'CURRENT_SOURCE_AVAILABLE','basis'=>'current_active_job','matchedCount'=>1];
+              }
+
+              $expectedSha = '';"""
+          new2="""    if ($activeSource !== '' && is_file($activeSource) && is_readable($activeSource)) {
+                  vf_ops_s01_static_source_pointer_recovery_store_v121810('current','CURRENT_SOURCE_AVAILABLE','current_active_job',1);
+                  return ['status'=>'PASS','code'=>'CURRENT_SOURCE_AVAILABLE','basis'=>'current_active_job','matchedCount'=>1];
+              }
+              $activeMode = sanitize_key((string)($activeJob['job_mode'] ?? ''));
+              $activeStatus = strtoupper(trim((string)($activeJob['status'] ?? '')));
+              if ($activeMode !== 'candidate' || !in_array($activeStatus, ['FAIL','FAILED','BLOCKED','ERROR','CANCELLED','TIMEOUT'], true)) {
+                  vf_ops_s01_static_source_pointer_recovery_store_v121810('not_recovered','ACTIVE_JOB_NOT_FAILED_CANDIDATE');
+                  return ['status'=>'NOT_RECOVERED','code'=>'ACTIVE_JOB_NOT_FAILED_CANDIDATE'];
+              }
+
+              $expectedSha = '';"""
+          if s.count(old2)!=1: raise SystemExit('terminal candidate anchor mismatch')
+          p.write_text(s.replace(old2,new2))
+
+          t=Path('ops/.github/phase3/v121810-static-source-pointer-recovery.php')
+          q=t.read_text()
+          auth_anchor="function current_user_can($cap): bool { return $cap === 'manage_options'; }\n"
+          auth_add=auth_anchor+"function vf_ops_s01_project_authority_v121799(): array { return ['project_id'=>'S01','component_id'=>'S01-C02']; }\nfunction vf_ops_s01_domain_authority_state_v121799(): array { return ['status'=>'CURRENT','authorityFinalHost'=>'https://ilovem3u8.com']; }\n"
+          if q.count(auth_anchor)!=1: raise SystemExit('test authority anchor mismatch')
+          q=q.replace(auth_anchor,auth_add)
+          marker='    echo "PASS_V121810_STATIC_SOURCE_POINTER_RECOVERY\\n";\n'
+          extra="""    reset_v121810();
+              set_record_v121810('cand-running',str_repeat('c',64));
+              $running=failed_candidate_v121810('cand-running',''); $running['status']='RUNNING'; $running['error']=''; $running['steps']=[['status'=>'RUNNING']];
+              $GLOBALS['vf_test_options_v121810'][job_key_v121810('cand-running')]=$running;
+              $r=vf_ops_s01_static_source_pointer_recover_v121810();
+              must_v121810(($r['status']??'')==='NOT_RECOVERED' && ($r['code']??'')==='ACTIVE_JOB_NOT_FAILED_CANDIDATE','non-terminal candidate cannot rebind');
+
+          """+marker
+          if q.count(marker)!=1: raise SystemExit('test tail anchor mismatch')
+          t.write_text(q.replace(marker,extra))
+          PY
+          cd ops
+          php .github/phase3/v121810-static-source-pointer-recovery.php | grep -Fxq PASS_V121810_STATIC_SOURCE_POINTER_RECOVERY
+          git diff --check
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add includes/site-release/s01-static-boundary-reconciler.php .github/phase3/v121810-static-source-pointer-recovery.php
+          git commit -m 'test(S01-C02): harden source pointer recovery authority'
+          git remote set-url origin "https://x-access-token:${W}@github.com/${REPO}.git"
+          git push -q origin "HEAD:${BRANCH}"
+          echo HARDEN_V121810=PASS
