@@ -1,0 +1,121 @@
+name: TEMP S01 Update Refresh Formal Releases
+on:
+  push:
+    branches: [temp/s01-update-refresh-policy-gate-20260904]
+    paths: ['.github/workflows/temp-s01-update-refresh-formal-release.yml']
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPS_SHA: fbdd766314d3f9abe8d1834343e8058d99167307
+      M3U8_SHA: 44ff4a658ed87af8746d7fc81244df80f24aa5c3
+      THEME_SHA: 2db7feab0fa975bcadf01867a044983b51b17145
+      OPS_BYTES: '3217144'
+      OPS_ASSET_SHA: d650af9f5191b6b362ae45712f350676008abefd717823ad64f7aed456cd71b1
+      M3U8_BYTES: '3548397'
+      M3U8_ASSET_SHA: 87021cce154a16233eab8220e9913096ffc6e135288835a851f1abc324fdd221
+      THEME_BYTES: '1774398'
+      THEME_ASSET_SHA: e542fb3c3925f7ee9a0620891decf3669570a54afd878fa072306af9ab710164
+    steps:
+      - name: Checkout exact Ops source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - name: Checkout exact M3U8 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+      - name: Checkout exact Theme source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - name: Verify promoted branch identities
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          live(){ curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1/branches/$2" | jq -r '.commit.sha'; }
+          test "$(live llhzx2018/vf-tools-ops main)" = "$OPS_SHA"
+          test "$(live llhzx2018/vf-tools-ops develop)" = "$OPS_SHA"
+          test "$(live llhzx2018/vf-tools-m3u8 main)" = "$M3U8_SHA"
+          test "$(live llhzx2018/vf-tools-m3u8 develop)" = "$M3U8_SHA"
+          test "$(live llhzx2018/vf-tools-theme main)" = "$THEME_SHA"
+          # Theme develop is intentionally divergent and must not be moved by this release.
+          test "$(live llhzx2018/vf-tools-theme develop)" = '63eb30f4250951e9a2c3dfe0a43c7f18af6e1f81'
+          echo PROMOTED_BRANCH_IDENTITIES=PASS
+      - name: Rebuild exact Candidate artifacts
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,os,re,zipfile
+          def emit(path,prefix,files):
+              files=sorted(files,key=lambda x:x[0]); z=Path(path)
+              with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+                  for rel,b in files:
+                      i=zipfile.ZipInfo(prefix+'/'+rel,(2026,9,4,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+              return z
+          ops=[]
+          for p in Path('ops').rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to('ops').as_posix(); parts=rel.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              ops.append((rel,p.read_bytes()))
+          emit('/tmp/release/vf-tools-ops_V1.21.811.zip','vf-ops',ops)
+          m=[(p.relative_to('m3u8/src').as_posix(),p.read_bytes()) for p in Path('m3u8/src').rglob('*') if p.is_file() and not p.is_symlink()]
+          emit('/tmp/release/vf-tools-m3u8_V1.25.20.zip','vf-tool-m3u8',m)
+          t=[(p.relative_to('theme/src').as_posix(),p.read_bytes()) for p in Path('theme/src').rglob('*') if p.is_file() and not p.is_symlink()]
+          emit('/tmp/release/vf-tools-theme_V1.35.9.zip','vf-tools-theme',t)
+          PY
+          check(){ f="$1" bytes="$2" sha="$3"; test "$(stat -c '%s' "$f")" = "$bytes"; test "$(sha256sum "$f"|awk '{print $1}')" = "$sha"; unzip -tq "$f" >/dev/null; }
+          check /tmp/release/vf-tools-ops_V1.21.811.zip "$OPS_BYTES" "$OPS_ASSET_SHA"
+          check /tmp/release/vf-tools-m3u8_V1.25.20.zip "$M3U8_BYTES" "$M3U8_ASSET_SHA"
+          check /tmp/release/vf-tools-theme_V1.35.9.zip "$THEME_BYTES" "$THEME_ASSET_SHA"
+          echo EXACT_CANDIDATE_ARTIFACTS=PASS
+      - name: Refuse existing releases
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ! gh release view v1.21.811 --repo llhzx2018/vf-tools-ops >/dev/null 2>&1
+          ! gh release view v1.25.20 --repo llhzx2018/vf-tools-m3u8 >/dev/null 2>&1
+          ! gh release view v1.35.9 --repo llhzx2018/vf-tools-theme >/dev/null 2>&1
+          echo RELEASE_ABSENCE=PASS
+      - name: Create three formal releases
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release create v1.21.811 /tmp/release/vf-tools-ops_V1.21.811.zip --repo llhzx2018/vf-tools-ops --target "$OPS_SHA" --title 'VF Tools Ops v1.21.811' --notes 'S01-C02 Update Discovery Refresh V1. Auto manifest cache 60 minutes; OWNER manual check bypasses component cache and rebuilds WordPress update_plugins immediately. Cumulative from 1.21.809/1.21.810 will be authorized by core-updates. Includes 1.21.810 Static Source Pointer Recovery. No Production activation, content write, M3U8 migration/data write, Seed HOLD release, plugin-state write or DNS write.'
+          gh release create v1.25.20 /tmp/release/vf-tools-m3u8_V1.25.20.zip --repo llhzx2018/vf-tools-m3u8 --target "$M3U8_SHA" --title 'VF Tools M3U8 v1.25.20' --notes 'S01-C03 Update Discovery Refresh V1. Auto manifest cache 60 minutes; OWNER manual check bypasses component cache and rebuilds WordPress update_plugins immediately. M3U8 migration remains CLOSED; no migration/schema repair/data write is performed by this release.'
+          gh release create v1.35.9 /tmp/release/vf-tools-theme_V1.35.9.zip --repo llhzx2018/vf-tools-theme --target "$THEME_SHA" --title 'VF Tools Theme v1.35.9' --notes 'S01-C01 Update Discovery Refresh V1. Auto manifest cache 60 minutes; existing OWNER manual check bypasses component cache and rebuilds WordPress update_themes immediately. Theme develop remains intentionally untouched because it diverges from main. No Production activation or content/data write is performed by this release.'
+      - name: Remote release metadata readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          verify(){ repo="$1" tag="$2" target="$3" asset="$4" bytes="$5" sha="$6"; j="$(gh api "repos/$repo/releases/tags/$tag")"; test "$(jq -r '.tag_name' <<<"$j")" = "$tag"; test "$(jq -r '.target_commitish' <<<"$j")" = "$target"; test "$(jq -r '.draft' <<<"$j")" = false; test "$(jq -r '.prerelease' <<<"$j")" = false; test "$(jq -r --arg a "$asset" '.assets[]|select(.name==$a)|.size' <<<"$j")" = "$bytes"; digest="$(jq -r --arg a "$asset" '.assets[]|select(.name==$a)|.digest // empty' <<<"$j")"; test "$digest" = "sha256:$sha"; echo "$repo $tag RELEASE=PASS"; }
+          verify llhzx2018/vf-tools-ops v1.21.811 "$OPS_SHA" vf-tools-ops_V1.21.811.zip "$OPS_BYTES" "$OPS_ASSET_SHA"
+          verify llhzx2018/vf-tools-m3u8 v1.25.20 "$M3U8_SHA" vf-tools-m3u8_V1.25.20.zip "$M3U8_BYTES" "$M3U8_ASSET_SHA"
+          verify llhzx2018/vf-tools-theme v1.35.9 "$THEME_SHA" vf-tools-theme_V1.35.9.zip "$THEME_BYTES" "$THEME_ASSET_SHA"
+          echo PASS_S01_UPDATE_REFRESH_FORMAL_RELEASES
