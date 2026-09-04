@@ -1,0 +1,153 @@
+name: TEMP S01-C02 Ops 1.21.805 Static Preflight Read Model Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121805-static-preflight-read-model-gate-20260904
+    paths:
+      - '.github/workflows/temp-s01-c02-v121805-static-preflight-read-model-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      OPS_BASE_SHA: 0697671830a948ee0665c2e8b41d5105afe9f647
+      OPS_CANDIDATE_SHA: d533ad1226bd074fa4c275b55d544651c94d6dd8
+      OPS_CANDIDATE_TREE: 9f9f5165fcbbfe0b6f003f6c6d124dd1f5329f00
+      ARTIFACT: /tmp/vf-tools-ops_V1.21.805.zip
+    steps:
+      - name: Checkout exact base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: base
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: candidate
+
+      - name: Verify exact source boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C base rev-parse HEAD)" = "$OPS_BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$OPS_CANDIDATE_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$OPS_CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < base/VERSION)" = 1.21.804
+          test "$(tr -d '\r\n' < candidate/VERSION)" = 1.21.805
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          def files(root):
+              out={}
+              for p in Path(root).rglob('*'):
+                  if p.is_file() and '.git' not in p.parts:
+                      out[p.relative_to(root).as_posix()]=hashlib.sha256(p.read_bytes()).hexdigest()
+              return out
+          a,b=files('base'),files('candidate')
+          changed=sorted(k for k in set(a)|set(b) if a.get(k)!=b.get(k))
+          expected=sorted([
+              '.github/phase3/v121805-static-preflight-read-model.php',
+              'VERSION',
+              'includes/site-release/s01-static-candidate-readiness.php',
+              'vf-ops.php',
+          ])
+          print('CHANGED_FILES=',changed)
+          assert changed==expected,(changed,expected)
+          PY
+          cmp base/includes/s01/tool-workbench.php candidate/includes/s01/tool-workbench.php
+          cmp base/includes/site-release/final-domain-authority.php candidate/includes/site-release/final-domain-authority.php
+          cmp base/includes/site-release/s01-static-boundary-reconciler.php candidate/includes/site-release/s01-static-boundary-reconciler.php
+          cmp base/includes/publish-o10/publish-preflight-product.php candidate/includes/publish-o10/publish-preflight-product.php
+          cmp base/includes/publish-o10/publish-zip-product.php candidate/includes/publish-o10/publish-zip-product.php
+          cmp base/includes/plugins-governance/inventory-readback-compat-v121794.php candidate/includes/plugins-governance/inventory-readback-compat-v121794.php
+          echo EXACT_BOUNDED_SOURCE=PASS
+
+      - name: Run focused read-model contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l candidate/vf-ops.php
+          php -l candidate/includes/site-release/s01-static-candidate-readiness.php
+          php -l candidate/.github/phase3/v121805-static-preflight-read-model.php
+          php candidate/.github/phase3/v121805-static-preflight-read-model.php | tee /tmp/read-model.txt
+          grep -Fxq PASS_V121805_STATIC_PREFLIGHT_READ_MODEL /tmp/read-model.txt
+          grep -Fq "Version: 1.21.805" candidate/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.805" candidate/vf-ops.php
+          grep -Fq "saved_snapshot_lightweight_batch_identity" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "publishPreflightBasis" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "finalOnlinePass'=>'NO'" candidate/includes/site-release/s01-static-candidate-readiness.php
+          echo SOURCE_CONTRACT=PASS
+
+      - name: Build deterministic release artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re, hashlib, zipfile, json, os
+          from pathlib import Path
+          root=Path('candidate'); files={}
+          def ok(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          for src in root.rglob('*'):
+              if src.is_file() and not src.is_symlink():
+                  rel=src.relative_to(root)
+                  if ok(rel): files[rel.as_posix()]=src.read_bytes()
+          files=dict(sorted(files.items()))
+          assert len(files)==898,len(files)
+          assert 'includes/site-release/s01-static-candidate-readiness.php' in files
+          fp=hashlib.sha256()
+          for rel,b in files.items(): fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          zpath=Path(os.environ['ARTIFACT'])
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,b in files.items():
+                  zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,4,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+          meta={
+              'target_commit':os.environ['OPS_CANDIDATE_SHA'],
+              'target_tree':os.environ['OPS_CANDIDATE_TREE'],
+              'version':'1.21.805',
+              'asset_name':'vf-tools-ops_V1.21.805.zip',
+              'asset_bytes':zpath.stat().st_size,
+              'asset_sha256':hashlib.sha256(zpath.read_bytes()).hexdigest(),
+              'runtime_files':len(files),
+              'runtime_fingerprint':fp.hexdigest(),
+          }
+          Path('/tmp/artifact-identity.json').write_text(json.dumps(meta,indent=2)+'\n')
+          print(json.dumps(meta,indent=2))
+          PY
+          unzip -tq "$ARTIFACT" >/dev/null
+          unzip -p "$ARTIFACT" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.805'
+          unzip -p "$ARTIFACT" vf-ops/includes/site-release/s01-static-candidate-readiness.php | grep -Fq 'saved_snapshot_lightweight_batch_identity'
+          echo DETERMINISTIC_ARTIFACT=PASS
+
+      - name: Verify read-only and protected production boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -Eq 'update_option|delete_option|update_post_meta|delete_post_meta|wp_delete_post|DROP TABLE|TRUNCATE TABLE' candidate/includes/site-release/s01-static-candidate-readiness.php
+          ! grep -Eqi 'm3u8.*(write|repair|reset|drop|delete)|seed.*(release|disable)|wpvivid.*(remove|delete)|jd\.gg.*(remove|delete)' candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "hash_equals" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "snapshotCurrent" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "gateReady" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "markerRevision === \$revision" candidate/includes/site-release/s01-static-candidate-readiness.php
+          grep -Fq "savedP0 === 0" candidate/includes/site-release/s01-static-candidate-readiness.php
+          echo PROTECTED_BOUNDARIES=PASS
+          echo PASS_V121805_STATIC_PREFLIGHT_READ_MODEL_GATE
