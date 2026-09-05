@@ -1,0 +1,118 @@
+name: TEMP S01-C02 v1.21.822 Build
+on:
+  push:
+    branches: [temp/s01-c02-production-readback-20260904-current]
+    paths: ['.github/workflows/temp-s01-c02-v121822-build.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact fix branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: fix/s01-c02-publish-runtime-generation-v121822
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: ops
+      - name: Apply Publish Runtime Generation V1 atomically
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd ops
+          test "$(git rev-parse HEAD)" = '696fb2d936210a2a179dec5fea4a2c6594d65df6'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          js=Path('assets/js/admin-publish-zip.js')
+          s=js.read_text()
+          old="""(function(){
+            'use strict';
+            if(window.vfOpsPublishZipRuntime){window.vfOpsPublishZipRuntime.bind();return;}
+
+            var state="""
+          new="""(function(){
+            'use strict';
+            var runtimeVersion='1.21.822';
+            var runtimeReloadKey='vfOpsPublishZipRuntimeReload:'+runtimeVersion;
+            var existingRuntime=window.vfOpsPublishZipRuntime;
+            if(existingRuntime){
+              if(String(existingRuntime.version||'')===runtimeVersion){existingRuntime.bind();return;}
+              var shouldReload=true;
+              try{shouldReload=window.sessionStorage.getItem(runtimeReloadKey)!=='1';if(shouldReload){window.sessionStorage.setItem(runtimeReloadKey,'1');}}catch(storageError){}
+              if(shouldReload){window.setTimeout(function(){window.location.reload();},0);return;}
+              window.vfOpsPublishZipRuntime=null;
+            }
+
+            var state="""
+          if old not in s: raise SystemExit('runtime head anchor missing')
+          s=s.replace(old,new,1)
+          old2="""  window.vfOpsPublishZipRuntime={bind:bind};
+            if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind,{once:true});}else{bind();}
+          """
+          new2="""  window.vfOpsPublishZipRuntime={version:runtimeVersion,bind:bind};
+            try{window.sessionStorage.removeItem(runtimeReloadKey);}catch(storageError){}
+            if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',bind,{once:true});}else{bind();}
+          """
+          if old2 not in s: raise SystemExit('runtime export anchor missing')
+          s=s.replace(old2,new2,1)
+          js.write_text(s)
+
+          Path('VERSION').write_text('1.21.822\n')
+          p=Path('vf-ops.php'); t=p.read_text()
+          for a,b in [
+            ('Version: 1.21.821','Version: 1.21.822'),
+            ("define('VF_OPS_VERSION', '1.21.821')","define('VF_OPS_VERSION', '1.21.822')"),
+            ("define('VF_OPS_ROUND', 'CANDIDATE-WORKER-RESILIENCE-V1')","define('VF_OPS_ROUND', 'PUBLISH-RUNTIME-GENERATION-V1')"),
+          ]:
+            if t.count(a)!=1: raise SystemExit('vf-ops identity anchor missing: '+a)
+            t=t.replace(a,b,1)
+          p.write_text(t)
+
+          test=Path('.github/phase3/v121822-publish-runtime-generation.mjs')
+          test.write_text(r'''import fs from 'node:fs';
+          const js=fs.readFileSync('assets/js/admin-publish-zip.js','utf8');
+          const style=fs.readFileSync('includes/views/admin-style-helpers/admin-style-core.php','utf8');
+          const saas=fs.readFileSync('includes/admin-v13/saas-operation-contract.php','utf8');
+          const view=fs.readFileSync('includes/admin-v13/views/publish_zip.php','utf8');
+          const state=fs.readFileSync('includes/release/async-job-parts/03-job-state-trait.php','utf8');
+          const must=[
+            "var runtimeVersion='1.21.822'",
+            "var runtimeReloadKey='vfOpsPublishZipRuntimeReload:'+runtimeVersion",
+            "String(existingRuntime.version||'')===runtimeVersion",
+            "window.sessionStorage.setItem(runtimeReloadKey,'1')",
+            "window.location.reload()",
+            "window.vfOpsPublishZipRuntime={version:runtimeVersion,bind:bind}",
+            "window.sessionStorage.removeItem(runtimeReloadKey)",
+            "async function runStageWithRecovery()",
+            "maxAttempts=6",
+          ];
+          for(const needle of must){if(!js.includes(needle))throw new Error('missing:'+needle);}
+          if(js.includes('if(window.vfOpsPublishZipRuntime){window.vfOpsPublishZipRuntime.bind();return;}'))throw new Error('unversioned stale-runtime early return remains');
+          if(!style.includes("filemtime($path)")||!style.includes("wp_enqueue_script"))throw new Error('route asset cache-bust contract missing');
+          if(!saas.includes("filemtime($path)")||!saas.includes("routeScriptUrls"))throw new Error('soft-route cache-bust contract missing');
+          if(!view.includes("$autorun=$requestedAutorun||(($candidateRunning||$inspectionRunning)&&$jobStatus==='RUNNING');"))throw new Error('RUNNING autorun server contract changed');
+          if(!state.includes('acquire_run_lock_v121305')||!state.includes('release_run_lock_v121305'))throw new Error('server execution lock contract missing');
+          console.log('PASS_V121822_PUBLISH_RUNTIME_GENERATION');
+          ''')
+          PY
+          test "$(cat VERSION)" = '1.21.822'
+          grep -q 'Version: 1.21.822' vf-ops.php
+          grep -q "PUBLISH-RUNTIME-GENERATION-V1" vf-ops.php
+          node --check assets/js/admin-publish-zip.js
+          node .github/phase3/v121822-publish-runtime-generation.mjs
+          find . -type f -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          git diff --check
+          git add .github/phase3/v121822-publish-runtime-generation.mjs VERSION assets/js/admin-publish-zip.js vf-ops.php
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = '.github/phase3/v121822-publish-runtime-generation.mjs VERSION assets/js/admin-publish-zip.js vf-ops.php '
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git commit -m 'fix(S01-C02): version publish runtime generation'
+          git push origin HEAD:fix/s01-c02-publish-runtime-generation-v121822
+          echo CANDIDATE_SHA=$(git rev-parse HEAD)
+          echo CANDIDATE_TREE=$(git rev-parse HEAD^{tree})
+          echo PASS_V121822_BUILD
