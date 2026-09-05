@@ -1,0 +1,98 @@
+name: TEMP S01-C02 v1.21.821 Formal Release
+on:
+  push:
+    branches: [temp/s01-c02-production-readback-20260904-current]
+    paths: ['.github/workflows/temp-s01-c02-v121821-formal-release.yml']
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OPS_SHA: 696fb2d936210a2a179dec5fea4a2c6594d65df6
+      OPS_TREE: 28c459d52596108c942d92e04c182b32dbdb3969
+      CANDIDATE_GATE_RUN: '33961126820'
+      CANDIDATE_GATE_HEAD: 98db746b09d12ceefcc1f5dd16a0999b2977a486
+      ASSET_NAME: vf-tools-ops_V1.21.821.zip
+      ASSET_BYTES: '3235879'
+      ASSET_SHA: 01b008a263d4b718053c8bfde46349b89682c1bd0b501c269ea7caa6e10b9192
+      RUNTIME_FILES: '905'
+      RUNTIME_FP: 275304bc29c0f595bf605deb58ca12c80cb51434a7c72114231b2e6993a2c311
+    steps:
+      - name: Checkout exact Ops source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify promoted source Gate and exact artifact
+        shell: bash
+        env:
+          R: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gate=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/core-free-runner-public/actions/runs/$CANDIDATE_GATE_RUN")
+          test "$(jq -r '.conclusion' <<<"$gate")" = success
+          test "$(jq -r '.head_sha' <<<"$gate")" = "$CANDIDATE_GATE_HEAD"
+          main=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/main | jq -r '.commit.sha')
+          develop=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/develop | jq -r '.commit.sha')
+          test "$main" = "$OPS_SHA"
+          test "$develop" = "$OPS_SHA"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$OPS_TREE"
+          node --check ops/assets/js/admin-publish-zip.js
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path('ops'); runtime=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/'); low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              runtime.append((rel,p.read_bytes()))
+          runtime.sort(key=lambda x:x[0])
+          fp=hashlib.sha256()
+          for rel,b in runtime: fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/vf-tools-ops_V1.21.821.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in runtime:
+                  i=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          assert len(runtime)==905
+          assert fp.hexdigest()=='275304bc29c0f595bf605deb58ca12c80cb51434a7c72114231b2e6993a2c311'
+          assert z.stat().st_size==3235879
+          assert hashlib.sha256(z.read_bytes()).hexdigest()=='01b008a263d4b718053c8bfde46349b89682c1bd0b501c269ea7caa6e10b9192'
+          PY
+          unzip -tq "/tmp/release/$ASSET_NAME" >/dev/null
+          echo RELEASE_AUTHORITY=PASS
+          echo EXACT_ARTIFACT=PASS
+      - name: Create and read back Formal Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ! gh release view v1.21.821 --repo llhzx2018/vf-tools-ops >/dev/null 2>&1
+          gh release create v1.21.821 "/tmp/release/$ASSET_NAME" \
+            --repo llhzx2018/vf-tools-ops \
+            --target "$OPS_SHA" \
+            --title 'VF Tools Ops v1.21.821' \
+            --notes 'S01-C02 Candidate Worker Resilience V1. Fixes the proven Production failure mode where a browser-driven Candidate stage loop could stop after a transient AJAX timeout/network/invalid-JSON error while the server job remained RUNNING indefinitely. The browser now performs bounded transient recovery: it passively reads the persisted server job state, preserves terminal evidence, and retries the stage request with backoff. Existing per-job server execution locks remain authoritative and unchanged, preventing duplicate concurrent stage work. Permanent errors remain fail-closed; explicit pause remains available. The current Production Candidate job is preserved across upgrade and may resume from its saved stage; no repeat Source ZIP upload or Candidate recreation is authorized. Candidate Audit, Preflight policy, Source Inspection, final online freeze, M3U8 migration/schema/DB, Seed HOLD, JD.gg, WPvivid, content and DNS are unchanged.'
+          j=$(gh api repos/llhzx2018/vf-tools-ops/releases/tags/v1.21.821)
+          test "$(jq -r '.target_commitish' <<<"$j")" = "$OPS_SHA"
+          test "$(jq -r '.draft' <<<"$j")" = false
+          test "$(jq -r '.prerelease' <<<"$j")" = false
+          test "$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .size' <<<"$j")" = "$ASSET_BYTES"
+          test "$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .digest' <<<"$j")" = "sha256:$ASSET_SHA"
+          echo "RELEASE_ID=$(jq -r '.id' <<<"$j")"
+          echo "ASSET_ID=$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          echo "PUBLISHED_AT=$(jq -r '.published_at' <<<"$j")"
+          echo PASS_V121821_FORMAL_RELEASE
