@@ -1,0 +1,127 @@
+name: TEMP S01-C02 Ops 1.21.825 Formal Release
+on:
+  push:
+    branches: [temp/s01-c02-v121825-formal-release-20260905]
+    paths: ['.github/workflows/temp-s01-c02-v121825-formal-release.yml']
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      REPO: llhzx2018/vf-tools-ops
+      COMMIT: 28e979580704fb9f6936a0f02d478cf8871ad15d
+      TREE: 2982a422a92b10965431bede6f1480b995ef1c12
+      GATE_RUN: '33981118900'
+      GATE_SHA: 5abe6077c5a210ba6870b57708d5b4fd360c28e8
+      TAG: v1.21.825
+      ASSET: vf-tools-ops_V1.21.825.zip
+      BYTES: '3242663'
+      SHA256: c71fe90ccc4a7d5dcad039e37d4f5787cac0e09b45f7819f50971fb835dc5360
+      FILES: '907'
+      FP: b6fd6f281a6226861ebfb13594e3228e7d3fd8168e49707b4b317cd158b30341
+    steps:
+      - name: Verify authority and Candidate Gate
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$R"; test -n "$W"
+          J="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/core-free-runner-public/actions/runs/$GATE_RUN")"
+          test "$(jq -r .status <<<"$J")" = completed
+          test "$(jq -r .conclusion <<<"$J")" = success
+          test "$(jq -r .head_sha <<<"$J")" = "$GATE_SHA"
+          L="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/latest")"
+          test "$(jq -r .tag_name <<<"$L")" = v1.21.824
+          for b in main develop; do
+            B="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/branches/$b")"
+            test "$(jq -r .commit.sha <<<"$B")" = "$COMMIT"
+            test "$(jq -r .commit.commit.tree.sha <<<"$B")" = "$TREE"
+          done
+          test "$(curl -sS -o /tmp/existing -w '%{http_code}' -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/tags/$TAG")" = 404
+          test "$(curl -sS -o /tmp/tag-existing -w '%{http_code}' -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/git/ref/tags/$TAG")" = 404
+          echo RELEASE_AUTHORITY=PASS
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - name: Rebuild exact artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = 1.21.825
+          php ops/.github/phase3/v121825-internal-link-target-family-readback.php | grep -Fxq PASS_V121825_INTERNAL_LINK_TARGET_FAMILY_READBACK
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          import re,hashlib,zipfile,os
+          from pathlib import Path
+          root=Path('ops'); f={}
+          def ok(r):
+            p=r.as_posix(); q=p.split('/')
+            if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in q): return False
+            if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+            if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+            return q[0] in {'includes','assets','languages','config'}
+          for s in root.rglob('*'):
+            if s.is_file() and not s.is_symlink():
+              r=s.relative_to(root)
+              if ok(r): f[r.as_posix()]=s.read_bytes()
+          f=dict(sorted(f.items())); fp=hashlib.sha256()
+          for r,b in f.items(): fp.update((r+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/'+os.environ['ASSET'])
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as o:
+            for r,b in f.items():
+              i=zipfile.ZipInfo('vf-ops/'+r,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; o.writestr(i,b)
+          assert z.stat().st_size==int(os.environ['BYTES'])
+          assert hashlib.sha256(z.read_bytes()).hexdigest()==os.environ['SHA256']
+          assert len(f)==int(os.environ['FILES'])
+          assert fp.hexdigest()==os.environ['FP']
+          PY
+          unzip -tq "/tmp/release/$ASSET" >/dev/null
+          echo EXACT_ARTIFACT=PASS
+      - name: Create formal tag release and asset
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          W: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg ref "refs/tags/$TAG" --arg sha "$COMMIT" '{ref:$ref,sha:$sha}' >/tmp/tag.json
+          curl -fsSL -X POST -H "Authorization: Bearer $W" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/$REPO/git/refs" --data-binary @/tmp/tag.json >/tmp/tag-out.json
+          test "$(jq -r .object.sha /tmp/tag-out.json)" = "$COMMIT"
+          cat >/tmp/body.md <<EOF
+          VF Tools Ops V1.21.825 adds read-only aggregate target-family observability over the full terminal Candidate internal-link failure set.
+
+          - Exact Target Family Gate $GATE_RUN PASS on source $COMMIT / tree $TREE.
+          - Reads the full candidate_audit failure list, avoiding the existing 80-item findings/source-fix-plan display limit.
+          - Reports aggregate leaf and unique-target counts for known-safe replacements, About, zh, archive, core tool, blog-prefix, guides-prefix and other targets.
+          - No URL/path/failure text, filename, package identity, SHA, source path or job identity is exposed.
+          - Unparsed internal-link leaves remain PARTIAL/fail-closed; Candidate verdict, final_decision and package readiness are unchanged.
+          - Existing recovered Static Source remains reusable; no source re-upload or Candidate recreation is authorized.
+          - M3U8 migration/data, Seed HOLD, JD.gg, WPvivid, content, schema and DNS are untouched.
+          - Asset $ASSET; $BYTES bytes; SHA256 $SHA256; runtime files $FILES; fingerprint $FP.
+          - Production upgrade is NOT executed by this GitHub Release.
+          EOF
+          sed -i 's/^          //' /tmp/body.md
+          jq -n --arg tag "$TAG" --arg name 'VF Tools Ops v1.21.825' --rawfile body /tmp/body.md '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false}' >/tmp/rel.json
+          curl -fsSL -X POST -H "Authorization: Bearer $W" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "https://api.github.com/repos/$REPO/releases" --data-binary @/tmp/rel.json >/tmp/rel-out.json
+          RID="$(jq -r .id /tmp/rel-out.json)"; test -n "$RID"; test "$RID" != null
+          curl -fsSL -X POST -H "Authorization: Bearer $W" -H 'Content-Type: application/zip' "https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$ASSET" --data-binary "@/tmp/release/$ASSET" >/tmp/asset-out.json
+          test "$(jq -r .size /tmp/asset-out.json)" = "$BYTES"
+          L="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/tags/$TAG")"
+          test "$(jq -r .draft <<<"$L")" = false
+          test "$(jq -r .prerelease <<<"$L")" = false
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$L")" = "$BYTES"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$L")" = "sha256:$SHA256"
+          T="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/git/ref/tags/$TAG")"
+          test "$(jq -r .object.sha <<<"$T")" = "$COMMIT"
+          echo FORMAL_RELEASE_V121825=PASS
