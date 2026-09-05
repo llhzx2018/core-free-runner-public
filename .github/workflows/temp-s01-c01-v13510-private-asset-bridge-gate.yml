@@ -1,0 +1,85 @@
+name: TEMP S01-C01 v1.35.10 Private Asset Bridge Gate
+on:
+  push:
+    branches: [temp/s01-update-refresh-policy-gate-20260904]
+    paths: ['.github/workflows/temp-s01-c01-v13510-private-asset-bridge-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASE: 2db7feab0fa975bcadf01867a044983b51b17145
+      CANDIDATE: cae5a32961c067d1336635610154b2f009a6bd03
+      THEME_DEVELOP: 63eb30f4250951e9a2c3dfe0a43c7f18af6e1f81
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: theme
+      - name: Verify live base and exact scope
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          live(){ curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/vf-tools-theme/branches/$1" | jq -r '.commit.sha'; }
+          test "$(live main)" = "$BASE"
+          test "$(live develop)" = "$THEME_DEVELOP"
+          printf '%s\n' \
+            VERSION \
+            src/inc/update/bootstrap.php \
+            src/inc/update/class-vf-theme-private-asset-download-bridge-v1.php \
+            src/style.css \
+            tests/private-asset-bulk-bridge-contract.php | sort >/tmp/expected
+          git -C theme diff --name-only "$BASE" "$CANDIDATE" | sort >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          echo EXACT_SCOPE_AND_BRANCH_AUTHORITY=PASS
+      - name: PHP lint and focused bridge contract
+        run: |
+          set -Eeuo pipefail
+          find theme -path 'theme/.git' -prune -o -type f -name '*.php' -print0 | xargs -0 -n 1 php -l >/tmp/php-lint
+          php theme/tests/private-asset-bulk-bridge-contract.php
+          grep -Fq "VF_Theme_Private_Asset_Download_Bridge_V1::register();" theme/src/inc/update/bootstrap.php
+          grep -Fq "Version: 1.35.10" theme/src/style.css
+          grep -Fq "private const CACHE_TTL = 3600;" theme/src/inc/update/class-vf-theme-update-source-v1.php
+          echo PHP_AND_PRIVATE_ASSET_BRIDGE=PASS
+      - name: Runtime authority and deterministic artifact
+        run: |
+          set -Eeuo pipefail
+          git -C theme worktree add /tmp/theme-base "$BASE" >/dev/null
+          cat >/tmp/auth.php <<'PHP'
+          <?php
+          define('ABSPATH','/'); class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/src/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1].'/src'); unset($s['files']); echo json_encode($s),"\n";
+          PHP
+          B="$(php /tmp/auth.php /tmp/theme-base)"; C="$(php /tmp/auth.php theme)"
+          echo "BASE_RUNTIME=$B"; echo "CANDIDATE_RUNTIME=$C"
+          test "$(jq -r '.file_count' <<<"$B")" = 437
+          test "$(jq -r '.fingerprint_sha256' <<<"$B")" = fd01891ba3f14c0f886788f7fadc5d4dcff5c795c07399fe74111a9d8ac1a2a5
+          test "$(jq -r '.file_count' <<<"$C")" = 438
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,zipfile,json
+          files=[]
+          for p in Path('theme/src').rglob('*'):
+              if p.is_file() and not p.is_symlink(): files.append((p.relative_to('theme/src').as_posix(),p.read_bytes()))
+          files.sort(key=lambda x:x[0])
+          z=Path('/tmp/release/vf-tools-theme_V1.35.10.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in files:
+                  i=zipfile.ZipInfo('vf-tools-theme/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          fp=hashlib.sha256(''.join(k+'\0'+hashlib.sha256(b).hexdigest()+'\n' for k,b in files if True).encode()).hexdigest()
+          print('ARTIFACT_AUTHORITY='+json.dumps({'bytes':z.stat().st_size,'sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'zip_files':len(files)},separators=(',',':')))
+          PY
+          unzip -tq /tmp/release/vf-tools-theme_V1.35.10.zip >/dev/null
+          unzip -p /tmp/release/vf-tools-theme_V1.35.10.zip vf-tools-theme/style.css | grep -Fq 'Version: 1.35.10'
+          echo "TARGET_RUNTIME_FILES=$(jq -r '.file_count' <<<"$C")"
+          echo "TARGET_RUNTIME_FP=$(jq -r '.fingerprint_sha256' <<<"$C")"
+          echo PASS_THEME_V13510_CANDIDATE_GATE
