@@ -1,0 +1,104 @@
+name: TEMP S01-C02 v1.21.819 Build
+on:
+  push:
+    branches: [temp/s01-c02-v121819-build-20260905]
+    paths: ['.github/workflows/temp-s01-c02-v121819-build.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OPS_BASE: 2380c5cb29fbf60b3af3f99ae93ea6717dbc34dd
+      OPS_BRANCH: fix/s01-c02-new-job-terminal-evidence-reset-v121819
+    steps:
+      - name: Checkout exact product branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_BRANCH }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: ops
+      - name: Patch stale terminal evidence poisoning
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_BASE"
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('ops')
+          (root/'VERSION').write_text('1.21.819\n',encoding='utf-8')
+          p=root/'vf-ops.php'; s=p.read_text(encoding='utf-8')
+          for old,new in [
+            ('Version: 1.21.818','Version: 1.21.819'),
+            ("VF_OPS_VERSION', '1.21.818'","VF_OPS_VERSION', '1.21.819'"),
+            ("VF_OPS_ROUND', 'STATIC-INSPECTION-FAILURE-SEGMENT-RUNTIME-V1'","VF_OPS_ROUND', 'STATIC-NEW-JOB-TERMINAL-EVIDENCE-RESET-V1'"),
+          ]:
+              assert old in s, old
+              s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+
+          p=root/'includes/release/async-job-parts/01-job-create-trait.php'; s=p.read_text(encoding='utf-8')
+          anchor="""    private static function create_job_from_source_file(string $job_id, string $source_path, string $source_name, string $target_base_url, string $mode = 'one_step_cf_zip'): string {\n"""
+          assert anchor in s
+          helper="""    /**\n     * V1.21.819: a genuinely new release/inspection job must never inherit\n     * terminal Candidate evidence from the previously active job. Historical\n     * evidence remains in release history; this resets only the mutable current\n     * release record before it is rebound to the new job id.\n     */\n    public static function reset_record_terminal_evidence_for_new_job_v121819(array $record): array {\n        foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error','candidate_audit'] as $key) {\n            $record[$key] = '';\n        }\n        $record['failures'] = 0;\n        $record['warnings'] = 0;\n        $record['status'] = 'PARTIAL';\n        return $record;\n    }\n\n\n"""
+          s=s.replace(anchor,helper+anchor,1)
+          needle="            $record = vf_toolsite_cf_release_record();"
+          assert s.count(needle)==2, s.count(needle)
+          s=s.replace(needle,"            $record = self::reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record());")
+          p.write_text(s,encoding='utf-8')
+
+          test=root/'.github/phase3/v121819-new-job-terminal-evidence-reset.php'
+          test.write_text(r'''<?php
+          if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
+          require dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php';
+          final class VF_Test_New_Job_Record_Reset { use VF_Ops_Release_Async_Job_Create_Trait; }
+          $stale = [
+              'status'=>'FAIL',
+              'final_candidate_audit_result'=>'FAIL',
+              'generation_result'=>'FAIL',
+              'cf_upload_check_summary'=>'最终候选包自检失败：old',
+              'candidate_async_error'=>'old error',
+              'candidate_audit'=>'{"status":"FAIL","failures":["old"]}',
+              'failures'=>12,
+              'warnings'=>3,
+              'source_sha256'=>str_repeat('a',64),
+              'source_package_sha256'=>str_repeat('a',64),
+              'package_name'=>'preserve-source.zip',
+              'custom_authority'=>'KEEP',
+          ];
+          $out = VF_Test_New_Job_Record_Reset::reset_record_terminal_evidence_for_new_job_v121819($stale);
+          foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error','candidate_audit'] as $key) {
+              if (($out[$key] ?? null) !== '') { fwrite(STDERR, "FAIL_NOT_CLEARED_$key\n"); exit(1); }
+          }
+          if (($out['failures'] ?? -1) !== 0 || ($out['warnings'] ?? -1) !== 0 || ($out['status'] ?? '') !== 'PARTIAL') { fwrite(STDERR, "FAIL_COUNTS_OR_STATUS\n"); exit(1); }
+          foreach (['source_sha256','source_package_sha256','package_name','custom_authority'] as $key) {
+              if (($out[$key] ?? null) !== $stale[$key]) { fwrite(STDERR, "FAIL_AUTHORITY_MUTATED_$key\n"); exit(1); }
+          }
+          $create = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php');
+          if (substr_count((string)$create, 'reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record())') !== 2) { fwrite(STDERR, "FAIL_CALL_SITES\n"); exit(1); }
+          $state = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/03-job-state-trait.php');
+          foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error'] as $key) {
+              if (!str_contains((string)$state, $key)) { fwrite(STDERR, "FAIL_POISON_KEY_BINDING_$key\n"); exit(1); }
+          }
+          echo "PASS_V121819_NEW_JOB_TERMINAL_EVIDENCE_RESET\n";
+          ''',encoding='utf-8')
+          PY
+          php ops/.github/phase3/v121819-new-job-terminal-evidence-reset.php
+          php -l ops/includes/release/async-job-parts/01-job-create-trait.php >/dev/null
+          php -l ops/vf-ops.php >/dev/null
+          test "$(cat ops/VERSION)" = '1.21.819'
+          printf '%s\n' '.github/phase3/v121819-new-job-terminal-evidence-reset.php' 'VERSION' 'includes/release/async-job-parts/01-job-create-trait.php' 'vf-ops.php' | sort >/tmp/expected
+          git -C ops diff --name-only | sort >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          ! git -C ops diff -- . ':!vf-ops.php' ':!VERSION' | grep -Ei 'm3u8.*(migration|schema|db|drop|reset)|Seed HOLD|jd\.gg|wpvivid|source_sha256.*=' || true
+          git -C ops config user.name VictorForge
+          git -C ops config user.email llhzx2018@gmail.com
+          git -C ops add .github/phase3/v121819-new-job-terminal-evidence-reset.php VERSION includes/release/async-job-parts/01-job-create-trait.php vf-ops.php
+          git -C ops commit -m 'fix(S01-C02): prevent stale terminal evidence poisoning new jobs'
+          git -C ops push origin HEAD:"$OPS_BRANCH"
+          echo "CANDIDATE_SHA=$(git -C ops rev-parse HEAD)"
+          echo "CANDIDATE_TREE=$(git -C ops rev-parse HEAD^{tree})"
+          echo PASS_V121819_BUILD
