@@ -1,0 +1,199 @@
+name: P01 V2.46.4 Post-Merge Readback
+
+on:
+  push:
+    branches:
+      - gate/p01-v2464-postmerge-readback-20260905
+    paths:
+      - .github/workflows/p01-v2464-postmerge-readback-20260905.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      MERGE_SHA: c177787de0dce6c300fb2e76085cb062fd7fc890
+      OWNER_SOURCE: 494b7a9a497fed050885f27ccad3a280ba53b0ce
+      FORMAL_SOURCE: 1bd95e8777e72f6cd89206ddb9daf934ad4e6b9e
+      RELEASE_ID: '383204011'
+      CANONICAL_ASSET: VF_Start_V2.46.4_UPDATE.zip
+      CANONICAL_ID: '545657130'
+      CANONICAL_BYTES: '1682840'
+      CANONICAL_SHA: e4387e850a5813af00611c8fbc03eec09c9062e79c212cfc4f95b4bd2089f115
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring,openssl,fileinfo
+          coverage: none
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: core
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.OWNER_SOURCE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          path: owner
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Actual merged main contains exact P01 channel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          LIVE_SHA="$(git -C core rev-parse HEAD)"
+          git -C core merge-base --is-ancestor "$MERGE_SHA" "$LIVE_SHA"
+          test "$(cat owner/VERSION)" = '2.46.3'
+          test "$(cat owner/src/VERSION.txt)" = '2.46.3'
+          python3 - <<'PY'
+          import json,os
+          p=json.load(open('core/projects/P01.json',encoding='utf-8'))
+          expected={
+            'schema_version':'1.0','project_id':'P01','component_id':'APP','enabled':True,
+            'current_version':'2.46.3','target_version':'2.46.4','update_type':'ATOMIC',
+            'from_versions':['2.46.3'],'schema_from':'2026090401','schema_to':'2026090401',
+            'repository':'llhzx2018/vf-start','release_tag':'v2.46.4','release_id':int(os.environ['RELEASE_ID']),
+            'product_identity':os.environ['FORMAL_SOURCE'],'asset_name':os.environ['CANONICAL_ASSET'],
+            'asset_bytes':int(os.environ['CANONICAL_BYTES']),'asset_sha256':os.environ['CANONICAL_SHA'],
+            'backup_required':True,'rollback_supported':True,'minimum_php':'8.0.0'
+          }
+          for k,v in expected.items(): assert p.get(k)==v,(k,p.get(k),v)
+          print('P01_V2464_POSTMERGE_MANIFEST=PASS')
+          PY
+          echo "LIVE_CORE_SHA=$LIVE_SHA" >> "$GITHUB_ENV"
+
+      - name: Actual merged main passes exact V2.46.3 anti-replay client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v2464-postmerge-replay.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          define('VF_ROOT','/tmp/p01-v2464-postmerge-root');
+          define('VF_PRIVATE_ROOT','/tmp/p01-v2464-postmerge-private');
+          if(!function_exists('vf_write_storage_guards')){function vf_write_storage_guards(string $dir):void{}}
+          if(!function_exists('vf_clean_text')){function vf_clean_text(string $value,int $max=600):string{return mb_substr(trim($value),0,$max);}}
+          final class VfMigrationRunner{public function __construct(private PDO $db){} public function schemaState():array{return ['current_head'=>'2026090401'];}}
+          require getcwd().'/owner/src/app/UpdateManager.php';
+          $new=json_decode(file_get_contents(getcwd().'/core/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $pdo=new PDO('sqlite::memory:');
+          $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+          $pdo->exec('CREATE TABLE update_state(state_key TEXT PRIMARY KEY,state_value TEXT NOT NULL DEFAULT "",updated_at TEXT NOT NULL DEFAULT "")');
+          $put=$pdo->prepare('INSERT INTO update_state(state_key,state_value,updated_at) VALUES(?,?,?)');
+          $put->execute(['highest_verified_release_version','2.46.3',gmdate('c')]);
+          $put->execute(['highest_verified_release_manifest_sha256',str_repeat('c',64),gmdate('c')]);
+          $same=$new;
+          $same['target_version']='2.46.3';
+          $same['release_tag']='v2.46.3';
+          $same['release_id']=383126819;
+          $same['product_identity']='494b7a9a497fed050885f27ccad3a280ba53b0ce';
+          $same['asset_name']='VF_Start_V2.46.3_UPDATE.zip';
+          $same['asset_bytes']=1609058;
+          $same['asset_sha256']='b17da14ff7b0a0b598d55b0fc968a3cf1137e2e62fa73a3e99d109965c86a5ff';
+          $blocked=false;
+          try {
+              $m=new VfUpdateManager($pdo,[
+                  'root'=>'/tmp/p01-v2464-postmerge-root','private_root'=>'/tmp/p01-v2464-postmerge-private','current_version'=>'2.46.3',
+                  'manifest_fetcher'=>static fn(string $repo,string $path,string $ref):array=>$same,
+                  'capabilities'=>['curl'=>true,'zip'=>true],'randomizer'=>static fn(int $a,int $b):int=>0,
+              ]);
+              $m->check(true);
+          } catch (RuntimeException $e) {
+              if(!str_contains($e->getMessage(),'同一正式版本')) throw $e;
+              $blocked=true;
+          }
+          if(!$blocked) throw new RuntimeException('same-version changed manifest was not blocked');
+          $m=new VfUpdateManager($pdo,[
+              'root'=>'/tmp/p01-v2464-postmerge-root','private_root'=>'/tmp/p01-v2464-postmerge-private','current_version'=>'2.46.3',
+              'manifest_fetcher'=>static fn(string $repo,string $path,string $ref):array=>$new,
+              'capabilities'=>['curl'=>true,'zip'=>true],'randomizer'=>static fn(int $a,int $b):int=>0,
+          ]);
+          $r=$m->check(true);
+          if(($r['ok']??false)!==true||($r['latest_version']??'')!=='2.46.4'||($r['available']??false)!==true||($r['can_update']??false)!==true){throw new RuntimeException(json_encode($r,JSON_UNESCAPED_UNICODE));}
+          $q=$pdo->prepare('SELECT state_value FROM update_state WHERE state_key=?');$q->execute(['highest_verified_release_version']);
+          if((string)$q->fetchColumn()!=='2.46.4') throw new RuntimeException('highest verified release not advanced');
+          echo "P01_V2464_POSTMERGE_ANTI_REPLAY=PASS\n";
+          PHP
+          php /tmp/p01-v2464-postmerge-replay.php
+
+      - name: Remote Release byte readback remains exact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.46.4 >/tmp/release.json
+          jq -e --arg s "$FORMAL_SOURCE" --argjson rid "$RELEASE_ID" '.id==$rid and .tag_name=="v2.46.4" and .target_commitish==$s and (.assets|length)==8' /tmp/release.json >/dev/null
+          jq -e --argjson id "$CANONICAL_ID" --arg n "$CANONICAL_ASSET" --argjson b "$CANONICAL_BYTES" --arg d "sha256:$CANONICAL_SHA" '.assets[]|select(.id==$id)|.name==$n and .size==$b and .digest==$d' /tmp/release.json >/dev/null
+          rm -rf /tmp/p01-v2464-postmerge-asset; mkdir -p /tmp/p01-v2464-postmerge-asset
+          gh release download v2.46.4 --repo llhzx2018/vf-start --pattern "$CANONICAL_ASSET" --dir /tmp/p01-v2464-postmerge-asset
+          test "$(sha256sum /tmp/p01-v2464-postmerge-asset/$CANONICAL_ASSET | awk '{print $1}')" = "$CANONICAL_SHA"
+          unzip -p /tmp/p01-v2464-postmerge-asset/$CANONICAL_ASSET repair-v2.46.4.php >/tmp/repair-v2.46.4.php
+          php /tmp/repair-v2.46.4.php --self-test | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          echo P01_V2464_POSTMERGE_RELEASE_BYTES=PASS
+
+      - name: Actual merged Update Core routing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php core/update-core/php/tests/run.php
+          cat >/tmp/p01-v2464-postmerge-core.php <<'PHP'
+          <?php
+          require 'core/update-core/php/src/UpdateAdapter.php';
+          require 'core/update-core/php/src/UpdateCore.php';
+          $m=json_decode(file_get_contents('core/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $c=new CoreUpdates\UpdateCore('P01','APP');
+          $cases=[['2.46.3','2026090401','AVAILABLE'],['2.46.2','2026090401','BLOCKED_SOURCE_VERSION'],['2.46.1','2026090401','BLOCKED_SOURCE_VERSION'],['2.46.3','2026090301','BLOCKED_SCHEMA'],['2.46.4','2026090401','UP_TO_DATE']];
+          foreach($cases as [$v,$s,$want]){ $got=$c->check($v,$s,$m)['status']; if($got!==$want) throw new RuntimeException("$v/$s expected $want got $got"); }
+          echo "P01_V2464_POSTMERGE_UPDATE_CORE=PASS\n";
+          PHP
+          php /tmp/p01-v2464-postmerge-core.php
+
+      - name: Seal post-merge receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v2464-postmerge
+          cat >/tmp/p01-v2464-postmerge/receipt.json <<JSON
+          {
+            "status":"PASS",
+            "gate":"P01_V2464_POSTMERGE_READBACK",
+            "merge_sha":"$MERGE_SHA",
+            "live_core_main":"$LIVE_CORE_SHA",
+            "owner_source":"$OWNER_SOURCE",
+            "formal_source":"$FORMAL_SOURCE",
+            "source_version":"2.46.3",
+            "target_version":"2.46.4",
+            "schema":"2026090401",
+            "migration":null,
+            "release_id":$RELEASE_ID,
+            "canonical_asset_id":$CANONICAL_ID,
+            "canonical_sha256":"$CANONICAL_SHA",
+            "anti_replay_same_version_blocked":true,
+            "strictly_newer_accepted":true,
+            "owner_production_write":false
+          }
+          JSON
+          jq -e '.status=="PASS" and .merge_sha!="" and .target_version=="2.46.4" and .owner_production_write==false' /tmp/p01-v2464-postmerge/receipt.json >/dev/null
+          echo P01_V2464_POSTMERGE_READBACK=PASS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p01-v2464-postmerge-readback-${{ github.run_id }}
+          path: /tmp/p01-v2464-postmerge/receipt.json
+          retention-days: 14
