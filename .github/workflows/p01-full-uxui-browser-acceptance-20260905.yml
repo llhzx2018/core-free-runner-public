@@ -1,0 +1,352 @@
+name: P01 Full UXUI Browser Acceptance
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-full-uxui-browser-acceptance-20260905.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-full-uxui-browser-acceptance-20260905
+  cancel-in-progress: false
+
+jobs:
+  browser-acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      EXPECTED_SHA: c6b6a7d7c8766a3e5db1be8965b67cab1fa7fee8
+      APP_URL: http://127.0.0.1:8089
+      TEST_PASSWORD: VF-Acceptance-2026!
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/uxui
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: c6b6a7d7c8766a3e5db1be8965b67cab1fa7fee8
+          path: vf-start
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring,pdo_sqlite,sqlite3,curl
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Exact source and no-release boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(cat VERSION)" = '2.46.3'
+          test "$(cat src/VERSION.txt)" = '2.46.3'
+          grep -Fq "define('VF_VERSION', '2.46.3')" src/app/bootstrap.php
+          grep -Fq -- '--vf-touch-target:40px' src/assets/visual-system-final.css
+          php tests/unit/consolidated_product_acceptance_contract.php
+          php tests/unit/uxui_round8_visual_system_contract.php
+
+      - name: Install Chromium browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Start clean VF Start runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR/empty" "$EVIDENCE_DIR/data"
+          php -S 127.0.0.1:8089 -t "$GITHUB_WORKSPACE/vf-start/src" >"$RUNNER_TEMP/vf-start-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/vf-start-server.pid"
+          for i in $(seq 1 40); do
+            if curl -fsS "$APP_URL/setup.php" >/dev/null; then exit 0; fi
+            sleep 0.5
+          done
+          cat "$RUNNER_TEMP/vf-start-server.log"
+          exit 1
+
+      - name: Perform real clean HTTP install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          COOKIE="$RUNNER_TEMP/setup.cookies"
+          curl -fsS -c "$COOKIE" "$APP_URL/setup.php" > "$RUNNER_TEMP/setup.html"
+          CSRF="$(python3 - <<'PY'
+          import re
+          p=open('/home/runner/work/_temp/setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',p)
+          if not m: raise SystemExit('setup csrf not found')
+          print(m.group(1))
+          PY
+          )"
+          test -n "$CSRF"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=VF Start Browser Acceptance" \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            "$APP_URL/setup.php" > "$RUNNER_TEMP/setup-post.html"
+          grep -Fq 'VF Start 安装完成' "$RUNNER_TEMP/setup-post.html"
+          curl -fsS "$APP_URL/" | grep -Fq 'VF Start'
+
+      - name: Write browser acceptance harness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p01-uxui-browser-gate.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const base = process.env.APP_URL;
+          const password = process.env.TEST_PASSWORD;
+          const state = process.env.ACCEPTANCE_STATE;
+          const evidenceRoot = path.join(process.env.EVIDENCE_DIR, state);
+          fs.mkdirSync(evidenceRoot,{recursive:true});
+
+          const routes = [
+            ['home','/'],
+            ['start','/start.php'],
+            ['channels','/channels.php'],
+            ['watch','/watch.php'],
+            ['topics','/topics.php'],
+            ['courses','/courses.php'],
+            ['projects','/projects.php'],
+            ['tools','/tools.php'],
+            ['software','/software.php'],
+          ];
+          const navFiles=['home.php','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'];
+          const viewports=[
+            ['desktop',1440,1000],
+            ['tablet',900,1000],
+            ['mobile',390,844],
+          ];
+          const expectedData={
+            start:'Acceptance API Tool',
+            channels:'Acceptance Channel',
+            watch:'Acceptance Movie',
+            topics:'Acceptance Topic',
+            courses:'Acceptance Course',
+            projects:'Acceptance Project',
+            tools:'Acceptance API Tool',
+            software:'Acceptance Desktop Editor',
+          };
+          const touchSelector=[
+            '.vf-icon-button','.vf-theme-toggle','.vf-context-action','.vf-workspace-button','.vf-secondary-button',
+            '.vf-mobile-category-close','.vf-subject-pagination a','.vf-project-action-row>a','.vf-project-action-row>button',
+            '.vf-topic-open','.vf-course-open','.vf-course-state-action','.vf-watch-coverage-button','.vf-watch-enrich-button',
+            '.vf-subject-chips a','.vf-course-chips a'
+          ].join(',');
+
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
+          const auth=await context.newPage();
+          const authErrors=[];
+          auth.on('pageerror',e=>authErrors.push(`pageerror:${e.message}`));
+          auth.on('console',m=>{if(m.type()==='error')authErrors.push(`console:${m.text()}`)});
+          const publicResponse=await auth.goto(base+'/',{waitUntil:'domcontentloaded'});
+          if(!publicResponse || publicResponse.status()>=400) throw new Error('public root failed');
+          if(await auth.locator('body').getAttribute('data-vf-mode')!=='home') throw new Error('public root is not Home');
+          await auth.locator('[data-vf-auth-login]').first().click();
+          const dialog=auth.locator('[data-vf-auth-dialog]');
+          await dialog.waitFor({state:'visible'});
+          await dialog.locator('input[name="password"]').fill(password);
+          await dialog.locator('[data-vf-auth-submit]').click();
+          await auth.waitForLoadState('domcontentloaded');
+          await auth.waitForTimeout(250);
+          if(await auth.locator('body').getAttribute('data-vf-mode')!=='home') throw new Error('login did not enter Owner Home');
+          if(authErrors.length) throw new Error('login runtime errors: '+authErrors.join(' | '));
+          await auth.close();
+
+          const report=[];
+          for(const [vpName,width,height] of viewports){
+            for(const [mode,route] of routes){
+              const page=await context.newPage();
+              await page.setViewportSize({width,height});
+              const runtimeErrors=[];
+              page.on('pageerror',e=>runtimeErrors.push(`pageerror:${e.message}`));
+              page.on('console',m=>{if(m.type()==='error')runtimeErrors.push(`console:${m.text()}`)});
+              const response=await page.goto(base+route,{waitUntil:'domcontentloaded'});
+              if(!response || response.status()>=400) throw new Error(`${state}/${vpName}/${mode}: HTTP failure`);
+              await page.waitForTimeout(220);
+              const actualMode=await page.locator('body').getAttribute('data-vf-mode');
+              if(actualMode!==mode) throw new Error(`${state}/${vpName}/${mode}: body mode=${actualMode}`);
+              const title=await page.title();
+              if(!title.includes('VF Start')) throw new Error(`${state}/${vpName}/${mode}: title identity missing`);
+
+              const hrefFiles=await page.locator('a[href]').evaluateAll(nodes=>nodes.map(n=>{
+                try{return new URL(n.href).pathname.split('/').filter(Boolean).pop()||''}catch{return ''}
+              }));
+              for(const file of navFiles){
+                if(!hrefFiles.includes(file)) throw new Error(`${state}/${vpName}/${mode}: missing nav ${file}`);
+              }
+
+              const overflow=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth,body:document.body.scrollWidth}));
+              if(overflow.scroll>overflow.client+2 || overflow.body>overflow.client+2){
+                throw new Error(`${state}/${vpName}/${mode}: horizontal overflow ${JSON.stringify(overflow)}`);
+              }
+
+              let focused=false;
+              for(let i=0;i<6;i++){
+                await page.keyboard.press('Tab');
+                const focus=await page.evaluate(()=>{
+                  const el=document.activeElement;
+                  if(!el || el===document.body) return {ok:false};
+                  const s=getComputedStyle(el);
+                  return {ok:true,tag:el.tagName,outline:s.outlineStyle,width:parseFloat(s.outlineWidth)||0,shadow:s.boxShadow};
+                });
+                if(focus.ok){
+                  focused=true;
+                  if(focus.outline==='none' && (!focus.shadow || focus.shadow==='none')) throw new Error(`${state}/${vpName}/${mode}: keyboard focus not visible`);
+                  break;
+                }
+              }
+              if(!focused) throw new Error(`${state}/${vpName}/${mode}: keyboard focus unreachable`);
+
+              if(vpName==='mobile'){
+                const touch=await page.locator(touchSelector).evaluateAll(nodes=>nodes.filter(n=>{
+                  const s=getComputedStyle(n); const r=n.getBoundingClientRect();
+                  return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
+                }).map(n=>({tag:n.tagName,cls:n.className,h:n.getBoundingClientRect().height,w:n.getBoundingClientRect().width})));
+                for(const item of touch){
+                  if(item.h<39.5) throw new Error(`${state}/${vpName}/${mode}: touch target <40px ${JSON.stringify(item)}`);
+                }
+              }
+
+              if(state==='data' && expectedData[mode]){
+                const text=await page.locator('body').innerText();
+                if(!text.includes(expectedData[mode])) throw new Error(`${state}/${vpName}/${mode}: representative data missing: ${expectedData[mode]}`);
+              }
+              if(runtimeErrors.length) throw new Error(`${state}/${vpName}/${mode}: runtime errors ${runtimeErrors.join(' | ')}`);
+
+              const shot=path.join(evidenceRoot,`${vpName}-${mode}.png`);
+              await page.screenshot({path:shot,fullPage:true});
+              report.push({state,vpName,mode,status:response.status(),overflow,shot:path.basename(shot)});
+              await page.close();
+            }
+          }
+          fs.writeFileSync(path.join(evidenceRoot,'report.json'),JSON.stringify(report,null,2));
+          await context.close();
+          await browser.close();
+          console.log(`P01_UXUI_BROWSER_${state.toUpperCase()}=PASS`);
+          JS
+
+      - name: Browser acceptance — clean empty state
+        shell: bash
+        env:
+          ACCEPTANCE_STATE: empty
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          node p01-uxui-browser-gate.mjs
+
+      - name: Seed canonical representative product data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p01-seed.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getenv('GITHUB_WORKSPACE') . '/vf-start/src/app/FunctionalWorkspaceCore.php';
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $surface=new VfSurfaceRepository($db);
+          $category=$repo->createCategory(['name'=>'验收导航','description'=>'browser acceptance fixture','is_private'=>0,'sort_order'=>100]);
+
+          $saveStart=function(array $data) use($repo,$surface,$category): int {
+              $data['surface']='start';$data['category_id']=$category;
+              $result=$repo->saveLink(null,$data,'manual');
+              $id=(int)$result['id'];
+              $surface->upsertProfile($id,['surface'=>'start']);
+              return $id;
+          };
+          $saveDomain=function(string $domain,array $data,array $profile=[]) use($repo,$surface): int {
+              $data['surface']=$domain;
+              $result=$repo->saveLink(null,$data,'manual');
+              $id=(int)$result['id'];
+              $surface->upsertProfile($id,array_merge(['surface'=>$domain],$profile));
+              return $id;
+          };
+
+          $saveStart(['title'=>'Acceptance API Tool','url'=>'https://example.com/api-tool','description'=>'开发工具 API 调试与建站','tags'=>['场景:做网站','开发工具','API','建站'],'is_private'=>0]);
+          $saveStart(['title'=>'Acceptance Desktop Editor','url'=>'https://example.com/desktop-editor','description'=>'桌面代码编辑器客户端','tags'=>['软件:开发 / 编程','软件','代码编辑器','客户端'],'is_private'=>0]);
+          $repo->saveLink(null,['surface'=>'start','category_id'=>$category,'title'=>'Acceptance Pending','url'=>'https://example.com/pending','description'=>'待整理验收项','tags'=>[],'is_private'=>1,'is_pending'=>1],'manual');
+
+          $saveDomain('channels',['title'=>'Acceptance Channel','url'=>'https://www.youtube.com/@acceptance-demo','description'=>'频道验收','tags'=>['YouTube'],'is_private'=>0],['resource_kind'=>'youtube','background_friendly'=>1]);
+          $saveDomain('watch',['title'=>'Acceptance Movie','url'=>'https://example.com/movie','description'=>'影视验收','tags'=>['电影'],'is_private'=>0],['resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want']);
+          $saveDomain('topics',['title'=>'Acceptance Topic','url'=>'https://example.com/topic','description'=>'专题验收','tags'=>['指南'],'is_private'=>0],['resource_kind'=>'guide','source_kind'=>'remote_url']);
+          $saveDomain('books',['title'=>'Acceptance Course','url'=>'https://example.com/course','description'=>'课程验收','tags'=>['课程'],'is_private'=>0],['resource_kind'=>'course']);
+          $saveDomain('projects',['title'=>'Acceptance Project','url'=>'https://example.com/project','description'=>'项目验收','tags'=>['项目'],'is_private'=>1],['resource_kind'=>'project','project_code'=>'P99','project_status'=>'active','project_sort_order'=>10]);
+
+          $assets=$surface->allAssets(true);
+          $counts=VfWorkspaceViewCatalog::counts($assets);
+          foreach(['start','channels','watch','topics','courses','projects','tools','software'] as $key){if((int)($counts[$key]??0)<1)throw new RuntimeException('fixture count missing: '.$key);}
+          $integrity=strtolower((string)$db->query('PRAGMA integrity_check')->fetchColumn());
+          if($integrity!=='ok')throw new RuntimeException('SQLite integrity failed: '.$integrity);
+          echo "P01_CANONICAL_FIXTURE=PASS\n";
+          echo json_encode($counts,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          PHP
+          php "$RUNNER_TEMP/p01-seed.php"
+
+      - name: Browser acceptance — populated product state
+        shell: bash
+        env:
+          ACCEPTANCE_STATE: data
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          node p01-uxui-browser-gate.mjs
+
+      - name: Build acceptance receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(find "$EVIDENCE_DIR/empty" -name '*.png' | wc -l)" -eq 27
+          test "$(find "$EVIDENCE_DIR/data" -name '*.png' | wc -l)" -eq 27
+          cat > "$EVIDENCE_DIR/P01_FULL_UXUI_ACCEPTANCE.txt" <<EOF
+          P01_FULL_UXUI_ACCEPTANCE=PASS
+          EXACT_MAIN_SHA=$EXPECTED_SHA
+          VERSION=2.46.3
+          SCHEMA=2026090401
+          MIGRATION=NONE
+          CLEAN_INSTALL=PASS
+          LOGIN_DIALOG=PASS
+          EMPTY_STATE_9_PAGES_X_3_VIEWPORTS=PASS
+          POPULATED_STATE_9_PAGES_X_3_VIEWPORTS=PASS
+          NINE_ENTRY_REACHABILITY=PASS
+          HORIZONTAL_OVERFLOW=PASS
+          KEYBOARD_FOCUS=PASS
+          MOBILE_40PX_TARGETS=PASS
+          CONSOLE_AND_PAGE_ERRORS=PASS
+          CANONICAL_DATA_LANE=VfRepository+VfSurfaceRepository
+          RELEASE_MUTATION=NO
+          PRODUCTION_MUTATION=NO
+          EOF
+          cat "$EVIDENCE_DIR/P01_FULL_UXUI_ACCEPTANCE.txt"
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-full-uxui-browser-acceptance-${{ github.run_id }}
+          path: |
+            evidence/uxui
+            ${{ runner.temp }}/vf-start-server.log
+            ${{ runner.temp }}/setup-post.html
+          if-no-files-found: warn
+          retention-days: 14
