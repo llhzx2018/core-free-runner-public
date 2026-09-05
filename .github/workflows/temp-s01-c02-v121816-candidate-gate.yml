@@ -1,0 +1,85 @@
+name: TEMP S01-C02 v1.21.816 Candidate Gate
+on:
+  push:
+    branches: [temp/s01-c02-v121816-build-20260905]
+    paths: ['.github/workflows/temp-s01-c02-v121816-candidate-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OPS_BASE: 75cee365f69db2684ab753de03cb34607d4eb25e
+      OPS_SHA: 9e6c5700f652c2a4c5b915aac8c96d6198aecdf9
+    steps:
+      - name: Checkout exact Candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify source identity and exact scope
+        shell: bash
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          main=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/main | jq -r '.commit.sha')
+          develop=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/develop | jq -r '.commit.sha')
+          test "$main" = "$OPS_BASE"
+          test "$develop" = "$OPS_BASE"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C ops rev-list --count "$OPS_BASE..$OPS_SHA")" = 1
+          printf '%s\n' '.github/phase3/v121816-inspection-failure-classification.php' 'VERSION' 'includes/site-release/s01-static-inspection-failure-classification-v121816.php' 'vf-ops.php' | sort >/tmp/expected
+          git -C ops diff --name-only "$OPS_BASE" "$OPS_SHA" | sort >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          test "$(cat ops/VERSION)" = '1.21.816'
+          grep -Fq 'Version: 1.21.816' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.816'" ops/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'STATIC-INSPECTION-FAILURE-CLASSIFICATION-V1'" ops/vf-ops.php
+          echo SOURCE_IDENTITY_SCOPE=PASS
+      - name: PHP lint and focused classification contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find ops -path 'ops/.git' -prune -o -type f -name '*.php' -print0 | xargs -0 -n 1 php -l >/tmp/php-lint
+          php ops/.github/phase3/v121816-inspection-failure-classification.php
+          grep -Fq "add_filter('rest_post_dispatch', 'vf_ops_s01_static_inspection_failure_class_rest_v121816', 21, 3)" ops/includes/site-release/s01-static-inspection-failure-classification-v121816.php
+          ! git -C ops diff "$OPS_BASE" "$OPS_SHA" -- . ':!vf-ops.php' ':!VERSION' | grep -E 'm3u8.*(migration|schema|db|drop|reset)|Seed HOLD|jd\.gg|wpvivid' -i
+          echo PHP_AND_FAIL_CLOSED_CONTRACT=PASS
+      - name: Build deterministic Candidate authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,re,zipfile
+          root=Path('ops'); runtime=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/'); low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              runtime.append((rel,p.read_bytes()))
+          runtime.sort(key=lambda x:x[0])
+          fp=hashlib.sha256()
+          for rel,b in runtime: fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/vf-tools-ops_V1.21.816.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in runtime:
+                  i=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          print('CANDIDATE_AUTHORITY='+json.dumps({'bytes':z.stat().st_size,'sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'runtime_files':len(runtime),'runtime_fingerprint':fp.hexdigest()},separators=(',',':')))
+          assert len(runtime)==903
+          PY
+          unzip -tq /tmp/release/vf-tools-ops_V1.21.816.zip >/dev/null
+          unzip -p /tmp/release/vf-tools-ops_V1.21.816.zip vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.816'
+          echo "CANDIDATE_TREE=$(git -C ops rev-parse HEAD^{tree})"
+          echo PASS_V121816_CANDIDATE_GATE
