@@ -1,0 +1,100 @@
+name: TEMP S01-C02 Ops 1.21.835 Helper Finalize Gate
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121835-helper-finalize-gate-20260905
+    paths:
+      - '.github/workflows/temp-s01-c02-v121835-helper-finalize-gate.yml'
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE: 3f2fd2b83062bab477408feb2ff36ff2d832be8c
+      CANDIDATE: e1195a4c5c5eaf7b53565973413a8273a8fa3f48
+      TREE: 08906950f4bd57a0acbc279b352b4b9f2731a21c
+      RUNNER_MAIN: 0160b557ad4ae0e8c6acd97e7551285bc05870bd
+    steps:
+      - name: Checkout exact Product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: ops
+      - name: Verify identity syntax and exact six-file scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = 1.21.835
+          php -l ops/includes/release/builders/class-candidate-batch-builder.php >/dev/null
+          php -l ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php >/dev/null
+          php -l ops/includes/site-release/s01-static-helper-finalize-retry-v121835.php >/dev/null
+          php -l ops/vf-ops.php >/dev/null
+          php -l ops/.github/phase3/v121835-helper-finalize-closure.php >/dev/null
+          php ops/.github/phase3/v121835-helper-finalize-closure.php | grep -Fxq PASS_V121835_HELPER_FINALIZE_CLOSURE
+          mapfile -t files < <(git -C ops diff --name-only "$BASE" "$CANDIDATE" | sort)
+          expected=(
+            .github/phase3/v121835-helper-finalize-closure.php
+            VERSION
+            includes/release/builders/class-candidate-batch-builder.php
+            includes/site-release/s01-static-candidate-build-failure-readback-v121830.php
+            includes/site-release/s01-static-helper-finalize-retry-v121835.php
+            vf-ops.php
+          )
+          test "${#files[@]}" = "${#expected[@]}"
+          for i in "${!expected[@]}"; do test "${files[$i]}" = "${expected[$i]}"; done
+          git -C ops diff --check "$BASE" "$CANDIDATE"
+      - name: Verify helper finalize contract remains fail-closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          b=ops/includes/release/builders/class-candidate-batch-builder.php
+          c=ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php
+          r=ops/includes/site-release/s01-static-helper-finalize-retry-v121835.php
+          grep -Fq "helper_phase'] = 'resource_backfill'" "$b"
+          grep -Fq "helper_phase'] = 'helper_write'" "$b"
+          grep -Fq "helper_phase'] = 'helper_zip_close'" "$b"
+          ! grep -Fq 'VF_Ops_Release_Candidate_Resource_Backfiller::ensure_helpers' "$b"
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('ops/includes/release/builders/class-candidate-batch-builder.php').read_text()
+          assert s.index('VF_Ops_Release_Candidate_Resource_Backfiller::backfill') < s.index('VF_Ops_Release_Candidate_Helper_Writer::write_generated_files')
+          PY
+          grep -Fq 'candidate_helper_backfill_failed' "$c"
+          grep -Fq 'candidate_helper_write_failed' "$c"
+          grep -Fq 'candidate_helper_zip_close_failed' "$c"
+          grep -Fq 'offset < $total' "$r"
+          grep -Fq "completenessStatus !== 'PASS'" "$r"
+          grep -Fq "!empty($build['helpers_written'])" "$r"
+          grep -Fq "failureClass !== 'candidate_build_unclassified'" "$r"
+          grep -Fq 'delete_option(vf_ops_s01_static_zero_write_retry_option_v121834())' "$r"
+          grep -Fq 'vf_ops_s01_static_zero_write_retry_start_v121834()' "$r"
+          ! grep -Eq 'wp_insert_post|wp_update_post|TRUNCATE|DROP TABLE|candidatePackageReady[[:space:]]*=[[:space:]]*true|finalOnlinePass[[:space:]]*=[[:space:]]*YES' "$r"
+      - name: Verify Product authority before promotion
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C ops fetch origin main develop --quiet
+          test "$(git -C ops rev-parse origin/main)" = "$BASE"
+          test "$(git -C ops rev-parse origin/develop)" = "$BASE"
+      - name: Verify Production remains 1.21.834 fail-closed before owner upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-domain-authority' -o /tmp/domain.json
+          curl -fsSL --retry 2 --connect-timeout 15 --max-time 30 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-candidate-readiness' -o /tmp/static.json
+          jq -e '.pluginVersion == "1.21.834" and .authorityStatus == "CURRENT" and .authorityFinalHost == "https://ilovem3u8.com" and .authorityMatch == true' /tmp/domain.json >/dev/null
+          jq -e '.pluginVersion == "1.21.834" and .sourceArtifactAvailable == true and .manualSourceUploadRequired == false and .candidatePackageReady == false and .finalOnlinePass == "NO"' /tmp/static.json >/dev/null
+          jq -e '.sourceRecoveryZeroWriteRetryStatus == "fail" and .sourceRecoveryZeroWriteRetryCandidateStatus == "fail" and .sourceRecoveryZeroWriteRetryCandidateCurrentStage == 4 and .sourceRecoveryZeroWriteRetryCandidateAuditFailureCount == 0' /tmp/static.json >/dev/null
+      - name: Verify runner main untouched
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git ls-remote https://github.com/llhzx2018/core-free-runner-public.git refs/heads/main | awk '{print $1}')" = "$RUNNER_MAIN"
+      - name: Seal result
+        run: echo PASS_V121835_HELPER_FINALIZE_GATE
