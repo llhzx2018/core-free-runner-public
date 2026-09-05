@@ -1,0 +1,107 @@
+name: TEMP S01-C02 Ops 1.21.830 Candidate Build Failure Gate
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121830-candidate-build-failure-gate-20260905
+    paths:
+      - '.github/workflows/temp-s01-c02-v121830-candidate-build-failure-gate.yml'
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      BASE: c02a0d9bec85207669192ea242d44ad756c96fa4
+      COMMIT: 729eeb29a4b99a26c124c9f6969332fab75896f2
+      TREE: 319d71f3ed736faa658444f7dc4771eec09ceb6a
+    steps:
+      - name: Checkout exact Product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops
+      - name: Verify identity syntax and exact scope
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = 1.21.830
+          php -l ops/vf-ops.php
+          php -l ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php
+          php -l ops/.github/phase3/v121830-candidate-build-failure-readback.php
+          C="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/compare/$BASE...$COMMIT")"
+          test "$(jq -r .status <<<"$C")" = ahead
+          mapfile -t FILES < <(jq -r '.files[].filename' <<<"$C" | sort)
+          EXPECTED=(.github/phase3/v121830-candidate-build-failure-readback.php VERSION includes/site-release/s01-static-candidate-build-failure-readback-v121830.php vf-ops.php)
+          printf '%s\n' "${EXPECTED[@]}" | sort >/tmp/expected
+          printf '%s\n' "${FILES[@]}" >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          for b in main develop; do
+            B="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/branches/$b")"
+            test "$(jq -r .commit.sha <<<"$B")" = "$BASE"
+          done
+      - name: Run classifier contract and unit cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php ops/.github/phase3/v121830-candidate-build-failure-readback.php | grep -Fxq PASS_V121830_CANDIDATE_BUILD_FAILURE_READBACK
+          php -r '
+            define("ABSPATH", __DIR__);
+            require "ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php";
+            $cases = [
+              "大包候选包构建找不到源 ZIP。"=>"candidate_source_zip_missing",
+              "大包候选包文件打开失败：bad"=>"candidate_zip_open_failed",
+              "大包候选包写入失败：x"=>"candidate_zip_entry_write_failed",
+              "候选包状态 JSON 编码失败：x"=>"candidate_state_json_encode_failed",
+              "候选包生成不完整，已在内链和 SEO 扫描前停止"=>"candidate_completeness_failed",
+              "some opaque runtime error"=>"candidate_build_unclassified",
+            ];
+            foreach ($cases as $in=>$want) { $got=vf_ops_s01_static_candidate_build_failure_classify_v121830($in); if ($got!==$want) { fwrite(STDERR,"case fail: $got != $want\n"); exit(1); } }
+            echo "PASS_CLASSIFIER_CASES\n";
+          ' | grep -Fxq PASS_CLASSIFIER_CASES
+      - name: Verify read-only privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php
+          grep -Fq "sourceRecoveryCandidateFailureClass" "$F"
+          grep -Fq "sourceRecoveryCandidateBuildOffset" "$F"
+          grep -Fq "sourceRecoveryCandidateRouteInventoryCount" "$F"
+          ! grep -Eq 'move_uploaded_file|\$_FILES|wp_update_post|wp_insert_post|wp_delete_post|update_post_meta|DELETE FROM|DROP TABLE|ALTER TABLE' "$F"
+          ! grep -Fq "finalOnlinePass'=>'YES'" "$F"
+          ! grep -Fq "candidatePackageReady'=>true" "$F"
+          ! grep -Fq "getMessage()" "$F"
+      - name: Verify Production pre-upgrade failure truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-candidate-readiness)"
+          test "$(jq -r .pluginVersion <<<"$J")" = 1.21.829
+          test "$(jq -r .sourceRecoveryJobStatus <<<"$J")" = done
+          test "$(jq -r .sourceRecoveryJobInspectionComplete <<<"$J")" = true
+          test "$(jq -r .sourceRecoveryContinuationStatus <<<"$J")" = fail
+          test "$(jq -r .sourceRecoveryCandidateStatus <<<"$J")" = fail
+          test "$(jq -r .sourceRecoveryCandidateCurrentStage <<<"$J")" = 4
+          test "$(jq -r .sourceRecoveryCandidateAuditFailureCount <<<"$J")" = 0
+          test "$(jq -r .candidatePackageReady <<<"$J")" = false
+          test "$(jq -r .manualSourceUploadRequired <<<"$J")" = false
+          test "$(jq -r .finalOnlinePass <<<"$J")" = NO
+      - name: Verify runner main untouched
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/core-free-runner-public/git/ref/heads/main)"
+          test "$(jq -r .object.sha <<<"$J")" = 0160b557ad4ae0e8c6acd97e7551285bc05870bd
+      - name: Seal result
+        run: echo PASS_V121830_CANDIDATE_BUILD_FAILURE_GATE
