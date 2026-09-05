@@ -1,0 +1,133 @@
+name: TEMP S01-C02 v1.21.821 Build
+on:
+  push:
+    branches: [temp/s01-c02-production-readback-20260904-current]
+    paths: ['.github/workflows/temp-s01-c02-v121821-build.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact fix branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: fix/s01-c02-candidate-worker-resilience-v121821
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: ops
+      - name: Apply Candidate Worker Resilience V1 atomically
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd ops
+          test "$(git rev-parse HEAD)" = '562827263f4d8fe93aee3ea6fb445164cfa5242a'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          js=Path('assets/js/admin-publish-zip.js')
+          s=js.read_text()
+          old="""  function jobCall(action,extra){
+              var body=new URLSearchParams(Object.assign({action:action,job:state.jobId,_wpnonce:state.jobNonce},extra||{}));
+              return jsonFetch(state.ajaxUrl,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:body.toString()},90000);
+            }
+          """
+          new="""  function jobCall(action,extra,timeoutMs){
+              var body=new URLSearchParams(Object.assign({action:action,job:state.jobId,_wpnonce:state.jobNonce},extra||{}));
+              return jsonFetch(state.ajaxUrl,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:body.toString()},Number(timeoutMs||90000));
+            }
+            function jobTransientError(error){
+              var message=String(error&&error.message||'');
+              return !!(error&&(error.busy||error.timeout||/Failed to fetch|NetworkError|Load failed|有效 JSON|服务器处理超时/i.test(message)));
+            }
+            async function passiveJobStatus(){
+              return jobCall('vf_ops_release_job_status',{},30000);
+            }
+            async function runStageWithRecovery(){
+              var attempts=0,maxAttempts=6;
+              while(state.jobLoop){
+                try{return await jobCall('vf_ops_release_job_run');}
+                catch(error){
+                  if(!jobTransientError(error)||attempts>=maxAttempts)throw error;
+                  attempts++;
+                  try{
+                    var statusData=await passiveJobStatus();updateJob(statusData);
+                    if(statusData&&statusData.terminal)return statusData;
+                  }catch(statusError){
+                    if(!jobTransientError(statusError))throw error;
+                  }
+                  updateJob({job:state.jobId,status:'RUNNING',job_mode:state.jobMode,message:'连接暂时中断，正在从服务器已保存阶段自动恢复（'+attempts+'/'+maxAttempts+'）。'});
+                  await wait(Math.min(8000,Math.max(Number(error.retryAfterMs||0),900*Math.pow(2,attempts-1))));
+                }
+              }
+              return {job:state.jobId,status:state.jobStatus||'RUNNING',terminal:false,busy:true,retry_after_ms:1600};
+            }
+          """
+          if old not in s: raise SystemExit('jobCall anchor missing')
+          s=s.replace(old,new,1)
+          old2="var data=await jobCall('vf_ops_release_job_run');updateJob(data);"
+          new2="var data=await runStageWithRecovery();updateJob(data);"
+          if s.count(old2)!=1: raise SystemExit(f'run loop anchor count={s.count(old2)}')
+          s=s.replace(old2,new2,1)
+          old3="""    }catch(error){state.jobLoop=false;updateJob({status:'PAUSED',job:state.jobId,message:error.message||'任务推进失败，当前阶段已保留。'});showFeedback(error.message||'任务推进失败，当前阶段已保留。','error');}
+          """
+          new3="""    }catch(error){state.jobLoop=false;updateJob({status:state.jobStatus||'RUNNING',job:state.jobId,message:error.message||'自动恢复暂时停止；服务器已保存当前阶段，重新打开本页会继续。'});showFeedback(error.message||'自动恢复暂时停止；服务器已保存当前阶段，重新打开本页会继续。','error');}
+          """
+          if old3 not in s: raise SystemExit('outer catch anchor missing')
+          s=s.replace(old3,new3,1)
+          js.write_text(s)
+
+          Path('VERSION').write_text('1.21.821\n')
+          p=Path('vf-ops.php'); t=p.read_text()
+          for a,b in [
+            ('Version: 1.21.820','Version: 1.21.821'),
+            ("define('VF_OPS_VERSION', '1.21.820')","define('VF_OPS_VERSION', '1.21.821')"),
+            ("define('VF_OPS_ROUND', 'CANDIDATE-PREFLIGHT-AUTHORITY-V1')","define('VF_OPS_ROUND', 'CANDIDATE-WORKER-RESILIENCE-V1')"),
+          ]:
+            if t.count(a)!=1: raise SystemExit('vf-ops identity anchor missing: '+a)
+            t=t.replace(a,b,1)
+          p.write_text(t)
+
+          test=Path('.github/phase3/v121821-candidate-worker-resilience.php')
+          test.write_text(r'''<?php
+          $root=dirname(__DIR__,2);
+          $js=file_get_contents($root.'/assets/js/admin-publish-zip.js');
+          $state=file_get_contents($root.'/includes/release/async-job-parts/03-job-state-trait.php');
+          $view=file_get_contents($root.'/includes/admin-v13/views/publish_zip.php');
+          $must=[
+            "function jobTransientError(error)",
+            "async function passiveJobStatus()",
+            "async function runStageWithRecovery()",
+            "maxAttempts=6",
+            "vf_ops_release_job_status",
+            "await runStageWithRecovery()",
+            "error.timeout",
+            "retryAfterMs",
+          ];
+          foreach($must as $needle){if(strpos($js,$needle)===false){fwrite(STDERR,"missing:$needle\n");exit(1);}}
+          if(substr_count($js,"var data=await jobCall('vf_ops_release_job_run');")!==0){fwrite(STDERR,"direct brittle run call remains\n");exit(1);}
+          if(strpos($state,'acquire_run_lock_v121305($job_id, $job)')===false || strpos($state,'release_run_lock_v121305')===false){fwrite(STDERR,"server lock contract missing\n");exit(1);}
+          if(strpos($view,"$autorun=$requestedAutorun||(($candidateRunning||$inspectionRunning)&&$jobStatus==='RUNNING');")===false){fwrite(STDERR,"RUNNING job autostart contract changed\n");exit(1);}
+          if(strpos($js,"action==='pause'")===false || strpos($js,"vf_ops_release_job_pause")===false){fwrite(STDERR,"explicit pause contract missing\n");exit(1);}
+          echo "PASS_V121821_CANDIDATE_WORKER_RESILIENCE\n";
+          ''')
+          PY
+          test "$(cat VERSION)" = '1.21.821'
+          grep -q 'Version: 1.21.821' vf-ops.php
+          grep -q "CANDIDATE-WORKER-RESILIENCE-V1" vf-ops.php
+          node --check assets/js/admin-publish-zip.js
+          php .github/phase3/v121821-candidate-worker-resilience.php
+          find . -type f -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          git diff --check
+          test "$(git diff --name-only | sort | tr '\n' ' ')" = '.github/phase3/v121821-candidate-worker-resilience.php VERSION assets/js/admin-publish-zip.js vf-ops.php '
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add .github/phase3/v121821-candidate-worker-resilience.php VERSION assets/js/admin-publish-zip.js vf-ops.php
+          git commit -m 'fix(S01-C02): make Candidate worker resilient'
+          git push origin HEAD:fix/s01-c02-candidate-worker-resilience-v121821
+          echo CANDIDATE_SHA=$(git rev-parse HEAD)
+          echo CANDIDATE_TREE=$(git rev-parse HEAD^{tree})
+          echo PASS_V121821_BUILD
