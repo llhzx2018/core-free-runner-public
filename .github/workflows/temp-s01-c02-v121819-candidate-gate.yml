@@ -1,0 +1,109 @@
+name: TEMP S01-C02 v1.21.819 Candidate Gate
+on:
+  push:
+    branches: [temp/s01-c02-v121819-build-20260905]
+    paths: ['.github/workflows/temp-s01-c02-v121819-candidate-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OPS_BASE: 2380c5cb29fbf60b3af3f99ae93ea6717dbc34dd
+      OPS_SHA: 00bc49b070485c6095a3b5bd3337b3fcc23d42f5
+      OPS_TREE: 601d8e12aaa00574adffcff8efbfb6ae564ecab5
+    steps:
+      - name: Checkout exact Candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify identity and exact scope
+        shell: bash
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          main=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/main | jq -r '.commit.sha')
+          develop=$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/develop | jq -r '.commit.sha')
+          test "$main" = "$OPS_BASE"
+          test "$develop" = "$OPS_BASE"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$OPS_TREE"
+          test "$(git -C ops rev-list --count "$OPS_BASE..$OPS_SHA")" = 1
+          test "$(git -C ops rev-list --count "$OPS_SHA..$OPS_BASE")" = 0
+          printf '%s\n' \
+            '.github/phase3/v121819-new-job-terminal-evidence-reset.php' \
+            'VERSION' \
+            'includes/release/async-job-parts/01-job-create-trait.php' \
+            'includes/site-release/s01-static-source-recovery-v2.php' \
+            'vf-ops.php' | sort >/tmp/expected
+          git -C ops diff --name-only "$OPS_BASE" "$OPS_SHA" | sort >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          test "$(cat ops/VERSION)" = '1.21.819'
+          grep -Fq 'Version: 1.21.819' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.819'" ops/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'STATIC-NEW-JOB-TERMINAL-EVIDENCE-RESET-V1'" ops/vf-ops.php
+          echo SOURCE_IDENTITY_SCOPE_CONTRACT=PASS
+      - name: Full PHP lint and focused fail-closed contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find ops -path 'ops/.git' -prune -o -type f -name '*.php' -print0 | xargs -0 -n 1 php -l >/tmp/php-lint
+          php ops/.github/phase3/v121819-new-job-terminal-evidence-reset.php
+          create='ops/includes/release/async-job-parts/01-job-create-trait.php'
+          recovery='ops/includes/site-release/s01-static-source-recovery-v2.php'
+          test "$(grep -Fc 'reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record())' "$create")" = 2
+          grep -Fq "'final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error','candidate_audit'" "$create"
+          grep -Fq "vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819" "$recovery"
+          grep -Fq "'final_decision'" "$recovery"
+          grep -Fq "'inspect_only'" "$recovery"
+          grep -Fq "CURRENT_ACTIVE_SOURCE_HASH_MISMATCH" "$recovery"
+          grep -Fq "FAILED_ACTIVE_SOURCE_REBOUND" "$recovery"
+          grep -Fq "create_inspection_from_trusted_source_v121814" "$recovery"
+          grep -Fq "hash_equals((string)\$shaAuthority['sha'], \$actualSha)" "$recovery"
+          git -C ops diff -U0 "$OPS_BASE" "$OPS_SHA" -- includes/release/async-job-parts/01-job-create-trait.php includes/site-release/s01-static-source-recovery-v2.php vf-ops.php | grep '^+' | grep -Ev '^\+\+\+' >/tmp/runtime-added || true
+          if grep -Eqi 'm3u8|Seed HOLD|jd\.gg|wpvivid|\$wpdb|delete_option|wp_insert|wp_update|DROP TABLE|ALTER TABLE|wp_delete_post|wp_update_post|update_post_meta|delete_post_meta' /tmp/runtime-added; then
+            echo FAIL_FORBIDDEN_RUNTIME_SCOPE
+            cat /tmp/runtime-added
+            exit 1
+          fi
+          echo PHP_AND_STALE_EVIDENCE_FAIL_CLOSED_CONTRACT=PASS
+      - name: Build deterministic Candidate authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,re,zipfile
+          root=Path('ops'); runtime=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/'); low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              runtime.append((rel,p.read_bytes()))
+          runtime.sort(key=lambda x:x[0])
+          fp=hashlib.sha256()
+          for rel,b in runtime: fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/release/vf-tools-ops_V1.21.819.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in runtime:
+                  i=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          authority={'bytes':z.stat().st_size,'sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'runtime_files':len(runtime),'runtime_fingerprint':fp.hexdigest()}
+          print('CANDIDATE_AUTHORITY='+json.dumps(authority,separators=(',',':')))
+          assert len(runtime)==905, authority
+          PY
+          unzip -tq /tmp/release/vf-tools-ops_V1.21.819.zip >/dev/null
+          unzip -p /tmp/release/vf-tools-ops_V1.21.819.zip vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.819'
+          echo "CANDIDATE_TREE=$(git -C ops rev-parse HEAD^{tree})"
+          echo PASS_V121819_CANDIDATE_GATE
