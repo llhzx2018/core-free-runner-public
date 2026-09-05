@@ -1,0 +1,161 @@
+name: P01 Mobile Touch Minimum
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-mobile-touch-minimum-20260905.yml
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: c94d1873555ca81c227da14054bca496e866325b
+      BASE_SHA: 6666e3847545ee20f843acd2a86adfb2e23b7a12
+      APP_URL: http://127.0.0.1:8092
+      TEST_PASSWORD: VF-Mobile-Touch-2026!
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: c94d1873555ca81c227da14054bca496e866325b
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 4
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring,pdo_sqlite,sqlite3,curl
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Exact candidate and regression boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+          changed="$(git diff --name-only "$BASE_SHA"..HEAD | sort)"
+          printf '%s\n' "$changed"
+          test "$changed" = 'src/assets/visual-system-final.css'
+          test "$(cat VERSION)" = '2.46.3'
+          test "$(cat src/VERSION.txt)" = '2.46.3'
+          ! git diff --name-only "$BASE_SHA"..HEAD | grep -Eq '(^VERSION$|^src/VERSION.txt$|^src/app/bootstrap.php$|^src/migrations/)'
+          grep -Fq 'min-height:var(--vf-touch-target)!important' src/assets/visual-system-final.css
+          grep -Fq 'min-width:var(--vf-touch-target)!important' src/assets/visual-system-final.css
+          php tests/unit/consolidated_product_acceptance_contract.php
+          php tests/unit/uxui_round8_visual_system_contract.php
+          for f in tests/unit/uxui_round1_home_root_contract.php tests/unit/uxui_round2_subject_identity_contract.php tests/unit/uxui_round3_course_identity_contract.php tests/unit/uxui_round4_tools_identity_contract.php tests/unit/uxui_round5_software_identity_contract.php tests/unit/uxui_round6_channels_watch_identity_contract.php tests/unit/uxui_round7_navigation_home_identity_contract.php; do php "$f"; done
+
+      - name: Install Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Clean install runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:8092 -t "$GITHUB_WORKSPACE/src" >"$RUNNER_TEMP/p01-mobile-touch-server.log" 2>&1 &
+          ready=0
+          for i in $(seq 1 40); do if curl -fsS "$APP_URL/setup.php" >/dev/null; then ready=1; break; fi; sleep 0.5; done
+          test "$ready" -eq 1
+          COOKIE="$RUNNER_TEMP/setup.cookies"
+          curl -fsS -c "$COOKIE" "$APP_URL/setup.php" > "$RUNNER_TEMP/setup.html"
+          CSRF="$(python3 - <<'PY'
+          import re,os
+          p=open(os.environ['RUNNER_TEMP']+'/setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',p)
+          if not m: raise SystemExit('setup csrf missing')
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=VF Mobile Touch Gate" \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            "$APP_URL/setup.php" > "$RUNNER_TEMP/setup-post.html"
+          grep -Fq 'VF Start 安装完成' "$RUNNER_TEMP/setup-post.html"
+
+      - name: Real mobile all-page touch sweep
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/mobile-touch-gate.mjs" <<'JS'
+          import { chromium } from 'playwright';
+          const base=process.env.APP_URL;
+          const routes=[['home','/'],['start','/start.php'],['channels','/channels.php'],['watch','/watch.php'],['topics','/topics.php'],['courses','/courses.php'],['projects','/projects.php'],['tools','/tools.php'],['software','/software.php']];
+          const touchSelector=[
+            '.vf-icon-button','.vf-theme-toggle','.vf-context-action','.vf-workspace-button','.vf-secondary-button',
+            '.vf-mobile-category-close','.vf-subject-pagination a','.vf-project-action-row>a','.vf-project-action-row>button',
+            '.vf-topic-open','.vf-course-open','.vf-course-state-action','.vf-watch-coverage-button','.vf-watch-enrich-button',
+            '.vf-subject-chips a','.vf-course-chips a'
+          ].join(',');
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:390,height:844},reducedMotion:'reduce'});
+          const login=await context.newPage();
+          const loginErrors=[];
+          login.on('console',m=>{if(m.type()==='error')loginErrors.push('console:'+m.text())});
+          login.on('pageerror',e=>loginErrors.push('pageerror:'+e.message));
+          await login.goto(base+'/',{waitUntil:'domcontentloaded'});
+          await login.locator('[data-vf-auth-login]').first().click();
+          const dialog=login.locator('[data-vf-auth-dialog]');
+          await dialog.locator('input[name="password"]').fill(process.env.TEST_PASSWORD);
+          const nav=login.waitForNavigation({waitUntil:'networkidle'});
+          await dialog.locator('[data-vf-auth-submit]').click();
+          await nav;
+          await login.locator('body.vf-functional-workspace').waitFor({state:'attached'});
+          if(loginErrors.length)throw new Error(loginErrors.join(' | '));
+          await login.close();
+
+          const results=[];
+          for(const [mode,route] of routes){
+            const page=await context.newPage();
+            const errors=[];
+            page.on('console',m=>{if(m.type()==='error')errors.push('console:'+m.text())});
+            page.on('pageerror',e=>errors.push('pageerror:'+e.message));
+            const response=await page.goto(base+route,{waitUntil:'domcontentloaded'});
+            if(!response||response.status()>=400)throw new Error(`${mode}: HTTP failure`);
+            await page.waitForTimeout(150);
+            if(await page.locator('body').getAttribute('data-vf-mode')!==mode)throw new Error(`${mode}: identity mismatch`);
+            const items=await page.locator(touchSelector).evaluateAll(nodes=>nodes.filter(n=>{
+              const s=getComputedStyle(n),r=n.getBoundingClientRect();
+              return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;
+            }).map(n=>({tag:n.tagName,cls:typeof n.className==='string'?n.className:'',h:n.getBoundingClientRect().height,w:n.getBoundingClientRect().width})));
+            for(const item of items){if(item.h<39.5)throw new Error(`${mode}: touch target <40px ${JSON.stringify(item)}`)}
+            const overflow=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth,body:document.body.scrollWidth}));
+            if(overflow.scroll>overflow.client+2||overflow.body>overflow.client+2)throw new Error(`${mode}: horizontal overflow ${JSON.stringify(overflow)}`);
+            if(errors.length)throw new Error(`${mode}: ${errors.join(' | ')}`);
+            results.push({mode,count:items.length,overflow});
+            await page.close();
+          }
+          console.log('P01_MOBILE_TOUCH_MINIMUM=PASS');
+          console.log(JSON.stringify(results));
+          await browser.close();
+          JS
+          cd "$RUNNER_TEMP"
+          node mobile-touch-gate.mjs
+
+      - name: Receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_MOBILE_TOUCH_MINIMUM=PASS'
+          echo "EXACT_CANDIDATE=$EXPECTED_SHA"
+          echo 'VERSION=2.46.3'
+          echo 'SCHEMA=2026090401'
+          echo 'MIGRATION=NONE'
+          echo 'RELEASE_MUTATION=NO'
+          echo 'PRODUCTION_MUTATION=NO'
