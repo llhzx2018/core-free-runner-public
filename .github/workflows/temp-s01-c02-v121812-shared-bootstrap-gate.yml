@@ -1,0 +1,84 @@
+name: TEMP S01-C02 v1.21.812 Shared Bootstrap Gate
+on:
+  push:
+    branches: [temp/s01-c02-v121812-shared-bootstrap-20260905]
+    paths: ['.github/workflows/temp-s01-c02-v121812-shared-bootstrap-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASE: fbdd766314d3f9abe8d1834343e8058d99167307
+      CANDIDATE: b32ea5d6012aa25305ed23b3aaadc4bf048e8c3c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify live authority and exact scope
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          live(){ curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/vf-tools-ops/branches/$1" | jq -r '.commit.sha'; }
+          test "$(live main)" = "$BASE"
+          test "$(live develop)" = "$BASE"
+          printf '%s\n' \
+            .github/phase3/v121812-shared-private-asset-bootstrap.php \
+            VERSION \
+            includes/wp-update/bootstrap.php \
+            includes/wp-update/class-vf-ops-shared-private-asset-bootstrap-v1.php \
+            vf-ops.php | sort >/tmp/expected
+          git -C ops diff --name-only "$BASE" "$CANDIDATE" | sort >/tmp/actual
+          diff -u /tmp/expected /tmp/actual
+          grep -Fq 'Version: 1.21.812' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.812'" ops/vf-ops.php
+          grep -Fq 'SHARED-PRIVATE-ASSET-BOOTSTRAP-V1' ops/vf-ops.php
+          test "$(cat ops/VERSION)" = '1.21.812'
+          echo SOURCE_IDENTITY_SCOPE=PASS
+      - name: PHP lint and focused shared bootstrap contract
+        run: |
+          set -Eeuo pipefail
+          find ops -path 'ops/.git' -prune -o -type f -name '*.php' -print0 | xargs -0 -n 1 php -l >/tmp/php-lint
+          php ops/.github/phase3/v121812-shared-private-asset-bootstrap.php
+          f=ops/includes/wp-update/class-vf-ops-shared-private-asset-bootstrap-v1.php
+          grep -Fq "private const THEME_REPOSITORY = 'llhzx2018/vf-tools-theme';" "$f"
+          grep -Fq "private const M3U8_REPOSITORY = 'llhzx2018/vf-tools-m3u8';" "$f"
+          grep -Fq "add_filter('upgrader_pre_download', [self::class, 'pre_download'], 11, 4);" "$f"
+          ! grep -E 'update_option|delete_option|wpdb|dbDelta|DROP TABLE|TRUNCATE|migration|schema_repair|seed' "$f"
+          echo PHP_AND_SHARED_BOOTSTRAP_CONTRACT=PASS
+      - name: Build deterministic Candidate artifact
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/release
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile,json
+          files=[]
+          for p in Path('ops').rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to('ops').as_posix(); parts=rel.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              files.append((rel,p.read_bytes()))
+          files.sort(key=lambda x:x[0])
+          fp=hashlib.sha256(''.join(rel+'\0'+hashlib.sha256(b).hexdigest()+'\n' for rel,b in files).encode()).hexdigest()
+          z=Path('/tmp/release/vf-tools-ops_V1.21.812.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in files:
+                  i=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          print('ARTIFACT_AUTHORITY='+json.dumps({'bytes':z.stat().st_size,'sha256':hashlib.sha256(z.read_bytes()).hexdigest(),'runtime_files':len(files),'runtime_fingerprint':fp},separators=(',',':')))
+          assert len(files)==900
+          PY
+          unzip -tq /tmp/release/vf-tools-ops_V1.21.812.zip >/dev/null
+          unzip -p /tmp/release/vf-tools-ops_V1.21.812.zip vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.812'
+          echo PASS_V121812_SHARED_BOOTSTRAP_CANDIDATE_GATE
