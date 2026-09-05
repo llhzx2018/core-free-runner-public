@@ -1,0 +1,92 @@
+name: TEMP S01-C02 Ops 1.21.831 Tail Replay Probe Gate
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121831-tail-replay-probe-gate-20260905
+    paths:
+      - '.github/workflows/temp-s01-c02-v121831-tail-replay-probe-gate.yml'
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      BASE: 8364be24e1e4d4bb0f3589dfc8d2b5d3fd0cd767
+      BASE_TREE: 319d71f3ed736faa658444f7dc4771eec09ceb6a
+      RELEASE_1830: 729eeb29a4b99a26c124c9f6969332fab75896f2
+      CANDIDATE: b0ef670e5a9564ad33329cfee8d5902bfe6a0d47
+      CANDIDATE_TREE: bc1290af8750d54f2f2c85b6814948b7b86d891c
+    steps:
+      - name: Checkout exact Product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.CANDIDATE }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: ops
+      - name: Verify identity syntax and exact scope
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = 1.21.831
+          php -l ops/vf-ops.php >/dev/null
+          php -l ops/includes/site-release/s01-static-candidate-tail-replay-probe-v121831.php >/dev/null
+          php ops/.github/phase3/v121831-candidate-tail-replay-probe.php | grep -Fxq PASS_V121831_CANDIDATE_TAIL_REPLAY_PROBE
+          C="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/compare/$BASE...$CANDIDATE")"
+          test "$(jq -r .status <<<"$C")" = ahead
+          test "$(jq '.files|length' <<<"$C")" = 4
+          mapfile -t files < <(jq -r '.files[].filename' <<<"$C" | sort)
+          expected=(.github/phase3/v121831-candidate-tail-replay-probe.php VERSION includes/site-release/s01-static-candidate-tail-replay-probe-v121831.php vf-ops.php)
+          printf '%s\n' "${files[@]}" > /tmp/files
+          printf '%s\n' "${expected[@]}" | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/files
+      - name: Verify 1.21.830 cleanup authority and no noop residue
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BC="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/git/commits/$BASE")"
+          test "$(jq -r .tree.sha <<<"$BC")" = "$BASE_TREE"
+          RC="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/git/commits/$RELEASE_1830")"
+          test "$(jq -r .tree.sha <<<"$RC")" = "$BASE_TREE"
+          for b in main develop; do
+            B="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/branches/$b")"
+            test "$(jq -r .commit.sha <<<"$B")" = "$BASE"
+            test "$(jq -r .commit.commit.tree.sha <<<"$B")" = "$BASE_TREE"
+            code="$(curl -sS -o /tmp/noop.json -w '%{http_code}' -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/contents/_noop?ref=$b")"
+            test "$code" = 404
+          done
+      - name: Verify Production remains 1.21.830 fail-closed before owner upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-candidate-readiness)"
+          test "$(jq -r .pluginVersion <<<"$J")" = 1.21.830
+          test "$(jq -r .activeStaticJobStatus <<<"$J")" = FAIL
+          test "$(jq -r .activeStaticJobFirstFailedStep <<<"$J")" = candidate_build
+          test "$(jq -r .sourceRecoveryCandidateFailureClass <<<"$J")" = candidate_build_unclassified
+          test "$(jq -r .sourceRecoveryCandidateBuildOffset <<<"$J")" = 225
+          test "$(jq -r .sourceRecoveryCandidateBuildTotal <<<"$J")" = 231
+          test "$(jq -r .candidatePackageReady <<<"$J")" = false
+          test "$(jq -r .manualSourceUploadRequired <<<"$J")" = false
+          test "$(jq -r .finalOnlinePass <<<"$J")" = NO
+          test "$(jq 'has("sourceRecoveryCandidateTailProbeStatus")' <<<"$J")" = false
+      - name: Verify runner main untouched
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/core-free-runner-public/git/ref/heads/main)"
+          test "$(jq -r .object.sha <<<"$J")" = 0160b557ad4ae0e8c6acd97e7551285bc05870bd
+      - name: Seal result
+        run: echo PASS_V121831_TAIL_REPLAY_PROBE_GATE
