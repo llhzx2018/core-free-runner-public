@@ -21,7 +21,7 @@ jobs:
           token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
           fetch-depth: 0
           path: ops
-      - name: Patch stale terminal evidence poisoning
+      - name: Patch stale terminal evidence poisoning and exact-source rebind
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -30,6 +30,7 @@ jobs:
           from pathlib import Path
           root=Path('ops')
           (root/'VERSION').write_text('1.21.819\n',encoding='utf-8')
+
           p=root/'vf-ops.php'; s=p.read_text(encoding='utf-8')
           for old,new in [
             ('Version: 1.21.818','Version: 1.21.819'),
@@ -50,53 +51,101 @@ jobs:
           s=s.replace(needle,"            $record = self::reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record());")
           p.write_text(s,encoding='utf-8')
 
+          p=root/'includes/site-release/s01-static-source-recovery-v2.php'; s=p.read_text(encoding='utf-8')
+          start_anchor="function vf_ops_s01_static_source_recovery_v2_start_v121814(): array {\n"
+          assert start_anchor in s
+          poison_helper="""/**\n * V1.21.819: exact signature of the legacy poisoning bug. A correct inspect-only\n * job never runs final Candidate audit, so an incomplete inspect-only job that is\n * terminal-failed specifically at final_decision with candidate_audit failures is\n * stale terminal evidence, not a fresh Source Inspection verdict.\n */\nfunction vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819(array $job): bool {\n    $mode = strtolower(trim((string)($job['job_mode'] ?? '')));\n    $status = strtoupper(trim((string)($job['status'] ?? '')));\n    if ($mode !== 'inspect_only' || !in_array($status, ['FAIL','FAILED','BLOCKED','ERROR','CANCELLED','TIMEOUT','ABORTED'], true)) { return false; }\n    if (!empty($job['inspection_complete'])) { return false; }\n    $audit = is_array($job['candidate_audit'] ?? null) ? (array)$job['candidate_audit'] : [];\n    if (!$audit && is_array($job['context']['candidate_audit'] ?? null)) { $audit = (array)$job['context']['candidate_audit']; }\n    $failures = array_values(array_filter(array_map(static fn($v): string => trim((string)$v), (array)($audit['failures'] ?? [])), static fn($v): bool => $v !== ''));\n    if (!$failures) { return false; }\n    foreach ((array)($job['steps'] ?? []) as $row) {\n        if (!is_array($row)) { continue; }\n        $key = strtolower(trim((string)($row['key'] ?? '')));\n        $rowStatus = strtoupper(trim((string)($row['status'] ?? '')));\n        if ($key === 'final_decision' && in_array($rowStatus, ['FAIL','FAILED','BLOCKED','ERROR'], true)) { return true; }\n    }\n    return false;\n}\n\n"""
+          s=s.replace(start_anchor,poison_helper+start_anchor,1)
+          old="""    if ($activeId !== '') {\n        $activeJob = VF_Ops_Release_Async_Job::load($activeId);\n        $activeSource = is_array($activeJob) ? trim((string)($activeJob['source_path'] ?? '')) : '';\n        if ($activeSource !== '' && is_file($activeSource) && is_readable($activeSource)) {\n            vf_ops_s01_static_source_recovery_v2_store_marker_v121814('current','CURRENT_SOURCE_AVAILABLE','current_active_job',1,0,true,true,'');\n            return ['status'=>'PASS','code'=>'CURRENT_SOURCE_AVAILABLE'];\n        }\n    }\n"""
+          assert old in s
+          new="""    if ($activeId !== '') {\n        $activeJob = VF_Ops_Release_Async_Job::load($activeId);\n        $activeSource = is_array($activeJob) ? trim((string)($activeJob['source_path'] ?? '')) : '';\n        if ($activeSource !== '' && is_file($activeSource) && is_readable($activeSource) && !is_link($activeSource)) {\n            if (is_array($activeJob) && vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($activeJob)) {\n                $shaAuthority = vf_ops_s01_static_source_recovery_v2_sha_authority_v121814();\n                if (empty($shaAuthority['ok'])) {\n                    vf_ops_s01_static_source_recovery_v2_store_marker_v121814('blocked',(string)$shaAuthority['code'],'current_failed_inspect_only',1,0,!empty($shaAuthority['present']),true,'failed');\n                    return ['status'=>'BLOCKED','code'=>(string)$shaAuthority['code']];\n                }\n                $actualSha = strtolower((string)@hash_file('sha256', $activeSource));\n                if (preg_match('/^[a-f0-9]{64}$/', $actualSha) !== 1 || !hash_equals((string)$shaAuthority['sha'], $actualSha)) {\n                    vf_ops_s01_static_source_recovery_v2_store_marker_v121814('blocked','CURRENT_ACTIVE_SOURCE_HASH_MISMATCH','current_failed_inspect_only',1,0,true,true,'failed');\n                    return ['status'=>'BLOCKED','code'=>'CURRENT_ACTIVE_SOURCE_HASH_MISMATCH'];\n                }\n                try {\n                    $newJobId = VF_Ops_Release_Async_Job::create_inspection_from_trusted_source_v121814(\n                        $activeSource,\n                        'recovered-current-source.zip',\n                        (string)$shaAuthority['sha']\n                    );\n                } catch (Throwable $e) {\n                    vf_ops_s01_static_source_recovery_v2_store_marker_v121814('blocked','FAILED_ACTIVE_SOURCE_REBIND_JOB_CREATE_FAILED','current_failed_inspect_only_sha_rebind',1,0,true,true,'failed');\n                    return ['status'=>'BLOCKED','code'=>'FAILED_ACTIVE_SOURCE_REBIND_JOB_CREATE_FAILED'];\n                }\n                $stored = vf_ops_s01_static_source_recovery_v2_store_state_v121814([\n                    'status'=>'running',\n                    'jobId'=>$newJobId,\n                    'expectedSha'=>(string)$shaAuthority['sha'],\n                    'attempts'=>0,\n                ]);\n                if (!$stored) {\n                    vf_ops_s01_static_source_recovery_v2_store_marker_v121814('blocked','FAILED_ACTIVE_SOURCE_REBIND_STATE_WRITE_FAILED','current_failed_inspect_only_sha_rebind',1,0,true,true,'failed');\n                    return ['status'=>'BLOCKED','code'=>'FAILED_ACTIVE_SOURCE_REBIND_STATE_WRITE_FAILED'];\n                }\n                vf_ops_s01_static_source_recovery_v2_schedule_v121814(2);\n                vf_ops_s01_static_source_recovery_v2_store_marker_v121814('running','FAILED_ACTIVE_SOURCE_REBOUND','current_failed_inspect_only_sha_rebind',1,0,true,true,'scheduled');\n                return ['status'=>'RUNNING','code'=>'FAILED_ACTIVE_SOURCE_REBOUND'];\n            }\n            vf_ops_s01_static_source_recovery_v2_store_marker_v121814('current','CURRENT_SOURCE_AVAILABLE','current_active_job',1,0,true,true,'');\n            return ['status'=>'PASS','code'=>'CURRENT_SOURCE_AVAILABLE'];\n        }\n    }\n"""
+          s=s.replace(old,new,1)
+          p.write_text(s,encoding='utf-8')
+
           test=root/'.github/phase3/v121819-new-job-terminal-evidence-reset.php'
           test.write_text(r'''<?php
-          if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
-          require dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php';
-          final class VF_Test_New_Job_Record_Reset { use VF_Ops_Release_Async_Job_Create_Trait; }
-          $stale = [
-              'status'=>'FAIL',
-              'final_candidate_audit_result'=>'FAIL',
-              'generation_result'=>'FAIL',
-              'cf_upload_check_summary'=>'最终候选包自检失败：old',
-              'candidate_async_error'=>'old error',
-              'candidate_audit'=>'{"status":"FAIL","failures":["old"]}',
-              'failures'=>12,
-              'warnings'=>3,
-              'source_sha256'=>str_repeat('a',64),
-              'source_package_sha256'=>str_repeat('a',64),
-              'package_name'=>'preserve-source.zip',
-              'custom_authority'=>'KEEP',
-          ];
-          $out = VF_Test_New_Job_Record_Reset::reset_record_terminal_evidence_for_new_job_v121819($stale);
-          foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error','candidate_audit'] as $key) {
-              if (($out[$key] ?? null) !== '') { fwrite(STDERR, "FAIL_NOT_CLEARED_$key\n"); exit(1); }
-          }
-          if (($out['failures'] ?? -1) !== 0 || ($out['warnings'] ?? -1) !== 0 || ($out['status'] ?? '') !== 'PARTIAL') { fwrite(STDERR, "FAIL_COUNTS_OR_STATUS\n"); exit(1); }
-          foreach (['source_sha256','source_package_sha256','package_name','custom_authority'] as $key) {
-              if (($out[$key] ?? null) !== $stale[$key]) { fwrite(STDERR, "FAIL_AUTHORITY_MUTATED_$key\n"); exit(1); }
-          }
-          $create = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php');
-          if (substr_count((string)$create, 'reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record())') !== 2) { fwrite(STDERR, "FAIL_CALL_SITES\n"); exit(1); }
-          $state = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/03-job-state-trait.php');
-          foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error'] as $key) {
-              if (!str_contains((string)$state, $key)) { fwrite(STDERR, "FAIL_POISON_KEY_BINDING_$key\n"); exit(1); }
-          }
-          echo "PASS_V121819_NEW_JOB_TERMINAL_EVIDENCE_RESET\n";
-          ''',encoding='utf-8')
+if (!defined('ABSPATH')) { define('ABSPATH', __DIR__ . '/'); }
+require dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php';
+require dirname(__DIR__, 2) . '/includes/site-release/s01-static-source-recovery-v2.php';
+final class VF_Test_New_Job_Record_Reset { use VF_Ops_Release_Async_Job_Create_Trait; }
+
+$stale = [
+    'status'=>'FAIL',
+    'final_candidate_audit_result'=>'FAIL',
+    'generation_result'=>'FAIL',
+    'cf_upload_check_summary'=>'最终候选包自检失败：old',
+    'candidate_async_error'=>'old error',
+    'candidate_audit'=>'{"status":"FAIL","failures":["old"]}',
+    'failures'=>12,
+    'warnings'=>3,
+    'source_sha256'=>str_repeat('a',64),
+    'source_package_sha256'=>str_repeat('a',64),
+    'package_name'=>'preserve-source.zip',
+    'custom_authority'=>'KEEP',
+];
+$out = VF_Test_New_Job_Record_Reset::reset_record_terminal_evidence_for_new_job_v121819($stale);
+foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error','candidate_audit'] as $key) {
+    if (($out[$key] ?? null) !== '') { fwrite(STDERR, "FAIL_NOT_CLEARED_$key\n"); exit(1); }
+}
+if (($out['failures'] ?? -1) !== 0 || ($out['warnings'] ?? -1) !== 0 || ($out['status'] ?? '') !== 'PARTIAL') { fwrite(STDERR, "FAIL_COUNTS_OR_STATUS\n"); exit(1); }
+foreach (['source_sha256','source_package_sha256','package_name','custom_authority'] as $key) {
+    if (($out[$key] ?? null) !== $stale[$key]) { fwrite(STDERR, "FAIL_AUTHORITY_MUTATED_$key\n"); exit(1); }
+}
+
+$poison = [
+    'job_mode'=>'inspect_only','status'=>'FAIL','inspection_complete'=>false,
+    'candidate_audit'=>['failures'=>['old candidate leaf']],
+    'steps'=>[['key'=>'source_structure','status'=>'PASS'],['key'=>'final_decision','status'=>'FAIL']],
+];
+if (!vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($poison)) { fwrite(STDERR, "FAIL_POISON_SIGNATURE\n"); exit(1); }
+$realSourceFail=$poison; $realSourceFail['steps']=[['key'=>'source_structure','status'=>'FAIL'],['key'=>'final_decision','status'=>'NOT_VERIFIED']];
+if (vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($realSourceFail)) { fwrite(STDERR, "FAIL_REAL_SOURCE_FAILURE_REBOUND\n"); exit(1); }
+$candidate=$poison; $candidate['job_mode']='candidate';
+if (vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($candidate)) { fwrite(STDERR, "FAIL_CANDIDATE_REBOUND\n"); exit(1); }
+$complete=$poison; $complete['inspection_complete']=true;
+if (vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($complete)) { fwrite(STDERR, "FAIL_COMPLETE_INSPECTION_REBOUND\n"); exit(1); }
+$noAudit=$poison; $noAudit['candidate_audit']=[];
+if (vf_ops_s01_static_source_recovery_v2_stale_terminal_poison_v121819($noAudit)) { fwrite(STDERR, "FAIL_NO_AUDIT_REBOUND\n"); exit(1); }
+
+$create = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/01-job-create-trait.php');
+if (substr_count((string)$create, 'reset_record_terminal_evidence_for_new_job_v121819((array)vf_toolsite_cf_release_record())') !== 2) { fwrite(STDERR, "FAIL_CALL_SITES\n"); exit(1); }
+$state = file_get_contents(dirname(__DIR__, 2) . '/includes/release/async-job-parts/03-job-state-trait.php');
+foreach (['final_candidate_audit_result','generation_result','cf_upload_check_summary','candidate_async_error'] as $key) {
+    if (!str_contains((string)$state, $key)) { fwrite(STDERR, "FAIL_POISON_KEY_BINDING_$key\n"); exit(1); }
+}
+$recovery = file_get_contents(dirname(__DIR__, 2) . '/includes/site-release/s01-static-source-recovery-v2.php');
+foreach (['FAILED_ACTIVE_SOURCE_REBOUND','CURRENT_ACTIVE_SOURCE_HASH_MISMATCH','current_failed_inspect_only_sha_rebind','create_inspection_from_trusted_source_v121814','hash_equals'] as $marker) {
+    if (!str_contains((string)$recovery, $marker)) { fwrite(STDERR, "FAIL_RECOVERY_MARKER_$marker\n"); exit(1); }
+}
+echo "PASS_V121819_NEW_JOB_TERMINAL_EVIDENCE_RESET\n";
+''',encoding='utf-8')
           PY
+
           php ops/.github/phase3/v121819-new-job-terminal-evidence-reset.php
           php -l ops/includes/release/async-job-parts/01-job-create-trait.php >/dev/null
+          php -l ops/includes/site-release/s01-static-source-recovery-v2.php >/dev/null
           php -l ops/vf-ops.php >/dev/null
           test "$(cat ops/VERSION)" = '1.21.819'
-          printf '%s\n' '.github/phase3/v121819-new-job-terminal-evidence-reset.php' 'VERSION' 'includes/release/async-job-parts/01-job-create-trait.php' 'vf-ops.php' | sort >/tmp/expected
-          git -C ops diff --name-only | sort >/tmp/actual
+
+          printf '%s\n' \
+            '.github/phase3/v121819-new-job-terminal-evidence-reset.php' \
+            'VERSION' \
+            'includes/release/async-job-parts/01-job-create-trait.php' \
+            'includes/site-release/s01-static-source-recovery-v2.php' \
+            'vf-ops.php' | sort >/tmp/expected
+          { git -C ops diff --name-only; git -C ops ls-files --others --exclude-standard; } | sort >/tmp/actual
           diff -u /tmp/expected /tmp/actual
-          ! git -C ops diff -- . ':!vf-ops.php' ':!VERSION' | grep -Ei 'm3u8.*(migration|schema|db|drop|reset)|Seed HOLD|jd\.gg|wpvivid|source_sha256.*=' || true
+
+          git -C ops diff -U0 -- includes/release/async-job-parts/01-job-create-trait.php includes/site-release/s01-static-source-recovery-v2.php vf-ops.php | grep '^+' | grep -Ev '^\+\+\+' >/tmp/runtime-added || true
+          if grep -Eqi 'm3u8|Seed HOLD|jd\.gg|wpvivid|\$wpdb|delete_option|wp_insert|wp_update|DROP TABLE|ALTER TABLE' /tmp/runtime-added; then
+            echo 'FAIL_FORBIDDEN_RUNTIME_SCOPE'
+            cat /tmp/runtime-added
+            exit 1
+          fi
+
           git -C ops config user.name VictorForge
           git -C ops config user.email llhzx2018@gmail.com
-          git -C ops add .github/phase3/v121819-new-job-terminal-evidence-reset.php VERSION includes/release/async-job-parts/01-job-create-trait.php vf-ops.php
+          git -C ops add .github/phase3/v121819-new-job-terminal-evidence-reset.php VERSION includes/release/async-job-parts/01-job-create-trait.php includes/site-release/s01-static-source-recovery-v2.php vf-ops.php
           git -C ops commit -m 'fix(S01-C02): prevent stale terminal evidence poisoning new jobs'
           git -C ops push origin HEAD:"$OPS_BRANCH"
           echo "CANDIDATE_SHA=$(git -C ops rev-parse HEAD)"
