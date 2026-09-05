@@ -1,0 +1,96 @@
+name: TEMP S01-C02 v1.21.822 Candidate Gate
+on:
+  push:
+    branches: [temp/s01-c02-production-readback-20260904-current]
+    paths: ['.github/workflows/temp-s01-c02-v121822-candidate-gate.yml']
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_SHA: 696fb2d936210a2a179dec5fea4a2c6594d65df6
+      CANDIDATE_SHA: 711512a2fdbdb1a136dc1e2e60c9dad3052c1a62
+      CANDIDATE_TREE: 9aa8a999c194a35ad76d431a9e781d1de7b7221f
+    steps:
+      - name: Checkout exact Candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Gate exact scope runtime takeover and deterministic artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd ops
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$CANDIDATE_TREE"
+          test "$(git rev-list --count "$BASE_SHA..$CANDIDATE_SHA")" = 1
+          test "$(git rev-list --count "$CANDIDATE_SHA..$BASE_SHA")" = 0
+          test "$(git diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort | tr '\n' ' ')" = '.github/phase3/v121822-publish-runtime-generation.mjs VERSION assets/js/admin-publish-zip.js vf-ops.php '
+          test -z "$(git diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- includes/release includes/site-release includes/publish-o10 includes/admin-v13/views/publish_zip.php)"
+          test "$(cat VERSION)" = '1.21.822'
+          grep -q 'Version: 1.21.822' vf-ops.php
+          grep -q "define('VF_OPS_VERSION', '1.21.822')" vf-ops.php
+          grep -q "PUBLISH-RUNTIME-GENERATION-V1" vf-ops.php
+          node --check assets/js/admin-publish-zip.js
+          node .github/phase3/v121822-publish-runtime-generation.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('assets/js/admin-publish-zip.js').read_text()
+          checks={
+            'generation':"var runtimeVersion='1.21.822'" in s,
+            'same_generation_rebind':"String(existingRuntime.version||'')===runtimeVersion" in s,
+            'stale_generation_reload':'window.location.reload()' in s,
+            'bounded_reload_guard':"sessionStorage.setItem(runtimeReloadKey,'1')" in s,
+            'new_generation_export':'{version:runtimeVersion,bind:bind}' in s,
+            'worker_recovery':'async function runStageWithRecovery()' in s and 'maxAttempts=6' in s,
+            'status_readback':'vf_ops_release_job_status' in s,
+            'permanent_fail_closed':'if(!jobTransientError(error)||attempts>=maxAttempts)throw error;' in s,
+            'explicit_pause':"action==='pause'" in s and 'vf_ops_release_job_pause' in s,
+          }
+          bad=[k for k,v in checks.items() if not v]
+          assert not bad,bad
+          assert 'if(window.vfOpsPublishZipRuntime){window.vfOpsPublishZipRuntime.bind();return;}' not in s
+          print('PASS_V121822_RUNTIME_TAKEOVER_BEHAVIOR')
+          PY
+          grep -q 'acquire_run_lock_v121305' includes/release/async-job-parts/03-job-state-trait.php
+          grep -q 'release_run_lock_v121305' includes/release/async-job-parts/03-job-state-trait.php
+          grep -q 'filemtime($path)' includes/views/admin-style-helpers/admin-style-core.php
+          grep -q 'filemtime($path)' includes/admin-v13/saas-operation-contract.php
+          grep -q 'data-vf-publish-autostart' includes/admin-v13/views/publish_zip.php
+          ! git diff "$BASE_SHA" "$CANDIDATE_SHA" -- | grep -Ei 'm3u8.*(delete|drop|reset|migrat)|seed.*hold.*(off|release)|wpvivid.*(remove|delete)|jd\.gg.*(remove|delete)|dns.*(write|update)' >/dev/null
+          find . -type f -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.log
+          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path('.'); runtime=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/'); low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              if '/' not in rel:
+                  if rel not in {'vf-ops.php','uninstall.php'}: continue
+              elif parts[0] not in {'includes','assets','languages','config'}: continue
+              runtime.append((rel,p.read_bytes()))
+          runtime.sort(key=lambda x:x[0])
+          fp=hashlib.sha256()
+          for rel,b in runtime: fp.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          z=Path('/tmp/vf-tools-ops_V1.21.822.zip')
+          with zipfile.ZipFile(z,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+              for rel,b in runtime:
+                  i=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,5,0,0,0)); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100644<<16; out.writestr(i,b)
+          print('RUNTIME_FILES='+str(len(runtime)))
+          print('RUNTIME_FP='+fp.hexdigest())
+          print('ASSET_BYTES='+str(z.stat().st_size))
+          print('ASSET_SHA='+hashlib.sha256(z.read_bytes()).hexdigest())
+          assert len(runtime)==905
+          PY
+          echo PASS_V121822_CANDIDATE_GATE
