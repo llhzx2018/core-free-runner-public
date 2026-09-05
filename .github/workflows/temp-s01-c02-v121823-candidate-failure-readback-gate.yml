@@ -1,0 +1,119 @@
+name: TEMP S01-C02 Ops 1.21.823 Candidate Failure Readback Gate
+
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121823-candidate-failure-readback-gate-20260905
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-s01-c02-v121823-candidate-failure-readback-gate-20260905
+  cancel-in-progress: true
+
+jobs:
+  focused-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPS_SHA: e4bf4735f881fe733b04f309f9db517ebae71a34
+      BASE_SHA: 711512a2fdbdb1a136dc1e2e60c9dad3052c1a62
+      EVIDENCE_DIR: /tmp/vf-s01-c02-v121823-evidence
+    steps:
+      - name: Checkout exact Ops candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: e4bf4735f881fe733b04f309f9db517ebae71a34
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+
+      - name: Verify exact identity and PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          git -C ops cat-file -e "$BASE_SHA^{commit}"
+          test "$(tr -d '\r\n' < ops/VERSION)" = '1.21.823'
+          grep -Fq ' * Version: 1.21.823' ops/vf-ops.php
+          grep -Fq "define('VF_OPS_VERSION', '1.21.823')" ops/vf-ops.php
+          grep -Fq "define('VF_OPS_ROUND', 'STATIC-CANDIDATE-FAILURE-READBACK-V1')" ops/vf-ops.php
+          php -l ops/includes/site-release/s01-static-inspection-failure-segment-runtime-v121818.php
+          php -l ops/.github/phase3/v121823-candidate-failure-segment-readback.php
+
+      - name: Run candidate failure readback contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php ops/.github/phase3/v121823-candidate-failure-segment-readback.php | tee "$EVIDENCE_DIR/v121823-contract.txt"
+          grep -Fxq 'PASS_V121823_CANDIDATE_FAILURE_SEGMENT_READBACK' "$EVIDENCE_DIR/v121823-contract.txt"
+
+      - name: Run adjacent segment readback regressions when present
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r f; do
+            [ "$f" = 'ops/.github/phase3/v121823-candidate-failure-segment-readback.php' ] && continue
+            php -l "$f"
+            php "$f"
+          done < <(find ops/.github/phase3 -maxdepth 1 -type f \( -name '*121817*.php' -o -name '*121818*.php' \) -print | sort)
+
+      - name: Verify bounded read-only diff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mapfile -t changed < <(git -C ops diff --name-only "$BASE_SHA".."$OPS_SHA")
+          printf '%s\n' "${changed[@]}" | tee "$EVIDENCE_DIR/changed-files.txt"
+          test "${#changed[@]}" -eq 4
+          for expected in \
+            .github/phase3/v121823-candidate-failure-segment-readback.php \
+            VERSION \
+            includes/site-release/s01-static-inspection-failure-segment-runtime-v121818.php \
+            vf-ops.php; do
+            printf '%s\n' "${changed[@]}" | grep -Fxq "$expected"
+          done
+          runtime=ops/includes/site-release/s01-static-inspection-failure-segment-runtime-v121818.php
+          grep -Fq "['inspect_only','candidate']" "$runtime"
+          grep -Fq "activeStaticJobNonAuditFailureCount" "$runtime"
+          if grep -En 'update_option\(|delete_option\(|wp_insert|wp_update|unlink\(|rename\(|copy\(' "$runtime"; then
+            echo 'FORBIDDEN_STATE_WRITE_IN_READBACK' >&2
+            exit 1
+          fi
+          if git -C ops diff "$BASE_SHA".."$OPS_SHA" -- includes/site-release/s01-static-inspection-failure-segment-runtime-v121818.php | grep -E '^\+.*(candidatePackageReady|candidateReady|downloadReady|preflightPass)[[:space:]]*='; then
+            echo 'FORBIDDEN_GATE_RELAXATION' >&2
+            exit 1
+          fi
+
+      - name: Seal evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$EVIDENCE_DIR/S01_C02_V121823_CANDIDATE_FAILURE_READBACK_GATE.txt" <<EOF
+          S01_C02_V121823_CANDIDATE_FAILURE_READBACK_GATE=PASS
+          OPS_SHA=$OPS_SHA
+          BASE_SHA=$BASE_SHA
+          OPS_VERSION=1.21.823
+          CANDIDATE_TERMINAL_AUDIT_CLASSIFICATION=ENABLED
+          INSPECT_ONLY_COMPATIBILITY=PASS
+          RUNNING_CANDIDATE_NOT_APPLICABLE=PASS
+          UNKNOWN_TERMINAL_FAIL_CLOSED=PASS
+          PUBLIC_FAILURE_TEXT_EXPOSURE=NO_CHANGE
+          CANDIDATE_VERDICT_CHANGE=NO
+          PACKAGE_READINESS_CHANGE=NO
+          PRODUCTION_WRITE=NO
+          RUNNER_MAIN_WRITE=NO
+          FINAL_ONLINE_PASS=NO
+          EOF
+
+      - name: Upload public-safe evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v121823-candidate-failure-readback-${{ github.run_id }}
+          path: /tmp/vf-s01-c02-v121823-evidence/
+          if-no-files-found: warn
+          retention-days: 14
