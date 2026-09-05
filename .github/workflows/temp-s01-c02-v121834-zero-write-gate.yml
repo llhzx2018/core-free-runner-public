@@ -1,0 +1,138 @@
+name: TEMP S01-C02 Ops 1.21.834 Zero-Write Closure Gate
+on:
+  push:
+    branches:
+      - temp/s01-c02-v121834-zero-write-gate-20260905
+    paths:
+      - '.github/workflows/temp-s01-c02-v121834-zero-write-gate.yml'
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      BASE: b87c30f039c495122a59888b9c01d3b4431643d6
+      BASE_TREE: efc2a1558b288b9e4851e8c9779f83fed3443e8e
+      COMMIT: 3f2fd2b83062bab477408feb2ff36ff2d832be8c
+      TREE: 6be3c3bbd3e26cc947bab8e88af89ea39d840957
+      RUNNER_MAIN: 0160b557ad4ae0e8c6acd97e7551285bc05870bd
+    steps:
+      - name: Checkout exact Product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.COMMIT }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+      - name: Verify identity syntax and exact scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$COMMIT"
+          test "$(git -C ops rev-parse HEAD^{tree})" = "$TREE"
+          test "$(tr -d '\r\n' < ops/VERSION)" = 1.21.834
+          test "$(head -c 5 ops/includes/site-release/s01-static-zero-write-batch-retry-v121834.php)" = '<?php'
+          test "$(head -c 5 ops/.github/phase3/v121834-zero-write-batch-closure.php)" = '<?php'
+          php -l ops/includes/release/builders/class-candidate-batch-builder.php >/dev/null
+          php -l ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php >/dev/null
+          php -l ops/includes/site-release/s01-static-zero-write-batch-retry-v121834.php >/dev/null
+          php -l ops/vf-ops.php >/dev/null
+          php ops/.github/phase3/v121834-zero-write-batch-closure.php | grep -Fxq PASS_V121834_ZERO_WRITE_BATCH_CLOSURE
+          mapfile -t changed < <(git -C ops diff --name-only "$BASE" "$COMMIT" | sort)
+          expected=(
+            .github/phase3/v121834-zero-write-batch-closure.php
+            VERSION
+            includes/release/builders/class-candidate-batch-builder.php
+            includes/site-release/s01-static-candidate-build-failure-readback-v121830.php
+            includes/site-release/s01-static-zero-write-batch-retry-v121834.php
+            vf-ops.php
+          )
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | sort)
+          test "${#changed[@]}" -eq 6
+          diff -u <(printf '%s\n' "${expected[@]}") <(printf '%s\n' "${changed[@]}")
+          git -C ops diff --check "$BASE" "$COMMIT"
+      - name: Verify zero-write lazy-open contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('ops/includes/release/builders/class-candidate-batch-builder.php').read_text()
+          start=s.index("$written = self::read_json")
+          loop=s.index("for ($i = $start; $i < $end; $i++)", start)
+          write_gate=s.index("if (!$write) { continue; }", loop)
+          lazy=s.index("if (!$dstOpened)", write_gate)
+          append=s.index("open_for_append($dst", lazy)
+          close=s.index("if ($dstOpened && $dst instanceof ZipArchive)", append)
+          offset=s.index("$state['offset'] = max($start, $cursor);", close)
+          assert start < loop < write_gate < lazy < append < close < offset
+          pre=s[start:write_gate]
+          assert "open_for_append($dst" not in pre
+          assert "candidate_zip_close_failed" in Path('ops/includes/site-release/s01-static-candidate-build-failure-readback-v121830.php').read_text()
+          PY
+      - name: Verify one-time retry remains fail-closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          R=ops/includes/site-release/s01-static-zero-write-batch-retry-v121834.php
+          grep -Fq 'vf_ops_s01_static_recovery_continuation_inspection_v121829' "$R"
+          grep -Fq 'vf_ops_publish_release_prepare_candidate_v121771' "$R"
+          grep -Fq 'sourceRecoveryCandidateExactProcessProbeShadowWrittenDelta' "$R"
+          grep -Fq 'ZERO_WRITE_RETRY_FRESH_CANDIDATE_MISMATCH' "$R"
+          grep -Fq 'hash_equals($oldId, $candidateId)' "$R"
+          grep -Fq "add_action('admin_init'" "$R"
+          grep -Fq "current_user_can('manage_options')" "$R"
+          grep -Fq 'sourceRecoveryZeroWriteRetryCandidateAuditFailureCount' "$R"
+          ! grep -Fq "'candidatePackageReady'" "$R"
+          ! grep -Fq "'finalOnlinePass'" "$R"
+          ! grep -Eq 'wp_insert_post|wp_update_post|wpdb|DELETE FROM|UPDATE .* SET|DROP TABLE|ALTER TABLE' "$R"
+      - name: Verify Product authority before promotion
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for b in main develop; do
+            J="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$PRODUCT_REPO/branches/$b")"
+            test "$(jq -r .commit.sha <<<"$J")" = "$BASE"
+            test "$(jq -r .commit.commit.tree.sha <<<"$J")" = "$BASE_TREE"
+          done
+      - name: Verify Production remains 1.21.833 exact fail-closed case
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL --retry 2 --max-time 30 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-candidate-readiness')"
+          jq -e '
+            .pluginVersion == "1.21.833" and
+            .activeStaticJobStatus == "FAIL" and
+            .activeStaticJobMode == "candidate" and
+            .activeStaticJobFirstFailedStep == "candidate_build" and
+            .sourceRecoveryCandidateCurrentStage == 4 and
+            .sourceRecoveryCandidateFailureClass == "candidate_build_unclassified" and
+            .sourceRecoveryCandidateBuildInitialized == true and
+            .sourceRecoveryCandidateBuildOffset == 225 and
+            .sourceRecoveryCandidateBuildTotal == 231 and
+            .sourceRecoveryCandidateTailProbeStatus == "pass" and
+            .sourceRecoveryCandidateTailProbeCheckedCount == 6 and
+            .sourceRecoveryCandidateExactProcessProbeStatus == "pass" and
+            .sourceRecoveryCandidateExactProcessProbeCheckedCount == 6 and
+            .sourceRecoveryCandidateExactProcessProbeShadowWrittenDelta == 0 and
+            .sourceRecoveryCandidateExactProcessProbeCompletenessStatus == "pass" and
+            .sourceRecoveryCandidateExactProcessProbeCompletenessReasonCount == 0 and
+            .candidatePackageReady == false and
+            .manualSourceUploadRequired == false and
+            .finalOnlinePass == "NO"
+          ' <<<"$J" >/dev/null
+      - name: Verify runner main untouched
+        env:
+          R: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          J="$(curl -fsSL -H "Authorization: Bearer $R" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/llhzx2018/core-free-runner-public/git/ref/heads/main)"
+          test "$(jq -r .object.sha <<<"$J")" = "$RUNNER_MAIN"
+      - name: Seal result
+        shell: bash
+        run: echo PASS_V121834_ZERO_WRITE_BATCH_CLOSURE_GATE
