@@ -1,0 +1,106 @@
+name: P07 OneShot v0.6 Patch
+
+on:
+  push:
+    branches:
+      - experiment/p07-oneshot-bench-v05
+    paths:
+      - .github/workflows/p07-v06-patch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch v0.6
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('experiments/p07-bench.sh')
+          s=p.read_text()
+          s=s.replace('VERSION="0.5.0"','VERSION="0.6.0"',1)
+          old='''speed_node_retry(){
+  local id="$1" name="$2" original="$NETWORK_TSV" tmp="$TMP_DIR/retry-$$-$RANDOM.tsv"
+  local output row state reason attempt
+  for attempt in 1 2; do
+    : >"$tmp"
+    NETWORK_TSV="$tmp"
+    output="$(speed_node "$id" "$name" || true)"
+    NETWORK_TSV="$original"
+    row="$(tail -n1 "$tmp" 2>/dev/null || true)"
+    [[ -n "$row" ]] || continue
+    IFS=$'\\t' read -r _ _ state reason _ <<<"$row"
+    if [[ "$state" == PASS || ! "$reason" =~ ^(BACKEND_FAILURE|TIMEOUT|CONNECTION_FAILED)$ || "$attempt" == 2 ]]; then
+      cat "$tmp" >>"$original"
+      printf '%s\\n' "$output"
+      [[ "$state" == PASS ]]
+      return
+    fi
+  done
+  NETWORK_TSV="$original"
+  [[ -s "$tmp" ]] && cat "$tmp" >>"$original"
+  [[ -n "${output:-}" ]] && printf '%s\\n' "$output"
+  return 1
+}
+'''
+          new='''speed_node_retry(){
+  local id="$1" name="$2" original="$NETWORK_TSV" tmp="$TMP_DIR/retry-$$-$RANDOM.tsv"
+  local out="$TMP_DIR/retry-output-$$-$RANDOM.txt" output row state reason attempt
+  for attempt in 1 2; do
+    : >"$tmp"; : >"$out"
+    NETWORK_TSV="$tmp"
+    speed_node "$id" "$name" >"$out" || true
+    NETWORK_TSV="$original"
+    output="$(cat "$out" 2>/dev/null || true)"
+    row="$(tail -n1 "$tmp" 2>/dev/null || true)"
+    [[ -n "$row" ]] || continue
+    IFS=$'\\t' read -r _ _ state reason _ <<<"$row"
+    if [[ "$state" == PASS || ! "$reason" =~ ^(BACKEND_FAILURE|TIMEOUT|CONNECTION_FAILED)$ || "$attempt" == 2 ]]; then
+      cat "$tmp" >>"$original"
+      printf '%s\\n' "$output"
+      [[ "$state" == PASS ]]
+      return
+    fi
+  done
+  NETWORK_TSV="$original"
+  [[ -s "$tmp" ]] && cat "$tmp" >>"$original"
+  [[ -n "${output:-}" ]] && printf '%s\\n' "$output"
+  return 1
+}
+'''
+          if old not in s:
+              raise SystemExit('old retry function not found')
+          s=s.replace(old,new,1)
+          # Add lifecycle regression to self_test before final result.
+          marker='''  DEMO="$old_demo"\n  if (( f )); then printf 'SELF_TEST=FAIL\\n'; return 1; else printf 'SELF_TEST=PASS\\n'; fi\n'''
+          repl='''  DEMO="$old_demo"\n  # Retry lifecycle regression: run the real (non-demo) retry path twice with a fake backend.\n  local fake="$TMP_DIR/fake-speedtest" saved_bin="$SPEEDTEST_BIN" saved_temp="$SPEEDTEST_TEMP" saved_demo="$DEMO" saved_tsv="$NETWORK_TSV"\n  cat >"$fake" <<'EOFFAKE'\n#!/usr/bin/env bash\nprintf '%s\\n' '{"ping":{"latency":1.25},"download":{"bandwidth":4000000},"upload":{"bandwidth":2000000}}'\nEOFFAKE\n  chmod +x "$fake"\n  SPEEDTEST_BIN="$fake"; SPEEDTEST_TEMP=0; DEMO=0; NETWORK_TSV="$TMP_DIR/lifecycle.tsv"; : >"$NETWORK_TSV"\n  speed_node_retry '' 'Lifecycle A' >/dev/null || f=1\n  [[ -x "$fake" && -d "$TMP_DIR" ]] || f=1\n  speed_node_retry '' 'Lifecycle B' >/dev/null || f=1\n  [[ "$(awk -F '\\t' '$3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")" == "2" ]] || f=1\n  [[ -x "$fake" && -d "$TMP_DIR" ]] || f=1\n  SPEEDTEST_BIN="$saved_bin"; SPEEDTEST_TEMP="$saved_temp"; DEMO="$saved_demo"; NETWORK_TSV="$saved_tsv"\n  if (( f )); then printf 'SELF_TEST=FAIL\\n'; return 1; else printf 'SELF_TEST=PASS\\n'; fi\n'''
+          if marker not in s:
+              raise SystemExit('self test marker not found')
+          s=s.replace(marker,repl,1)
+          p.write_text(s)
+          PY
+      - name: Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n experiments/p07-bench.sh
+          ./experiments/p07-bench.sh --version | grep -F '0.6.0'
+          ./experiments/p07-bench.sh --self-test | grep -F 'SELF_TEST=PASS'
+          ./experiments/p07-bench.sh --demo >/tmp/demo
+          grep -F 'P07 Enhanced Bench' /tmp/demo
+          grep -F 'Evidence Quality' /tmp/demo
+          ! grep -q '请选择\|Select option' /tmp/demo
+      - name: Commit candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add experiments/p07-bench.sh
+          git commit -m 'fix(p07-bench): preserve backend lifecycle in retry v0.6'
+          git push origin HEAD:experiment/p07-oneshot-bench-v05
