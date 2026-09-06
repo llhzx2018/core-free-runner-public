@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-preview2"
+VERSION="0.1.0-preview3"
+VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -29,11 +30,17 @@ show_menu() {
   say
 }
 
+local_node_version() {
+  command -v vf-node >/dev/null 2>&1 || return 1
+  NO_COLOR=1 vf-node --version 2>/dev/null | awk '{print $NF}' || true
+}
+
 run_network_node() {
-  if command -v vf-node >/dev/null 2>&1; then
+  if [[ "$(local_node_version || true)" == "$VF_NODE_EXPECTED" ]]; then
     vf-node
     return $?
   fi
+
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
   local tmp rc
   tmp="$(mktemp -t p07-vf-node.XXXXXX)"
