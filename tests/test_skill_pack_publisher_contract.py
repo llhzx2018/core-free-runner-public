@@ -49,9 +49,12 @@ class SkillPackPublisherContractTests(unittest.TestCase):
         self.assertNotIn("skill-book", self.text)
         self.assertNotRegex(self.text, r"assert .*version.*==\s*['\"]V\d")
 
-    def test_distribution_mirror_remains_pr_gated(self) -> None:
-        self.assertIn("GOV_DOC_DISTRIBUTION_MERGE_GATE=PENDING_PR", self.text)
-        self.assertIn("'base': 'main'", self.text)
+    def test_distribution_mirror_remains_external_pr_gated(self) -> None:
+        self.assertIn("GOV_DOC_DISTRIBUTION_MERGE_GATE=PENDING_EXTERNAL_PR", self.text)
+        self.assertIn("GOV_DOC_DISTRIBUTION_PR=EXTERNAL_ORCHESTRATION_REQUIRED", self.text)
+        self.assertIn("GOV_DOC_MIRROR_BRANCH=", self.text)
+        self.assertNotIn("/pulls?", self.text)
+        self.assertNotIn("call('POST', f'/repos/{repo}/pulls'", self.text)
         self.assertNotIn("/merges", self.text)
 
 
