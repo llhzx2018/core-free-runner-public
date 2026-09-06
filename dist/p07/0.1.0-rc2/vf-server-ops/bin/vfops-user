@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 CORE="$ROOT_DIR/bin/vfops"
 VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || printf 'UNKNOWN')"
 CHANNEL="RC2"
+BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
 INV_FILE=""
 SELECTED_DOMAIN=""
 SELECTED_BACKUP=""
@@ -37,18 +38,56 @@ header() {
 EOF
 }
 
+diagnostic_value() {
+  local output="$1" key="$2"
+  printf '%s\n' "$output" | sed -nE "s/.*${key}=([^ ]+).*/\1/p" | tail -n1
+}
+
+human_reason() {
+  local blocker="$1"
+  case "$blocker" in
+    SITE_NOT_FOUND) printf '没有在 CloudPanel 中找到这个网站。' ;;
+    FRESH_VERIFY_NOT_PASS) printf '备份完整性检查没有通过。' ;;
+    TARGET_STATE_CONFLICT) printf '目标服务器已有冲突的网站或文件，P07 已停止写入。' ;;
+    TARGET_PREFLIGHT_FAILED) printf '新服务器还没有准备好，P07 没有开始迁移。' ;;
+    TARGET_CRONTAB_CONFLICT) printf '目标网站用户已有 Cron，P07 不会直接覆盖。' ;;
+    RUNTIME_MANUAL_GATE_REQUIRED) printf '有系统级 Cron 需要人工确认，P07 不会自动覆盖。' ;;
+    PM2_RUNTIME_FAILED) printf 'PM2 运行环境没有恢复成功。' ;;
+    CONFIRMATION_REQUIRED|CONFIRMATION_MISMATCH) printf '安全确认没有通过，P07 已停止。' ;;
+    GOOGLE_POOL_CAPACITY_NOT_READY) printf 'Google 备份空间当前不足。' ;;
+    ENCRYPTED_REMOTE_NOT_VERIFIED) printf '远程加密存储还没有验证通过。' ;;
+    REMOTE_FETCH_FAILED) printf '远程备份取回失败。' ;;
+    REMOTE_TRANSFER_FAILED) printf '服务器之间的备份传输失败。' ;;
+    REMOTE_INTEGRITY_NOT_PASS) printf '远程备份完整性检查没有通过。' ;;
+    *) printf '操作没有完成，P07 已安全停止。' ;;
+  esac
+}
+
+friendly_failure() {
+  local title="$1" output="$2" safe_note="${3:-原网站和现有数据没有被 P07 删除。}"
+  local blocker stage
+  blocker="$(diagnostic_value "$output" blocker)"
+  stage="$(diagnostic_value "$output" stage)"
+  printf '\n%s\n' "$title"
+  printf '%s\n' "$(human_reason "${blocker:-UNKNOWN}")"
+  [[ -n "$stage" ]] && printf '阶段：%s\n' "$stage"
+  [[ -n "$blocker" ]] && printf '状态：%s\n' "$blocker"
+  [[ -n "$safe_note" ]] && printf '%s\n' "$safe_note"
+  printf '如需工程诊断，可运行：vfops --advanced --help\n'
+}
+
 load_inventory() {
   cleanup
   INV_FILE="$(mktemp -t p07-inventory.XXXXXX)"
-  local err
-  err="$(mktemp -t p07-inventory-error.XXXXXX)"
-  if ! "$CORE" inventory --compact >"$INV_FILE" 2>"$err"; then
-    printf '\n[P07] 无法读取这台服务器。\n' >&2
-    sed -n '1,8p' "$err" >&2 || true
-    rm -f "$err"
+  local output rc
+  if output="$("$CORE" inventory --compact 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "无法读取这台服务器。" "$output" "服务器没有被修改。"
     return 1
   fi
-  rm -f "$err"
+  printf '%s\n' "$output" >"$INV_FILE"
   return 0
 }
 
@@ -56,7 +95,7 @@ show_inventory() {
   python3 - "$INV_FILE" <<'PY'
 import json, sys
 p=json.load(open(sys.argv[1], encoding='utf-8'))
-system=p.get('system',{})
+system=p.get('system',{}) if isinstance(p.get('system'),dict) else {}
 osinfo=system.get('os',{}) if isinstance(system.get('os'),dict) else {}
 sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
 summary=p.get('summary',{}) if isinstance(p.get('summary'),dict) else {}
@@ -98,15 +137,18 @@ PY
     printf '\n没有发现可操作的网站。\n' >&2
     return 1
   fi
+  printf '\n请选择网站\n----------------------------------------\n'
   python3 - "$INV_FILE" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
 for i,s in enumerate(p.get('sites',[]),1):
     print(f"  {i}. {s.get('domain','UNKNOWN')}")
+print("  0. 返回")
 PY
-  printf '\n请选择网站 [1-%s]：' "$count"
-  read -r choice || return 1
+  printf '\n请选择 [0-%s]：' "$count"
+  read -r choice || return 2
   [[ "$choice" =~ ^[0-9]+$ ]] || { printf '请输入上面的数字。\n' >&2; return 1; }
+  [[ "$choice" == "0" ]] && return 2
   (( choice >= 1 && choice <= count )) || { printf '选择超出范围。\n' >&2; return 1; }
   SELECTED_DOMAIN="$(python3 - "$INV_FILE" "$choice" <<'PY'
 import json,sys
@@ -117,22 +159,38 @@ PY
   [[ -n "$SELECTED_DOMAIN" ]]
 }
 
+show_server() {
+  printf '\n[P07] 正在读取这台服务器...\n'
+  if load_inventory; then
+    show_inventory
+  fi
+  pause
+}
+
 backup_site() {
   printf '\n[P07] 正在读取 CloudPanel 网站...\n'
-  select_site || { pause; return; }
+  local rc
+  if select_site; then
+    rc=0
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
+
   printf '\n将备份：%s\n' "$SELECTED_DOMAIN"
-  printf '备份位置：/var/backups/vf-server-ops\n'
+  printf '备份位置：%s\n' "$BACKUP_DIR"
   printf '开始备份？[Y/n]：'
-  local yn output rc
+  local yn output
   read -r yn || return
   [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]] || return
   printf '\n[P07] 正在创建并校验备份...\n'
-  set +e
-  output="$("$CORE" backup --site "$SELECTED_DOMAIN" 2>&1)"
-  rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    printf '\n备份失败。\n%s\n' "$output" >&2
+  if output="$("$CORE" backup --site "$SELECTED_DOMAIN" --output-dir "$BACKUP_DIR" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "备份没有完成。" "$output"
     pause
     return
   fi
@@ -142,14 +200,6 @@ backup_site() {
   printf '网站：%s\n' "$SELECTED_DOMAIN"
   printf '备份：%s\n' "$path"
   printf '完整性校验：PASS\n'
-  pause
-}
-
-show_server() {
-  printf '\n[P07] 正在读取这台服务器...\n'
-  if load_inventory; then
-    show_inventory
-  fi
   pause
 }
 
@@ -164,10 +214,10 @@ PY
 }
 
 list_backups() {
-  python3 - <<'PY'
-import json
+  python3 - "$BACKUP_DIR" <<'PY'
+import json,sys
 from pathlib import Path
-base=Path('/var/backups/vf-server-ops')
+base=Path(sys.argv[1])
 rows=[]
 if base.is_dir():
     for m in base.glob('*/manifest.json'):
@@ -193,70 +243,198 @@ select_backup() {
   count="$(printf '%s\n' "$raw" | wc -l | tr -d ' ')"
   printf '\n可用备份\n----------------------------------------\n'
   printf '%s\n' "$raw" | awk -F '\t' '{printf "  %s. %s  (%s)\n",$1,$3,$5}'
-  printf '\n请选择备份 [1-%s]：' "$count"
-  read -r choice || return 1
-  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-  (( choice >= 1 && choice <= count )) || return 1
+  printf '  0. 返回\n'
+  printf '\n请选择 [0-%s]：' "$count"
+  read -r choice || return 2
+  [[ "$choice" =~ ^[0-9]+$ ]] || { printf '请输入上面的数字。\n' >&2; return 1; }
+  [[ "$choice" == "0" ]] && return 2
+  (( choice >= 1 && choice <= count )) || { printf '选择超出范围。\n' >&2; return 1; }
   SELECTED_BACKUP="$(printf '%s\n' "$raw" | awk -F '\t' -v n="$choice" '$1==n{print $2}')"
   [[ -n "$SELECTED_BACKUP" ]]
 }
 
+validate_ip() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import ipaddress,sys
+ipaddress.ip_address(sys.argv[1])
+PY
+}
+
+target_ssh_preflight() {
+  local target_ip="$1" output rc
+  command -v ssh >/dev/null 2>&1 || {
+    printf '\n新服务器连接未准备好。\n'
+    printf '原因：这台服务器没有 SSH 客户端。\n'
+    printf '迁移尚未开始，也没有创建迁移备份。\n'
+    return 1
+  }
+  printf '\n[P07] 先检查新服务器连接（只读，不创建网站）...\n'
+  if output="$(ssh \
+    -p 22 \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=1 \
+    "root@${target_ip}" \
+    'set -eu; command -v clpctl >/dev/null 2>&1; test -f /home/clp/htdocs/app/data/db.sq3' 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    printf '\n新服务器还没有准备好。\n'
+    printf 'P07 无法使用 SSH Key 从这台服务器连接到 %s，或目标 CloudPanel 未检测到。\n' "$target_ip"
+    printf '迁移尚未开始，也没有创建迁移备份。\n'
+    printf '请先确认：SOURCE 可以免密 SSH 登录 TARGET，且 TARGET 已安装 CloudPanel。\n'
+    return 1
+  fi
+  printf '新服务器连接：READY ✓\n'
+  printf 'CloudPanel：READY ✓\n'
+  return 0
+}
+
+runtime_plan_summary() {
+  local payload="$1"
+  python3 - "$payload" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+manual=p.get('manual_cron',[]) if isinstance(p.get('manual_cron'),list) else []
+user_cron=isinstance(p.get('user_crontab'),dict)
+pm2=p.get('pm2',{}) if isinstance(p.get('pm2'),dict) else {}
+print(f"STATUS={p.get('status','UNKNOWN')}")
+print(f"USER_CRON={'YES' if user_cron else 'NO'}")
+print(f"PM2={'YES' if pm2.get('ready') is True else 'NO'}")
+print(f"MANUAL={len(manual)}")
+PY
+}
+
 restore_backup() {
-  select_backup || { pause; return; }
+  local rc
+  if select_backup; then
+    rc=0
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
+
   printf '\n[P07] 先做恢复前检查（不会写入服务器）...\n'
-  local plan rc identity domain backup_id confirm
-  set +e
-  plan="$("$CORE" restore plan --package "$SELECTED_BACKUP" 2>&1)"
-  rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    printf '\n恢复前检查未通过：\n%s\n' "$plan" >&2
+  local plan identity domain backup_id confirm restore_output runtime_plan runtime_info runtime_status manual runtime_output
+  if plan="$("$CORE" restore plan --package "$SELECTED_BACKUP" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "恢复前检查没有通过。" "$plan" "服务器没有被修改。"
     pause
     return
   fi
-  printf '恢复前检查：PASS\n'
+  printf '恢复前检查：PASS ✓\n'
   identity="$(backup_identity "$SELECTED_BACKUP")"
   IFS=$'\t' read -r domain backup_id <<<"$identity"
   printf '将恢复网站：%s\n' "$domain"
   printf '仅允许恢复到全新的 CloudPanel 站点；不会覆盖已有站点，不会改 DNS。\n'
-  printf '确认执行请输入 YES：'
+  printf '继续恢复？[y/N]：'
   read -r confirm || return
-  [[ "$confirm" == "YES" ]] || { printf '已取消。\n'; pause; return; }
-  printf '\n[P07] 正在恢复...\n'
-  set +e
-  "$CORE" restore apply-new-site --package "$SELECTED_BACKUP" --confirm "RESTORE_NEW_SITE:${domain}:${backup_id}"
-  rc=$?
-  set -e
-  if [[ $rc -eq 0 ]]; then
-    printf '\n恢复完成 ✓\n'
-    printf '说明：DNS 仍未修改。若该站点有 Cron/PM2，还需要继续做 Runtime 恢复。\n'
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return; }
+
+  printf '\n[P07] 正在恢复网站数据...\n'
+  if restore_output="$("$CORE" restore apply-new-site --package "$SELECTED_BACKUP" --confirm "RESTORE_NEW_SITE:${domain}:${backup_id}" 2>&1)"; then
+    rc=0
   else
-    printf '\n恢复未完成，请以上方错误为准。\n' >&2
+    rc=$?
+    friendly_failure "网站数据恢复没有完成。" "$restore_output"
+    pause
+    return
   fi
+  printf '网站数据：已恢复 ✓\n'
+
+  printf '\n[P07] 正在检查 Cron / PM2 运行环境（只读）...\n'
+  if runtime_plan="$("$CORE" runtime plan --package "$SELECTED_BACKUP" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "网站数据已恢复，但运行环境检查没有完成。" "$runtime_plan" "网站数据已保留；DNS 没有修改。"
+    printf '最终状态：NEEDS_RUNTIME_CHECK\n'
+    pause
+    return
+  fi
+
+  runtime_info="$(runtime_plan_summary "$runtime_plan")"
+  runtime_status="$(printf '%s\n' "$runtime_info" | sed -n 's/^STATUS=//p')"
+  manual="$(printf '%s\n' "$runtime_info" | sed -n 's/^MANUAL=//p')"
+
+  if [[ "$runtime_status" == "READY_WITH_MANUAL_GATES" || "${manual:-0}" -gt 0 ]]; then
+    printf '\n网站数据已恢复 ✓\n'
+    printf '但运行环境尚未完全恢复。\n'
+    printf '原因：发现系统级/不支持自动处理的 Cron，需要人工确认。\n'
+    printf '最终状态：NEEDS_MANUAL_RUNTIME_GATE\n'
+    printf 'DNS 没有修改。\n'
+    pause
+    return
+  fi
+
+  printf '运行环境检查：READY ✓\n'
+  printf '[P07] 正在恢复 Cron / PM2...\n'
+  if runtime_output="$("$CORE" runtime apply-new-site \
+    --package "$SELECTED_BACKUP" \
+    --confirm "ACTIVATE_RUNTIME:${domain}:${backup_id}" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "网站数据已恢复，但 Cron / PM2 没有完全恢复。" "$runtime_output" "网站数据已保留；DNS 没有修改。"
+    printf '最终状态：NEEDS_RUNTIME_ATTENTION\n'
+    pause
+    return
+  fi
+
+  printf '\n恢复完成 ✓\n'
+  printf '网站数据：PASS\n'
+  printf 'Cron / PM2：PASS\n'
+  printf 'DNS：未修改\n'
+  printf '最终状态：RESTORE_COMPLETE\n'
   pause
 }
 
 migrate_site() {
   printf '\n[P07] 正在读取源服务器网站...\n'
-  select_site || { pause; return; }
-  local target_ip confirm output rc package identity domain backup_id
+  local rc
+  if select_site; then
+    rc=0
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
+
+  local target_ip confirm output package identity domain backup_id migration_output
   printf '\n迁移网站：%s\n' "$SELECTED_DOMAIN"
-  printf '新服务器 IP：'
+  printf '新服务器 IP（输入 0 返回）：'
   read -r target_ip || return
-  [[ -n "$target_ip" ]] || { printf '未输入 IP，已取消。\n'; pause; return; }
-  printf '\nP07 将：创建迁移备份 → SSH 传输 → 新站恢复 → 技术验证。\n'
+  [[ "$target_ip" == "0" ]] && return
+  if [[ -z "$target_ip" ]] || ! validate_ip "$target_ip"; then
+    printf '请输入有效的 IPv4 / IPv6 地址。\n'
+    pause
+    return
+  fi
+
+  if ! target_ssh_preflight "$target_ip"; then
+    pause
+    return
+  fi
+
+  printf '\nP07 将：创建迁移备份 → SSH 传输 → 新站恢复 → Runtime → 技术验证。\n'
   printf '不会改 DNS，不会删除旧服务器。\n'
-  printf '确认迁移到 %s 请输入 YES：' "$target_ip"
+  printf '开始迁移？[y/N]：'
   read -r confirm || return
-  [[ "$confirm" == "YES" ]] || { printf '已取消。\n'; pause; return; }
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return; }
 
   printf '\n[1/2] 创建并验证迁移备份...\n'
-  set +e
-  output="$("$CORE" backup --site "$SELECTED_DOMAIN" --kind pre_migration 2>&1)"
-  rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    printf '\n迁移备份失败：\n%s\n' "$output" >&2
+  if output="$("$CORE" backup --site "$SELECTED_DOMAIN" --kind pre_migration --output-dir "$BACKUP_DIR" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    friendly_failure "迁移备份没有完成。" "$output"
     pause
     return
   fi
@@ -264,22 +442,23 @@ migrate_site() {
   identity="$(backup_identity "$package")"
   IFS=$'\t' read -r domain backup_id <<<"$identity"
 
-  printf '[2/2] 连接新服务器并迁移...\n'
-  set +e
-  "$CORE" migrate transfer-new-site \
+  printf '[2/2] 正在连接新服务器并迁移...\n'
+  if migration_output="$("$CORE" migrate transfer-new-site \
     --package "$package" \
     --target-host "$target_ip" \
     --target-ip "$target_ip" \
     --ssh-user root \
     --ssh-port 22 \
-    --confirm "MIGRATE_NEW_SITE:${domain}:${backup_id}"
-  rc=$?
-  set -e
-  if [[ $rc -eq 0 ]]; then
+    --confirm "MIGRATE_NEW_SITE:${domain}:${backup_id}" 2>&1)"; then
+    rc=0
     printf '\n迁移技术验证完成 ✓\n'
-    printf 'DNS 仍未修改，旧服务器仍保留。\n'
+    printf '网站：%s\n' "$domain"
+    printf '目标：%s\n' "$target_ip"
+    printf '技术切换条件：READY\n'
+    printf 'DNS：未修改\n'
+    printf '旧服务器：保留\n'
   else
-    printf '\n迁移未完成。源服务器和刚生成的迁移备份仍保留。\n' >&2
+    friendly_failure "迁移没有完成。" "$migration_output" "源网站和迁移备份仍保留；DNS 没有修改。"
   fi
   pause
 }
