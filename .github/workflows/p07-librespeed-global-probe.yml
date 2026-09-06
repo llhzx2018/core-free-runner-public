@@ -1,0 +1,82 @@
+name: P07 LibreSpeed Global Fallback Probe
+
+on:
+  push:
+    branches:
+      - experiment/p07-oneshot-bench-v05
+    paths:
+      - .github/workflows/p07-librespeed-global-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified LibreSpeed CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/librespeed/speedtest-cli/releases/download/v1.0.14/librespeed-cli_1.0.14_linux_amd64.tar.gz'
+          SHA='89800767ac14085c78a20847ebea23340f6c14a78de0a15c2ac7db8b565c961f'
+          curl -fL --retry 2 --connect-timeout 10 --max-time 90 "$URL" -o /tmp/librespeed.tgz
+          echo "$SHA  /tmp/librespeed.tgz" | sha256sum -c -
+          mkdir -p /tmp/librespeed
+          tar -xzf /tmp/librespeed.tgz -C /tmp/librespeed
+          BIN="$(find /tmp/librespeed -maxdepth 2 -type f -name 'librespeed-cli*' | head -n1)"
+          test -n "$BIN"
+          chmod +x "$BIN"
+          echo "LIBRESPEED_BIN=$BIN" >> "$GITHUB_ENV"
+          "$BIN" --version
+      - name: Create pinned HTTPS server list
+        shell: bash
+        run: |
+          cat >/tmp/p07-librespeed-servers.json <<'JSON'
+          [
+            {"id":91,"name":"Los Angeles, USA","server":"https://laxspeed.sharktech.net","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"},
+            {"id":93,"name":"Chicago, USA","server":"https://chispeed.sharktech.net","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"},
+            {"id":52,"name":"New York, USA","server":"https://nyc.speedtest.clouvider.net/backend","dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP.php"},
+            {"id":50,"name":"Frankfurt, Germany","server":"https://fra.speedtest.clouvider.net/backend","dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP.php"},
+            {"id":68,"name":"Singapore","server":"https://speedtest.dsgroupmedia.com","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"},
+            {"id":82,"name":"Tokyo, Japan","server":"https://librespeed.a573.net/","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"}
+          ]
+          JSON
+          python3 -m json.tool /tmp/p07-librespeed-servers.json >/dev/null
+      - name: Probe six regions with low traffic
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/global.tsv
+          probe(){
+            local id="$1" region="$2" out="/tmp/ls-${id}.json"
+            set +e
+            timeout 35s "$LIBRESPEED_BIN" --json --local-json /tmp/p07-librespeed-servers.json --server "$id" --no-icmp --duration 1 --concurrent 1 --chunks 5 --upload-size 256 --timeout 10 --telemetry-level disabled >"$out" 2>"$out.err"
+            rc=$?
+            set -e
+            if (( rc != 0 )); then
+              echo "$region FAIL rc=$rc"
+              cat "$out.err" || true
+              return 1
+            fi
+            python3 - "$out" "$region" <<'PY'
+          import json,sys
+          p,region=sys.argv[1:]
+          obj=json.load(open(p,encoding='utf-8'))
+          if isinstance(obj,list): obj=obj[0]
+          up=float(obj['upload']); down=float(obj['download']); ping=float(obj['ping'])
+          assert up >= 0 and down >= 0 and ping >= 0
+          print(f"{region}\t{up:.2f}\t{down:.2f}\t{ping:.2f}")
+          PY
+          }
+          probe 91 'US West'    | tee -a /tmp/global.tsv
+          probe 93 'US Central' | tee -a /tmp/global.tsv
+          probe 52 'US East'    | tee -a /tmp/global.tsv
+          probe 50 'Europe'     | tee -a /tmp/global.tsv
+          probe 68 'Singapore'  | tee -a /tmp/global.tsv
+          probe 82 'Tokyo'      | tee -a /tmp/global.tsv
+          test "$(wc -l </tmp/global.tsv)" -eq 6
+          cat /tmp/global.tsv
