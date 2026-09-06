@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc6'
+VERSION='0.1.0-rc7'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='94855a3f9208ac939b0f73a5ce392dc41f1f1e850ebd4b1f142489eaae480603'
+MANIFEST_SHA256='a3c3242f628c93656776cfaab4867bcae367581e4d7b32deb2b2dab83db79643'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 STATE='/etc/vf-node/state.env'
@@ -80,18 +80,18 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info '下载并校验公开 RC6 Manifest...'
+  info '下载并校验公开 RC7 安装包...'
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
-    fail 'Manifest 下载失败，已停止。'
+    fail '安装包清单下载失败，已停止。'
     return 9
   fi
   if ! printf '%s  %s\n' "$MANIFEST_SHA256" "$tmp/pkg/MANIFEST.sha256" | sha256sum -c - >/dev/null; then
     rm -rf "$tmp" "$stage"
-    fail 'Manifest SHA256 校验失败，已停止。'
+    fail '安装包清单校验失败，已停止。'
     return 10
   fi
-  ok 'Manifest 校验通过'
+  ok '安装包清单校验通过'
 
   local files=(
     VERSION
@@ -106,7 +106,7 @@ install_runtime_files() {
     lib/patch_upstream_core.py
   )
 
-  info '下载 RC6 运行文件...'
+  info '下载运行文件...'
   local f
   for f in "${files[@]}"; do
     mkdir -p "$tmp/pkg/$(dirname "$f")"
@@ -122,10 +122,10 @@ install_runtime_files() {
     sha256sum -c MANIFEST.sha256 >/dev/null
   ); then
     rm -rf "$tmp" "$stage"
-    fail 'RC6 文件 SHA256 校验失败，已停止。'
+    fail '运行文件校验失败，已停止。'
     return 12
   fi
-  ok 'RC6 运行文件校验通过'
+  ok '运行文件校验通过'
 
   info '安装 / 更新 VF Network Node 管理模块...'
   cp -a "$tmp/pkg/VERSION" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
@@ -165,37 +165,11 @@ refresh_manager_if_needed() {
   fi
 }
 
-post_install_actions() {
-  [[ -t 0 ]] || return 0
-  local choice=''
-  while :; do
-    say
-    say "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"
-    say "${B}${GREEN}节点已就绪 · 下一步${R}"
-    say "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"
-    say
-    say "  ${CYAN}1. [管理]${R} 打开节点管理菜单"
-    say "  ${MAGENTA}2. [分享]${R} 再次显示干净分享链接"
-    say "  ${BLUE}3. [备份]${R} 立即备份节点配置"
-    say "  ${GRAY}0. [返回]${R} 回到一键主菜单"
-    say
-    printf '%b' "${B}请选择 [0-3]：${R}"
-    read -r choice || return 0
-    case "$choice" in
-      1) "$ENTRY" ;;
-      2) "$ENTRY" url; pause_return ;;
-      3) "$ENTRY" backup; pause_return ;;
-      0|'') return 0 ;;
-      *) warn '请输入 0-3。' ;;
-    esac
-  done
-}
-
 install_node() {
   if p07_installed; then
     warn "这台服务器已经安装 P07 节点（$(installed_version)）。"
-    say '无需重装；节点配置保持原样。'
-    post_install_actions
+    say '无需重装；可以直接使用管理、分享或卸载。'
+    pause_return
     return 0
   fi
 
@@ -208,7 +182,7 @@ install_node() {
   install_runtime_files || return $?
 
   say
-  info '正在自动安装稳定节点：VMess + mKCP + dtls ...'
+  info '正在安装稳定节点：VMess + mKCP + dtls ...'
   if ! NO_COLOR="${NO_COLOR:-0}" "$ENTRY" install </dev/null; then
     fail '节点安装未完成。上方错误就是当前真实状态。'
     return 20
@@ -219,21 +193,34 @@ install_node() {
     return 21
   fi
 
-  say
-  ok '节点安装与本机健康检查 PASS'
-  say "${GRAY}无需记命令；下面直接给你下一步。${R}"
-  post_install_actions
+  # The installer already showed the clean share link. Hold the screen so the
+  # user can copy it, then return to this same top-level menu. No nested menu.
+  pause_return
 }
 
 manage_node() {
   if p07_installed; then
-    install_runtime_files || return $?
+    refresh_manager_if_needed
     "$ENTRY"
     return 0
   fi
   if any_v2ray_present; then
     warn '检测到 V2Ray，但它不是当前 P07 管理节点。'
     warn '为了安全，不接管、不改写旧节点。'
+    return 3
+  fi
+  warn '当前还没有安装 P07 节点。'
+  return 1
+}
+
+share_node() {
+  if p07_installed; then
+    refresh_manager_if_needed
+    "$ENTRY" url
+    return 0
+  fi
+  if any_v2ray_present; then
+    warn '检测到外部 V2Ray。P07 不读取或展示它的节点凭据。'
     return 3
   fi
   warn '当前还没有安装 P07 节点。'
@@ -251,7 +238,7 @@ uninstall_node() {
     return 1
   fi
 
-  install_runtime_files || return $?
+  refresh_manager_if_needed
   "$ENTRY" uninstall
 }
 
@@ -280,10 +267,7 @@ menu() {
     case "$choice" in
       1) if ! install_node; then pause_return; fi ;;
       2) if ! manage_node; then pause_return; fi ;;
-      3)
-        if p07_installed; then "$ENTRY" url; else warn '当前没有 P07 节点。'; fi
-        pause_return
-        ;;
+      3) share_node || true; pause_return ;;
       4) uninstall_node || true; pause_return ;;
       0) return 0 ;;
       *) warn '无效选择。'; sleep 1 ;;
@@ -296,6 +280,7 @@ require_root
 case "${1:-}" in
   install) refresh_manager_if_needed; install_node ;;
   manage|menu) menu ;;
+  share|url) refresh_manager_if_needed; share_node ;;
   uninstall) refresh_manager_if_needed; uninstall_node ;;
   '')
     if [[ -t 0 ]]; then
@@ -310,8 +295,8 @@ case "${1:-}" in
 P07 · VF Network Node 一键入口
 
 交互运行：直接显示安装 / 管理 / 分享 / 卸载菜单。
-旧版 P07：再次运行一键入口会只升级管理模块，不改节点 UUID/端口/配置。
-安装成功：只显示干净 vmess:// 分享链接，再显示下一步菜单。
+安装成功：显示干净 vmess:// 链接，按 Enter 回到原主菜单。
+旧版 P07：再次运行一键入口只升级管理模块，不改节点 UUID/端口/配置。
 非交互运行：默认执行安装。
 EOF
     ;;
