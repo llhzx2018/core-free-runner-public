@@ -20,6 +20,15 @@ info() { say "${CYAN}●${R} $*"; }
 warn() { say "${YELLOW}⚠${R} $*"; }
 fail() { say "${RED}✗${R} $*" >&2; }
 
+write_entry() {
+  rm -f "$ENTRY"
+  cat > "$ENTRY" <<EOF
+#!/usr/bin/env bash
+exec "$TARGET/vf-node.sh" "\$@"
+EOF
+  chmod 0755 "$ENTRY"
+}
+
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   fail '请使用 root 运行。'
   exit 1
@@ -101,14 +110,17 @@ if [[ -d "$TARGET" ]]; then
   mv "$TARGET" "${TARGET}.previous"
 fi
 mv "$stage" "$TARGET"
-ln -sfn "$TARGET/vf-node.sh" "$ENTRY"
+# Use a real launcher rather than a symlink. The module resolves lib/ relative
+# to its own file path; a symlink from /usr/local/bin would make it look for
+# /usr/local/bin/lib/common.sh and reproduce the old P07 launcher-path bug.
+write_entry
 
 if [[ "$(NO_COLOR=1 "$ENTRY" --version)" != "VF Network Node ${VERSION}" ]]; then
   fail 'vf-node 安装自检失败。'
   if [[ -d "${TARGET}.previous" ]]; then
     rm -rf "$TARGET"
     mv "${TARGET}.previous" "$TARGET"
-    ln -sfn "$TARGET/vf-node.sh" "$ENTRY"
+    write_entry
   fi
   exit 12
 fi
