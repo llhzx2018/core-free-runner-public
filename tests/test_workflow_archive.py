@@ -29,7 +29,10 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(value["category_counts"]["late-active"], 86)
         self.assertEqual(value["delta"]["git_tree_sha"], MODULE.LATE_BATCH_TREE_SHA)
         self.assertEqual(value["delta"]["source_commit"], MODULE.LATE_BATCH_SOURCE_COMMIT)
-        self.assertEqual(value["active_current_workflows"], sorted(MODULE.ACTIVE_CURRENT_WORKFLOW_NAMES))
+        self.assertEqual(
+            value["active_current_workflows"],
+            sorted(MODULE.V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT),
+        )
 
         v10 = MODULE.build_v10_manifest(root)
         raw = json.dumps(v10, ensure_ascii=False)
@@ -100,11 +103,16 @@ class WorkflowArchiveTests(unittest.TestCase):
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "s01").glob("s01*.yml"))
         self.assertEqual(len(archived), 6)
 
-    def test_active_current_workflow_allowlist_is_exact(self):
+    def test_v11_active_field_is_historical_snapshot_not_live_allowlist(self):
         root = Path(__file__).resolve().parents[1]
-        active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
-        self.assertEqual(active, MODULE.ACTIVE_CURRENT_WORKFLOW_NAMES)
-        archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "public-infrastructure").glob("*.yml"))
+        value = MODULE.build_manifest(root)
+        self.assertEqual(
+            set(value["active_current_workflows"]),
+            MODULE.V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT,
+        )
+        archived = list(
+            (root / MODULE.ARCHIVE_BATCH / "historical-version" / "public-infrastructure").glob("*.yml")
+        )
         self.assertEqual(len(archived), 2)
 
     def test_current_checkout_and_setup_python_use_approved_node24_pins(self):
