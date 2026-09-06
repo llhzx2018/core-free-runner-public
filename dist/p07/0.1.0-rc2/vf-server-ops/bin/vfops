@@ -1,0 +1,670 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="$ROOT_DIR/bin/vfops"
+VERSION_FILE="$ROOT_DIR/VERSION"
+VERSION="$(cat "$VERSION_FILE" 2>/dev/null || printf 'UNKNOWN')"
+
+show_help() {
+  cat <<'EOF'
+VF Server Ops
+
+Usage:
+  vfops
+  vfops menu
+  vfops --version
+  vfops --help
+  vfops status
+  vfops inventory [--root PATH] [--output FILE] [--compact]
+  vfops backup --site DOMAIN [--root PATH] [--output-dir PATH] [--clpctl PATH] [--kind manual|automatic|pre_migration|pre_upgrade]
+  vfops storage --config FILE [--rclone PATH] status|list|push|fetch ...
+  vfops restore plan --package DIR [--target-root PATH]
+  vfops restore apply-sandbox --package DIR --target-root PATH [--clpctl PATH]
+  vfops restore apply-new-site --package DIR [--target-root /] [--clpctl PATH] --confirm RESTORE_NEW_SITE:DOMAIN:BACKUP_ID
+  vfops runtime plan --package DIR [--target-root PATH]
+  vfops runtime apply-new-site --package DIR [--target-root /] --confirm ACTIVATE_RUNTIME:DOMAIN:BACKUP_ID [--crontab PATH] [--runuser PATH] [--pm2 PATH] [--chown PATH]
+  vfops verify restore --package DIR --target-root PATH [--clpctl PATH]
+  vfops verify cross --source-inventory FILE --target-inventory FILE --domain DOMAIN
+  vfops verify cutover --package DIR --source-inventory FILE --target-inventory FILE --target-root PATH --target-ip IP [--path /] [--clpctl PATH] [--curl PATH]
+  vfops migrate transfer-new-site --package DIR --target-host HOST --target-ip IP [--ssh-user root] [--ssh-port 22] [--identity-file PATH] --confirm MIGRATE_NEW_SITE:DOMAIN:BACKUP_ID
+  vfops migrate apply-sandbox --package DIR --target-root PATH [--clpctl PATH]
+  vfops migrate apply-new-site --package DIR [--target-root /] --target-ip IP --confirm MIGRATE_NEW_SITE:DOMAIN:BACKUP_ID [runtime/curl overrides]
+  vfops config validate --policy FILE
+  vfops policy run --policy FILE [--clpctl PATH] [--rclone PATH]
+  vfops retention plan --policy FILE
+  vfops retention apply --policy FILE --confirm DELETE_AUTOMATIC_BACKUPS
+  vfops automation render-cron --policy FILE [--vfops PATH]
+
+V1 interactive menu:
+  1. 服务器检查
+  2. 网站备份
+  3. 网站恢复
+  4. 服务器迁移
+  5. 备份/恢复验证
+
+V1 commands:
+  inventory   Read-only server/business asset discovery
+  backup      Verified portable backup package
+  storage     Encrypted Google Drive Pool / Backblaze B2 adapter
+  restore     Plan, isolated rehearsal, and guarded restore to a brand-new CloudPanel site
+  runtime     Plan/activate guarded user Cron and PM2 runtime for a restored new site
+  verify      Restore/cross-server/cutover readiness verification
+  migrate     Direct SSH transport or target-local migration; always stops at TECHNICAL_CUTOVER_READY
+  config      Validate no-secret operational policy
+  policy      Run configured automatic backup policy
+  retention   Plan/apply local automatic-backup retention
+  automation  Render the dedicated VF policy-run Cron entry; no general Cron manager
+
+结果含义：
+- 备份已创建，不等于备份已验证；只有验证 PASS 的备份才应进入恢复/迁移链。
+- 恢复完成，不等于技术切换条件已满足；必须继续完成 Runtime、Cross-server、HTTP/HTTPS 验证。
+- TECHNICAL_CUTOVER_READY 表示“技术检查已通过”，不代表 OWNER 已批准 DNS 切换。
+- NOT_RUN / UNKNOWN / BLOCKED / FAIL 都不等于 PASS。
+- 失败时额外输出 VFOPS_DIAGNOSTIC_V1；该行只含白名单 stage/error_class/blocker/cleanup/exit_code，不回显原始私有值。
+
+Safety:
+- the interactive menu is only a thin launcher; it never bypasses the existing confirmation gates.
+- backup menu exposes local and encrypted remote workflows but never asks for OAuth/B2 secret values; rclone credentials stay in protected rclone runtime configuration.
+- restore apply-new-site refuses any pre-existing site and requires exact DOMAIN+BACKUP_ID confirmation; it never overwrites an existing Production site.
+- runtime apply-new-site refuses an existing non-empty user crontab, requires exact DOMAIN+BACKUP_ID confirmation, and leaves system-level /etc/cron.d entries as manual reconciliation gates.
+- runtime PM2 activation runs as the site user and rolls back newly installed user Cron / newly copied PM2 dump if activation fails.
+- migrate transfer-new-site uses SSH BatchMode and StrictHostKeyChecking=accept-new, accepts SSH key/agent authentication only, streams the verified PRIVATE package, and invokes the same guarded target migration engine.
+- migrate apply-new-site accepts one migration OWNER confirmation, internally reuses the guarded restore/runtime gates, records private migration evidence, and never treats that confirmation as DNS cutover approval.
+- manual/pre_migration/pre_upgrade backups are protected from automatic retention.
+- retention apply only deletes fresh-verified `automatic` packages and requires explicit confirmation plus policy authorization.
+- policy files may not contain password/token/private-key/oauth style fields; credentials stay in protected runtime/rclone configuration.
+- automation render-cron only prints a dedicated VF policy-run entry; it does not install or edit unrelated Cron jobs.
+- DNS is never automatically changed; TECHNICAL_CUTOVER_READY still requires OWNER cutover approval.
+- overwrite of an existing Production site, DNS mutation, and old-server deletion are not implemented.
+EOF
+}
+
+require_python() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'ERROR: python3 is required.\n' >&2
+    exit 3
+  fi
+}
+
+run_diagnosed() {
+  require_python
+  local operation="$1"
+  shift
+  local err_file rc
+  err_file="$(mktemp -t vfops-diagnostics.XXXXXX)"
+  chmod 600 "$err_file"
+  set +e
+  "$@" 2>"$err_file"
+  rc=$?
+  set -e
+  if [[ -s "$err_file" ]]; then
+    cat "$err_file" >&2
+  fi
+  if [[ $rc -ne 0 ]]; then
+    python3 "$ROOT_DIR/lib/diagnostics.py" --operation "$operation" --exit-code "$rc" <"$err_file" >&2 || true
+  fi
+  rm -f "$err_file"
+  return "$rc"
+}
+
+run_inventory() { run_diagnosed "inventory" python3 "$ROOT_DIR/lib/inventory.py" "$@"; }
+run_backup() { run_diagnosed "backup" python3 "$ROOT_DIR/lib/package.py" "$@"; }
+run_storage() { run_diagnosed "storage.${1:-unknown}" python3 "$ROOT_DIR/lib/storage.py" "$@"; }
+run_verify() {
+  require_python
+  if [[ "${1:-}" == "cross" || "${1:-}" == "cutover" ]]; then
+    run_diagnosed "verify.${1}" python3 "$ROOT_DIR/lib/cutover.py" "$@"
+    return
+  fi
+  run_diagnosed "verify.${1:-unknown}" python3 "$ROOT_DIR/lib/verify.py" "$@"
+}
+run_restore() {
+  require_python
+  case "${1:-}" in
+    apply-sandbox) shift; run_diagnosed "restore.apply-sandbox" python3 "$ROOT_DIR/lib/restore_apply.py" "$@" ;;
+    apply-new-site) shift; run_diagnosed "restore.apply-new-site" python3 "$ROOT_DIR/lib/restore_new.py" "$@" ;;
+    *) run_diagnosed "restore.${1:-unknown}" python3 "$ROOT_DIR/lib/restore.py" "$@" ;;
+  esac
+}
+run_runtime() { run_diagnosed "runtime.${1:-unknown}" python3 "$ROOT_DIR/lib/runtime.py" "$@"; }
+run_migrate() {
+  require_python
+  if [[ "${1:-}" == "transfer-new-site" ]]; then
+    shift
+    run_diagnosed "migrate.transfer-new-site" python3 "$ROOT_DIR/lib/transport.py" "$@"
+    return
+  fi
+  run_diagnosed "migrate.${1:-unknown}" python3 "$ROOT_DIR/lib/migrate.py" "$@"
+}
+run_policy_raw() { run_diagnosed "policy.${1:-unknown}" python3 "$ROOT_DIR/lib/policy.py" "$@"; }
+
+menu_pause() {
+  printf '\n按 Enter 返回菜单...'
+  read -r _ || true
+}
+
+menu_header() {
+  cat <<EOF
+============================================================
+ VF Server Ops $VERSION
+ CloudPanel 备份 · 恢复 · 迁移工具
+============================================================
+
+  1. 服务器检查
+     盘点网站、数据库、服务与异常
+
+  2. 网站备份
+     创建可验证备份，并管理 Google/B2 加密远程副本
+
+  3. 网站恢复
+     先做零写入检查，再恢复到全新 CloudPanel 站点
+
+  4. 服务器迁移
+     旧 CloudPanel -> 新 CloudPanel，自动传输、恢复并完成技术验证
+
+  5. 备份/恢复验证
+     检查备份是否可用，并验证恢复结果
+
+  0. 退出
+
+  h. 高级命令帮助
+------------------------------------------------------------
+EOF
+}
+
+menu_action_name() {
+  case "${1:-}:${2:-}" in
+    inventory:*) printf '服务器检查' ;;
+    backup:*) printf '创建并验证本地备份' ;;
+    storage:*) printf '远程存储操作' ;;
+    restore:plan) printf '恢复计划检查' ;;
+    restore:apply-new-site) printf '全新站点恢复' ;;
+    runtime:plan) printf '运行环境检查' ;;
+    runtime:apply-new-site) printf '运行环境激活' ;;
+    verify:*) printf '验证' ;;
+    migrate:transfer-new-site) printf '服务器迁移' ;;
+    *) printf '当前操作' ;;
+  esac
+}
+
+menu_run() {
+  local label
+  label="$(menu_action_name "${1:-}" "${2:-}")"
+  if "$SELF" "$@"; then
+    printf '\n已完成：%s。\n' "$label"
+  else
+    local rc=$?
+    printf '\n未完成：%s（退出码 %s）。请以上方错误信息为准；没有 PASS 就不要继续下一步。\n' "$label" "$rc" >&2
+  fi
+  menu_pause
+}
+
+menu_render_json() {
+  local mode="$1"
+  require_python
+  python3 "$ROOT_DIR/lib/ux.py" "$mode"
+}
+
+menu_run_json() {
+  local mode="$1"
+  shift
+  local label tmp rc
+  label="$(menu_action_name "${1:-}" "${2:-}")"
+  tmp="$(mktemp -t vfops-menu-result.XXXXXX)"
+  chmod 600 "$tmp"
+  set +e
+  "$SELF" "$@" >"$tmp"
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 ]]; then
+    if ! menu_render_json "$mode" <"$tmp"; then
+      printf '\n已完成：%s，但交互摘要生成失败。请使用高级 CLI 查看机器 JSON。\n' "$label" >&2
+    fi
+  else
+    printf '\n未完成：%s（退出码 %s）。请以上方错误信息为准；没有 PASS 就不要继续下一步。\n' "$label" "$rc" >&2
+  fi
+  rm -f "$tmp"
+  menu_pause
+}
+
+package_identity() {
+  require_python
+  local package_dir="$1"
+  python3 - "$package_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = Path(sys.argv[1]).expanduser().resolve() / "manifest.json"
+try:
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(2)
+domain = payload.get("site", {}).get("domain") if isinstance(payload.get("site"), dict) else None
+backup_id = payload.get("backup_id")
+if not isinstance(domain, str) or not domain or not isinstance(backup_id, str) or not backup_id:
+    raise SystemExit(2)
+print(f"{domain}\t{backup_id}")
+PY
+}
+
+menu_verify_package() {
+  require_python
+  local package_dir="$1"
+  python3 - "$ROOT_DIR" "$package_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "lib"))
+import package as package_engine
+
+try:
+    result = package_engine.verify_package(Path(sys.argv[2]).expanduser().resolve())
+except Exception as exc:
+    print(f"ERROR: backup verification failed: {exc}", file=sys.stderr)
+    raise SystemExit(8)
+print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+raise SystemExit(0 if result.get("status") == "PASS" else 8)
+PY
+}
+
+menu_storage_config() {
+  local config_path
+  printf '远程存储配置文件（只写 remote/策略；认证由受保护的 rclone 配置提供）：'
+  read -r config_path || return 1
+  if [[ -z "$config_path" ]]; then
+    printf '未输入存储配置文件。可从 config/storage.example.json 复制后按实际 remote 修改。\n' >&2
+    return 1
+  fi
+  if [[ ! -f "$config_path" ]]; then
+    printf '存储配置文件不存在：%s\n' "$config_path" >&2
+    return 1
+  fi
+  printf '%s\n' "$config_path"
+}
+
+menu_backup_local() {
+  local domain output_dir
+  printf '\n[创建并验证本地备份]\n'
+  printf '网站域名：'
+  read -r domain || return 0
+  if [[ -z "$domain" ]]; then
+    printf '未输入网站域名。\n' >&2
+    menu_pause
+    return 0
+  fi
+  printf '备份目录 [/var/backups/vf-server-ops]：'
+  read -r output_dir || return 0
+  if [[ -n "$output_dir" ]]; then
+    menu_run backup --site "$domain" --output-dir "$output_dir"
+  else
+    menu_run backup --site "$domain"
+  fi
+}
+
+menu_backup_remote_push() {
+  local config_path package_dir target
+  printf '\n[上传已验证备份到加密远程]\n'
+  if ! config_path="$(menu_storage_config)"; then
+    menu_pause
+    return 0
+  fi
+  printf '本地备份包目录：'
+  read -r package_dir || return 0
+  [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; return 0; }
+  printf '目标 [auto/google/b2/账号ID，默认 auto]：'
+  read -r target || return 0
+  [[ -n "$target" ]] || target="auto"
+  printf '系统会先重新验证备份包；验证通过后才加密上传。上传成功不会删除本地备份。\n'
+  menu_run_json storage-push storage --config "$config_path" push --package "$package_dir" --target "$target"
+}
+
+menu_backup_remote_status() {
+  local config_path
+  printf '\n[远程存储状态]\n'
+  if ! config_path="$(menu_storage_config)"; then
+    menu_pause
+    return 0
+  fi
+  menu_run_json storage-status storage --config "$config_path" status
+}
+
+menu_backup_remote_list() {
+  local config_path source
+  printf '\n[列出可恢复的远程备份]\n'
+  if ! config_path="$(menu_storage_config)"; then
+    menu_pause
+    return 0
+  fi
+  printf '来源 [auto/google/b2/账号ID，默认 auto]：'
+  read -r source || return 0
+  [[ -n "$source" ]] || source="auto"
+  menu_run_json storage-list storage --config "$config_path" list --source "$source"
+}
+
+menu_backup_remote_fetch() {
+  local config_path backup_id target_dir source
+  printf '\n[从远程取回并验证备份]\n'
+  if ! config_path="$(menu_storage_config)"; then
+    menu_pause
+    return 0
+  fi
+  printf 'Backup ID（备份编号）：'
+  read -r backup_id || return 0
+  [[ -n "$backup_id" ]] || { printf '未输入 Backup ID。\n' >&2; menu_pause; return 0; }
+  printf '取回到已有本地目录 [/var/backups/vf-server-ops]：'
+  read -r target_dir || return 0
+  [[ -n "$target_dir" ]] || target_dir="/var/backups/vf-server-ops"
+  printf '来源 [auto/google/b2/账号ID，默认 auto]：'
+  read -r source || return 0
+  [[ -n "$source" ]] || source="auto"
+  printf '只会取回带完成标记的远程备份；下载完成后会自动重新验证。\n'
+  menu_run_json storage-fetch storage --config "$config_path" fetch --backup-id "$backup_id" --target-dir "$target_dir" --source "$source"
+}
+
+menu_backup() {
+  local choice
+  while true; do
+    cat <<'EOF'
+
+[网站备份]
+  1. 创建并验证本地备份
+  2. 上传已验证备份到加密远程
+  3. 查看远程存储状态 / Google 配额
+  4. 列出可恢复的远程备份
+  5. 从远程取回并验证备份
+  0. 返回
+EOF
+    printf '请选择：'
+    read -r choice || return 0
+    case "$choice" in
+      1) menu_backup_local ;;
+      2) menu_backup_remote_push ;;
+      3) menu_backup_remote_status ;;
+      4) menu_backup_remote_list ;;
+      5) menu_backup_remote_fetch ;;
+      0) return 0 ;;
+      *) printf '无效选择。请输入 0-5。\n' ;;
+    esac
+  done
+}
+
+menu_restore() {
+  local choice package_dir identity domain backup_id expected confirm
+  while true; do
+    cat <<'EOF'
+
+[网站恢复]
+  1. 先检查：生成恢复计划（零写入）
+  2. 执行恢复：恢复到全新 CloudPanel 站点
+  3. 运行环境检查：Cron / PM2 计划（零写入）
+  4. 激活运行环境：恢复用户 Cron / PM2
+  0. 返回
+EOF
+    printf '请选择：'
+    read -r choice || return 0
+    case "$choice" in
+      1)
+        printf '备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        menu_run_json restore-plan restore plan --package "$package_dir"
+        ;;
+      2)
+        printf '备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        if ! identity="$(package_identity "$package_dir")"; then
+          printf '无法读取备份包身份信息（域名 / Backup ID）；未执行恢复。\n' >&2
+          menu_pause
+          continue
+        fi
+        IFS=$'\t' read -r domain backup_id <<<"$identity"
+        expected="RESTORE_NEW_SITE:${domain}:${backup_id}"
+        printf '\n安全边界：只允许恢复到全新 CloudPanel 站点，不覆盖已有站点，不修改 DNS。\n'
+        printf '如确认执行，请完整输入：\n%s\n> ' "$expected"
+        read -r confirm || return 0
+        if [[ "$confirm" != "$expected" ]]; then
+          printf '确认串不匹配，零写入退出。\n' >&2
+          menu_pause
+          continue
+        fi
+        menu_run_json restore-result restore apply-new-site --package "$package_dir" --confirm "$confirm"
+        ;;
+      3)
+        printf '用于恢复该站点的备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        menu_run_json runtime-plan runtime plan --package "$package_dir"
+        ;;
+      4)
+        printf '用于恢复该站点的备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        if ! identity="$(package_identity "$package_dir")"; then
+          printf '无法读取备份包身份信息（域名 / Backup ID）；未执行 Runtime 激活。\n' >&2
+          menu_pause
+          continue
+        fi
+        IFS=$'\t' read -r domain backup_id <<<"$identity"
+        expected="ACTIVATE_RUNTIME:${domain}:${backup_id}"
+        printf '\n激活范围：仅受控恢复 Site User 的 Cron / PM2；不修改 DNS，不覆盖 system Cron。\n'
+        printf '如确认执行，请完整输入：\n%s\n> ' "$expected"
+        read -r confirm || return 0
+        if [[ "$confirm" != "$expected" ]]; then
+          printf '确认串不匹配，Runtime 零写入退出。\n' >&2
+          menu_pause
+          continue
+        fi
+        menu_run_json runtime-result runtime apply-new-site --package "$package_dir" --confirm "$confirm"
+        ;;
+      0) return 0 ;;
+      *) printf '无效选择。请输入 0-4。\n' ;;
+    esac
+  done
+}
+
+menu_migrate() {
+  local domain target_ip target_host ssh_user ssh_port identity_file output_dir backup_path identity backup_domain backup_id expected confirm rc
+  printf '\n[服务器迁移]\n'
+  printf '此流程应在旧/源 CloudPanel 服务器运行；目标服务器必须已安装干净 CloudPanel。\n'
+  printf '流程：1) 创建迁移备份  2) 私密传输  3) 在全新目标站点恢复  4) 验证技术切换条件。\n'
+  printf '不会自动修改 DNS，不会覆盖已有站点，也不会删除旧服务器。\n\n'
+  printf '要迁移的网站域名：'
+  read -r domain || return 0
+  [[ -n "$domain" ]] || { printf '未输入网站域名。\n' >&2; menu_pause; return 0; }
+
+  printf '新服务器 IP：'
+  read -r target_ip || return 0
+  [[ -n "$target_ip" ]] || { printf '未输入目标 IP。\n' >&2; menu_pause; return 0; }
+  printf 'SSH 主机 [%s]：' "$target_ip"
+  read -r target_host || return 0
+  [[ -n "$target_host" ]] || target_host="$target_ip"
+  printf 'SSH 用户 [root]：'
+  read -r ssh_user || return 0
+  [[ -n "$ssh_user" ]] || ssh_user="root"
+  printf 'SSH 端口 [22]：'
+  read -r ssh_port || return 0
+  [[ -n "$ssh_port" ]] || ssh_port="22"
+  printf 'SSH 私钥路径 [使用 ssh-agent/默认密钥]：'
+  read -r identity_file || return 0
+  printf '源机迁移备份目录 [/var/backups/vf-server-ops]：'
+  read -r output_dir || return 0
+  [[ -n "$output_dir" ]] || output_dir="/var/backups/vf-server-ops"
+
+  printf '\n[1/4] 创建并验证迁移专用备份...\n'
+  set +e
+  backup_path="$("$SELF" backup --site "$domain" --output-dir "$output_dir" --kind pre_migration)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 || -z "$backup_path" ]]; then
+    printf '迁移前备份失败；未接触目标服务器。\n' >&2
+    menu_pause
+    return 0
+  fi
+  backup_path="$(printf '%s\n' "$backup_path" | tail -n1)"
+  if ! identity="$(package_identity "$backup_path")"; then
+    printf '迁移备份身份校验失败；未接触目标服务器。\n' >&2
+    menu_pause
+    return 0
+  fi
+  IFS=$'\t' read -r backup_domain backup_id <<<"$identity"
+  if [[ "$backup_domain" != "$domain" ]]; then
+    printf '迁移备份域名不匹配；未接触目标服务器。\n' >&2
+    menu_pause
+    return 0
+  fi
+
+  expected="MIGRATE_NEW_SITE:${backup_domain}:${backup_id}"
+  printf '\n已生成并验证迁移备份：%s\n' "$backup_path"
+  printf '\n[2-4/4] 确认后将连续完成：私密传输 -> 全新站点恢复 -> Runtime/跨服务器/HTTP/HTTPS 验证。\n'
+  printf '成功结果是“技术切换条件已通过（TECHNICAL_CUTOVER_READY）”。\n'
+  printf '这仍不代表已批准 DNS 切换；OWNER Cutover 是独立 Gate。\n'
+  printf '如确认执行，请完整输入：\n%s\n> ' "$expected"
+  read -r confirm || return 0
+  if [[ "$confirm" != "$expected" ]]; then
+    printf '确认串不匹配；目标服务器零写入。刚生成的 pre_migration 备份保留。\n' >&2
+    menu_pause
+    return 0
+  fi
+
+  if [[ -n "$identity_file" ]]; then
+    menu_run_json migration-result migrate transfer-new-site \
+      --package "$backup_path" --target-host "$target_host" --target-ip "$target_ip" \
+      --ssh-user "$ssh_user" --ssh-port "$ssh_port" --identity-file "$identity_file" --confirm "$confirm"
+  else
+    menu_run_json migration-result migrate transfer-new-site \
+      --package "$backup_path" --target-host "$target_host" --target-ip "$target_ip" \
+      --ssh-user "$ssh_user" --ssh-port "$ssh_port" --confirm "$confirm"
+  fi
+}
+
+menu_verify() {
+  local choice package_dir target_root
+  while true; do
+    cat <<'EOF'
+
+[备份/恢复验证]
+  1. 验证备份包是否完整可用
+  2. 检查恢复计划（零写入）
+  3. 验证已恢复站点的数据与运行结果
+  0. 返回
+EOF
+    printf '请选择：'
+    read -r choice || return 0
+    case "$choice" in
+      1)
+        printf '备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        if menu_verify_package "$package_dir"; then
+          printf '\n备份包验证通过：可进入恢复/迁移的下一步。\n'
+        else
+          printf '\n备份包验证失败：不要继续恢复或迁移。\n' >&2
+        fi
+        menu_pause
+        ;;
+      2)
+        printf '备份包目录：'
+        read -r package_dir || return 0
+        [[ -n "$package_dir" ]] || { printf '未输入备份包目录。\n' >&2; menu_pause; continue; }
+        menu_run_json restore-plan restore plan --package "$package_dir"
+        ;;
+      3)
+        printf '备份包目录：'
+        read -r package_dir || return 0
+        printf '目标根目录：'
+        read -r target_root || return 0
+        if [[ -z "$package_dir" || -z "$target_root" ]]; then
+          printf '备份包目录和目标根目录都不能为空。\n' >&2
+          menu_pause
+          continue
+        fi
+        menu_run_json verify-restore verify restore --package "$package_dir" --target-root "$target_root"
+        ;;
+      0) return 0 ;;
+      *) printf '无效选择。请输入 0-3。\n' ;;
+    esac
+  done
+}
+
+show_menu() {
+  local choice
+  while true; do
+    printf '\n'
+    menu_header
+    printf '请选择 [0-5/h]：'
+    read -r choice || return 0
+    case "$choice" in
+      1) menu_run inventory ;;
+      2) menu_backup ;;
+      3) menu_restore ;;
+      4) menu_migrate ;;
+      5) menu_verify ;;
+      0) return 0 ;;
+      h|H) show_help; menu_pause ;;
+      *) printf '无效选择。请输入 0-5，或输入 h 查看高级命令帮助。\n'; menu_pause ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  --version|-V) printf 'VF Server Ops %s\n' "$VERSION" ;;
+  --help|-h) show_help ;;
+  menu)
+    if [[ -t 0 && -t 1 ]]; then
+      show_menu
+    else
+      printf 'ERROR: interactive menu requires a TTY. Use vfops --help for commands.\n' >&2
+      exit 2
+    fi
+    ;;
+  status) printf 'Project: P07 · VF Server Ops\nVersion: %s\nLifecycle: L2_PRODUCT_OPTIMIZATION / REAL_PREPRODUCTION_CLOSURE_PASS\nFormal Release: NOT_RELEASED\nProduction: NOT_PRODUCTION\nOwner Cutover: NOT_EXECUTED\n' "$VERSION" ;;
+  inventory) shift; run_inventory "$@" ;;
+  backup) shift; run_backup "$@" ;;
+  storage) shift; run_storage "$@" ;;
+  restore) shift; run_restore "$@" ;;
+  runtime) shift; run_runtime "$@" ;;
+  verify) shift; run_verify "$@" ;;
+  migrate) shift; run_migrate "$@" ;;
+  config)
+    shift
+    case "${1:-}" in
+      validate) shift; run_policy_raw validate "$@" ;;
+      *) printf 'ERROR: config supports only: validate\n' >&2; exit 2 ;;
+    esac
+    ;;
+  policy)
+    shift
+    case "${1:-}" in
+      run) shift; run_policy_raw run "$@" ;;
+      *) printf 'ERROR: policy supports only: run\n' >&2; exit 2 ;;
+    esac
+    ;;
+  retention)
+    shift
+    case "${1:-}" in
+      plan) shift; run_policy_raw retention-plan "$@" ;;
+      apply) shift; run_policy_raw retention-apply "$@" ;;
+      *) printf 'ERROR: retention supports: plan, apply\n' >&2; exit 2 ;;
+    esac
+    ;;
+  automation)
+    shift
+    case "${1:-}" in
+      render-cron) shift; run_policy_raw render-cron "$@" ;;
+      *) printf 'ERROR: automation supports only: render-cron\n' >&2; exit 2 ;;
+    esac
+    ;;
+  "")
+    if [[ -t 0 && -t 1 ]]; then
+      show_menu
+    else
+      show_help
+    fi
+    ;;
+  *) printf 'ERROR: unknown command: %s\n' "$1" >&2; exit 2 ;;
+esac
