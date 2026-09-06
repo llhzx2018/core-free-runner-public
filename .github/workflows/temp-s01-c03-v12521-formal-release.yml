@@ -1,0 +1,124 @@
+name: S01-C03 V1.25.21 Formal Release
+
+on:
+  push:
+    branches: [temp/s01-c03-v12521-formal-release]
+    paths:
+      - '.github/workflows/temp-s01-c03-v12521-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      REPO: llhzx2018/vf-tools-m3u8
+      PRODUCT_COMMIT: db11959db7ce726ad56d74be4add9fa594061817
+      TAG: v1.25.21
+      ASSET_NAME: vf-tools-m3u8_V1.25.21.zip
+      EXPECTED_FILES: '559'
+      EXPECTED_RUNTIME_FILES: '557'
+      EXPECTED_BYTES: '3573646'
+      EXPECTED_SHA: 6a34f9997dafd9be4ee1a87a8ed57f623318b53c294fd7274503cbe3980dd29c
+      EXPECTED_FP: 02934574aa6ac3769bb48cbd612949e75d448ae8f14a9690b9727530418003f7
+      EXPECTED_RUNTIME_FP: 5cf274f3f69fc2bd9b244d8a8096d34792f16107b162000e838c70a09e98abc4
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Credentials
+        run: |
+          test -n "$READ_TOKEN" && test -n "$WRITE_TOKEN"
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gate and rebuild candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3u8 rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = '1.25.21'
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.21'" m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_ROUND', 'R245'" m3u8/src/vf-tool-m3u8.php
+          find m3u8/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php m3u8/tests/unit/update-refresh-policy-contract.php
+          php m3u8/tests/frontend-s01-uiux-final-owner-contract.php
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,os,zipfile
+          src=Path('m3u8/src'); dest=Path(os.environ['RUNNER_TEMP'])/'release'/os.environ['ASSET_NAME']
+          rows=[(p.relative_to(src).as_posix(),p) for p in sorted(src.rglob('*'),key=lambda x:x.relative_to(src).as_posix()) if p.is_file()]
+          dirs={'vf-tool-m3u8/'}
+          for rel,_ in rows:
+              cur='vf-tool-m3u8'
+              for part in rel.split('/')[:-1]: cur += '/'+part; dirs.add(cur+'/')
+          with zipfile.ZipFile(dest,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for d in sorted(dirs):
+                  zi=zipfile.ZipInfo(d); zi.date_time=(1980,1,1,0,0,0); zi.external_attr=(0o40755<<16)|0x10; z.writestr(zi,b'')
+              for rel,p in rows:
+                  zi=zipfile.ZipInfo('vf-tool-m3u8/'+rel); zi.date_time=(1980,1,1,0,0,0); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,p.read_bytes())
+          def fp(items):
+              b=''.join(f'{r}\0{hashlib.sha256(p.read_bytes()).hexdigest()}\n' for r,p in items).encode(); return hashlib.sha256(b).hexdigest()
+          runtime=[]
+          for rel,p in rows:
+              parts=rel.split('/'); low=[x.lower() for x in parts]; b=parts[-1].lower()
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'} or b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): continue
+              if len(parts)==1 and rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}: runtime.append((rel,p))
+              elif len(parts)>1 and parts[0] in {'admin','config','includes','public','templates','tools'}: runtime.append((rel,p))
+          assert len(rows)==int(os.environ['EXPECTED_FILES'])
+          assert len(runtime)==int(os.environ['EXPECTED_RUNTIME_FILES'])
+          assert dest.stat().st_size==int(os.environ['EXPECTED_BYTES'])
+          assert hashlib.sha256(dest.read_bytes()).hexdigest()==os.environ['EXPECTED_SHA']
+          assert fp(rows)==os.environ['EXPECTED_FP'] and fp(runtime)==os.environ['EXPECTED_RUNTIME_FP']
+          with zipfile.ZipFile(dest) as z: assert z.testzip() is None
+          print('CANDIDATE_IDENTITY=PASS')
+          PY
+
+      - name: Tag, draft, readback, publish
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ASSET="$RUNNER_TEMP/release/$ASSET_NAME"
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then echo TAG_EXISTS; exit 71; fi
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then echo RELEASE_EXISTS; exit 72; fi
+          TAG_CREATED=0
+          cleanup(){ rc=$?; if [ "$rc" -ne 0 ] && [ "$TAG_CREATED" = 1 ]; then gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes >/dev/null 2>&1 || gh api --method DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true; fi; exit "$rc"; }
+          trap cleanup EXIT
+          gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$PRODUCT_COMMIT" >/dev/null
+          TAG_CREATED=1
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$PRODUCT_COMMIT"
+          gh release create "$TAG" "$ASSET" --repo "$REPO" --title 'VF Tools M3U8 V1.25.21' --notes 'S01-C03 · VF Tools M3U8 1.25.21 UI/UX closure. Git/Release PASS does not claim Production, Static, Online or FINAL_ONLINE_PASS.' --draft
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/readback"
+          REMOTE="$RUNNER_TEMP/readback/$ASSET_NAME"
+          test "$(stat -c %s "$REMOTE")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$REMOTE" | awk '{print $1}')" = "$EXPECTED_SHA"
+          python3 - "$REMOTE" <<'PY'
+          import sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None
+              files=[i for i in z.infolist() if not i.is_dir()]
+              assert len(files)==559
+              assert sorted({i.filename.split('/')[0] for i in files})==['vf-tool-m3u8']
+              assert b'Version: 1.25.21' in z.read('vf-tool-m3u8/vf-tool-m3u8.php')
+          PY
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq '.isDraft')" = false
+          test "$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" = "$PRODUCT_COMMIT"
+          trap - EXIT
+          echo 'FORMAL_RELEASE=PASS'
+          echo 'REMOTE_ASSET_EXACT_READBACK=PASS'
+          echo 'TESTED_ARTIFACT_EQUALS_DELIVERED_ARTIFACT=PASS'
