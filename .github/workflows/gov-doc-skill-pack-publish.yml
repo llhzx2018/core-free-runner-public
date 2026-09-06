@@ -1,14 +1,32 @@
 name: GOV-DOC Current Skill Pack Publish
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/gov-doc-skill-pack-publish.yml'
   workflow_dispatch:
+    inputs:
+      exact_source_sha:
+        description: 'Exact 40-char GOV-DOC main SHA approved for this distribution'
+        required: true
+        type: string
+      pack_version:
+        description: 'Immutable distribution identity, e.g. 2026.09.06-r1'
+        required: true
+        type: string
+      build_id:
+        description: 'Build identity, e.g. 20260906r1'
+        required: true
+        type: string
+      confirm_publish:
+        description: 'I explicitly authorize creating/verifying the GitHub Release and staging the verified mirror PR'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+concurrency:
+  group: gov-doc-skill-pack-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -16,22 +34,33 @@ jobs:
     timeout-minutes: 15
     env:
       TARGET_REPO: llhzx2018/gov-doc
-      EXPECTED_GOV_DOC_SHA: 27680edd2f21cb65a14ef0b5609b8e92515a12a0
-      VF_SKILL_PACK_VERSION: 2026.08.29-r4
-      VF_SKILL_BUILD_ID: 20260829r4
-      VF_SKILL_RELEASE_TAG: skills-pack-2026.08.29-r4
-      VF_SKILL_RELEASE_TITLE: VF Skills Pack 2026.08.29 R4
-      DIST_DIR: dist/skills-2026.08.29-r4
-      MIRROR_BRANCH: release/skill-pack-20260829r4-mirror
+      EXPECTED_GOV_DOC_SHA: ${{ inputs.exact_source_sha }}
+      VF_SKILL_PACK_VERSION: ${{ inputs.pack_version }}
+      VF_SKILL_BUILD_ID: ${{ inputs.build_id }}
+      VF_SKILL_RELEASE_TAG: skills-pack-${{ inputs.pack_version }}
+      VF_SKILL_RELEASE_TITLE: VF Skills Pack ${{ inputs.pack_version }}
+      DIST_DIR: dist/skills-${{ inputs.pack_version }}
+      MIRROR_BRANCH: release/skill-pack-${{ inputs.build_id }}-mirror
+      CONFIRM_PUBLISH: ${{ inputs.confirm_publish }}
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
       VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
+      - name: Validate explicit publication identity and authorization
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$CONFIRM_PUBLISH" = "true" || { echo 'PUBLISH_BLOCK=EXPLICIT_CONFIRMATION_REQUIRED'; exit 77; }
+          [[ "$EXPECTED_GOV_DOC_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'PUBLISH_BLOCK=INVALID_EXACT_SOURCE_SHA'; exit 78; }
+          [[ "$VF_SKILL_PACK_VERSION" =~ ^[0-9]{4}\.[0-9]{2}(\.[0-9]{2})?(-r[0-9]+)?$ ]] || { echo 'PUBLISH_BLOCK=INVALID_PACK_VERSION'; exit 79; }
+          [[ "$VF_SKILL_BUILD_ID" =~ ^[0-9]{8}(r[0-9]+)?$ ]] || { echo 'PUBLISH_BLOCK=INVALID_BUILD_ID'; exit 80; }
+          echo 'PUBLICATION_IDENTITY_GATE=PASS'
+
       - name: Require VF registered capabilities
         shell: bash
         run: |
           set -Eeuo pipefail
-          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 78; }
-          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 79; }
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 81; }
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo 'REGISTERED_CAPABILITY_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 82; }
           echo 'REGISTERED_VF_CAPABILITIES=PASS'
 
       - name: Checkout exact GOV-DOC Current source
@@ -70,32 +99,28 @@ jobs:
           assert manifest['pack_version'] == os.environ['VF_SKILL_PACK_VERSION'], manifest['pack_version']
           assert manifest['build_date'] == os.environ['VF_SKILL_BUILD_ID'], manifest['build_date']
           assert manifest['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], manifest['source_sha']
-          assert manifest['skill_count'] == 11, manifest['skill_count']
-          assert len(manifest['skills']) == 11, len(manifest['skills'])
-          names = [r['skill'] for r in manifest['skills']]
-          assert len(names) == len(set(names)) == 11, names
-          assert 'skill-topic' in names, names
-          topic = next(r for r in manifest['skills'] if r['skill'] == 'skill-topic')
-          assert topic['version'] == 'V1.2', topic
-          book = next(r for r in manifest['skills'] if r['skill'] == 'skill-book')
-          assert book['version'] == 'V5.7', book
+          skills = manifest['skills']
+          skill_count = manifest['skill_count']
+          assert skill_count == len(skills) and skill_count > 0, {'skill_count': skill_count, 'records': len(skills)}
+          names = [r['skill'] for r in skills]
+          assert len(names) == len(set(names)), names
           build_id = os.environ['VF_SKILL_BUILD_ID']
           skill_zips = sorted(root.glob(f'skill-*_V*_INSTALL_{build_id}.zip'))
-          assert len(skill_zips) == 11, [p.name for p in skill_zips]
+          assert len(skill_zips) == skill_count, [p.name for p in skill_zips]
           all_zips = sorted(root.glob('*.zip'))
-          assert len(all_zips) == 12, [p.name for p in all_zips]
+          assert len(all_zips) == skill_count + 1, [p.name for p in all_zips]
           for p in all_zips:
               with zipfile.ZipFile(p) as z:
                   assert z.testzip() is None, p.name
                   entries = z.namelist()
                   assert len(entries) == len(set(entries)), p.name
                   assert not any(n.startswith('/') or '..' in Path(n).parts for n in entries), p.name
-          for r in manifest['skills']:
+          for r in skills:
               p = root/r['artifact']
               assert p.stat().st_size == r['bytes'], p.name
               assert hashlib.sha256(p.read_bytes()).hexdigest() == r['sha256'], p.name
               assert r['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], r['skill']
-          print('LOCAL_DISTRIBUTION_VERIFY_PASS=11_SKILLS_12_ZIPS_SKILL_TOPIC_V1.2_SKILL_BOOK_V5.7')
+          print(f'LOCAL_DISTRIBUTION_VERIFY_PASS={skill_count}_SKILLS_{skill_count + 1}_ZIPS')
           PY
 
       - name: Create immutable private GOV-DOC Release or adopt existing exact Release identity
@@ -119,15 +144,12 @@ jobs:
           assert manifest['pack_version'] == os.environ['VF_SKILL_PACK_VERSION'], manifest['pack_version']
           assert manifest['build_date'] == os.environ['VF_SKILL_BUILD_ID'], manifest['build_date']
           assert manifest['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], manifest['source_sha']
-          assert manifest['skill_count'] == 11, manifest['skill_count']
-          assert len(manifest['skills']) == 11, len(manifest['skills'])
-          names = [r['skill'] for r in manifest['skills']]
-          assert len(names) == len(set(names)) == 11, names
-          topic = next(r for r in manifest['skills'] if r['skill'] == 'skill-topic')
-          assert topic['version'] == 'V1.2', topic
-          book = next(r for r in manifest['skills'] if r['skill'] == 'skill-book')
-          assert book['version'] == 'V5.7', book
-          for r in manifest['skills']:
+          skills = manifest['skills']
+          skill_count = manifest['skill_count']
+          assert skill_count == len(skills) and skill_count > 0, {'skill_count': skill_count, 'records': len(skills)}
+          names = [r['skill'] for r in skills]
+          assert len(names) == len(set(names)), names
+          for r in skills:
               p = remote/r['artifact']
               assert p.is_file(), p.name
               assert p.stat().st_size == r['bytes'], p.name
@@ -150,12 +172,12 @@ jobs:
               if line.strip():
                   digest, name = line.split(None, 1)
                   sums[name.strip()] = digest
-          for r in manifest['skills']:
+          for r in skills:
               assert sums[r['artifact']] == r['sha256'], r['artifact']
-          expected_assets = 16
+          expected_assets = skill_count + 5
           actual_assets = len([p for p in remote.iterdir() if p.is_file()])
-          assert actual_assets == expected_assets, actual_assets
-          print('EXISTING_RELEASE_REMOTE_SELF_VERIFY_PASS=11_SKILLS_16_ASSETS_SKILL_TOPIC_V1.2_SKILL_BOOK_V5.7')
+          assert actual_assets == expected_assets, {'expected_assets': expected_assets, 'actual_assets': actual_assets}
+          print(f'EXISTING_RELEASE_REMOTE_SELF_VERIFY_PASS={skill_count}_SKILLS_{expected_assets}_ASSETS')
           PY
             rm -rf "$DIR"
             mkdir -p "$DIR"
@@ -193,11 +215,11 @@ jobs:
               assert a.stat().st_size == b.stat().st_size, name
               assert hashlib.sha256(a.read_bytes()).hexdigest() == hashlib.sha256(b.read_bytes()).hexdigest(), name
           manifest = json.loads((remote/'INSTALL_BUILD_MANIFEST.json').read_text(encoding='utf-8'))
-          topic = next(r for r in manifest['skills'] if r['skill'] == 'skill-topic')
-          assert topic['version'] == 'V1.2', topic
-          book = next(r for r in manifest['skills'] if r['skill'] == 'skill-book')
-          assert book['version'] == 'V5.7', book
-          print(f'REMOTE_RELEASE_READBACK_PASS={len(expected)}_ASSETS_SKILL_TOPIC_V1.2_SKILL_BOOK_V5.7')
+          assert manifest['source_sha'] == os.environ['EXPECTED_GOV_DOC_SHA'], manifest['source_sha']
+          assert manifest['pack_version'] == os.environ['VF_SKILL_PACK_VERSION'], manifest['pack_version']
+          assert manifest['build_date'] == os.environ['VF_SKILL_BUILD_ID'], manifest['build_date']
+          assert manifest['skill_count'] == len(manifest['skills']) and manifest['skill_count'] > 0
+          print(f'REMOTE_RELEASE_READBACK_PASS={len(expected)}_ASSETS_{manifest["skill_count"]}_SKILLS')
           PY
 
       - name: Build verified repository download mirror
@@ -220,6 +242,9 @@ jobs:
           token = os.environ['VF_RELEASE_WRITE_TOKEN']
           api_root = 'https://api.github.com'
           local_root = Path('.')
+          manifest = json.loads((local_root/os.environ['DIST_DIR']/'INSTALL_BUILD_MANIFEST.json').read_text(encoding='utf-8'))
+          skill_count = manifest['skill_count']
+          assert skill_count == len(manifest['skills']) and skill_count > 0
 
           def call(method: str, path: str, payload=None):
               data = None if payload is None else json.dumps(payload).encode('utf-8')
@@ -317,9 +342,7 @@ jobs:
                       'Machine-generated verified distribution mirror after GitHub Release exact readback.\n\n'
                       f'Exact Source: `{expected_main}`\n'
                       f'Release: `{os.environ["VF_SKILL_RELEASE_TAG"]}`\n'
-                      'Expected Current Skills: `11`\n'
-                      'Expected skill-topic: `V1.2`\n'
-                      'Expected skill-book: `V5.7`\n'
+                      f'Current Skills: `{skill_count}`\n'
                       'Production: `NO CHANGE`\n'
                   ),
               })
