@@ -1,0 +1,106 @@
+name: P07 RC5 用户体验收口
+
+on:
+  push:
+    branches:
+      - experiment/p07-oneshot-bench-v05
+    paths:
+      - .github/workflows/p07-rc5-ux.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: experiment/p07-oneshot-bench-v05
+
+      - name: 生成 RC5 候选
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/p07_patch_rc5_ux.py
+          chmod +x experiments/p07-bench.sh
+          bash -n experiments/p07-bench.sh
+          experiments/p07-bench.sh --self-test
+
+      - name: 中文排版与产品语义 Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          normal="$(NO_COLOR=1 experiments/p07-bench.sh --demo)"
+          fallback="$(NO_COLOR=1 P07_BENCH_FORCE_FALLBACK=1 experiments/p07-bench.sh --demo)"
+          printf '%s\n' "$normal"
+          printf '%s\n' "$fallback"
+          grep -q '1.0.0-rc5-zh' <<<"$normal"
+          grep -q '马来西亚·吉隆坡' <<<"$normal"
+          grep -q '印度尼西亚·雅加达' <<<"$normal"
+          grep -q '验机结论' <<<"$normal"
+          grep -q '中国大陆直连' <<<"$normal"
+          ! grep -q '中国大陆访问评估' <<<"$normal"
+          ! grep -q 'VPS 出站 HTTPS' <<<"$normal"
+          ! grep -q '中国联通' <<<"$normal"
+          ! grep -q '中国电信' <<<"$normal"
+          ! grep -q '中国大陆备用' <<<"$normal"
+          grep -q '马来西亚·吉隆坡' <<<"$fallback"
+          grep -q '印度尼西亚·雅加达' <<<"$fallback"
+          python3 - <<'PY'
+          import os, subprocess, unicodedata, re
+          env=dict(os.environ,NO_COLOR='1',P07_BENCH_FORCE_FALLBACK='1')
+          out=subprocess.check_output(['bash','experiments/p07-bench.sh','--demo'],env=env,text=True)
+          rows=[]
+          for line in out.splitlines():
+              if any(k in line for k in ['美国西部','美国东部','欧洲','中国香港','新加坡','马来西亚·吉隆坡','印度尼西亚·雅加达','日本·东京','Cloudflare 边缘基准']):
+                  m=re.search(r'\d+(?:\.\d+)? Mbps',line)
+                  if m:
+                      def width(s):
+                          return sum(2 if unicodedata.east_asian_width(c) in 'WFA' else 1 for c in s)
+                      rows.append((line,width(line[:m.start()])))
+          if len(rows) < 8:
+              raise SystemExit(f'ALIGNMENT_ROWS_MISSING:{len(rows)}')
+          cols={c for _,c in rows}
+          print('upload_display_columns=',sorted(cols))
+          if len(cols) != 1:
+              raise SystemExit('CJK_ALIGNMENT_FAIL')
+          PY
+
+      - name: 真实东南亚与全球备用 Gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/p07-rc5-home
+          HOME=/tmp/p07-rc5-home P07_BENCH_FORCE_FALLBACK=1 P07_BENCH_IO_MIB=64 experiments/p07-bench.sh | tee /tmp/p07-rc5-real.txt
+          grep -q '马来西亚·吉隆坡' /tmp/p07-rc5-real.txt
+          grep -q '印度尼西亚·雅加达' /tmp/p07-rc5-real.txt
+          grep -q '验机结论' /tmp/p07-rc5-real.txt
+          REPORT="$(find /tmp/p07-rc5-home/.local/state/p07-bench/reports -name '*.json' -type f | sort | tail -n1)"
+          test -n "$REPORT"
+          python3 - "$REPORT" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          rows=d.get('network_nodes',[])
+          ok={r.get('name') for r in rows if r.get('state')=='PASS'}
+          print('real_pass_regions=',sorted(ok))
+          assert 'Kuala Lumpur' in ok
+          assert 'Jakarta' in ok
+          assert 'Singapore' in ok
+          assert 'Europe' in ok
+          assert ('US West' in ok or 'US East' in ok)
+          assert len(ok-{'Cloudflare Edge'}) >= 7
+          PY
+
+      - name: 提交 RC5
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add experiments/p07-bench.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat(p07-bench): align CJK output and add Southeast Asia coverage'
+          git push origin HEAD:experiment/p07-oneshot-bench-v05
