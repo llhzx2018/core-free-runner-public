@@ -64,16 +64,19 @@ install_runtime_files() {
   local tmp stage
   tmp="$(mktemp -d /tmp/vf-node-public.XXXXXX)"
   stage="${TARGET}.new.$$"
-  cleanup_stage() { rm -rf "$tmp" "$stage"; }
-  trap cleanup_stage RETURN
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
   info '下载并校验公开 RC2 Manifest...'
-  curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"
-  printf '%s  %s\n' "$MANIFEST_SHA256" "$tmp/pkg/MANIFEST.sha256" | sha256sum -c - >/dev/null || {
+  if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
+    rm -rf "$tmp" "$stage"
+    fail 'Manifest 下载失败，已停止。'
+    return 9
+  fi
+  if ! printf '%s  %s\n' "$MANIFEST_SHA256" "$tmp/pkg/MANIFEST.sha256" | sha256sum -c - >/dev/null; then
+    rm -rf "$tmp" "$stage"
     fail 'Manifest SHA256 校验失败，已停止。'
     return 10
-  }
+  fi
   ok 'Manifest 校验通过'
 
   local files=(
@@ -93,16 +96,21 @@ install_runtime_files() {
   local f
   for f in "${files[@]}"; do
     mkdir -p "$tmp/pkg/$(dirname "$f")"
-    curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/${f}" -o "$tmp/pkg/$f"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/${f}" -o "$tmp/pkg/$f"; then
+      rm -rf "$tmp" "$stage"
+      fail "运行文件下载失败：${f}"
+      return 11
+    fi
   done
 
-  (
+  if ! (
     cd "$tmp/pkg"
     sha256sum -c MANIFEST.sha256 >/dev/null
-  ) || {
+  ); then
+    rm -rf "$tmp" "$stage"
     fail 'RC2 文件 SHA256 校验失败，已停止。'
-    return 11
-  }
+    return 12
+  fi
   ok 'RC2 运行文件校验通过'
 
   info '安装 VF Network Node 管理模块...'
@@ -125,9 +133,10 @@ install_runtime_files() {
       mv "${TARGET}.previous" "$TARGET"
       write_entry
     fi
-    return 12
+    rm -rf "$tmp" "$stage"
+    return 13
   fi
-  rm -rf "${TARGET}.previous"
+  rm -rf "${TARGET}.previous" "$tmp" "$stage"
   ok "VF Network Node ${VERSION} 管理模块已就绪"
 }
 
