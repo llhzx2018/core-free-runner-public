@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP="P07 VPS Acceptance Suite"
 VERSION="0.1.0"
+CHANNEL="EXPERIMENT"
 INSTALL_DIR="${P07_SUITE_DIR:-/opt/p07-vps-suite}"
 BIN_DIR="${P07_SUITE_BIN_DIR:-/usr/local/bin}"
 BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public"
@@ -76,6 +77,7 @@ self_check "$BIN_DIR/p07-netcheck" 0.5.0 NetCheck
 cat >"$INSTALL_DIR/INSTALL_MANIFEST.txt" <<EOF
 suite=$APP
 suite_version=$VERSION
+channel=$CHANNEL
 installed_at=$(date -Is 2>/dev/null || date)
 inspect_version=0.3.0
 inspect_commit=$INSPECT_COMMIT
@@ -91,7 +93,7 @@ EOF
 chmod 0644 "$INSTALL_DIR/INSTALL_MANIFEST.txt"
 
 printf '\n============================================================\n'
-printf ' P07 VPS Acceptance Suite %s · Experimental\n' "$VERSION"
+printf ' P07 VPS Acceptance Suite %s · %s\n' "$VERSION" "$CHANNEL"
 printf '============================================================\n'
 printf ' Inspect    0.3.0   PASS\n'
 printf ' Benchmark  0.4.0   PASS\n'
