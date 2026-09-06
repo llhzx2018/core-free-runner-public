@@ -1,0 +1,212 @@
+name: S01 UIUX Release Candidate Packaging Gate
+
+on:
+  push:
+    branches: [temp/s01-uiux-release-candidate-20260906]
+    paths:
+      - '.github/workflows/temp-s01-uiux-release-candidate-20260906.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-uiux-release-candidate-20260906
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      THEME_SHA: 868192e5f355f4b2f49855de868360c47b87ea78
+      OPS_SHA: 0e6fb809748a3c2b392c13b1c787490ebbeb390d
+      M3U8_SHA: db11959db7ce726ad56d74be4add9fa594061817
+    steps:
+      - name: Credential authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=VF_PRIVATE_READ_TOKEN'
+          echo 'RELEASE_WRITE_USED=NO'
+
+      - name: Checkout exact Theme main source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: theme
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact Ops main source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact M3U8 main source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and release identity gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(tr -d '\r\n' < theme/VERSION)" = '1.35.11'
+          grep -Eq '^Version: 1\.35\.11$' theme/src/style.css
+          grep -Eq '^ \* Version: 1\.21\.850$' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.850'" ops/vf-ops.php
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = '1.25.21'
+          grep -Eq '^ \* Version: 1\.25\.21$' m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.21'" m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_ROUND', 'R245'" m3u8/src/vf-tool-m3u8.php
+          echo 'SOURCE_IDENTITY_GATE=PASS'
+
+      - name: PHP syntax and release regression gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v | head -n 1
+          find theme/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          find ops -type f -name '*.php' \
+            -not -path 'ops/.git/*' -not -path 'ops/tests/*' -not -path 'ops/docs/*' -print0 | xargs -0 -n1 php -l >/dev/null
+          find m3u8/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php theme/tests/update-refresh-policy-contract.php
+          php theme/tests/public-reading-final-owner-contract.php
+          php m3u8/tests/unit/update-refresh-policy-contract.php
+          php m3u8/tests/frontend-s01-uiux-final-owner-contract.php
+          echo 'RELEASE_REGRESSION_GATE=PASS'
+
+      - name: Build deterministic WordPress release candidates and evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p candidate
+          python3 - <<'PY'
+          from pathlib import Path
+          import fnmatch, hashlib, json, os, zipfile
+
+          root = Path.cwd()
+          out = root / 'candidate'
+
+          def ops_include(rel: str) -> bool:
+              rel = rel.replace('\\', '/')
+              parts = rel.split('/')
+              if any(p in {'.git', '.github', '_tools', 'tests', 'docs', 'handoff_out'} for p in parts):
+                  return False
+              base = parts[-1]
+              if fnmatch.fnmatch(base, '*.zip') or fnmatch.fnmatch(base, '*_repo.tar') or fnmatch.fnmatch(base, '*.tar') or fnmatch.fnmatch(base, '*.download'):
+                  return False
+              if base in {'query', 'nul', 'VF_TASK.json', 'VF_PROJECT.json', 'VF_GIT.json', 'VF_LINKS.json'}:
+                  return False
+              if fnmatch.fnmatch(base, 'P7_*.md') or fnmatch.fnmatch(base, 'VF_HANDOFF*') or fnmatch.fnmatch(base, 'VF_PROMPT*'):
+                  return False
+              return True
+
+          def all_files(src: Path, include=None):
+              rows=[]
+              for p in sorted(src.rglob('*'), key=lambda x: x.relative_to(src).as_posix()):
+                  if not p.is_file():
+                      continue
+                  rel=p.relative_to(src).as_posix()
+                  if include and not include(rel):
+                      continue
+                  rows.append((rel,p))
+              return rows
+
+          def payload_fp(rows):
+              canon=''.join(f'{rel}\0{hashlib.sha256(p.read_bytes()).hexdigest()}\n' for rel,p in rows).encode()
+              return hashlib.sha256(canon).hexdigest()
+
+          def write_zip(src: Path, rows, top: str, dest: Path):
+              dirs={top+'/' }
+              for rel,_ in rows:
+                  parts=rel.split('/')[:-1]
+                  cur=top
+                  for part in parts:
+                      cur += '/' + part
+                      dirs.add(cur + '/')
+              with zipfile.ZipFile(dest,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for d in sorted(dirs):
+                      zi=zipfile.ZipInfo(d); zi.date_time=(1980,1,1,0,0,0); zi.external_attr=(0o40755<<16)|0x10
+                      z.writestr(zi,b'')
+                  for rel,p in rows:
+                      zi=zipfile.ZipInfo(top+'/'+rel); zi.date_time=(1980,1,1,0,0,0); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16
+                      z.writestr(zi,p.read_bytes())
+
+          def m3_runtime(rows):
+              out=[]
+              for rel,p in rows:
+                  parts=rel.split('/'); low=[x.lower() for x in parts]
+                  if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+                  b=parts[-1].lower()
+                  if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: continue
+                  if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): continue
+                  if len(parts)==1:
+                      if rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}: out.append((rel,p))
+                  elif parts[0] in {'admin','config','includes','public','templates','tools'}:
+                      out.append((rel,p))
+              return out
+
+          specs=[
+              ('theme','1.35.11',Path('theme/src'),None,'vf-tools-theme','vf-tools-theme_V1.35.11.zip'),
+              ('ops','1.21.850',Path('ops'),ops_include,'vf-tools-ops','vf-tools-ops_V1.21.850.zip'),
+              ('m3u8','1.25.21',Path('m3u8/src'),None,'vf-tool-m3u8','vf-tools-m3u8_V1.25.21.zip'),
+          ]
+          evidence={}
+          for name,version,src,include,top,asset in specs:
+              rows=all_files(src,include)
+              dest=out/asset
+              write_zip(src,rows,top,dest)
+              with zipfile.ZipFile(dest) as z:
+                  assert z.testzip() is None
+                  names=[i.filename for i in z.infolist() if not i.is_dir()]
+                  assert len(names)==len(rows)
+                  assert sorted({n.split('/')[0] for n in names})==[top]
+              item={
+                  'version':version,
+                  'asset':asset,
+                  'package_file_count':len(rows),
+                  'zip_bytes':dest.stat().st_size,
+                  'zip_sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),
+                  'payload_fingerprint_sha256':payload_fp(rows),
+              }
+              if name=='m3u8':
+                  runtime=m3_runtime(rows)
+                  item['runtime_file_count']=len(runtime)
+                  item['runtime_fingerprint_sha256']=payload_fp(runtime)
+              evidence[name]=item
+          evidence['source_sha']={
+              'theme':os.environ['THEME_SHA'],
+              'ops':os.environ['OPS_SHA'],
+              'm3u8':os.environ['M3U8_SHA'],
+          }
+          (out/'evidence.json').write_text(json.dumps(evidence,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(evidence,indent=2,sort_keys=True))
+          PY
+          echo 'CANDIDATE_PACKAGE_GATE=PASS'
+
+      - name: Upload exact candidate evidence package
+        uses: actions/upload-artifact@v4
+        with:
+          name: S01-UIUX-RELEASE-CANDIDATES-20260906
+          path: candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
