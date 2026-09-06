@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-APP="P07 Enhanced Bench"
-VERSION="1.0.0-rc2"
+APP="P07 VPS 一键验机"
+VERSION="1.0.0-rc3-zh"
 DEMO=0
 SELF_TEST=0
 IO_MIB="${P07_BENCH_IO_MIB:-256}"
@@ -30,19 +30,19 @@ while (($#)); do
     --version) printf '%s %s\n' "$APP" "$VERSION"; exit 0 ;;
     -h|--help)
       cat <<'EOF'
-P07 Enhanced Bench
-Usage:
-  p07-bench.sh              Run complete one-shot VPS acceptance
-  p07-bench.sh --demo       Render a no-impact demo
-  p07-bench.sh --self-test  Run internal logic tests
-  p07-bench.sh --version
+P07 VPS 一键验机
+用法：
+  p07-bench.sh              自动完成整台 VPS 验机
+  p07-bench.sh --demo       显示无影响演示结果
+  p07-bench.sh --self-test  运行内部自检
+  p07-bench.sh --version    显示版本
 
-Environment:
-  P07_BENCH_IO_MIB=256      Per-round disk write size (3 rounds)
-  P07_BENCH_DIR=/var/tmp    Real filesystem path used for I/O
+可选环境变量：
+  P07_BENCH_IO_MIB=256      每轮磁盘写入大小（共 3 轮）
+  P07_BENCH_DIR=/var/tmp    磁盘测速使用的真实目录
 EOF
       exit 0 ;;
-    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+    *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
   esac
   shift
 done
@@ -56,12 +56,73 @@ else
 fi
 
 rule(){ printf '%s\n' '----------------------------------------------------------------------'; }
-color_state(){
+zh_state(){
   case "$1" in
-    PASS|NORMAL) printf '%s%s%s' "$GREEN" "$1" "$RESET" ;;
-    RISK|PARTIAL|INCONCLUSIVE|UNKNOWN|SKIPPED|UNAVAILABLE) printf '%s%s%s' "$YELLOW" "$1" "$RESET" ;;
-    FAIL|HIGH_RISK) printf '%s%s%s' "$RED" "$1" "$RESET" ;;
+    PASS|NORMAL) printf '正常' ;;
+    FAIL) printf '失败' ;;
+    RISK) printf '有风险' ;;
+    HIGH_RISK) printf '高风险' ;;
+    PARTIAL) printf '部分有效' ;;
+    INCONCLUSIVE) printf '证据不足' ;;
+    UNKNOWN) printf '未知' ;;
+    SKIPPED) printf '已跳过' ;;
+    UNAVAILABLE) printf '不可用' ;;
+    NOT_RUN) printf '未执行' ;;
+    GOOD) printf '良好' ;;
+    LOW) printf '较低' ;;
     *) printf '%s' "$1" ;;
+  esac
+}
+zh_reason(){
+  case "$1" in
+    NONE) printf '-' ;;
+    TIMEOUT) printf '超时' ;;
+    RATE_LIMITED) printf '测速平台限流' ;;
+    BACKEND_UNAVAILABLE) printf '测速平台暂不可用' ;;
+    BACKEND_FAILURE) printf '测速平台异常' ;;
+    NODE_UNAVAILABLE) printf '测速节点不可用' ;;
+    DNS_FAILURE) printf 'DNS 解析失败' ;;
+    TLS_FAILURE) printf 'TLS 连接失败' ;;
+    CONNECTION_FAILED) printf '连接失败' ;;
+    PARSE_ERROR) printf '结果解析失败' ;;
+    SPEEDTEST_UNAVAILABLE) printf 'Ookla 测速不可用' ;;
+    TIMEOUT_COMMAND_MISSING) printf '系统缺少超时控制命令' ;;
+    LIBRESPEED_FALLBACK) printf '全球备用测速' ;;
+    LIBRESPEED_UNAVAILABLE) printf '备用测速节点不可用' ;;
+    SUPPLEMENTAL) printf '补充基准' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+zh_name(){
+  case "$1" in
+    'Speedtest.net') printf '自动测速节点' ;;
+    'Los Angeles, US') printf '美国西部·洛杉矶' ;;
+    'Dallas, US') printf '美国中部·达拉斯' ;;
+    'Montreal, CA') printf '加拿大·蒙特利尔' ;;
+    'Paris, FR') printf '欧洲·巴黎' ;;
+    'Amsterdam, NL') printf '欧洲·阿姆斯特丹' ;;
+    'China Unicom, CN') printf '中国联通' ;;
+    'China Telecom, CN') printf '中国电信' ;;
+    'China Backup, CN') printf '中国大陆备用' ;;
+    'Hong Kong, CN') printf '中国香港' ;;
+    'Singapore, SG') printf '新加坡' ;;
+    'Taipei, CN') printf '台北' ;;
+    'Tokyo, JP'|'Tokyo') printf '日本·东京' ;;
+    '美国西部') printf '美国西部' ;;
+    '美国中部') printf '美国中部' ;;
+    '美国东部') printf '美国东部' ;;
+    '欧洲') printf '欧洲' ;;
+    '亚洲南部') printf '亚洲南部' ;;
+    'Cloudflare Edge') printf 'Cloudflare 边缘基准' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+color_state(){
+  local shown; shown="$(zh_state "$1")"
+  case "$1" in
+    PASS|NORMAL) printf '%s%s%s' "$GREEN" "$shown" "$RESET" ;;
+    FAIL|HIGH_RISK) printf '%s%s%s' "$RED" "$shown" "$RESET" ;;
+    *) printf '%s%s%s' "$YELLOW" "$shown" "$RESET" ;;
   esac
 }
 
@@ -111,7 +172,7 @@ cleanup(){
   rm -rf "$TMP_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
-trap 'printf "\n%sTest interrupted. Cleaning up...%s\n" "$RED" "$RESET"; exit 130' INT TERM
+trap 'printf "\n%s测速已中断，正在清理临时文件……%s\n" "$RED" "$RESET"; exit 130' INT TERM
 
 exec > >(tee -a "$RAW_LOG") 2>&1
 
@@ -323,41 +384,41 @@ collect_system(){
 }
 
 print_system(){
-  printf '%s%s-------------------- P07 Enhanced Bench --------------------%s\n' "$BOLD" "$BLUE" "$RESET"
-  printf ' Version            : %s%s%s\n' "$GREEN" "$VERSION" "$RESET"
-  printf ' CPU Model          : %s%s%s\n' "$BLUE" "${CPU:-UNKNOWN}" "$RESET"
-  printf ' CPU Cores          : %s%s%s @ %s\n' "$GREEN" "$CORES" "$RESET" "$FREQ"
-  printf ' CPU Cache          : %s\n' "${CACHE:-UNKNOWN}"
-  printf ' AES-NI             : %s\n' "$AES"
-  printf ' VM-x / AMD-V Flag  : %s\n' "$NESTED"
-  printf ' Total Disk         : %s%s%s  (%s used)\n' "$YELLOW" "$DISK_TOTAL" "$RESET" "$DISK_USED"
-  printf ' Total RAM          : %s%s%s  (%s used)\n' "$YELLOW" "$RAM_TOTAL" "$RESET" "$RAM_USED"
-  printf ' Total Swap         : %s  (%s used)\n' "$SWAP_TOTAL" "$SWAP_USED"
-  printf ' System Uptime      : %s\n' "$UPTIME"
-  printf ' Load Average       : %s\n' "$LOAD"
-  printf ' OS                 : %s\n' "$OS"
-  printf ' Arch               : %s (%s Bit)\n' "$ARCH" "$BITS"
-  printf ' Kernel             : %s\n' "$KERNEL"
-  printf ' TCP Congestion Ctrl: %s%s%s\n' "$YELLOW" "$TCP" "$RESET"
-  printf ' Virtualization     : %s%s%s\n' "$BLUE" "$VIRT" "$RESET"
+  printf '%s%s-------------------- P07 VPS 一键验机 --------------------%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf ' 版本               : %s%s%s\n' "$GREEN" "$VERSION" "$RESET"
+  printf ' CPU 型号           : %s%s%s\n' "$BLUE" "${CPU:-未知}" "$RESET"
+  printf ' CPU 核心           : %s%s%s @ %s\n' "$GREEN" "$CORES" "$RESET" "$FREQ"
+  printf ' CPU 缓存           : %s\n' "${CACHE:-未知}"
+  printf ' AES-NI             : %s\n' "$([[ "$AES" == Enabled ]] && printf '已启用' || printf '未启用')"
+  printf ' 硬件虚拟化         : %s\n' "$([[ "$NESTED" == Enabled ]] && printf '已启用' || printf '未启用')"
+  printf ' 磁盘总量           : %s%s%s  （已用 %s）\n' "$YELLOW" "$DISK_TOTAL" "$RESET" "$DISK_USED"
+  printf ' 内存总量           : %s%s%s  （已用 %s）\n' "$YELLOW" "$RAM_TOTAL" "$RESET" "$RAM_USED"
+  printf ' Swap               : %s  （已用 %s）\n' "$SWAP_TOTAL" "$SWAP_USED"
+  printf ' 运行时间           : %s\n' "$UPTIME"
+  printf ' 系统负载           : %s\n' "$LOAD"
+  printf ' 操作系统           : %s\n' "$OS"
+  printf ' 系统架构           : %s（%s 位）\n' "$ARCH" "$BITS"
+  printf ' 内核版本           : %s\n' "$KERNEL"
+  printf ' TCP 拥塞控制       : %s%s%s\n' "$YELLOW" "$TCP" "$RESET"
+  printf ' 虚拟化类型         : %s%s%s\n' "$BLUE" "$VIRT" "$RESET"
   if [[ "$CLOUDPANEL_STATE" == Installed ]]; then
-    printf ' CloudPanel         : %sInstalled%s · %s site(s)\n' "$GREEN" "$RESET" "$CLOUDPANEL_SITES"
+    printf ' CloudPanel         : %s已安装%s · %s 个网站\n' "$GREEN" "$RESET" "$CLOUDPANEL_SITES"
   else
-    printf ' CloudPanel         : %sNot detected%s\n' "$GRAY" "$RESET"
+    printf ' CloudPanel         : %s未检测到%s\n' "$GRAY" "$RESET"
   fi
   if [[ "$IPV4" == OFFLINE || "$IPV4" == UNAVAILABLE ]]; then
-    printf ' IPv4              : %s%s%s\n' "$RED" "$IPV4" "$RESET"
+    printf ' IPv4               : %s不可用%s\n' "$RED" "$RESET"
   else
-    printf ' IPv4              : %s%s%s  (ONLINE)\n' "$GREEN" "$IPV4" "$RESET"
+    printf ' IPv4               : %s%s%s  （在线）\n' "$GREEN" "$IPV4" "$RESET"
   fi
   if [[ "$IPV6" == OFFLINE || "$IPV6" == UNAVAILABLE ]]; then
-    printf ' IPv6              : %s%s%s\n' "$RED" "$IPV6" "$RESET"
+    printf ' IPv6               : %s不可用%s\n' "$RED" "$RESET"
   else
-    printf ' IPv6              : %s%s%s  (ONLINE)\n' "$GREEN" "$IPV6" "$RESET"
+    printf ' IPv6               : %s%s%s  （在线）\n' "$GREEN" "$IPV6" "$RESET"
   fi
-  printf ' Organization       : %s%s%s\n' "$BLUE" "$ORG" "$RESET"
-  printf ' Location           : %s / %s\n' "$CITY" "$COUNTRY"
-  printf ' Region             : %s%s%s\n' "$YELLOW" "$REGION" "$RESET"
+  printf ' 网络运营商/组织    : %s%s%s\n' "$BLUE" "$ORG" "$RESET"
+  printf ' 机房位置           : %s / %s\n' "$CITY" "$COUNTRY"
+  printf ' 地区               : %s%s%s\n' "$YELLOW" "$REGION" "$RESET"
 }
 
 rate_to_mb(){
@@ -392,21 +453,21 @@ run_dd_once(){
 }
 print_io(){
   rule
-  printf '%s%s I/O Speed%s  %s(3 x %s MiB, %s)%s\n' "$BOLD" "$MAGENTA" "$RESET" "$GRAY" "$IO_MIB" "$BENCH_DIR" "$RESET"
+  printf '%s%s 磁盘 I/O 测速%s  %s（3 轮 × %s MiB，目录：%s）%s\n' "$BOLD" "$MAGENTA" "$RESET" "$GRAY" "$IO_MIB" "$BENCH_DIR" "$RESET"
   IO_STATE="PASS"; IO_AVG_MB="0"; IO_RATES=()
   if ! [[ "$IO_MIB" =~ ^[0-9]+$ ]] || (( IO_MIB < 64 || IO_MIB > 1024 )); then
-    IO_STATE="SKIPPED"; printf ' %-18s: invalid P07_BENCH_IO_MIB (64-1024 required)\n' 'I/O Test'; return
+    IO_STATE="SKIPPED"; printf ' 磁盘测速           : 参数无效（P07_BENCH_IO_MIB 必须为 64-1024）\n'; return
   fi
   if (( ! DEMO )); then
-    [[ -d "$BENCH_DIR" && -w "$BENCH_DIR" ]] || { IO_STATE="SKIPPED"; printf ' %-18s: directory not writable\n' 'I/O Test'; return; }
+    [[ -d "$BENCH_DIR" && -w "$BENCH_DIR" ]] || { IO_STATE="SKIPPED"; printf ' 磁盘测速           : 目录不可写，已跳过\n'; return; }
     local fs free_mib
     fs="$(df -PT "$BENCH_DIR" 2>/dev/null | awk 'NR==2{print $2}')"
     if [[ "$fs" == tmpfs || "$fs" == devtmpfs ]]; then
-      IO_STATE="SKIPPED"; printf ' %-18s: blocked on %s (not real disk)\n' 'I/O Test' "$fs"; return
+      IO_STATE="SKIPPED"; printf ' 磁盘测速           : %s 不是真实磁盘，已跳过\n' "$fs"; return
     fi
     free_mib="$(df -Pm "$BENCH_DIR" 2>/dev/null | awk 'NR==2{print $4}')"
     [[ "$free_mib" =~ ^[0-9]+$ ]] && (( free_mib >= IO_MIB + 256 )) || {
-      IO_STATE="SKIPPED"; printf ' %-18s: insufficient free space\n' 'I/O Test'; return
+      IO_STATE="SKIPPED"; printf ' 磁盘测速           : 可用空间不足，已跳过\n'; return
     }
   fi
 
@@ -414,16 +475,16 @@ print_io(){
   for i in 1 2 3; do
     raw="$(run_dd_once "$BENCH_DIR/.p07-bench-$$-$i.dat" "$i" || true)"
     if [[ "$raw" == FAIL || -z "$raw" ]]; then
-      IO_STATE="FAIL"; printf ' I/O #%-13s: %sFAIL%s\n' "$i" "$RED" "$RESET"; continue
+      IO_STATE="FAIL"; printf ' 第 %-2s 轮            : %s失败%s\n' "$i" "$RED" "$RESET"; continue
     fi
     mb="$(rate_to_mb "$raw")"
     IO_RATES+=("$mb")
     sum="$(awk -v a="$sum" -v b="$mb" 'BEGIN{printf "%.2f",a+b}')"
-    printf ' I/O Speed(%s run)  : %s%s%s\n' "$i" "$GREEN" "$(format_mb_rate "$mb")" "$RESET"
+    printf ' 第 %-2s 轮            : %s%s%s\n' "$i" "$GREEN" "$(format_mb_rate "$mb")" "$RESET"
   done
   if ((${#IO_RATES[@]})); then
     IO_AVG_MB="$(awk -v s="$sum" -v n="${#IO_RATES[@]}" 'BEGIN{printf "%.2f",s/n}')"
-    printf ' I/O Speed(average) : %s%s%s\n' "$GREEN" "$(format_mb_rate "$IO_AVG_MB")" "$RESET"
+    printf ' 三轮平均           : %s%s%s\n' "$GREEN" "$(format_mb_rate "$IO_AVG_MB")" "$RESET"
   else
     IO_STATE="FAIL"
   fi
@@ -455,7 +516,7 @@ prepare_speedtest(){
   fetch_to_file "$url" "$d/speedtest.tgz" || return 1
   got="$(sha256sum "$d/speedtest.tgz" | awk '{print $1}')"
   [[ "$got" == "$sha" ]] || {
-    printf '%sSpeedtest checksum mismatch; network benchmark skipped.%s\n' "$RED" "$RESET"
+    printf '%s测速组件校验失败，网络测速已安全跳过。%s\n' "$RED" "$RESET"
     return 1
   }
   tar -xzf "$d/speedtest.tgz" -C "$d" speedtest >/dev/null 2>&1 || return 1
@@ -690,7 +751,7 @@ prepare_librespeed(){
   fetch_to_file "$url" "$d/librespeed.tgz" || return 1
   got="$(sha256sum "$d/librespeed.tgz" | awk '{print $1}')"
   [[ "$got" == "$sha" ]] || {
-    printf '%sLibreSpeed checksum mismatch; global fallback skipped.%s\n' "$RED" "$RESET"
+    printf '%s备用测速组件校验失败，全球备用测速已跳过。%s\n' "$RED" "$RESET"
     return 1
   }
   tar -xzf "$d/librespeed.tgz" -C "$d" >/dev/null 2>&1 || return 1
@@ -766,10 +827,10 @@ librespeed_region_pool(){
   return 1
 }
 librespeed_global_fallback(){
-  printf ' %sGlobal fallback     : LibreSpeed multi-region quick test%s\n' "$BLUE" "$RESET"
+  printf ' %s全球备用测速       : 正在使用多地区备用节点%s\n' "$BLUE" "$RESET"
   if ! prepare_librespeed; then
     GLOBAL_FALLBACK_PROVIDER="UNAVAILABLE"
-    printf ' %sLibreSpeed fallback unavailable.%s\n' "$YELLOW" "$RESET"
+    printf ' %s全球备用测速暂不可用。%s\n' "$YELLOW" "$RESET"
     return 1
   fi
   GLOBAL_FALLBACK_PROVIDER="LIBRESPEED"
@@ -788,7 +849,7 @@ cloudflare_fallback(){
   local dres ures d_speed d_ttfb d_code u_speed u_code up_file down_mbps up_mbps ttfb_ms
   if (( DEMO )); then
     printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" 'Cloudflare Edge' "$RESET" "$GREEN" '850.0 Mbps' "$RESET" "$RED" '920.0 Mbps' "$RESET" "$BLUE" '24.0 ms' "$RESET" "$GREEN" 'PASS' "$RESET" 'SUPPLEMENTAL'
+      "$YELLOW" 'Cloudflare 边缘基准' "$RESET" "$GREEN" '850.0 Mbps' "$RESET" "$RED" '920.0 Mbps' "$RESET" "$BLUE" '24.0 ms' "$RESET" "$GREEN" '正常' "$RESET" '补充基准'
     printf 'cf-fallback\tCloudflare Edge\tPASS\tSUPPLEMENTAL\t850.0\t920.0\t24.0\n' >>"$NETWORK_TSV"
     return 0
   fi
@@ -807,25 +868,25 @@ cloudflare_fallback(){
   printf 'cf-fallback\tCloudflare Edge\tPASS\tSUPPLEMENTAL\t%s\t%s\t%s\n' "$up_mbps" "$down_mbps" "$ttfb_ms" >>"$NETWORK_TSV"
   tty_clean_line
   printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-    "$YELLOW" 'Cloudflare Edge' "$RESET" "$GREEN" "$up_mbps Mbps" "$RESET" "$RED" "$down_mbps Mbps" "$RESET" "$BLUE" "$ttfb_ms ms" "$RESET" "$GREEN" 'PASS' "$RESET" 'SUPPLEMENTAL'
+    "$YELLOW" 'Cloudflare 边缘基准' "$RESET" "$GREEN" "$up_mbps Mbps" "$RESET" "$RED" "$down_mbps Mbps" "$RESET" "$BLUE" "$ttfb_ms ms" "$RESET" "$GREEN" '正常' "$RESET" '补充基准'
   return 0
 }
 global_fallback_stack(){
   librespeed_global_fallback || true
-  printf ' %sSupplemental        : Cloudflare Edge single-edge baseline%s\n' "$BLUE" "$RESET"
-  cloudflare_fallback || printf ' %sCloudflare supplemental baseline unavailable.%s\n' "$YELLOW" "$RESET"
+  printf ' %s补充基准           : Cloudflare 单边缘节点（仅作参考）%s\n' "$BLUE" "$RESET"
+  cloudflare_fallback || printf ' %sCloudflare 补充基准暂不可用。%s\n' "$YELLOW" "$RESET"
 }
 
 print_network(){
   rule
-  printf '%s Node Name         Upload        Download        Latency   State   Reason%s\n' "$BOLD$YELLOW" "$RESET"
+  printf '%s 节点/地区              上传          下载            延迟      状态       原因%s\n' "$BOLD$YELLOW" "$RESET"
   : >"$NETWORK_TSV"
   if ! prepare_speedtest; then
     SPEEDTEST_BIN=""
     OOKLA_PROVIDER_STATE="UNAVAILABLE"
     OOKLA_PROVIDER_REASON="SPEEDTEST_UNAVAILABLE"
     speed_node '' 'Speedtest.net' || true
-    printf ' %sSpeedtest backend unavailable; Ookla node tests skipped.%s\n' "$YELLOW" "$RESET"
+    printf ' %sOokla 测速平台当前不可用，已自动切换全球备用测速。%s\n' "$YELLOW" "$RESET"
     global_fallback_stack
     return 0
   fi
@@ -837,7 +898,7 @@ print_network(){
   OOKLA_PROVIDER_STATE="$pre_state"
   OOKLA_PROVIDER_REASON="${pre_reason:-UNKNOWN}"
   if [[ "$pre_state" != PASS && "$pre_reason" =~ ^(RATE_LIMITED|BACKEND_UNAVAILABLE|BACKEND_FAILURE)$ ]]; then
-    printf ' %sSpeedtest backend preflight failed: %s. Remaining Ookla nodes skipped.%s\n' "$YELLOW" "$pre_reason" "$RESET"
+    printf ' %sOokla 预检未通过：%s。已自动切换全球备用测速。%s\n' "$YELLOW" "$(zh_reason "$pre_reason")" "$RESET"
     global_fallback_stack
     return 0
   fi
@@ -924,11 +985,11 @@ china_assessment(){
   if [[ "$OOKLA_PROVIDER_STATE" != PASS && "$cn_speed_total" -eq 0 && "$fallback_pass" -eq 0 ]]; then
     CHINA_VERDICT="UNKNOWN"
     if (( mainland_http >= 4 || cf_pass >= 1 )); then evidence_quality="PARTIAL"; else evidence_quality="LOW"; fi
-    carrier_line="NOT_RUN (Ookla ${OOKLA_PROVIDER_REASON})"
+    carrier_line="未执行（Ookla：$(zh_reason "$OOKLA_PROVIDER_REASON")）"
     case "$OOKLA_PROVIDER_REASON" in
-      RATE_LIMITED) CHINA_RECOMMENDATION="OOKLA RATE LIMITED; NO IP-BLOCKING VERDICT FROM SPEEDTEST" ;;
-      BACKEND_UNAVAILABLE|BACKEND_FAILURE) CHINA_RECOMMENDATION="OOKLA BACKEND UNAVAILABLE; NO IP-BLOCKING VERDICT FROM SPEEDTEST" ;;
-      *) CHINA_RECOMMENDATION="CARRIER SPEED NOT RUN; VERIFY FROM MAINLAND" ;;
+      RATE_LIMITED) CHINA_RECOMMENDATION="Ookla 当前被限流；这不代表服务器 IP 被中国大陆屏蔽" ;;
+      BACKEND_UNAVAILABLE|BACKEND_FAILURE) CHINA_RECOMMENDATION="Ookla 平台当前不可用；这不代表服务器 IP 被中国大陆屏蔽" ;;
+      *) CHINA_RECOMMENDATION="运营商测速未完成，建议补充中国大陆到 VPS 的真实访问验证" ;;
     esac
   else
     CHINA_VERDICT="$(china_verdict_from_counts "$cn_speed_pass" "$cn_path_fail" "$cn_node_unavailable" "$overseas_speed_pass" "$mainland_http" "$mainland_fail" "$overseas_http")"
@@ -936,16 +997,16 @@ china_assessment(){
     elif (( fallback_pass >= 1 || mainland_http >= 4 || cf_pass >= 1 )); then evidence_quality=PARTIAL
     else evidence_quality=LOW
     fi
-    carrier_line="${cn_speed_pass}/${cn_speed_total} PASS | Fallback ${fallback_pass} PASS"
+    carrier_line="主要运营商 ${cn_speed_pass}/${cn_speed_total} 正常｜备用 ${fallback_pass} 个正常"
     case "$CHINA_VERDICT" in
-      NORMAL) CHINA_RECOMMENDATION="OUTBOUND LOOKS NORMAL; VERIFY MAINLAND -> VPS BEFORE CUTOVER" ;;
-      HIGH_RISK) CHINA_RECOMMENDATION="CHANGE IP BEFORE MIGRATION" ;;
-      RISK) CHINA_RECOMMENDATION="VERIFY FROM MAINLAND BEFORE MIGRATION" ;;
+      NORMAL) CHINA_RECOMMENDATION="当前出站访问看起来正常；正式迁移前仍建议验证中国大陆到 VPS" ;;
+      HIGH_RISK) CHINA_RECOMMENDATION="风险较高，建议迁移前更换 IP" ;;
+      RISK) CHINA_RECOMMENDATION="存在风险，建议迁移前从中国大陆真实访问验证" ;;
       *)
         if (( cn_speed_pass == 0 && fallback_pass >= 1 )); then
-          CHINA_RECOMMENDATION="CARRIER NODES UNAVAILABLE; VERIFY FROM MAINLAND"
+          CHINA_RECOMMENDATION="运营商测速节点不可用，建议从中国大陆真实访问验证"
         else
-          CHINA_RECOMMENDATION="MAINLAND SIGNAL INCONCLUSIVE"
+          CHINA_RECOMMENDATION="现有证据不足，暂时不能判断中国大陆访问质量"
         fi
         ;;
     esac
@@ -953,18 +1014,18 @@ china_assessment(){
   EVIDENCE_QUALITY="$evidence_quality"
 
   rule
-  printf '%s%s China Access Assessment%s\n' "$BOLD" "$BLUE" "$RESET"
-  printf ' Outbound HTTPS      : Overseas %s/3 | Mainland %s/6\n' "$overseas_http" "$mainland_http"
-  [[ -n "$mainland_failed" ]] && printf ' Mainland HTTPS Fail : %s\n' "$mainland_failed"
-  printf ' Carrier Speed       : %s\n' "$carrier_line"
-  printf ' Evidence Quality    : %s\n' "$evidence_quality"
-  printf ' Mainland -> VPS     : %sNOT_RUN%s\n' "$YELLOW" "$RESET"
-  printf ' China IP Risk       : '; color_state "$CHINA_VERDICT"; printf '\n'
-  printf ' Advice              : %s%s%s\n' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
+  printf '%s%s 中国大陆访问评估%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf ' VPS 出站 HTTPS     : 海外 %s/3｜中国大陆 %s/6\n' "$overseas_http" "$mainland_http"
+  [[ -n "$mainland_failed" ]] && printf ' 大陆站点失败       : %s\n' "$mainland_failed"
+  printf ' 运营商测速         : %s\n' "$carrier_line"
+  printf ' 证据质量           : %s\n' "$(zh_state "$evidence_quality")"
+  printf ' 大陆 → VPS         : %s未执行%s（当前还没有大陆入口探针）\n' "$YELLOW" "$RESET"
+  printf ' 中国大陆访问风险   : '; color_state "$CHINA_VERDICT"; printf '\n'
+  printf ' 建议               : %s%s%s\n' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
   if [[ "$OOKLA_PROVIDER_STATE" != PASS ]]; then
-    printf ' %sNote: Ookla provider failure is test-platform evidence, not IP-blocking evidence.%s\n' "$GRAY" "$RESET"
+    printf ' %s说明：Ookla 平台故障/限流只是测速平台问题，不能据此判断 IP 被屏蔽。%s\n' "$GRAY" "$RESET"
   else
-    printf ' %sNote: fallback-only evidence cannot produce NORMAL; NODE_UNAVAILABLE is neutral.%s\n' "$GRAY" "$RESET"
+    printf ' %s说明：仅有备用测速时不会强行判定“正常”；测速节点不可用也不会被当成 IP 风险。%s\n' "$GRAY" "$RESET"
   fi
 }
 
@@ -1073,9 +1134,9 @@ print_network
 china_assessment
 rule
 ELAPSED=$(( $(date +%s) - START_EPOCH ))
-printf ' Finished in        : %s%s min %s sec%s\n' "$GREEN" "$((ELAPSED/60))" "$((ELAPSED%60))" "$RESET"
-printf ' Timestamp          : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf ' 总耗时             : %s%s 分 %s 秒%s\n' "$GREEN" "$((ELAPSED/60))" "$((ELAPSED%60))" "$RESET"
+printf ' 完成时间           : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 write_reports
-printf ' Report saved       : %s%s%s\n' "$BLUE" "$REPORT_TXT" "$RESET"
-[[ -f "${REPORT_JSON:-}" ]] && printf ' JSON report        : %s%s%s\n' "$BLUE" "$REPORT_JSON" "$RESET"
+printf ' 中文报告           : %s%s%s\n' "$BLUE" "$REPORT_TXT" "$RESET"
+[[ -f "${REPORT_JSON:-}" ]] && printf ' 机器数据（JSON）   : %s%s%s\n' "$BLUE" "$REPORT_JSON" "$RESET"
 rule
