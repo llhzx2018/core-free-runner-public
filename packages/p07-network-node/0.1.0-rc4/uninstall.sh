@@ -58,6 +58,8 @@ rm -f /usr/local/sbin/v2ray
 rm -rf /etc/v2ray /var/log/v2ray
 rm -f /lib/systemd/system/v2ray.service /etc/systemd/system/v2ray.service /etc/init.d/v2ray
 
+# The pinned upstream installer adds an alias for its management command.
+# Remove only that exact alias class; do not touch unrelated shell settings.
 if [[ -f /root/.bashrc ]]; then
   sed -i '/^[[:space:]]*alias[[:space:]]\+v2ray=/d' /root/.bashrc
 fi
