@@ -2,7 +2,7 @@
 set -uo pipefail
 
 APP="P07 Enhanced Bench"
-VERSION="0.6.0"
+VERSION="0.7.0"
 DEMO=0
 SELF_TEST=0
 IO_MIB="${P07_BENCH_IO_MIB:-256}"
@@ -447,6 +447,8 @@ prepare_speedtest(){
 network_reason(){
   local rc="$1" text="$2"
   if (( rc == 124 )); then printf TIMEOUT
+  elif grep -qiE 'too many requests|rate.?limit|http[^0-9]*429|429' <<<"$text"; then printf RATE_LIMITED
+  elif grep -qiE 'cannot retrieve.*configuration|failed to retrieve.*configuration|configurationerror|configuration.*failed|service unavailable|temporarily unavailable' <<<"$text"; then printf BACKEND_UNAVAILABLE
   elif grep -qiE 'server.*not found|no servers|invalid server' <<<"$text"; then printf NODE_UNAVAILABLE
   elif grep -qiE 'resolve|dns' <<<"$text"; then printf DNS_FAILURE
   elif grep -qiE 'ssl|tls|certificate' <<<"$text"; then printf TLS_FAILURE
@@ -573,12 +575,13 @@ speed_node_retry(){
     [[ -n "$row" ]] || continue
     state="$(awk -F '\t' 'END{print $3}' "$tmp")"
     reason="$(awk -F '\t' 'END{print $4}' "$tmp")"
-    if [[ "$state" == PASS || ! "$reason" =~ ^(BACKEND_FAILURE|TIMEOUT|CONNECTION_FAILED)$ || "$attempt" == 2 ]]; then
+    if [[ "$state" == PASS || ! "$reason" =~ ^(BACKEND_FAILURE|BACKEND_UNAVAILABLE|RATE_LIMITED|TIMEOUT|CONNECTION_FAILED)$ || "$attempt" == 2 ]]; then
       cat "$tmp" >>"$original"
       printf '%s\n' "$output"
       [[ "$state" == PASS ]]
       return
     fi
+    (( DEMO )) || sleep 2
   done
   NETWORK_TSV="$original"
   [[ -s "$tmp" ]] && cat "$tmp" >>"$original"
@@ -588,16 +591,21 @@ speed_node_retry(){
 speed_node_pool(){
   local display="$1"; shift
   local original="$NETWORK_TSV" tmp="$TMP_DIR/pool-$$-$RANDOM.tsv"
-  local spec id label row state reason up down lat output best_reason=NODE_UNAVAILABLE best_id=0
+  local out="$TMP_DIR/pool-output-$$-$RANDOM.txt" spec id label row state reason up down lat output best_reason=NODE_UNAVAILABLE best_id=0
   for spec in "$@"; do
     IFS='|' read -r id label <<<"$spec"
-    : >"$tmp"
+    : >"$tmp"; : >"$out"
     NETWORK_TSV="$tmp"
-    output="$(speed_node "$id" "$label" || true)"
+    speed_node "$id" "$label" >"$out" || true
     NETWORK_TSV="$original"
+    output="$(cat "$out" 2>/dev/null || true)"
     row="$(tail -n1 "$tmp" 2>/dev/null || true)"
     [[ -n "$row" ]] || continue
-    IFS=$'\t' read -r _ _ state reason up down lat <<<"$row"
+    state="$(awk -F '\t' 'END{print $3}' "$tmp")"
+    reason="$(awk -F '\t' 'END{print $4}' "$tmp")"
+    up="$(awk -F '\t' 'END{print $5}' "$tmp")"
+    down="$(awk -F '\t' 'END{print $6}' "$tmp")"
+    lat="$(awk -F '\t' 'END{print $7}' "$tmp")"
     if [[ "$state" == PASS ]]; then
       printf '%s\t%s\tPASS\tNONE\t%s\t%s\t%s\n' "$id" "$display" "$up" "$down" "$lat" >>"$original"
       tty_clean_line
@@ -618,9 +626,22 @@ print_network(){
   rule
   printf '%s Node Name         Upload        Download        Latency   State   Reason%s\n' "$BOLD$YELLOW" "$RESET"
   : >"$NETWORK_TSV"
-  if ! prepare_speedtest; then SPEEDTEST_BIN=""; fi
+  if ! prepare_speedtest; then
+    SPEEDTEST_BIN=""
+    speed_node '' 'Speedtest.net' || true
+    printf ' %sSpeedtest backend unavailable; node throughput tests skipped.%s\n' "$YELLOW" "$RESET"
+    return 0
+  fi
 
-  speed_node_retry ''      'Speedtest.net' || true
+  speed_node_retry '' 'Speedtest.net' || true
+  local pre_state pre_reason
+  pre_state="$(awk -F '\t' '$2=="Speedtest.net"{s=$3} END{print s}' "$NETWORK_TSV")"
+  pre_reason="$(awk -F '\t' '$2=="Speedtest.net"{r=$4} END{print r}' "$NETWORK_TSV")"
+  if [[ "$pre_state" != PASS && "$pre_reason" =~ ^(RATE_LIMITED|BACKEND_UNAVAILABLE|BACKEND_FAILURE)$ ]]; then
+    printf ' %sSpeedtest backend preflight failed: %s. Remaining node tests skipped.%s\n' "$YELLOW" "$pre_reason" "$RESET"
+    return 0
+  fi
+
   speed_node_retry 7190    'Los Angeles, US' || true
   speed_node_retry 22288   'Dallas, US' || true
   speed_node_retry 64420   'Montreal, CA' || true
@@ -788,6 +809,12 @@ EOFFAKE
   speed_node_retry '' 'Lifecycle B' >/dev/null || f=1
   [[ "$(awk -F '\t' '$3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")" == "2" ]] || f=1
   [[ -x "$fake" && -d "$TMP_DIR" ]] || f=1
+  : >"$NETWORK_TSV"
+  speed_node_pool 'Lifecycle Pool' '1|Lifecycle A' '2|Lifecycle B' >/dev/null || f=1
+  [[ "$(awk -F '\t' '$2=="Lifecycle Pool" && $3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")" == "1" ]] || f=1
+  [[ -x "$fake" && -d "$TMP_DIR" ]] || f=1
+  [[ "$(network_reason 1 'HTTP 429 Too Many Requests')" == RATE_LIMITED ]] || f=1
+  [[ "$(network_reason 1 'Cannot retrieve speedtest configuration')" == BACKEND_UNAVAILABLE ]] || f=1
   SPEEDTEST_BIN="$saved_bin"; SPEEDTEST_TEMP="$saved_temp"; DEMO="$saved_demo"; NETWORK_TSV="$saved_tsv"
   if (( f )); then printf 'SELF_TEST=FAIL\n'; return 1; else printf 'SELF_TEST=PASS\n'; fi
 }
