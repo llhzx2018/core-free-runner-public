@@ -12,6 +12,12 @@ s=s.replace(' CPU 配额           : ',' CPU 有效配额       : ')
 s=s.replace(' 内存 cgroup 上限   : ',' 内存有效上限       : ')
 s=s.replace(' Swap cgroup 上限   : ',' Swap 有效上限      : ')
 
+# RC3 draft calculated scaling but its detail-row insertion was too brittle.
+needle="      printf ' SHA256 多核        : %s MB/s  （最多使用 4 核）\\n' \"$V20_CPU_MULTI\""
+if ' 多核扩展效率       :' not in s:
+    if needle not in s: raise SystemExit('cpu multi output anchor missing')
+    s=s.replace(needle, needle+"\n      printf ' 多核扩展效率       : %s%%\\n' \"$V20_CPU_SCALE_EFF\"",1)
+
 # Resource health: include CPU, memory, swap and PID effective limits.
 resource=r'''v20_resource_health(){
   v20_read_resource_limits
