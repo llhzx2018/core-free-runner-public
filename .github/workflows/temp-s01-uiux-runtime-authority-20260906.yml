@@ -1,0 +1,132 @@
+name: S01 UIUX Runtime Authority Gate
+
+on:
+  push:
+    branches: [temp/s01-uiux-runtime-authority-20260906]
+    paths:
+      - '.github/workflows/temp-s01-uiux-runtime-authority-20260906.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  authority:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      THEME_SHA: 868192e5f355f4b2f49855de868360c47b87ea78
+      OPS_SHA: 0e6fb809748a3c2b392c13b1c787490ebbeb390d
+      M3U8_SHA: db11959db7ce726ad56d74be4add9fa594061817
+    steps:
+      - name: Credential gate
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'RELEASE_WRITE_USED=NO'
+
+      - name: Checkout Theme
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: theme
+          persist-credentials: false
+
+      - name: Checkout Ops
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          persist-credentials: false
+
+      - name: Checkout M3U8
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          persist-credentials: false
+
+      - name: Compute exact runtime authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          mkdir -p authority
+
+          cat > /tmp/theme-authority.php <<'PHP'
+          <?php
+          define('ABSPATH','/');
+          class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/src/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1].'/src');
+          unset($s['files']);
+          echo json_encode($s, JSON_UNESCAPED_SLASHES), "\n";
+          PHP
+          php /tmp/theme-authority.php theme > authority/theme.json
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,re,os
+
+          def identity(items):
+              h=hashlib.sha256()
+              for rel,b in sorted(items):
+                  h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+              return {'file_count':len(items),'fingerprint_sha256':h.hexdigest()}
+
+          ops=[]
+          root=Path('ops')
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              ok=(rel in {'vf-ops.php','uninstall.php'}) if '/' not in rel else parts[0] in {'includes','assets','languages','config'}
+              if ok: ops.append((rel,p.read_bytes()))
+          oj={'component_id':'S01-C02','runtime_contract':'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1',**identity(ops)}
+          Path('authority/ops.json').write_text(json.dumps(oj,indent=2)+'\n')
+
+          m3=[]
+          root=Path('m3u8/src')
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/'); low=[x.lower() for x in parts]; b=parts[-1].lower()
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: continue
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): continue
+              ok=(rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}) if len(parts)==1 else parts[0] in {'admin','config','includes','public','templates','tools'}
+              if ok: m3.append((rel,p.read_bytes()))
+          mj={'component_id':'S01-C03','runtime_contract':'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1',**identity(m3)}
+          Path('authority/m3u8.json').write_text(json.dumps(mj,indent=2)+'\n')
+          PY
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          t=json.load(open('authority/theme.json')); o=json.load(open('authority/ops.json')); m=json.load(open('authority/m3u8.json'))
+          assert t['component_id']=='S01-C01' and t['runtime_contract']=='VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          assert o['component_id']=='S01-C02' and o['runtime_contract']=='VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          assert m['component_id']=='S01-C03' and m['runtime_contract']=='VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          assert m['file_count']==557
+          assert m['fingerprint_sha256']=='5cf274f3f69fc2bd9b244d8a8096d34792f16107b162000e838c70a09e98abc4'
+          out={'source_sha':{'theme':os.environ['THEME_SHA'],'ops':os.environ['OPS_SHA'],'m3u8':os.environ['M3U8_SHA']},'theme':t,'ops':o,'m3u8':m}
+          Path('authority/S01_RUNTIME_AUTHORITY_20260906.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+          echo 'S01_RUNTIME_AUTHORITY_GATE=PASS'
+
+      - name: Upload runtime authority evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: S01-RUNTIME-AUTHORITY-20260906
+          path: authority/
+          if-no-files-found: error
+          retention-days: 14
