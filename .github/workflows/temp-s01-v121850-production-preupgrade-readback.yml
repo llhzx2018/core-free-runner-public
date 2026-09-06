@@ -1,0 +1,71 @@
+name: S01 Production Pre-Upgrade Fresh Readback
+
+on:
+  push:
+    branches: [temp/s01-v121850-production-preupgrade-readback-20260906]
+    paths:
+      - '.github/workflows/temp-s01-v121850-production-preupgrade-readback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Read public S01 Production endpoints
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/s01-prod-readback
+          probe(){
+            local name="$1" url="$2" out="/tmp/s01-prod-readback/${name}.json" code
+            code="$(curl -sS --retry 3 --connect-timeout 15 --max-time 40 -o "$out" -w '%{http_code}' "$url")"
+            echo "${name}_HTTP=${code}"
+            test "$code" = 200
+            jq -e . "$out" >/dev/null
+          }
+          probe domain 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-domain-authority'
+          probe seo 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-seo-closure'
+          probe reconciliation 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-boundary-reconciliation'
+          probe static 'https://www3.m3u8.one/wp-json/vf-ops/v1/s01-static-candidate-readiness'
+          probe rest_index 'https://www3.m3u8.one/wp-json/'
+          echo 'PUBLIC_PRODUCTION_ENDPOINTS=PASS'
+
+      - name: Classify current Production truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo '--- STATIC CORE ---'
+          jq -c '{pluginVersion,sourceArtifactAvailable,manualSourceUploadRequired,candidatePackageReady,finalOnlinePass,activeStaticJobStatus,activeStaticJobMode,activeStaticJobFirstFailedStep,activeStaticJobAuditFailureCount,activeStaticJobInternalLinkFailureLeafCount,sourceRecoveryCanonicalFinalAuditRetryStatus,sourceRecoveryCanonicalFinalAuditRetryCode,sourceRecoveryCanonicalFinalAuditRetryEligibleCount,sourceRecoveryCanonicalFinalAuditRetryCandidateStatus,sourceRecoveryCanonicalFinalAuditRetryCandidateCurrentStage,sourceRecoveryCanonicalFinalAuditRetryCandidateAuditFailureCount}' /tmp/s01-prod-readback/static.json
+          echo '--- DOMAIN ---'
+          jq -c . /tmp/s01-prod-readback/domain.json
+          echo '--- SEO ---'
+          jq -c . /tmp/s01-prod-readback/seo.json
+          echo '--- RECONCILIATION ---'
+          jq -c . /tmp/s01-prod-readback/reconciliation.json
+          plugin_version="$(jq -r '.pluginVersion // "UNKNOWN"' /tmp/s01-prod-readback/static.json)"
+          test -n "$plugin_version"
+          echo "CURRENT_PRODUCTION_OPS_VERSION=$plugin_version"
+          if [ "$plugin_version" = '1.21.850' ]; then echo 'OPS_1_21_850_ALREADY_INSTALLED=YES'; else echo 'OPS_1_21_850_ALREADY_INSTALLED=NO'; fi
+          echo 'PRODUCTION_WRITE=NO'
+
+      - name: Enumerate live vf-ops REST routes and update-capable candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -r '.routes | to_entries[] | select(.key|startswith("/vf-ops/")) | [.key, ((.value.methods // [])|join(","))] | @tsv' /tmp/s01-prod-readback/rest_index.json | sort | tee /tmp/s01-prod-readback/vf-ops-routes.tsv
+          echo '--- UPDATE/UPGRADE/INSTALL/RELEASE/ACTION ROUTE CANDIDATES ---'
+          grep -Ei 'update|upgrade|install|release|action|refresh' /tmp/s01-prod-readback/vf-ops-routes.tsv | tee /tmp/s01-prod-readback/update-route-candidates.tsv || true
+          echo "VF_OPS_ROUTE_COUNT=$(wc -l < /tmp/s01-prod-readback/vf-ops-routes.tsv)"
+          echo "UPDATE_ROUTE_CANDIDATE_COUNT=$(wc -l < /tmp/s01-prod-readback/update-route-candidates.tsv)"
+          echo 'REST_ROUTE_DISCOVERY=PASS'
+
+      - name: Upload fresh Production readback evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: S01-PRODUCTION-PREUPGRADE-READBACK-20260906
+          path: /tmp/s01-prod-readback/
+          if-no-files-found: error
+          retention-days: 14
