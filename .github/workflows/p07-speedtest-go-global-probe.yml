@@ -1,0 +1,79 @@
+name: P07 speedtest-go Global Fallback Probe
+
+on:
+  push:
+    branches:
+      - experiment/p07-oneshot-bench-v05
+    paths:
+      - .github/workflows/p07-speedtest-go-global-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download verified speedtest-go
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/showwin/speedtest-go/releases/download/v1.8.3/speedtest-go_1.8.3_Linux_x86_64.tar.gz'
+          SHA='c55caae22927cd719a2f8c0bef96ecf74b5fe8ca919ff9200d76328ae5de9477'
+          curl -fL --retry 2 --connect-timeout 10 --max-time 90 "$URL" -o /tmp/speedtest-go.tgz
+          echo "$SHA  /tmp/speedtest-go.tgz" | sha256sum -c -
+          mkdir -p /tmp/speedtest-go
+          tar -xzf /tmp/speedtest-go.tgz -C /tmp/speedtest-go
+          BIN="$(find /tmp/speedtest-go -maxdepth 2 -type f -name 'speedtest-go*' ! -name '*.tgz' | head -n1)"
+          test -n "$BIN"
+          chmod +x "$BIN"
+          echo "SPEEDTEST_GO_BIN=$BIN" >> "$GITHUB_ENV"
+          "$BIN" --version
+      - name: Probe six target regions
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/stg.tsv
+          probe(){
+            local region="$1" coords="$2" out rc
+            out="/tmp/stg-$(echo "$region" | tr ' ' '-').json"
+            set +e
+            timeout 80s "$SPEEDTEST_GO_BIN" --json --saving-mode --thread 1 --location "$coords" --ping-mode http >"$out" 2>"$out.err"
+            rc=$?
+            set -e
+            if (( rc != 0 )); then
+              echo "$region FAIL rc=$rc" >&2
+              cat "$out.err" >&2 || true
+              return 1
+            fi
+            python3 - "$out" "$region" <<'PY'
+          import json,sys
+          path,region=sys.argv[1:]
+          obj=json.load(open(path,encoding='utf-8'))
+          if isinstance(obj,list):
+              if not obj: raise SystemExit(1)
+              obj=obj[0]
+          if not isinstance(obj,dict): raise SystemExit(1)
+          # speedtest-go server JSON fields
+          up=obj.get('ul_speed', obj.get('upload'))
+          down=obj.get('dl_speed', obj.get('download'))
+          latency=obj.get('latency', obj.get('ping'))
+          name=obj.get('name','')
+          country=obj.get('country','')
+          if up is None or down is None or latency is None: raise SystemExit(1)
+          print(f"{region}\t{up}\t{down}\t{latency}\t{name}\t{country}")
+          PY
+          }
+          pass=0
+          probe 'US West'    '37.7749,-122.4194' | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          probe 'US East'    '40.7128,-74.0060'   | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          probe 'Europe'     '50.1109,8.6821'      | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          probe 'Hong Kong'  '22.3193,114.1694'    | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          probe 'Singapore'  '1.3521,103.8198'     | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          probe 'Tokyo'      '35.6762,139.6503'    | tee -a /tmp/stg.tsv && pass=$((pass+1)) || true
+          cat /tmp/stg.tsv
+          echo "REGION_PASS=$pass"
+          test "$pass" -ge 5
