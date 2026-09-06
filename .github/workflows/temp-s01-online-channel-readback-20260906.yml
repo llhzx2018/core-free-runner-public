@@ -1,0 +1,122 @@
+name: S01 Post-Merge Online Update Channel Readback
+
+on:
+  push:
+    branches: [temp/s01-online-channel-readback-20260906]
+    paths:
+      - '.github/workflows/temp-s01-online-channel-readback-20260906.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  online-channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      CORE_REPO: llhzx2018/core-updates
+      CORE_MAIN_SHA: ef6d1f982c3c82d1c186851c18b9aa05254edf98
+    steps:
+      - name: Credential and boundary gate
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=VF_PRIVATE_READ_TOKEN'
+          echo 'WRITE_USED=NO'
+          echo 'PRODUCTION_WRITE=NO'
+
+      - name: Checkout exact merged Update Core client
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_MAIN_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: core-updates
+          persist-credentials: false
+
+      - name: Assert remote core-updates main identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REMOTE_SHA="$(curl --fail-with-body -sS -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/$CORE_REPO/branches/main" | python3 -c 'import json,sys;print(json.load(sys.stdin)["commit"]["sha"])')"
+          test "$REMOTE_SHA" = "$CORE_MAIN_SHA"
+          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_MAIN_SHA"
+          echo 'CORE_UPDATES_MAIN_IDENTITY=PASS'
+
+      - name: Use real GitHubClient to read main manifests and download release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/s01-online"
+          cat > "$RUNNER_TEMP/s01-online/readback.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd() . '/core-updates/update-core/php/src/GitHubClient.php';
+          use CoreUpdates\GitHubClient;
+          $token = getenv('READ_TOKEN') ?: '';
+          if ($token === '') { throw new RuntimeException('READ_TOKEN missing'); }
+          $client = new GitHubClient($token, 's01-online-channel-readback');
+          $expected = [
+            'S01-C01' => ['version'=>'1.35.11','from'=>['1.35.8','1.35.9','1.35.10'],'bytes'=>1796071,'sha'=>'b2107ba0dfa13720fe40164d2943fa3016d82e4f162bc4d7f8c31df55c9b61ef','runtime_files'=>442,'runtime_fp'=>'0c041e0e920f40c3b0c070b33ea7f600aa983a74a6097398be3311577e697e8f'],
+            'S01-C02' => ['version'=>'1.21.850','from'=>['1.21.849'],'bytes'=>3334143,'sha'=>'1556eae3698412831bb9c81fe8729160ad5a3dcb1a9ca979b76add98cc58dfb0','runtime_files'=>933,'runtime_fp'=>'58bc6003dbf642a5978649b52f2d9eb5493907508349c43bb89ab27abfb5e410','locator'=>'vf-ops/vf-ops.php'],
+            'S01-C03' => ['version'=>'1.25.21','from'=>['1.25.20'],'bytes'=>3573646,'sha'=>'6a34f9997dafd9be4ee1a87a8ed57f623318b53c294fd7274503cbe3980dd29c','runtime_files'=>557,'runtime_fp'=>'5cf274f3f69fc2bd9b244d8a8096d34792f16107b162000e838c70a09e98abc4','locator'=>'vf-tool-m3u8/vf-tool-m3u8.php'],
+          ];
+          $out = [];
+          foreach ($expected as $cid=>$e) {
+              $m = $client->fetchProjectManifest('llhzx2018/core-updates', $cid . '.json', 'main');
+              if (($m['component_id'] ?? '') !== $cid) throw new RuntimeException("component mismatch $cid");
+              if (($m['target_version'] ?? '') !== $e['version']) throw new RuntimeException("version mismatch $cid");
+              if (($m['from_versions'] ?? []) !== $e['from']) throw new RuntimeException("from_versions mismatch $cid");
+              if (($m['asset_bytes'] ?? 0) !== $e['bytes']) throw new RuntimeException("bytes manifest mismatch $cid");
+              if (($m['asset_sha256'] ?? '') !== $e['sha']) throw new RuntimeException("sha manifest mismatch $cid");
+              if (($m['runtime_files'] ?? 0) !== $e['runtime_files']) throw new RuntimeException("runtime_files mismatch $cid");
+              if (($m['runtime_fingerprint'] ?? '') !== $e['runtime_fp']) throw new RuntimeException("runtime fp mismatch $cid");
+              if (isset($e['locator']) && (($m['physical_locator'] ?? '') !== $e['locator'])) throw new RuntimeException("locator mismatch $cid");
+              $dest = getenv('RUNNER_TEMP') . '/s01-online/' . $m['asset_name'];
+              $asset = $client->downloadReleaseAsset($m['repository'], $m['release_tag'], $m['asset_name'], $dest);
+              if (!is_file($dest) || filesize($dest) !== $e['bytes']) throw new RuntimeException("download size mismatch $cid");
+              if (hash_file('sha256', $dest) !== $e['sha']) throw new RuntimeException("download sha mismatch $cid");
+              if (($asset['name'] ?? '') !== $m['asset_name']) throw new RuntimeException("asset metadata mismatch $cid");
+              $out[$cid] = ['manifest'=>$m,'asset_id'=>$asset['id'] ?? null,'download'=>$dest,'download_bytes'=>filesize($dest),'download_sha256'=>hash_file('sha256',$dest)];
+              echo "$cid GITHUB_CLIENT_READBACK=PASS\n";
+          }
+          file_put_contents(getenv('RUNNER_TEMP') . '/s01-online/readback.json', json_encode($out, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES) . "\n");
+          echo "REAL_GITHUB_CLIENT_CHANNEL=PASS\n";
+          PHP
+          php "$RUNNER_TEMP/s01-online/readback.php"
+
+      - name: Inspect downloaded WordPress package roots and locators
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os,zipfile,re
+          root=os.path.join(os.environ['RUNNER_TEMP'],'s01-online')
+          checks={
+            'S01-C01':('vf-tools-theme',446,'vf-tools-theme/style.css',r'(?m)^Version:\s*1\.35\.11\s*$'),
+            'S01-C02':('vf-ops',933,'vf-ops/vf-ops.php',r'(?m)^\s*\* Version:\s*1\.21\.850\s*$'),
+            'S01-C03':('vf-tool-m3u8',559,'vf-tool-m3u8/vf-tool-m3u8.php',r'(?m)^\s*\* Version:\s*1\.25\.21\s*$')}
+          data=json.load(open(os.path.join(root,'readback.json')))
+          for cid,(top,count,locator,pattern) in checks.items():
+              p=data[cid]['download']
+              with zipfile.ZipFile(p) as z:
+                  assert z.testzip() is None
+                  files=[i for i in z.infolist() if not i.is_dir()]
+                  assert len(files)==count,(cid,len(files),count)
+                  assert sorted({i.filename.split('/')[0] for i in files})==[top]
+                  assert locator in {i.filename for i in files}
+                  txt=z.read(locator).decode('utf-8')
+                  assert re.search(pattern,txt),(cid,locator)
+              print(cid,'WORDPRESS_PACKAGE_READBACK=PASS')
+          print('ONLINE_CHANNEL_PACKAGE_STRUCTURE=PASS')
+          PY
+
+      - name: Final classification
+        run: |
+          echo 'S01_UPDATE_CHANNEL_POST_MERGE=PASS'
+          echo 'REAL_GITHUB_CLIENT_FETCH=PASS'
+          echo 'REMOTE_RELEASE_DOWNLOAD_BYTES_SHA=PASS'
+          echo 'PRODUCTION_WORDPRESS_UPGRADE=NOT_RUN'
+          echo 'STATIC_CANDIDATE=NOT_RUN'
+          echo 'FINAL_ONLINE_PASS=NO'
