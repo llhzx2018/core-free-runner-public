@@ -3,9 +3,10 @@ from pathlib import Path
 p=Path('experiments/p07-bench.sh')
 s=p.read_text(encoding='utf-8')
 
-# User-visible title and demo quota wording.
+# User-visible title, demo quota wording, and hidden-limit state translation.
 s=s.replace('-------------------- P07 VPS 一键验机 --------------------','-------------------- P07 VPS 一键验机 2.0 --------------------')
 s=s.replace("if (( DEMO )); then printf '%s|%s' \"$CORES\" NORMAL; return; fi","if (( DEMO )); then printf '%s 核|%s' \"$CORES\" NORMAL; return; fi")
+s=s.replace("    LOW) printf '较低' ;;", "    LOW) printf '较低' ;;\n    LIMITED) printf '发现限额' ;;")
 
 # Legacy report writer compatibility. The old China-assessment object is explicitly neutral;
 # authoritative V2 semantics live in vps_audit_v20.
@@ -46,11 +47,13 @@ resource=r'''v20_resource_health(){
 if anchor not in s: raise SystemExit('score anchor missing')
 s=s.replace(anchor,resource+anchor,1)
 
-# Add 10% resource/runtime constraint category before final score assignment.
+# Add 10% resource/runtime constraint category and expose a normalized 0-100 score.
 needle='''  # IP 10
   tested=$((tested+10)); if [[ "$V20_IP_HEALTH" == NORMAL ]]; then score=$((score+10)); else score=$((score+5)); v20_add_issue "IP/DNS/HTTPS 基础健康存在缺项"; fi
 
-  V20_SCORE="$score"; V20_COMPLETENESS="$tested"'''
+  V20_SCORE="$score"; V20_COMPLETENESS="$tested"
+  local normalized=0
+  (( tested>0 )) && normalized=$(( score*100/tested ))'''
 repl='''  # IP 10
   tested=$((tested+10)); if [[ "$V20_IP_HEALTH" == NORMAL ]]; then score=$((score+10)); else score=$((score+5)); v20_add_issue "IP/DNS/HTTPS 基础健康存在缺项"; fi
 
@@ -64,11 +67,15 @@ repl='''  # IP 10
     *) score=$((score+4)); v20_add_issue "资源限制信号无法完整判断" ;;
   esac
 
-  V20_SCORE="$score"; V20_COMPLETENESS="$tested"'''
-if needle not in s: raise SystemExit('IP score anchor missing')
+  V20_COMPLETENESS="$tested"
+  local normalized=0
+  (( tested>0 )) && normalized=$(( score*100/tested ))
+  V20_SCORE="$normalized"'''
+if needle not in s: raise SystemExit('IP/score anchor missing')
 s=s.replace(needle,repl,1)
 
-# Print resource state in final verdict.
+# Print score and evidence completeness separately; add resource state to the final verdict.
+s=s.replace("  printf ' 评分 / 证据完整度  : %s / %s%%\\n' \"$V20_SCORE\" \"$V20_COMPLETENESS\"", "  printf ' 综合得分           : %s/100\\n' \"$V20_SCORE\"\n  printf ' 证据完整度         : %s%%\\n' \"$V20_COMPLETENESS\"")
 needle="  printf ' IP 基础健康        : '; color_state \"$V20_IP_HEALTH\"; printf '\\n'\n  printf ' 中国大陆入站"
 repl="  printf ' IP 基础健康        : '; color_state \"$V20_IP_HEALTH\"; printf '\\n'\n  printf ' 资源限制信号       : '; color_state \"$V20_RESOURCE_STATE\"; printf '\\n'\n  printf ' 资源说明           : 未输入购买套餐，本项只检查隐藏限额/异常，不声称套餐规格完全一致\\n'\n  printf ' 中国大陆入站"
 if needle not in s: raise SystemExit('final verdict anchor missing')
