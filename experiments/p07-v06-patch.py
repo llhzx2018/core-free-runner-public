@@ -40,7 +40,8 @@ new = r'''speed_node_retry(){
     output="$(cat "$out" 2>/dev/null || true)"
     row="$(tail -n1 "$tmp" 2>/dev/null || true)"
     [[ -n "$row" ]] || continue
-    IFS=$'\t' read -r _ _ state reason _ <<<"$row"
+    state="$(awk -F '\t' 'END{print $3}' "$tmp")"
+    reason="$(awk -F '\t' 'END{print $4}' "$tmp")"
     if [[ "$state" == PASS || ! "$reason" =~ ^(BACKEND_FAILURE|TIMEOUT|CONNECTION_FAILED)$ || "$attempt" == 2 ]]; then
       cat "$tmp" >>"$original"
       printf '%s\n' "$output"
