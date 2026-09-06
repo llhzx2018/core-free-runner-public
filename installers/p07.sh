@@ -2,6 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/vf-server-ops"
+PREVIOUS_DIR="/opt/vf-server-ops.previous"
 BIN_LINK="/usr/local/bin/vfops"
 CHANNEL="0.1.0-rc2"
 BASE_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/dist/p07/${CHANNEL}"
@@ -36,8 +37,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 cd "$TMP_DIR"
 
 say "下载 P07 RC2..."
-curl -fL --retry 3 --connect-timeout 15 "$PACKAGE_URL" -o "$PACKAGE_NAME"
-curl -fL --retry 3 --connect-timeout 15 "$CHECKSUM_URL" -o SHA256SUMS.txt
+curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "$PACKAGE_URL" -o "$PACKAGE_NAME" || fail "安装包下载失败。"
+curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "$CHECKSUM_URL" -o SHA256SUMS.txt || fail "校验文件下载失败。"
 
 say "校验安装包..."
 sha256sum -c SHA256SUMS.txt >/dev/null || fail "安装包 SHA256 校验失败。"
@@ -49,34 +50,71 @@ SRC_DIR="$TMP_DIR/extracted/vf-server-ops"
 [[ -f "$SRC_DIR/bin/vfops-user" ]] || fail "安装包结构异常：缺少用户入口。"
 [[ -f "$SRC_DIR/VERSION" ]] || fail "安装包结构异常：缺少 VERSION。"
 
+say "安装前自检..."
+chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user"
+bash -n "$SRC_DIR/bin/vfops" || fail "核心程序 Bash 自检失败。"
+bash -n "$SRC_DIR/bin/vfops-user" || fail "用户入口 Bash 自检失败。"
+python3 -m py_compile "$SRC_DIR"/lib/*.py || fail "Python 模块自检失败。"
+find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
 say "安装 P07..."
 rm -rf "$INSTALL_DIR.new"
 mkdir -p "$INSTALL_DIR.new"
 cp -a "$SRC_DIR"/. "$INSTALL_DIR.new"/
 chmod +x "$INSTALL_DIR.new/bin/vfops" "$INSTALL_DIR.new/bin/vfops-user"
-bash -n "$INSTALL_DIR.new/bin/vfops"
-bash -n "$INSTALL_DIR.new/bin/vfops-user"
-python3 -m py_compile "$INSTALL_DIR.new"/lib/*.py
-find "$INSTALL_DIR.new/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
+HAD_PREVIOUS=0
 if [[ -e "$INSTALL_DIR" ]]; then
-  rm -rf "$INSTALL_DIR.previous"
-  mv "$INSTALL_DIR" "$INSTALL_DIR.previous"
+  HAD_PREVIOUS=1
+  rm -rf "$PREVIOUS_DIR"
+  mv "$INSTALL_DIR" "$PREVIOUS_DIR"
 fi
 mv "$INSTALL_DIR.new" "$INSTALL_DIR"
 ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK"
 
+rollback_install() {
+  say "新版本自检未通过，正在自动恢复安装前版本..."
+  rm -rf "$INSTALL_DIR"
+  if [[ "$HAD_PREVIOUS" -eq 1 && -e "$PREVIOUS_DIR" ]]; then
+    mv "$PREVIOUS_DIR" "$INSTALL_DIR"
+    if [[ -f "$INSTALL_DIR/bin/vfops-user" ]]; then
+      ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK"
+    elif [[ -f "$INSTALL_DIR/bin/vfops" ]]; then
+      ln -sfn "$INSTALL_DIR/bin/vfops" "$BIN_LINK"
+    else
+      rm -f "$BIN_LINK"
+    fi
+    say "已恢复安装前版本。"
+  else
+    rm -f "$BIN_LINK"
+    say "这台服务器之前没有 P07，已清理失败的新安装。"
+  fi
+}
+
 say "安装后自检..."
-VERSION_OUT="$($BIN_LINK --version)"
-[[ "$VERSION_OUT" == "VF Server Ops 0.1.0 RC2" ]] || fail "版本自检失败：$VERSION_OUT"
+if ! VERSION_OUT="$($BIN_LINK --version 2>/dev/null)"; then
+  rollback_install
+  fail "版本自检失败；未保留失败的新版本。"
+fi
+if [[ "$VERSION_OUT" != "VF Server Ops 0.1.0 RC2" ]]; then
+  rollback_install
+  fail "版本自检不匹配；未保留失败的新版本。"
+fi
 SELFTEST_JSON="$TMP_DIR/inventory.json"
-$BIN_LINK inventory --compact > "$SELFTEST_JSON" || fail "服务器检查自检失败。"
-python3 - "$SELFTEST_JSON" <<'PY'
+if ! $BIN_LINK inventory --compact > "$SELFTEST_JSON" 2>/dev/null; then
+  rollback_install
+  fail "服务器检查自检失败；未保留失败的新版本。"
+fi
+if ! python3 - "$SELFTEST_JSON" <<'PY'
 import json, sys
 p=json.load(open(sys.argv[1], encoding='utf-8'))
 if p.get('schema') != 'vf-server-ops.inventory.v1':
     raise SystemExit(1)
 PY
+then
+  rollback_install
+  fail "Inventory 结果自检失败；未保留失败的新版本。"
+fi
 
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
