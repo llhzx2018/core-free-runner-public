@@ -102,5 +102,8 @@ new='P07_V20_RESOURCE_STATE="$V20_RESOURCE_STATE" P07_V20_CGROUP_BASE="$V20_CGRO
 if old not in s: raise SystemExit('json export anchor missing')
 s=s.replace(old,new,1)
 
+# RC3 changes the machine-readable contract.
+s=s.replace("d['schema_version']=4", "d['schema_version']=5",1)
+
 p.write_text(s,encoding='utf-8')
 print('PATCH_V20_RC3_FIXUP=OK')
