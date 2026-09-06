@@ -2,7 +2,7 @@
 set -uo pipefail
 
 APP="P07 Enhanced Bench"
-VERSION="1.0.0-rc1"
+VERSION="1.0.0-rc2"
 DEMO=0
 SELF_TEST=0
 IO_MIB="${P07_BENCH_IO_MIB:-256}"
@@ -672,6 +672,7 @@ write_librespeed_server_json(){
   {"id":94,"name":"Amsterdam, Netherlands","server":"https://amsspeed.sharktech.net","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"},
   {"id":49,"name":"London, England","server":"https://lon.speedtest.clouvider.net/backend","dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP.php"},
   {"id":68,"name":"Singapore","server":"https://speedtest.dsgroupmedia.com","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"},
+  {"id":75,"name":"Bangalore, India","server":"https://in1.backend.librespeed.org/","dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP.php"},
   {"id":82,"name":"Tokyo, Japan","server":"https://librespeed.a573.net/","dlURL":"backend/garbage.php","ulURL":"backend/empty.php","pingURL":"backend/empty.php","getIpURL":"backend/getIP.php"}
 ]
 JSONLS
@@ -720,7 +721,7 @@ librespeed_probe(){
   local id="$1" out="$2" parsed="$3" err="$4" rc
   : >"$out"; : >"$parsed"; : >"$err"
   set +e
-  timeout 35s "$LIBRESPEED_BIN" --json --local-json "$LIBRESPEED_SERVER_JSON" --server "$id" --no-icmp --duration 1 --concurrent 1 --chunks 5 --upload-size 256 --timeout 10 --telemetry-level disabled >"$out" 2>"$err"
+  timeout 45s "$LIBRESPEED_BIN" --json --local-json "$LIBRESPEED_SERVER_JSON" --server "$id" --no-icmp --duration 2 --concurrent 2 --chunks 12 --upload-size 512 --timeout 10 --telemetry-level disabled >"$out" 2>"$err"
   rc=$?
   set -e 2>/dev/null || true
   (( rc == 0 )) || return 1
@@ -736,7 +737,7 @@ librespeed_region_pool(){
       'US Central') up=720.8; down=860.1; lat=42.7 ;;
       'US East') up=680.5; down=790.6; lat=71.8 ;;
       'Europe') up=510.2; down=650.9; lat=142.4 ;;
-      'Singapore') up=460.7; down=590.2; lat=164.8 ;;
+      'Asia South') up=460.7; down=590.2; lat=164.8 ;;
       'Tokyo') up=520.1; down=680.4; lat=108.6 ;;
       *) return 1 ;;
     esac
@@ -777,7 +778,7 @@ librespeed_global_fallback(){
   librespeed_region_pool 'US Central' '93|Chicago Sharktech' '92|Denver Sharktech' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
   librespeed_region_pool 'US East'    '52|New York Clouvider' '78|Virginia Riverside' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
   librespeed_region_pool 'Europe'     '50|Frankfurt Clouvider' '94|Amsterdam Sharktech' '49|London Clouvider' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
-  librespeed_region_pool 'Singapore'  '68|Singapore' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
+  librespeed_region_pool 'Asia South' '68|Singapore' '75|Bangalore' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
   librespeed_region_pool 'Tokyo'      '82|Tokyo' && GLOBAL_FALLBACK_PASS=$((GLOBAL_FALLBACK_PASS+1)) || true
   (( GLOBAL_FALLBACK_PASS >= 3 ))
 }
