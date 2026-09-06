@@ -1,0 +1,125 @@
+name: P07 VPS 验机 2.0 RC2
+
+on:
+  push:
+    branches:
+      - experiment/p07-vps-audit-v20
+    paths:
+      - .github/scripts/p07_patch_v20_rc2.py
+      - .github/scripts/p07_patch_v20_rc2_selftest.py
+      - .github/workflows/p07-v20-rc2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  full-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: experiment/p07-vps-audit-v20
+          fetch-depth: 0
+
+      - name: 构建 RC2 精确源码
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/p07_patch_v20_rc1.py
+          python3 .github/scripts/p07_patch_v20_rc1_fixup.py
+          python3 .github/scripts/p07_patch_v20_rc2.py
+          python3 .github/scripts/p07_patch_v20_rc2_selftest.py
+          chmod +x experiments/p07-bench.sh
+          bash -n experiments/p07-bench.sh
+          grep -q 'VERSION="2.0.0-rc2-zh"' experiments/p07-bench.sh
+
+      - name: 原有自检 + V20 + RC2 反例自检
+        run: |
+          set -euo pipefail
+          experiments/p07-bench.sh --self-test | tee /tmp/self.txt
+          grep -q 'SELF_TEST=PASS' /tmp/self.txt
+          grep -q 'V20_SELF_TEST=PASS' /tmp/self.txt
+          grep -q 'V20_RC2_SEMANTIC_SELF_TEST=PASS' /tmp/self.txt
+
+      - name: 中文 UX Gate
+        run: |
+          set -euo pipefail
+          NO_COLOR=1 P07_BENCH_FORCE_FALLBACK=1 experiments/p07-bench.sh --demo | tee /tmp/demo.txt
+          grep -q 'P07 VPS 一键验机 2.0' /tmp/demo.txt
+          grep -q 'CPU Steal（空载）' /tmp/demo.txt
+          grep -q 'CPU Steal（负载）' /tmp/demo.txt
+          grep -q 'SHA256 单核' /tmp/demo.txt
+          grep -q '全球上行中位数' /tmp/demo.txt
+          grep -q '全球下行中位数' /tmp/demo.txt
+          grep -q '东南亚上行中位数' /tmp/demo.txt
+          grep -q '最终验机结论' /tmp/demo.txt
+          grep -Eq '综合得分 +: [0-9]+/100' /tmp/demo.txt
+          grep -Eq '证据完整度 +: [0-9]+%' /tmp/demo.txt
+          grep -q '中国大陆入站.*未直接检测' /tmp/demo.txt
+          ! grep -q 'China Access Assessment' /tmp/demo.txt
+          ! grep -q 'LIMITED' /tmp/demo.txt
+
+      - name: 真实 CPU / 磁盘 / 全球网络 / 稳定性 Gate
+        run: |
+          set -euo pipefail
+          NO_COLOR=1 P07_BENCH_FORCE_FALLBACK=1 P07_BENCH_IO_MIB=64 experiments/p07-bench.sh | tee /tmp/real.txt
+          grep -q 'SHA256 单核.*MB/s' /tmp/real.txt
+          grep -q 'SHA256 多核.*MB/s' /tmp/real.txt
+          grep -q '4K 同步写 IOPS' /tmp/real.txt
+          grep -q 'fsync P95 延迟' /tmp/real.txt
+          grep -q 'HTTPS 稳定性' /tmp/real.txt
+          grep -q 'DNS 解析' /tmp/real.txt
+          grep -q '全球上行中位数' /tmp/real.txt
+          grep -q '东南亚上行中位数' /tmp/real.txt
+          grep -q '美国西部' /tmp/real.txt
+          grep -q '欧洲' /tmp/real.txt
+          grep -q '中国香港' /tmp/real.txt
+          grep -q '新加坡' /tmp/real.txt
+          grep -q '马来西亚 吉隆坡' /tmp/real.txt
+          grep -q '泰国 曼谷' /tmp/real.txt
+          grep -q '日本 东京' /tmp/real.txt
+          grep -q '最终验机结论' /tmp/real.txt
+          # ICMP can be measurable or provider-blocked; both are valid evidence semantics.
+          grep -Eq 'ICMP 丢包（最差）|ICMP 丢包/抖动 +: 受限' /tmp/real.txt
+          if grep -q 'ICMP 丢包/抖动.*受限' /tmp/real.txt; then
+            ! grep -q '主要问题.*网络丢包偏高' /tmp/real.txt
+          fi
+
+      - name: JSON V4 RC2 Gate
+        run: |
+          set -euo pipefail
+          report="$(find /var/lib/p07-bench/reports "$HOME/.local/state/p07-bench/reports" -maxdepth 1 -type f -name 'p07-bench_*.json' 2>/dev/null | sort | tail -n1)"
+          test -n "$report"
+          python3 - "$report" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['schema_version']==4
+          v=d['vps_audit_v20']
+          assert v['cpu']['bench_state']=='PASS'
+          assert float(v['cpu']['sha256_single_mb_s']) > 0
+          assert float(v['cpu']['sha256_multi_mb_s']) > 0
+          assert 'load_steal_percent' in v['cpu']
+          assert float(v['disk']['sync_4k_iops']) > 0
+          assert v['stability']['icmp_state'] in {'PASS','ICMP_BLOCKED','NOT_RUN'}
+          nq=v['network_quality']
+          assert float(nq['global_median_upload_mbps']) > 0
+          assert float(nq['global_median_download_mbps']) > 0
+          assert float(nq['sea_median_upload_mbps']) > 0
+          assert float(nq['sea_median_download_mbps']) > 0
+          assert v['resource_constraints']['state'] in {'NORMAL','PARTIAL','LIMITED','UNKNOWN'}
+          assert v['mainland_inbound_probe']=='NOT_RUN'
+          assert v['verdict']['grade'] in {'GOOD','FAIR','CAUTION','POOR'}
+          assert 0 <= v['verdict']['score'] <= 100
+          assert 0 <= v['verdict']['evidence_completeness_percent'] <= 100
+          print('JSON_V4_RC2_GATE=PASS')
+          PY
+
+      - name: 发布已通过 Gate 的 RC2 源码
+        run: |
+          set -euo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add experiments/p07-bench.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat(p07-bench): VPS audit 2.0 rc2'
+          git push origin HEAD:experiment/p07-vps-audit-v20
