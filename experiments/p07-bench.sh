@@ -2,7 +2,7 @@
 set -uo pipefail
 
 APP="P07 Enhanced Bench"
-VERSION="0.2.0"
+VERSION="0.3.0"
 DEMO=0
 SELF_TEST=0
 IO_MIB="${P07_BENCH_IO_MIB:-256}"
@@ -51,10 +51,19 @@ rule(){ printf '%s\n' '---------------------------------------------------------
 color_state(){
   case "$1" in
     PASS|NORMAL) printf '%s%s%s' "$GREEN" "$1" "$RESET" ;;
-    RISK|PARTIAL|SKIPPED|UNAVAILABLE) printf '%s%s%s' "$YELLOW" "$1" "$RESET" ;;
+    RISK|PARTIAL|INCONCLUSIVE|SKIPPED|UNAVAILABLE) printf '%s%s%s' "$YELLOW" "$1" "$RESET" ;;
     FAIL|HIGH_RISK) printf '%s%s%s' "$RED" "$1" "$RESET" ;;
     *) printf '%s' "$1" ;;
   esac
+}
+
+# One-shot mode never asks for stdin. Remove accidental terminal echo before each result row
+# and drain pending keystrokes before returning to the parent shell.
+tty_clean_line(){ [[ -t 1 ]] && printf '\r\033[2K' || true; }
+drain_tty_input(){
+  [[ -r /dev/tty ]] || return 0
+  while IFS= read -r -t 0.001 -n 1 _ </dev/tty 2>/dev/null; do :; done
+  return 0
 }
 
 START_EPOCH="$(date +%s)"
@@ -76,6 +85,7 @@ SPEEDTEST_BIN=""
 SPEEDTEST_TEMP=0
 
 cleanup(){
+  drain_tty_input
   if [[ $SPEEDTEST_TEMP -eq 1 && -n "$SPEEDTEST_BIN" ]]; then
     rm -rf "$(dirname "$SPEEDTEST_BIN")" 2>/dev/null || true
   fi
@@ -316,7 +326,16 @@ print_system(){
   else
     printf ' CloudPanel         : %sNot detected%s\n' "$GRAY" "$RESET"
   fi
-  printf ' IPv4 / IPv6        : %s / %s\n' "$IPV4" "$IPV6"
+  if [[ "$IPV4" == OFFLINE || "$IPV4" == UNAVAILABLE ]]; then
+    printf ' IPv4              : %s%s%s\n' "$RED" "$IPV4" "$RESET"
+  else
+    printf ' IPv4              : %s%s%s  (ONLINE)\n' "$GREEN" "$IPV4" "$RESET"
+  fi
+  if [[ "$IPV6" == OFFLINE || "$IPV6" == UNAVAILABLE ]]; then
+    printf ' IPv6              : %s%s%s\n' "$RED" "$IPV6" "$RESET"
+  else
+    printf ' IPv6              : %s%s%s  (ONLINE)\n' "$GREEN" "$IPV6" "$RESET"
+  fi
   printf ' Organization       : %s%s%s\n' "$BLUE" "$ORG" "$RESET"
   printf ' Location           : %s / %s\n' "$CITY" "$COUNTRY"
   printf ' Region             : %s%s%s\n' "$YELLOW" "$REGION" "$RESET"
@@ -333,6 +352,9 @@ rate_to_mb(){
     else if(u=="B/s")printf "%.2f",v/1000000;
     else print 0
   }'
+}
+format_mb_rate(){
+  awk -v m="${1:-0}" 'BEGIN{if(m!~/^[0-9.]+$/){print "FAIL";exit} if(m>=1000)printf "%.2f GB/s",m/1000; else printf "%.0f MB/s",m}'
 }
 run_dd_once(){
   local file="$1" round="$2" out rc raw
@@ -378,11 +400,11 @@ print_io(){
     mb="$(rate_to_mb "$raw")"
     IO_RATES+=("$mb")
     sum="$(awk -v a="$sum" -v b="$mb" 'BEGIN{printf "%.2f",a+b}')"
-    printf ' I/O Speed(%s run)  : %s%s%s\n' "$i" "$GREEN" "$raw" "$RESET"
+    printf ' I/O Speed(%s run)  : %s%s%s\n' "$i" "$GREEN" "$(format_mb_rate "$mb")" "$RESET"
   done
   if ((${#IO_RATES[@]})); then
     IO_AVG_MB="$(awk -v s="$sum" -v n="${#IO_RATES[@]}" 'BEGIN{printf "%.2f",s/n}')"
-    printf ' I/O Speed(average) : %s%s MB/s%s\n' "$GREEN" "$IO_AVG_MB" "$RESET"
+    printf ' I/O Speed(average) : %s%s%s\n' "$GREEN" "$(format_mb_rate "$IO_AVG_MB")" "$RESET"
   else
     IO_STATE="FAIL"
   fi
@@ -489,17 +511,18 @@ PY
   fi
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$state" "$reason" "$up" "$down" "$lat" >>"$NETWORK_TSV"
+  tty_clean_line
   if [[ "$state" == PASS ]]; then
-    printf ' %-18s %s%-14s%s %s%-16s%s %s%-10s%s %sPASS%s\n' \
-      "$name" "$GREEN" "$up Mbps" "$RESET" "$BLUE" "$down Mbps" "$RESET" "$MAGENTA" "$lat ms" "$RESET" "$GREEN" "$RESET"
+    printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
+      "$YELLOW" "$name" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "PASS" "$RESET" '-'
   else
-    printf ' %-18s %-14s %-16s %-10s %s%-12s%s %s\n' \
-      "$name" '-' '-' '-' "$RED" "$state" "$RESET" "$reason"
+    printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
+      "$YELLOW" "$name" "$RESET" '-' '-' '-' "$RED" "$state" "$RESET" "$YELLOW" "$reason" "$RESET"
   fi
 }
 print_network(){
   rule
-  printf '%s%s Node Name          Upload Speed   Download Speed   Latency     State%s\n' "$BOLD" "$YELLOW" "$RESET"
+  printf '%s Node Name         Upload        Download        Latency   State   Reason%s\n' "$BOLD$YELLOW" "$RESET"
   : >"$NETWORK_TSV"
   if ! prepare_speedtest; then SPEEDTEST_BIN=""; fi
 
@@ -535,37 +558,49 @@ count_speed(){
   local pattern="$1" state="$2"
   awk -F '\t' -v p="$pattern" -v s="$state" '$2~p && $3==s{n++} END{print n+0}' "$NETWORK_TSV"
 }
+count_speed_reason(){
+  local pattern="$1" reason_re="$2"
+  awk -F '\t' -v p="$pattern" -v r="$reason_re" '$2~p && $3=="FAIL" && $4~r{n++} END{print n+0}' "$NETWORK_TSV"
+}
+china_verdict_from_counts(){
+  local cn_pass="$1" cn_path_fail="$2" cn_node_unavailable="$3" overseas_speed_pass="$4" mainland_http="$5" mainland_fail="$6" overseas_http="$7"
+  if (( cn_pass >= 1 && mainland_http >= 4 )); then printf NORMAL
+  elif (( cn_path_fail >= 2 && overseas_speed_pass >= 5 && mainland_fail >= 3 && overseas_http >= 2 )); then printf HIGH_RISK
+  elif (( cn_path_fail >= 2 && overseas_speed_pass >= 3 )) || (( mainland_fail >= 2 && overseas_http >= 2 )); then printf RISK
+  else printf INCONCLUSIVE
+  fi
+}
 china_assessment(){
-  local overseas_http=0 mainland_http=0 mainland_fail=0 u cn_speed_pass cn_speed_fail overseas_speed_pass
-  for u in https://www.cloudflare.com/ https://github.com/ https://www.google.com/; do
-    http_probe "$u" && overseas_http=$((overseas_http+1))
-  done
+  local overseas_http=0 mainland_http=0 mainland_fail=0 u cn_speed_pass cn_speed_fail cn_path_fail cn_node_unavailable overseas_speed_pass
+  for u in https://www.cloudflare.com/ https://github.com/ https://www.google.com/; do http_probe "$u" && overseas_http=$((overseas_http+1)); done
   for u in https://www.baidu.com/ https://www.qq.com/ https://www.taobao.com/ https://www.189.cn/ https://www.10010.com/ https://www.10086.cn/; do
     if http_probe "$u"; then mainland_http=$((mainland_http+1)); else mainland_fail=$((mainland_fail+1)); fi
   done
-
   cn_speed_pass="$(count_speed 'Suzhou, CN|Ningbo, CN' PASS)"
   cn_speed_fail="$(count_speed 'Suzhou, CN|Ningbo, CN' FAIL)"
+  cn_path_fail="$(count_speed_reason 'Suzhou, CN|Ningbo, CN' '^(TIMEOUT|CONNECTION_FAILED|DNS_FAILURE|TLS_FAILURE)$')"
+  cn_node_unavailable="$(count_speed_reason 'Suzhou, CN|Ningbo, CN' '^NODE_UNAVAILABLE$')"
   overseas_speed_pass="$(awk -F '\t' '$2 !~ /Suzhou, CN|Ningbo, CN/ && $3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")"
-
-  CHINA_VERDICT="PARTIAL"; CHINA_RECOMMENDATION="REVIEW RESULT"
-  if (( cn_speed_pass >= 1 && mainland_http >= 4 )); then
-    CHINA_VERDICT="NORMAL"; CHINA_RECOMMENDATION="IP looks usable from current outbound signals"
-  elif (( cn_speed_fail >= 2 && overseas_speed_pass >= 5 && mainland_fail >= 3 && overseas_http >= 2 )); then
-    CHINA_VERDICT="HIGH_RISK"; CHINA_RECOMMENDATION="CHANGE IP BEFORE MIGRATION"
-  elif (( cn_speed_fail >= 2 && overseas_speed_pass >= 3 )) || (( mainland_fail >= 2 && overseas_http >= 2 )); then
-    CHINA_VERDICT="RISK"; CHINA_RECOMMENDATION="VERIFY FROM MAINLAND BEFORE MIGRATION"
-  fi
-
+  CHINA_VERDICT="$(china_verdict_from_counts "$cn_speed_pass" "$cn_path_fail" "$cn_node_unavailable" "$overseas_speed_pass" "$mainland_http" "$mainland_fail" "$overseas_http")"
+  case "$CHINA_VERDICT" in
+    NORMAL) CHINA_RECOMMENDATION="Current outbound signals look normal" ;;
+    HIGH_RISK) CHINA_RECOMMENDATION="CHANGE IP BEFORE MIGRATION" ;;
+    RISK) CHINA_RECOMMENDATION="VERIFY FROM MAINLAND BEFORE MIGRATION" ;;
+    *) if (( cn_node_unavailable >= 1 )); then CHINA_RECOMMENDATION="RETRY WITH ALTERNATE MAINLAND SPEEDTEST NODES"; else CHINA_RECOMMENDATION="NEED MAINLAND-ORIGIN PROBE"; fi ;;
+  esac
   rule
-  printf '%s%s China IP Assessment%s\n' "$BOLD" "$BLUE" "$RESET"
-  printf ' Overseas HTTPS     : %s%s / 3 PASS%s\n' "$GREEN" "$overseas_http" "$RESET"
-  printf ' Mainland HTTPS     : %s / 6 PASS\n' "$mainland_http"
-  printf ' Mainland Speedtest : %s PASS / %s FAIL\n' "$cn_speed_pass" "$cn_speed_fail"
-  printf ' Risk               : '; color_state "$CHINA_VERDICT"; printf '\n'
-  printf ' Recommendation     : %s%s%s\n' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
-  printf ' %sNote: HIGH_RISK is a strong signal, not proof that an IP is blocked. Strongest verdict needs mainland-origin probes.%s\n' "$GRAY" "$RESET"
+  printf '%s%s China Access Assessment%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf ' VPS -> Overseas HTTPS : %s%s / 3 PASS%s\n' "$GREEN" "$overseas_http" "$RESET"
+  printf ' VPS -> Mainland HTTPS : %s / 6 PASS\n' "$mainland_http"
+  printf ' VPS -> Mainland Speed : %s PASS / %s FAIL\n' "$cn_speed_pass" "$cn_speed_fail"
+  printf '   Path failures         : %s\n' "$cn_path_fail"
+  printf '   Node unavailable      : %s\n' "$cn_node_unavailable"
+  printf ' Mainland -> VPS Probe: %sNOT_RUN%s\n' "$YELLOW" "$RESET"
+  printf ' Risk                 : '; color_state "$CHINA_VERDICT"; printf '\n'
+  printf ' Recommendation       : %s%s%s\n' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
+  printf ' %sEvidence scope: current VPS outbound only. NODE_UNAVAILABLE is a test-node problem and is not counted as IP blocking evidence.%s\n' "$GRAY" "$RESET"
 }
+
 
 write_reports(){
   local ts clean elapsed
@@ -607,6 +642,9 @@ self_test(){
   local f=0
   [[ "$(rate_to_mb '1.20 GB/s')" == "1200.00" ]] || f=1
   [[ "$(rate_to_mb '577 MB/s')" == "577.00" ]] || f=1
+  [[ "$(format_mb_rate '1500.00')" == "1.50 GB/s" ]] || f=1
+  [[ "$(china_verdict_from_counts 0 0 2 9 6 0 3)" == "INCONCLUSIVE" ]] || f=1
+  [[ "$(china_verdict_from_counts 0 2 0 9 2 4 3)" == "HIGH_RISK" ]] || f=1
   [[ ${#OOKLA_X86_64_SHA256} -eq 64 ]] || f=1
   [[ ${#OOKLA_I386_SHA256} -eq 64 ]] || f=1
   [[ ${#OOKLA_AARCH64_SHA256} -eq 64 ]] || f=1
