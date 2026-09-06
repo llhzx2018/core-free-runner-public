@@ -1,0 +1,96 @@
+name: P07 VPS 验机 2.0 RC1
+
+on:
+  push:
+    branches:
+      - experiment/p07-vps-audit-v20
+    paths:
+      - .github/scripts/p07_patch_v20_rc1.py
+      - .github/workflows/p07-v20-rc1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: experiment/p07-vps-audit-v20
+          fetch-depth: 0
+
+      - name: 构建 VPS 验机 2.0 RC1
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/p07_patch_v20_rc1.py
+          chmod +x experiments/p07-bench.sh
+          bash -n experiments/p07-bench.sh
+          grep -q 'VERSION="2.0.0-rc1-zh"' experiments/p07-bench.sh
+
+      - name: 内部自检
+        run: |
+          set -euo pipefail
+          experiments/p07-bench.sh --self-test | tee /tmp/self.txt
+          grep -q 'SELF_TEST=PASS' /tmp/self.txt
+          grep -q 'V20_SELF_TEST=PASS' /tmp/self.txt
+
+      - name: 中文一键演示 Gate
+        run: |
+          set -euo pipefail
+          NO_COLOR=1 P07_BENCH_FORCE_FALLBACK=1 experiments/p07-bench.sh --demo | tee /tmp/demo.txt
+          grep -q 'CPU 真实表现' /tmp/demo.txt
+          grep -q 'CPU Steal' /tmp/demo.txt
+          grep -q '磁盘数据库型负载' /tmp/demo.txt
+          grep -q '4K 同步写 IOPS' /tmp/demo.txt
+          grep -q '网络稳定性' /tmp/demo.txt
+          grep -q 'IP 与基础可达性' /tmp/demo.txt
+          grep -q '最终验机结论' /tmp/demo.txt
+          grep -q '建议保留' /tmp/demo.txt
+          grep -q '中国大陆入站.*未直接检测' /tmp/demo.txt
+          ! grep -q 'China Access Assessment' /tmp/demo.txt
+
+      - name: 真实组件与全球网络 Gate
+        run: |
+          set -euo pipefail
+          NO_COLOR=1 P07_BENCH_FORCE_FALLBACK=1 P07_BENCH_IO_MIB=64 experiments/p07-bench.sh | tee /tmp/real.txt
+          grep -q 'CPU 真实表现' /tmp/real.txt
+          grep -q '4K 同步写 IOPS' /tmp/real.txt
+          grep -q 'fsync P95 延迟' /tmp/real.txt
+          grep -q '网络稳定性' /tmp/real.txt
+          grep -q 'HTTPS 稳定性' /tmp/real.txt
+          grep -q 'IP 基础健康' /tmp/real.txt
+          grep -q '最终验机结论' /tmp/real.txt
+          grep -q '美国西部' /tmp/real.txt
+          grep -q '欧洲' /tmp/real.txt
+          grep -q '新加坡' /tmp/real.txt
+          grep -q '日本 东京' /tmp/real.txt
+
+      - name: JSON V4 Gate
+        run: |
+          set -euo pipefail
+          report=$(ls -1t /var/lib/p07-bench/reports/p07-bench_*.json | head -n1)
+          python3 - "$report" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['schema_version']==4
+          v=d['vps_audit_v20']
+          assert 'steal_percent' in v['cpu']
+          assert 'sync_4k_iops' in v['disk']
+          assert 'https_pass' in v['stability']
+          assert 'state' in v['ip_health']
+          assert v['mainland_inbound_probe']=='NOT_RUN'
+          assert v['verdict']['grade'] in {'GOOD','FAIR','CAUTION','POOR'}
+          print('JSON_V4_GATE=PASS')
+          PY
+
+      - name: 发布已通过 Gate 的候选源码
+        run: |
+          set -euo pipefail
+          git config user.name 'VictorForge'
+          git config user.email 'llhzx2018@gmail.com'
+          git add experiments/p07-bench.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'feat(p07-bench): VPS audit 2.0 rc1'
+          git push origin HEAD:experiment/p07-vps-audit-v20
