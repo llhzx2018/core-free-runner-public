@@ -110,6 +110,9 @@ valid_port() {
 port_in_use_udp() {
   local port="$1"
   command -v ss >/dev/null 2>&1 || return 1
+  # With `ss -H -lun`, local-address:port is field 4. Field 5 is the peer.
+  # Using field 5 previously produced a false negative even while V2Ray was
+  # visibly listening on *:31535 in the real Ubuntu gate.
   ss -H -lun 2>/dev/null | awk -v p="$port" '$4 ~ (":" p "$") { found=1 } END { exit !found }'
 }
 
