@@ -108,11 +108,11 @@ zh_name(){
     'Singapore, SG') printf '新加坡' ;;
     'Taipei, CN') printf '台北' ;;
     'Tokyo, JP'|'Tokyo') printf '日本·东京' ;;
-    '美国西部') printf '美国西部' ;;
-    '美国中部') printf '美国中部' ;;
-    '美国东部') printf '美国东部' ;;
-    '欧洲') printf '欧洲' ;;
-    '亚洲南部') printf '亚洲南部' ;;
+    'US West'|'美国西部') printf '美国西部' ;;
+    'US Central'|'美国中部') printf '美国中部' ;;
+    'US East'|'美国东部') printf '美国东部' ;;
+    'Europe'|'欧洲') printf '欧洲' ;;
+    'Asia South'|'亚洲南部') printf '亚洲南部' ;;
     'Cloudflare Edge') printf 'Cloudflare 边缘基准' ;;
     *) printf '%s' "$1" ;;
   esac
@@ -393,8 +393,8 @@ print_system(){
   printf ' 硬件虚拟化         : %s\n' "$([[ "$NESTED" == Enabled ]] && printf '已启用' || printf '未启用')"
   printf ' 磁盘总量           : %s%s%s  （已用 %s）\n' "$YELLOW" "$DISK_TOTAL" "$RESET" "$DISK_USED"
   printf ' 内存总量           : %s%s%s  （已用 %s）\n' "$YELLOW" "$RAM_TOTAL" "$RESET" "$RAM_USED"
-  printf ' Swap               : %s  （已用 %s）\n' "$SWAP_TOTAL" "$SWAP_USED"
-  printf ' 运行时间           : %s\n' "$UPTIME"
+  printf ' 交换分区           : %s  （已用 %s）\n' "$SWAP_TOTAL" "$SWAP_USED"
+  printf ' 运行时间           : %s\n' "$(sed -e 's/weeks\?/周/g' -e 's/days\?/天/g' -e 's/hours\?/小时/g' -e 's/minutes\?/分钟/g' -e 's/seconds\?/秒/g' <<<"$UPTIME")"
   printf ' 系统负载           : %s\n' "$LOAD"
   printf ' 操作系统           : %s\n' "$OS"
   printf ' 系统架构           : %s（%s 位）\n' "$ARCH" "$BITS"
@@ -641,10 +641,10 @@ speed_node(){
   tty_clean_line
   if [[ "$state" == PASS ]]; then
     printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" "$name" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "PASS" "$RESET" '-'
+      "$YELLOW" "$(zh_name "$name")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "正常" "$RESET" '-'
   else
     printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-      "$YELLOW" "$name" "$RESET" '-' '-' '-' "$RED" "$state" "$RESET" "$YELLOW" "$reason" "$RESET"
+      "$YELLOW" "$(zh_name "$name")" "$RESET" '-' '-' '-' "$RED" "$(zh_state "$state")" "$RESET" "$YELLOW" "$(zh_reason "$reason")" "$RESET"
   fi
 }
 speed_node_retry(){
@@ -695,7 +695,7 @@ speed_node_pool(){
       printf '%s\t%s\tPASS\tNONE\t%s\t%s\t%s\n' "$id" "$display" "$up" "$down" "$lat" >>"$original"
       tty_clean_line
       printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-        "$YELLOW" "$display" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "PASS" "$RESET" '-'
+        "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "正常" "$RESET" '-'
       return 0
     fi
     if [[ "$reason" != NODE_UNAVAILABLE ]]; then best_reason="$reason"; best_id="$id"; fi
@@ -704,7 +704,7 @@ speed_node_pool(){
   printf '%s\t%s\tFAIL\t%s\t-\t-\t-\n' "$best_id" "$display" "$best_reason" >>"$original"
   tty_clean_line
   printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-    "$YELLOW" "$display" "$RESET" '-' '-' '-' "$RED" "FAIL" "$RESET" "$YELLOW" "$best_reason" "$RESET"
+    "$YELLOW" "$(zh_name "$display")" "$RESET" '-' '-' '-' "$RED" "失败" "$RESET" "$YELLOW" "$(zh_reason "$best_reason")" "$RESET"
   return 1
 }
 librespeed_arch(){
@@ -804,7 +804,7 @@ librespeed_region_pool(){
     esac
     printf 'ls-demo\t%s\tPASS\tLIBRESPEED_FALLBACK\t%s\t%s\t%s\n' "$display" "$up" "$down" "$lat" >>"$NETWORK_TSV"
     printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" "$display" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" 'PASS' "$RESET" 'LIBRESPEED'
+      "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" '正常' "$RESET" '备用测速'
     return 0
   fi
   for spec in "$@"; do
@@ -816,14 +816,14 @@ librespeed_region_pool(){
       printf 'ls-%s\t%s\tPASS\tLIBRESPEED_FALLBACK\t%s\t%s\t%s\n' "$id" "$display" "$up" "$down" "$lat" >>"$NETWORK_TSV"
       tty_clean_line
       printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-        "$YELLOW" "$display" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" 'PASS' "$RESET" 'LIBRESPEED'
+        "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" '正常' "$RESET" '备用测速'
       return 0
     fi
   done
   printf 'ls-none\t%s\tFAIL\tLIBRESPEED_UNAVAILABLE\t-\t-\t-\n' "$display" >>"$NETWORK_TSV"
   tty_clean_line
   printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-    "$YELLOW" "$display" "$RESET" '-' '-' '-' "$RED" 'FAIL' "$RESET" "$YELLOW" 'LIBRESPEED_UNAVAILABLE' "$RESET"
+    "$YELLOW" "$(zh_name "$display")" "$RESET" '-' '-' '-' "$RED" '失败' "$RESET" "$YELLOW" '备用测速节点不可用' "$RESET"
   return 1
 }
 librespeed_global_fallback(){
