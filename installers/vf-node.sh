@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc1'
+VERSION='0.1.0-rc2'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='465c9c6279700cf17f46133e4c3f6f334fe1a227871cf18b63079eade040170a'
+MANIFEST_SHA256='819634dc645652899039e73ffc9569715f270b5a80a808d3cf1d450b1e164f68'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 
@@ -40,11 +40,11 @@ say "${CYAN}│${R}  VMess · mKCP · dtls   ${GREEN}长期稳定基线${R}     
 say "${CYAN}└──────────────────────────────────────────────────────────────┘${R}"
 say
 
-# The RC1 baseline intentionally refuses to touch an existing V2Ray node.
+# The candidate intentionally refuses to touch an existing V2Ray node.
 if [[ -e /etc/v2ray/config.json || -x /usr/local/sbin/v2ray || -x /usr/bin/v2ray/v2ray ]] || command -v v2ray >/dev/null 2>&1; then
   warn '检测到这台服务器已经存在 V2Ray。'
   warn '为保护你现有的长期节点，一键安装器不会覆盖、升级或修改它。'
-  say '请在一台新的 VPS 上测试 RC1。'
+  say '请在一台新的 VPS 上安装当前 Candidate。'
   exit 3
 fi
 
@@ -63,7 +63,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-info '下载并校验公开 RC1 Manifest...'
+info '下载并校验公开 RC2 Manifest...'
 curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"
 printf '%s  %s\n' "$MANIFEST_SHA256" "$tmp/pkg/MANIFEST.sha256" | sha256sum -c - >/dev/null || {
   fail 'Manifest SHA256 校验失败，已停止。'
@@ -84,7 +84,7 @@ files=(
   lib/patch_upstream_core.py
 )
 
-info '下载 RC1 运行文件...'
+info '下载 RC2 运行文件...'
 for f in "${files[@]}"; do
   mkdir -p "$tmp/pkg/$(dirname "$f")"
   curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/${f}" -o "$tmp/pkg/$f"
@@ -94,10 +94,10 @@ done
   cd "$tmp/pkg"
   sha256sum -c MANIFEST.sha256 >/dev/null
 ) || {
-  fail 'RC1 文件 SHA256 校验失败，已停止。'
+  fail 'RC2 文件 SHA256 校验失败，已停止。'
   exit 11
 }
-ok 'RC1 运行文件校验通过'
+ok 'RC2 运行文件校验通过'
 
 info '安装 VF Network Node...'
 cp -a "$tmp/pkg/VERSION" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
