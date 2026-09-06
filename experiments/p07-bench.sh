@@ -2,7 +2,7 @@
 set -uo pipefail
 
 APP="P07 VPS 一键验机"
-VERSION="1.0.0-rc4-zh"
+VERSION="1.0.0-rc5-zh"
 DEMO=0
 SELF_TEST=0
 IO_MIB="${P07_BENCH_IO_MIB:-256}"
@@ -64,6 +64,54 @@ else
 fi
 
 rule(){ printf '%s\n' '----------------------------------------------------------------------'; }
+display_width(){
+  local text="$1" w
+  w="$(LC_ALL=C.UTF-8 printf '%s\n' "$text" | wc -L 2>/dev/null | tr -d '[:space:]')"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=${#text}
+  printf '%s' "$w"
+}
+pad_cell(){
+  local text="$1" width="$2" w pad
+  w="$(display_width "$text")"
+  pad=$(( width - w ))
+  (( pad < 0 )) && pad=0
+  printf '%s' "$text"
+  printf '%*s' "$pad" ''
+}
+print_net_header(){
+  printf '%s ' "$BOLD$YELLOW"
+  pad_cell '节点/地区' 22; printf ' '
+  pad_cell '上传' 15; printf ' '
+  pad_cell '下载' 15; printf ' '
+  pad_cell '延迟' 11; printf ' '
+  pad_cell '状态' 8; printf ' '
+  pad_cell '说明' 18
+  printf '%s\n' "$RESET"
+}
+print_net_row(){
+  local name="$1" up="$2" down="$3" lat="$4" state="$5" reason="$6"
+  local shown_name shown_up shown_down shown_lat shown_state shown_reason state_color
+  shown_name="$(zh_name "$name")"
+  if [[ "$state" == PASS ]]; then
+    shown_up="${up} Mbps"; shown_down="${down} Mbps"; shown_lat="${lat} ms"; shown_state='正常'
+    case "$reason" in
+      SUPPLEMENTAL) shown_reason='补充参考' ;;
+      *) shown_reason='-' ;;
+    esac
+    state_color="$GREEN"
+  else
+    shown_up='-'; shown_down='-'; shown_lat='-'; shown_state="$(zh_state "$state")"; shown_reason="$(zh_reason "$reason")"
+    state_color="$RED"
+  fi
+  printf ' '
+  printf '%s' "$YELLOW"; pad_cell "$shown_name" 22; printf '%s ' "$RESET"
+  printf '%s' "$GREEN"; pad_cell "$shown_up" 15; printf '%s ' "$RESET"
+  printf '%s' "$RED"; pad_cell "$shown_down" 15; printf '%s ' "$RESET"
+  printf '%s' "$BLUE"; pad_cell "$shown_lat" 11; printf '%s ' "$RESET"
+  printf '%s' "$state_color"; pad_cell "$shown_state" 8; printf '%s ' "$RESET"
+  pad_cell "$shown_reason" 18
+  printf '\n'
+}
 zh_state(){
   case "$1" in
     PASS|NORMAL) printf '正常' ;;
@@ -106,18 +154,20 @@ zh_reason(){
 zh_name(){
   case "$1" in
     'Speedtest.net') printf '自动测速节点' ;;
-    'Los Angeles, US') printf '美国西部·洛杉矶' ;;
-    'Dallas, US') printf '美国中部·达拉斯' ;;
-    'Montreal, CA') printf '加拿大·蒙特利尔' ;;
-    'Paris, FR') printf '欧洲·巴黎' ;;
-    'Amsterdam, NL') printf '欧洲·阿姆斯特丹' ;;
+    'Los Angeles, US') printf '美国西部 洛杉矶' ;;
+    'Dallas, US') printf '美国中部 达拉斯' ;;
+    'Montreal, CA') printf '加拿大 蒙特利尔' ;;
+    'Paris, FR') printf '欧洲 巴黎' ;;
+    'Amsterdam, NL') printf '欧洲 阿姆斯特丹' ;;
     'China Unicom, CN') printf '中国联通' ;;
     'China Telecom, CN') printf '中国电信' ;;
     'China Backup, CN') printf '中国大陆备用' ;;
     'Hong Kong, CN'|'Hong Kong') printf '中国香港' ;;
     'Singapore, SG'|'Singapore') printf '新加坡' ;;
+    'Kuala Lumpur') printf '马来西亚 吉隆坡' ;;
+    'Bangkok') printf '泰国 曼谷' ;;
     'Taipei, CN') printf '台北' ;;
-    'Tokyo, JP'|'Tokyo') printf '日本·东京' ;;
+    'Tokyo, JP'|'Tokyo') printf '日本 东京' ;;
     'US West'|'美国西部') printf '美国西部' ;;
     'US Central'|'美国中部') printf '美国中部' ;;
     'US East'|'美国东部') printf '美国东部' ;;
@@ -650,13 +700,7 @@ speed_node(){
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$state" "$reason" "$up" "$down" "$lat" >>"$NETWORK_TSV"
   tty_clean_line
-  if [[ "$state" == PASS ]]; then
-    printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" "$(zh_name "$name")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "正常" "$RESET" '-'
-  else
-    printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-      "$YELLOW" "$(zh_name "$name")" "$RESET" '-' '-' '-' "$RED" "$(zh_state "$state")" "$RESET" "$YELLOW" "$(zh_reason "$reason")" "$RESET"
-  fi
+  print_net_row "$name" "$up" "$down" "$lat" "$state" "$reason"
 }
 speed_node_retry(){
   local id="$1" name="$2" original="$NETWORK_TSV" tmp="$TMP_DIR/retry-$$-$RANDOM.tsv"
@@ -705,8 +749,7 @@ speed_node_pool(){
     if [[ "$state" == PASS ]]; then
       printf '%s\t%s\tPASS\tNONE\t%s\t%s\t%s\n' "$id" "$display" "$up" "$down" "$lat" >>"$original"
       tty_clean_line
-      printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-        "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" "正常" "$RESET" '-'
+      print_net_row "$display" "$up" "$down" "$lat" PASS NONE
       return 0
     fi
     if [[ "$reason" != NODE_UNAVAILABLE ]]; then best_reason="$reason"; best_id="$id"; fi
@@ -714,8 +757,7 @@ speed_node_pool(){
   NETWORK_TSV="$original"
   printf '%s\t%s\tFAIL\t%s\t-\t-\t-\n' "$best_id" "$display" "$best_reason" >>"$original"
   tty_clean_line
-  printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-    "$YELLOW" "$(zh_name "$display")" "$RESET" '-' '-' '-' "$RED" "失败" "$RESET" "$YELLOW" "$(zh_reason "$best_reason")" "$RESET"
+  print_net_row "$display" '-' '-' '-' FAIL "$best_reason"
   return 1
 }
 speedtestgo_arch(){
@@ -783,6 +825,9 @@ speedtestgo_region(){
       'Europe') up=510.3; down=650.9; lat=142.4 ;;
       'Hong Kong') up=420.7; down=590.2; lat=164.8 ;;
       'Singapore') up=460.4; down=610.6; lat=171.2 ;;
+      'Kuala Lumpur') up=430.8; down=570.5; lat=176.4 ;;
+      'Jakarta') up=390.6; down=520.3; lat=188.7 ;;
+      'Bangkok') up=410.2; down=545.8; lat=181.5 ;;
       'Tokyo') up=520.1; down=680.4; lat=108.6 ;;
       *) return 1 ;;
     esac
@@ -792,7 +837,7 @@ speedtestgo_region(){
     err="$out.err"; parsed="$out.parsed"
     : >"$out"; : >"$err"; : >"$parsed"
     set +e
-    timeout 80s "$SPEEDTEST_GO_BIN" --json --saving-mode --thread 1 --location "$coords" --ping-mode http >"$out" 2>"$err"
+    timeout 80s "$SPEEDTEST_GO_BIN" --json --saving-mode --thread 1 --location="$coords" --ping-mode http >"$out" 2>"$err"
     rc=$?
     set -e 2>/dev/null || true
     (( rc == 0 )) || return 1
@@ -801,8 +846,7 @@ speedtestgo_region(){
   fi
   printf 'stg\t%s\tPASS\tSPEEDTESTGO_FALLBACK\t%s\t%s\t%s\n' "$display" "$up" "$down" "$lat" >>"$NETWORK_TSV"
   tty_clean_line
-  printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-    "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" '正常' "$RESET" '备用测速'
+  print_net_row "$display" "$up" "$down" "$lat" PASS SPEEDTESTGO_FALLBACK
   return 0
 }
 speedtestgo_global_fallback(){
@@ -815,12 +859,20 @@ speedtestgo_global_fallback(){
   speedtestgo_region 'US East'   '40.7128,-74.0060' && pass=$((pass+1)) || true
   speedtestgo_region 'Europe'    '50.1109,8.6821' && pass=$((pass+1)) || true
   speedtestgo_region 'Hong Kong' '22.3193,114.1694' && pass=$((pass+1)) || true
-  speedtestgo_region 'Singapore' '1.3521,103.8198' && pass=$((pass+1)) || true
-  speedtestgo_region 'Tokyo'     '35.6762,139.6503' && pass=$((pass+1)) || true
+  speedtestgo_region 'Singapore'    '1.3521,103.8198' && pass=$((pass+1)) || true
+  speedtestgo_region 'Kuala Lumpur' '3.1390,101.6869' && pass=$((pass+1)) || true
+  speedtestgo_region 'Bangkok'      '13.7563,100.5018' && pass=$((pass+1)) || true
+  speedtestgo_region 'Tokyo'        '35.6762,139.6503' && pass=$((pass+1)) || true
   GLOBAL_FALLBACK_PASS="$pass"
   GLOBAL_FALLBACK_PROVIDER="SPEEDTEST_GO"
   (( pass >= 5 ))
 }
+speedtestgo_sea_supplement(){
+  prepare_speedtestgo || return 0
+  speedtestgo_region 'Kuala Lumpur' '3.1390,101.6869' || true
+  speedtestgo_region 'Bangkok' '13.7563,100.5018' || true
+}
+
 fallback_has_pass(){
   local pattern="$1"
   awk -F '\t' -v p="$pattern" '$2~p && $3=="PASS" && $4~/(SPEEDTESTGO_FALLBACK|LIBRESPEED_FALLBACK)/{ok=1} END{exit !ok}' "$NETWORK_TSV"
@@ -936,8 +988,7 @@ librespeed_region_pool(){
       *) return 1 ;;
     esac
     printf 'ls-demo\t%s\tPASS\tLIBRESPEED_FALLBACK\t%s\t%s\t%s\n' "$display" "$up" "$down" "$lat" >>"$NETWORK_TSV"
-    printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" '正常' "$RESET" '备用测速'
+    print_net_row "$display" "$up" "$down" "$lat" PASS LIBRESPEED_FALLBACK
     return 0
   fi
   for spec in "$@"; do
@@ -948,15 +999,13 @@ librespeed_region_pool(){
       IFS='|' read -r up down lat <"$parsed"
       printf 'ls-%s\t%s\tPASS\tLIBRESPEED_FALLBACK\t%s\t%s\t%s\n' "$id" "$display" "$up" "$down" "$lat" >>"$NETWORK_TSV"
       tty_clean_line
-      printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-        "$YELLOW" "$(zh_name "$display")" "$RESET" "$GREEN" "$up Mbps" "$RESET" "$RED" "$down Mbps" "$RESET" "$BLUE" "$lat ms" "$RESET" "$GREEN" '正常' "$RESET" '备用测速'
+      print_net_row "$display" "$up" "$down" "$lat" PASS LIBRESPEED_FALLBACK
       return 0
     fi
   done
   printf 'ls-none\t%s\tFAIL\tLIBRESPEED_UNAVAILABLE\t-\t-\t-\n' "$display" >>"$NETWORK_TSV"
   tty_clean_line
-  printf ' %s%-17s%s %-13s %-15s %-9s %s%-7s%s %s%-18s%s\n' \
-    "$YELLOW" "$(zh_name "$display")" "$RESET" '-' '-' '-' "$RED" '失败' "$RESET" "$YELLOW" '备用测速节点不可用' "$RESET"
+  # Supplementary fallback failures stay internal; only useful rows are shown.
   return 1
 }
 librespeed_global_fallback(){
@@ -981,9 +1030,9 @@ cloudflare_fallback(){
   local up_url='https://speed.cloudflare.com/__up'
   local dres ures d_speed d_ttfb d_code u_speed u_code up_file down_mbps up_mbps ttfb_ms
   if (( DEMO )); then
-    printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-      "$YELLOW" 'Cloudflare 边缘基准' "$RESET" "$GREEN" '850.0 Mbps' "$RESET" "$RED" '920.0 Mbps' "$RESET" "$BLUE" '24.0 ms' "$RESET" "$GREEN" '正常' "$RESET" '补充基准'
-    printf 'cf-fallback\tCloudflare Edge\tPASS\tSUPPLEMENTAL\t850.0\t920.0\t24.0\n' >>"$NETWORK_TSV"
+    print_net_row 'Cloudflare Edge' '850.0' '920.0' '24.0' PASS SUPPLEMENTAL
+    printf 'cf-fallback	Cloudflare Edge	PASS	SUPPLEMENTAL	850.0	920.0	24.0
+' >>"$NETWORK_TSV"
     return 0
   fi
   command -v curl >/dev/null 2>&1 || return 1
@@ -1000,8 +1049,7 @@ cloudflare_fallback(){
   ttfb_ms="$(awk -v t="$d_ttfb" 'BEGIN{printf "%.1f",t*1000}')"
   printf 'cf-fallback\tCloudflare Edge\tPASS\tSUPPLEMENTAL\t%s\t%s\t%s\n' "$up_mbps" "$down_mbps" "$ttfb_ms" >>"$NETWORK_TSV"
   tty_clean_line
-  printf ' %s%-17s%s %s%-13s%s %s%-15s%s %s%-9s%s %s%-7s%s %-18s\n' \
-    "$YELLOW" 'Cloudflare 边缘基准' "$RESET" "$GREEN" "$up_mbps Mbps" "$RESET" "$RED" "$down_mbps Mbps" "$RESET" "$BLUE" "$ttfb_ms ms" "$RESET" "$GREEN" '正常' "$RESET" '补充基准'
+  print_net_row 'Cloudflare Edge' "$up_mbps" "$down_mbps" "$ttfb_ms" PASS SUPPLEMENTAL
   return 0
 }
 global_fallback_stack(){
@@ -1025,7 +1073,7 @@ global_fallback_stack(){
 
 print_network(){
   rule
-  printf '%s 节点/地区              上传          下载            延迟      状态       原因%s\n' "$BOLD$YELLOW" "$RESET"
+  print_net_header
   : >"$NETWORK_TSV"
   if [[ "${P07_BENCH_FORCE_FALLBACK:-0}" == 1 ]]; then
     OOKLA_PROVIDER_STATE="UNAVAILABLE"
@@ -1062,14 +1110,9 @@ print_network(){
   speed_node_retry 64420   'Montreal, CA' || true
   speed_node_retry 61933   'Paris, FR' || true
   speed_node_retry 41423   'Amsterdam, NL' || true
-  local cn_primary_pass=0
-  speed_node_pool 'China Unicom, CN' '24447|China Unicom 5G' '43752|BJ Unicom' && cn_primary_pass=$((cn_primary_pass+1)) || true
-  speed_node_pool 'China Telecom, CN' '36663|China Telecom JiangSu 5G' '5396|China Telecom JiangSu 5G' '59387|Zhejiang Telecom' && cn_primary_pass=$((cn_primary_pass+1)) || true
-  if (( cn_primary_pass == 0 )); then
-    speed_node_pool 'China Backup, CN' '16204|JSQY' '30852|Duke Kunshan University' || true
-  fi
   speed_node_retry 32155   'Hong Kong, CN' || true
   speed_node_retry 13623   'Singapore, SG' || true
+  speedtestgo_sea_supplement
   speed_node_retry 65092   'Taipei, CN' || true
   speed_node_retry 48463   'Tokyo, JP' || true
 }
@@ -1107,80 +1150,40 @@ china_verdict_from_counts(){
   fi
 }
 china_assessment(){
-  local overseas_http=0 mainland_http=0 mainland_fail=0 u host mainland_failed=""
-  local cn_speed_pass cn_speed_fail cn_speed_total cn_path_fail cn_node_unavailable
-  local fallback_pass fallback_fail overseas_speed_pass evidence_quality cf_pass carrier_line
-  local primary_pattern='China Unicom, CN|China Telecom, CN'
-  local fallback_pattern='China Backup, CN'
-  for u in https://www.cloudflare.com/ https://github.com/ https://www.google.com/; do http_probe "$u" && overseas_http=$((overseas_http+1)); done
-  for u in https://www.baidu.com/ https://www.qq.com/ https://www.taobao.com/ https://www.189.cn/ https://www.10010.com/ https://www.10086.cn/; do
-    if http_probe "$u"; then
-      mainland_http=$((mainland_http+1))
-    else
-      mainland_fail=$((mainland_fail+1))
-      host="${u#https://}"; host="${host%%/*}"
-      mainland_failed="${mainland_failed}${mainland_failed:+,}${host}"
-    fi
-  done
-  MAINLAND_HTTP_PASS="$mainland_http"
-  MAINLAND_HTTP_FAIL="$mainland_fail"
-  MAINLAND_HTTP_FAILED="$mainland_failed"
-
-  cn_speed_pass="$(count_speed "$primary_pattern" PASS)"
-  cn_speed_fail="$(count_speed "$primary_pattern" FAIL)"
-  cn_speed_total=$((cn_speed_pass+cn_speed_fail))
-  fallback_pass="$(count_speed "$fallback_pattern" PASS)"
-  fallback_fail="$(count_speed "$fallback_pattern" FAIL)"
-  cf_pass="$(count_speed '^Cloudflare Edge$' PASS)"
-  cn_path_fail="$(count_speed_reason "$primary_pattern" '^(TIMEOUT|CONNECTION_FAILED|DNS_FAILURE|TLS_FAILURE)$')"
-  cn_node_unavailable="$(count_speed_reason "$primary_pattern" '^NODE_UNAVAILABLE$')"
-  overseas_speed_pass="$(awk -F '\t' '$2 !~ /China Unicom, CN|China Telecom, CN|China Backup, CN/ && $3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")"
-
-  if [[ "$OOKLA_PROVIDER_STATE" != PASS && "$cn_speed_total" -eq 0 && "$fallback_pass" -eq 0 ]]; then
-    CHINA_VERDICT="UNKNOWN"
-    if (( mainland_http >= 4 || cf_pass >= 1 )); then evidence_quality="PARTIAL"; else evidence_quality="LOW"; fi
-    carrier_line="未执行（Ookla：$(zh_reason "$OOKLA_PROVIDER_REASON")）"
-    case "$OOKLA_PROVIDER_REASON" in
-      RATE_LIMITED) CHINA_RECOMMENDATION="Ookla 当前被限流；这不代表服务器 IP 被中国大陆屏蔽" ;;
-      BACKEND_UNAVAILABLE|BACKEND_FAILURE) CHINA_RECOMMENDATION="Ookla 平台当前不可用；这不代表服务器 IP 被中国大陆屏蔽" ;;
-      *) CHINA_RECOMMENDATION="运营商测速未完成，建议补充中国大陆到 VPS 的真实访问验证" ;;
-    esac
+  local measured_pass sea_pass overall
+  measured_pass="$(awk -F '	' '$3=="PASS" && $2!="Cloudflare Edge"{seen[$2]=1} END{for(k in seen)n++;print n+0}' "$NETWORK_TSV")"
+  sea_pass="$(awk -F '	' '$3=="PASS" && $2~/(Singapore|Kuala Lumpur|Jakarta|Bangkok)/{seen[$2]=1} END{for(k in seen)n++;print n+0}' "$NETWORK_TSV")"
+  CHINA_VERDICT="UNKNOWN"
+  EVIDENCE_QUALITY="LOW"
+  MAINLAND_HTTP_PASS=0
+  MAINLAND_HTTP_FAIL=0
+  MAINLAND_HTTP_FAILED=""
+  if [[ "$IO_STATE" == PASS && "$measured_pass" -ge 5 && "$sea_pass" -ge 2 ]]; then
+    overall=PASS
+    CHINA_RECOMMENDATION="服务器基础性能与国际/东南亚网络表现可用；中国大陆直连必须用大陆入口探针单独验证"
+  elif [[ "$measured_pass" -ge 3 ]]; then
+    overall=PARTIAL
+    CHINA_RECOMMENDATION="基础网络有有效结果，但覆盖不足；中国大陆直连仍需大陆入口探针"
   else
-    CHINA_VERDICT="$(china_verdict_from_counts "$cn_speed_pass" "$cn_path_fail" "$cn_node_unavailable" "$overseas_speed_pass" "$mainland_http" "$mainland_fail" "$overseas_http")"
-    if (( cn_speed_pass >= 1 )); then evidence_quality=GOOD
-    elif (( fallback_pass >= 1 || mainland_http >= 4 || cf_pass >= 1 )); then evidence_quality=PARTIAL
-    else evidence_quality=LOW
-    fi
-    carrier_line="主要运营商 ${cn_speed_pass}/${cn_speed_total} 正常｜备用 ${fallback_pass} 个正常"
-    case "$CHINA_VERDICT" in
-      NORMAL) CHINA_RECOMMENDATION="当前出站访问看起来正常；正式迁移前仍建议验证中国大陆到 VPS" ;;
-      HIGH_RISK) CHINA_RECOMMENDATION="风险较高，建议迁移前更换 IP" ;;
-      RISK) CHINA_RECOMMENDATION="存在风险，建议迁移前从中国大陆真实访问验证" ;;
-      *)
-        if (( cn_speed_pass == 0 && fallback_pass >= 1 )); then
-          CHINA_RECOMMENDATION="运营商测速节点不可用，建议从中国大陆真实访问验证"
-        else
-          CHINA_RECOMMENDATION="现有证据不足，暂时不能判断中国大陆访问质量"
-        fi
-        ;;
-    esac
+    overall=RISK
+    CHINA_RECOMMENDATION="有效测速地区过少，建议先排查网络再迁移"
   fi
-  EVIDENCE_QUALITY="$evidence_quality"
 
   rule
-  printf '%s%s 中国大陆访问评估%s\n' "$BOLD" "$BLUE" "$RESET"
-  printf ' VPS 出站 HTTPS     : 海外 %s/3｜中国大陆 %s/6\n' "$overseas_http" "$mainland_http"
-  [[ -n "$mainland_failed" ]] && printf ' 大陆站点失败       : %s\n' "$mainland_failed"
-  printf ' 运营商测速         : %s\n' "$carrier_line"
-  printf ' 证据质量           : %s\n' "$(zh_state "$evidence_quality")"
-  printf ' 大陆 → VPS         : %s未执行%s（当前还没有大陆入口探针）\n' "$YELLOW" "$RESET"
-  printf ' 中国大陆访问风险   : '; color_state "$CHINA_VERDICT"; printf '\n'
-  printf ' 建议               : %s%s%s\n' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
-  if [[ "$OOKLA_PROVIDER_STATE" != PASS ]]; then
-    printf ' %s说明：Ookla 平台故障/限流只是测速平台问题，不能据此判断 IP 被屏蔽。%s\n' "$GRAY" "$RESET"
-  else
-    printf ' %s说明：仅有备用测速时不会强行判定“正常”；测速节点不可用也不会被当成 IP 风险。%s\n' "$GRAY" "$RESET"
-  fi
+  printf '%s%s 验机结论%s
+' "$BOLD" "$BLUE" "$RESET"
+  printf ' 基础验机结果       : '; color_state "$overall"; printf '
+'
+  printf ' 全球有效测速       : %s 个地区
+' "$measured_pass"
+  printf ' 东南亚有效测速     : %s 个地区
+' "$sea_pass"
+  printf ' 中国大陆直连       : %s未直接检测%s
+' "$YELLOW" "$RESET"
+  printf ' 说明               : 当前 VPS→外部 的测速不能代表中国大陆用户→VPS 的真实访问
+'
+  printf ' 建议               : %s%s%s
+' "$YELLOW" "$CHINA_RECOMMENDATION" "$RESET"
 }
 
 
@@ -1252,8 +1255,9 @@ EOFJ
   local old_demo="$DEMO"; DEMO=1
   : >"$NETWORK_TSV"
   speed_node '' 'Speedtest.net' >/dev/null || f=1
-  speed_node_pool 'China Unicom, CN' '24447|China Unicom 5G' '43752|BJ Unicom' >/dev/null || f=1
-  [[ "$(awk -F '\t' '$2=="China Unicom, CN"{print $1":"$3}' "$NETWORK_TSV")" == "43752:PASS" ]] || f=1
+  speedtestgo_sea_supplement >/dev/null || true
+  [[ "$(awk -F '	' '$2=="Kuala Lumpur" && $3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")" == "1" ]] || f=1
+  [[ "$(awk -F '	' '$2=="Bangkok" && $3=="PASS"{n++} END{print n+0}' "$NETWORK_TSV")" == "1" ]] || f=1
   DEMO="$old_demo"
   # Retry lifecycle regression: exercise non-demo retry twice with a fake backend.
   local fake="$TMP_DIR/fake-speedtest" saved_bin="$SPEEDTEST_BIN" saved_temp="$SPEEDTEST_TEMP" saved_demo="$DEMO" saved_tsv="$NETWORK_TSV"
