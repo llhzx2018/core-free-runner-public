@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc7'
+VERSION='0.1.0-rc8'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='a3c3242f628c93656776cfaab4867bcae367581e4d7b32deb2b2dab83db79643'
+MANIFEST_SHA256='2f9eff4af9da9f01bee9dc83e54d467d457669b3b5e1ef826e919372a04c1d8f'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 STATE='/etc/vf-node/state.env'
@@ -49,6 +49,11 @@ p07_installed() {
   [[ -x "$ENTRY" && -x "$TARGET/vf-node.sh" && -s "$STATE" ]]
 }
 
+p07_healthy() {
+  p07_installed || return 1
+  NO_COLOR=1 "$ENTRY" check >/dev/null 2>&1
+}
+
 any_v2ray_present() {
   [[ -e /etc/v2ray/config.json || -x /usr/local/sbin/v2ray || -x /usr/bin/v2ray/v2ray ]] || command -v v2ray >/dev/null 2>&1
 }
@@ -80,7 +85,7 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info '下载并校验公开 RC7 安装包...'
+  info '下载并校验公开 RC8 安装包...'
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
     fail '安装包清单下载失败，已停止。'
@@ -165,12 +170,39 @@ refresh_manager_if_needed() {
   fi
 }
 
+repair_if_needed() {
+  p07_installed || return 1
+  p07_healthy && return 0
+  warn '检测到 P07 节点安装异常，正在自动修复...'
+  if NO_COLOR="${NO_COLOR:-0}" "$ENTRY" install && p07_healthy; then
+    ok '自动修复完成，节点已经恢复正常'
+    return 0
+  fi
+  fail '自动修复没有通过健康检查。不会覆盖节点配置、UUID 或端口。'
+  return 1
+}
+
 install_node() {
   if p07_installed; then
-    warn "这台服务器已经安装 P07 节点（$(installed_version)）。"
-    say '无需重装；可以直接使用管理、分享或卸载。'
-    pause_return
-    return 0
+    refresh_manager_if_needed
+    if p07_healthy; then
+      warn "这台服务器已经安装 P07 节点（$(installed_version)）并运行正常。"
+      say '无需重装；可以直接使用管理、分享或卸载。'
+      pause_return
+      return 0
+    fi
+
+    if repair_if_needed; then
+      say
+      ok '节点健康检查 PASS'
+      say "${MAGENTA}分享链接${R}"
+      say "${GRAY}──────────────────────────────────────────────────────────────${R}"
+      "$ENTRY" url | grep -oE 'vmess://[A-Za-z0-9+/=_-]+' | head -n1
+      say "${GRAY}──────────────────────────────────────────────────────────────${R}"
+      pause_return
+      return 0
+    fi
+    return 22
   fi
 
   if any_v2ray_present; then
@@ -188,13 +220,11 @@ install_node() {
     return 20
   fi
 
-  if ! NO_COLOR="${NO_COLOR:-0}" "$ENTRY" check; then
+  if ! p07_healthy; then
     fail '节点安装完成，但健康检查没有 PASS。'
     return 21
   fi
 
-  # The installer already showed the clean share link. Hold the screen so the
-  # user can copy it, then return to this same top-level menu. No nested menu.
   pause_return
 }
 
@@ -216,6 +246,10 @@ manage_node() {
 share_node() {
   if p07_installed; then
     refresh_manager_if_needed
+    if ! repair_if_needed; then
+      fail '节点仍未通过健康检查，暂不显示分享链接。'
+      return 4
+    fi
     "$ENTRY" url
     return 0
   fi
@@ -248,14 +282,18 @@ menu() {
     clear 2>/dev/null || true
     print_header
     if p07_installed; then
-      say "状态   ${GREEN}● 已安装 · $(installed_version)${R}"
+      if p07_healthy; then
+        say "状态   ${GREEN}● 已安装 · 运行正常 · $(installed_version)${R}"
+      else
+        say "状态   ${RED}● 安装异常 · 可自动修复 · $(installed_version)${R}"
+      fi
     elif any_v2ray_present; then
       say "状态   ${YELLOW}● 检测到非 P07 V2Ray · 受保护${R}"
     else
       say "状态   ${GRAY}● 未安装${R}"
     fi
     say
-    say "  ${GREEN}1. [安装]${R} 安装稳定节点"
+    say "  ${GREEN}1. [安装]${R} 安装 / 自动修复稳定节点"
     say "  ${CYAN}2. [管理]${R} 进入节点管理"
     say "  ${MAGENTA}3. [分享]${R} 显示分享链接"
     say "  ${RED}4. [危险]${R} 卸载节点"
@@ -296,6 +334,7 @@ P07 · VF Network Node 一键入口
 
 交互运行：直接显示安装 / 管理 / 分享 / 卸载菜单。
 安装成功：显示干净 vmess:// 链接，按 Enter 回到原主菜单。
+异常节点：RC8 会先刷新管理器，再自动重启并等待 UDP 健康；不改 UUID、端口或配置。
 旧版 P07：再次运行一键入口只升级管理模块，不改节点 UUID/端口/配置。
 非交互运行：默认执行安装。
 EOF
