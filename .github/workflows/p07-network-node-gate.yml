@@ -12,6 +12,8 @@ permissions:
 jobs:
   network-node-static-gate:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +71,8 @@ jobs:
             modules/network-node/backup.sh \
             modules/network-node/uninstall.sh \
             modules/network-node/tests/static_gate.sh \
-            modules/network-node/tests/upstream_patch_gate.sh
+            modules/network-node/tests/upstream_patch_gate.sh \
+            modules/network-node/tests/ephemeral_install_gate.sh
 
       - name: ShellCheck shared library
         run: |
@@ -78,7 +81,7 @@ jobs:
           # SC2034 is expected for globals consumed by scripts that source common.sh.
           shellcheck -e SC2034 modules/network-node/lib/common.sh
 
-      - name: Emit exact gate markers
+      - name: Emit exact source gate markers
         env:
           SRC_SHA: ${{ steps.source.outputs.sha }}
         run: |
@@ -87,3 +90,52 @@ jobs:
           echo 'P07_NETWORK_NODE_UPSTREAM_PATCH_GATE=PASS'
           echo 'P07_NETWORK_NODE_CORE_PIN=PASS'
           echo 'P07_NETWORK_NODE_SHELLCHECK=PASS'
+
+  ephemeral-ubuntu-install:
+    needs: network-node-static-gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch exact gated private source
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          SRC_SHA: ${{ needs.network-node-static-gate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}" || exit 20
+          test "${#SRC_SHA}" = 40
+          TMP="$(mktemp -d)"
+          curl -fL \
+            -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/llhzx2018/vf-server-ops/tarball/${SRC_SHA}" \
+            -o "${TMP}/source.tar.gz"
+          mkdir -p .p07-network-node-source
+          tar -xzf "${TMP}/source.tar.gz" -C "${TMP}"
+          SRC_DIR="$(find "${TMP}" -mindepth 1 -maxdepth 1 -type d -name 'llhzx2018-vf-server-ops-*' | head -n1)"
+          test -n "$SRC_DIR"
+          cp -a "$SRC_DIR/." .p07-network-node-source/
+
+      - name: Run ephemeral Ubuntu install compatibility gate
+        run: |
+          set -euo pipefail
+          sudo env VF_NODE_GATE_PORT=31535 NO_COLOR=1 \
+            bash "$PWD/.p07-network-node-source/modules/network-node/tests/ephemeral_install_gate.sh"
+
+      - name: Emit install classification boundary
+        env:
+          SRC_SHA: ${{ needs.network-node-static-gate.outputs.source_sha }}
+        run: |
+          echo "P07_NETWORK_NODE_SOURCE_SHA=${SRC_SHA}"
+          echo 'P07_NETWORK_NODE_EPHEMERAL_RUNNER_INSTALL_PASS=1'
+          echo 'P07_NETWORK_NODE_REAL_VPS_NETWORK_PASS=NOT_CLAIMED'
+          echo 'P07_NETWORK_NODE_CHINA_IP_PASS=NOT_CLAIMED'
+          echo 'P07_NETWORK_NODE_LONG_TERM_DURABILITY_PASS=NOT_CLAIMED'
+
+      - name: Cleanup ephemeral runtime
+        if: always()
+        run: |
+          sudo systemctl stop v2ray.service 2>/dev/null || true
+          sudo rm -rf /etc/v2ray /etc/vf-node /root/vf-node-backups /usr/bin/v2ray
+          sudo rm -f /usr/local/sbin/v2ray /tmp/vf-node-*-gate* /tmp/v2ray.zip
