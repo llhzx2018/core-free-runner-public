@@ -47,6 +47,9 @@ v2ray_cli() {
   fi
 }
 
+# The historical `v2ray url` command may print banners/tutorial/promotional
+# text around the useful result. P07 treats that command as a compatibility
+# data source only and emits the vmess:// token itself as the product output.
 print_vmess_url() {
   local cli raw url
   cli="$(v2ray_cli || true)"
