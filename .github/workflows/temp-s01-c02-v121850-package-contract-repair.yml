@@ -1,0 +1,105 @@
+name: S01-C02 V1.21.850 Package Contract Repair Gate
+
+on:
+  push:
+    branches: [temp/s01-uiux-runtime-authority-20260906]
+    paths:
+      - '.github/workflows/temp-s01-c02-v121850-package-contract-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      BASE_SHA: ca87ee6a6dd1139dab6fe33f20b64d537b1a2b20
+      TARGET_SHA: 0e6fb809748a3c2b392c13b1c787490ebbeb390d
+      BASE_BYTES: '3325881'
+      BASE_SHA256: d4feb6bac88022a0abfc7fccf17471bdbedaa518e45821b8436ad17b514d2b67
+    steps:
+      - name: Credential gate
+        run: test -n "$READ_TOKEN"
+
+      - name: Checkout 1.21.849 calibration source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: base
+          persist-credentials: false
+
+      - name: Checkout 1.21.850 target source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Calibrate historical contract and build corrected target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,re,zipfile
+
+          def runtime(root):
+              root=Path(root); rows=[]
+              for p in root.rglob('*'):
+                  if not p.is_file() or p.is_symlink(): continue
+                  rel=p.relative_to(root).as_posix(); parts=rel.split('/')
+                  if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+                  if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+                  ok=(rel in {'vf-ops.php','uninstall.php'}) if '/' not in rel else parts[0] in {'includes','assets','languages','config'}
+                  if ok: rows.append((rel,p.read_bytes()))
+              return sorted(rows)
+
+          def fp(rows):
+              h=hashlib.sha256()
+              for rel,b in rows: h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+              return h.hexdigest()
+
+          def build(rows,path):
+              path=Path(path)
+              with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,b in rows:
+                      zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,6,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+              return {'files':len(rows),'bytes':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'runtime_fingerprint':fp(rows),'root':'vf-ops'}
+
+          base=build(runtime('base'),'out/vf-tools-ops_V1.21.849-calibration.zip')
+          assert base['files']==930
+          assert base['bytes']==int(os.environ['BASE_BYTES'])
+          assert base['sha256']==os.environ['BASE_SHA256']
+          assert base['runtime_fingerprint']=='02bc476b22d8664d4387c271cf354fc548d705468f2e0f6181177c16d6392372'
+
+          target=build(runtime('target'),'out/vf-tools-ops_V1.21.850.zip')
+          assert target['files']==933
+          assert target['runtime_fingerprint']=='58bc6003dbf642a5978649b52f2d9eb5493907508349c43bb89ab27abfb5e410'
+          with zipfile.ZipFile('out/vf-tools-ops_V1.21.850.zip') as z:
+              assert z.testzip() is None
+              names=[x.filename for x in z.infolist() if not x.is_dir()]
+              assert all(x.startswith('vf-ops/') for x in names)
+              assert 'vf-ops/vf-ops.php' in names
+              assert b'Version: 1.21.850' in z.read('vf-ops/vf-ops.php')
+          meta={'calibration_1_21_849':base,'target_1_21_850':target,'base_sha':os.environ['BASE_SHA'],'target_sha':os.environ['TARGET_SHA'],'package_contract':'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1 + physical root vf-ops'}
+          Path('out/package-contract-evidence.json').write_text(json.dumps(meta,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(meta,indent=2,sort_keys=True))
+          PY
+          echo 'OPS_PACKAGE_CONTRACT_REPAIR_GATE=PASS'
+
+      - name: Upload corrected candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: S01-C02-V1.21.850-CORRECTED-PACKAGE
+          path: |
+            out/vf-tools-ops_V1.21.850.zip
+            out/package-contract-evidence.json
+          if-no-files-found: error
+          retention-days: 14
