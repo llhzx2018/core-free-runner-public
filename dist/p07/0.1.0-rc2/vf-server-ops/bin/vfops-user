@@ -223,6 +223,12 @@ if base.is_dir():
     for m in base.glob('*/manifest.json'):
         try:
             d=json.loads(m.read_text(encoding='utf-8'))
+            vpath=m.parent/'verification.json'
+            if not vpath.is_file():
+                continue
+            verification=json.loads(vpath.read_text(encoding='utf-8'))
+            if verification.get('status') != 'PASS':
+                continue
             rows.append((m.parent, d.get('site',{}).get('domain','UNKNOWN'), d.get('backup_id','UNKNOWN'), d.get('created_at','UNKNOWN')))
         except Exception:
             pass
@@ -237,11 +243,11 @@ select_backup() {
   local raw count choice
   raw="$(list_backups)"
   if [[ -z "$raw" ]]; then
-    printf '\n没有发现 P07 本地备份。\n' >&2
+    printf '\n没有发现已验证、可恢复的 P07 本地备份。\n' >&2
     return 1
   fi
   count="$(printf '%s\n' "$raw" | wc -l | tr -d ' ')"
-  printf '\n可用备份\n----------------------------------------\n'
+  printf '\n可恢复备份\n----------------------------------------\n'
   printf '%s\n' "$raw" | awk -F '\t' '{printf "  %s. %s  (%s)\n",$1,$3,$5}'
   printf '  0. 返回\n'
   printf '\n请选择 [0-%s]：' "$count"
@@ -261,14 +267,21 @@ PY
 }
 
 target_ssh_preflight() {
-  local target_ip="$1" output rc
+  local target_ip="$1" domain="$2" output rc remote_cmd
   command -v ssh >/dev/null 2>&1 || {
     printf '\n新服务器连接未准备好。\n'
     printf '原因：这台服务器没有 SSH 客户端。\n'
     printf '迁移尚未开始，也没有创建迁移备份。\n'
     return 1
   }
-  printf '\n[P07] 先检查新服务器连接（只读，不创建网站）...\n'
+  if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    printf '\n网站标识无法安全用于迁移预检。\n'
+    printf '迁移尚未开始，也没有创建迁移备份。\n'
+    return 1
+  fi
+
+  remote_cmd="set -eu; command -v clpctl >/dev/null 2>&1; test -f /home/clp/htdocs/app/data/db.sq3; for p in /home/*/htdocs/${domain}; do [ ! -e \"\$p\" ] || exit 42; done"
+  printf '\n[P07] 先检查新服务器连接与目标冲突（只读，不创建网站）...\n'
   if output="$(ssh \
     -p 22 \
     -o BatchMode=yes \
@@ -277,10 +290,16 @@ target_ssh_preflight() {
     -o ServerAliveInterval=10 \
     -o ServerAliveCountMax=1 \
     "root@${target_ip}" \
-    'set -eu; command -v clpctl >/dev/null 2>&1; test -f /home/clp/htdocs/app/data/db.sq3' 2>&1)"; then
+    "$remote_cmd" 2>&1)"; then
     rc=0
   else
     rc=$?
+    if [[ $rc -eq 42 ]]; then
+      printf '\n新服务器已经存在同名网站目录：%s\n' "$domain"
+      printf 'P07 不会覆盖已有站点。\n'
+      printf '迁移尚未开始，也没有创建迁移备份。\n'
+      return 1
+    fi
     printf '\n新服务器还没有准备好。\n'
     printf 'P07 无法使用 SSH Key 从这台服务器连接到 %s，或目标 CloudPanel 未检测到。\n' "$target_ip"
     printf '迁移尚未开始，也没有创建迁移备份。\n'
@@ -289,6 +308,7 @@ target_ssh_preflight() {
   fi
   printf '新服务器连接：READY ✓\n'
   printf 'CloudPanel：READY ✓\n'
+  printf '同名网站冲突：未发现 ✓\n'
   return 0
 }
 
@@ -418,7 +438,7 @@ migrate_site() {
     return
   fi
 
-  if ! target_ssh_preflight "$target_ip"; then
+  if ! target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
     pause
     return
   fi
