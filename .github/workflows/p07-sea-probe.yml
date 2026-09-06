@@ -1,0 +1,72 @@
+name: P07 东南亚节点真实探针
+
+on:
+  push:
+    branches:
+      - experiment/p07-oneshot-bench-v05
+    paths:
+      - .github/workflows/p07-sea-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 下载并校验 speedtest-go
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/showwin/speedtest-go/releases/download/v1.8.3/speedtest-go_1.8.3_Linux_x86_64.tar.gz'
+          SHA='c55caae22927cd719a2f8c0bef96ecf74b5fe8ca919ff9200d76328ae5de9477'
+          curl -fL --retry 2 --connect-timeout 10 --max-time 90 "$URL" -o /tmp/speedtest-go.tgz
+          echo "$SHA  /tmp/speedtest-go.tgz" | sha256sum -c -
+          mkdir -p /tmp/speedtest-go
+          tar -xzf /tmp/speedtest-go.tgz -C /tmp/speedtest-go
+          BIN="$(find /tmp/speedtest-go -maxdepth 2 -type f -name 'speedtest-go*' ! -name '*.tgz' | head -n1)"
+          test -n "$BIN"
+          chmod +x "$BIN"
+          echo "SPEEDTEST_GO_BIN=$BIN" >> "$GITHUB_ENV"
+      - name: 东南亚四地区真实测速
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/sea.tsv
+          probe(){
+            local region="$1" coords="$2" out rc
+            out="/tmp/sea-$(echo "$region" | tr ' ' '-').json"
+            set +e
+            timeout 80s "$SPEEDTEST_GO_BIN" --json --saving-mode --thread 1 --location "$coords" --ping-mode http >"$out" 2>"$out.err"
+            rc=$?
+            set -e
+            if (( rc != 0 )); then
+              echo "$region FAIL rc=$rc" >&2
+              cat "$out.err" >&2 || true
+              return 1
+            fi
+            python3 - "$out" "$region" <<'PY'
+          import json,sys
+          path,region=sys.argv[1:]
+          obj=json.load(open(path,encoding='utf-8'))
+          servers=obj.get('servers') if isinstance(obj,dict) else None
+          if not servers: raise SystemExit(1)
+          srv=servers[0]
+          up=float(srv['ul_speed'])/125000.0
+          down=float(srv['dl_speed'])/125000.0
+          latency=float(srv['latency'])/1_000_000.0
+          if min(up,down,latency) < 0: raise SystemExit(1)
+          print(f"{region}\t{up:.2f}\t{down:.2f}\t{latency:.2f}\t{srv.get('name','')}\t{srv.get('country','')}\t{srv.get('id','')}")
+          PY
+          }
+          pass=0
+          probe 'Singapore'    '1.3521,103.8198'      | tee -a /tmp/sea.tsv && pass=$((pass+1)) || true
+          probe 'Kuala Lumpur' '3.1390,101.6869'      | tee -a /tmp/sea.tsv && pass=$((pass+1)) || true
+          probe 'Jakarta'      '-6.2088,106.8456'     | tee -a /tmp/sea.tsv && pass=$((pass+1)) || true
+          probe 'Bangkok'      '13.7563,100.5018'     | tee -a /tmp/sea.tsv && pass=$((pass+1)) || true
+          cat /tmp/sea.tsv
+          echo "SEA_PASS=$pass"
+          test "$pass" -ge 3
