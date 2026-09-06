@@ -1,0 +1,123 @@
+name: S01-C02 V1.21.850 Release Package Repair
+
+on:
+  push:
+    branches: [temp/s01-uiux-runtime-authority-20260906]
+    paths:
+      - '.github/workflows/temp-s01-c02-v121850-release-repair.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      REPO: llhzx2018/vf-tools-ops
+      PRODUCT_COMMIT: 0e6fb809748a3c2b392c13b1c787490ebbeb390d
+      TAG: v1.21.850
+      ASSET_NAME: vf-tools-ops_V1.21.850.zip
+      EXPECTED_FILES: '933'
+      EXPECTED_BYTES: '3334143'
+      EXPECTED_SHA: 1556eae3698412831bb9c81fe8729160ad5a3dcb1a9ca979b76add98cc58dfb0
+      EXPECTED_RUNTIME_FP: 58bc6003dbf642a5978649b52f2d9eb5493907508349c43bb89ab27abfb5e410
+      WRONG_BYTES: '3422610'
+      WRONG_SHA: 7a3eb58d5255f27222baf0605f8f95f05a19f188b81997fbcddfeefbfe67ee0d
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Credential gate
+        run: |
+          test -n "$READ_TOKEN" && test -n "$WRITE_TOKEN"
+
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.PRODUCT_COMMIT }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          persist-credentials: false
+
+      - name: Rebuild corrected historical-contract package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,os,re,zipfile
+          root=Path('ops'); rows=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              ok=(rel in {'vf-ops.php','uninstall.php'}) if '/' not in rel else parts[0] in {'includes','assets','languages','config'}
+              if ok: rows.append((rel,p.read_bytes()))
+          rows.sort()
+          zpath=Path(os.environ['RUNNER_TEMP'])/'release'/os.environ['ASSET_NAME']
+          with zipfile.ZipFile(zpath,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,b in rows:
+                  zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,6,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+          h=hashlib.sha256()
+          for rel,b in rows: h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          assert len(rows)==int(os.environ['EXPECTED_FILES'])
+          assert zpath.stat().st_size==int(os.environ['EXPECTED_BYTES'])
+          assert hashlib.sha256(zpath.read_bytes()).hexdigest()==os.environ['EXPECTED_SHA']
+          assert h.hexdigest()==os.environ['EXPECTED_RUNTIME_FP']
+          with zipfile.ZipFile(zpath) as z:
+              assert z.testzip() is None
+              names=[x.filename for x in z.infolist() if not x.is_dir()]
+              assert all(x.startswith('vf-ops/') for x in names)
+              assert 'vf-ops/vf-ops.php' in names
+              assert b'Version: 1.21.850' in z.read('vf-ops/vf-ops.php')
+          print('CORRECTED_PACKAGE=PASS')
+          PY
+
+      - name: Replace incorrect published Release atomically
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ASSET="$RUNNER_TEMP/release/$ASSET_NAME"
+          j="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          test "$(jq -r '.draft' <<<"$j")" = false
+          test "$(jq -r '.prerelease' <<<"$j")" = false
+          test "$(jq -r '.assets[]|select(.name==env.ASSET_NAME)|.size' <<<"$j")" = "$WRONG_BYTES"
+          test "$(jq -r '.assets[]|select(.name==env.ASSET_NAME)|.digest' <<<"$j")" = "sha256:$WRONG_SHA"
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$PRODUCT_COMMIT"
+          echo 'INCORRECT_RELEASE_IDENTITY_CONFIRMED=PASS'
+
+          gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes
+          ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1
+          ! gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1
+          echo 'INCORRECT_RELEASE_REMOVED=PASS'
+
+          gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$PRODUCT_COMMIT" >/dev/null
+          gh release create "$TAG" "$ASSET" --repo "$REPO" --title 'VF Tools Ops V1.21.850' --notes 'S01-C02 · VF Tools Ops 1.21.850 UI/UX closure. Release package was reissued before update-channel publication to preserve the canonical WordPress physical locator vf-ops/vf-ops.php. Exact package contract is calibrated byte-for-byte against 1.21.849. Git/Release PASS does not claim Production, Static, Online or FINAL_ONLINE_PASS.' --draft
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET_NAME" --dir "$RUNNER_TEMP/readback"
+          REMOTE="$RUNNER_TEMP/readback/$ASSET_NAME"
+          test "$(stat -c %s "$REMOTE")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$REMOTE"|awk '{print $1}')" = "$EXPECTED_SHA"
+          python3 - "$REMOTE" <<'PY'
+          import os,sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert z.testzip() is None
+              files=[x for x in z.infolist() if not x.is_dir()]
+              assert len(files)==int(os.environ['EXPECTED_FILES'])
+              assert sorted({x.filename.split('/')[0] for x in files})==['vf-ops']
+              assert b'Version: 1.21.850' in z.read('vf-ops/vf-ops.php')
+          PY
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          final="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          test "$(jq -r '.draft' <<<"$final")" = false
+          test "$(jq -r '.assets[]|select(.name==env.ASSET_NAME)|.size' <<<"$final")" = "$EXPECTED_BYTES"
+          test "$(jq -r '.assets[]|select(.name==env.ASSET_NAME)|.digest' <<<"$final")" = "sha256:$EXPECTED_SHA"
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$PRODUCT_COMMIT"
+          test "$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" = "$PRODUCT_COMMIT"
+          echo 'OPS_V1.21.850_RELEASE_PACKAGE_REPAIR=PASS'
+          echo 'REMOTE_ASSET_EXACT_READBACK=PASS'
