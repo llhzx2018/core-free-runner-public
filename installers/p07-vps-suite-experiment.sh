@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP="P07 VPS Acceptance Suite"
-VERSION="0.1.0"
+VERSION="0.2.0"
 CHANNEL="EXPERIMENT"
 INSTALL_DIR="${P07_SUITE_DIR:-/opt/p07-vps-suite}"
 BIN_DIR="${P07_SUITE_BIN_DIR:-/usr/local/bin}"
@@ -23,8 +23,7 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1 || fail "缺少命令：$1"; }
 blob_sha(){
   python3 - "$1" <<'PY'
 import hashlib,sys
-p=sys.argv[1]
-data=open(p,'rb').read()
+data=open(sys.argv[1],'rb').read()
 print(hashlib.sha1((f'blob {len(data)}\0').encode()+data).hexdigest())
 PY
 }
@@ -69,10 +68,40 @@ ln -sfn "$INSTALL_DIR/modules/p07-inspect.sh" "$BIN_DIR/p07-inspect"
 ln -sfn "$INSTALL_DIR/modules/p07-benchmark.sh" "$BIN_DIR/p07-benchmark"
 ln -sfn "$INSTALL_DIR/modules/p07-netcheck.sh" "$BIN_DIR/p07-netcheck"
 
+cat >"$INSTALL_DIR/p07-vpscheck" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  R=$'\033[0m'; C=$'\033[38;5;45m'; G=$'\033[38;5;48m'; Y=$'\033[38;5;220m'; M=$'\033[38;5;141m'; D=$'\033[38;5;245m'; B=$'\033[1m'
+else R=""; C=""; G=""; Y=""; M=""; D=""; B=""; fi
+pause(){ printf '\n%s按 Enter 返回...%s' "$D" "$R"; read -r _ || true; }
+while true; do
+  [[ -t 1 ]] && clear 2>/dev/null || true
+  printf '%s%sP07 · VPS 验机套件%s\n' "$B" "$C" "$R"
+  printf '%s\n' '────────────────────────────────────────────────────────────'
+  printf '  %s1%s  %-18s %s\n' "$G" "$R" '服务器概览' 'CPU / 内存 / 磁盘 / CloudPanel / IP'
+  printf '  %s2%s  %-18s %s\n' "$Y" "$R" '性能测试' '磁盘 / 全球测速 / SOURCE-TARGET 对比'
+  printf '  %s3%s  %-18s %s\n' "$M" "$R" '中国访问 / IP' '三网信号 / 风险判断 / 网络诊断'
+  printf '\n  %s0 返回%s\n' "$D" "$R"
+  printf '%s\n' '────────────────────────────────────────────────────────────'
+  printf '请选择 [0-3]：'; read -r c || exit 0
+  case "$c" in
+    1) p07-inspect; pause;;
+    2) p07-benchmark;;
+    3) p07-netcheck;;
+    0) exit 0;;
+    *) sleep 1;;
+  esac
+done
+EOF
+chmod 0755 "$INSTALL_DIR/p07-vpscheck"
+ln -sfn "$INSTALL_DIR/p07-vpscheck" "$BIN_DIR/p07-vpscheck"
+
 log '安装后自检...'
 self_check "$BIN_DIR/p07-inspect" 0.3.0 Inspect
 self_check "$BIN_DIR/p07-benchmark" 0.4.0 Benchmark
 self_check "$BIN_DIR/p07-netcheck" 0.5.0 NetCheck
+bash -n "$BIN_DIR/p07-vpscheck" || fail 'p07-vpscheck syntax 检查失败'
 
 cat >"$INSTALL_DIR/INSTALL_MANIFEST.txt" <<EOF
 suite=$APP
@@ -88,6 +117,7 @@ benchmark_blob=$BENCHMARK_BLOB
 netcheck_version=0.5.0
 netcheck_commit=$NETCHECK_COMMIT
 netcheck_blob=$NETCHECK_BLOB
+suite_dispatcher=p07-vpscheck
 vfops_integration=NOT_RUN
 EOF
 chmod 0644 "$INSTALL_DIR/INSTALL_MANIFEST.txt"
@@ -98,9 +128,11 @@ printf '============================================================\n'
 printf ' Inspect    0.3.0   PASS\n'
 printf ' Benchmark  0.4.0   PASS\n'
 printf ' NetCheck   0.5.0   PASS\n'
-printf '\n已安装命令：\n'
-printf '  p07-inspect\n'
-printf '  p07-benchmark\n'
-printf '  p07-netcheck\n'
-printf '\n说明：此安装器没有修改 vfops 总菜单，没有改 DNS，没有运行重负载测速。\n'
-printf '全球带宽/磁盘重测试仍由你在对应模块里主动选择。\n'
+printf '\n以后直接输入：p07-vpscheck\n'
+printf '三个模块仍然独立安装，可分别运行 p07-inspect / p07-benchmark / p07-netcheck。\n'
+printf '\n不会修改 vfops 总菜单，不会改 DNS，不会自动运行重负载测速。\n'
+
+if [[ -t 0 && -t 1 && "${P07_SUITE_NO_LAUNCH:-0}" != "1" ]]; then
+  printf '\n正在进入 P07 VPS 验机套件...\n\n'
+  "$BIN_DIR/p07-vpscheck"
+fi
