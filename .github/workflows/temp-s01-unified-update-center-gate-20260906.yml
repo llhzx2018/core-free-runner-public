@@ -1,0 +1,151 @@
+name: S01 Unified Update Center Gate
+
+on:
+  push:
+    branches: [temp/s01-unified-update-center-gate-20260906]
+    paths:
+      - '.github/workflows/temp-s01-unified-update-center-gate-20260906.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  wordpress-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: vf_update_center_gate
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      THEME_SHA: 75e290d6e28ca3027f3cf8041494d5c924c98f85
+      OPS_SHA: 841865fe9507c38a9a81a7c321991c62afd3052f
+      M3U8_SHA: 2dc6074718b14e0531a715777d3494935c6000be
+      WP_PATH: /tmp/s01-update-center-wp
+    steps:
+      - name: Checkout exact hotfix candidates
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: theme
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact identities and PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          php -l theme/src/inc/update/class-vf-wp-update-admin-v1.php
+          php -l ops/includes/wp-update/class-vf-ops-update-admin-v1.php
+          php -l ops/vf-ops.php
+          php -l m3u8/src/includes/update/class-vf-m3u8-update-admin-v1.php
+          php -l m3u8/src/vf-tool-m3u8.php
+          test "$(tr -d '\r\n' < theme/VERSION)" = '1.35.12'
+          test "$(tr -d '\r\n' < ops/VERSION)" = '1.21.851'
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = '1.25.22'
+          grep -Fq 'Version: 1.35.12' theme/src/style.css
+          grep -Fq 'Version: 1.21.851' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.851'" ops/vf-ops.php
+          grep -Fq 'Version: 1.25.22' m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.22'" m3u8/src/vf-tool-m3u8.php
+          echo SOURCE_AND_VERSION_GATE=PASS
+
+      - name: Install WordPress gate runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y php-cli php-mysql php-curl php-zip php-mbstring php-xml php-gd unzip curl mariadb-client rsync >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp
+          chmod +x /tmp/wp && sudo mv /tmp/wp /usr/local/bin/wp
+          mkdir -p "$WP_PATH"
+          wp core download --path="$WP_PATH" --force
+          wp config create --path="$WP_PATH" --dbname=vf_update_center_gate --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check
+          wp core install --path="$WP_PATH" --url=http://127.0.0.1:8080 --title='VF Update Center Gate' --admin_user=owner --admin_password='gate-only-not-production' --admin_email=owner@example.invalid --skip-email
+          echo WORDPRESS_RUNTIME=PASS
+
+      - name: Install exact three component candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WP_PATH/wp-content/themes/vf-tools-theme" "$WP_PATH/wp-content/plugins/vf-ops" "$WP_PATH/wp-content/plugins/vf-tool-m3u8"
+          rsync -a --delete theme/src/ "$WP_PATH/wp-content/themes/vf-tools-theme/"
+          rsync -a --delete --exclude='.git' ops/ "$WP_PATH/wp-content/plugins/vf-ops/"
+          rsync -a --delete --exclude='.git' m3u8/src/ "$WP_PATH/wp-content/plugins/vf-tool-m3u8/"
+          wp theme activate vf-tools-theme --path="$WP_PATH"
+          wp plugin activate vf-ops --path="$WP_PATH"
+          wp plugin activate vf-tool-m3u8 --path="$WP_PATH"
+          test "$(wp theme get vf-tools-theme --field=version --path="$WP_PATH")" = '1.35.12'
+          test "$(wp plugin get vf-ops --field=version --path="$WP_PATH")" = '1.21.851'
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$WP_PATH")" = '1.25.22'
+          echo EXACT_COMPONENT_INSTALL=PASS
+
+      - name: Verify one visible updater menu and registry contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/menu-gate.php <<PHP
+          <?php
+          define('WP_ADMIN', true);
+          \$_SERVER['HTTP_HOST']='127.0.0.1';
+          \$_SERVER['REQUEST_URI']='/wp-admin/tools.php?page=vf-private-updates';
+          require '${WP_PATH}/wp-load.php';
+          if (!current_user_can('manage_options')) { wp_set_current_user(1); }
+          do_action('admin_menu');
+          global \$submenu;
+          \$tools=(array)(\$submenu['tools.php']??[]);
+          \$labels=[]; \$slugs=[];
+          foreach(\$tools as \$row){ \$labels[]=(string)(\$row[0]??''); \$slugs[]=(string)(\$row[2]??''); }
+          \$vfLabels=array_values(array_filter(\$labels,fn(\$x)=>str_contains(\$x,'VF')));
+          if(count(array_filter(\$labels,fn(\$x)=>\$x==='VF 在线更新'))!==1){fwrite(STDERR,"CENTRAL_MENU_COUNT_FAIL\n");exit(2);} 
+          if(in_array('vf-ops-updates',\$slugs,true)||in_array('vf-m3u8-updates',\$slugs,true)){fwrite(STDERR,"LEGACY_MENU_VISIBLE\n");exit(3);} 
+          \$registry=apply_filters('vf_wp_update_components_v1',[]);
+          foreach(['S01-C02','S01-C03'] as \$id){if(!isset(\$registry[\$id])){fwrite(STDERR,"REGISTRY_MISSING_".\$id."\n");exit(4);}}
+          if((\$registry['S01-C02']['current_version']??'')!=='1.21.851'){exit(5);} 
+          if((\$registry['S01-C03']['current_version']??'')!=='1.25.22'){exit(6);} 
+          \$themeSource=file_get_contents('${WP_PATH}/wp-content/themes/vf-tools-theme/inc/update/class-vf-wp-update-admin-v1.php');
+          if(!is_string(\$themeSource)||!str_contains(\$themeSource,"'S01-C01' =>")||!str_contains(\$themeSource,"apply_filters('vf_wp_update_components_v1'")){exit(7);} 
+          echo json_encode(['tools_vf_labels'=>\$vfLabels,'tools_slugs'=>\$slugs,'registry'=>array_keys(\$registry)],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),"\n";
+          echo "UNIFIED_UPDATE_CENTER_MENU_REGISTRY=PASS\n";
+          PHP
+          php /tmp/menu-gate.php
+
+      - name: No business scope regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C ops diff 0e6fb809748a3c2b392c13b1c787490ebbeb390d...HEAD --name-only | sort
+          git -C m3u8 diff db11959db7ce726ad56d74be4add9fa594061817...HEAD --name-only | sort
+          git -C theme diff 868192e5f355f4b2f49855de868360c47b87ea78...HEAD --name-only | sort
+          echo BUSINESS_SCOPE_WRITE=NO
+          echo S01_UNIFIED_UPDATE_CENTER_GATE=PASS
