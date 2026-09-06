@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc3'
+VERSION='0.1.0-rc4'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='a2b79313ae066b3948239fcc46863ce99667a1b8c821aae564f6190f9c2886d0'
+MANIFEST_SHA256='337ab6e1676be27c4c31a1204345d97fe8b08368c6e1cf5b361df99a6411723e'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 STATE='/etc/vf-node/state.env'
@@ -66,7 +66,7 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info '下载并校验公开 RC3 Manifest...'
+  info '下载并校验公开 RC4 Manifest...'
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
     fail 'Manifest 下载失败，已停止。'
@@ -92,7 +92,7 @@ install_runtime_files() {
     lib/patch_upstream_core.py
   )
 
-  info '下载 RC3 运行文件...'
+  info '下载 RC4 运行文件...'
   local f
   for f in "${files[@]}"; do
     mkdir -p "$tmp/pkg/$(dirname "$f")"
@@ -108,10 +108,10 @@ install_runtime_files() {
     sha256sum -c MANIFEST.sha256 >/dev/null
   ); then
     rm -rf "$tmp" "$stage"
-    fail 'RC3 文件 SHA256 校验失败，已停止。'
+    fail 'RC4 文件 SHA256 校验失败，已停止。'
     return 12
   fi
-  ok 'RC3 运行文件校验通过'
+  ok 'RC4 运行文件校验通过'
 
   info '安装 / 更新 VF Network Node 管理模块...'
   cp -a "$tmp/pkg/VERSION" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
@@ -181,7 +181,6 @@ install_node() {
 
 manage_node() {
   if p07_installed; then
-    # Refresh only P07's management files. The live node/config/state is not reinstalled.
     install_runtime_files || return $?
     exec "$ENTRY"
   fi
@@ -205,8 +204,7 @@ uninstall_node() {
     return 1
   fi
 
-  # Existing RC1/RC2 nodes may still have the historical delegated uninstall.
-  # Refresh only the P07 manager to RC3 first; do not reinstall/change V2Ray.
+  # Refresh only the P07 manager to RC4 first; do not reinstall/change V2Ray.
   install_runtime_files || return $?
   "$ENTRY" uninstall
 }
