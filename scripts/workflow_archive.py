@@ -48,7 +48,11 @@ V10_ARCHIVE_SOURCES = (
     ("historical-version", ARCHIVE_BATCH / "historical-version" / "public-infrastructure", "0a109a88a46997ef91145d80a452545d78a77208"),
 )
 V10_CATEGORIES = ("temporary", "invalid-yaml", "historical-version")
-ACTIVE_CURRENT_WORKFLOW_NAMES = {
+
+# Historical snapshot embedded in the immutable V11 archive manifest. This is
+# not a live allowlist for the current workflow surface. Current workflow
+# safety is owned by the Trigger/Estate gates.
+V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT = {
     "core-agent-current-verify.yml",
     "gov-doc-skill-pack-publish.yml",
     "runner-selftest-current.yml",
@@ -116,7 +120,7 @@ def build_manifest(root: Path) -> dict[str, Any]:
             "git_tree_sha": LATE_BATCH_TREE_SHA,
             "entry_count": late_count,
         },
-        "active_current_workflows": sorted(ACTIVE_CURRENT_WORKFLOW_NAMES),
+        "active_current_workflows": sorted(V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT),
     }
 
 
@@ -184,11 +188,11 @@ def verify(root: Path) -> list[str]:
     for entry in expected_v10["entries"]:
         source = root / entry["source_path"]
         source_name = Path(entry["source_path"]).name
-        if source.exists() and source_name not in ACTIVE_CURRENT_WORKFLOW_NAMES:
+        if source.exists() and source_name not in V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT:
             failures.append(f"SOURCE_STILL_ACTIVE:{entry['source_path']}")
     for path in late_files:
         source = root / ".github/workflows" / path.name
-        if source.exists() and path.name not in ACTIVE_CURRENT_WORKFLOW_NAMES:
+        if source.exists() and path.name not in V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT:
             failures.append(f"LATE_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
 
     active_dir = root / ".github/workflows"
@@ -228,9 +232,6 @@ def verify(root: Path) -> list[str]:
     if len(archived_infrastructure) != 2:
         failures.append("PUBLIC_INFRASTRUCTURE_V10_ARCHIVE_COUNT_NOT_2")
 
-    active_names = {path.name for path in active_dir.glob("*.yml")}
-    if active_names != ACTIVE_CURRENT_WORKFLOW_NAMES:
-        failures.append("ACTIVE_CURRENT_WORKFLOW_ALLOWLIST_DRIFT")
     return failures
 
 
