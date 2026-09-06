@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc4'
+VERSION='0.1.0-rc5'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='337ab6e1676be27c4c31a1204345d97fe8b08368c6e1cf5b361df99a6411723e'
+MANIFEST_SHA256='95a68159fc3c4cf30071fcbf9f07d0b23238b789dd194c2a3f41fed6032e331a'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 STATE='/etc/vf-node/state.env'
 
 if [[ -t 1 && "${NO_COLOR:-0}" != '1' ]]; then
-  R=$'\033[0m'; B=$'\033[1m'; RED=$'\033[91m'; GREEN=$'\033[92m'; YELLOW=$'\033[93m'; CYAN=$'\033[96m'
+  R=$'\033[0m'; B=$'\033[1m'
+  RED=$'\033[91m'; GREEN=$'\033[92m'; YELLOW=$'\033[93m'
+  BLUE=$'\033[94m'; MAGENTA=$'\033[95m'; CYAN=$'\033[96m'; GRAY=$'\033[90m'
 else
-  R=''; B=''; RED=''; GREEN=''; YELLOW=''; CYAN=''
+  R=''; B=''; RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; GRAY=''
 fi
 
 say()  { printf '%b\n' "$*"; }
@@ -20,6 +22,12 @@ ok()   { say "${GREEN}✓${R} $*"; }
 info() { say "${CYAN}●${R} $*"; }
 warn() { say "${YELLOW}⚠${R} $*"; }
 fail() { say "${RED}✗${R} $*" >&2; }
+
+pause_return() {
+  [[ -t 0 ]] || return 0
+  printf '\n按 Enter 返回菜单...'
+  read -r _ || true
+}
 
 write_entry() {
   rm -f "$ENTRY"
@@ -45,9 +53,15 @@ any_v2ray_present() {
   [[ -e /etc/v2ray/config.json || -x /usr/local/sbin/v2ray || -x /usr/bin/v2ray/v2ray ]] || command -v v2ray >/dev/null 2>&1
 }
 
+installed_version() {
+  if [[ -x "$ENTRY" ]]; then
+    NO_COLOR=1 "$ENTRY" --version 2>/dev/null | awk '{print $NF}' || true
+  fi
+}
+
 print_header() {
   say "${CYAN}┌──────────────────────────────────────────────────────────────┐${R}"
-  say "${CYAN}│${R}  ${B}P07 · VF Network Node${R}   ${VERSION}                           ${CYAN}│${R}"
+  say "${CYAN}│${R}  ${B}P07 · VF Network Node${R}   ${GRAY}${VERSION}${R}                           ${CYAN}│${R}"
   say "${CYAN}│${R}  VMess · mKCP · dtls   ${GREEN}长期稳定基线${R}                  ${CYAN}│${R}"
   say "${CYAN}└──────────────────────────────────────────────────────────────┘${R}"
   say
@@ -66,7 +80,7 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info '下载并校验公开 RC4 Manifest...'
+  info '下载并校验公开 RC5 Manifest...'
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
     fail 'Manifest 下载失败，已停止。'
@@ -92,7 +106,7 @@ install_runtime_files() {
     lib/patch_upstream_core.py
   )
 
-  info '下载 RC4 运行文件...'
+  info '下载 RC5 运行文件...'
   local f
   for f in "${files[@]}"; do
     mkdir -p "$tmp/pkg/$(dirname "$f")"
@@ -108,10 +122,10 @@ install_runtime_files() {
     sha256sum -c MANIFEST.sha256 >/dev/null
   ); then
     rm -rf "$tmp" "$stage"
-    fail 'RC4 文件 SHA256 校验失败，已停止。'
+    fail 'RC5 文件 SHA256 校验失败，已停止。'
     return 12
   fi
-  ok 'RC4 运行文件校验通过'
+  ok 'RC5 运行文件校验通过'
 
   info '安装 / 更新 VF Network Node 管理模块...'
   cp -a "$tmp/pkg/VERSION" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
@@ -140,10 +154,38 @@ install_runtime_files() {
   ok "VF Network Node ${VERSION} 管理模块已就绪"
 }
 
+post_install_actions() {
+  [[ -t 0 ]] || return 0
+  local choice=''
+  while :; do
+    say
+    say "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"
+    say "${B}${GREEN}节点已就绪 · 下一步${R}"
+    say "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${R}"
+    say
+    say "  ${CYAN}1. [管理]${R} 打开节点管理菜单"
+    say "  ${MAGENTA}2. [分享]${R} 再次显示分享链接"
+    say "  ${BLUE}3. [备份]${R} 立即备份节点配置"
+    say "  ${GRAY}0. [返回]${R} 回到一键主菜单"
+    say
+    printf '%b' "${B}请选择 [0-3]：${R}"
+    read -r choice || return 0
+    case "$choice" in
+      1) "$ENTRY" ;;
+      2) "$ENTRY" url; pause_return ;;
+      3) "$ENTRY" backup; pause_return ;;
+      0|'') return 0 ;;
+      *) warn '请输入 0-3。' ;;
+    esac
+  done
+}
+
 install_node() {
   if p07_installed; then
-    warn '这台服务器已经安装 P07 节点。'
-    say '请使用「进入节点管理」查看状态、分享、备份或卸载。'
+    local current
+    current="$(installed_version)"
+    warn "这台服务器已经安装 P07 节点${current:+（${current}）}。"
+    say '不用重装。可以直接进入节点管理。'
     return 3
   fi
 
@@ -167,22 +209,17 @@ install_node() {
     return 21
   fi
 
-  ok '节点安装与本机健康检查 PASS'
   say
-  say "以后直接输入：${B}vf-node${R}"
-  say '会进入彩色节点管理菜单。'
-
-  if [[ "${VF_NODE_INSTALLER_NO_SHARE:-0}" != '1' ]]; then
-    say
-    warn '下面的分享链接包含节点凭据，请只保存到你自己的客户端。'
-    "$ENTRY" share
-  fi
+  ok '节点安装与本机健康检查 PASS'
+  say "${GRAY}无需记命令；下面直接给你下一步。${R}"
+  post_install_actions
 }
 
 manage_node() {
   if p07_installed; then
     install_runtime_files || return $?
-    exec "$ENTRY"
+    "$ENTRY"
+    return 0
   fi
   if any_v2ray_present; then
     warn '检测到 V2Ray，但它不是当前 P07 管理节点。'
@@ -204,7 +241,7 @@ uninstall_node() {
     return 1
   fi
 
-  # Refresh only the P07 manager to RC4 first; do not reinstall/change V2Ray.
+  # Refresh only P07 management files first. Do not reinstall/change V2Ray.
   install_runtime_files || return $?
   "$ENTRY" uninstall
 }
@@ -214,25 +251,35 @@ menu() {
     clear 2>/dev/null || true
     print_header
     if p07_installed; then
-      say "状态：${GREEN}● 已安装${R}"
+      say "状态   ${GREEN}● 已安装 · $(installed_version)${R}"
     elif any_v2ray_present; then
-      say "状态：${YELLOW}● 检测到非 P07 V2Ray，受保护${R}"
+      say "状态   ${YELLOW}● 检测到非 P07 V2Ray · 受保护${R}"
     else
-      say "状态：${YELLOW}● 未安装${R}"
+      say "状态   ${GRAY}● 未安装${R}"
     fi
     say
-    say "  ${CYAN}1.${R} 安装稳定节点"
-    say "  ${CYAN}2.${R} 进入节点管理"
-    say "  ${RED}3.${R} 卸载节点"
-    say "  0. 退出"
+    say "  ${GREEN}1. [安装]${R} 安装稳定节点"
+    say "  ${CYAN}2. [管理]${R} 进入节点管理"
+    say "  ${RED}3. [危险]${R} 卸载节点"
+    say "  ${GRAY}0. [退出]${R} 退出"
     say
-    printf '请选择 [0-3]：'
+    printf '%b' "${B}请选择 [0-3]：${R}"
     local choice
     read -r choice || return 0
     case "$choice" in
-      1) install_node; say; read -r -p '按 Enter 返回菜单...' _ || true ;;
-      2) manage_node; say; read -r -p '按 Enter 返回菜单...' _ || true ;;
-      3) uninstall_node; say; read -r -p '按 Enter 返回菜单...' _ || true ;;
+      1)
+        if ! install_node; then pause_return; fi
+        ;;
+      2)
+        if ! manage_node; then pause_return; fi
+        ;;
+      3)
+        if uninstall_node; then
+          pause_return
+        else
+          pause_return
+        fi
+        ;;
       0) return 0 ;;
       *) warn '无效选择。'; sleep 1 ;;
     esac
@@ -257,6 +304,7 @@ case "${1:-}" in
 P07 · VF Network Node 一键入口
 
 交互运行：直接显示安装 / 管理 / 卸载菜单。
+安装成功：自动显示分享链接，再显示下一步菜单。
 非交互运行：默认执行安装。
 EOF
     ;;
