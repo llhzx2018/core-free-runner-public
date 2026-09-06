@@ -1,0 +1,98 @@
+name: P07 Network Node Package Gate
+
+on:
+  push:
+    paths:
+      - 'packages/p07-network-node/0.1.0-rc1/**'
+      - '.github/workflows/p07-network-node-package-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-identity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read package source identity
+        id: identity
+        run: |
+          set -euo pipefail
+          PKG='packages/p07-network-node/0.1.0-rc1'
+          test -f "$PKG/SOURCE_IDENTITY"
+          source "$PKG/SOURCE_IDENTITY"
+          test "$VERSION" = '0.1.0-rc1'
+          test "${#PRIVATE_SOURCE_SHA}" = 40
+          echo "sha=$PRIVATE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch exact private RC1 source
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          SRC_SHA: ${{ steps.identity.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}" || { echo 'VF_PRIVATE_READ_TOKEN is not configured'; exit 20; }
+          TMP="$(mktemp -d)"
+          curl -fL \
+            -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/llhzx2018/vf-server-ops/tarball/${SRC_SHA}" \
+            -o "$TMP/source.tar.gz"
+          tar -xzf "$TMP/source.tar.gz" -C "$TMP"
+          SRC_DIR="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'llhzx2018-vf-server-ops-*' | head -n1)"
+          test -n "$SRC_DIR"
+          mkdir -p .private-network-node
+          cp -a "$SRC_DIR/modules/network-node/." .private-network-node/
+
+      - name: Compare public runtime bytes to exact private RC1
+        run: |
+          set -euo pipefail
+          PKG='packages/p07-network-node/0.1.0-rc1'
+          SRC='.private-network-node'
+          files=(
+            VERSION
+            vf-node.sh
+            install.sh
+            status.sh
+            share.sh
+            backup.sh
+            uninstall.sh
+            lib/common.sh
+            lib/core-pin.env
+            lib/patch_upstream_core.py
+          )
+          for f in "${files[@]}"; do
+            cmp "$SRC/$f" "$PKG/$f"
+          done
+          echo 'P07_NETWORK_NODE_PUBLIC_BYTES_MATCH_PRIVATE_RC1=PASS'
+
+      - name: Runtime syntax and secret-surface checks
+        run: |
+          set -euo pipefail
+          PKG='packages/p07-network-node/0.1.0-rc1'
+          bash -n "$PKG/vf-node.sh" "$PKG/install.sh" "$PKG/status.sh" "$PKG/share.sh" "$PKG/backup.sh" "$PKG/uninstall.sh" "$PKG/lib/common.sh"
+          python3 -m py_compile "$PKG/lib/patch_upstream_core.py"
+          ! grep -R -nE '(VF_PRIVATE_READ_TOKEN|ghp_|github_pat_|BEGIN .*PRIVATE KEY)' "$PKG" || exit 31
+          grep -Fq '0.1.0-rc1' "$PKG/VERSION"
+          grep -Fq 'PRIVATE_SOURCE_SHA=6902f834365235399605c632c8cfd85bc0aaf839' "$PKG/SOURCE_IDENTITY"
+          echo 'P07_NETWORK_NODE_PUBLIC_SECRET_SURFACE=PASS'
+
+      - name: Emit runtime SHA256 manifest
+        run: |
+          set -euo pipefail
+          cd packages/p07-network-node/0.1.0-rc1
+          echo 'P07_NETWORK_NODE_MANIFEST_BEGIN'
+          sha256sum \
+            VERSION \
+            vf-node.sh \
+            install.sh \
+            status.sh \
+            share.sh \
+            backup.sh \
+            uninstall.sh \
+            lib/common.sh \
+            lib/core-pin.env \
+            lib/patch_upstream_core.py
+          echo 'P07_NETWORK_NODE_MANIFEST_END'
