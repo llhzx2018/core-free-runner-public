@@ -21,14 +21,18 @@ if command -v apt-get >/dev/null 2>&1; then
   command -v tar >/dev/null 2>&1 || missing+=(tar)
   command -v python3 >/dev/null 2>&1 || missing+=(python3)
   command -v sha256sum >/dev/null 2>&1 || missing+=(coreutils)
+  command -v ssh >/dev/null 2>&1 || missing+=(openssh-client)
+  command -v ssh-copy-id >/dev/null 2>&1 || missing+=(openssh-client)
+  command -v ssh-keygen >/dev/null 2>&1 || missing+=(openssh-client)
   if ((${#missing[@]})); then
+    mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk '!seen[$0]++')
     say "自动安装依赖：${missing[*]}"
     apt-get update -y
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   fi
 fi
 
-for cmd in curl tar python3 sha256sum readlink; do
+for cmd in curl tar python3 sha256sum readlink ssh ssh-copy-id ssh-keygen; do
   command -v "$cmd" >/dev/null 2>&1 || fail "缺少依赖：$cmd"
 done
 
