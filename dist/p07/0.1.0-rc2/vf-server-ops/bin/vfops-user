@@ -10,6 +10,7 @@ BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
 INV_FILE=""
 SELECTED_DOMAIN=""
 SELECTED_BACKUP=""
+SSH_PREFLIGHT_STATE="UNKNOWN"
 
 cleanup() {
   [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true
@@ -167,6 +168,30 @@ show_server() {
   pause
 }
 
+backup_result_card() {
+  local package="$1" fallback_domain="$2" size="未知"
+  command -v du >/dev/null 2>&1 && size="$(du -sh "$package" 2>/dev/null | awk '{print $1}' || printf '未知')"
+  python3 - "$package" "$fallback_domain" "$size" <<'PY'
+import json,sys
+from pathlib import Path
+package=Path(sys.argv[1])
+fallback=sys.argv[2]
+size=sys.argv[3]
+try:
+    d=json.loads((package/'manifest.json').read_text(encoding='utf-8'))
+except Exception:
+    d={}
+domain=(d.get('site') or {}).get('domain') if isinstance(d.get('site'),dict) else None
+print('\n备份完成 ✓')
+print(f"网站：{domain or fallback}")
+print(f"备份编号：{d.get('backup_id','UNKNOWN')}")
+print(f"大小：{size}")
+print('状态：已验证，可恢复')
+print('保存：本机')
+print(f"位置：{package}")
+PY
+}
+
 backup_site() {
   printf '\n[P07] 正在读取 CloudPanel 网站...\n'
   local rc
@@ -183,8 +208,8 @@ backup_site() {
   printf '备份位置：%s\n' "$BACKUP_DIR"
   printf '开始备份？[Y/n]：'
   local yn output
-  read -r yn || return
-  [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]] || return
+  read -r yn || return 0
+  [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]] || return 0
   printf '\n[P07] 正在创建并校验备份...\n'
   if output="$("$CORE" backup --site "$SELECTED_DOMAIN" --output-dir "$BACKUP_DIR" 2>&1)"; then
     rc=0
@@ -192,14 +217,11 @@ backup_site() {
     rc=$?
     friendly_failure "备份没有完成。" "$output"
     pause
-    return
+    return 0
   fi
   local path
   path="$(printf '%s\n' "$output" | tail -n1)"
-  printf '\n备份完成 ✓\n'
-  printf '网站：%s\n' "$SELECTED_DOMAIN"
-  printf '备份：%s\n' "$path"
-  printf '完整性校验：PASS\n'
+  backup_result_card "$path" "$SELECTED_DOMAIN"
   pause
 }
 
@@ -266,22 +288,59 @@ ipaddress.ip_address(sys.argv[1])
 PY
 }
 
+ssh_state_line() {
+  printf '连接状态：%s\n' "$1"
+}
+
 target_ssh_preflight() {
   local target_ip="$1" domain="$2" output rc remote_cmd
+  SSH_PREFLIGHT_STATE="UNKNOWN"
   command -v ssh >/dev/null 2>&1 || {
+    SSH_PREFLIGHT_STATE="UNREACHABLE"
     printf '\n新服务器连接未准备好。\n'
-    printf '原因：这台服务器没有 SSH 客户端。\n'
+    ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf '原因：这台源服务器缺少 SSH 客户端。\n'
     printf '迁移尚未开始，也没有创建迁移备份。\n'
-    return 1
+    return 13
   }
   if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    SSH_PREFLIGHT_STATE="UNREACHABLE"
     printf '\n网站标识无法安全用于迁移预检。\n'
+    ssh_state_line "$SSH_PREFLIGHT_STATE"
     printf '迁移尚未开始，也没有创建迁移备份。\n'
-    return 1
+    return 13
   fi
 
-  remote_cmd="set -eu; command -v clpctl >/dev/null 2>&1; test -f /home/clp/htdocs/app/data/db.sq3; for p in /home/*/htdocs/${domain}; do [ ! -e \"\$p\" ] || exit 42; done"
-  printf '\n[P07] 先检查新服务器连接与目标冲突（只读，不创建网站）...\n'
+  printf '\n[P07] 正在检查 SSH、CloudPanel 与同名网站冲突...\n'
+  if output="$(ssh \
+    -p 22 \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 \
+    -o ServerAliveCountMax=1 \
+    "root@${target_ip}" \
+    "printf P07_SSH_READY" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+    if printf '%s\n' "$output" | grep -Eqi 'permission denied|publickey|no supported authentication methods'; then
+      SSH_PREFLIGHT_STATE="NEEDS_KEY_SETUP"
+      printf '\nSOURCE 还没有获得 TARGET 的 SSH Key 登录权限。\n'
+      ssh_state_line "$SSH_PREFLIGHT_STATE"
+      printf '这通常只需要准备一次。\n'
+      printf '迁移尚未开始，也没有创建迁移备份。\n'
+      return 10
+    fi
+    SSH_PREFLIGHT_STATE="UNREACHABLE"
+    printf '\n无法连接新服务器：%s\n' "$target_ip"
+    ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf '请检查 IP、22 端口、防火墙或服务器是否在线。\n'
+    printf '迁移尚未开始，也没有创建迁移备份。\n'
+    return 13
+  fi
+
+  remote_cmd="set -eu; command -v clpctl >/dev/null 2>&1 || exit 43; test -f /home/clp/htdocs/app/data/db.sq3 || exit 43; for p in /home/*/htdocs/${domain}; do [ ! -e \"\$p\" ] || exit 42; done"
   if output="$(ssh \
     -p 22 \
     -o BatchMode=yes \
@@ -295,20 +354,69 @@ target_ssh_preflight() {
   else
     rc=$?
     if [[ $rc -eq 42 ]]; then
+      SSH_PREFLIGHT_STATE="TARGET_SITE_CONFLICT"
       printf '\n新服务器已经存在同名网站目录：%s\n' "$domain"
+      ssh_state_line "$SSH_PREFLIGHT_STATE"
       printf 'P07 不会覆盖已有站点。\n'
       printf '迁移尚未开始，也没有创建迁移备份。\n'
-      return 1
+      return 12
     fi
-    printf '\n新服务器还没有准备好。\n'
-    printf 'P07 无法使用 SSH Key 从这台服务器连接到 %s，或目标 CloudPanel 未检测到。\n' "$target_ip"
+    if [[ $rc -eq 43 ]]; then
+      SSH_PREFLIGHT_STATE="TARGET_NOT_CLOUDPANEL"
+      printf '\n新服务器可以 SSH 登录，但没有检测到可用的 CloudPanel。\n'
+      ssh_state_line "$SSH_PREFLIGHT_STATE"
+      printf '请先完成 TARGET 的 CloudPanel 安装。\n'
+      printf '迁移尚未开始，也没有创建迁移备份。\n'
+      return 11
+    fi
+    SSH_PREFLIGHT_STATE="UNREACHABLE"
+    printf '\n新服务器检查中断。\n'
+    ssh_state_line "$SSH_PREFLIGHT_STATE"
     printf '迁移尚未开始，也没有创建迁移备份。\n'
-    printf '请先确认：SOURCE 可以免密 SSH 登录 TARGET，且 TARGET 已安装 CloudPanel。\n'
-    return 1
+    return 13
   fi
-  printf '新服务器连接：READY ✓\n'
+
+  SSH_PREFLIGHT_STATE="READY"
+  ssh_state_line "$SSH_PREFLIGHT_STATE"
+  printf 'SSH Key：READY ✓\n'
   printf 'CloudPanel：READY ✓\n'
   printf '同名网站冲突：未发现 ✓\n'
+  return 0
+}
+
+prepare_target_ssh_key() {
+  local target_ip="$1" ssh_dir="${HOME:-/root}/.ssh"
+  command -v ssh-copy-id >/dev/null 2>&1 || {
+    printf '\n无法自动准备连接：缺少 ssh-copy-id。\n'
+    printf '请安装 openssh-client 后重新进入迁移。\n'
+    return 1
+  }
+  command -v ssh-keygen >/dev/null 2>&1 || {
+    printf '\n无法自动准备连接：缺少 ssh-keygen。\n'
+    printf '请安装 openssh-client 后重新进入迁移。\n'
+    return 1
+  }
+
+  mkdir -p "$ssh_dir"
+  chmod 700 "$ssh_dir"
+  if ! compgen -G "$ssh_dir/id_*.pub" >/dev/null; then
+    printf '\n[P07] 正在为这台 SOURCE 生成 SSH Key...\n'
+    ssh-keygen -q -t ed25519 -f "$ssh_dir/id_ed25519" -N '' -C 'p07-vf-server-ops' || {
+      printf 'SSH Key 生成失败。\n'
+      return 1
+    }
+    chmod 600 "$ssh_dir/id_ed25519"
+    chmod 644 "$ssh_dir/id_ed25519.pub"
+    printf 'SSH Key：已生成 ✓\n'
+  fi
+
+  printf '\n接下来如果系统询问 root 密码，请输入 TARGET 的 root 密码。\n'
+  printf '这是系统 ssh-copy-id 的临时输入；P07 不读取、不保存、不记录密码。\n'
+  if ! ssh-copy-id -o StrictHostKeyChecking=accept-new "root@${target_ip}"; then
+    printf '\n连接权限没有准备完成。迁移仍未开始。\n'
+    return 1
+  fi
+  printf '\nSSH Key 已发送到 TARGET ✓\n'
   return 0
 }
 
@@ -346,7 +454,7 @@ restore_backup() {
     rc=$?
     friendly_failure "恢复前检查没有通过。" "$plan" "服务器没有被修改。"
     pause
-    return
+    return 0
   fi
   printf '恢复前检查：PASS ✓\n'
   identity="$(backup_identity "$SELECTED_BACKUP")"
@@ -354,8 +462,8 @@ restore_backup() {
   printf '将恢复网站：%s\n' "$domain"
   printf '仅允许恢复到全新的 CloudPanel 站点；不会覆盖已有站点，不会改 DNS。\n'
   printf '继续恢复？[y/N]：'
-  read -r confirm || return
-  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return; }
+  read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return 0; }
 
   printf '\n[P07] 正在恢复网站数据...\n'
   if restore_output="$("$CORE" restore apply-new-site --package "$SELECTED_BACKUP" --confirm "RESTORE_NEW_SITE:${domain}:${backup_id}" 2>&1)"; then
@@ -364,7 +472,7 @@ restore_backup() {
     rc=$?
     friendly_failure "网站数据恢复没有完成。" "$restore_output"
     pause
-    return
+    return 0
   fi
   printf '网站数据：已恢复 ✓\n'
 
@@ -376,7 +484,7 @@ restore_backup() {
     friendly_failure "网站数据已恢复，但运行环境检查没有完成。" "$runtime_plan" "网站数据已保留；DNS 没有修改。"
     printf '最终状态：NEEDS_RUNTIME_CHECK\n'
     pause
-    return
+    return 0
   fi
 
   runtime_info="$(runtime_plan_summary "$runtime_plan")"
@@ -390,7 +498,7 @@ restore_backup() {
     printf '最终状态：NEEDS_MANUAL_RUNTIME_GATE\n'
     printf 'DNS 没有修改。\n'
     pause
-    return
+    return 0
   fi
 
   printf '运行环境检查：READY ✓\n'
@@ -404,7 +512,7 @@ restore_backup() {
     friendly_failure "网站数据已恢复，但 Cron / PM2 没有完全恢复。" "$runtime_output" "网站数据已保留；DNS 没有修改。"
     printf '最终状态：NEEDS_RUNTIME_ATTENTION\n'
     pause
-    return
+    return 0
   fi
 
   printf '\n恢复完成 ✓\n'
@@ -427,42 +535,68 @@ migrate_site() {
     return 0
   fi
 
-  local target_ip confirm output package identity domain backup_id migration_output
+  local target_ip confirm output package identity domain backup_id migration_output preflight_rc setup_choice
   printf '\n迁移网站：%s\n' "$SELECTED_DOMAIN"
   printf '新服务器 IP（输入 0 返回）：'
-  read -r target_ip || return
-  [[ "$target_ip" == "0" ]] && return
+  read -r target_ip || return 0
+  [[ "$target_ip" == "0" ]] && return 0
   if [[ -z "$target_ip" ]] || ! validate_ip "$target_ip"; then
     printf '请输入有效的 IPv4 / IPv6 地址。\n'
     pause
-    return
+    return 0
   fi
 
-  if ! target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
-    pause
-    return
+  printf '\n[1/3] 检查新服务器...\n'
+  if target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
+    preflight_rc=0
+  else
+    preflight_rc=$?
+    if [[ $preflight_rc -eq 10 ]]; then
+      printf '\n  1. 现在准备 SOURCE → TARGET 连接\n'
+      printf '  0. 返回\n'
+      printf '请选择 [0-1]：'
+      read -r setup_choice || return 0
+      if [[ "$setup_choice" == "1" ]]; then
+        if prepare_target_ssh_key "$target_ip"; then
+          printf '\n[P07] 重新检查新服务器...\n'
+          if ! target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
+            pause
+            return 0
+          fi
+        else
+          pause
+          return 0
+        fi
+      else
+        return 0
+      fi
+    else
+      pause
+      return 0
+    fi
   fi
 
   printf '\nP07 将：创建迁移备份 → SSH 传输 → 新站恢复 → Runtime → 技术验证。\n'
   printf '不会改 DNS，不会删除旧服务器。\n'
   printf '开始迁移？[y/N]：'
-  read -r confirm || return
-  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return; }
+  read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return 0; }
 
-  printf '\n[1/2] 创建并验证迁移备份...\n'
+  printf '\n[2/3] 创建并验证迁移备份...\n'
   if output="$("$CORE" backup --site "$SELECTED_DOMAIN" --kind pre_migration --output-dir "$BACKUP_DIR" 2>&1)"; then
     rc=0
   else
     rc=$?
     friendly_failure "迁移备份没有完成。" "$output"
     pause
-    return
+    return 0
   fi
   package="$(printf '%s\n' "$output" | tail -n1)"
   identity="$(backup_identity "$package")"
   IFS=$'\t' read -r domain backup_id <<<"$identity"
 
-  printf '[2/2] 正在连接新服务器并迁移...\n'
+  printf '\n[3/3] 正在传输、恢复 Runtime 并做技术验证...\n'
+  printf '这一步可能需要一些时间，请以最终结果为准。\n'
   if migration_output="$("$CORE" migrate transfer-new-site \
     --package "$package" \
     --target-host "$target_ip" \
@@ -473,10 +607,12 @@ migrate_site() {
     rc=0
     printf '\n迁移技术验证完成 ✓\n'
     printf '网站：%s\n' "$domain"
-    printf '目标：%s\n' "$target_ip"
-    printf '技术切换条件：READY\n'
+    printf '新服务器：%s · READY\n' "$target_ip"
+    printf '迁移技术验证：PASS\n'
+    printf '当前网站流量：仍在旧服务器\n'
     printf 'DNS：未修改\n'
     printf '旧服务器：保留\n'
+    printf '下一步：确认新服务器网站无误后，再单独决定 DNS 切换。\n'
   else
     friendly_failure "迁移没有完成。" "$migration_output" "源网站和迁移备份仍保留；DNS 没有修改。"
   fi
