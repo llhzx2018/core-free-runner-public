@@ -44,7 +44,7 @@ show_header() {
 show_menu() {
   show_header
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_CYAN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_CYAN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
@@ -271,7 +271,7 @@ Usage:
   p07-toolbox
 
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
-2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}（测试中）
+2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}（可用）
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（测试中）
 4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（测试中）
 
