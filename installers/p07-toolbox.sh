@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-preview3"
+VERSION="0.1.0-preview4"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
+
+VPS_AUDIT_EXPECTED="2.0.0-rc3-zh"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/e765c5547a4a92972428042c8594f9359346d3e6/experiments/p07-vps-audit-v20-rc3.sh"
+VPS_AUDIT_SHA256="53b30d3616d40f8e64780e97486e36227afb5c07b651923f9205f2906c860951"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -24,7 +28,7 @@ show_header() {
 show_menu() {
   show_header
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray                    ${C_GREEN}可用${C_RESET}"
-  say "  ${C_YELLOW}2.${C_RESET} 功能模块 B                         ${C_YELLOW}待接入${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                        ${C_GREEN}可用${C_RESET}"
   say "  ${C_YELLOW}3.${C_RESET} 功能模块 C                         ${C_YELLOW}待接入${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
@@ -54,6 +58,57 @@ run_network_node() {
   return "$rc"
 }
 
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
+run_vps_audit() {
+  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
+
+  local tmp actual_sha version rc
+  tmp="$(mktemp -t p07-vps-audit.XXXXXX)"
+  chmod 700 "$tmp"
+
+  if ! curl -fsSL "$VPS_AUDIT_URL" -o "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ VPS 验机模块下载失败。${C_RESET}" >&2
+    return 4
+  fi
+
+  actual_sha="$(sha256_file "$tmp" 2>/dev/null || true)"
+  if [[ -z "$actual_sha" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}✗ 当前系统缺少 SHA256 校验工具，已停止执行。${C_RESET}" >&2
+    return 5
+  fi
+  if [[ "$actual_sha" != "$VPS_AUDIT_SHA256" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}✗ VPS 验机模块完整性校验失败，已停止执行。${C_RESET}" >&2
+    return 6
+  fi
+
+  version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
+  if [[ "$version" != "$VPS_AUDIT_EXPECTED" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}✗ VPS 验机模块版本不匹配，已停止执行。${C_RESET}" >&2
+    return 7
+  fi
+
+  set +e
+  bash "$tmp"
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  return "$rc"
+}
+
 pending_slot() {
   say
   say "${C_YELLOW}⚠ $1 尚未接入。${C_RESET}"
@@ -73,7 +128,14 @@ main_menu() {
         set -e
         [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 网络节点模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
         ;;
-      2) pending_slot "功能模块 B"; pause_menu ;;
+      2)
+        set +e
+        run_vps_audit
+        rc=$?
+        set -e
+        [[ $rc -eq 0 ]] || say "${C_YELLOW}⚠ VPS 一键验机模块返回退出码 ${rc}。${C_RESET}"
+        pause_menu
+        ;;
       3) pending_slot "功能模块 C"; pause_menu ;;
       0) return 0 ;;
       *) say "${C_YELLOW}⚠ 无效选择，请输入 0-3。${C_RESET}" ;;
@@ -91,7 +153,7 @@ Usage:
   p07-toolbox
 
 1. 网络节点 / V2Ray
-2. 功能模块 B（待接入）
+2. VPS 一键验机
 3. 功能模块 C（待接入）
 EOF
     ;;
