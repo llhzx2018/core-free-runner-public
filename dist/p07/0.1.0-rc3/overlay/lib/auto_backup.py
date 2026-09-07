@@ -23,13 +23,11 @@ STATE_SCHEMA = "vf-server-ops.auto-backup-state.v1"
 DOMAIN_RE = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$")
 TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 SECRET_KEY_RE = re.compile(r"(?:password|passwd|token|client_secret|access_key|secret_key|private_key|oauth)", re.I)
-BACKUP_JOB_RE = re.compile(
-    r"(?:backup|snapshot|mysqldump|mariadb-dump|pg_dump|restic|borg|duplicity|rclone|cloudpanel|clpctl)",
-    re.I,
-)
+BACKUP_JOB_RE = re.compile(r"(?:backup|snapshot|mysqldump|mariadb-dump|pg_dump|restic|borg|duplicity|rclone|cloudpanel|clpctl)", re.I)
 BUSY_PROCESS_RE = re.compile(
-    r"(?:vfops(?:-user)?\s+(?:backup|restore|migrate)|vf-server-ops.*(?:backup|restore|migrate)|"
-    r"restore_new\.py|migrate_new\.py|transport\.py|auto_backup\.py\s+run)",
+    r"(?:vfops(?:-user)?\s+(?:backup|restore|migrate|storage)|vf-server-ops.*(?:backup|restore|migrate|storage)|"
+    r"restore_new\.py|migrate\.py|transport\.py|storage\.py|auto_backup\.py\s+run|"
+    r"cloudpanel.*backup|clpctl.*backup|mysqldump|mariadb-dump|pg_dump|restic|borg|duplicity)",
     re.I,
 )
 REMOTE_TARGETS = ["google", "b2"]
@@ -66,8 +64,8 @@ def _secret_paths(value: Any, prefix: str = "") -> list[str]:
                 found.append(path)
             found.extend(_secret_paths(child, path))
     elif isinstance(value, list):
-        for index, child in enumerate(value):
-            found.extend(_secret_paths(child, f"{prefix}[{index}]"))
+        for i, child in enumerate(value):
+            found.extend(_secret_paths(child, f"{prefix}[{i}]"))
     return found
 
 
@@ -88,7 +86,7 @@ def validate_config(path: Path) -> dict[str, Any]:
     sites = payload.get("sites")
     if not isinstance(sites, list) or not sites:
         raise AutoBackupError("sites must be a non-empty list")
-    normalized: list[str] = []
+    normalized = []
     for site in sites:
         if not isinstance(site, str) or not DOMAIN_RE.fullmatch(site) or site.startswith("*."):
             raise AutoBackupError(f"invalid site domain: {site!r}")
@@ -98,9 +96,6 @@ def validate_config(path: Path) -> dict[str, Any]:
     daily_at = payload.get("daily_at")
     if not isinstance(daily_at, str) or not TIME_RE.fullmatch(daily_at):
         raise AutoBackupError("daily_at must be HH:MM")
-    storage_config = _absolute(str(payload.get("storage_config", "")), "storage_config")
-    local_backup_dir = _absolute(str(payload.get("local_backup_dir", "")), "local_backup_dir")
-    source_root = _absolute(str(payload.get("source_root", "/")), "source_root")
     if payload.get("remote_targets") != REMOTE_TARGETS:
         raise AutoBackupError("remote_targets must be exactly ['google', 'b2'] for RC3 dual-copy mode")
     keep_last = payload.get("local_keep_last", 7)
@@ -114,9 +109,9 @@ def validate_config(path: Path) -> dict[str, Any]:
         "enabled": enabled,
         "sites": normalized,
         "daily_at": daily_at,
-        "source_root": source_root,
-        "local_backup_dir": local_backup_dir,
-        "storage_config": storage_config,
+        "source_root": _absolute(str(payload.get("source_root", "/")), "source_root"),
+        "local_backup_dir": _absolute(str(payload.get("local_backup_dir", "")), "local_backup_dir"),
+        "storage_config": _absolute(str(payload.get("storage_config", "")), "storage_config"),
         "remote_targets": list(REMOTE_TARGETS),
         "local_keep_last": keep_last,
         "manual_backups_protected": True,
@@ -128,9 +123,9 @@ def _atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     tmp = path.with_name(path.name + ".tmp")
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(text)
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
     os.chmod(tmp, mode)
@@ -139,7 +134,7 @@ def _atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None
 
 
 def configure(config_path: Path, sites: list[str], daily_at: str, storage_config: str, backup_dir: str, keep_last: int) -> dict[str, Any]:
-    payload = {
+    _atomic_json(config_path, {
         "schema": CONFIG_SCHEMA,
         "enabled": True,
         "sites": sites,
@@ -150,33 +145,27 @@ def configure(config_path: Path, sites: list[str], daily_at: str, storage_config
         "remote_targets": list(REMOTE_TARGETS),
         "local_keep_last": keep_last,
         "manual_backups_protected": True,
-    }
-    _atomic_json(config_path, payload)
+    })
     return validate_config(config_path)
 
 
 def storage_structure(config: dict[str, Any]) -> dict[str, Any]:
-    storage_path = Path(config["storage_config"])
-    if not storage_path.is_file():
-        raise AutoBackupError(f"storage config not found: {storage_path}")
-    raw = storage_engine.load_json(storage_path)
-    accounts = storage_engine.accounts_from_config(raw)
+    path = Path(config["storage_config"])
+    if not path.is_file():
+        raise AutoBackupError(f"storage config not found: {path}")
+    accounts = storage_engine.accounts_from_config(storage_engine.load_json(path))
     google = [a for a in accounts if a["enabled"] and a["provider"] == "google"]
     b2 = [a for a in accounts if a["enabled"] and a["provider"] == "b2"]
     if not google:
         raise AutoBackupError("no enabled Google encrypted backup target configured")
     if not b2:
         raise AutoBackupError("no enabled Backblaze B2 encrypted disaster-recovery target configured")
-    return {
-        "google_accounts": [a["id"] for a in google],
-        "b2_accounts": [a["id"] for a in b2],
-        "dual_remote_configured": True,
-    }
+    return {"google_accounts": [a["id"] for a in google], "b2_accounts": [a["id"] for a in b2], "dual_remote_configured": True}
 
 
 def _time_minutes(value: str) -> int:
-    hour, minute = value.split(":")
-    return int(hour) * 60 + int(minute)
+    h, m = value.split(":")
+    return int(h) * 60 + int(m)
 
 
 def _minute_distance(a: int, b: int) -> int:
@@ -190,52 +179,37 @@ def _iter_cron_files(extra_roots: Iterable[Path] | None = None) -> list[Path]:
     dirs = [Path("/etc/cron.d"), Path("/var/spool/cron/crontabs")]
     if extra_roots:
         for root in extra_roots:
-            if root.is_dir():
-                dirs.append(root)
-            else:
-                candidates.append(root)
-    for path in candidates:
-        if path.is_file():
-            files.append(path)
+            (dirs if root.is_dir() else candidates).append(root)
+    files.extend(path for path in candidates if path.is_file())
     for directory in dirs:
         if not directory.is_dir():
             continue
         try:
-            for path in directory.iterdir():
-                if path.is_file():
-                    files.append(path)
+            files.extend(path for path in directory.iterdir() if path.is_file())
         except OSError:
-            continue
-    unique: dict[str, Path] = {}
-    for path in files:
-        unique[str(path.resolve())] = path
-    return list(unique.values())
+            pass
+    return list({str(path.resolve()): path for path in files}.values())
 
 
 def _parse_exact_cron(line: str) -> tuple[int, int, str] | None:
     stripped = line.strip()
-    if not stripped or stripped.startswith("#") or stripped.startswith("@") or "=" in stripped.split()[0]:
+    if not stripped or stripped.startswith(("#", "@")) or "=" in stripped.split()[0]:
         return None
     parts = stripped.split()
-    if len(parts) < 6:
+    if len(parts) < 6 or not parts[0].isdigit() or not parts[1].isdigit():
         return None
-    minute, hour = parts[0], parts[1]
-    if not minute.isdigit() or not hour.isdigit():
-        return None
-    m, h = int(minute), int(hour)
+    m, h = int(parts[0]), int(parts[1])
     if not 0 <= m <= 59 or not 0 <= h <= 23:
         return None
-    command = " ".join(parts[5:])
-    return h, m, command
+    return h, m, " ".join(parts[5:])
 
 
 def schedule_collisions(daily_at: str, cron_files: list[Path] | None = None, window: int = COLLISION_WINDOW_MINUTES) -> dict[str, Any]:
     if not TIME_RE.fullmatch(daily_at):
         raise AutoBackupError("daily_at must be HH:MM")
     requested = _time_minutes(daily_at)
-    collisions: list[dict[str, Any]] = []
-    files = cron_files if cron_files is not None else _iter_cron_files()
-    for path in files:
+    jobs: list[dict[str, Any]] = []
+    for path in (cron_files if cron_files is not None else _iter_cron_files()):
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
@@ -247,21 +221,18 @@ def schedule_collisions(daily_at: str, cron_files: list[Path] | None = None, win
             if not parsed:
                 continue
             hour, minute, command = parsed
-            if not BACKUP_JOB_RE.search(command):
-                continue
-            scheduled = hour * 60 + minute
-            distance = _minute_distance(requested, scheduled)
-            if distance <= window:
-                collisions.append({
-                    "path": str(path),
-                    "line": line_no,
-                    "scheduled_at": f"{hour:02d}:{minute:02d}",
-                    "distance_minutes": distance,
-                    "command_class": "BACKUP_LIKE",
-                })
-    occupied = {_time_minutes(item["scheduled_at"]) for item in collisions}
+            if BACKUP_JOB_RE.search(command):
+                jobs.append({"path": str(path), "line": line_no, "scheduled_at": f"{hour:02d}:{minute:02d}", "minutes": hour * 60 + minute, "command_class": "BACKUP_LIKE"})
+    collisions = []
+    for job in jobs:
+        distance = _minute_distance(requested, job["minutes"])
+        if distance <= window:
+            item = {k: v for k, v in job.items() if k != "minutes"}
+            item["distance_minutes"] = distance
+            collisions.append(item)
     recommended = requested
     if collisions:
+        occupied = [job["minutes"] for job in jobs]
         for offset in range(45, 361, 15):
             candidate = (requested + offset) % 1440
             if all(_minute_distance(candidate, item) > window for item in occupied):
@@ -280,48 +251,41 @@ def schedule_collisions(daily_at: str, cron_files: list[Path] | None = None, win
 
 
 def _busy_processes(proc_root: Path = Path("/proc")) -> list[dict[str, Any]]:
-    busy: list[dict[str, Any]] = []
-    current = os.getpid()
+    busy = []
     if not proc_root.is_dir():
         return busy
+    current = os.getpid()
     for item in proc_root.iterdir():
         if not item.name.isdigit() or int(item.name) == current:
             continue
         try:
-            raw = (item / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            cmd = (item / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
         except OSError:
             continue
-        if raw and BUSY_PROCESS_RE.search(raw):
-            busy.append({"pid": int(item.name), "class": "P07_BACKUP_RESTORE_MIGRATION"})
+        if cmd and BUSY_PROCESS_RE.search(cmd):
+            busy.append({"pid": int(item.name), "class": "BACKUP_RESTORE_MIGRATION_OR_STORAGE"})
     return busy
 
 
-def _write_state(state_file: Path, status: str, **extra: Any) -> None:
-    payload: dict[str, Any] = {
-        "schema": STATE_SCHEMA,
-        "status": status,
-        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-    }
+def _write_state(path: Path, status: str, **extra: Any) -> None:
+    payload = {"schema": STATE_SCHEMA, "status": status, "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     payload.update(extra)
-    _atomic_json(state_file, payload)
+    _atomic_json(path, payload)
 
 
-def _read_state(state_file: Path) -> dict[str, Any] | None:
+def _read_state(path: Path) -> dict[str, Any] | None:
     try:
-        payload = json.loads(state_file.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) and payload.get("schema") == STATE_SCHEMA else None
 
 
-def _created_at(package_dir: Path) -> dt.datetime:
+def _created_at(path: Path) -> dt.datetime:
     try:
-        manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
-        raw = manifest.get("created_at")
-        parsed = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=dt.timezone.utc)
-        return parsed.astimezone(dt.timezone.utc)
+        manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        parsed = dt.datetime.fromisoformat(str(manifest.get("created_at")).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=parsed.tzinfo or dt.timezone.utc).astimezone(dt.timezone.utc)
     except Exception:
         return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
 
@@ -336,18 +300,18 @@ def _verified_automatic_for_domain(path: Path, domain: str) -> bool:
     return manifest.get("backup_kind") == "automatic" and site.get("domain") == domain and verification.get("status") == "PASS"
 
 
-def prune_local(backup_root: Path, domain: str, keep_last: int) -> list[str]:
-    if not backup_root.is_dir():
+def prune_local(root: Path, domain: str, keep_last: int) -> list[str]:
+    if not root.is_dir():
         return []
-    candidates = [p for p in backup_root.iterdir() if p.is_dir() and not p.is_symlink() and _verified_automatic_for_domain(p, domain)]
-    candidates.sort(key=_created_at, reverse=True)
-    deleted: list[str] = []
-    root = backup_root.resolve()
-    for path in candidates[keep_last:]:
-        resolved = path.resolve()
-        if resolved.parent != root:
+    items = [p for p in root.iterdir() if p.is_dir() and not p.is_symlink() and _verified_automatic_for_domain(p, domain)]
+    items.sort(key=_created_at, reverse=True)
+    deleted = []
+    resolved_root = root.resolve()
+    for path in items[keep_last:]:
+        target = path.resolve()
+        if target.parent != resolved_root:
             continue
-        shutil.rmtree(resolved)
+        shutil.rmtree(target)
         deleted.append(path.name)
     return deleted
 
@@ -363,178 +327,123 @@ def _push_one(config: dict[str, Any], package: Path, target: str, rclone: str) -
 
 def _execute_run(config: dict[str, Any], clpctl: str, rclone: str) -> dict[str, Any]:
     storage = storage_structure(config)
-    backup_root = Path(config["local_backup_dir"])
-    backup_root.mkdir(parents=True, exist_ok=True)
-    os.chmod(backup_root, 0o700)
-    results: list[dict[str, Any]] = []
-    overall_pass = True
+    root = Path(config["local_backup_dir"])
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    results = []
+    overall = True
     for domain in config["sites"]:
         record: dict[str, Any] = {"domain": domain, "local_backup": "NOT_RUN", "google": "NOT_RUN", "b2": "NOT_RUN", "dual_remote": "NOT_RUN", "local_prune": "NOT_RUN"}
         try:
-            package = package_engine.build_backup(Path(config["source_root"]), domain, backup_root, clpctl, "automatic")
-            record["local_backup"] = "PASS"
-            record["backup_id"] = package.name
+            package = package_engine.build_backup(Path(config["source_root"]), domain, root, clpctl, "automatic")
+            record.update(local_backup="PASS", backup_id=package.name)
         except (RuntimeError, OSError) as exc:
             record.update(status="FAIL", error_class=exc.__class__.__name__, local_prune="SKIPPED_ON_FAILURE")
-            overall_pass = False
+            overall = False
             results.append(record)
             continue
-        google_status, google_account, google_error = _push_one(config, package, "google", rclone)
-        b2_status, b2_account, b2_error = _push_one(config, package, "b2", rclone)
-        record.update(google=google_status, google_account_id=google_account, b2=b2_status, b2_account_id=b2_account)
-        if google_error:
-            record["google_error_class"] = google_error
-        if b2_error:
-            record["b2_error_class"] = b2_error
-        if google_status == "PASS" and b2_status == "PASS":
-            record["dual_remote"] = "PASS"
-            record["deleted_old_local_automatic"] = prune_local(backup_root, domain, config["local_keep_last"])
-            record["local_prune"] = "PASS"
-            record["status"] = "PASS"
+        g_status, g_id, g_err = _push_one(config, package, "google", rclone)
+        b_status, b_id, b_err = _push_one(config, package, "b2", rclone)
+        record.update(google=g_status, google_account_id=g_id, b2=b_status, b2_account_id=b_id)
+        if g_err: record["google_error_class"] = g_err
+        if b_err: record["b2_error_class"] = b_err
+        if g_status == "PASS" and b_status == "PASS":
+            record.update(dual_remote="PASS", local_prune="PASS", status="PASS", deleted_old_local_automatic=prune_local(root, domain, config["local_keep_last"]))
         else:
             record.update(dual_remote="FAIL", local_prune="SKIPPED_ON_FAILURE", status="FAIL")
-            overall_pass = False
+            overall = False
         results.append(record)
-    return {
-        "schema": RESULT_SCHEMA,
-        "status": "PASS" if overall_pass else "FAIL",
-        "sites": results,
-        "remote_redundancy": "GOOGLE_PLUS_B2",
-        "storage": storage,
-        "local_keep_last": config["local_keep_last"],
-        "dns_changed": False,
-        "source_deleted": False,
-        "production_restore_performed": False,
-        "secrets_emitted": False,
-    }
+    return {"schema": RESULT_SCHEMA, "status": "PASS" if overall else "FAIL", "sites": results, "remote_redundancy": "GOOGLE_PLUS_B2", "storage": storage, "local_keep_last": config["local_keep_last"], "dns_changed": False, "source_deleted": False, "production_restore_performed": False, "secrets_emitted": False}
 
 
 def run_once(config_path: Path, clpctl: str, rclone: str, lock_file: Path = DEFAULT_LOCK, state_file: Path = DEFAULT_STATE, proc_root: Path = Path("/proc")) -> dict[str, Any]:
     config = validate_config(config_path)
     if not config["enabled"]:
-        result = {"schema": RESULT_SCHEMA, "status": "DISABLED", "sites": [], "dns_changed": False, "source_deleted": False}
         _write_state(state_file, "DISABLED")
-        return result
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-    lock_handle = lock_file.open("a+")
+        return {"schema": RESULT_SCHEMA, "status": "DISABLED", "sites": [], "dns_changed": False, "source_deleted": False}
+    try:
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_file.open("a+")
+    except OSError as exc:
+        raise AutoBackupError("cannot open automatic-backup lock") from exc
     try:
         try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            result = {"schema": RESULT_SCHEMA, "status": "SKIPPED_BUSY", "reason": "P07_AUTO_BACKUP_ALREADY_RUNNING", "sites": [], "dns_changed": False, "source_deleted": False}
-            _write_state(state_file, "SKIPPED_BUSY", reason=result["reason"])
-            return result
+            _write_state(state_file, "SKIPPED_BUSY", reason="P07_AUTO_BACKUP_ALREADY_RUNNING")
+            return {"schema": RESULT_SCHEMA, "status": "SKIPPED_BUSY", "reason": "P07_AUTO_BACKUP_ALREADY_RUNNING", "sites": [], "dns_changed": False, "source_deleted": False}
         busy = _busy_processes(proc_root)
         if busy:
-            result = {"schema": RESULT_SCHEMA, "status": "SKIPPED_BUSY", "reason": "P07_BACKUP_RESTORE_MIGRATION_ACTIVE", "busy": busy, "sites": [], "dns_changed": False, "source_deleted": False}
-            _write_state(state_file, "SKIPPED_BUSY", reason=result["reason"], busy=busy)
-            return result
+            _write_state(state_file, "SKIPPED_BUSY", reason="BACKUP_RESTORE_MIGRATION_OR_STORAGE_ACTIVE", busy=busy)
+            return {"schema": RESULT_SCHEMA, "status": "SKIPPED_BUSY", "reason": "BACKUP_RESTORE_MIGRATION_OR_STORAGE_ACTIVE", "busy": busy, "sites": [], "dns_changed": False, "source_deleted": False}
         _write_state(state_file, "RUNNING", sites=config["sites"])
-        result = _execute_run(config, clpctl, rclone)
+        try:
+            result = _execute_run(config, clpctl, rclone)
+        except (RuntimeError, OSError, storage_engine.StorageError, AutoBackupError) as exc:
+            _write_state(state_file, "FAIL", error_class=exc.__class__.__name__)
+            return {"schema": RESULT_SCHEMA, "status": "FAIL", "error_class": exc.__class__.__name__, "sites": [], "dns_changed": False, "source_deleted": False}
         _write_state(state_file, result["status"], sites=result.get("sites", []))
         return result
     finally:
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            lock_handle.close()
+        try: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally: handle.close()
 
 
 def _cron_line(config: dict[str, Any], script: Path, python: str, log_file: Path) -> str:
-    hour, minute = config["daily_at"].split(":")
+    h, m = config["daily_at"].split(":")
     command = " ".join([shlex.quote(python), shlex.quote(str(script.resolve())), "run", "--config", shlex.quote(str(DEFAULT_CONFIG.resolve())), ">>", shlex.quote(str(log_file)), "2>&1"])
-    return f"{int(minute)} {int(hour)} * * * root {command}"
+    return f"{int(m)} {int(h)} * * * root {command}"
 
 
 def install_cron(config_path: Path, cron_file: Path, script: Path, python: str, log_file: Path, confirm: str) -> dict[str, Any]:
-    if confirm != CONFIRM_ENABLE:
-        raise AutoBackupError(f"install-cron requires --confirm {CONFIRM_ENABLE}")
-    if os.geteuid() != 0:
-        raise AutoBackupError("install-cron requires root")
-    config = validate_config(config_path)
-    storage_structure(config)
-    if config_path.resolve() != DEFAULT_CONFIG.resolve():
-        raise AutoBackupError(f"automatic user flow installs only the canonical config path: {DEFAULT_CONFIG}")
+    if confirm != CONFIRM_ENABLE: raise AutoBackupError(f"install-cron requires --confirm {CONFIRM_ENABLE}")
+    if os.geteuid() != 0: raise AutoBackupError("install-cron requires root")
+    config = validate_config(config_path); storage_structure(config)
+    if config_path.resolve() != DEFAULT_CONFIG.resolve(): raise AutoBackupError(f"automatic user flow installs only the canonical config path: {DEFAULT_CONFIG}")
     if cron_file.exists():
-        try:
-            first = cron_file.read_text(encoding="utf-8").splitlines()[0]
-        except OSError as exc:
-            raise AutoBackupError("cannot read existing cron file") from exc
-        if first != CRON_MARKER:
-            raise AutoBackupError("refusing to overwrite a cron file not owned by P07")
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(log_file.parent, 0o700)
-    cron_file.parent.mkdir(parents=True, exist_ok=True)
+        try: first = cron_file.read_text(encoding="utf-8").splitlines()[0]
+        except OSError as exc: raise AutoBackupError("cannot read existing cron file") from exc
+        if first != CRON_MARKER: raise AutoBackupError("refusing to overwrite a cron file not owned by P07")
+    log_file.parent.mkdir(parents=True, exist_ok=True); os.chmod(log_file.parent, 0o700); cron_file.parent.mkdir(parents=True, exist_ok=True)
     body = CRON_MARKER + "\nSHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n" + _cron_line(config, script, python, log_file) + "\n"
-    tmp = cron_file.with_name(cron_file.name + ".tmp")
-    tmp.write_text(body, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, cron_file)
-    os.chmod(cron_file, 0o644)
+    tmp = cron_file.with_name(cron_file.name + ".tmp"); tmp.write_text(body, encoding="utf-8"); os.chmod(tmp, 0o644); os.replace(tmp, cron_file); os.chmod(cron_file, 0o644)
     return {"schema": STATUS_SCHEMA, "status": "ENABLED", "cron_file": str(cron_file), "daily_at": config["daily_at"], "sites": config["sites"], "remote_targets": list(REMOTE_TARGETS), "writes_scope": "P07_OWNED_CRON_ONLY"}
 
 
 def disable(config_path: Path, cron_file: Path, confirm: str) -> dict[str, Any]:
-    if confirm != CONFIRM_DISABLE:
-        raise AutoBackupError(f"disable requires --confirm {CONFIRM_DISABLE}")
-    if os.geteuid() != 0:
-        raise AutoBackupError("disable requires root")
+    if confirm != CONFIRM_DISABLE: raise AutoBackupError(f"disable requires --confirm {CONFIRM_DISABLE}")
+    if os.geteuid() != 0: raise AutoBackupError("disable requires root")
     validate_config(config_path)
     if cron_file.exists():
-        try:
-            first = cron_file.read_text(encoding="utf-8").splitlines()[0]
-        except OSError as exc:
-            raise AutoBackupError("cannot read existing cron file") from exc
-        if first != CRON_MARKER:
-            raise AutoBackupError("refusing to remove a cron file not owned by P07")
+        try: first = cron_file.read_text(encoding="utf-8").splitlines()[0]
+        except OSError as exc: raise AutoBackupError("cannot read existing cron file") from exc
+        if first != CRON_MARKER: raise AutoBackupError("refusing to remove a cron file not owned by P07")
         cron_file.unlink()
-    raw = _read_json(config_path)
-    raw["enabled"] = False
-    _atomic_json(config_path, raw)
+    raw = _read_json(config_path); raw["enabled"] = False; _atomic_json(config_path, raw)
     return {"schema": STATUS_SCHEMA, "status": "DISABLED", "cron_file": str(cron_file), "backups_deleted": False, "remote_copies_deleted": False}
 
 
 def status(config_path: Path, cron_file: Path, state_file: Path = DEFAULT_STATE) -> dict[str, Any]:
-    if not config_path.is_file():
-        return {"schema": STATUS_SCHEMA, "status": "NOT_CONFIGURED", "config": str(config_path), "cron_installed": False, "last_run": _read_state(state_file)}
-    config = validate_config(config_path)
-    storage = None
-    storage_state = "NOT_READY"
-    try:
-        storage = storage_structure(config)
-        storage_state = "CONFIGURED"
-    except AutoBackupError:
-        pass
+    if not config_path.is_file(): return {"schema": STATUS_SCHEMA, "status": "NOT_CONFIGURED", "config": str(config_path), "cron_installed": False, "last_run": _read_state(state_file)}
+    config = validate_config(config_path); storage = None; storage_state = "NOT_READY"
+    try: storage = storage_structure(config); storage_state = "CONFIGURED"
+    except AutoBackupError: pass
     cron_owned = False
     if cron_file.is_file():
-        try:
-            cron_owned = cron_file.read_text(encoding="utf-8").splitlines()[0] == CRON_MARKER
-        except OSError:
-            cron_owned = False
-    if not config["enabled"]:
-        overall = "DISABLED"
-    elif cron_owned and storage_state == "CONFIGURED":
-        overall = "ENABLED"
-    else:
-        overall = "ATTENTION"
+        try: cron_owned = cron_file.read_text(encoding="utf-8").splitlines()[0] == CRON_MARKER
+        except OSError: pass
+    overall = "DISABLED" if not config["enabled"] else ("ENABLED" if cron_owned and storage_state == "CONFIGURED" else "ATTENTION")
     return {"schema": STATUS_SCHEMA, "status": overall, "config": str(config_path), "cron_file": str(cron_file), "cron_installed": cron_owned, "enabled": config["enabled"], "daily_at": config["daily_at"], "sites": config["sites"], "remote_targets": list(REMOTE_TARGETS), "storage_state": storage_state, "storage": storage, "local_keep_last": config["local_keep_last"], "last_run": _read_state(state_file)}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="P07 guarded automatic Google + B2 backup")
-    sub = parser.add_subparsers(dest="command", required=True)
-    cfg = sub.add_parser("configure")
-    cfg.add_argument("--config", default=str(DEFAULT_CONFIG)); cfg.add_argument("--site", action="append", required=True); cfg.add_argument("--daily-at", default="03:30"); cfg.add_argument("--storage-config", default="/etc/vf-server-ops/storage.json"); cfg.add_argument("--backup-dir", default="/var/backups/vf-server-ops"); cfg.add_argument("--keep-last", type=int, default=7)
-    run = sub.add_parser("run")
-    run.add_argument("--config", default=str(DEFAULT_CONFIG)); run.add_argument("--clpctl", default=os.environ.get("VFOPS_CLPCTL", "clpctl")); run.add_argument("--rclone", default=os.environ.get("VFOPS_RCLONE", "rclone")); run.add_argument("--lock-file", default=str(DEFAULT_LOCK)); run.add_argument("--state-file", default=str(DEFAULT_STATE))
-    stat = sub.add_parser("status")
-    stat.add_argument("--config", default=str(DEFAULT_CONFIG)); stat.add_argument("--cron-file", default=str(DEFAULT_CRON)); stat.add_argument("--state-file", default=str(DEFAULT_STATE))
-    sched = sub.add_parser("schedule-check")
-    sched.add_argument("--daily-at", required=True); sched.add_argument("--cron-file", action="append")
-    install = sub.add_parser("install-cron")
-    install.add_argument("--config", default=str(DEFAULT_CONFIG)); install.add_argument("--cron-file", default=str(DEFAULT_CRON)); install.add_argument("--script", required=True); install.add_argument("--python", default="/usr/bin/python3"); install.add_argument("--log-file", default=str(DEFAULT_LOG)); install.add_argument("--confirm", required=True)
-    off = sub.add_parser("disable")
-    off.add_argument("--config", default=str(DEFAULT_CONFIG)); off.add_argument("--cron-file", default=str(DEFAULT_CRON)); off.add_argument("--confirm", required=True)
+    parser = argparse.ArgumentParser(description="P07 guarded automatic Google + B2 backup"); sub = parser.add_subparsers(dest="command", required=True)
+    cfg = sub.add_parser("configure"); cfg.add_argument("--config", default=str(DEFAULT_CONFIG)); cfg.add_argument("--site", action="append", required=True); cfg.add_argument("--daily-at", default="03:30"); cfg.add_argument("--storage-config", default="/etc/vf-server-ops/storage.json"); cfg.add_argument("--backup-dir", default="/var/backups/vf-server-ops"); cfg.add_argument("--keep-last", type=int, default=7)
+    run = sub.add_parser("run"); run.add_argument("--config", default=str(DEFAULT_CONFIG)); run.add_argument("--clpctl", default=os.environ.get("VFOPS_CLPCTL", "clpctl")); run.add_argument("--rclone", default=os.environ.get("VFOPS_RCLONE", "rclone")); run.add_argument("--lock-file", default=str(DEFAULT_LOCK)); run.add_argument("--state-file", default=str(DEFAULT_STATE))
+    stat = sub.add_parser("status"); stat.add_argument("--config", default=str(DEFAULT_CONFIG)); stat.add_argument("--cron-file", default=str(DEFAULT_CRON)); stat.add_argument("--state-file", default=str(DEFAULT_STATE))
+    sched = sub.add_parser("schedule-check"); sched.add_argument("--daily-at", required=True); sched.add_argument("--cron-file", action="append")
+    install = sub.add_parser("install-cron"); install.add_argument("--config", default=str(DEFAULT_CONFIG)); install.add_argument("--cron-file", default=str(DEFAULT_CRON)); install.add_argument("--script", required=True); install.add_argument("--python", default="/usr/bin/python3"); install.add_argument("--log-file", default=str(DEFAULT_LOG)); install.add_argument("--confirm", required=True)
+    off = sub.add_parser("disable"); off.add_argument("--config", default=str(DEFAULT_CONFIG)); off.add_argument("--cron-file", default=str(DEFAULT_CRON)); off.add_argument("--confirm", required=True)
     args = parser.parse_args()
     try:
         if args.command == "configure": result = configure(Path(args.config), args.site, args.daily_at, args.storage_config, args.backup_dir, args.keep_last)
@@ -549,5 +458,4 @@ def main() -> int:
     return 12 if result.get("status") in {"FAIL", "ATTENTION"} else 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == "__main__": raise SystemExit(main())
