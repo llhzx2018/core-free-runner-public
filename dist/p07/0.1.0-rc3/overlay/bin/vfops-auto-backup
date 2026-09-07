@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+CORE="$ROOT_DIR/bin/vfops"
+ENGINE="$ROOT_DIR/lib/auto_backup.py"
+CONFIG="${VFOPS_AUTO_BACKUP_CONFIG:-/etc/vf-server-ops/auto-backup.json}"
+STORAGE_CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
+BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
+CRON_FILE="${VFOPS_AUTO_BACKUP_CRON:-/etc/cron.d/vf-server-ops-auto-backup}"
+
+screen_clear() { [[ -t 1 ]] && printf '\033[H\033[2J' || true; }
+pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
+
+header() {
+  screen_clear
+  cat <<'EOF'
+P07 · 自动备份
+
+每天自动执行：
+  本地 Fresh Verify
+  → Google Drive 加密副本
+  → Backblaze B2 加密灾备副本
+
+EOF
+}
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    printf '自动备份设置需要 root。\n' >&2
+    return 1
+  fi
+}
+
+storage_preflight() {
+  if [[ ! -f "$STORAGE_CONFIG" ]]; then
+    printf '远程存储尚未配置：%s\n' "$STORAGE_CONFIG" >&2
+    printf '自动备份不会在缺少 Google + B2 配置时假装启用。\n' >&2
+    return 1
+  fi
+  command -v rclone >/dev/null 2>&1 || {
+    printf '缺少 rclone，无法验证 Google / B2 加密远程。\n' >&2
+    return 1
+  }
+  printf '\n[P07] 正在验证 Google + B2 加密远程，请稍候...\n'
+  local output
+  if ! output="$("$CORE" storage --config "$STORAGE_CONFIG" status 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    printf '远程存储检查没有通过，自动备份未启用。\n' >&2
+    return 1
+  fi
+  if ! python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+accounts=p.get('accounts',[]) if isinstance(p.get('accounts'),list) else []
+google=any(a.get('provider')=='google' and a.get('enabled') is True and a.get('health')=='OK' for a in accounts if isinstance(a,dict))
+b2=any(a.get('provider')=='b2' and a.get('enabled') is True and a.get('health')=='OK' for a in accounts if isinstance(a,dict))
+raise SystemExit(0 if google and b2 else 1)
+PY
+  then
+    printf '需要至少一个健康的 Google crypt 远程和一个健康的 B2 crypt 远程。\n' >&2
+    printf '自动备份未启用。\n' >&2
+    return 1
+  fi
+  printf 'Google Drive：READY ✓\n'
+  printf 'Backblaze B2：READY ✓\n'
+  return 0
+}
+
+inventory_sites() {
+  local payload
+  if ! payload="$("$CORE" inventory --compact 2>&1)"; then
+    printf '%s\n' "$payload" >&2
+    return 1
+  fi
+  python3 - "$payload" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+for site in p.get('sites',[]):
+    if isinstance(site,dict) and isinstance(site.get('domain'),str) and site.get('domain'):
+        print(site['domain'])
+PY
+}
+
+show_status() {
+  printf '\n[P07] 正在读取自动备份设置...\n'
+  local output
+  if ! output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    pause_menu
+    return 0
+  fi
+  python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+print()
+print('自动备份状态')
+print('----------------------------------------')
+status=p.get('status','UNKNOWN')
+print(f"状态：{status}")
+if status != 'NOT_CONFIGURED':
+    print(f"时间：每天 {p.get('daily_at','UNKNOWN')}")
+    sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
+    print(f"网站：{len(sites)} 个")
+    for site in sites:
+        print(f"  - {site}")
+    print('远程：Google + Backblaze B2')
+    print(f"本地自动备份保留：最近 {p.get('local_keep_last','?')} 份 / 网站")
+    print(f"Cron：{'已安装' if p.get('cron_installed') else '未安装'}")
+    print(f"存储：{p.get('storage_state','UNKNOWN')}")
+PY
+  pause_menu
+}
+
+enable_or_update() {
+  require_root || { pause_menu; return 0; }
+  storage_preflight || { pause_menu; return 0; }
+
+  local sites_raw daily_at choice
+  if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
+    printf '没有发现可自动备份的 CloudPanel 网站。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  printf '\n将保护当前 CloudPanel 全部网站：\n'
+  while IFS= read -r site; do
+    [[ -n "$site" ]] && printf '  - %s\n' "$site"
+  done <<<"$sites_raw"
+
+  printf '\n每天备份时间 [03:30]：'
+  read -r daily_at || return 0
+  [[ -n "$daily_at" ]] || daily_at='03:30'
+  if [[ ! "$daily_at" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    printf '时间格式应为 HH:MM，例如 03:30。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  printf '\n将启用：本地 + Google + B2，每个网站本地保留最近 7 份自动备份。\n'
+  printf '不会修改 DNS，不会删除网站，不会删除手工/迁移备份。\n\n'
+  printf '1. 确认启用 / 更新\n'
+  printf '0. 取消\n\n'
+  printf '请选择 [0-1]：'
+  read -r choice || return 0
+  [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
+
+  local args=()
+  while IFS= read -r site; do
+    [[ -n "$site" ]] && args+=(--site "$site")
+  done <<<"$sites_raw"
+
+  printf '\n[P07] 正在写入 P07 自动备份配置...\n'
+  if ! python3 "$ENGINE" configure \
+      --config "$CONFIG" \
+      "${args[@]}" \
+      --daily-at "$daily_at" \
+      --storage-config "$STORAGE_CONFIG" \
+      --backup-dir "$BACKUP_DIR" \
+      --keep-last 7 >/dev/null; then
+    printf '自动备份配置写入失败。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  if ! python3 "$ENGINE" install-cron \
+      --config "$CONFIG" \
+      --cron-file "$CRON_FILE" \
+      --script "$ENGINE" \
+      --python /usr/bin/python3 \
+      --confirm ENABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+    printf '定时任务安装失败；不会假装已启用。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  printf '\n自动备份已启用 ✓\n'
+  printf '时间：每天 %s\n' "$daily_at"
+  printf '目标：本地 + Google Drive + Backblaze B2\n'
+  printf '本地：每个网站保留最近 7 份自动备份\n'
+  printf 'DNS：不会修改\n'
+  pause_menu
+}
+
+run_now() {
+  require_root || { pause_menu; return 0; }
+  if [[ ! -f "$CONFIG" ]]; then
+    printf '尚未配置自动备份，请先选择“启用 / 更新自动备份”。\n' >&2
+    pause_menu
+    return 0
+  fi
+  printf '\n[P07] 正在执行一次完整双远程自动备份。\n'
+  printf '这一步会真实创建备份并上传 Google + B2，请稍候...\n'
+  local output rc
+  set +e
+  output="$(python3 "$ENGINE" run --config "$CONFIG" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    printf '%s\n' "$output" >&2
+    printf '\n本次自动备份没有达到双副本 PASS；已有本地/成功远程副本不会因此被删除。\n' >&2
+    pause_menu
+    return 0
+  fi
+  python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+print()
+print('自动备份结果')
+print('----------------------------------------')
+for row in p.get('sites',[]):
+    print(row.get('domain','UNKNOWN'))
+    print(f"  本地：{row.get('local_backup','UNKNOWN')}")
+    print(f"  Google：{row.get('google','UNKNOWN')}")
+    print(f"  B2：{row.get('b2','UNKNOWN')}")
+    print(f"  双副本：{row.get('dual_remote','UNKNOWN')}")
+print(f"最终：{p.get('status','UNKNOWN')}")
+print('DNS：未修改')
+PY
+  pause_menu
+}
+
+disable_auto() {
+  require_root || { pause_menu; return 0; }
+  if [[ ! -f "$CONFIG" && ! -f "$CRON_FILE" ]]; then
+    printf '自动备份当前没有启用。\n'
+    pause_menu
+    return 0
+  fi
+  printf '\n关闭后只停止以后自动执行；不会删除现有本地、Google 或 B2 备份。\n\n'
+  printf '1. 确认关闭\n'
+  printf '0. 取消\n\n'
+  printf '请选择 [0-1]：'
+  local choice
+  read -r choice || return 0
+  [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
+  if python3 "$ENGINE" disable \
+      --config "$CONFIG" \
+      --cron-file "$CRON_FILE" \
+      --confirm DISABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+    printf '自动备份已关闭。现有备份均保留。\n'
+  else
+    printf '关闭没有完成；P07 没有删除任何备份。\n' >&2
+  fi
+  pause_menu
+}
+
+while true; do
+  header
+  cat <<'EOF'
+1. 启用 / 更新自动备份
+2. 立即完整备份一次
+3. 查看自动备份状态
+4. 关闭自动备份
+0. 返回
+
+EOF
+  printf '请选择 [0-4]：'
+  read -r choice || exit 0
+  case "$choice" in
+    1) enable_or_update ;;
+    2) run_now ;;
+    3) show_status ;;
+    4) disable_auto ;;
+    0) exit 0 ;;
+    *) printf '请输入 0-4。\n'; pause_menu ;;
+  esac
+done
