@@ -57,6 +57,9 @@ fetch(){
   else return 127
   fi
 }
+strip_terminal_codes(){
+  sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\r$//'
+}
 
 TMP="$(mktemp -d -t p07-audit-rc5.XXXXXX 2>/dev/null || printf '/tmp/p07-audit-rc5.%s' "$$")"
 mkdir -p "$TMP" 2>/dev/null || exit 3
@@ -75,18 +78,25 @@ mkdir -p "$REPORT_DIR" 2>/dev/null || true
 START_EPOCH="$(date +%s)"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BASE_OUTPUT="$TMP/base-output.txt"
+BASE_PLAIN="$TMP/base-plain.txt"
 : >"$BASE_OUTPUT"
+: >"$BASE_PLAIN"
 FIO_TSV="$TMP/fio.tsv"
 : >"$FIO_TSV"
 FIO_VERDICT="未执行"
 FIO_SMALLFILE="未知"
 FIO_LARGEBLOCK="未知"
+BASE_GRADE="未知"
+BASE_RECOMMEND="未知"
+BASE_SCORE="未知"
+FINAL_RECOMMEND="未知"
 MARKDOWN_REPORT=""
 
 normalize_base_output(){
   sed \
     -e 's/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 2.1/g' \
     -e 's/2\.0\.0-rc3-zh/2.1.0-rc5-zh/g' \
+    -e 's/ 最终验机结论/ 基础综合结论/g' \
     -e 's/ 总耗时             :/ 基础验机耗时       :/g' \
     -e 's/ 完成时间           :/ 基础验机完成       :/g'
 }
@@ -109,6 +119,7 @@ run_base(){
     rc=${PIPESTATUS[0]}
   fi
   set -e 2>/dev/null || true
+  strip_terminal_codes <"$BASE_OUTPUT" >"$BASE_PLAIN"
   return "$rc"
 }
 
@@ -234,8 +245,30 @@ print_fio(){
   esac
 }
 
-strip_terminal_codes(){
-  sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\r$//'
+extract_base_summary(){
+  [[ -s "$BASE_PLAIN" ]] || return 0
+  BASE_GRADE="$(awk -F: '$1 ~ /^[[:space:]]*综合评级[[:space:]]*$/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$BASE_PLAIN")"
+  BASE_RECOMMEND="$(awk -F: '$1 ~ /^[[:space:]]*建议[[:space:]]*$/{sub(/^[^:]*:/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}' "$BASE_PLAIN")"
+  BASE_SCORE="$(awk -F: '$1 ~ /^[[:space:]]*综合得分[[:space:]]*$/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$BASE_PLAIN")"
+  [[ -n "$BASE_GRADE" ]] || BASE_GRADE="未知"
+  [[ -n "$BASE_RECOMMEND" ]] || BASE_RECOMMEND="未知"
+  [[ -n "$BASE_SCORE" ]] || BASE_SCORE="未知"
+}
+
+build_final_recommendation(){
+  if [[ "$BASE_RECOMMEND" == 未知 ]]; then
+    FINAL_RECOMMEND="基础验机未执行；当前仅验证增强磁盘"
+    return
+  fi
+  FINAL_RECOMMEND="$BASE_RECOMMEND"
+  case "$FIO_VERDICT" in
+    需观察)
+      FINAL_RECOMMEND="${FINAL_RECOMMEND}；数据库/混合磁盘负载需观察"
+      ;;
+    证据不足|未执行)
+      FINAL_RECOMMEND="${FINAL_RECOMMEND}；增强磁盘证据不足"
+      ;;
+  esac
 }
 
 write_markdown(){
@@ -245,9 +278,9 @@ write_markdown(){
     printf -- '- 版本：`%s`\n' "$VERSION"
     printf -- '- 时间：`%s`\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     printf -- '- 说明：报告仅保存到本机，不自动上传第三方。\n\n'
-    if [[ -s "$BASE_OUTPUT" ]]; then
+    if [[ -s "$BASE_PLAIN" ]]; then
       printf '## 完整基础与网络验机输出\n\n```text\n'
-      strip_terminal_codes <"$BASE_OUTPUT"
+      cat "$BASE_PLAIN"
       printf '\n```\n\n'
     fi
     printf '## 增强磁盘混合读写\n\n'
@@ -260,11 +293,34 @@ write_markdown(){
     printf -- '- 小文件/数据库：**%s**\n' "$FIO_SMALLFILE"
     printf -- '- 大块混合吞吐：**%s**\n' "$FIO_LARGEBLOCK"
     printf -- '- 综合：**%s**\n' "$FIO_VERDICT"
+    printf '\n## 最终验机结论\n\n'
+    printf -- '- 综合评级：**%s**\n' "$BASE_GRADE"
+    printf -- '- 基础得分：**%s**\n' "$BASE_SCORE"
+    printf -- '- 增强磁盘：**%s**\n' "$FIO_VERDICT"
+    printf -- '- 建议：**%s**\n' "$FINAL_RECOMMEND"
     printf '\n## 证据边界\n\n'
     printf -- '- 中国大陆区域结果反映本次 VPS 与真实大陆节点之间的有界跨境线路参考，不等同于中国普通用户到 VPS 的直接入站探测。\n'
   } >"$md"
   MARKDOWN_REPORT="$md"
   printf ' Markdown 报告       : %s%s%s\n' "$GREEN" "$md" "$RESET"
+}
+
+print_final(){
+  local end_epoch total_sec total_min total_rem
+  end_epoch="$(date +%s)"
+  total_sec=$((end_epoch-START_EPOCH))
+  total_min=$((total_sec/60))
+  total_rem=$((total_sec%60))
+  rule
+  printf '%s%s 最终验机结论%s\n' "$BOLD" "$CYAN" "$RESET"
+  printf ' 综合评级           : %s\n' "$BASE_GRADE"
+  printf ' 基础得分           : %s\n' "$BASE_SCORE"
+  printf ' 增强磁盘           : %s\n' "$FIO_VERDICT"
+  printf ' 建议               : %s\n' "$FINAL_RECOMMEND"
+  printf ' 完整验机总耗时     : %s 分 %s 秒\n' "$total_min" "$total_rem"
+  printf ' 最终完成时间       : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf ' 本地报告           : TXT / JSON / Markdown\n'
+  [[ -n "$MARKDOWN_REPORT" ]] && printf ' Markdown            : %s\n' "$MARKDOWN_REPORT"
 }
 
 set +e
@@ -277,15 +333,7 @@ if (( base_rc != 0 )); then
 fi
 
 print_fio
+extract_base_summary
+build_final_recommendation
 write_markdown
-
-END_EPOCH="$(date +%s)"
-TOTAL_SEC=$((END_EPOCH-START_EPOCH))
-TOTAL_MIN=$((TOTAL_SEC/60))
-TOTAL_REM=$((TOTAL_SEC%60))
-rule
-printf '%s%s 完整验机完成%s\n' "$BOLD" "$CYAN" "$RESET"
-printf ' 完整验机总耗时     : %s 分 %s 秒\n' "$TOTAL_MIN" "$TOTAL_REM"
-printf ' 最终完成时间       : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-printf ' 本地报告           : TXT / JSON / Markdown\n'
-[[ -n "$MARKDOWN_REPORT" ]] && printf ' Markdown            : %s\n' "$MARKDOWN_REPORT"
+print_final
