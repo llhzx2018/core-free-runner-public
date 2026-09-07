@@ -1,0 +1,187 @@
+name: S01-C03 1.25.24 Formal Release
+
+on:
+  push:
+    branches: [temp/s01-c03-v12524-formal-release-20260907]
+    paths:
+      - '.github/workflows/temp-s01-c03-v12524-formal-release-20260907.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      M3U8_SHA: 9a6997418b339c88a61501f43337a461a8ff1dbb
+      M3U8_BASE: fda320e63e135489a3d46aed1c107aa48114ee86
+      TAG: v1.25.24
+      ASSET: vf-tools-m3u8_V1.25.24.zip
+    steps:
+      - name: Credential boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'CREDENTIAL_MODEL=READ_WRITE_SEPARATED'
+          echo 'PRODUCTION_WRITE_USED=NO'
+
+      - name: Checkout exact released source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Formal source gate
+        working-directory: m3u8
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = '1.25.24'
+          grep -Fq 'Version: 1.25.24' src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.24'" src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_ROUND', 'R248'" src/vf-tool-m3u8.php
+          php tests/unit/admin-human-language-contract.php
+          php tests/unit/visible-console-v2-contract.php
+          php tests/unit/update-refresh-policy-contract.php
+          php tests/unit/update-schema-authority-contract.php
+          php tests/unit/package-physical-locator-contract.php
+          php tests/frontend-s01-uiux-final-owner-contract.php
+          find . -type f -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l >/dev/null
+          python3 - <<'PY'
+          import os, subprocess
+          got=set(subprocess.check_output(['git','diff','--name-only',os.environ['M3U8_BASE']+'..HEAD'],text=True).splitlines())
+          expected={'VERSION','src/admin/admin-ia-contract.php','src/vf-tool-m3u8.php','tests/unit/admin-human-language-contract.php','tests/unit/package-physical-locator-contract.php','tests/unit/update-refresh-policy-contract.php','tests/unit/visible-console-v2-contract.php'}
+          assert got==expected,(got,expected)
+          assert not any('schema' in x.lower() or 'migration' in x.lower() or 'provider' in x.lower() or x.endswith('.css') for x in got),got
+          print('EXACT_RELEASE_DELTA=PASS')
+          print('NO_SCHEMA_MIGRATION_PROVIDER_CSS_DELTA=PASS')
+          PY
+          echo 'FORMAL_SOURCE_GATE=PASS'
+
+      - name: Deterministic double build and runtime authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/release-a" "$RUNNER_TEMP/release-b"
+          python3 - <<'PY' > "$RUNNER_TEMP/metrics.env"
+          from pathlib import Path
+          import hashlib, os, re, zipfile
+
+          src=Path('m3u8/src')
+          def ident(items):
+              h=hashlib.sha256()
+              for rel,b in sorted(items):
+                  h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+              return len(items),h.hexdigest()
+          def build(out):
+              rows=[(p.relative_to(src).as_posix(),p.read_bytes()) for p in sorted(src.rglob('*'),key=lambda x:x.relative_to(src).as_posix()) if p.is_file()]
+              dirs={'vf-tool-m3u8/'}
+              for rel,_ in rows:
+                  cur='vf-tool-m3u8'
+                  for part in rel.split('/')[:-1]:
+                      cur += '/'+part; dirs.add(cur+'/')
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for d in sorted(dirs):
+                      zi=zipfile.ZipInfo(d); zi.date_time=(1980,1,1,0,0,0); zi.external_attr=(0o40755<<16)|0x10; z.writestr(zi,b'')
+                  for rel,b in rows:
+                      zi=zipfile.ZipInfo('vf-tool-m3u8/'+rel); zi.date_time=(1980,1,1,0,0,0); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+              runtime=[]
+              for rel,b in rows:
+                  parts=rel.split('/'); low=[x.lower() for x in parts]; bn=parts[-1].lower()
+                  if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): continue
+                  if bn in {'readme.md','changelog.md','license','license.txt','package_profile.json'} or bn.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): continue
+                  ok=(rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}) if len(parts)==1 else parts[0] in {'admin','config','includes','public','templates','tools'}
+                  if ok: runtime.append((rel,b))
+              files,fp=ident(rows); rfiles,rfp=ident(runtime); data=Path(out).read_bytes()
+              return {'M3U8_FILES':str(files),'M3U8_FP':fp,'M3U8_RUNTIME_FILES':str(rfiles),'M3U8_RUNTIME_FP':rfp,'M3U8_BYTES':str(len(data)),'M3U8_SHA256':hashlib.sha256(data).hexdigest()}
+          a=build(Path(os.environ['RUNNER_TEMP'])/'release-a'/os.environ['ASSET'])
+          b=build(Path(os.environ['RUNNER_TEMP'])/'release-b'/os.environ['ASSET'])
+          assert a==b,(a,b)
+          for k in sorted(a): print(f'{k}={a[k]}')
+          PY
+          cat "$RUNNER_TEMP/metrics.env"
+          cat "$RUNNER_TEMP/metrics.env" >> "$GITHUB_ENV"
+          cmp "$RUNNER_TEMP/release-a/$ASSET" "$RUNNER_TEMP/release-b/$ASSET"
+          python3 - <<'PY'
+          import os,zipfile
+          p=os.environ['RUNNER_TEMP']+'/release-a/'+os.environ['ASSET']
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              files=[x for x in z.infolist() if not x.is_dir()]
+              assert len(files)==int(os.environ['M3U8_FILES'])
+              assert sorted({x.filename.split('/')[0] for x in files})==['vf-tool-m3u8']
+              assert b'Version: 1.25.24' in z.read('vf-tool-m3u8/vf-tool-m3u8.php')
+          print('PACKAGE_STRUCTURE=PASS')
+          PY
+          echo 'DOUBLE_BUILD_DETERMINISM=PASS'
+          echo 'RUNTIME_AUTHORITY=PASS'
+
+      - name: Draft remote readback and formal publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          created_tag=0
+          created_release=0
+          cleanup(){
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              if [ "$created_release" -eq 1 ]; then gh release delete "$TAG" --repo llhzx2018/vf-tools-m3u8 --cleanup-tag --yes >/dev/null 2>&1 || true; fi
+              if [ "$created_tag" -eq 1 ]; then gh api --method DELETE "repos/llhzx2018/vf-tools-m3u8/git/refs/tags/$TAG" >/dev/null 2>&1 || true; fi
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+
+          ! gh release view "$TAG" --repo llhzx2018/vf-tools-m3u8 >/dev/null 2>&1
+          ! gh api "repos/llhzx2018/vf-tools-m3u8/git/ref/tags/$TAG" >/dev/null 2>&1
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/branches/main --jq '.commit.sha')" = "$M3U8_SHA"
+          echo 'REMOTE_RELEASE_PREFLIGHT=PASS'
+
+          gh api --method POST repos/llhzx2018/vf-tools-m3u8/git/refs -f ref="refs/tags/$TAG" -f sha="$M3U8_SHA" >/dev/null
+          created_tag=1
+          test "$(gh api "repos/llhzx2018/vf-tools-m3u8/git/ref/tags/$TAG" --jq '.object.sha')" = "$M3U8_SHA"
+
+          gh release create "$TAG" "$RUNNER_TEMP/release-a/$ASSET" --repo llhzx2018/vf-tools-m3u8 --title 'VF Tools M3U8 V1.25.24' --notes 'S01-C03 · Human Admin Language. Canonical M3U8 admin pages now use task-oriented Chinese labels and explanations instead of mixed engineering vocabulary. All slugs, Page IDs, routes, update semantics and Provider schema 1.3.0 are unchanged; migration remains CLOSED. Git/Release PASS does not claim Production visibility.' --draft
+          created_release=1
+
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$TAG" --repo llhzx2018/vf-tools-m3u8 --pattern "$ASSET" --dir "$RUNNER_TEMP/readback"
+          test "$(stat -c %s "$RUNNER_TEMP/readback/$ASSET")" = "$M3U8_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/readback/$ASSET" | awk '{print $1}')" = "$M3U8_SHA256"
+          python3 - <<'PY'
+          import os,zipfile
+          p=os.environ['RUNNER_TEMP']+'/readback/'+os.environ['ASSET']
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              files=[x for x in z.infolist() if not x.is_dir()]
+              assert len(files)==int(os.environ['M3U8_FILES'])
+              assert b'Version: 1.25.24' in z.read('vf-tool-m3u8/vf-tool-m3u8.php')
+          print('REMOTE_ASSET_EXACT_READBACK_BEFORE_PUBLISH=PASS')
+          PY
+
+          gh release edit "$TAG" --repo llhzx2018/vf-tools-m3u8 --draft=false
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq '.draft')" = false
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq '.prerelease')" = false
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq --arg a "$ASSET" '.assets[]|select(.name==$a)|.size')" = "$M3U8_BYTES"
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq --arg a "$ASSET" '.assets[]|select(.name==$a)|.digest')" = "sha256:$M3U8_SHA256"
+          test "$(gh api "repos/llhzx2018/vf-tools-m3u8/git/ref/tags/$TAG" --jq '.object.sha')" = "$M3U8_SHA"
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/branches/main --jq '.commit.sha')" = "$M3U8_SHA"
+
+          trap - EXIT
+          echo "M3U8_RELEASE_ID=$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq '.id')"
+          echo "M3U8_ASSET_ID=$(gh api repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG --jq --arg a "$ASSET" '.assets[]|select(.name==$a)|.id')"
+          echo 'FORMAL_RELEASE=PASS'
+          echo 'REMOTE_ASSET_EXACT_READBACK=PASS'
+          echo 'TESTED_ARTIFACT_EQUALS_DELIVERED_ARTIFACT=PASS'
