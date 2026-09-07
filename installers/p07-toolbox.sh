@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Public versions stay short and semantic. Internal build identities remain hidden
 # and are used only for exact validation / engineering traceability.
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-preview13"
+BUILD_ID="0.1.0-preview14"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
@@ -46,7 +46,7 @@ show_menu() {
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
-  say "  ${C_CYAN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
+  say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
 }
@@ -273,7 +273,7 @@ Usage:
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
 2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}（可用）
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（测试中）
-4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（测试中）
+4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（可用）
 
 说明：用户界面仅显示 Vx.x.x 公共版本；RC / preview / zh 等构建标识只用于内部工程追溯。
 EOF
