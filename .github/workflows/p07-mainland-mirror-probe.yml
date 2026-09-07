@@ -1,0 +1,74 @@
+name: P07 Mainland Mirror Probe
+
+on:
+  push:
+    branches: [feature/p07-vps-audit-rc4-china-regions]
+    paths:
+      - '.github/workflows/p07-mainland-mirror-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe real mainland regional mirrors
+        shell: bash
+        run: |
+          set -euo pipefail
+          : >/tmp/mainland-mirror-results.tsv
+          probe_url() {
+            local region="$1" label="$2" url="$3" tmp="/tmp/p07-${region// /-}.bin" meta rc code size ttfb total speed
+            rm -f "$tmp"
+            set +e
+            meta="$(curl -4 -L -sS --fail --connect-timeout 8 --max-time 35 --range 0-4194303 -o "$tmp" -w '%{http_code}|%{size_download}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{speed_download}' "$url" 2>/tmp/curl.err)"
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              printf '%s\t%s\tFAIL\t%s\n' "$region" "$label" "$(tr '\n' ' ' </tmp/curl.err | head -c 180)" >>/tmp/mainland-mirror-results.tsv
+              return 1
+            fi
+            IFS='|' read -r code size _ _ ttfb total speed <<<"$meta"
+            if [ "$code" != 200 ] && [ "$code" != 206 ]; then
+              printf '%s\t%s\tFAIL\thttp_%s\n' "$region" "$label" "$code" >>/tmp/mainland-mirror-results.tsv
+              return 1
+            fi
+            if [ "${size%.*}" -lt 524288 ]; then
+              printf '%s\t%s\tFAIL\ttoo_small_%s\n' "$region" "$label" "$size" >>/tmp/mainland-mirror-results.tsv
+              return 1
+            fi
+            mbps="$(awk -v b="$speed" 'BEGIN{printf "%.2f",b*8/1000000}')"
+            ttfb_ms="$(awk -v t="$ttfb" 'BEGIN{printf "%.1f",t*1000}')"
+            printf '%s\t%s\tPASS\t%s\t%s\t%s\t%s\n' "$region" "$label" "$mbps" "$ttfb_ms" "$size" "$url" >>/tmp/mainland-mirror-results.tsv
+            return 0
+          }
+          probe_pool() {
+            local region="$1"; shift
+            local spec label url
+            for spec in "$@"; do
+              label="${spec%%|*}"; url="${spec#*|}"
+              if probe_url "$region" "$label" "$url"; then return 0; fi
+            done
+            return 1
+          }
+          probe_pool '北京' '清华 TUNA|https://mirrors.tuna.tsinghua.edu.cn/debian/ls-lR.gz' '北外 BFSU|https://mirrors.bfsu.edu.cn/debian/ls-lR.gz' || true
+          probe_pool '上海' '上海交大 SJTUG|https://mirror.sjtu.edu.cn/debian/ls-lR.gz' '上海交大 SJTUG2|https://mirrors.sjtug.sjtu.edu.cn/debian/ls-lR.gz' || true
+          probe_pool '华南 深圳' '南科大 SUSTech|https://mirrors.sustech.edu.cn/debian/ls-lR.gz' || true
+          probe_pool '西南 重庆' '重庆邮电 CQUPT|https://mirrors.cqupt.edu.cn/debian/ls-lR.gz' '重庆邮电 IPv4|https://ipv4.mirrors.cqupt.edu.cn/debian/ls-lR.gz' || true
+          cat /tmp/mainland-mirror-results.tsv
+          pass="$(awk -F '\t' '$3=="PASS"{n++} END{print n+0}' /tmp/mainland-mirror-results.tsv)"
+          echo "REGION_PASS=$pass"
+          test "$pass" -ge 3
+
+      - name: Upload regional evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p07-mainland-mirror-probe-${{ github.run_id }}
+          path: /tmp/mainland-mirror-results.tsv
+          if-no-files-found: error
+          retention-days: 14
