@@ -2,7 +2,7 @@
 set -euo pipefail
 
 INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-rc3-candidate.sh"
-EXPECTED_BLOB="23a0cb02931c96924d408c2fd7d9b9e620eee7e8"
+EXPECTED_BLOB="1a9a9229c22928b9064f02f11a10ce718dc54220"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 
