@@ -1,0 +1,126 @@
+name: S01 C01 1.35.13 Core Update External Gate
+
+on:
+  push:
+    branches: [temp/s01-c01-13513-core-update-gate-20260907]
+    paths:
+      - '.github/workflows/temp-s01-c01-13513-core-update-gate-20260907.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-c01-13513-core-update-gate-20260907
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      CORE_BASE: a4dee575b442c90a815e7c2c5dbecc050a23c199
+      CORE_HEAD: 3fa9c48a75dd90ebbb87624c43f7154eb0c7c7ea
+      THEME_SHA: 1337c9c65a453b15496b1f645a45ede70afe060a
+      OPS_SHA: e13191ff2efcb98d8a2866f85e3f9272a2aa49c8
+      M3U8_SHA: 466e9ecb97b4d7e03aeadc0533bcef6ecda9346e
+
+    steps:
+      - name: Credential boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'RELEASE_WRITE_USED=NO'
+          echo 'PRODUCTION_WRITE_USED=NO'
+
+      - name: Checkout exact core-updates candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_HEAD }}
+          token: ${{ env.READ_TOKEN }}
+          path: core
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact-head one-manifest delta gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C core rev-parse HEAD)" = "$CORE_HEAD"
+          git -C core cat-file -e "$CORE_BASE^{commit}"
+          python3 - <<'PY'
+          import os,subprocess
+          got=set(subprocess.check_output(['git','-C','core','diff','--name-only',os.environ['CORE_BASE']+'..'+os.environ['CORE_HEAD']],text=True).splitlines())
+          expected={'projects/S01-C01.json'}
+          assert got==expected,(got,expected)
+          print('EXACT_ONE_MANIFEST_DELTA=PASS')
+          PY
+
+      - name: Run canonical Update Core validation
+        working-directory: core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/check_manifest_contract.py
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+          echo 'CANONICAL_UPDATE_CORE_VALIDATION=PASS'
+
+      - name: S01 manifest semantic boundary gate
+        working-directory: core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          c1=json.load(open('projects/S01-C01.json'))
+          c2=json.load(open('projects/S01-C02.json'))
+          c3=json.load(open('projects/S01-C03.json'))
+          assert c1['target_version']=='1.35.13'
+          assert c1['from_versions']==['1.35.8','1.35.9','1.35.10','1.35.11','1.35.12']
+          assert c1['release_tag']=='v1.35.13'
+          assert c1['asset_name']=='vf-tools-theme_V1.35.13.zip'
+          assert c1['asset_bytes']==1800656
+          assert c1['asset_sha256']=='b80e0b01a025213927fc68e47cc8f880b16e5ad58481efef456466d6a6d3341e'
+          assert c1['schema_from']=='N/A' and c1['schema_to']=='N/A'
+          assert c1['runtime_files']==443
+          assert c1['runtime_fingerprint']=='2ccdc678ac7719740f235890b86cb5e7972ae9d55ae4346d791c57af624ee0a9'
+          assert '1337c9c65a453b15496b1f645a45ede70afe060a' in c1['notes']
+          assert '34082153934' in c1['notes']
+
+          assert c2['target_version']=='1.21.851'
+          assert c2['plugin_file']=='vf-ops/vf-ops.php' and c2['physical_locator']=='vf-ops/vf-ops.php'
+          assert c2['locator_cutover'] is False
+          assert c2['asset_sha256']=='67a12bc684852083a25d8f278e2114ff412596b1e339a2078b200be19ea25af6'
+
+          assert c3['target_version']=='1.25.22'
+          assert c3['plugin_file']=='vf-tool-m3u8/vf-tool-m3u8.php' and c3['physical_locator']=='vf-tool-m3u8/vf-tool-m3u8.php'
+          assert c3['locator_cutover'] is False
+          assert c3['schema_from']=='1.3.0' and c3['schema_to']=='1.3.0'
+          assert c3['asset_sha256']=='6ea12ce7d85cc4411f71aea5944c46c306e8adcd4c276f6fcdb82c5538a1c891'
+          assert 'migration remains CLOSED' in c3['notes']
+          print('S01_MANIFEST_SEMANTIC_BOUNDARY=PASS')
+          PY
+
+      - name: Exact formal Release metadata readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          auth=(-H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          check_release(){
+            repo="$1" tag="$2" source="$3" asset="$4" bytes="$5" digest="$6"
+            curl --fail-with-body -sS "${auth[@]}" "https://api.github.com/repos/$repo/releases/tags/$tag" >/tmp/release.json
+            test "$(jq -r '.draft' /tmp/release.json)" = false
+            test "$(jq -r '.prerelease' /tmp/release.json)" = false
+            test "$(jq -r --arg a "$asset" '.assets[]|select(.name==$a)|.size' /tmp/release.json)" = "$bytes"
+            test "$(jq -r --arg a "$asset" '.assets[]|select(.name==$a)|.digest' /tmp/release.json)" = "sha256:$digest"
+            test "$(curl --fail-with-body -sS "${auth[@]}" "https://api.github.com/repos/$repo/git/ref/tags/$tag" | jq -r '.object.sha')" = "$source"
+            test "$(curl --fail-with-body -sS "${auth[@]}" "https://api.github.com/repos/$repo/branches/main" | jq -r '.commit.sha')" = "$source"
+          }
+          check_release llhzx2018/vf-tools-theme v1.35.13 "$THEME_SHA" vf-tools-theme_V1.35.13.zip 1800656 b80e0b01a025213927fc68e47cc8f880b16e5ad58481efef456466d6a6d3341e
+          check_release llhzx2018/vf-tools-ops v1.21.851 "$OPS_SHA" vf-tools-ops_V1.21.851.zip 3334436 67a12bc684852083a25d8f278e2114ff412596b1e339a2078b200be19ea25af6
+          check_release llhzx2018/vf-tools-m3u8 v1.25.22 "$M3U8_SHA" vf-tools-m3u8_V1.25.22.zip 3574008 6ea12ce7d85cc4411f71aea5944c46c306e8adcd4c276f6fcdb82c5538a1c891
+          echo 'EXACT_FORMAL_RELEASE_METADATA_READBACK=PASS'
+          echo 'S01_C01_13513_CORE_UPDATE_EXTERNAL_GATE=PASS'
