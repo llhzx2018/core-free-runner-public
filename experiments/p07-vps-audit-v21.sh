@@ -96,6 +96,27 @@ FIO_VERDICT="未执行"
 FIO_SMALL="未知"
 FIO_LARGE="未知"
 ROUTE_VERDICT="未执行"
+BASE_OUTPUT="$TMP/base-output.txt"
+BASE_PLAIN="$TMP/base-plain.txt"
+: >"$BASE_OUTPUT"
+: >"$BASE_PLAIN"
+BASE_GRADE="未知"
+BASE_SCORE="未知"
+BASE_RECOMMEND="未知"
+FINAL_RECOMMEND="未知"
+
+strip_terminal_codes(){
+  sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\r$//'
+}
+normalize_base_output(){
+  sed -u \
+    -e 's/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 V2.1.0/g' \
+    -e 's/2\.0\.0-rc3-zh/V2.1.0/g' \
+    -e 's/2\.0\.0-rc4-zh/V2.1.0/g' \
+    -e 's/ 最终验机结论/ 基础综合结论/g' \
+    -e 's/ 总耗时             :/ 基础验机耗时       :/g' \
+    -e 's/ 完成时间           :/ 基础验机完成       :/g'
+}
 
 run_base(){
   [[ "${P07_V21_SKIP_BASE:-0}" == 1 ]] && return 0
@@ -106,9 +127,15 @@ run_base(){
   version="$(NO_COLOR=1 bash "$base" --version 2>/dev/null | awk '{print $NF}' || true)"
   if [[ "$version" != "$BASE_EXPECTED" ]]; then printf '%s基础验机模块版本不匹配，已停止。%s\n' "$RED" "$RESET" >&2; return 6; fi
   set +e
-  bash "$base"
-  rc=$?
+  if command -v script >/dev/null 2>&1 && [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    script -qec "bash '$base'" /dev/null | normalize_base_output | tee "$BASE_OUTPUT"
+    rc=${PIPESTATUS[0]}
+  else
+    bash "$base" 2>&1 | normalize_base_output | tee "$BASE_OUTPUT"
+    rc=${PIPESTATUS[0]}
+  fi
   set -e 2>/dev/null || true
+  strip_terminal_codes <"$BASE_OUTPUT" >"$BASE_PLAIN"
   return "$rc"
 }
 
@@ -341,6 +368,24 @@ print_three_carrier_route(){
   printf ' 三网回程证据       : %s\n' "$ROUTE_VERDICT"
 }
 
+extract_base_summary(){
+  [[ -s "$BASE_PLAIN" ]] || return 0
+  BASE_GRADE="$(awk -F: '$1 ~ /^[[:space:]]*综合评级[[:space:]]*$/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$BASE_PLAIN")"
+  BASE_SCORE="$(awk -F: '$1 ~ /^[[:space:]]*综合得分[[:space:]]*$/{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$BASE_PLAIN")"
+  BASE_RECOMMEND="$(awk -F: '$1 ~ /^[[:space:]]*建议[[:space:]]*$/{sub(/^[^:]*:/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit}' "$BASE_PLAIN")"
+  [[ -n "$BASE_GRADE" ]] || BASE_GRADE="未知"
+  [[ -n "$BASE_SCORE" ]] || BASE_SCORE="未知"
+  [[ -n "$BASE_RECOMMEND" ]] || BASE_RECOMMEND="未知"
+}
+build_final_recommendation(){
+  FINAL_RECOMMEND="$BASE_RECOMMEND"
+  [[ "$FINAL_RECOMMEND" != 未知 ]] || FINAL_RECOMMEND="请结合基础验机与增强项判断"
+  case "$FIO_VERDICT" in
+    需观察) FINAL_RECOMMEND="${FINAL_RECOMMEND}；数据库/混合磁盘负载需观察" ;;
+    证据不足|未执行) FINAL_RECOMMEND="${FINAL_RECOMMEND}；增强磁盘证据不足" ;;
+  esac
+}
+
 write_markdown(){
   local md="$REPORT_DIR/p07-vps-audit-v21_${STAMP}.md"
   {
@@ -348,6 +393,11 @@ write_markdown(){
     printf -- '- 版本：`%s`\n' "$VERSION"
     printf -- '- 时间：`%s`\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     printf -- '- 说明：仅保存本机，不自动上传第三方。\n\n'
+    if [[ -s "$BASE_PLAIN" ]]; then
+      printf '## 基础与网络验机输出\n\n```text\n'
+      cat "$BASE_PLAIN"
+      printf '\n```\n\n'
+    fi
     printf '## 增强磁盘低负载测试\n\n'
     printf '| 块大小 | QD | 随机读取 MB/s | 读 IOPS | 随机写入 MB/s | 写 IOPS |\n|---|---:|---:|---:|---:|---:|\n'
     while IFS=$'\t|' read -r bs qd rb ri wb wi; do [[ -n "$bs" ]] && printf '| %s | %s | %s | %s | %s | %s |\n' "$bs" "$qd" "$rb" "$ri" "$wb" "$wi"; done <"$FIO_TSV"
@@ -373,11 +423,16 @@ if (( base_rc != 0 )); then printf '%s基础验机未正常完成，增强测试
 
 print_fio
 print_three_carrier_route
+extract_base_summary
+build_final_recommendation
 write_markdown
 end_epoch="$(date +%s)"
 rule
-printf '%s%s V2.1.0 增强项结论%s\n' "$BOLD" "$CYAN" "$RESET"
+printf '%s%s 最终验机结论%s\n' "$BOLD" "$CYAN" "$RESET"
+printf ' 综合评级           : %s\n' "$BASE_GRADE"
+printf ' 基础得分           : %s\n' "$BASE_SCORE"
 printf ' 增强磁盘           : %s\n' "$FIO_VERDICT"
 printf ' 中国三网回程       : %s\n' "$ROUTE_VERDICT"
-printf ' 增强项总耗时       : %s 秒\n' "$((end_epoch-START_EPOCH))"
-printf ' 说明               : V2.0.0 基础验机保留；增强 fio 与三网回程均为 fail-closed，不会因单项失败拖住整套验机。\n'
+printf ' 建议               : %s\n' "$FINAL_RECOMMEND"
+printf ' 完整验机总耗时     : %s 秒\n' "$((end_epoch-START_EPOCH))"
+printf ' 说明               : 增强 fio 与三网回程均为 fail-closed，单项失败不会拖住整套验机。\n'
