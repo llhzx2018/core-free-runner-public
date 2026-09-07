@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Public versions stay short and semantic. Internal build identities remain hidden
 # and are used only for exact validation / engineering traceability.
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-preview14"
+BUILD_ID="0.1.0-preview15"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
@@ -17,7 +17,7 @@ VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-publ
 VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
-VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
+VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC3"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
