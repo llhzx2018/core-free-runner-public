@@ -81,7 +81,7 @@ fetch_overlay() {
 say "下载并校验 RC3 增量..."
 fetch_overlay "bin/vfops-user"          "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"   "810dc7723b719700e230bcad8231d6d47b22240c"
-fetch_overlay "bin/vfops-storage-setup" "07211e888304d07e97ac8122cc796406f16cd747"
+fetch_overlay "bin/vfops-storage-setup" "c0ed546a12e09898122be00108501894c0bc465a"
 fetch_overlay "lib/auto_backup.py"       "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"     "a1a629a64fbd677696c3f09250eb2757fd534ef4"
 
@@ -96,6 +96,7 @@ find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/nu
 
 grep -Fq '5. 自动备份（本地 + Google + B2）' "$SRC_DIR/bin/vfops-user" || fail "RC3 用户入口缺少自动备份。"
 grep -Fq '设置 / 检查 Google + B2' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份菜单缺少存储设置入口。"
+grep -Fq '1. 一键从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少一键导入入口。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
@@ -173,6 +174,7 @@ fi
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
 printf '自动备份：本地 + Google + B2 · Guarded Scheduler\n'
+printf '远程初始化：支持从已有 P07 服务器一键导入\n'
 printf 'CloudPanel 定时任务：不会修改\n'
 printf 'DNS：不会自动修改\n'
 printf '旧服务器：不会自动删除\n'
