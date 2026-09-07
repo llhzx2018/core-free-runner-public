@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/p07-system-care/0.1.0-rc4/**'
+      - 'packages/p07-system-care/0.1.0-rc5/**'
       - 'installers/p07-system-care.sh'
       - '.github/workflows/p07-system-care-real-mutation-smoke.yml'
   workflow_dispatch:
@@ -19,12 +19,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install exact RC4 runtime
+      - name: Install exact RC5 runtime
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo NO_COLOR=1 bash installers/p07-system-care.sh status | tee /tmp/p07-install-status.txt
-          test "$(sudo NO_COLOR=1 /usr/local/bin/vf-system-care --version)" = 'P07 System Care 0.1.0-rc4'
+          test "$(sudo NO_COLOR=1 /usr/local/bin/vf-system-care --version)" = 'P07 System Care 0.1.0-rc5'
           grep -q '^P07_SYSTEM_CARE_STATUS=' /tmp/p07-install-status.txt
 
       - name: Prepare protected sentinels
@@ -59,12 +59,80 @@ jobs:
           printf '1\n' | script -qec "sudo NO_COLOR=1 bash /opt/vf-system-care/cleanup.sh journal" /tmp/p07-clean-journal.typescript
           grep -Fq 'systemd journal 清理完成' /tmp/p07-clean-journal.typescript
 
-      - name: Destructive upgrade cancel path
+      - name: Real upgrade preflight is read-only
         shell: bash
         run: |
           set -Eeuo pipefail
-          printf '0\n' | script -qec "sudo NO_COLOR=1 bash /opt/vf-system-care/updates.sh all" /tmp/p07-upgrade-cancel.typescript
-          grep -Fq '已取消' /tmp/p07-upgrade-cancel.typescript
+          set +e
+          sudo NO_COLOR=1 bash /opt/vf-system-care/updates.sh preflight | tee /tmp/p07-real-preflight.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          case "$rc" in
+            0|90|91|92) ;;
+            *) echo "unexpected preflight rc=$rc" >&2; exit 1 ;;
+          esac
+          test "$(cat /proc/sys/kernel/random/boot_id)" = "$(cat /tmp/boot-id.before)"
+
+      - name: Exact downgrade field class is blocked before write
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shim="$(mktemp -d)"
+          cat > "$shim/apt-get" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ " $* " == *" -s "* ]]; then
+            cat <<'OUT'
+          The following packages will be DOWNGRADED:
+            sgml-base
+          0 upgraded, 0 newly installed, 1 downgraded, 0 to remove and 0 not upgraded.
+          OUT
+            exit 0
+          fi
+          echo REAL_WRITE_CALLED >> /tmp/p07-forbidden-write
+          exit 97
+          EOF
+          chmod +x "$shim/apt-get"
+          rm -f /tmp/p07-forbidden-write
+          set +e
+          sudo env PATH="$shim:$PATH" NO_COLOR=1 bash /opt/vf-system-care/updates.sh preflight > /tmp/p07-downgrade-guard.txt 2>&1
+          rc=$?
+          set -e
+          test "$rc" -eq 91
+          test ! -e /tmp/p07-forbidden-write
+          grep -Fq '检测到降级或移除包计划' /tmp/p07-downgrade-guard.txt
+          rm -rf "$shim"
+
+      - name: CloudPanel runtime package plan is blocked
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shim="$(mktemp -d)"
+          cat > "$shim/clpctl" <<'EOF'
+          #!/usr/bin/env bash
+          exit 0
+          EOF
+          cat > "$shim/apt-get" <<'EOF'
+          #!/usr/bin/env bash
+          if [[ " $* " == *" -s "* ]]; then
+            cat <<'OUT'
+          Inst nginx [1.26] (1.27 vendor:stable [amd64])
+          1 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+          OUT
+            exit 0
+          fi
+          echo REAL_WRITE_CALLED >> /tmp/p07-forbidden-write
+          exit 97
+          EOF
+          chmod +x "$shim/clpctl" "$shim/apt-get"
+          rm -f /tmp/p07-forbidden-write
+          set +e
+          sudo env PATH="$shim:$PATH" NO_COLOR=1 bash /opt/vf-system-care/updates.sh preflight > /tmp/p07-cloudpanel-guard.txt 2>&1
+          rc=$?
+          set -e
+          test "$rc" -eq 92
+          test ! -e /tmp/p07-forbidden-write
+          grep -Fq 'CloudPanel / 网站运行栈相关包' /tmp/p07-cloudpanel-guard.txt
+          rm -rf "$shim"
 
       - name: Protected-boundary readback
         shell: bash
