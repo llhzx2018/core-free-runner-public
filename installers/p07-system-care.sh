@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc1'
+VERSION='0.1.0-rc2'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='31c4a6cc55926783ea043b3ee548333413efc0a4'
+MANIFEST_BLOB='726999ee6501b571f4dc603befab696df4de3495'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -47,9 +47,9 @@ installed_version() {
 }
 
 manager_ready() {
-  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" ]] || return 1
+  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
-  NO_COLOR=1 "$ENTRY" status >/dev/null 2>&1
+  NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
 }
 
 install_runtime() {
