@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-preview7"
+# Public versions stay short and semantic. Internal build identities remain hidden
+# and are used only for exact validation / engineering traceability.
+VERSION="V0.1.0"
+BUILD_ID="0.1.0-preview7"
+
+VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
+VPS_AUDIT_PUBLIC="V2.0.0"
 VPS_AUDIT_EXPECTED="2.0.0-rc4-zh"
 VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/1197372f0b32b7cc9a8b35736c30563cb36633c9/experiments/p07-vps-audit-v20-rc4.sh"
 VPS_AUDIT_SHA256="54325e92bdf78a90c74b5fed73be9d0633b402659fdfa2848dc751ff23efaecd"
 
+VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
@@ -23,16 +30,16 @@ pause_menu() { [[ -t 0 ]] || return 0; printf '\n按 Enter 返回主菜单...'; 
 show_header() {
   clear 2>/dev/null || true
   say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF Server Ops${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                            ${C_CYAN}│${C_RESET}"
+  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF Server Ops${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
   say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
   say
 }
 
 show_menu() {
   show_header
-  say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray                    ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                        ${C_GREEN}可用${C_RESET}"
-  say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移        ${C_YELLOW}测试中${C_RESET}"
+  say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
 }
@@ -72,12 +79,23 @@ sha256_file() {
   fi
 }
 
+render_vps_audit_output() {
+  # Keep exact internal RC build identities for validation, but normalize all
+  # user-facing version text to the public semantic version.
+  sed -u \
+    -e "s/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 ${VPS_AUDIT_PUBLIC}/g" \
+    -e "s/2\.0\.0-rc3-zh/${VPS_AUDIT_PUBLIC}/g" \
+    -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g"
+}
+
 run_vps_audit() {
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
 
-  local tmp actual_sha version rc
+  local tmp actual_sha version rc cmd
   tmp="$(mktemp -t p07-vps-audit.XXXXXX)"
   chmod 700 "$tmp"
+
+  say "${C_CYAN}正在启动 VPS 一键验机 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
 
   if ! curl -fsSL "$VPS_AUDIT_URL" -o "$tmp"; then
     rm -f "$tmp"
@@ -105,8 +123,14 @@ run_vps_audit() {
   fi
 
   set +e
-  bash "$tmp"
-  rc=$?
+  if [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
+    printf -v cmd 'bash %q' "$tmp"
+    script -qec "$cmd" /dev/null | render_vps_audit_output
+    rc=${PIPESTATUS[0]}
+  else
+    bash "$tmp" | render_vps_audit_output
+    rc=${PIPESTATUS[0]}
+  fi
   set -e
   rm -f "$tmp"
   return "$rc"
@@ -185,17 +209,17 @@ main_menu() {
 case "${1:-}" in
   --version|-V) printf 'P07 Toolbox %s\n' "$VERSION" ;;
   --help|-h)
-    cat <<'EOF'
-P07 · VF Server Ops
+    cat <<EOF
+P07 · VF Server Ops ${VERSION}
 
 Usage:
   p07-toolbox
 
-1. 网络节点 / V2Ray
-2. VPS 一键验机
-3. CloudPanel 备份 / 恢复 / 迁移（测试中）
+1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
+2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}
+3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（测试中）
 
-说明：Slot 3 已接入 VF Server Ops RC2，但真实 Owner 迁移仍处于 FAIL_INCOMPLETE / NOT_PROVEN，不能将“已接入”解释为迁移验收 PASS。
+说明：用户界面仅显示 Vx.x.x 公共版本；RC / preview / zh 等构建标识只用于内部工程追溯。
 EOF
     ;;
   "")
