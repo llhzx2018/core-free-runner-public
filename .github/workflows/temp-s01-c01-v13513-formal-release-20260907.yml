@@ -1,0 +1,191 @@
+name: S01 C01 Formal Release 1.35.13
+
+on:
+  push:
+    branches: [temp/s01-c01-v13513-formal-release-20260907]
+    paths:
+      - '.github/workflows/temp-s01-c01-v13513-formal-release-20260907.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-c01-v13513-formal-release-20260907
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      THEME_SHA: 1337c9c65a453b15496b1f645a45ede70afe060a
+      VERSION: 1.35.13
+      TAG: v1.35.13
+      ASSET: vf-tools-theme_V1.35.13.zip
+      REPO: llhzx2018/vf-tools-theme
+
+    steps:
+      - name: Credential authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          test "$READ_TOKEN" != "$WRITE_TOKEN"
+          echo 'CREDENTIAL_MODEL=READ_WRITE_SEPARATED'
+
+      - name: Checkout exact Theme formal source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: theme
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and release gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(tr -d '\r\n' < theme/VERSION)" = "$VERSION"
+          grep -Eq '^Version: 1\.35\.13$' theme/src/style.css
+          grep -Fq 'V1.35.13_S01_UPDATE_CENTER_UX_POLISH' theme/src/style.css
+          grep -Fq "apply_filters('vf_wp_update_components_v1'" theme/src/inc/update/class-vf-wp-update-admin-v1.php
+          grep -Fq "'S01-C01' =>" theme/src/inc/update/class-vf-wp-update-admin-v1.php
+          grep -Fq 'vf-update-components' theme/src/inc/update/class-vf-wp-update-admin-v1.php
+          grep -Fq 'tools_page_vf-private-updates' theme/src/inc/update/class-vf-wp-update-admin-v1.php
+          find theme/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php theme/tests/update-refresh-policy-contract.php
+          php theme/tests/public-reading-final-owner-contract.php
+          mapfile -t changed < <(git -C theme diff --name-only 8c50ad91678cad78788c04ca839ba8304228499b..HEAD | sort)
+          printf '%s\n' "${changed[@]}" > /tmp/changed.txt
+          cat >/tmp/expected.txt <<'EOF'
+          VERSION
+          src/assets/css/admin/admin-update-center.css
+          src/inc/update/class-vf-wp-update-admin-v1.php
+          src/style.css
+          tests/update-refresh-policy-contract.php
+          EOF
+          sort -o /tmp/expected.txt /tmp/expected.txt
+          diff -u /tmp/expected.txt /tmp/changed.txt
+          ! grep -Eiq '(^|/)(schema|migration|migrations|database|db)(/|$)' /tmp/changed.txt
+          echo 'EXACT_FORMAL_SOURCE_GATE=PASS'
+          echo 'NO_SCHEMA_MIGRATION=PASS'
+
+      - name: Build deterministic Theme candidate and Runtime Authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/readback" evidence/runner
+          cat > /tmp/theme-authority.php <<'PHP'
+          <?php
+          define('ABSPATH','/');
+          class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/src/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1].'/src');
+          unset($s['files']);
+          echo json_encode($s, JSON_UNESCAPED_SLASHES), "\n";
+          PHP
+          php /tmp/theme-authority.php theme > "$RUNNER_TEMP/theme-runtime.json"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,zipfile
+          src=Path('theme/src')
+          out=Path(os.environ['RUNNER_TEMP'])/'release'/os.environ['ASSET']
+          rows=[(p.relative_to(src).as_posix(),p.read_bytes()) for p in sorted(src.rglob('*'),key=lambda x:x.relative_to(src).as_posix()) if p.is_file()]
+          dirs={'vf-tools-theme/'}
+          for rel,_ in rows:
+              cur='vf-tools-theme'
+              for part in rel.split('/')[:-1]:
+                  cur += '/'+part
+                  dirs.add(cur+'/')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for d in sorted(dirs):
+                  zi=zipfile.ZipInfo(d); zi.date_time=(1980,1,1,0,0,0); zi.external_attr=(0o40755<<16)|0x10; z.writestr(zi,b'')
+              for rel,b in rows:
+                  zi=zipfile.ZipInfo('vf-tools-theme/'+rel); zi.date_time=(1980,1,1,0,0,0); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert 'vf-tools-theme/style.css' in z.namelist()
+              assert 'vf-tools-theme/inc/update/class-vf-wp-update-admin-v1.php' in z.namelist()
+              assert 'vf-tools-theme/assets/css/admin/admin-update-center.css' in z.namelist()
+          h=hashlib.sha256()
+          for rel,b in sorted(rows):
+              h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+          runtime=json.load(open(Path(os.environ['RUNNER_TEMP'])/'theme-runtime.json'))
+          receipt={
+              'version':os.environ['VERSION'],
+              'source_sha':os.environ['THEME_SHA'],
+              'asset_name':os.environ['ASSET'],
+              'asset_bytes':out.stat().st_size,
+              'asset_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),
+              'package_file_count':len(rows),
+              'package_fingerprint_sha256':h.hexdigest(),
+              'runtime_file_count':runtime['file_count'],
+              'runtime_fingerprint_sha256':runtime['fingerprint_sha256'],
+          }
+          Path(os.environ['RUNNER_TEMP'],'candidate.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+          print(json.dumps(receipt,sort_keys=True))
+          PY
+          echo 'DETERMINISTIC_CANDIDATE=PASS'
+          echo 'RUNTIME_AUTHORITY=PASS'
+
+      - name: Publish draft, remote-read asset, then make Release public
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          asset="$RUNNER_TEMP/release/$ASSET"
+          cleanup(){
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              GH_TOKEN="$WRITE_TOKEN" gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes >/dev/null 2>&1 || true
+              GH_TOKEN="$WRITE_TOKEN" gh api --method DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+            fi
+            exit "$rc"
+          }
+          trap cleanup EXIT
+
+          ! GH_TOKEN="$READ_TOKEN" gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1
+          ! GH_TOKEN="$READ_TOKEN" gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1
+
+          GH_TOKEN="$WRITE_TOKEN" gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$THEME_SHA" >/tmp/tag.json
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/$REPO/git/ref/tags/$TAG" --jq .object.sha)" = "$THEME_SHA"
+
+          GH_TOKEN="$WRITE_TOKEN" gh release create "$TAG" "$asset" --repo "$REPO" --verify-tag --draft --title "VF Tools Theme $VERSION" --notes "S01-C01 · VF Tools Theme $VERSION. Unified VF update center UX refinement; registry contract unchanged; no schema/data migration."
+
+          mkdir -p "$RUNNER_TEMP/readback"
+          GH_TOKEN="$READ_TOKEN" gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP/readback"
+          local_sha="$(sha256sum "$asset" | awk '{print $1}')"
+          remote_sha="$(sha256sum "$RUNNER_TEMP/readback/$ASSET" | awk '{print $1}')"
+          local_bytes="$(stat -c %s "$asset")"
+          remote_bytes="$(stat -c %s "$RUNNER_TEMP/readback/$ASSET")"
+          test "$local_sha" = "$remote_sha"
+          test "$local_bytes" = "$remote_bytes"
+
+          GH_TOKEN="$WRITE_TOKEN" gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease=false
+          release_json="$(GH_TOKEN="$READ_TOKEN" gh api "repos/$REPO/releases/tags/$TAG")"
+          test "$(jq -r .draft <<<"$release_json")" = false
+          test "$(jq -r .prerelease <<<"$release_json")" = false
+          test "$(jq -r .tag_name <<<"$release_json")" = "$TAG"
+          asset_id="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$release_json")"
+          release_id="$(jq -r .id <<<"$release_json")"
+          test -n "$asset_id"; test "$asset_id" != null
+
+          jq --argjson release_id "$release_id" --argjson asset_id "$asset_id" --arg remote_sha "$remote_sha" --argjson remote_bytes "$remote_bytes" '. + {release_id:$release_id,asset_id:$asset_id,remote_asset_sha256:$remote_sha,remote_asset_bytes:$remote_bytes,release_draft:false,release_prerelease:false}' "$RUNNER_TEMP/candidate.json" > evidence/runner/S01_C01_V13513_FORMAL_RELEASE.json
+          cat evidence/runner/S01_C01_V13513_FORMAL_RELEASE.json
+          echo 'REMOTE_ASSET_READBACK=PASS'
+          echo 'FORMAL_RELEASE=PASS'
+          trap - EXIT
+
+      - name: Upload public-safe formal release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+        with:
+          name: s01-c01-v13513-formal-release-${{ github.run_id }}
+          path: evidence/runner/S01_C01_V13513_FORMAL_RELEASE.json
+          if-no-files-found: error
+          retention-days: 14
