@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 HELPER="$ROOT_DIR/lib/storage_setup.py"
+GOOGLE_OAUTH_HELPER="$ROOT_DIR/lib/google_device_oauth.py"
 CORE="$ROOT_DIR/bin/vfops"
 CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
 
@@ -147,25 +148,38 @@ print(derive("vf-p07-rclone-crypt-password-v1")); print(derive("vf-p07-rclone-cr
   unset recovery
 }
 
+GOOGLE_CLIENT_ID=""
+GOOGLE_CLIENT_SECRET=""
 GOOGLE_TOKEN=""
 B2_ACCOUNT=""
 B2_KEY=""
 
-read_google_token() {
-  local token
-  printf '\nGoogle Drive 需要一次官方 OAuth 浏览器授权。\n' >&2
-  printf '这台 VPS 没有浏览器，rclone 官方 headless 流程需要在有浏览器的电脑完成授权。\n' >&2
-  printf '在有浏览器且已安装 rclone 的电脑运行：\n\n  rclone authorize drive\n\n' >&2
-  printf '浏览器授权完成后，把 rclone 输出的 JSON token 粘贴到这里。\n' >&2
-  printf 'Token 输入不回显：' >&2
-  IFS= read -rs token || return 1
+read_google_device_oauth() {
+  local client_id client_secret token
+  [[ -f "$GOOGLE_OAUTH_HELPER" ]] || { printf '缺少 Google OAuth helper。\n' >&2; return 1; }
+
+  printf '\nGoogle Drive 首次接入\n' >&2
+  printf '需要你自己的 Google OAuth Client（类型：TVs and Limited Input devices）。\n' >&2
+  printf 'Client ID：' >&2
+  read -r client_id || return 1
+  [[ -n "$client_id" ]] || return 1
+  printf 'Client Secret（输入不回显）：' >&2
+  IFS= read -rs client_secret || return 1
   printf '\n' >&2
-  if ! printf '%s' "$token" | python3 -c 'import json,sys; p=json.load(sys.stdin); raise SystemExit(0 if isinstance(p,dict) and p.get("refresh_token") and p.get("access_token") else 1)' >/dev/null 2>&1; then
-    unset token
+  [[ -n "$client_secret" ]] || return 1
+
+  if ! token="$(printf '%s\n' "$client_secret" | python3 "$GOOGLE_OAUTH_HELPER" --client-id "$client_id")"; then
+    unset client_id client_secret token
     return 1
   fi
+  if ! printf '%s' "$token" | python3 -c 'import json,sys; p=json.load(sys.stdin); raise SystemExit(0 if isinstance(p,dict) and p.get("refresh_token") and p.get("access_token") else 1)' >/dev/null 2>&1; then
+    unset client_id client_secret token
+    return 1
+  fi
+  GOOGLE_CLIENT_ID="$client_id"
+  GOOGLE_CLIENT_SECRET="$client_secret"
   GOOGLE_TOKEN="$token"
-  unset token
+  unset client_id client_secret token
 }
 
 read_b2_credentials() {
@@ -230,6 +244,7 @@ fresh_initialize() {
   printf 'Google：%s → %s（crypt）\n' "$P07_GOOGLE_DIRECT" "$P07_GOOGLE_CRYPT"
   printf 'B2：%s → %s（crypt）\n' "$P07_B2_DIRECT" "$P07_B2_CRYPT"
   printf '目录：%s\n' "$P07_REMOTE_PATH"
+  printf 'Google 浏览器只需要完成一次官方 Device OAuth 授权。\n'
   printf '不会修改 DNS，不会删除 SOURCE，也不会改 CloudPanel 自己的定时任务。\n\n'
   printf '1. 开始\n0. 返回\n\n请选择 [0-1]：'
   local choice
@@ -264,19 +279,26 @@ fresh_initialize() {
   crypt_salt_obscured="$(obscure_stdin "$crypt_salt")" || { rollback_fresh; pause_menu; return 0; }
   unset crypt_pass crypt_salt material
 
-  if ! read_google_token; then
-    printf 'Google OAuth token 无效；未保留半成品配置。\n' >&2
+  if ! read_google_device_oauth; then
+    printf 'Google 官方授权未完成；未保留半成品配置。\n' >&2
     rollback_fresh; pause_menu; return 0
   fi
-  if ! printf 'scope\0drive\0token\0%s\0' "$GOOGLE_TOKEN" | write_remote_section "$rclone_config" "$P07_GOOGLE_DIRECT" drive; then
+  local google_client_secret_obscured
+  google_client_secret_obscured="$(obscure_stdin "$GOOGLE_CLIENT_SECRET")" || {
+    unset GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_TOKEN
+    rollback_fresh; pause_menu; return 0
+  }
+  unset GOOGLE_CLIENT_SECRET
+  if ! printf 'client_id\0%s\0client_secret\0%s\0scope\0drive.file\0token\0%s\0' \
+      "$GOOGLE_CLIENT_ID" "$google_client_secret_obscured" "$GOOGLE_TOKEN" | \
+      write_remote_section "$rclone_config" "$P07_GOOGLE_DIRECT" drive; then
     printf 'Google remote 写入失败；已回滚。\n' >&2
-    unset GOOGLE_TOKEN
+    unset GOOGLE_CLIENT_ID GOOGLE_TOKEN google_client_secret_obscured
     rollback_fresh; pause_menu; return 0
   fi
-  unset GOOGLE_TOKEN
+  unset GOOGLE_CLIENT_ID GOOGLE_TOKEN google_client_secret_obscured
   if ! RCLONE_CONFIG="$rclone_config" rclone about "${P07_GOOGLE_DIRECT}:" --json >/dev/null 2>&1; then
-    printf 'Google OAuth 验证失败；已回滚。\n' >&2
-    printf '注意：rclone 官方正在 2026 年退役共享 Google client_id；若共享授权已停用，需要 P07 后续接入自有 OAuth Client。\n' >&2
+    printf 'Google Drive 实际访问验证失败；已回滚。\n' >&2
     rollback_fresh; pause_menu; return 0
   fi
 
@@ -432,6 +454,7 @@ show_current() {
 main() {
   require_root || { pause_menu; return 0; }
   command -v rclone >/dev/null 2>&1 || { printf '缺少 rclone，请重新进入第 3 项让 P07 自动更新依赖。\n' >&2; pause_menu; return 0; }
+  [[ -f "$HELPER" && -f "$GOOGLE_OAUTH_HELPER" ]] || { printf 'P07 远程存储组件不完整，请重新从 Toolbox 更新。\n' >&2; pause_menu; return 0; }
   while true; do
     screen_clear
     cat <<'MENU'
