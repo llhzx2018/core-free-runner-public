@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -15,6 +16,11 @@ import unittest
 RUNTIME = Path(os.environ.get("P07_RC3_RUNTIME", "/tmp/p07-rc3"))
 SETUP_SOURCE = RUNTIME / "bin" / "vfops-storage-setup"
 OAUTH_SOURCE = RUNTIME / "lib" / "google_device_oauth.py"
+
+if os.geteuid() != 0 and os.environ.get("P07_GUIDED_TEST_SUDO") != "1":
+    env = os.environ.copy()
+    env["P07_GUIDED_TEST_SUDO"] = "1"
+    os.execvpe("sudo", ["sudo", "-E", sys.executable, *sys.argv], env)
 
 
 class GuidedRemoteInitTests(unittest.TestCase):
