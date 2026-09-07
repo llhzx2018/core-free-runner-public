@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-preview6"
+VERSION="0.1.0-preview7"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 VPS_AUDIT_EXPECTED="2.0.0-rc4-zh"
 VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/1197372f0b32b7cc9a8b35736c30563cb36633c9/experiments/p07-vps-audit-v20-rc4.sh"
 VPS_AUDIT_SHA256="54325e92bdf78a90c74b5fed73be9d0633b402659fdfa2848dc751ff23efaecd"
+
+VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -29,7 +32,7 @@ show_menu() {
   show_header
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray                    ${C_GREEN}可用${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                        ${C_GREEN}可用${C_RESET}"
-  say "  ${C_YELLOW}3.${C_RESET} 功能模块 C                         ${C_YELLOW}待接入${C_RESET}"
+  say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移        ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
 }
@@ -109,9 +112,39 @@ run_vps_audit() {
   return "$rc"
 }
 
-pending_slot() {
-  say
-  say "${C_YELLOW}⚠ $1 尚未接入。${C_RESET}"
+local_server_ops_version() {
+  command -v vfops >/dev/null 2>&1 || return 1
+  NO_COLOR=1 vfops --version 2>/dev/null || true
+}
+
+run_server_ops() {
+  if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" ]]; then
+    vfops
+    return $?
+  fi
+
+  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
+
+  local tmp rc
+  tmp="$(mktemp -t p07-server-ops.XXXXXX)"
+  chmod 700 "$tmp"
+  if ! curl -fsSL "$VF_SERVER_OPS_INSTALLER" -o "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ CloudPanel 运维模块入口下载失败。${C_RESET}" >&2
+    return 4
+  fi
+  if ! bash -n "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ CloudPanel 运维模块入口校验失败。${C_RESET}" >&2
+    return 5
+  fi
+
+  set +e
+  P07_TOOLBOX_PARENT=1 bash "$tmp"
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  return "$rc"
 }
 
 main_menu() {
@@ -136,7 +169,13 @@ main_menu() {
         [[ $rc -eq 0 ]] || say "${C_YELLOW}⚠ VPS 一键验机模块返回退出码 ${rc}。${C_RESET}"
         pause_menu
         ;;
-      3) pending_slot "功能模块 C"; pause_menu ;;
+      3)
+        set +e
+        run_server_ops
+        rc=$?
+        set -e
+        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ CloudPanel 运维模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        ;;
       0) return 0 ;;
       *) say "${C_YELLOW}⚠ 无效选择，请输入 0-3。${C_RESET}" ;;
     esac
@@ -154,7 +193,9 @@ Usage:
 
 1. 网络节点 / V2Ray
 2. VPS 一键验机
-3. 功能模块 C（待接入）
+3. CloudPanel 备份 / 恢复 / 迁移（测试中）
+
+说明：Slot 3 已接入 VF Server Ops RC2，但真实 Owner 迁移仍处于 FAIL_INCOMPLETE / NOT_PROVEN，不能将“已接入”解释为迁移验收 PASS。
 EOF
     ;;
   "")
