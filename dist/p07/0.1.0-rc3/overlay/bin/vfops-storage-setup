@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+HELPER="$ROOT_DIR/lib/storage_setup.py"
+CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
+
+pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    printf '远程存储设置需要 root。\n' >&2
+    return 1
+  fi
+}
+
+inspect_remotes() {
+  python3 "$HELPER" inspect 2>/dev/null
+}
+
+show_remotes() {
+  local payload="$1"
+  python3 - "$payload" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+rows=p.get('remotes',[]) if isinstance(p.get('remotes'),list) else []
+print('\n现有 rclone 存储')
+print('----------------------------------------')
+if not rows:
+    print('没有发现已配置的 rclone remote。')
+for i,row in enumerate(rows,1):
+    name=row.get('name','UNKNOWN')
+    typ=row.get('type','UNKNOWN')
+    under=row.get('underlying','')
+    extra=f" → {under}" if under else ''
+    print(f"{i}. {name}  [{typ}]{extra}")
+PY
+}
+
+remote_count() {
+  python3 - "$1" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1]); print(len(p.get('remotes',[]) if isinstance(p.get('remotes'),list) else []))
+PY
+}
+
+remote_name() {
+  python3 - "$1" "$2" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1]); n=int(sys.argv[2]); rows=p.get('remotes',[])
+if 1 <= n <= len(rows): print(rows[n-1].get('name',''))
+PY
+}
+
+choose_remote() {
+  local payload="$1" prompt="$2" count choice name
+  count="$(remote_count "$payload")"
+  while true; do
+    printf '%s [1-%s, 0 返回]：' "$prompt" "$count" >&2
+    read -r choice || return 1
+    [[ "$choice" == "0" ]] && return 2
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
+      name="$(remote_name "$payload" "$choice")"
+      [[ -n "$name" ]] && { printf '%s' "$name"; return 0; }
+    fi
+    printf '请输入上面的数字。\n' >&2
+  done
+}
+
+run_rclone_config() {
+  printf '\nP07 将打开 rclone 官方配置界面。\n'
+  printf 'Google OAuth / B2 Key / crypt 密码只在 rclone 自己的界面处理；P07 不读取、不保存。\n\n'
+  printf '1. 打开 rclone config\n0. 返回\n\n请选择 [0-1]：'
+  local choice
+  read -r choice || return 1
+  [[ "$choice" == "1" ]] || return 1
+  rclone config
+}
+
+main() {
+  require_root || { pause_menu; return 0; }
+  if ! command -v rclone >/dev/null 2>&1; then
+    printf '当前没有安装 rclone。请重新运行 P07 主入口更新 Server Ops 后再设置。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  if [[ -f "$CONFIG" ]]; then
+    printf '已经存在 P07 远程存储设置：%s\n' "$CONFIG"
+    printf '重新设置前会保留一份旧配置备份。\n\n'
+    printf '1. 重新设置\n0. 返回\n\n请选择 [0-1]：'
+    local overwrite
+    read -r overwrite || return 0
+    [[ "$overwrite" == "1" ]] || return 0
+  fi
+
+  local payload count
+  while true; do
+    if ! payload="$(inspect_remotes)"; then
+      printf '无法读取 rclone 配置。\n' >&2
+      pause_menu
+      return 0
+    fi
+    show_remotes "$payload"
+    count="$(remote_count "$payload")"
+    if [[ "$count" -gt 0 ]]; then
+      break
+    fi
+    if ! run_rclone_config; then
+      return 0
+    fi
+  done
+
+  printf '\n请选择 Google 原始盘、它对应的 crypt，以及 B2 crypt。\n'
+  printf 'P07 会自己验证类型和指向关系，选错不会写配置。\n\n'
+
+  local google_direct google_crypt b2_crypt rc
+  set +e
+  google_direct="$(choose_remote "$payload" 'Google 原始盘')"; rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || return 0
+  set +e
+  google_crypt="$(choose_remote "$payload" 'Google 加密盘 crypt')"; rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || return 0
+  set +e
+  b2_crypt="$(choose_remote "$payload" 'Backblaze B2 加密盘 crypt')"; rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || return 0
+
+  printf '\n准备验证：\n'
+  printf 'Google：%s → %s\n' "$google_direct" "$google_crypt"
+  printf 'B2：%s\n' "$b2_crypt"
+  printf '\n1. 验证并保存\n0. 取消\n\n请选择 [0-1]：'
+  local confirm
+  read -r confirm || return 0
+  [[ "$confirm" == "1" ]] || { printf '已取消。\n'; pause_menu; return 0; }
+
+  local backup=""
+  if [[ -f "$CONFIG" ]]; then
+    backup="${CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$CONFIG" "$backup"
+    chmod 600 "$backup"
+  fi
+
+  printf '\n[P07] 正在验证 Google / crypt / B2，请稍候...\n'
+  local output
+  if output="$(python3 "$HELPER" configure --config "$CONFIG" --google-direct "$google_direct" --google-crypt "$google_crypt" --b2-crypt "$b2_crypt" 2>&1)"; then
+    printf 'Google：PASS ✓\n'
+    printf 'Google crypt：PASS ✓\n'
+    printf 'Backblaze B2 crypt：PASS ✓\n'
+    printf 'P07 存储配置：已保存（不含账号密钥）✓\n'
+    [[ -n "$backup" ]] && printf '旧配置备份：%s\n' "$backup"
+  else
+    printf '远程存储验证没有通过，P07 没有接受这组设置。\n' >&2
+    printf '%s\n' "$output" | sed -n '1,3p' >&2
+    if [[ -n "$backup" && -f "$backup" ]]; then
+      cp -p "$backup" "$CONFIG"
+      chmod 600 "$CONFIG"
+      printf '旧配置已恢复。\n'
+    fi
+  fi
+  pause_menu
+}
+
+main "$@"
