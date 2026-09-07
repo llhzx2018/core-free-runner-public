@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Public versions stay short and semantic. Internal build identities remain hidden
 # and are used only for exact validation / engineering traceability.
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-preview10"
+BUILD_ID="0.1.0-preview11"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
@@ -21,7 +21,7 @@ VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc3"
+SYSTEM_CARE_EXPECTED="0.1.0-rc4"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -31,9 +31,10 @@ fi
 
 say() { printf '%b\n' "$*"; }
 pause_menu() { [[ -t 0 ]] || return 0; printf '\n按 Enter 返回主菜单...'; read -r _ || true; }
+screen_clear() { if [[ -t 1 ]]; then printf '\033[H\033[2J'; fi; }
 
 show_header() {
-  clear 2>/dev/null || true
+  screen_clear
   say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
   say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF Server Ops${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
   say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
