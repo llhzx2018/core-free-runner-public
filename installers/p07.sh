@@ -122,11 +122,16 @@ fi
 
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
-printf '以后只需要输入：vfops\n'
-printf '升级也继续使用同一条 p07.sh 安装命令。\n'
+if [[ "${P07_TOOLBOX_PARENT:-0}" == "1" ]]; then
+  printf 'CloudPanel 运维模块已接入当前 P07 Toolbox 会话。\n'
+  printf '退出模块后会返回 P07 Toolbox。\n'
+else
+  printf '普通用户请从统一 P07 Toolbox 入口进入。\n'
+  printf '已安装的模块仍可用 vfops 直接调用，供兼容/诊断使用。\n'
+fi
 printf 'P07 不会自动改 DNS，也不会自动删除旧服务器。\n'
 
 if [[ -t 0 && -t 1 ]]; then
-  printf '\n正在进入 P07...\n'
+  printf '\n正在进入 CloudPanel 运维模块...\n'
   exec "$BIN_LINK"
 fi
