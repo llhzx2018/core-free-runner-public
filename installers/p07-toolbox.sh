@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="0.1.0-preview4"
+VERSION="0.1.0-preview5"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
