@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Public versions stay short and semantic. Internal build identities remain hidden
 # and are used only for exact validation / engineering traceability.
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-preview7"
+BUILD_ID="0.1.0-preview8"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
@@ -18,6 +18,10 @@ VPS_AUDIT_SHA256="54325e92bdf78a90c74b5fed73be9d0633b402659fdfa2848dc751ff23efae
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
+
+SYSTEM_CARE_PUBLIC="V0.1.0"
+SYSTEM_CARE_EXPECTED="0.1.0-rc1"
+SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -40,6 +44,7 @@ show_menu() {
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
+  say "  ${C_CYAN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
 }
@@ -171,11 +176,46 @@ run_server_ops() {
   return "$rc"
 }
 
+local_system_care_version() {
+  command -v vf-system-care >/dev/null 2>&1 || return 1
+  NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true
+}
+
+run_system_care() {
+  if [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]; then
+    vf-system-care menu
+    return $?
+  fi
+
+  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
+
+  local tmp rc
+  tmp="$(mktemp -t p07-system-care.XXXXXX)"
+  chmod 700 "$tmp"
+  if ! curl -fsSL "$SYSTEM_CARE_INSTALLER" -o "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ 系统维护模块入口下载失败。${C_RESET}" >&2
+    return 4
+  fi
+  if ! bash -n "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ 系统维护模块入口校验失败。${C_RESET}" >&2
+    return 5
+  fi
+
+  set +e
+  bash "$tmp" menu
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  return "$rc"
+}
+
 main_menu() {
   local choice rc
   while true; do
     show_menu
-    printf '请选择 [0-3]：'
+    printf '请选择 [0-4]：'
     read -r choice || return 0
     case "$choice" in
       1)
@@ -200,8 +240,15 @@ main_menu() {
         set -e
         [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ CloudPanel 运维模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
         ;;
+      4)
+        set +e
+        run_system_care
+        rc=$?
+        set -e
+        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 系统维护模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        ;;
       0) return 0 ;;
-      *) say "${C_YELLOW}⚠ 无效选择，请输入 0-3。${C_RESET}" ;;
+      *) say "${C_YELLOW}⚠ 无效选择，请输入 0-4。${C_RESET}" ;;
     esac
   done
 }
@@ -218,6 +265,7 @@ Usage:
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
 2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（测试中）
+4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（测试中）
 
 说明：用户界面仅显示 Vx.x.x 公共版本；RC / preview / zh 等构建标识只用于内部工程追溯。
 EOF
