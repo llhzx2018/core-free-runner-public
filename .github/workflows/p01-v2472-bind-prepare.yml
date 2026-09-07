@@ -1,0 +1,122 @@
+name: P01 V2.47.2 Formal Bind Prepare
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v2472-bind-prepare.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2472-bind-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.head_ref == 'temp/p01-v2472-bind-prepare-20260908'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: c49c883bf075998acad2ecf5c7f1b156dd05a7fb
+      TARGET_BRANCH: release/p01-v2472-bind-20260908
+      TARGET_VERSION: 2.47.2
+      SOURCE_VERSION: 2.47.1
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require governed release write capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$WRITE_TOKEN" || { echo 'BIND_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 81; }
+          test "$(GH_TOKEN="$WRITE_TOKEN" gh api "repos/${PRODUCT_REPO}" --jq '.permissions.push')" = true
+          echo P01_RELEASE_WRITE_CAPABILITY=PASS
+
+      - name: Pre-mutation exact authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          current="$(GH_TOKEN="$WRITE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          test "$current" = "$BASE_SHA" || { echo "BIND_BLOCK=MAIN_DRIFT:${current}"; exit 82; }
+          if GH_TOKEN="$WRITE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" >/dev/null 2>&1; then
+            echo BIND_BLOCK=TARGET_BRANCH_ALREADY_EXISTS
+            exit 83
+          fi
+          echo P01_V2472_PRE_MUTATION_AUTHORITY=PASS
+
+      - name: Checkout exact P01 engineering source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ env.WRITE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 2
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Bind V2.47.2 release identity only
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n ' < VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -Fq "define('VF_VERSION', '$SOURCE_VERSION');" src/app/bootstrap.php
+          printf '%s\n' "$TARGET_VERSION" > VERSION
+          printf '%s\n' "$TARGET_VERSION" > src/VERSION.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/app/bootstrap.php')
+          s=p.read_text(encoding='utf-8')
+          old="define('VF_VERSION', '2.47.1');"
+          new="define('VF_VERSION', '2.47.2');"
+          if s.count(old) != 1:
+              raise SystemExit(f'VF_VERSION anchor count={s.count(old)}')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          test "$(git diff --name-only | wc -l | tr -d ' ')" = 3
+          git diff --name-only | sort > /tmp/v2472-files
+          printf '%s\n' VERSION src/VERSION.txt src/app/bootstrap.php | sort > /tmp/v2472-expected
+          diff -u /tmp/v2472-expected /tmp/v2472-files
+          test "$(git diff --numstat | awk '{a+=$1;d+=$2} END{print a":"d}')" = "3:3"
+          echo P01_V2472_BIND_DIFF_EXACT=PASS
+
+      - name: Syntax and Projects UX regression gate
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-php-lint.log
+          while IFS= read -r -d '' file; do node --check "$file" >/dev/null; done < <(find src/assets -type f -name '*.js' -print0)
+          php tests/unit/projects_description_truth_contract.php
+          test "$(tr -d '\r\n ' < VERSION)" = '2.47.2'
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = '2.47.2'
+          grep -Fq "define('VF_VERSION', '2.47.2');" src/app/bootstrap.php
+          echo P01_V2472_RELEASE_BIND_GATE=PASS
+
+      - name: Publish exact bind candidate branch
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git checkout -b "$TARGET_BRANCH"
+          git add VERSION src/VERSION.txt src/app/bootstrap.php
+          git commit -m "release(P01): bind V2.47.2 Projects UX refinement release" -m "Bind VERSION, src/VERSION.txt and runtime VF_VERSION to 2.47.2 only. Schema remains 2026090401; Migration NONE."
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          candidate="$(git rev-parse HEAD)"
+          echo "P01_V2472_BIND_CANDIDATE_SHA=${candidate}"
+
+      - name: Cleanup private source
+        if: always()
+        shell: bash
+        run: rm -rf vf-start
