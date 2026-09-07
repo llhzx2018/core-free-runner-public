@@ -79,11 +79,12 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "bin/vfops-user"          "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
-fetch_overlay "bin/vfops-auto-backup"   "810dc7723b719700e230bcad8231d6d47b22240c"
-fetch_overlay "bin/vfops-storage-setup" "c0ed546a12e09898122be00108501894c0bc465a"
-fetch_overlay "lib/auto_backup.py"       "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
-fetch_overlay "lib/storage_setup.py"     "a1a629a64fbd677696c3f09250eb2757fd534ef4"
+fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
+fetch_overlay "bin/vfops-auto-backup"       "810dc7723b719700e230bcad8231d6d47b22240c"
+fetch_overlay "bin/vfops-storage-setup"     "ef417629e809711beb703c69243c65dbae020f96"
+fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
+fetch_overlay "lib/storage_setup.py"         "a1a629a64fbd677696c3f09250eb2757fd534ef4"
+fetch_overlay "lib/google_device_oauth.py"   "18b94201eaf0914b30f648d7fedaef6485f9f728"
 
 say "安装前自检..."
 chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user" "$SRC_DIR/bin/vfops-auto-backup" "$SRC_DIR/bin/vfops-storage-setup"
@@ -96,7 +97,10 @@ find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/nu
 
 grep -Fq '5. 自动备份（本地 + Google + B2）' "$SRC_DIR/bin/vfops-user" || fail "RC3 用户入口缺少自动备份。"
 grep -Fq '设置 / 检查 Google + B2' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份菜单缺少存储设置入口。"
-grep -Fq '1. 一键从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少一键导入入口。"
+grep -Fq '1. 全新初始化 Google + B2' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少全新初始化入口。"
+grep -Fq '2. 从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少既有服务器导入入口。"
+grep -Fq 'TVs and Limited Input devices' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 Google Device OAuth 引导缺失。"
+grep -Fq 'https://oauth2.googleapis.com/device/code' "$SRC_DIR/lib/google_device_oauth.py" || fail "RC3 Google Device OAuth helper 缺失。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
@@ -146,7 +150,8 @@ for required in \
   "$INSTALL_DIR/bin/vfops-auto-backup" \
   "$INSTALL_DIR/bin/vfops-storage-setup" \
   "$INSTALL_DIR/lib/auto_backup.py" \
-  "$INSTALL_DIR/lib/storage_setup.py"; do
+  "$INSTALL_DIR/lib/storage_setup.py" \
+  "$INSTALL_DIR/lib/google_device_oauth.py"; do
   if [[ ! -f "$required" ]]; then
     rollback_install
     fail "RC3 运行文件缺失；已回滚。"
@@ -167,14 +172,14 @@ if p.get('schema') != 'vf-server-ops.inventory.v1':
 PY
   then
     rollback_install
-    fail "Inventory 结果自检失败；未保留失败的新版本。"
+    fail "Inventory 结果自检不匹配；未保留失败的新版本。"
   fi
 fi
 
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
 printf '自动备份：本地 + Google + B2 · Guarded Scheduler\n'
-printf '远程初始化：支持从已有 P07 服务器一键导入\n'
+printf '远程初始化：Google Device OAuth + B2 引导；也支持从已有 P07 服务器导入\n'
 printf 'CloudPanel 定时任务：不会修改\n'
 printf 'DNS：不会自动修改\n'
 printf '旧服务器：不会自动删除\n'
