@@ -1,0 +1,91 @@
+name: P07 System Care Smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/p07-system-care/**'
+      - 'installers/p07-system-care.sh'
+      - 'installers/p07-toolbox.sh'
+      - '.github/workflows/p07-system-care-smoke.yml'
+  pull_request:
+    paths:
+      - 'packages/p07-system-care/**'
+      - 'installers/p07-system-care.sh'
+      - 'installers/p07-toolbox.sh'
+      - '.github/workflows/p07-system-care-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc1'
+          bash -n installers/p07-system-care.sh
+          for f in "$pkg"/*.sh "$pkg"/lib/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Exact package blob manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc1'
+          while read -r expected path; do
+            test -n "$expected"
+            test -n "$path"
+            actual="$(git hash-object "$pkg/$path")"
+            test "$actual" = "$expected"
+          done < "$pkg/MANIFEST.gitblob"
+          grep -Fq 'PACKAGE_BYTES_MATCH_PRIVATE_SOURCE=YES' "$pkg/SOURCE_IDENTITY"
+          grep -Fq 'REAL_CLOUDPANEL_GATE=NOT_RUN' "$pkg/SOURCE_IDENTITY"
+          grep -Fq 'OWNER_FIELD_GATE=NOT_RUN' "$pkg/SOURCE_IDENTITY"
+
+      - name: Read-only package smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc1'
+          test "$(NO_COLOR=1 bash "$pkg/vf-system-care.sh" --version)" = 'P07 System Care 0.1.0-rc1'
+          NO_COLOR=1 bash "$pkg/vf-system-care.sh" status | tee /tmp/status.txt
+          grep -q '^P07_SYSTEM_CARE_STATUS=' /tmp/status.txt
+          grep -q '^P07_SYSTEM_CARE_ROOT_DISK_PCT=' /tmp/status.txt
+          NO_COLOR=1 bash "$pkg/vf-system-care.sh" audit | tee /tmp/audit.txt
+          grep -Fq 'P07 · 一键系统体检' /tmp/audit.txt
+          grep -Fq 'CloudPanel' /tmp/audit.txt
+          grep -Fq '不会被修改' /tmp/audit.txt
+          NO_COLOR=1 bash "$pkg/vf-system-care.sh" cleanup scan | tee /tmp/cleanup.txt
+          grep -Fq '不会删除网站' /tmp/cleanup.txt
+          NO_COLOR=1 bash "$pkg/vf-system-care.sh" security | tee /tmp/security.txt
+          grep -Fq '只检查，不修改 SSH' /tmp/security.txt
+
+      - name: Internal bootstrap smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo NO_COLOR=1 bash installers/p07-system-care.sh audit | tee /tmp/bootstrap-audit.txt
+          test "$(sudo NO_COLOR=1 /usr/local/bin/vf-system-care --version)" = 'P07 System Care 0.1.0-rc1'
+          sudo NO_COLOR=1 /usr/local/bin/vf-system-care status | grep -q '^P07_SYSTEM_CARE_STATUS='
+          grep -Fq 'CloudPanel' /tmp/bootstrap-audit.txt
+
+      - name: Mutation boundary static checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc1'
+          ! grep -REn --include='*.sh' 'rm[[:space:]]+-rf[[:space:]]+/(var|home|etc|tmp|root)([ /]|$)' "$pkg"
+          ! grep -REn --include='*.sh' '(ufw[[:space:]]+(enable|allow|deny|delete)|firewall-cmd.*--add|nft[[:space:]]+(add|delete)|iptables[[:space:]]+-[AIDF])' "$pkg"
+          ! grep -REn --include='*.sh' '(sed|perl|python).*sshd_config' "$pkg"
+          ! grep -REn --include='*.sh' '/home/[^ ]+/htdocs|/etc/nginx/sites|/etc/php|/etc/mysql' "$pkg"
+          grep -Fq 'journalctl --vacuum-time=14d' "$pkg/cleanup.sh"
+          grep -Fq 'apt-get clean' "$pkg/cleanup.sh"
+          grep -Fq '不会自动重启' "$pkg/updates.sh"
