@@ -10,10 +10,11 @@ VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.0.0"
-VPS_AUDIT_EXPECTED="2.0.0-rc4-zh"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/1197372f0b32b7cc9a8b35736c30563cb36633c9/experiments/p07-vps-audit-v20-rc4.sh"
-VPS_AUDIT_SHA256="54325e92bdf78a90c74b5fed73be9d0633b402659fdfa2848dc751ff23efaecd"
+VPS_AUDIT_PUBLIC="V2.1.0"
+VPS_AUDIT_EXPECTED="V2.1.0"
+VPS_AUDIT_BUILD_EXPECTED="2.1.0-rc7-field"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0a851b9fe1819c7970ed5bb8e3633f2fc8e73166/experiments/p07-vps-audit-v21.sh"
+VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC2"
@@ -42,7 +43,7 @@ show_header() {
 show_menu() {
   show_header
   say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_CYAN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_CYAN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_CYAN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
@@ -88,13 +89,14 @@ render_vps_audit_output() {
   sed -u \
     -e "s/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 ${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.0\.0-rc3-zh/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g"
+    -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g" \
+    -e "s/2\.1\.0-rc7-field/${VPS_AUDIT_PUBLIC}/g"
 }
 
 run_vps_audit() {
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
 
-  local tmp actual_sha version rc cmd
+  local tmp actual_sha version build_id rc cmd
   tmp="$(mktemp -t p07-vps-audit.XXXXXX)"
   chmod 700 "$tmp"
 
@@ -123,6 +125,13 @@ run_vps_audit() {
     rm -f "$tmp"
     say "${C_RED}✗ VPS 验机模块版本不匹配，已停止执行。${C_RESET}" >&2
     return 7
+  fi
+
+  build_id="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
+  if [[ "$build_id" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}✗ VPS 验机模块构建身份不匹配，已停止执行。${C_RESET}" >&2
+    return 8
   fi
 
   set +e
@@ -261,7 +270,7 @@ Usage:
   p07-toolbox
 
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
-2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}
+2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}（测试中）
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（测试中）
 4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（测试中）
 
