@@ -152,20 +152,22 @@ for required in \
   fi
 done
 
-SELFTEST_JSON="$TMP_DIR/inventory.json"
-if ! "$BIN_LINK" inventory --compact > "$SELFTEST_JSON" 2>/dev/null; then
-  rollback_install
-  fail "服务器检查自检失败；未保留失败的新版本。"
-fi
-if ! python3 - "$SELFTEST_JSON" <<'PY'
+if [[ "${P07_SKIP_INVENTORY_SELFTEST:-0}" != "1" ]]; then
+  SELFTEST_JSON="$TMP_DIR/inventory.json"
+  if ! "$BIN_LINK" inventory --compact > "$SELFTEST_JSON" 2>/dev/null; then
+    rollback_install
+    fail "服务器检查自检失败；未保留失败的新版本。"
+  fi
+  if ! python3 - "$SELFTEST_JSON" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
 if p.get('schema') != 'vf-server-ops.inventory.v1':
     raise SystemExit(1)
 PY
-then
-  rollback_install
-  fail "Inventory 结果自检失败；未保留失败的新版本。"
+  then
+    rollback_install
+    fail "Inventory 结果自检失败；未保留失败的新版本。"
+  fi
 fi
 
 say "安装完成 ✓"
