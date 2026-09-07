@@ -9,6 +9,7 @@ CONFIG="${VFOPS_AUTO_BACKUP_CONFIG:-/etc/vf-server-ops/auto-backup.json}"
 STORAGE_CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
 BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
 CRON_FILE="${VFOPS_AUTO_BACKUP_CRON:-/etc/cron.d/vf-server-ops-auto-backup}"
+STATE_FILE="${VFOPS_AUTO_BACKUP_STATE:-/var/lib/vf-server-ops/auto-backup-state.json}"
 
 screen_clear() { [[ -t 1 ]] && printf '\033[H\033[2J' || true; }
 pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
@@ -65,7 +66,6 @@ PY
   fi
   printf 'Google Drive：READY ✓\n'
   printf 'Backblaze B2：READY ✓\n'
-  return 0
 }
 
 inventory_sites() {
@@ -83,10 +83,27 @@ for site in p.get('sites',[]):
 PY
 }
 
+schedule_guard() {
+  local requested="$1" output
+  if ! output="$(python3 "$ENGINE" schedule-check --daily-at "$requested" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+print(p.get('status','UNKNOWN'))
+print(p.get('recommended_at',p.get('requested_at','')))
+print(p.get('collision_count',0))
+for item in p.get('collisions',[]):
+    print(f"{item.get('scheduled_at','?')}\t{item.get('path','?')}")
+PY
+}
+
 show_status() {
   printf '\n[P07] 正在读取自动备份设置...\n'
   local output
-  if ! output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" 2>&1)"; then
+  if ! output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>&1)"; then
     printf '%s\n' "$output" >&2
     pause_menu
     return 0
@@ -98,7 +115,8 @@ print()
 print('自动备份状态')
 print('----------------------------------------')
 status=p.get('status','UNKNOWN')
-print(f"状态：{status}")
+cn={'ENABLED':'已启用','DISABLED':'已关闭','NOT_CONFIGURED':'未配置','ATTENTION':'需关注'}.get(status,status)
+print(f"状态：{cn}")
 if status != 'NOT_CONFIGURED':
     print(f"时间：每天 {p.get('daily_at','UNKNOWN')}")
     sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
@@ -109,6 +127,12 @@ if status != 'NOT_CONFIGURED':
     print(f"本地自动备份保留：最近 {p.get('local_keep_last','?')} 份 / 网站")
     print(f"Cron：{'已安装' if p.get('cron_installed') else '未安装'}")
     print(f"存储：{p.get('storage_state','UNKNOWN')}")
+last=p.get('last_run') if isinstance(p.get('last_run'),dict) else None
+if last:
+    result=last.get('status','UNKNOWN')
+    cn_result={'PASS':'PASS','FAIL':'FAIL','RUNNING':'执行中','SKIPPED_BUSY':'服务器忙，已让路','DISABLED':'已关闭'}.get(result,result)
+    print(f"上次执行：{cn_result}")
+    print(f"更新时间：{last.get('updated_at','UNKNOWN')}")
 PY
   pause_menu
 }
@@ -117,7 +141,7 @@ enable_or_update() {
   require_root || { pause_menu; return 0; }
   storage_preflight || { pause_menu; return 0; }
 
-  local sites_raw daily_at choice
+  local sites_raw daily_at choice schedule_raw schedule_state recommended collision_count
   if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
     printf '没有发现可自动备份的 CloudPanel 网站。\n' >&2
     pause_menu
@@ -125,9 +149,7 @@ enable_or_update() {
   fi
 
   printf '\n将保护当前 CloudPanel 全部网站：\n'
-  while IFS= read -r site; do
-    [[ -n "$site" ]] && printf '  - %s\n' "$site"
-  done <<<"$sites_raw"
+  while IFS= read -r site; do [[ -n "$site" ]] && printf '  - %s\n' "$site"; done <<<"$sites_raw"
 
   printf '\n每天备份时间 [03:30]：'
   read -r daily_at || return 0
@@ -138,38 +160,43 @@ enable_or_update() {
     return 0
   fi
 
+  if ! schedule_raw="$(schedule_guard "$daily_at")"; then
+    printf '无法完成定时冲突检查，P07 暂不写入 Cron。\n' >&2
+    pause_menu
+    return 0
+  fi
+  schedule_state="$(printf '%s\n' "$schedule_raw" | sed -n '1p')"
+  recommended="$(printf '%s\n' "$schedule_raw" | sed -n '2p')"
+  collision_count="$(printf '%s\n' "$schedule_raw" | sed -n '3p')"
+  if [[ "$schedule_state" == 'COLLISION' ]]; then
+    printf '\n检测到 %s 个相邻的备份类定时任务。\n' "$collision_count"
+    printf '%s\n' "$schedule_raw" | tail -n +4 | while IFS=$'\t' read -r at path; do
+      [[ -n "$at" ]] && printf '  %s  %s\n' "$at" "$path"
+    done
+    printf 'P07 已建议错峰：%s → %s\n' "$daily_at" "$recommended"
+    daily_at="$recommended"
+  else
+    printf '\n定时冲突检查：CLEAR ✓\n'
+  fi
+
   printf '\n将启用：本地 + Google + B2，每个网站本地保留最近 7 份自动备份。\n'
+  printf '执行时间：每天 %s\n' "$daily_at"
+  printf '运行时若发现 P07 备份/恢复/迁移正忙，会自动让路，不抢资源。\n'
   printf '不会修改 DNS，不会删除网站，不会删除手工/迁移备份。\n\n'
-  printf '1. 确认启用 / 更新\n'
-  printf '0. 取消\n\n'
-  printf '请选择 [0-1]：'
+  printf '1. 确认启用 / 更新\n0. 取消\n\n请选择 [0-1]：'
   read -r choice || return 0
   [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
 
   local args=()
-  while IFS= read -r site; do
-    [[ -n "$site" ]] && args+=(--site "$site")
-  done <<<"$sites_raw"
+  while IFS= read -r site; do [[ -n "$site" ]] && args+=(--site "$site"); done <<<"$sites_raw"
 
   printf '\n[P07] 正在写入 P07 自动备份配置...\n'
-  if ! python3 "$ENGINE" configure \
-      --config "$CONFIG" \
-      "${args[@]}" \
-      --daily-at "$daily_at" \
-      --storage-config "$STORAGE_CONFIG" \
-      --backup-dir "$BACKUP_DIR" \
-      --keep-last 7 >/dev/null; then
+  if ! python3 "$ENGINE" configure --config "$CONFIG" "${args[@]}" --daily-at "$daily_at" --storage-config "$STORAGE_CONFIG" --backup-dir "$BACKUP_DIR" --keep-last 7 >/dev/null; then
     printf '自动备份配置写入失败。\n' >&2
     pause_menu
     return 0
   fi
-
-  if ! python3 "$ENGINE" install-cron \
-      --config "$CONFIG" \
-      --cron-file "$CRON_FILE" \
-      --script "$ENGINE" \
-      --python /usr/bin/python3 \
-      --confirm ENABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+  if ! python3 "$ENGINE" install-cron --config "$CONFIG" --cron-file "$CRON_FILE" --script "$ENGINE" --python /usr/bin/python3 --confirm ENABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
     printf '定时任务安装失败；不会假装已启用。\n' >&2
     pause_menu
     return 0
@@ -178,8 +205,7 @@ enable_or_update() {
   printf '\n自动备份已启用 ✓\n'
   printf '时间：每天 %s\n' "$daily_at"
   printf '目标：本地 + Google Drive + Backblaze B2\n'
-  printf '本地：每个网站保留最近 7 份自动备份\n'
-  printf 'DNS：不会修改\n'
+  printf '并发保护：已启用\nDNS：不会修改\n'
   pause_menu
 }
 
@@ -191,10 +217,10 @@ run_now() {
     return 0
   fi
   printf '\n[P07] 正在执行一次完整双远程自动备份。\n'
-  printf '这一步会真实创建备份并上传 Google + B2，请稍候...\n'
+  printf '若检测到备份/恢复/迁移正忙，本次会自动让路。\n'
   local output rc
   set +e
-  output="$(python3 "$ENGINE" run --config "$CONFIG" 2>&1)"
+  output="$(python3 "$ENGINE" run --config "$CONFIG" --state-file "$STATE_FILE" 2>&1)"
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
@@ -206,7 +232,13 @@ run_now() {
   python3 - "$output" <<'PY'
 import json,sys
 p=json.loads(sys.argv[1])
+status=p.get('status','UNKNOWN')
 print()
+if status=='SKIPPED_BUSY':
+    print('服务器当前有备份/恢复/迁移任务，P07 本次已自动让路。')
+    print('状态：SKIPPED_BUSY')
+    print('没有删除任何备份，也没有修改 DNS。')
+    raise SystemExit
 print('自动备份结果')
 print('----------------------------------------')
 for row in p.get('sites',[]):
@@ -215,7 +247,7 @@ for row in p.get('sites',[]):
     print(f"  Google：{row.get('google','UNKNOWN')}")
     print(f"  B2：{row.get('b2','UNKNOWN')}")
     print(f"  双副本：{row.get('dual_remote','UNKNOWN')}")
-print(f"最终：{p.get('status','UNKNOWN')}")
+print(f"最终：{status}")
 print('DNS：未修改')
 PY
   pause_menu
@@ -229,16 +261,11 @@ disable_auto() {
     return 0
   fi
   printf '\n关闭后只停止以后自动执行；不会删除现有本地、Google 或 B2 备份。\n\n'
-  printf '1. 确认关闭\n'
-  printf '0. 取消\n\n'
-  printf '请选择 [0-1]：'
+  printf '1. 确认关闭\n0. 取消\n\n请选择 [0-1]：'
   local choice
   read -r choice || return 0
   [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
-  if python3 "$ENGINE" disable \
-      --config "$CONFIG" \
-      --cron-file "$CRON_FILE" \
-      --confirm DISABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+  if python3 "$ENGINE" disable --config "$CONFIG" --cron-file "$CRON_FILE" --confirm DISABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
     printf '自动备份已关闭。现有备份均保留。\n'
   else
     printf '关闭没有完成；P07 没有删除任何备份。\n' >&2
