@@ -19,15 +19,17 @@ case "${1:-}" in
   --version|-V) printf '%s %s\n' "$APP" "$VERSION"; exit 0 ;;
   --help|-h)
     cat <<'EOF'
-P07 VPS 一键验机 2.1 RC5
+P07 VPS 一键验机 2.1
 
-在 2.0 RC4 基础上增加：
-- YABS 思路的 fio 4K / 64K / 512K / 1M 50/50 随机混合读写
-- 增强磁盘结论（小文件/数据库与大块混合吞吐）
-- 本地 Markdown 验机报告
+一条命令自动完成：
+- 系统 / CPU / 内存 / 隐藏资源限额
+- 顺序磁盘、4K/fsync、4K/64K/512K/1M 混合随机读写
+- 全球网络、东南亚、中国大陆区域参考
+- IP / DNS / HTTPS 基础健康
+- 综合评级与业务适配
+- TXT / JSON / Markdown 本地报告
 
-不会自动 apt/yum 安装软件；缺少 fio 时仅下载固定 commit 的临时 fio，
-执行前强制 SHA256 校验，跑完删除。
+不会自动 apt/yum 安装软件，不会自动上传报告到第三方。
 EOF
     exit 0 ;;
   "") ;;
@@ -72,11 +74,22 @@ mkdir -p "$REPORT_DIR" 2>/dev/null || REPORT_DIR="/tmp/p07-bench-reports"
 mkdir -p "$REPORT_DIR" 2>/dev/null || true
 START_EPOCH="$(date +%s)"
 STAMP="$(date +%Y%m%d_%H%M%S)"
+BASE_OUTPUT="$TMP/base-output.txt"
+: >"$BASE_OUTPUT"
 FIO_TSV="$TMP/fio.tsv"
 : >"$FIO_TSV"
 FIO_VERDICT="未执行"
 FIO_SMALLFILE="未知"
 FIO_LARGEBLOCK="未知"
+MARKDOWN_REPORT=""
+
+normalize_base_output(){
+  sed \
+    -e 's/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 2.1/g' \
+    -e 's/2\.0\.0-rc3-zh/2.1.0-rc5-zh/g' \
+    -e 's/ 总耗时             :/ 基础验机耗时       :/g' \
+    -e 's/ 完成时间           :/ 基础验机完成       :/g'
+}
 
 run_base(){
   [[ "${P07_RC5_SKIP_BASE:-0}" == 1 ]] && return 0
@@ -86,9 +99,15 @@ run_base(){
   if [[ "$got" != "$BASE_SHA256" ]]; then printf '%s基础验机模块完整性校验失败，已停止。%s\n' "$RED" "$RESET" >&2; return 5; fi
   version="$(NO_COLOR=1 bash "$base" --version 2>/dev/null | awk '{print $NF}' || true)"
   if [[ "$version" != "$BASE_VERSION" ]]; then printf '%s基础验机模块版本不匹配，已停止。%s\n' "$RED" "$RESET" >&2; return 6; fi
+
   set +e
-  bash "$base"
-  rc=$?
+  if command -v script >/dev/null 2>&1 && [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    script -qec "bash '$base'" /dev/null | normalize_base_output | tee "$BASE_OUTPUT"
+    rc=${PIPESTATUS[0]}
+  else
+    bash "$base" 2>&1 | normalize_base_output | tee "$BASE_OUTPUT"
+    rc=${PIPESTATUS[0]}
+  fi
   set -e 2>/dev/null || true
   return "$rc"
 }
@@ -101,7 +120,7 @@ fio_arch(){
   esac
 }
 prepare_fio(){
-  if command -v fio >/dev/null 2>&1; then FIO_BIN="$(command -v fio)"; FIO_SOURCE="系统已有 fio"; return 0; fi
+  if command -v fio >/dev/null 2>&1; then FIO_BIN="$(command -v fio)"; FIO_SOURCE="系统现有 fio"; return 0; fi
   command -v python3 >/dev/null 2>&1 || return 1
   local pair arch sha url got out
   pair="$(fio_arch 2>/dev/null || true)"; [[ -n "$pair" ]] || return 1
@@ -113,7 +132,7 @@ prepare_fio(){
   [[ "$got" == "$sha" ]] || { printf '%sfio 组件完整性校验失败，增强磁盘测试已跳过。%s\n' "$RED" "$RESET"; return 1; }
   chmod 700 "$out"
   "$out" --version >/dev/null 2>&1 || return 1
-  FIO_BIN="$out"; FIO_SOURCE="YABS 固定版本 fio 3.39"
+  FIO_BIN="$out"; FIO_SOURCE="校验版 fio 3.39（临时）"
 }
 
 fio_preflight(){
@@ -188,7 +207,7 @@ assess_fio(){
 print_fio(){
   rule
   printf '%s%s 增强磁盘混合读写%s\n' "$BOLD" "$CYAN" "$RESET"
-  printf ' %s4 档 50/50 随机读写；方法参考 YABS，结果用于识别数据库/小文件场景，不替代现有 fsync/P95。%s\n' "$GRAY" "$RESET"
+  printf ' %s4 档 50/50 随机读写，用于识别数据库/小文件与大块混合负载，不替代现有 fsync/P95。%s\n' "$GRAY" "$RESET"
   if ! fio_preflight; then printf ' %s当前磁盘目录/空间不满足安全条件，已跳过增强测试。%s\n' "$YELLOW" "$RESET"; return 0; fi
   if ! prepare_fio; then printf ' %sfio 不可用，已保留现有磁盘验机结果。%s\n' "$YELLOW" "$RESET"; return 0; fi
   printf ' 测试引擎           : %s\n' "$FIO_SOURCE"
@@ -208,24 +227,27 @@ print_fio(){
   printf ' 有效档位           : %s / 4\n' "$pass"
   printf ' 小文件/数据库      : %s\n' "$FIO_SMALLFILE"
   printf ' 大块混合吞吐       : %s\n' "$FIO_LARGEBLOCK"
-  printf ' 增强磁盘判断       : %s%s%s\n' "$GREEN" "$FIO_VERDICT" "$RESET"
+  case "$FIO_VERDICT" in
+    良好) printf ' 增强磁盘判断       : %s%s%s\n' "$GREEN" "$FIO_VERDICT" "$RESET" ;;
+    需观察) printf ' 增强磁盘判断       : %s%s%s\n' "$YELLOW" "$FIO_VERDICT" "$RESET" ;;
+    *) printf ' 增强磁盘判断       : %s\n' "$FIO_VERDICT" ;;
+  esac
+}
+
+strip_terminal_codes(){
+  sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/\r$//'
 }
 
 write_markdown(){
-  local md="$REPORT_DIR/p07-vps-audit_${STAMP}.md" txt="" f ts
-  for f in "$REPORT_DIR"/*.txt; do
-    [[ -f "$f" ]] || continue
-    ts="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || printf 0)"
-    [[ "$ts" =~ ^[0-9]+$ ]] && (( ts >= START_EPOCH )) && txt="$f"
-  done
+  local md="$REPORT_DIR/p07-vps-audit_${STAMP}.md"
   {
     printf '# P07 VPS 一键验机报告\n\n'
     printf -- '- 版本：`%s`\n' "$VERSION"
     printf -- '- 时间：`%s`\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
-    printf -- '- 说明：Markdown 仅保存到本机，不自动上传第三方。\n\n'
-    if [[ -n "$txt" ]]; then
-      printf '## 基础验机输出\n\n```text\n'
-      cat "$txt"
+    printf -- '- 说明：报告仅保存到本机，不自动上传第三方。\n\n'
+    if [[ -s "$BASE_OUTPUT" ]]; then
+      printf '## 完整基础与网络验机输出\n\n```text\n'
+      strip_terminal_codes <"$BASE_OUTPUT"
       printf '\n```\n\n'
     fi
     printf '## 增强磁盘混合读写\n\n'
@@ -238,9 +260,10 @@ write_markdown(){
     printf -- '- 小文件/数据库：**%s**\n' "$FIO_SMALLFILE"
     printf -- '- 大块混合吞吐：**%s**\n' "$FIO_LARGEBLOCK"
     printf -- '- 综合：**%s**\n' "$FIO_VERDICT"
-    printf '\n## 方向边界\n\n'
-    printf -- '- 中国大陆区域 HTTPS 与回程相关测试必须区分方向；不得据此直接判断“中国用户一定可访问 VPS”。\n'
+    printf '\n## 证据边界\n\n'
+    printf -- '- 中国大陆区域结果反映本次 VPS 与真实大陆节点之间的有界跨境线路参考，不等同于中国普通用户到 VPS 的直接入站探测。\n'
   } >"$md"
+  MARKDOWN_REPORT="$md"
   printf ' Markdown 报告       : %s%s%s\n' "$GREEN" "$md" "$RESET"
 }
 
@@ -249,15 +272,20 @@ run_base
 base_rc=$?
 set -e 2>/dev/null || true
 if (( base_rc != 0 )); then
-  printf '%s基础验机未正常完成，RC5 增强测试不继续。%s\n' "$RED" "$RESET" >&2
+  printf '%s基础验机未正常完成，增强测试不继续。%s\n' "$RED" "$RESET" >&2
   exit "$base_rc"
 fi
 
 print_fio
 write_markdown
 
+END_EPOCH="$(date +%s)"
+TOTAL_SEC=$((END_EPOCH-START_EPOCH))
+TOTAL_MIN=$((TOTAL_SEC/60))
+TOTAL_REM=$((TOTAL_SEC%60))
 rule
-printf '%s%s RC5 增强说明%s\n' "$BOLD" "$CYAN" "$RESET"
-printf ' 已吸收           : YABS 多块尺寸混合随机 I/O、NodeBench Markdown 本地报告思路\n'
-printf ' 暂未默认接入     : 三网回程 Backtrace（Hosted Runner 原始套接字不支持，等待真实 VPS 功能 Gate）\n'
-printf ' 不会自动执行     : apt/yum 安装、第三方 pastebin 上传、未校验 curl|bash\n'
+printf '%s%s 完整验机完成%s\n' "$BOLD" "$CYAN" "$RESET"
+printf ' 完整验机总耗时     : %s 分 %s 秒\n' "$TOTAL_MIN" "$TOTAL_REM"
+printf ' 最终完成时间       : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf ' 本地报告           : TXT / JSON / Markdown\n'
+[[ -n "$MARKDOWN_REPORT" ]] && printf ' Markdown            : %s\n' "$MARKDOWN_REPORT"
