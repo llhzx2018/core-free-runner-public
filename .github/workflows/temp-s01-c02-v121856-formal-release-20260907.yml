@@ -1,0 +1,185 @@
+name: S01-C02 Ops 1.21.856 Formal Release
+
+on:
+  push:
+    branches: [temp/s01-c02-v121856-formal-release-20260907]
+    paths:
+      - '.github/workflows/temp-s01-c02-v121856-formal-release-20260907.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s01-c02-v121856-formal-release-20260907
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      OPS_SHA: 1ac24e55e7e21e1d02154a6fd6c96ac814f377b3
+      OPS_BASE: 371b64c66c6daca48c86af5bdf11a8022b444868
+      TAG: v1.21.856
+      ASSET: vf-tools-ops_V1.21.856.zip
+
+    steps:
+      - name: Credential authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo 'CREDENTIAL_MODEL=READ_WRITE_SEPARATED'
+          echo 'PRODUCTION_WRITE_USED=NO'
+
+      - name: Checkout exact Ops source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and regression gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = '1.21.856'
+          grep -Fq 'Version: 1.21.856' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.856'" ops/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'S01-DASHBOARD-SELECTOR-HIT'" ops/vf-ops.php
+          php ops/tests/dashboard-selector-hit-contract.php
+          php ops/tests/admin-human-language-contract.php
+          php ops/tests/update-refresh-policy-current-contract.php
+          php ops/tests/visible-console-v2-contract.php
+          find ops -type f -name '*.php' -not -path '*/.git/*' -not -path '*/vendor/*' -print0 | xargs -0 -n1 php -l >/dev/null
+          python3 - <<'PY'
+          import os, subprocess
+          got=set(subprocess.check_output(['git','-C','ops','diff','--name-only',os.environ['OPS_BASE']+'..'+os.environ['OPS_SHA']],text=True).splitlines())
+          expected={
+            'VERSION',
+            'assets/css/current/admin-s01-console-v2.css',
+            'includes/admin-v13/views/dashboard.php',
+            'tests/admin-human-language-contract.php',
+            'tests/dashboard-selector-hit-contract.php',
+            'tests/update-refresh-policy-current-contract.php',
+            'tests/visible-console-v2-contract.php',
+            'vf-ops.php',
+          }
+          assert got==expected,(got,expected)
+          assert not any('schema' in p.lower() or 'migration' in p.lower() or p.startswith('includes/wp-update/') or p.startswith('includes/site-release/') or 'database' in p.lower() for p in got),got
+          print('EXACT_EIGHT_FILE_SCOPE=PASS')
+          print('REAL_DASHBOARD_SELECTOR_HIT_BOUNDARY=PASS')
+          PY
+          echo 'FORMAL_SOURCE_GATE=PASS'
+
+      - name: Build deterministic candidates twice and lock package identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/release-a" "$RUNNER_TEMP/release-b"
+          python3 - <<'PY' > "$RUNNER_TEMP/metrics.env"
+          from pathlib import Path
+          import hashlib, os, re, zipfile
+          root=Path('ops'); rows=[]
+          for p in root.rglob('*'):
+              if not p.is_file() or p.is_symlink(): continue
+              rel=p.relative_to(root).as_posix(); parts=rel.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): continue
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+              ok=(rel in {'vf-ops.php','uninstall.php'}) if '/' not in rel else parts[0] in {'includes','assets','languages','config'}
+              if ok: rows.append((rel,p.read_bytes()))
+          rows.sort(); assert len(rows) >= 900, len(rows)
+          def ident(items):
+              h=hashlib.sha256()
+              for rel,b in items: h.update((rel+'\0'+hashlib.sha256(b).hexdigest()+'\n').encode())
+              return len(items),h.hexdigest()
+          def build(out):
+              out=Path(out)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,b in rows:
+                      zi=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,7,0,0,0)); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16; z.writestr(zi,b)
+              with zipfile.ZipFile(out) as z:
+                  assert z.testzip() is None
+                  files=[x for x in z.infolist() if not x.is_dir()]
+                  assert len(files)==len(rows)
+                  assert sorted({x.filename.split('/')[0] for x in files})==['vf-ops']
+                  assert b'Version: 1.21.856' in z.read('vf-ops/vf-ops.php')
+              return out.stat().st_size,hashlib.sha256(out.read_bytes()).hexdigest()
+          a=Path(os.environ['RUNNER_TEMP'])/'release-a'/os.environ['ASSET']
+          b=Path(os.environ['RUNNER_TEMP'])/'release-b'/os.environ['ASSET']
+          ab,asha=build(a); bb,bsha=build(b); assert (ab,asha)==(bb,bsha)
+          count,fp=ident(rows)
+          print(f'OPS_FILES={count}'); print(f'OPS_RUNTIME_FILES={count}'); print(f'OPS_BYTES={ab}'); print(f'OPS_SHA256={asha}'); print(f'OPS_RUNTIME_FP={fp}')
+          PY
+          cat "$RUNNER_TEMP/metrics.env"
+          cat "$RUNNER_TEMP/metrics.env" >> "$GITHUB_ENV"
+          cmp "$RUNNER_TEMP/release-a/$ASSET" "$RUNNER_TEMP/release-b/$ASSET"
+          echo 'DOUBLE_BUILD_DETERMINISM=PASS'
+          echo 'PACKAGE_RUNTIME_IDENTITY=PASS'
+
+      - name: Tag, draft, remote readback and publish transaction
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REPO='llhzx2018/vf-tools-ops'
+          created_tag=0; created_release=0
+          cleanup(){ rc=$?; if [ "$rc" -ne 0 ]; then if [ "$created_release" -eq 1 ]; then gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes >/dev/null 2>&1 || true; fi; if [ "$created_tag" -eq 1 ]; then gh api --method DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true; fi; fi; exit "$rc"; }
+          trap cleanup EXIT
+          ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1
+          ! gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1
+          test "$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" = "$OPS_SHA"
+          echo 'REMOTE_RELEASE_PREFLIGHT=PASS'
+          gh api --method POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$OPS_SHA" >/dev/null
+          created_tag=1
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$OPS_SHA"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          S01-C02 · Dashboard Selector Hit Closure. The final admin visual owner now directly targets the real vf-v658 workbench DOM instead of a parallel page family. The visible dashboard uses human priority labels (紧急 / 优先 / 常规), while internal P0/P1/P2 semantics remain unchanged. Hero, current task, status cards, queue, main action and responsive behavior are now covered by exact selector-hit regression. Update protocol, release behavior, schema, migration and production contracts remain unchanged. Git/Release PASS does not claim Production visibility.
+
+          Exact source: $OPS_SHA
+          Package files: $OPS_FILES
+          Runtime files: $OPS_RUNTIME_FILES
+          Runtime fingerprint: $OPS_RUNTIME_FP
+          Asset bytes: $OPS_BYTES
+          Asset SHA256: $OPS_SHA256
+          Product Gate: 34100539925 PASS
+          EOF
+          gh release create "$TAG" "$RUNNER_TEMP/release-a/$ASSET" --repo "$REPO" --title 'VF Tools Ops V1.21.856' --notes-file "$RUNNER_TEMP/release-notes.md" --draft --verify-tag
+          created_release=1
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP/readback"
+          test "$(stat -c %s "$RUNNER_TEMP/readback/$ASSET")" = "$OPS_BYTES"
+          test "$(sha256sum "$RUNNER_TEMP/readback/$ASSET" | awk '{print $1}')" = "$OPS_SHA256"
+          python3 - <<'PY'
+          import os,zipfile
+          p=os.environ['RUNNER_TEMP']+'/readback/'+os.environ['ASSET']
+          with zipfile.ZipFile(p) as z:
+              assert z.testzip() is None
+              files=[x for x in z.infolist() if not x.is_dir()]
+              assert len(files)==int(os.environ['OPS_FILES'])
+              assert sorted({x.filename.split('/')[0] for x in files})==['vf-ops']
+              assert b'Version: 1.21.856' in z.read('vf-ops/vf-ops.php')
+          print('REMOTE_ASSET_EXACT_READBACK_BEFORE_PUBLISH=PASS')
+          PY
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          gh api "repos/$REPO/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          test "$(jq -r '.draft' "$RUNNER_TEMP/release.json")" = false
+          test "$(jq -r '.prerelease' "$RUNNER_TEMP/release.json")" = false
+          test "$(jq -r --arg a "$ASSET" '.assets[]|select(.name==$a)|.size' "$RUNNER_TEMP/release.json")" = "$OPS_BYTES"
+          test "$(jq -r --arg a "$ASSET" '.assets[]|select(.name==$a)|.digest' "$RUNNER_TEMP/release.json")" = "sha256:$OPS_SHA256"
+          test "$(gh api "repos/$REPO/branches/main" --jq '.commit.sha')" = "$OPS_SHA"
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$OPS_SHA"
+          trap - EXIT
+          echo "OPS_RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/release.json")"
+          echo "OPS_ASSET_ID=$(jq -r --arg a "$ASSET" '.assets[]|select(.name==$a)|.id' "$RUNNER_TEMP/release.json")"
+          echo 'FORMAL_RELEASE=PASS'
+          echo 'REMOTE_ASSET_EXACT_READBACK=PASS'
+          echo 'TESTED_ARTIFACT_EQUALS_DELIVERED_ARTIFACT=PASS'
