@@ -51,6 +51,130 @@ jobs:
           set -euo pipefail
           python3 dist/p07/0.1.0-rc3/tests/test_storage_setup.py -v
 
+      - name: One-step SOURCE import smoke
+        run: |
+          set -euo pipefail
+          WORK=/tmp/p07-import-smoke
+          FAKE="$WORK/fakebin"
+          mkdir -p "$FAKE" "$WORK/source" "$WORK/target/root/.config/rclone" "$WORK/target/etc/vf-server-ops"
+
+          cat > "$WORK/source/rclone.conf" <<'EOF'
+          [google]
+          type = drive
+          token = SECRET_TOKEN_MUST_NOT_PRINT
+          [google-crypt]
+          type = crypt
+          remote = google:VF-Server-Ops
+          password = SECRET_CRYPT_MUST_NOT_PRINT
+          [b2]
+          type = b2
+          account = test
+          key = SECRET_B2_MUST_NOT_PRINT
+          [b2-crypt]
+          type = crypt
+          remote = b2:bucket/VF-Server-Ops
+          password = SECRET_CRYPT2_MUST_NOT_PRINT
+          EOF
+          cat > "$WORK/source/storage.json" <<'EOF'
+          {"schema":"vf-server-ops.storage-config.v1","google_pool":[],"backblaze_b2":{}}
+          EOF
+
+          cat > "$FAKE/ssh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args="$*"
+          if [[ "$args" == *'printf P07_SOURCE_READY'* ]]; then
+            printf 'P07_SOURCE_READY'
+            exit 0
+          fi
+          if [[ "$args" == *'rclone config file'* ]]; then
+            printf '/root/.config/rclone/rclone.conf\n'
+            exit 0
+          fi
+          if [[ "$args" == *'test -s'* ]]; then
+            exit 0
+          fi
+          exit 0
+          EOF
+
+          cat > "$FAKE/scp" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          src="${@: -2:1}"
+          dst="${@: -1}"
+          if [[ "$src" == *'rclone.conf' ]]; then
+            cp "$P07_TEST_SOURCE/rclone.conf" "$dst"
+          else
+            cp "$P07_TEST_SOURCE/storage.json" "$dst"
+          fi
+          EOF
+
+          cat > "$FAKE/rclone" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == 'config' && "${2:-}" == 'file' ]]; then
+            printf 'Configuration file is stored at:\n%s\n' "$P07_TEST_TARGET_RCLONE"
+            exit 0
+          fi
+          exit 0
+          EOF
+
+          chmod +x "$FAKE/ssh" "$FAKE/scp" "$FAKE/rclone"
+
+          mv /tmp/p07-rc3/bin/vfops /tmp/p07-rc3/bin/vfops.real
+          cat > /tmp/p07-rc3/bin/vfops <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == 'storage' ]]; then
+            cfg="${3:-}"
+            if [[ "${P07_TEST_POST_FAIL:-0}" == '1' && "$cfg" == "$VFOPS_STORAGE_CONFIG" ]]; then
+              exit 12
+            fi
+            cat <<'JSON'
+          {"accounts":[{"provider":"google","enabled":true,"health":"OK"},{"provider":"b2","enabled":true,"health":"OK"}]}
+          JSON
+            exit 0
+          fi
+          exec /tmp/p07-rc3/bin/vfops.real "$@"
+          EOF
+          chmod +x /tmp/p07-rc3/bin/vfops
+
+          TARGET_RCLONE="$WORK/target/root/.config/rclone/rclone.conf"
+          TARGET_STORAGE="$WORK/target/etc/vf-server-ops/storage.json"
+
+          printf '1\n192.0.2.10\n\n0\n' | sudo env \
+            PATH="$FAKE:$PATH" \
+            P07_TEST_SOURCE="$WORK/source" \
+            P07_TEST_TARGET_RCLONE="$TARGET_RCLONE" \
+            VFOPS_STORAGE_CONFIG="$TARGET_STORAGE" \
+            bash /tmp/p07-rc3/bin/vfops-storage-setup > "$WORK/success.out" 2>&1
+
+          cmp "$WORK/source/rclone.conf" "$TARGET_RCLONE"
+          cmp "$WORK/source/storage.json" "$TARGET_STORAGE"
+          grep -Fq '远程备份初始化完成' "$WORK/success.out"
+          grep -Fq 'Google：READY' "$WORK/success.out"
+          grep -Fq 'B2：READY' "$WORK/success.out"
+          ! grep -Fq 'SECRET_TOKEN_MUST_NOT_PRINT' "$WORK/success.out"
+          ! grep -Fq 'SECRET_B2_MUST_NOT_PRINT' "$WORK/success.out"
+
+          printf 'OLD_RCLONE\n' > "$TARGET_RCLONE"
+          printf 'OLD_STORAGE\n' > "$TARGET_STORAGE"
+          printf '1\n192.0.2.10\n\n0\n' | sudo env \
+            PATH="$FAKE:$PATH" \
+            P07_TEST_SOURCE="$WORK/source" \
+            P07_TEST_TARGET_RCLONE="$TARGET_RCLONE" \
+            VFOPS_STORAGE_CONFIG="$TARGET_STORAGE" \
+            P07_TEST_POST_FAIL=1 \
+            bash /tmp/p07-rc3/bin/vfops-storage-setup > "$WORK/rollback.out" 2>&1 || true
+
+          grep -Fxq 'OLD_RCLONE' "$TARGET_RCLONE"
+          grep -Fxq 'OLD_STORAGE' "$TARGET_STORAGE"
+          grep -Fq '正在恢复安装前配置' "$WORK/rollback.out"
+          ! grep -Fq 'SECRET_TOKEN_MUST_NOT_PRINT' "$WORK/rollback.out"
+          ! grep -Fq 'SECRET_B2_MUST_NOT_PRINT' "$WORK/rollback.out"
+
+          mv /tmp/p07-rc3/bin/vfops.real /tmp/p07-rc3/bin/vfops
+
       - name: Contract guard
         run: |
           set -euo pipefail
@@ -67,7 +191,10 @@ jobs:
           grep -Fq 'schedule-check' "$ENGINE"
           grep -Fq 'P07 已建议错峰' "$MENU"
           grep -Fq '1. 设置 / 检查 Google + B2' "$MENU"
-          grep -Fq 'Google OAuth / B2 Key / crypt 密码只在 rclone 自己的界面处理' "$SETUP"
+          grep -Fq '1. 一键从已有 P07 服务器导入' "$SETUP"
+          grep -Fq 'storage_health_pass' "$SETUP"
+          grep -Fq 'RCLONE_CONFIG=' "$SETUP"
+          grep -Fq 'TARGET 安装后复核失败，正在恢复安装前配置' "$SETUP"
           grep -Fq 'config", "redacted"' "$HELPER"
           grep -Fq 'secrets_written_to_p07_config' "$HELPER"
 
@@ -84,6 +211,7 @@ jobs:
           grep -Fq 'source_deleted' "$ENGINE"
           grep -Fq 'manual_backups_protected' "$ENGINE"
           grep -Fq 'SKIPPED_ON_FAILURE' "$ENGINE"
+          grep -Fq 'scp -q -p' "$SETUP"
 
       - name: RC2 core regression syntax
         run: |
