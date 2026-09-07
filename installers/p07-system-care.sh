@@ -53,8 +53,9 @@ manager_ready() {
 }
 
 install_runtime() {
-  for cmd in curl sha1sum wc awk mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || { fail "缺少必要命令：${cmd}"; return 2; }
+  local dep
+  for dep in curl sha1sum wc awk mktemp; do
+    command -v "$dep" >/dev/null 2>&1 || { fail "缺少必要命令：${dep}"; return 2; }
   done
 
   local tmp stage manifest expected path actual
