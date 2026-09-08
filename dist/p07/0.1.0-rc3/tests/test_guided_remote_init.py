@@ -259,6 +259,65 @@ class GuidedRemoteInitTests(unittest.TestCase):
             self.assertIn("B2：READY", output)
             self.assertIn("建议先“立即完整备份一次”", output)
 
+    def test_import_second_install_failure_restores_existing_target(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p07-guided-import-atomic-") as td:
+            root = Path(td)
+            app, state, env = self._app(root)
+            fakebin = root / "fakebin"
+            source = root / "source"
+            source.mkdir()
+            source_rclone = "[p07-google]\ntype = drive\ntoken = SYNTH_SOURCE_TOKEN\n"
+            source_storage = '{"schema":"vf-server-ops.storage-config.v1","marker":"SYNTH_SOURCE_STORAGE"}\n'
+            (source / "rclone.conf").write_text(source_rclone, encoding="utf-8")
+            (source / "storage.json").write_text(source_storage, encoding="utf-8")
+
+            (fakebin / "ssh").write_text(textwrap.dedent("""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                args="$*"
+                if [[ "$args" == *'printf P07_SOURCE_READY'* ]]; then printf 'P07_SOURCE_READY'; exit 0; fi
+                if [[ "$args" == *'rclone config file'* ]]; then printf '/root/.config/rclone/rclone.conf\\n'; exit 0; fi
+                if [[ "$args" == *'test -s'* ]]; then exit 0; fi
+                exit 0
+            """), encoding="utf-8")
+            (fakebin / "scp").write_text(textwrap.dedent("""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                src="${@: -2:1}"; dst="${@: -1}"
+                if [[ "$src" == *'rclone.conf' ]]; then cp "$P07_TEST_SOURCE/rclone.conf" "$dst"; else cp "$P07_TEST_SOURCE/storage.json" "$dst"; fi
+            """), encoding="utf-8")
+            (fakebin / "install").write_text(textwrap.dedent("""\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                count=0
+                [[ -f "$P07_TEST_INSTALL_COUNT" ]] && count="$(cat "$P07_TEST_INSTALL_COUNT")"
+                count=$((count+1)); printf '%s' "$count" > "$P07_TEST_INSTALL_COUNT"
+                if [[ "$count" -eq 2 ]]; then exit 44; fi
+                exec /usr/bin/install "$@"
+            """), encoding="utf-8")
+            for name in ["ssh", "scp", "install"]:
+                os.chmod(fakebin / name, 0o755)
+
+            old_rclone = "OLD_TARGET_RCLONE\n"
+            old_storage = "OLD_TARGET_STORAGE\n"
+            (state / "rclone.conf").write_text(old_rclone, encoding="utf-8")
+            (state / "storage.json").write_text(old_storage, encoding="utf-8")
+            env["P07_TEST_SOURCE"] = str(source)
+            env["P07_TEST_INSTALL_COUNT"] = str(root / "install.count")
+
+            proc = subprocess.run(
+                ["bash", str(app / "bin" / "vfops-storage-setup")],
+                input="\n".join(["2", "192.0.2.10", "", "0", ""]),
+                text=True, capture_output=True, env=env, timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            output = proc.stdout + proc.stderr
+            self.assertIn("TARGET P07 storage 配置安装失败，正在恢复安装前配置", output)
+            self.assertEqual((state / "rclone.conf").read_text(encoding="utf-8"), old_rclone)
+            self.assertEqual((state / "storage.json").read_text(encoding="utf-8"), old_storage)
+            self.assertNotIn("SYNTH_SOURCE_TOKEN", output)
+            self.assertNotIn("SYNTH_SOURCE_STORAGE", output)
+
 
 if __name__ == "__main__":
     unittest.main()
