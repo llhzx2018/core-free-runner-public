@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,9 @@ SCHEMA = "vf-server-ops.storage-config.v1"
 RESULT_SCHEMA = "vf-server-ops.storage-setup.v1"
 REMOTE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DEFAULT_CONFIG = Path("/etc/vf-server-ops/storage.json")
+DEFAULT_MACHINE_ID = Path("/etc/machine-id")
+PROVENANCE_VERSION = 1
+PROVENANCE_FRESH = "GUIDED_DEVICE_OAUTH_FRESH"
 
 
 class SetupError(RuntimeError):
@@ -32,6 +36,16 @@ def normalize_remote(value: str) -> str:
     if not REMOTE_RE.fullmatch(name):
         raise SetupError(f"invalid rclone remote name: {value!r}")
     return name
+
+
+def host_binding(machine_id_path: Path = DEFAULT_MACHINE_ID) -> str:
+    try:
+        machine_id = machine_id_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SetupError("local VPS machine identity unavailable") from exc
+    if not machine_id:
+        raise SetupError("local VPS machine identity is empty")
+    return "sha256:" + hashlib.sha256(machine_id.encode("utf-8")).hexdigest()
 
 
 def list_remotes(rclone: str) -> list[str]:
@@ -112,10 +126,17 @@ def verify_b2_crypt(rclone: str, crypt_remote: str) -> dict[str, str]:
     return {"direct": underlying, "crypt": crypt}
 
 
-def build_config(google_direct: str, google_crypt: str, b2_crypt: str) -> dict[str, Any]:
+def provenance_payload(binding: str) -> dict[str, Any]:
+    if not isinstance(binding, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding):
+        raise SetupError("invalid local VPS provenance binding")
+    return {"version": PROVENANCE_VERSION, "mode": PROVENANCE_FRESH, "host_binding": binding}
+
+
+def build_config(google_direct: str, google_crypt: str, b2_crypt: str, binding: str) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "base_path": "VF-Server-Ops",
+        "setup_provenance": provenance_payload(binding),
         "google_pool": [
             {
                 "id": "google-a",
@@ -156,10 +177,11 @@ def atomic_write(path: Path, payload: dict[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
-def configure(rclone: str, config_path: Path, google_direct: str, google_crypt: str, b2_crypt: str) -> dict[str, Any]:
+def configure(rclone: str, config_path: Path, google_direct: str, google_crypt: str, b2_crypt: str, machine_id_path: Path = DEFAULT_MACHINE_ID) -> dict[str, Any]:
+    binding = host_binding(machine_id_path)
     google = verify_google_pair(rclone, google_direct, google_crypt)
     b2 = verify_b2_crypt(rclone, b2_crypt)
-    payload = build_config(google["direct"], google["crypt"], b2["crypt"])
+    payload = build_config(google["direct"], google["crypt"], b2["crypt"], binding)
     atomic_write(config_path, payload)
     return {
         "schema": RESULT_SCHEMA,
@@ -169,6 +191,7 @@ def configure(rclone: str, config_path: Path, google_direct: str, google_crypt: 
         "google_crypt": google["crypt"],
         "b2_direct": b2["direct"],
         "b2_crypt": b2["crypt"],
+        "setup_provenance": {"version": PROVENANCE_VERSION, "mode": PROVENANCE_FRESH, "local_host_bound": True},
         "secrets_written_to_p07_config": False,
         "mode": "0600",
     }
