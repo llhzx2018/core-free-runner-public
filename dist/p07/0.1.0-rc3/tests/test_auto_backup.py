@@ -252,8 +252,7 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("先选择“3. 立即完整备份一次”", output)
             self.assertIn("PASS 后再选择“2. 启用 / 更新自动备份”", output)
             self.assertIn("DNS 未修改", output)
-            self.assertIn("不会删除 SOURCE", output)
-            self.assertIn("不会修改 CloudPanel Cron", output)
+            self.assertIn("不会删除 SOURCE、备份或改写 CloudPanel Cron", output)
 
     def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
         with tempfile.TemporaryDirectory() as td:
