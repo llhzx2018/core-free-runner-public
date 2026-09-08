@@ -1,0 +1,127 @@
+name: P07 System Care RC9 Owner Package
+
+on:
+  push:
+    branches: [gate/p07-system-care-rc9-real-field-fix-20260908]
+    paths:
+      - '.github/workflows/p07-system-care-rc9-owner-package.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-owner-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public candidate branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gate/p07-system-care-rc9-real-field-fix-20260908
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Checkout exact RC9 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cbcf913914b8ec0d5f6a87e3714e16a29b0822bf
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Re-run source gates before packaging
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "cbcf913914b8ec0d5f6a87e3714e16a29b0822bf"
+          test "$(cat product/modules/system-care/VERSION)" = "0.1.0-rc9"
+          cd product
+          bash modules/system-care/tests/static_gate.sh
+          bash modules/system-care/tests/functional_gate.sh
+          echo P07_RC9_OWNER_PACKAGE_SOURCE_GATE=PASS
+
+      - name: Build exact runtime package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          src="$GITHUB_WORKSPACE/product/modules/system-care"
+          pkg="$GITHUB_WORKSPACE/packages/p07-system-care/0.1.0-rc9"
+          rm -rf "$pkg"
+          mkdir -p "$pkg/lib"
+          files=(
+            VERSION
+            vf-system-care.sh
+            status.sh
+            audit.sh
+            updates.sh
+            cleanup.sh
+            memory.sh
+            services.sh
+            security-audit.sh
+            intrusion-evidence.sh
+            lib/common.sh
+            lib/intrusion_evidence.py
+            lib/intrusion_logs.py
+            lib/intrusion_scan.py
+            lib/intrusion_state.py
+          )
+          for path in "${files[@]}"; do
+            mkdir -p "$pkg/$(dirname "$path")"
+            cp "$src/$path" "$pkg/$path"
+          done
+          find "$pkg" -type d -name __pycache__ -prune -exec rm -rf {} +
+          : > "$pkg/MANIFEST.gitblob"
+          for path in "${files[@]}"; do
+            printf '%s  %s\n' "$(git -C product hash-object "modules/system-care/$path")" "$path" >> "$pkg/MANIFEST.gitblob"
+          done
+          manifest_blob="$(git hash-object "$pkg/MANIFEST.gitblob")"
+          python3 - "$manifest_blob" <<'PY'
+          import re, sys
+          from pathlib import Path
+          manifest=sys.argv[1]
+          installer=Path('installers/p07-system-care.sh')
+          text=installer.read_text(encoding='utf-8')
+          text=re.sub(r"^VERSION='[^']+'$", "VERSION='0.1.0-rc9'", text, flags=re.M)
+          text=re.sub(r"^MANIFEST_BLOB='[^']+'$", f"MANIFEST_BLOB='{manifest}'", text, flags=re.M)
+          if 'evidence refresh-cache' not in text:
+              raise SystemExit('installer lost post-install evidence refresh-cache')
+          installer.write_text(text, encoding='utf-8')
+          toolbox=Path('installers/p07-toolbox.sh')
+          text=toolbox.read_text(encoding='utf-8')
+          text=re.sub(r'^SYSTEM_CARE_EXPECTED="[^"]+"$', 'SYSTEM_CARE_EXPECTED="0.1.0-rc9"', text, flags=re.M)
+          toolbox.write_text(text, encoding='utf-8')
+          PY
+          bash -n installers/p07-system-care.sh
+          bash -n installers/p07-toolbox.sh
+          test "$(wc -l < "$pkg/MANIFEST.gitblob" | tr -d '[:space:]')" = 15
+          grep -Fq "VERSION='0.1.0-rc9'" installers/p07-system-care.sh
+          grep -Fq "MANIFEST_BLOB='$manifest_blob'" installers/p07-system-care.sh
+          grep -Fq 'evidence refresh-cache' installers/p07-system-care.sh
+          grep -Fq 'SYSTEM_CARE_EXPECTED="0.1.0-rc9"' installers/p07-toolbox.sh
+          grep -Fq '系统维护 / 安全' installers/p07-toolbox.sh
+          grep -Fq '测试中' installers/p07-toolbox.sh
+          echo "P07_RC9_OWNER_PACKAGE_MANIFEST_BLOB=$manifest_blob"
+          echo P07_RC9_OWNER_PACKAGE_BUILD=PASS
+
+      - name: Verify exact package bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg="packages/p07-system-care/0.1.0-rc9"
+          while read -r expected path; do
+            test "$(git hash-object "$pkg/$path")" = "$expected"
+          done < "$pkg/MANIFEST.gitblob"
+          echo P07_RC9_OWNER_PACKAGE_EXACT_BYTES=PASS
+
+      - name: Commit owner-test candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name VictorForge
+          git config user.email llhzx2018@gmail.com
+          git add packages/p07-system-care/0.1.0-rc9 installers/p07-system-care.sh installers/p07-toolbox.sh
+          git commit -m 'test(P07): publish System Care RC9 owner-test candidate'
+          git push origin HEAD:gate/p07-system-care-rc9-real-field-fix-20260908
+          echo P07_RC9_OWNER_PACKAGE_COMMIT=PASS
