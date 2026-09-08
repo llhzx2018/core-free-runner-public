@@ -11,6 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init1"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -26,6 +27,7 @@ if [[ "${P07_SKIP_APT:-0}" != "1" ]] && command -v apt-get >/dev/null 2>&1; then
   command -v python3 >/dev/null 2>&1 || missing+=(python3)
   command -v sha256sum >/dev/null 2>&1 || missing+=(coreutils)
   command -v ssh >/dev/null 2>&1 || missing+=(openssh-client)
+  command -v scp >/dev/null 2>&1 || missing+=(openssh-client)
   command -v ssh-copy-id >/dev/null 2>&1 || missing+=(openssh-client)
   command -v ssh-keygen >/dev/null 2>&1 || missing+=(openssh-client)
   command -v rclone >/dev/null 2>&1 || missing+=(rclone)
@@ -37,7 +39,7 @@ if [[ "${P07_SKIP_APT:-0}" != "1" ]] && command -v apt-get >/dev/null 2>&1; then
   fi
 fi
 
-for cmd in curl tar python3 sha256sum readlink ssh ssh-copy-id ssh-keygen rclone; do
+for cmd in curl tar python3 sha256sum readlink ssh scp ssh-copy-id ssh-keygen rclone; do
   command -v "$cmd" >/dev/null 2>&1 || fail "缺少依赖：$cmd"
 done
 
@@ -79,6 +81,7 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
+fetch_overlay "BUILD_ID"                    "78644c990bdd355662b98b0078d254f73428c875"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"       "810dc7723b719700e230bcad8231d6d47b22240c"
 fetch_overlay "bin/vfops-storage-setup"     "ef417629e809711beb703c69243c65dbae020f96"
@@ -95,6 +98,7 @@ bash -n "$SRC_DIR/bin/vfops-storage-setup"
 python3 -m py_compile "$SRC_DIR"/lib/*.py
 find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
+[[ "$(cat "$SRC_DIR/BUILD_ID")" == "$EXPECTED_BUILD_ID" ]] || fail "RC3 Build ID 不匹配。"
 grep -Fq '5. 自动备份（本地 + Google + B2）' "$SRC_DIR/bin/vfops-user" || fail "RC3 用户入口缺少自动备份。"
 grep -Fq '设置 / 检查 Google + B2' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份菜单缺少存储设置入口。"
 grep -Fq '1. 全新初始化 Google + B2' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少全新初始化入口。"
@@ -145,6 +149,10 @@ fi
 if [[ "$VERSION_OUT" != "$EXPECTED_VERSION" ]]; then
   rollback_install
   fail "版本自检不匹配；未保留失败的新版本。"
+fi
+if [[ ! -f "$INSTALL_DIR/BUILD_ID" || "$(cat "$INSTALL_DIR/BUILD_ID")" != "$EXPECTED_BUILD_ID" ]]; then
+  rollback_install
+  fail "Build ID 自检不匹配；未保留失败的新版本。"
 fi
 for required in \
   "$INSTALL_DIR/bin/vfops-auto-backup" \
