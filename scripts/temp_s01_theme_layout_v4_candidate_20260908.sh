@@ -68,6 +68,7 @@ php tests/workbench-primary-action-contract.php
 php tests/update-center-human-language-contract.php
 php tests/update-refresh-policy-contract.php
 php tests/visible-console-v2-contract.php
+git add -N tests/layout-workflow-v4-contract.php
 mapfile -t changed < <(git diff --name-only "$BASE_SHA" -- | sort)
 expected=(
  'src/assets/css/admin/pages/page-structure/admin-page-layout.css'
