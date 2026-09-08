@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc6'
+VERSION='0.1.0-rc7'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='b6d47e3dd82d4dee4b3decc107fe83f52cccb76f'
+MANIFEST_BLOB='f8158064758a110086d092af72ca2d5f40bc21f3'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -47,7 +47,7 @@ installed_version() {
 }
 
 manager_ready() {
-  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" ]] || return 1
+  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -f "$TARGET/lib/intrusion_evidence.py" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
   NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
 }
@@ -94,8 +94,8 @@ install_runtime() {
   done < "$manifest"
 
   cp -a "$tmp/pkg/." "$stage/"
-  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh"
+  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh"
+  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py"
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
