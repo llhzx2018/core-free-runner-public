@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import configparser
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 RUNTIME = Path(os.environ.get("P07_RC3_RUNTIME", "/tmp/p07-rc3"))
 SETUP_SOURCE = RUNTIME / "bin" / "vfops-storage-setup"
@@ -24,11 +27,15 @@ if os.geteuid() != 0 and os.environ.get("P07_GUIDED_TEST_SUDO") != "1":
 
 
 class GuidedRemoteInitTests(unittest.TestCase):
-    def test_google_device_oauth_contract_without_network(self) -> None:
+    def _oauth_module(self):
         spec = importlib.util.spec_from_file_location("p07_google_oauth", OAUTH_SOURCE)
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
+
+    def test_google_device_oauth_contract_without_network(self) -> None:
+        module = self._oauth_module()
 
         class Response:
             def __init__(self, payload: dict[str, object]) -> None:
@@ -64,6 +71,52 @@ class GuidedRemoteInitTests(unittest.TestCase):
         token = module.authorize("P07_SYNTH_CLIENT", "P07_SYNTH_CLIENT_SECRET")
         self.assertEqual(token["access_token"], "SYNTH_ACCESS_SECRET")
         self.assertEqual(token["refresh_token"], "SYNTH_REFRESH_SECRET")
+
+    def test_google_oauth_failure_ux_and_slow_down_without_network(self) -> None:
+        module = self._oauth_module()
+        expected = {
+            "access_denied": "已被拒绝",
+            "expired_token": "已过期",
+            "invalid_client": "Client ID / Secret",
+            "unauthorized_client": "TVs and Limited Input devices",
+            "invalid_grant": "已经失效",
+            "temporarily_unavailable": "暂时不可用",
+        }
+        for code, text in expected.items():
+            with self.subTest(code=code):
+                message = module.friendly_oauth_error(code)
+                self.assertIn(text, message)
+                self.assertIn("没有修改配置", message)
+
+        device = {
+            "device_code": "SYNTH_DEVICE_SECRET",
+            "user_code": "P07-TEST",
+            "verification_url": "https://www.google.com/device",
+            "expires_in": 30,
+            "interval": 1,
+        }
+        success = {
+            "access_token": "SYNTH_ACCESS_SECRET",
+            "refresh_token": "SYNTH_REFRESH_SECRET",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+        stderr = io.StringIO()
+        with mock.patch.object(module, "post_form", side_effect=[device, {"error": "slow_down"}, success]), \
+             mock.patch.object(module.time, "monotonic", side_effect=[100.0, 100.0, 100.0]), \
+             mock.patch.object(module.time, "sleep") as sleep, \
+             contextlib.redirect_stderr(stderr):
+            token = module.authorize("P07_SYNTH_CLIENT", "P07_SYNTH_CLIENT_SECRET")
+        self.assertEqual(token["refresh_token"], "SYNTH_REFRESH_SECRET")
+        sleep.assert_called_once_with(6)
+        self.assertIn("已自动放慢等待", stderr.getvalue())
+
+        with mock.patch.object(module, "post_form", return_value={**device, "expires_in": 1}), \
+             mock.patch.object(module.time, "monotonic", side_effect=[10.0, 12.0]):
+            with self.assertRaises(module.OAuthError) as ctx:
+                module.authorize("P07_SYNTH_CLIENT", "P07_SYNTH_CLIENT_SECRET")
+        self.assertIn("超时", str(ctx.exception))
+        self.assertIn("重新进入初始化", str(ctx.exception))
 
     def _app(self, root: Path) -> tuple[Path, Path, dict[str, str]]:
         app = root / "app"
@@ -153,6 +206,7 @@ class GuidedRemoteInitTests(unittest.TestCase):
             output = proc.stdout + proc.stderr
             self.assertIn("远程备份初始化完成", output)
             self.assertIn("https://www.google.com/device", output)
+            self.assertIn("SOURCE：保留", output)
             for secret in [recovery, "P07_SYNTH_CLIENT_SECRET", "B2_SYNTH_SECRET", "SYNTH_ACCESS_SECRET", "SYNTH_REFRESH_SECRET"]:
                 self.assertNotIn(secret, output)
 
@@ -184,9 +238,26 @@ class GuidedRemoteInitTests(unittest.TestCase):
                 input=user_input, text=True, capture_output=True, env=env, timeout=10,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertIn("Recovery Key 未通过确认", proc.stdout + proc.stderr)
+            self.assertIn("两次 Recovery Key 不一致", proc.stdout + proc.stderr)
             self.assertEqual((state / "rclone.conf").read_text(encoding="utf-8"), old_rclone)
             self.assertEqual((state / "storage.json").read_text(encoding="utf-8"), old_storage)
+
+    def test_current_settings_reports_health_and_next_action(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p07-guided-status-") as td:
+            app, state, env = self._app(Path(td))
+            (state / "rclone.conf").write_text("[legacy]\ntype = local\n", encoding="utf-8")
+            (state / "storage.json").write_text("{}\n", encoding="utf-8")
+            user_input = "\n".join(["3", "", "0", ""])
+            proc = subprocess.run(
+                ["bash", str(app / "bin" / "vfops-storage-setup")],
+                input=user_input, text=True, capture_output=True, env=env, timeout=10,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            output = proc.stdout + proc.stderr
+            self.assertIn("P07 远程备份健康状态", output)
+            self.assertIn("Google：READY", output)
+            self.assertIn("B2：READY", output)
+            self.assertIn("建议先“立即完整备份一次”", output)
 
 
 if __name__ == "__main__":
