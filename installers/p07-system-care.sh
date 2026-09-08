@@ -122,6 +122,7 @@ install_runtime() {
 import intrusion_scan
 assert intrusion_scan.__name__ == "intrusion_scan"
 assert callable(intrusion_scan.discover)
+assert callable(intrusion_scan._cloudpanel_user_bounded_roots)
 PY
   then
     rm -rf "$tmp" "$stage"
