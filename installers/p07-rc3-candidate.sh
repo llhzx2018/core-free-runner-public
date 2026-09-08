@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init1"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init2"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,13 +81,13 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "78644c990bdd355662b98b0078d254f73428c875"
+fetch_overlay "BUILD_ID"                    "55b4a9a921ed242080679a8cc4fcfd2e6a747f64"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"       "810dc7723b719700e230bcad8231d6d47b22240c"
-fetch_overlay "bin/vfops-storage-setup"     "ef417629e809711beb703c69243c65dbae020f96"
+fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"         "a1a629a64fbd677696c3f09250eb2757fd534ef4"
-fetch_overlay "lib/google_device_oauth.py"   "18b94201eaf0914b30f648d7fedaef6485f9f728"
+fetch_overlay "lib/google_device_oauth.py"   "17a3db0c87dd8b1b5d1b3b8eb7c5071f9d0933a1"
 
 say "安装前自检..."
 chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user" "$SRC_DIR/bin/vfops-auto-backup" "$SRC_DIR/bin/vfops-storage-setup"
@@ -103,8 +103,11 @@ grep -Fq '5. 自动备份（本地 + Google + B2）' "$SRC_DIR/bin/vfops-user" |
 grep -Fq '设置 / 检查 Google + B2' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份菜单缺少存储设置入口。"
 grep -Fq '1. 全新初始化 Google + B2' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少全新初始化入口。"
 grep -Fq '2. 从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少既有服务器导入入口。"
+grep -Fq 'P07 远程备份健康状态' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少健康摘要。"
+grep -Fq 'SOURCE：保留，未修改 / 未删除' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 SOURCE retained 提示缺失。"
 grep -Fq 'TVs and Limited Input devices' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 Google Device OAuth 引导缺失。"
 grep -Fq 'https://oauth2.googleapis.com/device/code' "$SRC_DIR/lib/google_device_oauth.py" || fail "RC3 Google Device OAuth helper 缺失。"
+grep -Fq 'friendly_oauth_error' "$SRC_DIR/lib/google_device_oauth.py" || fail "RC3 Google OAuth 异常 UX 缺失。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
