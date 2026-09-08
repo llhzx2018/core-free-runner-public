@@ -14,7 +14,10 @@ python3 - <<'PY'
 from pathlib import Path
 paths=['VERSION','src/style.css','tests/update-refresh-policy-contract.php','tests/visible-console-v2-contract.php','tests/workbench-primary-action-contract.php']
 for p in paths:
-    f=Path(p); s=f.read_text(); s=s.replace('1.35.21','1.35.22').replace('V1.35.21_S01_UPDATE_CREDENTIAL_FIRST_CLOSURE','V1.35.22_S01_ADMIN_PAGE_BY_PAGE_UX_CLOSURE'); f.write_text(s)
+    f=Path(p)
+    s=f.read_text()
+    s=s.replace('V1.35.21_S01_UPDATE_CREDENTIAL_FIRST_CLOSURE','V1.35.22_S01_ADMIN_PAGE_BY_PAGE_UX_CLOSURE').replace('1.35.21','1.35.22')
+    f.write_text(s)
 PY
 test "$(tr -d '\r\n' < VERSION)" = '1.35.22'
 grep -q 'Version: 1.35.22' src/style.css
