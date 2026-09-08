@@ -87,7 +87,7 @@ fetch_overlay "bin/vfops-auto-backup"       "810dc7723b719700e230bcad8231d6d47b2
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"         "a1a629a64fbd677696c3f09250eb2757fd534ef4"
-fetch_overlay "lib/google_device_oauth.py"   "17a3db0c87dd8b1b5d1b3b8eb7c5071f9d0933a1"
+fetch_overlay "lib/google_device_oauth.py"   "5df0530f3a70ed93d6349c35c2b0fbee3d4d453f"
 
 say "安装前自检..."
 chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user" "$SRC_DIR/bin/vfops-auto-backup" "$SRC_DIR/bin/vfops-storage-setup"
