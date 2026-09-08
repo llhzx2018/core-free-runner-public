@@ -48,8 +48,8 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 cd "$TMP_DIR"
 
 say "下载并校验 P07 RC2 基础包..."
-curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "${BASE_URL}/${PACKAGE_NAME}" -o "$PACKAGE_NAME" || fail "RC2 基础包下载失败。"
-curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "${BASE_URL}/SHA256SUMS.txt" -o SHA256SUMS.txt || fail "RC2 校验文件下载失败。"
+curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "${BASE_URL}/${PACKAGE_NAME}" -o "$PACKAGE_NAME" || fail "RC2 基础包下载失败。"
+curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "${BASE_URL}/SHA256SUMS.txt" -o SHA256SUMS.txt || fail "RC2 校验文件下载失败。"
 sha256sum -c SHA256SUMS.txt >/dev/null || fail "RC2 基础包 SHA256 校验失败。"
 tar -tzf "$PACKAGE_NAME" >/dev/null 2>&1 || fail "RC2 基础包不是有效 tar.gz。"
 mkdir -p extracted
@@ -74,7 +74,7 @@ PY
 fetch_overlay() {
   local rel="$1" blob="$2"
   mkdir -p "$TMP_DIR/overlay/$(dirname "$rel")"
-  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "${RC3_URL}/${rel}" -o "$TMP_DIR/overlay/$rel" || fail "RC3 增量文件下载失败：$rel"
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "${RC3_URL}/${rel}" -o "$TMP_DIR/overlay/$rel" || fail "RC3 增量文件下载失败：$rel"
   verify_git_blob "$TMP_DIR/overlay/$rel" "$blob" || fail "RC3 增量文件身份校验失败：$rel"
   mkdir -p "$SRC_DIR/$(dirname "$rel")"
   cp "$TMP_DIR/overlay/$rel" "$SRC_DIR/$rel"
@@ -110,6 +110,7 @@ say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
 mkdir -p "${INSTALL_DIR}.new"
 cp -a "$SRC_DIR"/. "${INSTALL_DIR}.new"/
+chmod +x "${INSTALL_DIR}.new/bin/vfops" "$SRC_DIR/bin/vfops-user" >/dev/null 2>&1 || true
 chmod +x "${INSTALL_DIR}.new/bin/vfops" "${INSTALL_DIR}.new/bin/vfops-user" "${INSTALL_DIR}.new/bin/vfops-auto-backup" "${INSTALL_DIR}.new/bin/vfops-storage-setup"
 
 HAD_PREVIOUS=0
