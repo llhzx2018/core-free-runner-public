@@ -18,6 +18,7 @@ VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a95
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC3"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-rc3-guided-init1"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -154,8 +155,23 @@ local_server_ops_version() {
   NO_COLOR=1 vfops --version 2>/dev/null || true
 }
 
+local_server_ops_build() {
+  command -v vfops >/dev/null 2>&1 || return 1
+  local entry root value
+  entry="$(readlink -f "$(command -v vfops)" 2>/dev/null || true)"
+  case "$entry" in
+    */bin/vfops-user) root="${entry%/bin/vfops-user}" ;;
+    */bin/vfops) root="${entry%/bin/vfops}" ;;
+    *) return 1 ;;
+  esac
+  [[ -f "$root/BUILD_ID" ]] || return 1
+  IFS= read -r value < "$root/BUILD_ID" || return 1
+  printf '%s' "$value"
+}
+
 run_server_ops() {
-  if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" ]]; then
+  if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" && \
+        "$(local_server_ops_build || true)" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then
     vfops
     return $?
   fi
