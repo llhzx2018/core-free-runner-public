@@ -17,7 +17,7 @@ pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
 
 header() {
   screen_clear
-  cat <<'EOF'
+  cat <<'EOF_HEADER'
 P07 · 自动备份
 
 每天自动执行：
@@ -25,7 +25,7 @@ P07 · 自动备份
   → Google Drive 加密副本
   → Backblaze B2 加密灾备副本
 
-EOF
+EOF_HEADER
 }
 
 require_root() {
@@ -118,7 +118,6 @@ show_status() {
   rc=$?
   set -e
   if [[ $rc -ne 0 && $rc -ne 12 ]]; then
-    printf '%s\n' "$output" >&2
     printf '自动备份状态读取失败；没有修改任何配置。\n' >&2
     pause_menu
     return 0
@@ -129,7 +128,6 @@ p=json.loads(sys.argv[1])
 raise SystemExit(0 if isinstance(p,dict) and p.get('schema')=='vf-server-ops.auto-backup-status.v1' else 1)
 PY
   then
-    printf '%s\n' "$output" >&2
     printf '自动备份状态返回格式异常；没有修改任何配置。\n' >&2
     pause_menu
     return 0
@@ -240,7 +238,7 @@ elif not base.get('cron_installed',False):
 elif not live_ok:
     action='选择“1. 设置 / 检查 Google + B2”修复实时远程状态；修复后可选择“3. 立即完整备份一次”验证。'
 elif last and last.get('status')=='FAIL':
-    action='远程当前正常，但上次备份失败；选择“3. 立即完整备份一次”重新验证，并查看失败输出。'
+    action='远程当前正常，但上次备份失败；选择“3. 立即完整备份一次”重新验证。'
 elif last and last.get('status')=='SKIPPED_BUSY':
     action='无需修复；稍后选择“3. 立即完整备份一次”，或等待下一次计划任务自动重试。'
 elif last and last.get('status')=='RUNNING':
@@ -339,35 +337,79 @@ run_now() {
   printf '若检测到备份/恢复/迁移/远程上传正忙，本次会自动让路。\n'
   local output rc
   set +e
-  output="$(python3 "$ENGINE" run --config "$CONFIG" --state-file "$STATE_FILE" 2>&1)"
+  output="$(python3 "$ENGINE" run --config "$CONFIG" --state-file "$STATE_FILE" 2>/dev/null)"
   rc=$?
   set -e
-  if [[ $rc -ne 0 ]]; then
-    printf '%s\n' "$output" >&2
-    printf '\n本次自动备份没有达到双副本 PASS；已有本地/成功远程副本不会因此被删除。\n' >&2
+
+  if [[ $rc -ne 0 && $rc -ne 12 ]]; then
+    printf '\n自动备份执行失败，未取得可读结果；P07 不会把这次执行标记为成功。\n' >&2
+    printf '下一步：选择“4. 查看自动备份状态”；如远程异常，先选择“1. 设置 / 检查 Google + B2”。\n' >&2
+    printf '安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。\n' >&2
     pause_menu
     return 0
   fi
+
+  if ! python3 - "$output" <<'PY' >/dev/null 2>&1
+import json,sys
+p=json.loads(sys.argv[1])
+raise SystemExit(0 if isinstance(p,dict) and p.get('schema')=='vf-server-ops.auto-backup-run.v1' else 1)
+PY
+  then
+    printf '\n自动备份返回格式异常；P07 不会把这次执行标记为成功。\n' >&2
+    printf '下一步：选择“4. 查看自动备份状态”，确认最近执行状态后再重试。\n' >&2
+    printf '安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。\n' >&2
+    pause_menu
+    return 0
+  fi
+
   python3 - "$output" <<'PY'
 import json,sys
 p=json.loads(sys.argv[1])
 status=p.get('status','UNKNOWN')
+rows=[row for row in p.get('sites',[]) if isinstance(row,dict)] if isinstance(p.get('sites'),list) else []
+
 print()
 if status=='SKIPPED_BUSY':
-    print('服务器当前有备份/恢复/迁移/远程上传任务，P07 本次已自动让路。')
-    print('状态：SKIPPED_BUSY')
-    print('没有删除任何备份，也没有修改 DNS。')
+    print('服务器当前有备份 / 恢复 / 迁移 / 远程上传任务，P07 本次已自动让路。')
+    print('状态：服务器忙，已安全让路')
+    print('下一步：无需修复；稍后再选择“3. 立即完整备份一次”，或等待下一次计划任务。')
+    print('安全边界：DNS 未修改；SOURCE 保留；没有删除任何备份。')
     raise SystemExit
+
 print('自动备份结果')
 print('----------------------------------------')
-for row in p.get('sites',[]):
+for row in rows:
     print(row.get('domain','UNKNOWN'))
     print(f"  本地：{row.get('local_backup','UNKNOWN')}")
     print(f"  Google：{row.get('google','UNKNOWN')}")
     print(f"  B2：{row.get('b2','UNKNOWN')}")
     print(f"  双副本：{row.get('dual_remote','UNKNOWN')}")
 print(f"最终：{status}")
-print('DNS：未修改')
+
+if status=='PASS':
+    action='本次本地 + Google + B2 已完成；无需操作。'
+elif status=='DISABLED':
+    action='自动备份当前已关闭；如需恢复保护，选择“2. 启用 / 更新自动备份”。'
+elif status=='FAIL':
+    local_fail=any(row.get('local_backup')!='PASS' for row in rows) if rows else False
+    google_fail=any(row.get('google')!='PASS' for row in rows) if rows else False
+    b2_fail=any(row.get('b2')!='PASS' for row in rows) if rows else False
+    if google_fail or b2_fail:
+        failed=[]
+        if google_fail: failed.append('Google')
+        if b2_fail: failed.append('B2')
+        action=f"本次 {' + '.join(failed)} 未完成；先选择“1. 设置 / 检查 Google + B2”，修复后再选择“3. 立即完整备份一次”。"
+    elif local_fail:
+        action='本地 Fresh Verify 未完成；选择“4. 查看自动备份状态”确认最近结果，再检查网站 / 磁盘状态后重试。'
+    else:
+        action='本次没有达到双副本 PASS；选择“4. 查看自动备份状态”，再按提示重试。'
+else:
+    action='结果需要关注；选择“4. 查看自动备份状态”获取下一步。'
+
+print(f"下一步：{action}")
+if status=='FAIL':
+    print('保留策略：已成功的本地备份 / 远程副本会保留；失败运行不会执行本地自动清理。')
+print('安全边界：DNS 未修改；SOURCE 保留；不会因本次结果删除已有手工 / 迁移备份。')
 PY
   pause_menu
 }
@@ -394,7 +436,7 @@ disable_auto() {
 
 while true; do
   header
-  cat <<'EOF'
+  cat <<'EOF_MENU'
 1. 设置 / 检查 Google + B2
 2. 启用 / 更新自动备份
 3. 立即完整备份一次
@@ -402,7 +444,7 @@ while true; do
 5. 关闭自动备份
 0. 返回
 
-EOF
+EOF_MENU
   printf '请选择 [0-5]：'
   read -r choice || exit 0
   case "$choice" in
