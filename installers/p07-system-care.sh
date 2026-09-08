@@ -94,8 +94,8 @@ install_runtime() {
   done < "$manifest"
 
   cp -a "$tmp/pkg/." "$stage/"
-  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh "$stage/intrusion-evidence-entry.sh"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py "$stage/lib/intrusion_discovery.py"
+  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh" "$stage/intrusion-evidence-entry.sh"
+  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py" "$stage/lib/intrusion_discovery.py"
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
