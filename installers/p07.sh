@@ -3,7 +3,7 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-candidate.sh"
-EXPECTED_BLOB="04f5b5be84769e16d07b292cd6cb66e576adce48"
+EXPECTED_BLOB="928ed92c2b196eb03c197517f1cb4ed990560b9c"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -20,7 +20,7 @@ command -v python3 >/dev/null 2>&1 || fail "缺少依赖：python3"
 TMP="$(mktemp -t p07-server-ops.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 
-curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "$INSTALLER_URL" -o "$TMP" || fail "CloudPanel 运维模块安装器下载失败。"
+curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "$INSTALLER_URL" -o "$TMP" || fail "CloudPanel 运维模块安装器下载失败。"
 bash -n "$TMP" || fail "CloudPanel 运维模块安装器语法校验失败。"
 
 python3 - "$TMP" "$EXPECTED_BLOB" <<'PY' || fail "CloudPanel 运维模块安装器身份校验失败。"
