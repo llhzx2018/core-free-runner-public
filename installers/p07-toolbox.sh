@@ -22,7 +22,7 @@ VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-rc3-guided-init5"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc8"
+SYSTEM_CARE_EXPECTED="0.1.0-rc9"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
