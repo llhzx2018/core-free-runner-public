@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a95
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0 RC3"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-rc3-guided-init1"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-rc3-guided-init2"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -177,7 +177,6 @@ run_server_ops() {
   fi
 
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
-
   local tmp rc
   tmp="$(mktemp -t p07-server-ops.XXXXXX)"
   chmod 700 "$tmp"
