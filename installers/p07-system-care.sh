@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc7'
+VERSION='0.1.0-rc8'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='f8158064758a110086d092af72ca2d5f40bc21f3'
+MANIFEST_BLOB='b0a4a012de4489dc1ed67a7bd1e7e290be1d181f'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -115,6 +115,7 @@ install_runtime() {
     return 13
   fi
 
+  NO_COLOR=1 "$ENTRY" evidence refresh-cache >/dev/null 2>&1 || true
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
   ok "System Care ${VERSION} 已就绪"
 }
