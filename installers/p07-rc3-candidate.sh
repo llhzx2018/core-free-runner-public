@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init3"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init4"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,9 +81,9 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "c6bb614f4d68c6067feaca37e437efb2ea947165"
+fetch_overlay "BUILD_ID"                    "6bd078c1f22eaf187cbc395cd869c2818bbd08e7"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
-fetch_overlay "bin/vfops-auto-backup"       "a12e6d666000b61e4796361f10f9bea65c249174"
+fetch_overlay "bin/vfops-auto-backup"       "4002605b7544b8a825516d58582ce20b1ffa1569"
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"         "a1a629a64fbd677696c3f09250eb2757fd534ef4"
@@ -105,6 +105,9 @@ grep -Fq 'Google 实时：' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动
 grep -Fq 'B2 实时：' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份状态缺少 B2 实时健康。"
 grep -Fq '下一步：' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份状态缺少下一步指引。"
 grep -Fq '状态检查不会删除 SOURCE' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 自动备份状态缺少只读安全边界。"
+grep -Fq '自动备份返回格式异常' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少 fail-closed 结果 UX。"
+grep -Fq '失败运行不会执行本地自动清理' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少失败保留策略。"
+grep -Fq 'SOURCE 保留' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少 SOURCE retained 提示。"
 grep -Fq '1. 全新初始化 Google + B2' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少全新初始化入口。"
 grep -Fq '2. 从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少既有服务器导入入口。"
 grep -Fq 'P07 远程备份健康状态' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少健康摘要。"
@@ -197,6 +200,7 @@ printf '版本：%s\n' "$VERSION_OUT"
 printf '自动备份：本地 + Google + B2 · Guarded Scheduler\n'
 printf '远程初始化：Google Device OAuth + B2 引导；也支持从已有 P07 服务器导入\n'
 printf '状态检查：Google + B2 实时健康 + 下一步指引\n'
+printf '立即备份结果：PASS / FAIL / Busy 可读结果 + 下一步指引\n'
 printf 'CloudPanel 定时任务：不会修改\n'
 printf 'DNS：不会自动修改\n'
 printf '旧服务器：不会自动删除\n'
