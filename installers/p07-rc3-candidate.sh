@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init4"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init5"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,12 +81,12 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "6bd078c1f22eaf187cbc395cd869c2818bbd08e7"
+fetch_overlay "BUILD_ID"                    "8af7ded9bd39c07d4bcf91cde2623a89e918da11"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"       "4002605b7544b8a825516d58582ce20b1ffa1569"
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
-fetch_overlay "lib/storage_setup.py"         "a1a629a64fbd677696c3f09250eb2757fd534ef4"
+fetch_overlay "lib/storage_setup.py"         "2ff7077e1c2328a0eaeee6c4e85bdb5a3a971682"
 fetch_overlay "lib/google_device_oauth.py"   "5df0530f3a70ed93d6349c35c2b0fbee3d4d453f"
 
 say "安装前自检..."
@@ -115,6 +115,9 @@ grep -Fq 'SOURCE：保留，未修改 / 未删除' "$SRC_DIR/bin/vfops-storage-s
 grep -Fq 'TVs and Limited Input devices' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 Google Device OAuth 引导缺失。"
 grep -Fq 'https://oauth2.googleapis.com/device/code' "$SRC_DIR/lib/google_device_oauth.py" || fail "RC3 Google Device OAuth helper 缺失。"
 grep -Fq 'friendly_oauth_error' "$SRC_DIR/lib/google_device_oauth.py" || fail "RC3 Google OAuth 异常 UX 缺失。"
+grep -Fq 'PROVENANCE_FRESH = "GUIDED_DEVICE_OAUTH_FRESH"' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 Fresh 初始化来源标记缺失。"
+grep -Fq 'DEFAULT_MACHINE_ID = Path("/etc/machine-id")' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 Fresh 初始化缺少本机绑定。"
+grep -Fq 'setup_provenance' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 storage provenance 缺失。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
