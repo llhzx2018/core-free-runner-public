@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,6 +35,68 @@ class AutoBackupTests(unittest.TestCase):
 
     def _run(self, root: Path, cfg: Path):
         return auto_backup.run_once(cfg, "clpctl", "rclone", root / "locks" / "auto.lock", root / "state" / "last.json", root / "empty-proc")
+
+    def _run_status_menu(self, root: Path, status_payload: dict, storage_payload: dict, *, status_rc: int = 0, storage_rc: int = 0) -> str:
+        runtime = root / "runtime"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "lib").mkdir()
+        menu = runtime / "bin" / "vfops-auto-backup"
+        menu.write_text((ROOT / "overlay" / "bin" / "vfops-auto-backup").read_text(encoding="utf-8"), encoding="utf-8")
+        menu.chmod(0o755)
+
+        engine = runtime / "lib" / "auto_backup.py"
+        status_json = json.dumps(status_payload, ensure_ascii=False)
+        engine.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"print({status_json!r})\n"
+            f"raise SystemExit({status_rc})\n",
+            encoding="utf-8",
+        )
+
+        core = runtime / "bin" / "vfops"
+        storage_json = json.dumps(storage_payload, ensure_ascii=False)
+        core.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"print({storage_json!r})\n"
+            f"raise SystemExit({storage_rc})\n",
+            encoding="utf-8",
+        )
+        core.chmod(0o755)
+
+        setup = runtime / "bin" / "vfops-storage-setup"
+        setup.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        setup.chmod(0o755)
+
+        fakebin = root / "fakebin"
+        fakebin.mkdir()
+        rclone = fakebin / "rclone"
+        rclone.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        rclone.chmod(0o755)
+
+        auto_cfg = root / "auto.json"
+        storage_cfg = root / "storage.json"
+        auto_cfg.write_text("{}\n", encoding="utf-8")
+        storage_cfg.write_text("{}\n", encoding="utf-8")
+        env = os.environ.copy()
+        env.update({
+            "VFOPS_AUTO_BACKUP_CONFIG": str(auto_cfg),
+            "VFOPS_STORAGE_CONFIG": str(storage_cfg),
+            "VFOPS_AUTO_BACKUP_CRON": str(root / "cron"),
+            "VFOPS_AUTO_BACKUP_STATE": str(root / "state.json"),
+            "PATH": str(fakebin) + os.pathsep + env.get("PATH", ""),
+        })
+        proc = subprocess.run(
+            ["bash", str(menu)],
+            input="4\n\n0\n",
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
 
     def test_config_requires_google_plus_b2(self):
         with tempfile.TemporaryDirectory() as td:
@@ -143,5 +207,108 @@ class AutoBackupTests(unittest.TestCase):
                 with self.assertRaises(auto_backup.AutoBackupError): auto_backup.disable(cfg, cron, auto_backup.CONFIRM_DISABLE)
             self.assertTrue(cron.read_text().startswith("# foreign"))
 
+    def test_status_menu_renders_attention_exit_with_live_health_and_next_action(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            status = {
+                "schema": auto_backup.STATUS_SCHEMA,
+                "status": "ATTENTION",
+                "enabled": True,
+                "daily_at": "03:30",
+                "sites": ["example.com"],
+                "local_keep_last": 7,
+                "cron_installed": False,
+                "storage_state": "CONFIGURED",
+                "last_run": None,
+            }
+            live = {
+                "accounts": [
+                    {"provider": "google", "enabled": True, "health": "OK"},
+                    {"provider": "b2", "enabled": True, "health": "OK"},
+                ]
+            }
+            output = self._run_status_menu(root, status, live, status_rc=12)
+            self.assertIn("状态：需关注", output)
+            self.assertIn("Google 实时：正常 ✓", output)
+            self.assertIn("B2 实时：正常 ✓", output)
+            self.assertIn("启用 / 更新自动备份", output)
+            self.assertIn("不会修改 CloudPanel Cron", output)
 
-if __name__ == "__main__": unittest.main()
+    def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            status = {
+                "schema": auto_backup.STATUS_SCHEMA,
+                "status": "ENABLED",
+                "enabled": True,
+                "daily_at": "03:30",
+                "sites": ["example.com"],
+                "local_keep_last": 7,
+                "cron_installed": True,
+                "storage_state": "CONFIGURED",
+                "last_run": {"status": "PASS", "updated_at": "2026-09-08T08:00:00Z"},
+            }
+            live = {
+                "accounts": [
+                    {"provider": "google", "enabled": True, "health": "UNAVAILABLE", "client_secret": "DO-NOT-PRINT"},
+                    {"provider": "b2", "enabled": True, "health": "OK", "application_key": "DO-NOT-PRINT"},
+                ]
+            }
+            output = self._run_status_menu(root, status, live)
+            self.assertIn("状态：需关注（实时远程异常）", output)
+            self.assertIn("Google 实时：不可用", output)
+            self.assertIn("B2 实时：正常 ✓", output)
+            self.assertIn("设置 / 检查 Google + B2", output)
+            self.assertNotIn("DO-NOT-PRINT", output)
+
+    def test_status_menu_shows_last_site_result_and_busy_retry_guidance(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            live = {
+                "accounts": [
+                    {"provider": "google", "enabled": True, "health": "OK"},
+                    {"provider": "b2", "enabled": True, "health": "OK"},
+                ]
+            }
+            failed = {
+                "schema": auto_backup.STATUS_SCHEMA,
+                "status": "ENABLED",
+                "enabled": True,
+                "daily_at": "03:30",
+                "sites": ["example.com"],
+                "local_keep_last": 7,
+                "cron_installed": True,
+                "storage_state": "CONFIGURED",
+                "last_run": {
+                    "status": "FAIL",
+                    "updated_at": "2026-09-08T08:00:00Z",
+                    "sites": [{
+                        "domain": "example.com",
+                        "local_backup": "PASS",
+                        "google": "PASS",
+                        "b2": "FAIL",
+                        "dual_remote": "FAIL",
+                    }],
+                },
+            }
+            output = self._run_status_menu(root, failed, live)
+            self.assertIn("上次各网站", output)
+            self.assertIn("Google：PASS", output)
+            self.assertIn("B2：FAIL", output)
+            self.assertIn("双副本：FAIL", output)
+            self.assertIn("立即完整备份一次", output)
+
+            busy = dict(failed)
+            busy["last_run"] = {
+                "status": "SKIPPED_BUSY",
+                "updated_at": "2026-09-08T08:10:00Z",
+                "reason": "BACKUP_RESTORE_MIGRATION_OR_STORAGE_ACTIVE",
+            }
+            output = self._run_status_menu(root, busy, live)
+            self.assertIn("服务器忙，已让路", output)
+            self.assertIn("P07 已安全让路", output)
+            self.assertIn("无需修复", output)
+
+
+if __name__ == "__main__":
+    unittest.main()
