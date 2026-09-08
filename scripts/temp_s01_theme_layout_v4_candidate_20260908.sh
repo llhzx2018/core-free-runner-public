@@ -50,7 +50,7 @@ $shell=(string)file_get_contents($root.'/src/inc/admin/admin-shell.php');
 $css=(string)file_get_contents($root.'/src/assets/css/admin/pages/page-structure/admin-page-layout.css');
 $checks=[
  'dock'=>str_contains($view,'class="vf-layout-save-dock"')&&str_contains($view,'data-vf-layout-save-dock'),
- 'single_save'=>substr_count($view,'data-vf-layout-save')===2,
+ 'single_save'=>substr_count($view,'class="button button-primary" data-vf-layout-save')===1,
  'submit'=>str_contains($view,'type="submit" class="button button-primary" data-vf-layout-save'),
  'dirty_copy'=>str_contains($view,'data-vf-layout-dirty-copy'),
  'header_removed'=>str_contains($shell,"'layout' => [],")&&!str_contains($shell,"'layout' => ['label' => '保存布局草稿'"),
