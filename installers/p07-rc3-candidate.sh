@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init5"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init6"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,9 +81,9 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "8af7ded9bd39c07d4bcf91cde2623a89e918da11"
+fetch_overlay "BUILD_ID"                    "5ac1ccb58198dcc5a5911e93d261fb869571a37f"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
-fetch_overlay "bin/vfops-auto-backup"       "4002605b7544b8a825516d58582ce20b1ffa1569"
+fetch_overlay "bin/vfops-auto-backup"       "0563d0bb06c8cd2a2f375ea93153c66f6ed4530b"
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"         "2ff7077e1c2328a0eaeee6c4e85bdb5a3a971682"
@@ -108,6 +108,10 @@ grep -Fq '状态检查不会删除 SOURCE' "$SRC_DIR/bin/vfops-auto-backup" || f
 grep -Fq '自动备份返回格式异常' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少 fail-closed 结果 UX。"
 grep -Fq '失败运行不会执行本地自动清理' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少失败保留策略。"
 grep -Fq 'SOURCE 保留' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 立即备份缺少 SOURCE retained 提示。"
+grep -Fq 'prepare_first_run_config' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 缺少首次验证配置流程。"
+grep -Fq '首次启用定时备份前，必须先完成一次真实双远程备份验证' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 缺少首次 Scheduler Verify Gate。"
+grep -Fq '本次验证不会创建或修改 P07 Cron' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 缺少首次验证 Cron 安全边界。"
+grep -Fq '首次验证已通过 · 定时未开启' "$SRC_DIR/bin/vfops-auto-backup" || fail "RC3 缺少首次验证状态 UX。"
 grep -Fq '1. 全新初始化 Google + B2' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少全新初始化入口。"
 grep -Fq '2. 从已有 P07 服务器导入' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少既有服务器导入入口。"
 grep -Fq 'P07 远程备份健康状态' "$SRC_DIR/bin/vfops-storage-setup" || fail "RC3 远程存储缺少健康摘要。"
@@ -123,7 +127,6 @@ say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
 mkdir -p "${INSTALL_DIR}.new"
 cp -a "$SRC_DIR"/. "${INSTALL_DIR}.new"/
-chmod +x "${INSTALL_DIR}.new/bin/vfops" "$SRC_DIR/bin/vfops-user" >/dev/null 2>&1 || true
 chmod +x "${INSTALL_DIR}.new/bin/vfops" "${INSTALL_DIR}.new/bin/vfops-user" "${INSTALL_DIR}.new/bin/vfops-auto-backup" "${INSTALL_DIR}.new/bin/vfops-storage-setup"
 
 HAD_PREVIOUS=0
@@ -200,10 +203,11 @@ fi
 
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
-printf '自动备份：本地 + Google + B2 · Guarded Scheduler\n'
+printf '自动备份：先真实验证本地 + Google + B2，再启用 Guarded Scheduler\n'
 printf '远程初始化：Google Device OAuth + B2 引导；也支持从已有 P07 服务器导入\n'
 printf '状态检查：Google + B2 实时健康 + 下一步指引\n'
 printf '立即备份结果：PASS / FAIL / Busy 可读结果 + 下一步指引\n'
+printf '首次 Scheduler Gate：双远程未验证 PASS 时不会安装 P07 Cron\n'
 printf 'CloudPanel 定时任务：不会修改\n'
 printf 'DNS：不会自动修改\n'
 printf '旧服务器：不会自动删除\n'
