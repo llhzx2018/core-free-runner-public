@@ -25,8 +25,8 @@ def friendly_oauth_error(code: str, phase: str = "token") -> str:
     code = (code or "unknown_error").strip()
     if phase == "device":
         mapping = {
-            "invalid_client": "Google OAuth Client ID 无效；请确认使用你自己的 TVs and Limited Input devices Client。",
-            "unauthorized_client": "这个 Google OAuth Client 不能使用 Device Authorization；请确认 Client 类型为 TVs and Limited Input devices。",
+            "invalid_client": "Google OAuth Client ID 无效；没有修改配置。请确认使用你自己的 TVs and Limited Input devices Client。",
+            "unauthorized_client": "这个 Google OAuth Client 不能使用 Device Authorization；没有修改配置。请确认 Client 类型为 TVs and Limited Input devices。",
             "invalid_request": "Google 拒绝了 Device OAuth 请求；请检查 Client ID 后重新进入初始化。",
             "access_denied": "Google Device OAuth 请求被拒绝；没有修改配置。",
         }
@@ -34,8 +34,8 @@ def friendly_oauth_error(code: str, phase: str = "token") -> str:
         mapping = {
             "access_denied": "Google 授权已被拒绝；没有修改配置。重新进入初始化后可以再次授权。",
             "expired_token": "Google 一次性授权已过期；没有修改配置。请重新进入初始化获取新的授权代码。",
-            "invalid_client": "Google OAuth Client ID / Secret 验证失败；请检查你自己的 OAuth Client 信息。",
-            "unauthorized_client": "这个 Google OAuth Client 不能完成 Device Authorization；请确认 Client 类型为 TVs and Limited Input devices。",
+            "invalid_client": "Google OAuth Client ID / Secret 验证失败；没有修改配置。请检查你自己的 OAuth Client 信息。",
+            "unauthorized_client": "这个 Google OAuth Client 不能完成 Device Authorization；没有修改配置。请确认 Client 类型为 TVs and Limited Input devices。",
             "invalid_grant": "Google 授权会话已经失效；没有修改配置。请重新进入初始化获取新的授权代码。",
             "invalid_request": "Google 授权请求无效；没有修改配置。请重新进入初始化。",
             "temporarily_unavailable": "Google OAuth 暂时不可用；没有修改配置。请稍后重新进入初始化。",
