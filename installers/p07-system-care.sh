@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc9'
-PACKAGE_PATH="packages/p07-system-care/${VERSION}"
-RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='a6f75e96cf9b6971b6a431309f72f629ef6ed931'
+VERSION='0.1.0-rc10'
+BASE_VERSION='0.1.0-rc9'
+BASE_PACKAGE_PATH="packages/p07-system-care/${BASE_VERSION}"
+OVERLAY_PACKAGE_PATH="packages/p07-system-care/${VERSION}"
+BASE_RAW="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${BASE_PACKAGE_PATH}"
+OVERLAY_RAW="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${OVERLAY_PACKAGE_PATH}"
+BASE_MANIFEST_BLOB='a6f75e96cf9b6971b6a431309f72f629ef6ed931'
+OVERLAY_MANIFEST_BLOB='22da2481a09f3048fda79e3088ac4d021b000dd9'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -47,55 +51,83 @@ installed_version() {
 }
 
 manager_ready() {
-  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -f "$TARGET/lib/intrusion_evidence.py" ]] || return 1
+  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_scan_rc9.py" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
   NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
 }
 
-install_runtime() {
-  local dep
-  for dep in curl sha1sum wc awk mktemp; do
-    command -v "$dep" >/dev/null 2>&1 || { fail "缺少必要命令：${dep}"; return 2; }
-  done
-
-  local tmp stage manifest expected path actual
-  tmp="$(mktemp -d /tmp/p07-system-care.XXXXXX)"
-  stage="${TARGET}.new.$$"
-  manifest="$tmp/MANIFEST.gitblob"
-  mkdir -p "$tmp/pkg/lib" "$stage/lib"
-
-  info "校验并安装 P07 系统维护 / 安全 ${VERSION}..."
-  if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.gitblob" -o "$manifest"; then
-    rm -rf "$tmp" "$stage"
-    fail '运行清单下载失败。'
-    return 9
-  fi
-  actual="$(git_blob_sha1 "$manifest")"
-  if [[ "$actual" != "$MANIFEST_BLOB" ]]; then
-    rm -rf "$tmp" "$stage"
-    fail '运行清单完整性校验失败。'
-    return 10
-  fi
-
+fetch_manifest_files() {
+  local raw="$1" manifest="$2" out="$3" expected path actual
   while read -r expected path; do
     [[ -n "$expected" && -n "$path" ]] || continue
-    mkdir -p "$tmp/pkg/$(dirname "$path")"
-    if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/${path}" -o "$tmp/pkg/$path"; then
-      rm -rf "$tmp" "$stage"
+    mkdir -p "$out/$(dirname "$path")"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 "${raw}/${path}" -o "$out/$path"; then
       fail "运行文件下载失败：${path}"
       return 11
     fi
-    actual="$(git_blob_sha1 "$tmp/pkg/$path")"
+    actual="$(git_blob_sha1 "$out/$path")"
     if [[ "$actual" != "$expected" ]]; then
-      rm -rf "$tmp" "$stage"
       fail "运行文件完整性校验失败：${path}"
       return 12
     fi
   done < "$manifest"
+}
 
-  cp -a "$tmp/pkg/." "$stage/"
+install_runtime() {
+  local dep
+  for dep in curl sha1sum wc awk mktemp dirname cp chmod mv rm python3; do
+    command -v "$dep" >/dev/null 2>&1 || { fail "缺少必要命令：${dep}"; return 2; }
+  done
+
+  local tmp stage base_manifest overlay_manifest actual
+  tmp="$(mktemp -d /tmp/p07-system-care.XXXXXX)"
+  stage="${TARGET}.new.$$"
+  base_manifest="$tmp/BASE_MANIFEST.gitblob"
+  overlay_manifest="$tmp/OVERLAY_MANIFEST.gitblob"
+  mkdir -p "$tmp/base/lib" "$tmp/overlay/lib" "$stage/lib"
+
+  info "校验并安装 P07 系统维护 / 安全 ${VERSION}..."
+
+  if ! curl -fsSL --proto '=https' --tlsv1.2 "${BASE_RAW}/MANIFEST.gitblob" -o "$base_manifest"; then
+    rm -rf "$tmp" "$stage"; fail '基础运行清单下载失败。'; return 9
+  fi
+  actual="$(git_blob_sha1 "$base_manifest")"
+  if [[ "$actual" != "$BASE_MANIFEST_BLOB" ]]; then
+    rm -rf "$tmp" "$stage"; fail '基础运行清单完整性校验失败。'; return 10
+  fi
+
+  if ! curl -fsSL --proto '=https' --tlsv1.2 "${OVERLAY_RAW}/MANIFEST.gitblob" -o "$overlay_manifest"; then
+    rm -rf "$tmp" "$stage"; fail 'RC10 修复清单下载失败。'; return 14
+  fi
+  actual="$(git_blob_sha1 "$overlay_manifest")"
+  if [[ "$actual" != "$OVERLAY_MANIFEST_BLOB" ]]; then
+    rm -rf "$tmp" "$stage"; fail 'RC10 修复清单完整性校验失败。'; return 15
+  fi
+
+  fetch_manifest_files "$BASE_RAW" "$base_manifest" "$tmp/base" || {
+    local rc=$?; rm -rf "$tmp" "$stage"; return "$rc"
+  }
+  fetch_manifest_files "$OVERLAY_RAW" "$overlay_manifest" "$tmp/overlay" || {
+    local rc=$?; rm -rf "$tmp" "$stage"; return "$rc"
+  }
+
+  cp -a "$tmp/base/." "$stage/"
+  mv "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_scan_rc9.py"
+  cp -a "$tmp/overlay/." "$stage/"
+
   chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py"
+  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_scan_rc9.py" "$stage/lib/intrusion_state.py"
+
+  if ! PYTHONPATH="$stage/lib" python3 - <<'PY'
+import intrusion_scan
+assert intrusion_scan.__name__ == "intrusion_scan"
+assert callable(intrusion_scan.discover)
+PY
+  then
+    rm -rf "$tmp" "$stage"
+    fail 'RC10 WordPress 站点发现模块自检失败。'
+    return 16
+  fi
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
