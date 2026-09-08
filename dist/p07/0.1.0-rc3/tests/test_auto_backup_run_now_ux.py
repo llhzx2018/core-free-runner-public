@@ -132,6 +132,17 @@ class ImmediateBackupUxTests(unittest.TestCase):
         self.assertIn("SOURCE 保留", output)
         self.assertNotIn(marker, output)
 
+    def test_unexpected_engine_rc_is_fail_closed_without_raw_payload_echo(self):
+        marker = "UNEXPECTED-RC-DO-NOT-PRINT-SECRET"
+        output = self._run_menu(marker, 2, malformed=True)
+        self.assertIn("自动备份执行失败，未取得可读结果", output)
+        self.assertIn("不会把这次执行标记为成功", output)
+        self.assertIn("查看自动备份状态", output)
+        self.assertIn("设置 / 检查 Google + B2", output)
+        self.assertIn("DNS 未修改", output)
+        self.assertIn("SOURCE 保留", output)
+        self.assertNotIn(marker, output)
+
     def test_pass_is_structured_and_requires_no_action(self):
         payload = {
             "schema": "vf-server-ops.auto-backup-run.v1",
