@@ -1,0 +1,121 @@
+name: P07 System Care RC7 Owner Test Distribution Build
+
+on:
+  push:
+    branches: [test/p07-system-care-rc7-owner-20260908]
+    paths:
+      - '.github/workflows/p07-system-care-rc7-owner-dist-build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-owner-test-distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public candidate branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: test/p07-system-care-rc7-owner-20260908
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Checkout exact frozen private RC7 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 0ce386082b648c4fa64a2c01e1c85957d0a8919b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: _p07_source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build exact RC7 runtime package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C _p07_source rev-parse HEAD)" = 0ce386082b648c4fa64a2c01e1c85957d0a8919b
+          test "$(cat _p07_source/modules/system-care/VERSION)" = 0.1.0-rc7
+
+          pkg='packages/p07-system-care/0.1.0-rc7'
+          rm -rf "$pkg"
+          mkdir -p "$pkg/lib"
+          for f in VERSION vf-system-care.sh status.sh audit.sh updates.sh cleanup.sh memory.sh services.sh security-audit.sh intrusion-evidence.sh; do
+            cp "_p07_source/modules/system-care/$f" "$pkg/$f"
+          done
+          for f in common.sh intrusion_evidence.py intrusion_logs.py intrusion_scan.py intrusion_state.py; do
+            cp "_p07_source/modules/system-care/lib/$f" "$pkg/lib/$f"
+          done
+
+          : > "$pkg/MANIFEST.gitblob"
+          for f in VERSION vf-system-care.sh status.sh audit.sh updates.sh cleanup.sh memory.sh services.sh security-audit.sh intrusion-evidence.sh lib/common.sh lib/intrusion_evidence.py lib/intrusion_logs.py lib/intrusion_scan.py lib/intrusion_state.py; do
+            printf '%s  %s\n' "$(git hash-object "$pkg/$f")" "$f" >> "$pkg/MANIFEST.gitblob"
+          done
+
+          manifest_blob="$(git hash-object "$pkg/MANIFEST.gitblob")"
+          printf 'P07_RC7_PACKAGE_MANIFEST_BLOB=%s\n' "$manifest_blob"
+          printf '%s\n' "$manifest_blob" > /tmp/p07-rc7-manifest-blob
+
+          python3 - <<'PY'
+          from pathlib import Path
+          installer=Path('installers/p07-system-care.sh')
+          s=installer.read_text()
+          s=s.replace("VERSION='0.1.0-rc6'", "VERSION='0.1.0-rc7'")
+          old="MANIFEST_BLOB='b6d47e3dd82d4dee4b3decc107fe83f52cccb76f'"
+          manifest=Path('/tmp/p07-rc7-manifest-blob').read_text().strip()
+          if old not in s:
+              raise SystemExit('expected rc6 manifest identity not found')
+          s=s.replace(old, f"MANIFEST_BLOB='{manifest}'")
+          old_chmod='chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh"'
+          new_chmod='chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh"'
+          if old_chmod not in s:
+              raise SystemExit('expected installer chmod line not found')
+          s=s.replace(old_chmod, new_chmod)
+          s=s.replace('chmod 0644 "$stage/VERSION" "$stage/lib/common.sh"', 'chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py"')
+          s=s.replace('[[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" ]] || return 1', '[[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -f "$TARGET/lib/intrusion_evidence.py" ]] || return 1')
+          installer.write_text(s)
+
+          toolbox=Path('installers/p07-toolbox.sh')
+          t=toolbox.read_text()
+          if 'SYSTEM_CARE_EXPECTED="0.1.0-rc6"' not in t:
+              raise SystemExit('expected toolbox rc6 identity not found')
+          t=t.replace('SYSTEM_CARE_EXPECTED="0.1.0-rc6"', 'SYSTEM_CARE_EXPECTED="0.1.0-rc7"')
+          t=t.replace('say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"', 'say "  ${C_CYAN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_YELLOW}测试中${C_RESET}"')
+          t=t.replace('4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（可用）', '4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（测试中）')
+          toolbox.write_text(t)
+          PY
+
+      - name: Package and frozen-product gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc7'
+          while read -r expected path; do
+            test "$(git hash-object "$pkg/$path")" = "$expected"
+          done < "$pkg/MANIFEST.gitblob"
+          bash -n installers/p07-system-care.sh
+          bash -n installers/p07-toolbox.sh
+          for f in "$pkg"/*.sh "$pkg/lib/common.sh"; do bash -n "$f"; done
+          python3 -m py_compile "$pkg"/lib/intrusion_*.py
+          test "$(NO_COLOR=1 bash "$pkg/vf-system-care.sh" --version | awk '{print $NF}')" = 0.1.0-rc7
+
+          cd _p07_source
+          bash modules/system-care/tests/static_gate.sh
+          bash modules/system-care/tests/functional_gate.sh
+          echo P07_SYSTEM_CARE_RC7_OWNER_DIST_EXACT_SOURCE=PASS
+          echo P07_SYSTEM_CARE_RC7_OWNER_DIST_PACKAGE=PASS
+          echo P07_SYSTEM_CARE_RC7_OWNER_DIST_FROZEN_REGRESSION=PASS
+
+      - name: Commit generated owner-test distribution candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf _p07_source
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/p07-system-care/0.1.0-rc7 installers/p07-system-care.sh installers/p07-toolbox.sh
+          git diff --cached --check
+          git commit -m 'test(P07): stage System Care RC7 owner-test distribution'
+          git push origin HEAD:test/p07-system-care-rc7-owner-20260908
+          echo P07_SYSTEM_CARE_RC7_OWNER_DIST_BRANCH_READY=PASS
