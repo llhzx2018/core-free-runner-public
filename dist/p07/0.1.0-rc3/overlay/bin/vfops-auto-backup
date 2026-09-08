@@ -111,38 +111,147 @@ setup_storage() {
 }
 
 show_status() {
-  printf '\n[P07] 正在读取自动备份设置...\n'
-  local output
-  if ! output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>&1)"; then
+  printf '\n[P07] 正在检查自动备份设置与 Google + B2 实时状态，请稍候...\n'
+  local output rc remote_output remote_rc
+  set +e
+  output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 && $rc -ne 12 ]]; then
     printf '%s\n' "$output" >&2
+    printf '自动备份状态读取失败；没有修改任何配置。\n' >&2
     pause_menu
     return 0
   fi
-  python3 - "$output" <<'PY'
+  if ! python3 - "$output" <<'PY' >/dev/null 2>&1
 import json,sys
 p=json.loads(sys.argv[1])
+raise SystemExit(0 if isinstance(p,dict) and p.get('schema')=='vf-server-ops.auto-backup-status.v1' else 1)
+PY
+  then
+    printf '%s\n' "$output" >&2
+    printf '自动备份状态返回格式异常；没有修改任何配置。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  remote_output='{}'
+  remote_rc=125
+  if [[ -f "$STORAGE_CONFIG" ]] && command -v rclone >/dev/null 2>&1 && [[ -x "$CORE" ]]; then
+    set +e
+    remote_output="$("$CORE" storage --config "$STORAGE_CONFIG" status 2>/dev/null)"
+    remote_rc=$?
+    set -e
+  fi
+
+  python3 - "$output" "$remote_output" "$remote_rc" <<'PY'
+import json,sys
+
+base=json.loads(sys.argv[1])
+try:
+    live=json.loads(sys.argv[2]) if sys.argv[2] else {}
+except json.JSONDecodeError:
+    live={}
+try:
+    remote_rc=int(sys.argv[3])
+except ValueError:
+    remote_rc=125
+
+status=base.get('status','UNKNOWN')
+last=base.get('last_run') if isinstance(base.get('last_run'),dict) else None
+
+def provider_health(provider):
+    if status == 'NOT_CONFIGURED':
+        return 'NOT_CONFIGURED'
+    if remote_rc != 0 or not isinstance(live,dict):
+        return 'CHECK_FAILED'
+    accounts=live.get('accounts',[]) if isinstance(live.get('accounts'),list) else []
+    provider_accounts=[a for a in accounts if isinstance(a,dict) and a.get('provider')==provider and a.get('enabled') is True]
+    if not provider_accounts:
+        return 'MISSING'
+    return 'OK' if any(a.get('health')=='OK' for a in provider_accounts) else 'UNAVAILABLE'
+
+google=provider_health('google')
+b2=provider_health('b2')
+live_ok=(google=='OK' and b2=='OK')
+effective=status
+if status=='ENABLED' and not live_ok:
+    effective='LIVE_ATTENTION'
+
+cn={
+    'ENABLED':'已启用',
+    'DISABLED':'已关闭',
+    'NOT_CONFIGURED':'未配置',
+    'ATTENTION':'需关注',
+    'LIVE_ATTENTION':'需关注（实时远程异常）',
+}.get(effective,effective)
+health_cn={
+    'OK':'正常 ✓',
+    'UNAVAILABLE':'不可用',
+    'MISSING':'未配置',
+    'CHECK_FAILED':'检查失败',
+    'NOT_CONFIGURED':'未配置',
+}
+
 print()
 print('自动备份状态')
 print('----------------------------------------')
-status=p.get('status','UNKNOWN')
-cn={'ENABLED':'已启用','DISABLED':'已关闭','NOT_CONFIGURED':'未配置','ATTENTION':'需关注'}.get(status,status)
 print(f"状态：{cn}")
 if status != 'NOT_CONFIGURED':
-    print(f"时间：每天 {p.get('daily_at','UNKNOWN')}")
-    sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
+    print(f"时间：每天 {base.get('daily_at','UNKNOWN')}")
+    sites=base.get('sites',[]) if isinstance(base.get('sites'),list) else []
     print(f"网站：{len(sites)} 个")
     for site in sites:
         print(f"  - {site}")
     print('远程：Google + Backblaze B2')
-    print(f"本地自动备份保留：最近 {p.get('local_keep_last','?')} 份 / 网站")
-    print(f"Cron：{'已安装' if p.get('cron_installed') else '未安装'}")
-    print(f"存储：{p.get('storage_state','UNKNOWN')}")
-last=p.get('last_run') if isinstance(p.get('last_run'),dict) else None
+    print(f"Google 实时：{health_cn.get(google,google)}")
+    print(f"B2 实时：{health_cn.get(b2,b2)}")
+    print(f"本地自动备份保留：最近 {base.get('local_keep_last','?')} 份 / 网站")
+    print(f"Cron：{'已安装（P07 owned）' if base.get('cron_installed') else '未安装 / 非 P07 owned'}")
+    print(f"配置结构：{base.get('storage_state','UNKNOWN')}")
+
 if last:
     result=last.get('status','UNKNOWN')
     cn_result={'PASS':'PASS','FAIL':'FAIL','RUNNING':'执行中','SKIPPED_BUSY':'服务器忙，已让路','DISABLED':'已关闭'}.get(result,result)
     print(f"上次执行：{cn_result}")
     print(f"更新时间：{last.get('updated_at','UNKNOWN')}")
+    rows=last.get('sites',[]) if isinstance(last.get('sites'),list) else []
+    detail_rows=[row for row in rows if isinstance(row,dict)]
+    if detail_rows:
+        print('上次各网站：')
+        for row in detail_rows:
+            print(f"  {row.get('domain','UNKNOWN')}")
+            print(f"    本地：{row.get('local_backup','UNKNOWN')}")
+            print(f"    Google：{row.get('google','UNKNOWN')}")
+            print(f"    B2：{row.get('b2','UNKNOWN')}")
+            print(f"    双副本：{row.get('dual_remote','UNKNOWN')}")
+    if result=='SKIPPED_BUSY':
+        print('说明：上次检测到服务器正在执行备份 / 恢复 / 迁移 / 远程存储任务，P07 已安全让路。')
+
+if status=='NOT_CONFIGURED':
+    action='先选择“1. 设置 / 检查 Google + B2”，再选择“2. 启用 / 更新自动备份”。'
+elif not base.get('enabled',False):
+    if not live_ok:
+        action='自动备份已关闭；如要重新启用，先选择“1. 设置 / 检查 Google + B2”确认远程，再选择“2. 启用 / 更新自动备份”。'
+    else:
+        action='如需恢复定时保护，选择“2. 启用 / 更新自动备份”。'
+elif not base.get('cron_installed',False):
+    action='选择“2. 启用 / 更新自动备份”修复 P07 自己的定时任务；不会修改 CloudPanel Cron。'
+elif not live_ok:
+    action='选择“1. 设置 / 检查 Google + B2”修复实时远程状态；修复后可选择“3. 立即完整备份一次”验证。'
+elif last and last.get('status')=='FAIL':
+    action='远程当前正常，但上次备份失败；选择“3. 立即完整备份一次”重新验证，并查看失败输出。'
+elif last and last.get('status')=='SKIPPED_BUSY':
+    action='无需修复；稍后选择“3. 立即完整备份一次”，或等待下一次计划任务自动重试。'
+elif last and last.get('status')=='RUNNING':
+    action='当前可能仍在执行备份；稍后再查看状态，不要重复启动。'
+elif last is None:
+    action='当前设置正常但还没有执行记录；可选择“3. 立即完整备份一次”完成首次验证。'
+else:
+    action='当前无需操作；继续保留定时备份即可。'
+
+print(f"下一步：{action}")
+print('安全边界：DNS 未修改；状态检查不会删除 SOURCE、备份或改写 CloudPanel Cron。')
 PY
   pause_menu
 }
