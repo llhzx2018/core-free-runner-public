@@ -40,7 +40,8 @@ rclone_config_path() {
 }
 
 inspect_remotes() {
-  python3 "$HELPER" inspect 2>/dev/null
+  local rclone_config="$1"
+  RCLONE_CONFIG="$rclone_config" python3 "$HELPER" inspect 2>/dev/null
 }
 
 show_remotes() {
@@ -62,21 +63,22 @@ for i,row in enumerate(rows,1):
 PY
 }
 
-remote_count() {
-  python3 - "$1" <<'PY'
-import json,sys
-p=json.loads(sys.argv[1]); print(len(p.get('remotes',[]) if isinstance(p.get('remotes'),list) else []))
-PY
+storage_status_json() {
+  local storage_config="$1" rclone_config="$2"
+  RCLONE_CONFIG="$rclone_config" "$CORE" storage --config "$storage_config" status 2>/dev/null
 }
 
 storage_health_pass() {
   local storage_config="$1" rclone_config="$2" output
-  if ! output="$(RCLONE_CONFIG="$rclone_config" "$CORE" storage --config "$storage_config" status 2>&1)"; then
+  if ! output="$(storage_status_json "$storage_config" "$rclone_config")"; then
     return 1
   fi
   python3 - "$output" <<'PY'
 import json,sys
-p=json.loads(sys.argv[1])
+try:
+    p=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
 rows=p.get('accounts',[]) if isinstance(p.get('accounts'),list) else []
 google=any(isinstance(x,dict) and x.get('provider')=='google' and x.get('enabled') is True and x.get('health')=='OK' for x in rows)
 b2=any(isinstance(x,dict) and x.get('provider')=='b2' and x.get('enabled') is True and x.get('health')=='OK' for x in rows)
@@ -84,9 +86,38 @@ raise SystemExit(0 if google and b2 else 1)
 PY
 }
 
+print_health_summary() {
+  local storage_config="$1" rclone_config="$2" output
+  if ! output="$(storage_status_json "$storage_config" "$rclone_config")"; then
+    printf 'Google：UNKNOWN\nB2：UNKNOWN\n'
+    return 1
+  fi
+  python3 - "$output" <<'PY'
+import json,sys
+try:
+    p=json.loads(sys.argv[1])
+except Exception:
+    print("Google：UNKNOWN")
+    print("B2：UNKNOWN")
+    raise SystemExit(1)
+rows=p.get('accounts',[]) if isinstance(p.get('accounts'),list) else []
+def state(provider):
+    for row in rows:
+        if isinstance(row,dict) and row.get('provider')==provider:
+            if row.get('enabled') is True and row.get('health')=='OK':
+                return "READY"
+            return "NOT READY"
+    return "NOT READY"
+g=state('google'); b=state('b2')
+print(f"Google：{g}")
+print(f"B2：{b}")
+raise SystemExit(0 if g=="READY" and b=="READY" else 1)
+PY
+}
+
 p07_remote_exists() {
-  local name="$1"
-  rclone listremotes 2>/dev/null | grep -Fxq "${name}:"
+  local rclone_config="$1" name="$2"
+  RCLONE_CONFIG="$rclone_config" rclone listremotes 2>/dev/null | grep -Fxq "${name}:"
 }
 
 obscure_stdin() {
@@ -132,7 +163,13 @@ read_recovery_material() {
   printf '\n请再输入一次确认：' >&2
   IFS= read -rs confirm || { unset recovery; return 1; }
   printf '\n' >&2
-  if [[ "$recovery" != "$confirm" || ${#recovery} -lt 32 ]]; then
+  if [[ "$recovery" != "$confirm" ]]; then
+    printf '两次 Recovery Key 不一致；没有生成 crypt 配置。请重新进入全新初始化后再次输入。\n' >&2
+    unset recovery confirm
+    return 1
+  fi
+  if (( ${#recovery} < 32 )); then
+    printf 'Recovery Key 长度不足 32 字符；没有生成 crypt 配置。请使用密码管理器保存更长的随机密钥。\n' >&2
     unset recovery confirm
     return 1
   fi
@@ -162,17 +199,18 @@ read_google_device_oauth() {
   printf '需要你自己的 Google OAuth Client（类型：TVs and Limited Input devices）。\n' >&2
   printf 'Client ID：' >&2
   read -r client_id || return 1
-  [[ -n "$client_id" ]] || return 1
+  [[ -n "$client_id" ]] || { printf 'Client ID 不能为空。\n' >&2; return 1; }
   printf 'Client Secret（输入不回显）：' >&2
   IFS= read -rs client_secret || return 1
   printf '\n' >&2
-  [[ -n "$client_secret" ]] || return 1
+  [[ -n "$client_secret" ]] || { printf 'Client Secret 不能为空。\n' >&2; return 1; }
 
   if ! token="$(printf '%s\n' "$client_secret" | python3 "$GOOGLE_OAUTH_HELPER" --client-id "$client_id")"; then
     unset client_id client_secret token
     return 1
   fi
   if ! printf '%s' "$token" | python3 -c 'import json,sys; p=json.load(sys.stdin); raise SystemExit(0 if isinstance(p,dict) and p.get("refresh_token") and p.get("access_token") else 1)' >/dev/null 2>&1; then
+    printf 'Google 授权返回内容不完整；未修改配置。请重新进入初始化。\n' >&2
     unset client_id client_secret token
     return 1
   fi
@@ -186,11 +224,11 @@ read_b2_credentials() {
   local account key
   printf '\nBackblaze B2 Application Key ID：' >&2
   read -r account || return 1
-  [[ -n "$account" ]] || return 1
+  [[ -n "$account" ]] || { printf 'B2 Application Key ID 不能为空。\n' >&2; return 1; }
   printf 'Backblaze B2 Application Key（输入不回显）：' >&2
   IFS= read -rs key || return 1
   printf '\n' >&2
-  [[ -n "$key" ]] || return 1
+  [[ -n "$key" ]] || { printf 'B2 Application Key 不能为空。\n' >&2; return 1; }
   B2_ACCOUNT="$account"
   B2_KEY="$key"
   unset account key
@@ -199,16 +237,17 @@ read_b2_credentials() {
 choose_b2_bucket() {
   local rclone_config="$1" output count choice bucket
   if ! output="$(RCLONE_CONFIG="$rclone_config" rclone lsf "${P07_B2_DIRECT}:" --dirs-only --max-depth 1 2>/dev/null)"; then
-    printf 'B2 凭据验证失败，或 Application Key 没有列出 Bucket 的权限。\n' >&2
+    printf 'B2 凭据或 Bucket 列表验证失败。请检查 Application Key ID / Application Key 与 Bucket 列表权限。\n' >&2
     return 1
   fi
   mapfile -t buckets < <(printf '%s\n' "$output" | sed 's#/$##' | awk 'NF')
   count="${#buckets[@]}"
   if [[ "$count" -eq 0 ]]; then
-    printf '这个 B2 Key 当前没有可用 Bucket。请先在 Backblaze 创建/授权一个备份 Bucket。\n' >&2
+    printf '这个 B2 Key 当前没有可用 Bucket。请先在 Backblaze 创建一个备份 Bucket，或给 Key 授权可用 Bucket。\n' >&2
     return 1
   fi
   if [[ "$count" -eq 1 ]]; then
+    printf 'B2 Bucket：自动选择 %s\n' "${buckets[0]}" >&2
     printf '%s' "${buckets[0]}"
     return 0
   fi
@@ -223,22 +262,38 @@ choose_b2_bucket() {
       printf '%s' "${buckets[choice-1]}"
       return 0
     fi
+    printf '请输入 1-%s，或输入 0 返回。\n' "$count" >&2
   done
+}
+
+restore_file_or_remove() {
+  local backup="$1" target="$2" had="$3"
+  if [[ "$had" == "1" && -f "$backup" ]]; then
+    cp -p "$backup" "$target"
+    chmod 600 "$target" 2>/dev/null || true
+  else
+    rm -f "$target"
+  fi
 }
 
 fresh_initialize() {
   require_root || { pause_menu; return 0; }
   local rclone_config backup_config="" backup_storage="" stamp
+  local had_config=0 had_storage=0
   rclone_config="$(rclone_config_path)"
 
+  local collisions=() name
   for name in "$P07_GOOGLE_DIRECT" "$P07_GOOGLE_CRYPT" "$P07_B2_DIRECT" "$P07_B2_CRYPT"; do
-    if p07_remote_exists "$name"; then
-      printf '发现已有 P07 remote：%s。为避免覆盖，未执行全新初始化。\n' "$name" >&2
-      printf '请使用“检查当前设置”；需要重建时先人工确认旧备份恢复材料。\n' >&2
-      pause_menu
-      return 0
-    fi
+    if p07_remote_exists "$rclone_config" "$name"; then collisions+=("$name"); fi
   done
+  if ((${#collisions[@]})); then
+    printf '\n发现已有 P07 remote，已停止全新初始化，避免覆盖：\n' >&2
+    for name in "${collisions[@]}"; do printf '  - %s\n' "$name" >&2; done
+    printf '没有删除或覆盖任何现有 remote。\n' >&2
+    printf '下一步：选择“3. 检查当前设置”；如果要继承另一台 P07 的完整配置，请选择“2. 从已有 P07 服务器导入”。\n' >&2
+    pause_menu
+    return 0
+  fi
 
   printf '\nP07 将自动创建：\n'
   printf 'Google：%s → %s（crypt）\n' "$P07_GOOGLE_DIRECT" "$P07_GOOGLE_CRYPT"
@@ -255,22 +310,32 @@ fresh_initialize() {
   mkdir -p "$(dirname "$rclone_config")" "$(dirname "$CONFIG")"
   chmod 700 "$(dirname "$rclone_config")" "$(dirname "$CONFIG")" 2>/dev/null || true
   if [[ -f "$rclone_config" ]]; then
+    had_config=1
     backup_config="${rclone_config}.p07bak.${stamp}"
-    cp -p "$rclone_config" "$backup_config"; chmod 600 "$backup_config"
+    if ! cp -p "$rclone_config" "$backup_config"; then
+      printf '无法创建 rclone 配置安全备份；未开始初始化。\n' >&2
+      pause_menu; return 0
+    fi
+    chmod 600 "$backup_config"
   fi
   if [[ -f "$CONFIG" ]]; then
+    had_storage=1
     backup_storage="${CONFIG}.p07bak.${stamp}"
-    cp -p "$CONFIG" "$backup_storage"; chmod 600 "$backup_storage"
+    if ! cp -p "$CONFIG" "$backup_storage"; then
+      printf '无法创建 P07 storage 安全备份；未开始初始化。\n' >&2
+      pause_menu; return 0
+    fi
+    chmod 600 "$backup_storage"
   fi
 
   rollback_fresh() {
-    if [[ -n "$backup_config" && -f "$backup_config" ]]; then cp -p "$backup_config" "$rclone_config"; else rm -f "$rclone_config"; fi
-    if [[ -n "$backup_storage" && -f "$backup_storage" ]]; then cp -p "$backup_storage" "$CONFIG"; else rm -f "$CONFIG"; fi
+    restore_file_or_remove "$backup_config" "$rclone_config" "$had_config"
+    restore_file_or_remove "$backup_storage" "$CONFIG" "$had_storage"
   }
 
   local material crypt_pass crypt_salt crypt_pass_obscured crypt_salt_obscured
   if ! material="$(read_recovery_material)"; then
-    printf 'Recovery Key 未通过确认（需要两次一致且至少 32 字符）；未修改配置。\n' >&2
+    printf 'Recovery Key 未完成；未修改最终配置。\n' >&2
     rollback_fresh; pause_menu; return 0
   fi
   crypt_pass="$(printf '%s\n' "$material" | sed -n '1p')"
@@ -298,7 +363,7 @@ fresh_initialize() {
   fi
   unset GOOGLE_CLIENT_ID GOOGLE_TOKEN google_client_secret_obscured
   if ! RCLONE_CONFIG="$rclone_config" rclone about "${P07_GOOGLE_DIRECT}:" --json >/dev/null 2>&1; then
-    printf 'Google Drive 实际访问验证失败；已回滚。\n' >&2
+    printf 'Google Drive 实际访问验证失败；已回滚。请检查 OAuth Client、授权结果与 VPS 网络。\n' >&2
     rollback_fresh; pause_menu; return 0
   fi
 
@@ -317,6 +382,7 @@ fresh_initialize() {
 
   local b2_bucket
   if ! b2_bucket="$(choose_b2_bucket "$rclone_config")"; then
+    printf 'B2 初始化未完成；已恢复安装前配置。\n' >&2
     rollback_fresh; pause_menu; return 0
   fi
 
@@ -345,7 +411,8 @@ fresh_initialize() {
   printf '\n远程备份初始化完成 ✓\n'
   printf 'Google：READY\nB2：READY\ncrypt：READY\n'
   printf 'Recovery Key：已由你保存在 VPS 外；P07 未保存明文 Recovery Key\n'
-  printf 'DNS：未修改\nSOURCE：未删除\n'
+  printf '下一步：返回自动备份菜单，可先“立即完整备份一次”，确认双远程副本后再启用定时备份。\n'
+  printf 'DNS：未修改\nSOURCE：保留，未删除\n'
   pause_menu
 }
 
@@ -381,6 +448,8 @@ import_from_source() {
   command -v scp >/dev/null 2>&1 || { printf '缺少 scp。\n' >&2; pause_menu; return 0; }
 
   local source_ip preflight choice tmp source_rclone target_rclone stamp
+  local had_target_rclone=0 had_target_storage=0
+  local backup_target_rclone="" backup_target_storage=""
   printf '\nSOURCE 服务器 IP（输入 0 返回）：'
   read -r source_ip || return 0
   [[ "$source_ip" == "0" ]] && return 0
@@ -407,6 +476,11 @@ import_from_source() {
 
   source_rclone="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${source_ip}" "rclone config file 2>/dev/null | awk '/Configuration file is stored at:/{getline; print; exit}'" || true)"
   [[ -n "$source_rclone" ]] || source_rclone='/root/.config/rclone/rclone.conf'
+  if [[ "$source_rclone" != /* || "$source_rclone" == *$'\n'* || "$source_rclone" == *"'"* ]]; then
+    printf 'SOURCE rclone 配置路径异常；TARGET 没有被修改。\n' >&2
+    pause_menu; return 0
+  fi
+
   printf '\n[P07] 正在检查 SOURCE 是否已有完整 Google + B2 设置...\n'
   if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${source_ip}" "test -s '$source_rclone' && test -s '/etc/vf-server-ops/storage.json'"; then
     printf 'SOURCE 还没有完整的 P07 远程备份设置，无法直接导入。\n' >&2
@@ -414,40 +488,104 @@ import_from_source() {
     pause_menu; return 0
   fi
 
-  tmp="$(mktemp -d -t p07-storage-import.XXXXXX)"; chmod 700 "$tmp"; trap 'rm -rf "$tmp"' RETURN
+  tmp="$(mktemp -d -t p07-storage-import.XXXXXX)"
+  chmod 700 "$tmp"
   printf '[P07] 正在安全复制配置到临时区（不会打印密钥）...\n'
-  if ! scp -q -p "root@${source_ip}:${source_rclone}" "$tmp/rclone.conf" || ! scp -q -p "root@${source_ip}:/etc/vf-server-ops/storage.json" "$tmp/storage.json"; then
-    printf '配置复制失败；TARGET 没有被修改。\n' >&2; rm -rf "$tmp"; trap - RETURN; pause_menu; return 0
+  if ! scp -q -p -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "root@${source_ip}:${source_rclone}" "$tmp/rclone.conf" || \
+     ! scp -q -p -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "root@${source_ip}:/etc/vf-server-ops/storage.json" "$tmp/storage.json"; then
+    printf '配置复制失败；TARGET 没有被修改。\n' >&2; rm -rf "$tmp"; pause_menu; return 0
   fi
   chmod 600 "$tmp/rclone.conf" "$tmp/storage.json"
+
   printf '[P07] 正在临时验证 Google + B2...\n'
   if ! storage_health_pass "$tmp/storage.json" "$tmp/rclone.conf"; then
-    printf 'SOURCE 配置没有通过 Google + B2 实际健康检查；TARGET 没有被修改。\n' >&2; rm -rf "$tmp"; trap - RETURN; pause_menu; return 0
+    printf 'SOURCE 配置没有通过 Google + B2 实际健康检查；TARGET 没有被修改。\n' >&2
+    rm -rf "$tmp"; pause_menu; return 0
   fi
   printf 'Google：PASS ✓\nB2：PASS ✓\n'
 
-  target_rclone="$(rclone_config_path)"; stamp="$(date +%Y%m%d%H%M%S)"
-  mkdir -p "$(dirname "$target_rclone")" "$(dirname "$CONFIG")"; chmod 700 "$(dirname "$target_rclone")" "$(dirname "$CONFIG")" 2>/dev/null || true
-  [[ ! -f "$target_rclone" ]] || { cp -p "$target_rclone" "${target_rclone}.bak.${stamp}"; chmod 600 "${target_rclone}.bak.${stamp}"; }
-  [[ ! -f "$CONFIG" ]] || { cp -p "$CONFIG" "${CONFIG}.bak.${stamp}"; chmod 600 "${CONFIG}.bak.${stamp}"; }
-  printf '[P07] 正在安装到 TARGET...\n'
-  install -m 600 "$tmp/rclone.conf" "$target_rclone"; install -m 600 "$tmp/storage.json" "$CONFIG"
+  target_rclone="$(rclone_config_path)"
+  stamp="$(date +%Y%m%d%H%M%S)"
+  mkdir -p "$(dirname "$target_rclone")" "$(dirname "$CONFIG")"
+  chmod 700 "$(dirname "$target_rclone")" "$(dirname "$CONFIG")" 2>/dev/null || true
+
+  if [[ -f "$target_rclone" ]]; then
+    had_target_rclone=1
+    backup_target_rclone="${target_rclone}.bak.${stamp}"
+    if ! cp -p "$target_rclone" "$backup_target_rclone"; then
+      printf 'TARGET rclone 配置无法安全备份；TARGET 没有被修改。\n' >&2
+      rm -rf "$tmp"; pause_menu; return 0
+    fi
+    chmod 600 "$backup_target_rclone"
+  fi
+  if [[ -f "$CONFIG" ]]; then
+    had_target_storage=1
+    backup_target_storage="${CONFIG}.bak.${stamp}"
+    if ! cp -p "$CONFIG" "$backup_target_storage"; then
+      printf 'TARGET P07 storage 配置无法安全备份；TARGET 没有被修改。\n' >&2
+      rm -rf "$tmp"; pause_menu; return 0
+    fi
+    chmod 600 "$backup_target_storage"
+  fi
+
+  rollback_target() {
+    restore_file_or_remove "$backup_target_rclone" "$target_rclone" "$had_target_rclone"
+    restore_file_or_remove "$backup_target_storage" "$CONFIG" "$had_target_storage"
+  }
+
+  printf '[P07] 正在安装到 TARGET；原配置已先备份，失败会自动恢复...\n'
+  if ! install -m 600 "$tmp/rclone.conf" "$target_rclone"; then
+    printf 'TARGET rclone 配置安装失败，正在恢复安装前配置...\n' >&2
+    rollback_target; rm -rf "$tmp"; pause_menu; return 0
+  fi
+  if ! install -m 600 "$tmp/storage.json" "$CONFIG"; then
+    printf 'TARGET P07 storage 配置安装失败，正在恢复安装前配置...\n' >&2
+    rollback_target; rm -rf "$tmp"; pause_menu; return 0
+  fi
+
   if ! storage_health_pass "$CONFIG" "$target_rclone"; then
     printf 'TARGET 安装后复核失败，正在恢复安装前配置...\n' >&2
-    if [[ -f "${target_rclone}.bak.${stamp}" ]]; then cp -p "${target_rclone}.bak.${stamp}" "$target_rclone"; else rm -f "$target_rclone"; fi
-    if [[ -f "${CONFIG}.bak.${stamp}" ]]; then cp -p "${CONFIG}.bak.${stamp}" "$CONFIG"; else rm -f "$CONFIG"; fi
-    rm -rf "$tmp"; trap - RETURN; pause_menu; return 0
+    rollback_target; rm -rf "$tmp"; pause_menu; return 0
   fi
-  rm -rf "$tmp"; trap - RETURN
-  printf '\n远程备份初始化完成 ✓\nGoogle：READY\nB2：READY\ncrypt：已继承 SOURCE，同一批加密备份可直接读取\n密钥：未打印\nDNS：未修改\n'
+
+  rm -rf "$tmp"
+  printf '\n远程备份初始化完成 ✓\n'
+  printf 'Google：READY\nB2：READY\n'
+  printf 'crypt：已继承 SOURCE，同一批加密备份可直接读取\n'
+  printf '密钥：未打印\n'
+  printf '下一步：返回自动备份菜单，可先“立即完整备份一次”验证 TARGET 双远程副本。\n'
+  printf 'DNS：未修改\nSOURCE：保留，未修改 / 未删除\n'
   pause_menu
 }
 
 show_current() {
-  local payload
-  if payload="$(inspect_remotes 2>/dev/null)"; then show_remotes "$payload"; else printf '无法读取当前 rclone 配置。\n' >&2; fi
-  if [[ -f "$CONFIG" ]]; then printf '\nP07 storage：已配置\n'; else printf '\nP07 storage：未配置\n'; fi
+  local rclone_config payload
+  rclone_config="$(rclone_config_path)"
+
+  if payload="$(inspect_remotes "$rclone_config" 2>/dev/null)"; then
+    show_remotes "$payload"
+  else
+    printf '\n无法读取当前 rclone 配置。\n' >&2
+  fi
+
+  printf '\nP07 远程备份健康状态\n'
+  printf '%s\n' '----------------------------------------'
+  if [[ ! -f "$CONFIG" || ! -f "$rclone_config" ]]; then
+    [[ -f "$CONFIG" ]] && printf 'P07 storage：已配置\n' || printf 'P07 storage：未配置\n'
+    printf 'Google：NOT READY\nB2：NOT READY\n'
+    printf '下一步：第一次使用请选择“1. 全新初始化 Google + B2”；已有其他 P07 服务器请选择“2. 从已有 P07 服务器导入”。\n'
+  else
+    printf 'P07 storage：已配置\n'
+    if print_health_summary "$CONFIG" "$rclone_config"; then
+      printf '状态：Google + B2 健康，可以进入自动备份菜单运行或启用双远程备份。\n'
+      printf '下一步：建议先“立即完整备份一次”，再启用 / 更新自动备份。\n'
+    else
+      printf '状态：当前配置未通过 Google + B2 完整健康检查；P07 不会把它当作 READY。\n'
+      printf '下一步：检查 VPS 网络 / Google 授权 / B2 Key 与 Bucket 权限；若要继承另一台健康 P07 配置，请使用“2. 从已有 P07 服务器导入”。\n'
+    fi
+  fi
   printf 'Crypt Recovery：依赖你在 VPS 外保存的 Recovery Key（P07 不保存明文）\n'
+  printf 'DNS：不会由此处修改\nSOURCE：不会由此处删除\n'
   pause_menu
 }
 
