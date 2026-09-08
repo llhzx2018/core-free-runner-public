@@ -11,6 +11,7 @@ STORAGE_CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
 BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
 CRON_FILE="${VFOPS_AUTO_BACKUP_CRON:-/etc/cron.d/vf-server-ops-auto-backup}"
 STATE_FILE="${VFOPS_AUTO_BACKUP_STATE:-/var/lib/vf-server-ops/auto-backup-state.json}"
+CRON_MARKER="# P07 VF Server Ops automatic dual-remote backup"
 
 screen_clear() { [[ -t 1 ]] && printf '\033[H\033[2J' || true; }
 pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
@@ -33,6 +34,11 @@ require_root() {
     printf '自动备份设置需要 root。\n' >&2
     return 1
   fi
+}
+
+p07_cron_owned() {
+  [[ -f "$CRON_FILE" ]] || return 1
+  [[ "$(head -n1 "$CRON_FILE" 2>/dev/null || true)" == "$CRON_MARKER" ]]
 }
 
 storage_preflight() {
@@ -99,6 +105,54 @@ print(p.get('collision_count',0))
 for item in p.get('collisions',[]):
     print(f"{item.get('scheduled_at','?')}\t{item.get('path','?')}")
 PY
+}
+
+first_verification_passed() {
+  [[ -f "$CONFIG" ]] || return 1
+  local output rc
+  set +e
+  output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+  [[ $rc -eq 0 || $rc -eq 12 ]] || return 1
+  python3 - "$output" <<'PY' >/dev/null 2>&1
+import json,sys
+try:
+    p=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+if not isinstance(p,dict) or p.get('schema')!='vf-server-ops.auto-backup-status.v1':
+    raise SystemExit(1)
+last=p.get('last_run') if isinstance(p.get('last_run'),dict) else None
+if not last or last.get('status')!='PASS':
+    raise SystemExit(1)
+rows=last.get('sites',[]) if isinstance(last.get('sites'),list) else []
+if not rows:
+    raise SystemExit(1)
+for row in rows:
+    if not isinstance(row,dict): raise SystemExit(1)
+    if any(row.get(k)!='PASS' for k in ('local_backup','google','b2','dual_remote')):
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+}
+
+prepare_first_run_config() {
+  storage_preflight || return 1
+  local sites_raw
+  if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
+    printf '没有发现可备份的 CloudPanel 网站；没有创建首次验证配置。\n' >&2
+    return 1
+  fi
+  local args=()
+  while IFS= read -r site; do [[ -n "$site" ]] && args+=(--site "$site"); done <<<"$sites_raw"
+  if ! python3 "$ENGINE" configure --config "$CONFIG" "${args[@]}" --daily-at '03:30' --storage-config "$STORAGE_CONFIG" --backup-dir "$BACKUP_DIR" --keep-last 7 >/dev/null; then
+    printf '首次验证配置创建失败；没有安装定时任务。\n' >&2
+    return 1
+  fi
+  printf '首次验证配置：READY ✓\n'
+  printf '定时任务：尚未安装\n'
+  printf '说明：只有本次双远程备份验证 PASS 后，才建议选择“2. 启用 / 更新自动备份”。\n'
 }
 
 setup_storage() {
@@ -175,6 +229,8 @@ live_ok=(google=='OK' and b2=='OK')
 effective=status
 if status=='ENABLED' and not live_ok:
     effective='LIVE_ATTENTION'
+elif status=='ATTENTION' and base.get('enabled',False) and not base.get('cron_installed',False) and base.get('storage_state')=='CONFIGURED' and live_ok:
+    effective='VERIFIED_NO_SCHEDULE' if last and last.get('status')=='PASS' else 'READY_NO_SCHEDULE'
 
 cn={
     'ENABLED':'已启用',
@@ -182,6 +238,8 @@ cn={
     'NOT_CONFIGURED':'未配置',
     'ATTENTION':'需关注',
     'LIVE_ATTENTION':'需关注（实时远程异常）',
+    'READY_NO_SCHEDULE':'远程已就绪 · 待首次验证',
+    'VERIFIED_NO_SCHEDULE':'首次验证已通过 · 定时未开启',
 }.get(effective,effective)
 health_cn={
     'OK':'正常 ✓',
@@ -196,7 +254,10 @@ print('自动备份状态')
 print('----------------------------------------')
 print(f"状态：{cn}")
 if status != 'NOT_CONFIGURED':
-    print(f"时间：每天 {base.get('daily_at','UNKNOWN')}")
+    if base.get('cron_installed'):
+        print(f"时间：每天 {base.get('daily_at','UNKNOWN')}")
+    else:
+        print('定时：未开启')
     sites=base.get('sites',[]) if isinstance(base.get('sites'),list) else []
     print(f"网站：{len(sites)} 个")
     for site in sites:
@@ -205,7 +266,7 @@ if status != 'NOT_CONFIGURED':
     print(f"Google 实时：{health_cn.get(google,google)}")
     print(f"B2 实时：{health_cn.get(b2,b2)}")
     print(f"本地自动备份保留：最近 {base.get('local_keep_last','?')} 份 / 网站")
-    print(f"Cron：{'已安装（P07 owned）' if base.get('cron_installed') else '未安装 / 非 P07 owned'}")
+    print(f"Cron：{'已安装（P07 owned）' if base.get('cron_installed') else '未安装'}")
     print(f"配置结构：{base.get('storage_state','UNKNOWN')}")
 
 if last:
@@ -227,14 +288,23 @@ if last:
         print('说明：上次检测到服务器正在执行备份 / 恢复 / 迁移 / 远程存储任务，P07 已安全让路。')
 
 if status=='NOT_CONFIGURED':
-    action='先选择“1. 设置 / 检查 Google + B2”，再选择“2. 启用 / 更新自动备份”。'
+    action='先选择“1. 设置 / 检查 Google + B2”，然后选择“3. 立即完整备份一次”完成首次验证；PASS 后再选择“2. 启用 / 更新自动备份”。'
 elif not base.get('enabled',False):
     if not live_ok:
         action='自动备份已关闭；如要重新启用，先选择“1. 设置 / 检查 Google + B2”确认远程，再选择“2. 启用 / 更新自动备份”。'
     else:
         action='如需恢复定时保护，选择“2. 启用 / 更新自动备份”。'
 elif not base.get('cron_installed',False):
-    action='选择“2. 启用 / 更新自动备份”修复 P07 自己的定时任务；不会修改 CloudPanel Cron。'
+    if not live_ok:
+        action='定时尚未开启；先选择“1. 设置 / 检查 Google + B2”修复远程，再选择“3. 立即完整备份一次”验证。'
+    elif last and last.get('status')=='PASS':
+        action='首次真实备份已 PASS；定时仍未开启。选择“2. 启用 / 更新自动备份”即可开始每天自动保护。'
+    elif last and last.get('status')=='FAIL':
+        action='首次验证没有通过，定时仍未开启；按失败项修复后再次选择“3. 立即完整备份一次”。'
+    elif last and last.get('status')=='SKIPPED_BUSY':
+        action='首次验证遇到服务器忙，定时仍未开启；稍后再次选择“3. 立即完整备份一次”。'
+    else:
+        action='远程已就绪，定时尚未开启；先选择“3. 立即完整备份一次”，PASS 后再选择“2. 启用 / 更新自动备份”。'
 elif not live_ok:
     action='选择“1. 设置 / 检查 Google + B2”修复实时远程状态；修复后可选择“3. 立即完整备份一次”验证。'
 elif last and last.get('status')=='FAIL':
@@ -244,7 +314,7 @@ elif last and last.get('status')=='SKIPPED_BUSY':
 elif last and last.get('status')=='RUNNING':
     action='当前可能仍在执行备份；稍后再查看状态，不要重复启动。'
 elif last is None:
-    action='当前设置正常但还没有执行记录；可选择“3. 立即完整备份一次”完成首次验证。'
+    action='当前定时已启用但还没有执行记录；可选择“3. 立即完整备份一次”完成首次验证。'
 else:
     action='当前无需操作；继续保留定时备份即可。'
 
@@ -257,6 +327,15 @@ PY
 enable_or_update() {
   require_root || { pause_menu; return 0; }
   storage_preflight || { pause_menu; return 0; }
+
+  if ! p07_cron_owned && ! first_verification_passed; then
+    printf '\n首次启用定时备份前，必须先完成一次真实双远程备份验证。\n' >&2
+    printf '下一步：返回后选择“3. 立即完整备份一次”；本地 + Google + B2 全部 PASS 后再回来启用。\n' >&2
+    printf '定时任务：未安装\n' >&2
+    printf '安全边界：没有修改 Cron；DNS 未修改；SOURCE 保留。\n' >&2
+    pause_menu
+    return 0
+  fi
 
   local sites_raw daily_at choice schedule_raw schedule_state recommended collision_count
   if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
@@ -322,19 +401,27 @@ enable_or_update() {
   printf '\n自动备份已启用 ✓\n'
   printf '时间：每天 %s\n' "$daily_at"
   printf '目标：本地 + Google Drive + Backblaze B2\n'
-  printf '并发保护：已启用\nDNS：不会修改\n'
+  printf '首次真实验证：PASS ✓\n'
+  printf '并发保护：已启用\nDNS：不会修改\nSOURCE：保留\n'
   pause_menu
 }
 
 run_now() {
   require_root || { pause_menu; return 0; }
   if [[ ! -f "$CONFIG" ]]; then
-    printf '尚未配置自动备份，请先选择“启用 / 更新自动备份”。\n' >&2
-    pause_menu
-    return 0
+    printf '\n尚未启用定时备份。P07 会先建立“首次验证配置”，不会安装 Cron。\n'
+    if ! prepare_first_run_config; then
+      pause_menu
+      return 0
+    fi
   fi
+
+  local schedule_active=0
+  if p07_cron_owned; then schedule_active=1; fi
+
   printf '\n[P07] 正在执行一次完整双远程自动备份。\n'
   printf '若检测到备份/恢复/迁移/远程上传正忙，本次会自动让路。\n'
+  [[ $schedule_active -eq 0 ]] && printf '定时任务：当前未开启；本次仅做真实验证。\n'
   local output rc
   set +e
   output="$(python3 "$ENGINE" run --config "$CONFIG" --state-file "$STATE_FILE" 2>/dev/null)"
@@ -344,6 +431,7 @@ run_now() {
   if [[ $rc -ne 0 && $rc -ne 12 ]]; then
     printf '\n自动备份执行失败，未取得可读结果；P07 不会把这次执行标记为成功。\n' >&2
     printf '下一步：选择“4. 查看自动备份状态”；如远程异常，先选择“1. 设置 / 检查 Google + B2”。\n' >&2
+    printf '定时任务：%s\n' "$([[ $schedule_active -eq 1 ]] && printf '保持原状态' || printf '未开启')" >&2
     printf '安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。\n' >&2
     pause_menu
     return 0
@@ -357,14 +445,16 @@ PY
   then
     printf '\n自动备份返回格式异常；P07 不会把这次执行标记为成功。\n' >&2
     printf '下一步：选择“4. 查看自动备份状态”，确认最近执行状态后再重试。\n' >&2
+    printf '定时任务：%s\n' "$([[ $schedule_active -eq 1 ]] && printf '保持原状态' || printf '未开启')" >&2
     printf '安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。\n' >&2
     pause_menu
     return 0
   fi
 
-  python3 - "$output" <<'PY'
+  python3 - "$output" "$schedule_active" <<'PY'
 import json,sys
 p=json.loads(sys.argv[1])
+schedule_active=sys.argv[2]=='1'
 status=p.get('status','UNKNOWN')
 rows=[row for row in p.get('sites',[]) if isinstance(row,dict)] if isinstance(p.get('sites'),list) else []
 
@@ -372,7 +462,10 @@ print()
 if status=='SKIPPED_BUSY':
     print('服务器当前有备份 / 恢复 / 迁移 / 远程上传任务，P07 本次已自动让路。')
     print('状态：服务器忙，已安全让路')
-    print('下一步：无需修复；稍后再选择“3. 立即完整备份一次”，或等待下一次计划任务。')
+    if schedule_active:
+        print('下一步：无需修复；稍后再选择“3. 立即完整备份一次”，或等待下一次计划任务。')
+    else:
+        print('下一步：定时仍未开启；稍后再次选择“3. 立即完整备份一次”完成首次验证。')
     print('安全边界：DNS 未修改；SOURCE 保留；没有删除任何备份。')
     raise SystemExit
 
@@ -387,7 +480,10 @@ for row in rows:
 print(f"最终：{status}")
 
 if status=='PASS':
-    action='本次本地 + Google + B2 已完成；无需操作。'
+    if schedule_active:
+        action='本次本地 + Google + B2 已完成；定时保护保持启用，无需操作。'
+    else:
+        action='首次本地 + Google + B2 真实验证已 PASS；定时备份仍未开启。下一步：选择“2. 启用 / 更新自动备份”。'
 elif status=='DISABLED':
     action='自动备份当前已关闭；如需恢复保护，选择“2. 启用 / 更新自动备份”。'
 elif status=='FAIL':
@@ -403,12 +499,16 @@ elif status=='FAIL':
         action='本地 Fresh Verify 未完成；选择“4. 查看自动备份状态”确认最近结果，再检查网站 / 磁盘状态后重试。'
     else:
         action='本次没有达到双副本 PASS；选择“4. 查看自动备份状态”，再按提示重试。'
+    if not schedule_active:
+        action += ' 定时备份仍未开启。'
 else:
     action='结果需要关注；选择“4. 查看自动备份状态”获取下一步。'
 
 print(f"下一步：{action}")
 if status=='FAIL':
     print('保留策略：已成功的本地备份 / 远程副本会保留；失败运行不会执行本地自动清理。')
+if not schedule_active:
+    print('定时任务：未开启；本次验证不会创建或修改 P07 Cron。')
 print('安全边界：DNS 未修改；SOURCE 保留；不会因本次结果删除已有手工 / 迁移备份。')
 PY
   pause_menu
