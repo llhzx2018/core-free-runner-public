@@ -24,6 +24,9 @@ class ImmediateBackupUxTests(unittest.TestCase):
         cron_owned: bool = False,
         menu_input: str = "3\n\n0\n",
         status_payload: dict | None = None,
+        inventory_domains: list[str] | None = None,
+        config_payload: dict | None = None,
+        require_config_sites: bool = False,
     ) -> tuple[str, bool, bool]:
         with tempfile.TemporaryDirectory(prefix="p07-run-now-ux-") as td:
             root = Path(td)
@@ -43,6 +46,10 @@ class ImmediateBackupUxTests(unittest.TestCase):
             else:
                 result_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
+            if inventory_domains is None:
+                inventory_domains = ["example.com"]
+            inventory_payload = {"sites": [{"domain": x} for x in inventory_domains]}
+
             status_file = root / "status.txt"
             if status_payload is None:
                 status_payload = {
@@ -51,7 +58,7 @@ class ImmediateBackupUxTests(unittest.TestCase):
                     "enabled": True,
                     "cron_installed": False,
                     "storage_state": "CONFIGURED",
-                    "sites": ["example.com"],
+                    "sites": list(inventory_domains),
                     "last_run": None,
                 }
             status_file.write_text(json.dumps(status_payload, ensure_ascii=False), encoding="utf-8")
@@ -64,11 +71,21 @@ class ImmediateBackupUxTests(unittest.TestCase):
                 "cmd=sys.argv[1] if len(sys.argv)>1 else ''\n"
                 "if cmd == 'configure':\n"
                 "    cfg=Path(sys.argv[sys.argv.index('--config')+1])\n"
+                "    sites=[]\n"
+                "    for i,arg in enumerate(sys.argv[:-1]):\n"
+                "        if arg == '--site': sites.append(sys.argv[i+1])\n"
                 "    cfg.parent.mkdir(parents=True,exist_ok=True)\n"
-                "    cfg.write_text('{}\\n',encoding='utf-8')\n"
+                "    cfg.write_text(json.dumps({'enabled':True,'sites':sites})+'\\n',encoding='utf-8')\n"
                 "    print('{}')\n"
                 "    raise SystemExit(0)\n"
                 "if cmd == 'run':\n"
+                "    if os.environ.get('P07_TEST_REQUIRE_CONFIG_SITES') == '1':\n"
+                "        cfg=Path(sys.argv[sys.argv.index('--config')+1])\n"
+                "        actual=set(json.loads(cfg.read_text(encoding='utf-8')).get('sites',[]))\n"
+                "        expected=set(json.loads(os.environ['P07_TEST_INVENTORY_JSON']).get('sites_flat',[]))\n"
+                "        if actual != expected:\n"
+                "            print(json.dumps({'schema':'vf-server-ops.auto-backup-run.v1','status':'FAIL','sites':[]}))\n"
+                "            raise SystemExit(12)\n"
                 "    print(open(os.environ['P07_TEST_RESULT_FILE'], encoding='utf-8').read(), end='')\n"
                 "    raise SystemExit(int(os.environ['P07_TEST_RESULT_RC']))\n"
                 "if cmd == 'status':\n"
@@ -90,17 +107,16 @@ class ImmediateBackupUxTests(unittest.TestCase):
 
             core = root / "bin" / "vfops"
             core.write_text(
-                "#!/usr/bin/env bash\n"
-                "set -euo pipefail\n"
-                "if [[ ${1:-} == storage ]]; then\n"
-                "  printf '%s\\n' '{\"accounts\":[{\"provider\":\"google\",\"enabled\":true,\"health\":\"OK\"},{\"provider\":\"b2\",\"enabled\":true,\"health\":\"OK\"}]}'\n"
-                "  exit 0\n"
-                "fi\n"
-                "if [[ ${1:-} == inventory ]]; then\n"
-                "  printf '%s\\n' '{\"sites\":[{\"domain\":\"example.com\"}]}'\n"
-                "  exit 0\n"
-                "fi\n"
-                "exit 0\n",
+                "#!/usr/bin/env python3\n"
+                "import json,os,sys\n"
+                "if len(sys.argv)>1 and sys.argv[1] == 'storage':\n"
+                "    print(json.dumps({'accounts':[{'provider':'google','enabled':True,'health':'OK'},{'provider':'b2','enabled':True,'health':'OK'}]}))\n"
+                "    raise SystemExit(0)\n"
+                "if len(sys.argv)>1 and sys.argv[1] == 'inventory':\n"
+                "    p=json.loads(os.environ['P07_TEST_INVENTORY_JSON'])\n"
+                "    print(json.dumps({'sites':[{'domain':x} for x in p.get('sites_flat',[])]}))\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(0)\n",
                 encoding="utf-8",
             )
             core.chmod(0o755)
@@ -115,7 +131,9 @@ class ImmediateBackupUxTests(unittest.TestCase):
 
             auto_cfg = root / "auto-backup.json"
             if preconfigured:
-                auto_cfg.write_text("{}\n", encoding="utf-8")
+                if config_payload is None:
+                    config_payload = {}
+                auto_cfg.write_text(json.dumps(config_payload, ensure_ascii=False) + "\n", encoding="utf-8")
             state = root / "state.json"
             storage = root / "storage.json"
             storage.write_text("{}\n", encoding="utf-8")
@@ -134,6 +152,8 @@ class ImmediateBackupUxTests(unittest.TestCase):
                 "P07_TEST_RESULT_RC": str(rc),
                 "P07_TEST_STATUS_FILE": str(status_file),
                 "P07_TEST_CRON_MARKER": CRON_MARKER,
+                "P07_TEST_INVENTORY_JSON": json.dumps({"sites_flat": inventory_domains}, ensure_ascii=False),
+                "P07_TEST_REQUIRE_CONFIG_SITES": "1" if require_config_sites else "0",
             })
 
             proc = subprocess.run(
@@ -166,11 +186,40 @@ class ImmediateBackupUxTests(unittest.TestCase):
         self.assertFalse(cron_exists)
         self.assertIn("尚未启用定时备份", output)
         self.assertIn("首次验证配置：READY", output)
+        self.assertIn("当前网站：已重新读取 CloudPanel 全部站点", output)
         self.assertIn("定时任务：尚未安装", output)
         self.assertIn("最终：PASS", output)
         self.assertIn("定时备份仍未开启", output)
         self.assertIn("选择“2. 启用 / 更新自动备份”", output)
         self.assertIn("本次验证不会创建或修改 P07 Cron", output)
+
+    def test_first_run_refreshes_changed_site_set_before_scheduler_and_keeps_cron_absent(self):
+        domains = ["example.com", "new.example.com"]
+        payload = {
+            "schema": "vf-server-ops.auto-backup-run.v1",
+            "status": "PASS",
+            "sites": [
+                {"domain": d, "local_backup": "PASS", "google": "PASS", "b2": "PASS", "dual_remote": "PASS"}
+                for d in domains
+            ],
+            "dns_changed": False,
+            "source_deleted": False,
+        }
+        output, _, cron_exists = self._run_menu(
+            payload,
+            0,
+            preconfigured=True,
+            config_payload={"enabled": True, "sites": ["example.com"]},
+            inventory_domains=domains,
+            require_config_sites=True,
+        )
+        self.assertFalse(cron_exists)
+        self.assertIn("重新读取当前 CloudPanel 网站并刷新首次验证配置", output)
+        self.assertIn("当前网站：已重新读取 CloudPanel 全部站点", output)
+        self.assertIn("example.com", output)
+        self.assertIn("new.example.com", output)
+        self.assertIn("最终：PASS", output)
+        self.assertIn("定时任务：未开启；本次验证不会创建或修改 P07 Cron", output)
 
     def test_first_scheduler_enable_is_blocked_until_previous_dual_remote_pass(self):
         payload = {"schema": "vf-server-ops.auto-backup-run.v1", "status": "FAIL", "sites": []}
@@ -191,10 +240,44 @@ class ImmediateBackupUxTests(unittest.TestCase):
             status_payload=status_payload,
         )
         self.assertFalse(cron_exists)
-        self.assertIn("首次启用定时备份前，必须先完成一次真实双远程备份验证", output)
+        self.assertIn("首次启用定时备份前，当前全部 CloudPanel 网站必须先完成一次真实双远程备份验证", output)
         self.assertIn("定时任务：未安装", output)
         self.assertIn("没有修改 Cron", output)
         self.assertIn("SOURCE 保留", output)
+
+    def test_old_pass_does_not_cover_new_cloudpanel_site_before_first_scheduler_enable(self):
+        payload = {"schema": "vf-server-ops.auto-backup-run.v1", "status": "PASS", "sites": []}
+        status_payload = {
+            "schema": "vf-server-ops.auto-backup-status.v1",
+            "status": "ATTENTION",
+            "enabled": True,
+            "cron_installed": False,
+            "storage_state": "CONFIGURED",
+            "sites": ["example.com"],
+            "last_run": {
+                "status": "PASS",
+                "sites": [{
+                    "domain": "example.com",
+                    "local_backup": "PASS",
+                    "google": "PASS",
+                    "b2": "PASS",
+                    "dual_remote": "PASS",
+                }],
+            },
+        }
+        output, _, cron_exists = self._run_menu(
+            payload,
+            0,
+            preconfigured=True,
+            menu_input="2\n\n0\n",
+            status_payload=status_payload,
+            inventory_domains=["example.com", "new.example.com"],
+        )
+        self.assertFalse(cron_exists)
+        self.assertIn("网站列表刚发生变化，也必须重新验证", output)
+        self.assertIn("旧 PASS 不会覆盖新站点", output)
+        self.assertIn("当前全部网站本地 + Google + B2 PASS 后再回来启用", output)
+        self.assertIn("定时任务：未安装", output)
 
     def test_partial_b2_failure_is_structured_actionable_and_secret_safe(self):
         payload = {
