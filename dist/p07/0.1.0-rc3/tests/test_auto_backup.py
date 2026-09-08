@@ -34,11 +34,16 @@ class AutoBackupTests(unittest.TestCase):
         return cfg
 
     def _run(self, root: Path, cfg: Path):
-        return auto_backup.run_once(cfg, "clpctl", "rclone", root / "locks" / "auto.lock", root / "state" / "last.json", root / "empty-proc")
+        return auto_backup.run_once(
+            cfg, "clpctl", "rclone",
+            root / "locks" / "auto.lock",
+            root / "state" / "last.json",
+            root / "empty-proc",
+        )
 
     def _run_status_menu(self, root: Path, status_payload: dict, storage_payload: dict, *, status_rc: int = 0, storage_rc: int = 0) -> str:
-        runtime = root / "runtime"
-        (runtime / "bin").mkdir(parents=True)
+        runtime = Path(tempfile.mkdtemp(prefix="status-runtime-", dir=root))
+        (runtime / "bin").mkdir()
         (runtime / "lib").mkdir()
         menu = runtime / "bin" / "vfops-auto-backup"
         menu.write_text((ROOT / "overlay" / "bin" / "vfops-auto-backup").read_text(encoding="utf-8"), encoding="utf-8")
@@ -69,22 +74,22 @@ class AutoBackupTests(unittest.TestCase):
         setup.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         setup.chmod(0o755)
 
-        fakebin = root / "fakebin"
+        fakebin = runtime / "fakebin"
         fakebin.mkdir()
         rclone = fakebin / "rclone"
         rclone.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
         rclone.chmod(0o755)
 
-        auto_cfg = root / "auto.json"
-        storage_cfg = root / "storage.json"
+        auto_cfg = runtime / "auto.json"
+        storage_cfg = runtime / "storage.json"
         auto_cfg.write_text("{}\n", encoding="utf-8")
         storage_cfg.write_text("{}\n", encoding="utf-8")
         env = os.environ.copy()
         env.update({
             "VFOPS_AUTO_BACKUP_CONFIG": str(auto_cfg),
             "VFOPS_STORAGE_CONFIG": str(storage_cfg),
-            "VFOPS_AUTO_BACKUP_CRON": str(root / "cron"),
-            "VFOPS_AUTO_BACKUP_STATE": str(root / "state.json"),
+            "VFOPS_AUTO_BACKUP_CRON": str(runtime / "cron"),
+            "VFOPS_AUTO_BACKUP_STATE": str(runtime / "state.json"),
             "PATH": str(fakebin) + os.pathsep + env.get("PATH", ""),
         })
         proc = subprocess.run(
@@ -103,7 +108,8 @@ class AutoBackupTests(unittest.TestCase):
             root = Path(td); cfg = self._write_config(root)
             payload = json.loads(cfg.read_text()); payload["remote_targets"] = ["google"]
             cfg.write_text(json.dumps(payload))
-            with self.assertRaises(auto_backup.AutoBackupError): auto_backup.validate_config(cfg)
+            with self.assertRaises(auto_backup.AutoBackupError):
+                auto_backup.validate_config(cfg)
 
     def test_schedule_collision_recommends_stagger(self):
         with tempfile.TemporaryDirectory() as td:
@@ -128,7 +134,8 @@ class AutoBackupTests(unittest.TestCase):
 
     def test_non_backup_cron_does_not_collide(self):
         with tempfile.TemporaryDirectory() as td:
-            cron = Path(td) / "normal"; cron.write_text("30 3 * * * root /usr/local/bin/report-health\n")
+            cron = Path(td) / "normal"
+            cron.write_text("30 3 * * * root /usr/local/bin/report-health\n")
             self.assertEqual(auto_backup.schedule_collisions("03:30", [cron])["status"], "CLEAR")
 
     def test_busy_defers_without_backup_or_upload(self):
@@ -154,8 +161,13 @@ class AutoBackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); cfg = self._write_config(root); package = root / "backups" / "pkg"; package.mkdir(parents=True)
             calls = []
-            def push(_cfg, _pkg, target, _rclone): calls.append(target); return {"status":"PASS","account_id":target}
-            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), mock.patch.object(auto_backup, "_busy_processes", return_value=[]), mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), mock.patch.object(auto_backup, "prune_local", return_value=["old"]) as prune:
+            def push(_cfg, _pkg, target, _rclone):
+                calls.append(target); return {"status": "PASS", "account_id": target}
+            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), \
+                 mock.patch.object(auto_backup, "_busy_processes", return_value=[]), \
+                 mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), \
+                 mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), \
+                 mock.patch.object(auto_backup, "prune_local", return_value=["old"]) as prune:
                 result = self._run(root, cfg)
             self.assertEqual(result["status"], "PASS"); self.assertEqual(calls, ["google", "b2"]); prune.assert_called_once()
 
@@ -165,9 +177,13 @@ class AutoBackupTests(unittest.TestCase):
             calls = []
             def push(_cfg, _pkg, target, _rclone):
                 calls.append(target)
-                if target == "google": return {"status":"PASS","account_id":"g"}
+                if target == "google": return {"status": "PASS", "account_id": "g"}
                 raise auto_backup.storage_engine.StorageError("down")
-            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), mock.patch.object(auto_backup, "_busy_processes", return_value=[]), mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), mock.patch.object(auto_backup, "prune_local") as prune:
+            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), \
+                 mock.patch.object(auto_backup, "_busy_processes", return_value=[]), \
+                 mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), \
+                 mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), \
+                 mock.patch.object(auto_backup, "prune_local") as prune:
                 result = self._run(root, cfg)
             self.assertEqual(result["status"], "FAIL"); self.assertEqual(calls, ["google", "b2"]); prune.assert_not_called(); self.assertTrue(package.exists())
 
@@ -178,15 +194,20 @@ class AutoBackupTests(unittest.TestCase):
             def push(_cfg, _pkg, target, _rclone):
                 calls.append(target)
                 if target == "google": raise auto_backup.storage_engine.StorageError("down")
-                return {"status":"PASS","account_id":"b2"}
-            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), mock.patch.object(auto_backup, "_busy_processes", return_value=[]), mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), mock.patch.object(auto_backup, "prune_local") as prune:
+                return {"status": "PASS", "account_id": "b2"}
+            with mock.patch.object(auto_backup, "storage_structure", return_value={"dual_remote_configured": True}), \
+                 mock.patch.object(auto_backup, "_busy_processes", return_value=[]), \
+                 mock.patch.object(auto_backup.package_engine, "build_backup", return_value=package), \
+                 mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), \
+                 mock.patch.object(auto_backup, "prune_local") as prune:
                 result = self._run(root, cfg)
             self.assertEqual(result["status"], "FAIL"); self.assertEqual(calls, ["google", "b2"]); prune.assert_not_called()
 
     def test_storage_failure_writes_fail_state(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); cfg = self._write_config(root)
-            with mock.patch.object(auto_backup, "_busy_processes", return_value=[]), mock.patch.object(auto_backup, "storage_structure", side_effect=auto_backup.AutoBackupError("bad storage")):
+            with mock.patch.object(auto_backup, "_busy_processes", return_value=[]), \
+                 mock.patch.object(auto_backup, "storage_structure", side_effect=auto_backup.AutoBackupError("bad storage")):
                 result = self._run(root, cfg)
             self.assertEqual(result["status"], "FAIL")
             self.assertEqual(json.loads((root / "state" / "last.json").read_text())["status"], "FAIL")
@@ -194,7 +215,9 @@ class AutoBackupTests(unittest.TestCase):
     def test_install_disable_owned_cron_and_disabled_status(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); cfg = self._write_config(root); cron = root / "cron" / "p07"; script = root / "auto.py"; script.write_text("#x\n")
-            with mock.patch.object(auto_backup, "DEFAULT_CONFIG", cfg), mock.patch.object(auto_backup, "storage_structure", return_value={}), mock.patch.object(auto_backup.os, "geteuid", return_value=0):
+            with mock.patch.object(auto_backup, "DEFAULT_CONFIG", cfg), \
+                 mock.patch.object(auto_backup, "storage_structure", return_value={}), \
+                 mock.patch.object(auto_backup.os, "geteuid", return_value=0):
                 self.assertEqual(auto_backup.install_cron(cfg, cron, script, "/usr/bin/python3", root / "log", auto_backup.CONFIRM_ENABLE)["status"], "ENABLED")
                 self.assertEqual(auto_backup.disable(cfg, cron, auto_backup.CONFIRM_DISABLE)["status"], "DISABLED")
                 self.assertEqual(auto_backup.status(cfg, cron, root / "state")["status"], "DISABLED")
@@ -202,7 +225,9 @@ class AutoBackupTests(unittest.TestCase):
     def test_foreign_cron_is_never_overwritten_or_removed(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); cfg = self._write_config(root); cron = root / "cron"; cron.write_text("# foreign\n30 3 * * * root backup\n"); script = root / "auto.py"; script.write_text("#x\n")
-            with mock.patch.object(auto_backup, "DEFAULT_CONFIG", cfg), mock.patch.object(auto_backup, "storage_structure", return_value={}), mock.patch.object(auto_backup.os, "geteuid", return_value=0):
+            with mock.patch.object(auto_backup, "DEFAULT_CONFIG", cfg), \
+                 mock.patch.object(auto_backup, "storage_structure", return_value={}), \
+                 mock.patch.object(auto_backup.os, "geteuid", return_value=0):
                 with self.assertRaises(auto_backup.AutoBackupError): auto_backup.install_cron(cfg, cron, script, "/usr/bin/python3", root / "log", auto_backup.CONFIRM_ENABLE)
                 with self.assertRaises(auto_backup.AutoBackupError): auto_backup.disable(cfg, cron, auto_backup.CONFIRM_DISABLE)
             self.assertTrue(cron.read_text().startswith("# foreign"))
@@ -211,22 +236,14 @@ class AutoBackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             status = {
-                "schema": auto_backup.STATUS_SCHEMA,
-                "status": "ATTENTION",
-                "enabled": True,
-                "daily_at": "03:30",
-                "sites": ["example.com"],
-                "local_keep_last": 7,
-                "cron_installed": False,
-                "storage_state": "CONFIGURED",
-                "last_run": None,
+                "schema": auto_backup.STATUS_SCHEMA, "status": "ATTENTION", "enabled": True,
+                "daily_at": "03:30", "sites": ["example.com"], "local_keep_last": 7,
+                "cron_installed": False, "storage_state": "CONFIGURED", "last_run": None,
             }
-            live = {
-                "accounts": [
-                    {"provider": "google", "enabled": True, "health": "OK"},
-                    {"provider": "b2", "enabled": True, "health": "OK"},
-                ]
-            }
+            live = {"accounts": [
+                {"provider": "google", "enabled": True, "health": "OK"},
+                {"provider": "b2", "enabled": True, "health": "OK"},
+            ]}
             output = self._run_status_menu(root, status, live, status_rc=12)
             self.assertIn("状态：需关注", output)
             self.assertIn("Google 实时：正常 ✓", output)
@@ -238,22 +255,15 @@ class AutoBackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             status = {
-                "schema": auto_backup.STATUS_SCHEMA,
-                "status": "ENABLED",
-                "enabled": True,
-                "daily_at": "03:30",
-                "sites": ["example.com"],
-                "local_keep_last": 7,
-                "cron_installed": True,
-                "storage_state": "CONFIGURED",
+                "schema": auto_backup.STATUS_SCHEMA, "status": "ENABLED", "enabled": True,
+                "daily_at": "03:30", "sites": ["example.com"], "local_keep_last": 7,
+                "cron_installed": True, "storage_state": "CONFIGURED",
                 "last_run": {"status": "PASS", "updated_at": "2026-09-08T08:00:00Z"},
             }
-            live = {
-                "accounts": [
-                    {"provider": "google", "enabled": True, "health": "UNAVAILABLE", "client_secret": "DO-NOT-PRINT"},
-                    {"provider": "b2", "enabled": True, "health": "OK", "application_key": "DO-NOT-PRINT"},
-                ]
-            }
+            live = {"accounts": [
+                {"provider": "google", "enabled": True, "health": "UNAVAILABLE", "client_secret": "DO-NOT-PRINT"},
+                {"provider": "b2", "enabled": True, "health": "OK", "application_key": "DO-NOT-PRINT"},
+            ]}
             output = self._run_status_menu(root, status, live)
             self.assertIn("状态：需关注（实时远程异常）", output)
             self.assertIn("Google 实时：不可用", output)
@@ -264,31 +274,17 @@ class AutoBackupTests(unittest.TestCase):
     def test_status_menu_shows_last_site_result_and_busy_retry_guidance(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            live = {
-                "accounts": [
-                    {"provider": "google", "enabled": True, "health": "OK"},
-                    {"provider": "b2", "enabled": True, "health": "OK"},
-                ]
-            }
+            live = {"accounts": [
+                {"provider": "google", "enabled": True, "health": "OK"},
+                {"provider": "b2", "enabled": True, "health": "OK"},
+            ]}
             failed = {
-                "schema": auto_backup.STATUS_SCHEMA,
-                "status": "ENABLED",
-                "enabled": True,
-                "daily_at": "03:30",
-                "sites": ["example.com"],
-                "local_keep_last": 7,
-                "cron_installed": True,
-                "storage_state": "CONFIGURED",
+                "schema": auto_backup.STATUS_SCHEMA, "status": "ENABLED", "enabled": True,
+                "daily_at": "03:30", "sites": ["example.com"], "local_keep_last": 7,
+                "cron_installed": True, "storage_state": "CONFIGURED",
                 "last_run": {
-                    "status": "FAIL",
-                    "updated_at": "2026-09-08T08:00:00Z",
-                    "sites": [{
-                        "domain": "example.com",
-                        "local_backup": "PASS",
-                        "google": "PASS",
-                        "b2": "FAIL",
-                        "dual_remote": "FAIL",
-                    }],
+                    "status": "FAIL", "updated_at": "2026-09-08T08:00:00Z",
+                    "sites": [{"domain": "example.com", "local_backup": "PASS", "google": "PASS", "b2": "FAIL", "dual_remote": "FAIL"}],
                 },
             }
             output = self._run_status_menu(root, failed, live)
@@ -300,8 +296,7 @@ class AutoBackupTests(unittest.TestCase):
 
             busy = dict(failed)
             busy["last_run"] = {
-                "status": "SKIPPED_BUSY",
-                "updated_at": "2026-09-08T08:10:00Z",
+                "status": "SKIPPED_BUSY", "updated_at": "2026-09-08T08:10:00Z",
                 "reason": "BACKUP_RESTORE_MIGRATION_OR_STORAGE_ACTIVE",
             }
             output = self._run_status_menu(root, busy, live)
