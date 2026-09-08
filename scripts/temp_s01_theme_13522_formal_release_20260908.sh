@@ -17,7 +17,8 @@ grep -F 'V1.35.22_S01_ADMIN_PAGE_BY_PAGE_UX_CLOSURE' repo/src/style.css >/dev/nu
 # Page-by-page UX identity checks.
 grep -F 'vf-update-credential-setup' repo/src/inc/update/class-vf-wp-update-admin-v1.php >/dev/null
 grep -F '先配置更新凭证，再检查或安装此组件的更新。' repo/src/inc/update/class-vf-wp-update-admin-v1.php >/dev/null
-grep -F 'vf-workbench-v5141__command' repo/src/inc/admin/views/tabs/overview.php >/dev/null
+grep -F 'vf-workbench-v4' repo/src/inc/admin/views/tabs/overview.php >/dev/null
+grep -F 'class="button button-primary vf-workbench-v5141__action"' repo/src/inc/admin/views/tabs/overview.php >/dev/null
 grep -F 'data-vf-brand-save' repo/src/inc/admin/views/brand.php >/dev/null
 grep -F 'data-vf-layout-save-dock' repo/src/inc/admin/views/layout.php >/dev/null
 grep -F 'data-vf-navigation-save-dock' repo/src/inc/admin/views/navigation.php >/dev/null
