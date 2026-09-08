@@ -245,10 +245,14 @@ class AutoBackupTests(unittest.TestCase):
                 {"provider": "b2", "enabled": True, "health": "OK"},
             ]}
             output = self._run_status_menu(root, status, live, status_rc=12)
-            self.assertIn("状态：需关注", output)
+            self.assertIn("状态：远程已就绪 · 待首次验证", output)
+            self.assertIn("定时：未开启", output)
             self.assertIn("Google 实时：正常 ✓", output)
             self.assertIn("B2 实时：正常 ✓", output)
-            self.assertIn("启用 / 更新自动备份", output)
+            self.assertIn("先选择“3. 立即完整备份一次”", output)
+            self.assertIn("PASS 后再选择“2. 启用 / 更新自动备份”", output)
+            self.assertIn("DNS 未修改", output)
+            self.assertIn("不会删除 SOURCE", output)
             self.assertIn("不会修改 CloudPanel Cron", output)
 
     def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
