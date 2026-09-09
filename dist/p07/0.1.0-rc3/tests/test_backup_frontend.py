@@ -227,6 +227,43 @@ class BackupFrontendTest(unittest.TestCase):
             self.assertEqual(databases, ["prod"])
             self.assertEqual(backup_frontend.discover_credentials(resolved, databases)["prod"]["user_name"], "app")
 
+    def test_alias_backup_uses_canonical_domain_in_recovery_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            site_root = root / "home/alice/htdocs/example.test"
+            site_root.mkdir(parents=True)
+            (site_root / "wp-config.php").write_text(
+                "define('DB_NAME','prod');define('DB_USER','app');define('DB_PASSWORD','PRIVATE-ALIAS-SECRET');",
+                encoding="utf-8",
+            )
+            payload = {
+                "sites": [{
+                    "domain": "example.test",
+                    "domains": ["example.test", "www.example.test"],
+                    "site_user": "alice",
+                    "document_root": "/home/alice/htdocs/example.test/public",
+                    "mysql_databases": ["prod"],
+                }]
+            }
+            captured: list[dict] = []
+
+            def fake_build(source_root, selected_domain, output, clpctl, kind, recovery=None):
+                self.assertEqual(selected_domain, "www.example.test")
+                self.assertIsNotNone(recovery)
+                recovery_path = Path(recovery)
+                captured.append(json.loads(recovery_path.read_text(encoding="utf-8")))
+                return Path(tmp) / "backup-ok"
+
+            with mock.patch.object(backup_frontend.inventory, "build_manifest", return_value=payload), \
+                 mock.patch.object(backup_frontend, "_panel_schema_needs_recovery", return_value=True), \
+                 mock.patch.object(backup_frontend.package_engine, "build_backup", side_effect=fake_build):
+                result = backup_frontend.build_backup_with_discovery(
+                    root, "www.example.test", Path(tmp) / "out", "clpctl"
+                )
+            self.assertEqual(result, Path(tmp) / "backup-ok")
+            self.assertEqual(captured[0]["domain"], "example.test")
+            self.assertNotEqual(captured[0]["domain"], "www.example.test")
+
 
 if __name__ == "__main__":
     unittest.main()
