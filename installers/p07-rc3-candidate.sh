@@ -90,7 +90,7 @@ fetch_overlay "lib/storage_setup.py"         "2ff7077e1c2328a0eaeee6c4e85bdb5a3a
 fetch_overlay "lib/google_device_oauth.py"   "5df0530f3a70ed93d6349c35c2b0fbee3d4d453f"
 fetch_overlay "lib/package_core.py"          "a997b70ab0450df193977d8e449dd604c38b49ea"
 fetch_overlay "lib/package.py"               "1c0b73c6f72883fb6fb304436a01e1e84b12201a"
-fetch_overlay "lib/backup_frontend.py"       "53912a16be9d41cbee7afbd522604ce2380a1e25"
+fetch_overlay "lib/backup_frontend.py"       "aed21d0fd0f016ca73e01d7fcafb992f7476629a"
 fetch_overlay "lib/diagnostics.py"           "7f5d8f763e04c9178352cecd94612dc165abb018"
 
 say "安装前自检..."
@@ -137,7 +137,10 @@ grep -Fq 'setup_provenance' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 storage
 grep -Fq 'build_backup_with_discovery' "$SRC_DIR/lib/package.py" || fail "RC3 真实数据库备份兼容 facade 缺失。"
 grep -Fq 'wp-config.php' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 WordPress 数据库恢复凭据发现缺失。"
 grep -Fq 'DATABASE_URL' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 DATABASE_URL 数据库恢复凭据发现缺失。"
+grep -Fq 'O_NOFOLLOW' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 数据库凭据读取缺少 nofollow 防竞态保护。"
+grep -Fq 'CloudPanel site path contains a symlink' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 数据库凭据扫描缺少站点路径约束。"
 grep -Fq 'DB_RECOVERY_DISCOVERY_FAILED' "$SRC_DIR/lib/diagnostics.py" || fail "RC3 数据库恢复凭据诊断缺失。"
+grep -Fq 'DB_EXPORT_FAILED' "$SRC_DIR/lib/diagnostics.py" || fail "RC3 数据库导出失败诊断缺失。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
