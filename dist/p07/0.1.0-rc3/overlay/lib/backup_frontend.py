@@ -4,12 +4,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
 import tempfile
-from typing import Callable
 from urllib.parse import unquote, urlparse
 
 import inventory
@@ -28,13 +27,59 @@ DB_NAME_KEYS = ("DB_DATABASE", "DB_NAME", "MYSQL_DATABASE", "DATABASE_NAME")
 DB_USER_KEYS = ("DB_USERNAME", "DB_USER", "MYSQL_USER", "DATABASE_USER")
 DB_PASS_KEYS = ("DB_PASSWORD", "DB_PASS", "MYSQL_PASSWORD", "DATABASE_PASSWORD")
 URL_KEYS = ("DATABASE_URL", "MYSQL_URL", "MARIADB_URL")
+SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class DiscoveryError(RuntimeError):
     pass
 
 
+def _safe_component(value: object, label: str) -> str:
+    text = str(value)
+    if not text or text in {".", "..", "UNKNOWN"} or "\x00" in text or not SAFE_COMPONENT_RE.fullmatch(text):
+        raise DiscoveryError(f"unsafe {label}")
+    return text
+
+
+def _confined_site_root(root: Path, user: str, domain: str) -> Path:
+    root_resolved = root.resolve()
+    user = _safe_component(user, "site user")
+    domain = _safe_component(domain, "site domain")
+    candidate = root_resolved / "home" / user / "htdocs" / domain
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise DiscoveryError("site root unavailable")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise DiscoveryError("site root unavailable") from exc
+    if resolved == root_resolved or root_resolved not in resolved.parents:
+        raise DiscoveryError("site root escapes source root")
+    expected_parent = root_resolved / "home" / user / "htdocs"
+    try:
+        parent_resolved = expected_parent.resolve(strict=True)
+    except OSError as exc:
+        raise DiscoveryError("site root parent unavailable") from exc
+    if resolved.parent != parent_resolved:
+        raise DiscoveryError("site root is not the canonical CloudPanel path")
+    return candidate
+
+
+def _user_from_document_root(docroot: object, domain: str) -> str:
+    if not isinstance(docroot, str) or not docroot.startswith("/") or "\x00" in docroot:
+        raise DiscoveryError("document root unavailable")
+    pure = PurePosixPath(docroot)
+    parts = pure.parts
+    if len(parts) < 5 or parts[0] != "/" or parts[1] != "home" or parts[3] != "htdocs":
+        raise DiscoveryError("document root is outside the canonical CloudPanel tree")
+    user = _safe_component(parts[2], "site user")
+    doc_domain = _safe_component(parts[4], "document-root domain")
+    if doc_domain != domain:
+        raise DiscoveryError("document root domain does not match site")
+    return user
+
+
 def _site_from_inventory(root: Path, domain: str) -> tuple[Path, list[str]]:
+    root = root.resolve()
     payload = inventory.build_manifest(root)
     site = None
     for row in payload.get("sites", []):
@@ -43,29 +88,32 @@ def _site_from_inventory(root: Path, domain: str) -> tuple[Path, list[str]]:
             break
     if site is None:
         raise DiscoveryError("site inventory unavailable")
+
     databases = site.get("mysql_databases")
     if not isinstance(databases, list) or not all(isinstance(x, str) and x for x in databases):
         raise DiscoveryError("database association unavailable")
-    user = str(site.get("site_user", "UNKNOWN"))
-    site_domain = str(site.get("domain", domain))
-    candidate = root / f"home/{user}/htdocs/{site_domain}"
-    if user != "UNKNOWN" and candidate.is_dir():
-        return candidate, sorted(set(databases))
-    docroot = site.get("document_root")
-    if isinstance(docroot, str) and docroot.startswith("/"):
-        doc = root / docroot.lstrip("/")
-        if doc.is_dir():
-            return doc, sorted(set(databases))
-    raise DiscoveryError("site root unavailable")
+
+    site_domain = _safe_component(site.get("domain", domain), "site domain")
+    aliases = site.get("domains", [])
+    if domain != site_domain and (not isinstance(aliases, list) or domain not in aliases):
+        raise DiscoveryError("selected domain does not match site inventory")
+
+    user_raw = site.get("site_user")
+    if isinstance(user_raw, str) and user_raw not in {"", "UNKNOWN"}:
+        user = _safe_component(user_raw, "site user")
+    else:
+        user = _user_from_document_root(site.get("document_root"), site_domain)
+
+    return _confined_site_root(root, user, site_domain), sorted(set(databases))
 
 
 def _iter_known_files(site_root: Path):
     base_depth = len(site_root.parts)
     seen = 0
-    for current, dirs, files in os.walk(site_root):
+    for current, dirs, files in os.walk(site_root, followlinks=False):
         current_path = Path(current)
         depth = len(current_path.parts) - base_depth
-        dirs[:] = [d for d in dirs if d not in PRUNE_DIRS and depth < MAX_SCAN_DEPTH]
+        dirs[:] = [d for d in dirs if d not in PRUNE_DIRS and depth < MAX_SCAN_DEPTH and not (current_path / d).is_symlink()]
         for name in sorted(files):
             if name not in KNOWN_NAMES:
                 continue
@@ -261,20 +309,20 @@ def build_backup_with_discovery(
     if database_recovery_file is not None:
         return package_engine.build_backup(root, domain, output_dir, clpctl, backup_kind, database_recovery_file)
 
-    recovery_path: Path | None = None
     try:
         site_root, databases = _site_from_inventory(root, domain)
-        if _panel_schema_needs_recovery(root, databases):
-            credentials = discover_credentials(site_root, databases)
-            recovery_path = _write_recovery(domain, credentials)
-            return package_engine.build_backup(root, domain, output_dir, clpctl, backup_kind, recovery_path)
     except DiscoveryError:
-        if recovery_path is not None:
-            recovery_path.unlink(missing_ok=True)
-            recovery_path = None
-        pass
-    finally:
-        if recovery_path is not None:
+        site_root, databases = None, []
+
+    if site_root is not None and _panel_schema_needs_recovery(root, databases):
+        try:
+            credentials = discover_credentials(site_root, databases)
+        except DiscoveryError as discovery_exc:
+            raise RuntimeError("application database recovery credentials could not be discovered safely") from discovery_exc
+        recovery_path = _write_recovery(domain, credentials)
+        try:
+            return package_engine.build_backup(root, domain, output_dir, clpctl, backup_kind, recovery_path)
+        finally:
             try:
                 recovery_path.unlink(missing_ok=True)
             except OSError:
