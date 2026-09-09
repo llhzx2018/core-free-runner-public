@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init6"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init7"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,13 +81,17 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "5ac1ccb58198dcc5a5911e93d261fb869571a37f"
+fetch_overlay "BUILD_ID"                    "13705caa3d9560e547be923904fc375a10a9b3ad"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"       "cae9e02e802ce78f3f31ff521f4004ba01bbd748"
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
 fetch_overlay "lib/auto_backup.py"           "c3d6a2152a60f11c27a3b1ac1a4f86326e2d9986"
 fetch_overlay "lib/storage_setup.py"         "2ff7077e1c2328a0eaeee6c4e85bdb5a3a971682"
 fetch_overlay "lib/google_device_oauth.py"   "5df0530f3a70ed93d6349c35c2b0fbee3d4d453f"
+fetch_overlay "lib/package_core.py"          "a997b70ab0450df193977d8e449dd604c38b49ea"
+fetch_overlay "lib/package.py"               "1c0b73c6f72883fb6fb304436a01e1e84b12201a"
+fetch_overlay "lib/backup_frontend.py"       "53912a16be9d41cbee7afbd522604ce2380a1e25"
+fetch_overlay "lib/diagnostics.py"           "7f5d8f763e04c9178352cecd94612dc165abb018"
 
 say "安装前自检..."
 chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user" "$SRC_DIR/bin/vfops-auto-backup" "$SRC_DIR/bin/vfops-storage-setup"
@@ -96,6 +100,12 @@ bash -n "$SRC_DIR/bin/vfops-user"
 bash -n "$SRC_DIR/bin/vfops-auto-backup"
 bash -n "$SRC_DIR/bin/vfops-storage-setup"
 python3 -m py_compile "$SRC_DIR"/lib/*.py
+PYTHONPATH="$SRC_DIR/lib" python3 - <<'PY'
+import backup_frontend, package, package_core
+assert package.build_backup is backup_frontend.build_backup_with_discovery
+assert callable(package_core.build_backup)
+assert package_core.build_backup is not package.build_backup
+PY
 find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
 [[ "$(cat "$SRC_DIR/BUILD_ID")" == "$EXPECTED_BUILD_ID" ]] || fail "RC3 Build ID 不匹配。"
@@ -124,6 +134,10 @@ grep -Fq 'friendly_oauth_error' "$SRC_DIR/lib/google_device_oauth.py" || fail "R
 grep -Fq 'PROVENANCE_FRESH = "GUIDED_DEVICE_OAUTH_FRESH"' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 Fresh 初始化来源标记缺失。"
 grep -Fq 'DEFAULT_MACHINE_ID = Path("/etc/machine-id")' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 Fresh 初始化缺少本机绑定。"
 grep -Fq 'setup_provenance' "$SRC_DIR/lib/storage_setup.py" || fail "RC3 storage provenance 缺失。"
+grep -Fq 'build_backup_with_discovery' "$SRC_DIR/lib/package.py" || fail "RC3 真实数据库备份兼容 facade 缺失。"
+grep -Fq 'wp-config.php' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 WordPress 数据库恢复凭据发现缺失。"
+grep -Fq 'DATABASE_URL' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 DATABASE_URL 数据库恢复凭据发现缺失。"
+grep -Fq 'DB_RECOVERY_DISCOVERY_FAILED' "$SRC_DIR/lib/diagnostics.py" || fail "RC3 数据库恢复凭据诊断缺失。"
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
@@ -178,7 +192,11 @@ for required in \
   "$INSTALL_DIR/bin/vfops-storage-setup" \
   "$INSTALL_DIR/lib/auto_backup.py" \
   "$INSTALL_DIR/lib/storage_setup.py" \
-  "$INSTALL_DIR/lib/google_device_oauth.py"; do
+  "$INSTALL_DIR/lib/google_device_oauth.py" \
+  "$INSTALL_DIR/lib/package_core.py" \
+  "$INSTALL_DIR/lib/package.py" \
+  "$INSTALL_DIR/lib/backup_frontend.py" \
+  "$INSTALL_DIR/lib/diagnostics.py"; do
   if [[ ! -f "$required" ]]; then
     rollback_install
     fail "RC3 运行文件缺失；已回滚。"
@@ -205,6 +223,7 @@ fi
 
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
+printf '数据库备份：兼容当前 CloudPanel schema；优先从网站现有配置安全恢复必要凭据，不额外持久化明文\n'
 printf '自动备份：先真实验证本地 + Google + B2，再启用 Guarded Scheduler\n'
 printf '远程初始化：Google Device OAuth + B2 引导；也支持从已有 P07 服务器导入\n'
 printf '状态检查：Google + B2 实时健康 + 下一步指引\n'
