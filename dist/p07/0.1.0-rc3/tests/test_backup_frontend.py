@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import backup_frontend
+import diagnostics
 
 
 class BackupFrontendTest(unittest.TestCase):
@@ -88,20 +89,143 @@ class BackupFrontendTest(unittest.TestCase):
                 else:
                     os.environ["VFOPS_RECOVERY_TMPDIR"] = old_tmp
 
-    def test_missing_app_credentials_never_weakens_canonical_backup(self) -> None:
+    def test_temp_recovery_is_deleted_when_database_export_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            site = base / "site"
+            site.mkdir()
+            (site / ".env").write_text("DB_DATABASE=prod\nDB_USERNAME=app\nDB_PASSWORD=PRIVATE-FAIL-SECRET\n", encoding="utf-8")
+            run = base / "run"
+            run.mkdir()
+            old_tmp = os.environ.get("VFOPS_RECOVERY_TMPDIR")
+            os.environ["VFOPS_RECOVERY_TMPDIR"] = str(run)
+
+            def fail_export(root, domain, output, clpctl, kind, recovery=None):
+                self.assertIsNotNone(recovery)
+                self.assertTrue(Path(recovery).is_file())
+                raise RuntimeError("CloudPanel database export failed: prod (exit 1)")
+
+            try:
+                with mock.patch.object(backup_frontend, "_site_from_inventory", return_value=(site, ["prod"])), \
+                     mock.patch.object(backup_frontend, "_panel_schema_needs_recovery", return_value=True), \
+                     mock.patch.object(backup_frontend.package_engine, "build_backup", side_effect=fail_export) as build:
+                    with self.assertRaisesRegex(RuntimeError, "database export failed"):
+                        backup_frontend.build_backup_with_discovery(base, "example.test", base / "out", "clpctl")
+                self.assertEqual(build.call_count, 1)
+                self.assertEqual(list(run.iterdir()), [])
+            finally:
+                if old_tmp is None:
+                    os.environ.pop("VFOPS_RECOVERY_TMPDIR", None)
+                else:
+                    os.environ["VFOPS_RECOVERY_TMPDIR"] = old_tmp
+
+    def test_missing_app_credentials_fail_before_repeating_expensive_backup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             site = base / "site"
             site.mkdir()
             with mock.patch.object(backup_frontend, "_site_from_inventory", return_value=(site, ["prod"])), \
                  mock.patch.object(backup_frontend, "_panel_schema_needs_recovery", return_value=True), \
+                 mock.patch.object(backup_frontend.package_engine, "build_backup") as build:
+                with self.assertRaisesRegex(RuntimeError, "could not be discovered safely"):
+                    backup_frontend.build_backup_with_discovery(base, "example.test", base / "out", "clpctl")
+                build.assert_not_called()
+
+    def test_database_export_failures_are_not_retried_as_recovery_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            site = base / "site"
+            site.mkdir()
+            with mock.patch.object(backup_frontend, "_site_from_inventory", return_value=(site, ["prod"])), \
+                 mock.patch.object(backup_frontend, "_panel_schema_needs_recovery", return_value=False), \
                  mock.patch.object(
                      backup_frontend.package_engine,
                      "build_backup",
-                     side_effect=RuntimeError("portable database recovery credentials unavailable: prod; provide --db-recovery-file"),
-                 ):
-                with self.assertRaisesRegex(RuntimeError, "could not be discovered safely"):
+                     side_effect=RuntimeError("CloudPanel database export failed: prod (exit 1)"),
+                 ) as build:
+                with self.assertRaisesRegex(RuntimeError, "database export failed"):
                     backup_frontend.build_backup_with_discovery(base, "example.test", base / "out", "clpctl")
+                self.assertEqual(build.call_count, 1)
+            rendered = diagnostics.render("backup", 4, "ERROR: CloudPanel database export failed: prod (exit 1)")
+            self.assertIn("stage=DATABASE", rendered)
+            self.assertIn("blocker=DB_EXPORT_FAILED", rendered)
+
+            invalid = diagnostics.render("backup", 4, "ERROR: MySQL gzip validation failed: prod")
+            self.assertIn("blocker=DB_EXPORT_INVALID", invalid)
+
+    def test_inventory_site_user_path_escape_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            payload = {
+                "sites": [{
+                    "domain": "example.test",
+                    "domains": ["example.test"],
+                    "site_user": "../../outside",
+                    "document_root": "/home/alice/htdocs/example.test/public",
+                    "mysql_databases": ["prod"],
+                }]
+            }
+            with mock.patch.object(backup_frontend.inventory, "build_manifest", return_value=payload):
+                with self.assertRaises(backup_frontend.DiscoveryError):
+                    backup_frontend._site_from_inventory(root, "example.test")
+
+    def test_external_document_root_and_symlink_site_root_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            external_payload = {
+                "sites": [{
+                    "domain": "example.test",
+                    "domains": ["example.test"],
+                    "site_user": "UNKNOWN",
+                    "document_root": "/etc",
+                    "mysql_databases": ["prod"],
+                }]
+            }
+            with mock.patch.object(backup_frontend.inventory, "build_manifest", return_value=external_payload):
+                with self.assertRaises(backup_frontend.DiscoveryError):
+                    backup_frontend._site_from_inventory(root, "example.test")
+
+            htdocs = root / "home/alice/htdocs"
+            htdocs.mkdir(parents=True)
+            outside = base / "outside"
+            outside.mkdir()
+            (htdocs / "example.test").symlink_to(outside, target_is_directory=True)
+            symlink_payload = {
+                "sites": [{
+                    "domain": "example.test",
+                    "domains": ["example.test"],
+                    "site_user": "alice",
+                    "document_root": "/home/alice/htdocs/example.test/public",
+                    "mysql_databases": ["prod"],
+                }]
+            }
+            with mock.patch.object(backup_frontend.inventory, "build_manifest", return_value=symlink_payload):
+                with self.assertRaises(backup_frontend.DiscoveryError):
+                    backup_frontend._site_from_inventory(root, "example.test")
+
+    def test_document_root_fallback_normalizes_to_cloudpanel_site_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            site_root = root / "home/alice/htdocs/example.test"
+            (site_root / "public").mkdir(parents=True)
+            (site_root / ".env").write_text("DB_DATABASE=prod\nDB_USERNAME=app\nDB_PASSWORD=secret\n", encoding="utf-8")
+            payload = {
+                "sites": [{
+                    "domain": "example.test",
+                    "domains": ["example.test", "www.example.test"],
+                    "site_user": "UNKNOWN",
+                    "document_root": "/home/alice/htdocs/example.test/public",
+                    "mysql_databases": ["prod"],
+                }]
+            }
+            with mock.patch.object(backup_frontend.inventory, "build_manifest", return_value=payload):
+                resolved, databases = backup_frontend._site_from_inventory(root, "www.example.test")
+            self.assertEqual(resolved, site_root)
+            self.assertEqual(databases, ["prod"])
+            self.assertEqual(backup_frontend.discover_credentials(resolved, databases)["prod"]["user_name"], "app")
 
 
 if __name__ == "__main__":
