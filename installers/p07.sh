@@ -3,7 +3,7 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-candidate.sh"
-EXPECTED_BLOB="f7c8dff468a01edb28e039ade48327ac2243f2ca"
+EXPECTED_BLOB="77fcdcc3d85fe83926221061527084089caeccb7"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 
