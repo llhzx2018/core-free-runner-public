@@ -37,6 +37,7 @@ tests/layout-page-workflow-contract.php
 tests/mature-product-v5-contract.php
 tests/navigation-page-refinement-contract.php
 tests/render-page-refinement-contract.php
+tests/render-workflow-v4-contract.php
 tests/workbench-page-refresh-parity-contract.php
 EOF
 sort -o /tmp/page15_expected /tmp/page15_expected
