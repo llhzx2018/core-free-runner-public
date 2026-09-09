@@ -354,7 +354,7 @@ def build_backup_with_discovery(
             credentials = discover_credentials(site_root, databases)
         except DiscoveryError as discovery_exc:
             raise RuntimeError("application database recovery credentials could not be discovered safely") from discovery_exc
-        recovery_path = _write_recovery(domain, credentials)
+        recovery_path = _write_recovery(site_root.name, credentials)
         try:
             return package_engine.build_backup(root, domain, output_dir, clpctl, backup_kind, recovery_path)
         finally:
@@ -373,7 +373,7 @@ def build_backup_with_discovery(
             credentials = discover_credentials(site_root, databases)
         except DiscoveryError as discovery_exc:
             raise RuntimeError("application database recovery credentials could not be discovered safely") from discovery_exc
-        recovery_path = _write_recovery(domain, credentials)
+        recovery_path = _write_recovery(site_root.name, credentials)
         try:
             return package_engine.build_backup(root, domain, output_dir, clpctl, backup_kind, recovery_path)
         finally:
