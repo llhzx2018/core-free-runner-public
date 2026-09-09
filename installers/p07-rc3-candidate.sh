@@ -90,7 +90,7 @@ fetch_overlay "lib/storage_setup.py"         "2ff7077e1c2328a0eaeee6c4e85bdb5a3a
 fetch_overlay "lib/google_device_oauth.py"   "5df0530f3a70ed93d6349c35c2b0fbee3d4d453f"
 fetch_overlay "lib/package_core.py"          "a997b70ab0450df193977d8e449dd604c38b49ea"
 fetch_overlay "lib/package.py"               "1c0b73c6f72883fb6fb304436a01e1e84b12201a"
-fetch_overlay "lib/backup_frontend.py"       "aed21d0fd0f016ca73e01d7fcafb992f7476629a"
+fetch_overlay "lib/backup_frontend.py"       "4e3f4d3f1f76b2a301bad5d0c9aad68e5a1c2c23"
 fetch_overlay "lib/diagnostics.py"           "7f5d8f763e04c9178352cecd94612dc165abb018"
 
 say "安装前自检..."
