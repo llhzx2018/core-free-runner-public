@@ -1,0 +1,190 @@
+name: P01 V2.47.3 Candidate Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v2473-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2473-candidate-gate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.head_ref == 'temp/p01-v2473-candidate-gate-20260909'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      MAIN_SHA: fc322cde21dddb5678b6597cb98a6092d08b9fae
+      CANDIDATE_SHA: 95a3b218a74e93b41152c59ba3a65f1e77b70de5
+      CANDIDATE_BRANCH: release/v2.47.3
+      TARGET_VERSION: 2.47.3
+      SOURCE_VERSION: 2.47.2
+      EXPECTED_SCHEMA: '2026090401'
+      READ_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Require governed private-source read capability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'CANDIDATE_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 81; }
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}" --jq '.permissions.pull')" = true
+          echo P01_RELEASE_PRIVATE_READ_CAPABILITY=PASS
+
+      - name: Exact live authority gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          current="$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          candidate="$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${CANDIDATE_BRANCH}" --jq '.object.sha')"
+          test "$current" = "$MAIN_SHA" || { echo "CANDIDATE_BLOCK=MAIN_DRIFT:${current}"; exit 82; }
+          test "$candidate" = "$CANDIDATE_SHA" || { echo "CANDIDATE_BLOCK=HEAD_DRIFT:${candidate}"; exit 83; }
+          echo P01_V2473_LIVE_AUTHORITY=PASS
+
+      - name: Checkout exact V2.47.3 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact release identity and three-file diff
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n ' < VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '$TARGET_VERSION');" src/app/bootstrap.php
+          git diff --name-only "$MAIN_SHA" "$CANDIDATE_SHA" | sort > /tmp/p01-v2473-files
+          printf '%s\n' VERSION src/VERSION.txt src/app/bootstrap.php | sort > /tmp/p01-v2473-expected
+          diff -u /tmp/p01-v2473-expected /tmp/p01-v2473-files
+          test "$(git diff --numstat "$MAIN_SHA" "$CANDIDATE_SHA" | awk '{a+=$1;d+=$2} END{print a":"d}')" = '3:3'
+          grep -Fqx "$SOURCE_VERSION" <(git show "$MAIN_SHA:VERSION" | tr -d '\r')
+          echo P01_V2473_BIND_DIFF_EXACT=PASS
+
+      - name: Schema and migration boundary
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          schema="$(python3 - <<'PY'
+          import json
+          print(str(json.load(open('VF_PROJECT.json',encoding='utf-8'))['working_schema_version']))
+          PY
+          )"
+          test "$schema" = "$EXPECTED_SCHEMA"
+          head_schema="$(python3 - <<'PY'
+          import pathlib,re
+          versions=[]
+          for p in pathlib.Path('src/migrations').glob('*.php'):
+              m=re.search(r"['\"]version['\"]\s*=>\s*['\"](\d+)['\"]",p.read_text(encoding='utf-8'))
+              if not m: raise SystemExit(f'missing migration version: {p}')
+              versions.append(m.group(1))
+          if not versions: raise SystemExit('no migrations')
+          print(sorted(versions)[-1])
+          PY
+          )"
+          test "$head_schema" = "$EXPECTED_SCHEMA"
+          test -z "$(git diff --name-only "$MAIN_SHA" "$CANDIDATE_SHA" -- src/migrations VF_PROJECT.json)"
+          echo P01_V2473_SCHEMA_MIGRATION_BOUNDARY=PASS
+
+      - name: Full PHP and JavaScript syntax
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-v2473-php-lint.log
+          while IFS= read -r -d '' file; do node --check "$file" >/dev/null; done < <(find src -type f -name '*.js' -print0)
+          echo P01_V2473_SYNTAX=PASS
+
+      - name: All focused unit contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count=0
+          while IFS= read -r -d '' test_file; do
+            echo "RUN_UNIT=${test_file}"
+            php "$test_file"
+            count=$((count+1))
+          done < <(find tests/unit -maxdepth 1 -type f -name '*.php' -print0 | sort -z)
+          test "$count" -gt 0
+          echo "P01_V2473_UNIT_CONTRACTS=PASS count=${count}"
+
+      - name: Core resource integration contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/integration/p01_v2391_resource_groups_acceptance.php
+          php tests/integration/p01_books_catalog_acceptance.php
+          php tests/integration/p01_six_surface_authority_acceptance.php
+          echo P01_V2473_CORE_INTEGRATION=PASS
+
+      - name: Fresh install and runtime verify
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-v2473-runtime
+          rm -rf "$RUNTIME"
+          cp -a src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18103 -t . >/tmp/p01-v2473-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-v2473.cookies -b /tmp/p01-v2473.cookies http://127.0.0.1:18103/setup.php -o /tmp/p01-v2473-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-v2473-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v2473.cookies -b /tmp/p01-v2473.cookies -X POST http://127.0.0.1:18103/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start V2.47.3 Candidate' \
+            --data-urlencode 'admin_password=CandidateGate!2026' \
+            --data-urlencode 'admin_password_confirm=CandidateGate!2026' \
+            -o /tmp/p01-v2473-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-v2473-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v2473-verify.txt
+          for path in / /start.php /channels.php /watch.php /topics.php /courses.php /projects.php /tools.php /software.php; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18103${path}")"
+            test "$code" = 200 || { echo "HTTP_FAIL path=${path} code=${code}"; exit 91; }
+          done
+          echo P01_V2473_FRESH_RUNTIME=PASS
+
+      - name: Final candidate verdict
+        shell: bash
+        run: |
+          echo 'P01_V2473_CANDIDATE_GATE=PASS'
+          echo 'CANDIDATE_SHA=95a3b218a74e93b41152c59ba3a65f1e77b70de5'
+          echo 'SCHEMA=2026090401'
+          echo 'MIGRATION=NONE'
+
+      - name: Cleanup private source
+        if: always()
+        shell: bash
+        run: rm -rf vf-start
