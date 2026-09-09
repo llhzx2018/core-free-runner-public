@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import stat
 from urllib.parse import unquote, urlparse
 
 import inventory
@@ -45,8 +46,14 @@ def _confined_site_root(root: Path, user: str, domain: str) -> Path:
     root_resolved = root.resolve()
     user = _safe_component(user, "site user")
     domain = _safe_component(domain, "site domain")
-    candidate = root_resolved / "home" / user / "htdocs" / domain
-    if candidate.is_symlink() or not candidate.is_dir():
+    home = root_resolved / "home"
+    user_home = home / user
+    htdocs = user_home / "htdocs"
+    candidate = htdocs / domain
+    for component in (home, user_home, htdocs, candidate):
+        if component.is_symlink():
+            raise DiscoveryError("CloudPanel site path contains a symlink")
+    if not candidate.is_dir():
         raise DiscoveryError("site root unavailable")
     try:
         resolved = candidate.resolve(strict=True)
@@ -119,15 +126,43 @@ def _iter_known_files(site_root: Path):
                 continue
             path = current_path / name
             try:
-                st = path.stat()
+                st = path.lstat()
             except OSError:
                 continue
-            if not path.is_file() or path.is_symlink() or st.st_size > MAX_CONFIG_BYTES:
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_CONFIG_BYTES:
                 continue
             seen += 1
             if seen > MAX_CONFIG_FILES:
                 raise DiscoveryError("too many candidate configuration files")
             yield path
+
+
+def _read_known_text(path: Path) -> str:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise DiscoveryError("secure nofollow config open is unavailable")
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_CONFIG_BYTES:
+            raise DiscoveryError("candidate configuration file changed during scan")
+        chunks = []
+        remaining = MAX_CONFIG_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_CONFIG_BYTES:
+            raise DiscoveryError("candidate configuration file exceeds size limit")
+        return data.decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise DiscoveryError("candidate configuration file cannot be opened safely") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _unquote_scalar(value: str) -> str:
@@ -248,8 +283,8 @@ def discover_credentials(site_root: Path, databases: list[str]) -> dict[str, dic
     found: dict[str, set[tuple[str, str]]] = {db: set() for db in databases}
     for path in _iter_known_files(site_root):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            text = _read_known_text(path)
+        except DiscoveryError:
             continue
         candidates: list[tuple[str, str, str]] = []
         if path.name == "wp-config.php":
