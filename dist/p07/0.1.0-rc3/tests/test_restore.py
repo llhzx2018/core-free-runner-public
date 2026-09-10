@@ -32,8 +32,15 @@ class RestorePlanTest(unittest.TestCase):
 
     def run_plan(self, package: Path, target_root: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(CLI), "restore", "plan", "--package", str(package), "--target-root", str(target_root)],
-            cwd=ROOT, text=True, capture_output=True, check=False,
+            [
+                str(CLI), "restore", "plan",
+                "--package", str(package),
+                "--target-root", str(target_root),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
         )
 
     def tree_snapshot(self, root: Path) -> list[tuple[str, int, int]]:
@@ -58,11 +65,13 @@ class RestorePlanTest(unittest.TestCase):
             target = base / "target-rootfs"
             target.mkdir()
             before = self.tree_snapshot(target)
+
             proc = self.run_plan(package, target)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertNotIn("PRIVATE-RECOVERY-DB-SECRET", proc.stdout + proc.stderr)
             self.assertNotIn("SYNTHETIC-PRIVATE-KEY", proc.stdout + proc.stderr)
             plan = json.loads(proc.stdout)
+
             self.assertEqual(plan["schema"], "vf-server-ops.restore-plan.v1")
             self.assertEqual(plan["mode"], "DRY_RUN")
             self.assertFalse(plan["writes_performed"])
@@ -72,13 +81,24 @@ class RestorePlanTest(unittest.TestCase):
             self.assertEqual(plan["blockers"], [])
             self.assertIn(plan["status"], ("READY", "READY_WITH_GATES"))
             self.assertEqual(before, self.tree_snapshot(target))
+
             action_types = [item["type"] for item in plan["actions"]]
-            for expected in ("cloudpanel_site_prepare","restore_site_files","mysql_prepare_and_import","restore_sqlite","reconcile_cron","restore_pm2_runtime","reconcile_vhost","install_ssl_certificate","permissions_reconcile","post_restore_verify"):
-                self.assertIn(expected, action_types)
+            self.assertIn("cloudpanel_site_prepare", action_types)
+            self.assertIn("restore_site_files", action_types)
+            self.assertIn("mysql_prepare_and_import", action_types)
+            self.assertIn("restore_sqlite", action_types)
+            self.assertIn("reconcile_cron", action_types)
+            self.assertIn("restore_pm2_runtime", action_types)
+            self.assertIn("reconcile_vhost", action_types)
+            self.assertIn("install_ssl_certificate", action_types)
+            self.assertIn("permissions_reconcile", action_types)
+            self.assertIn("post_restore_verify", action_types)
+
             mysql = next(item for item in plan["actions"] if item["type"] == "mysql_prepare_and_import")
             self.assertEqual(mysql["database"], "example_prod")
             self.assertEqual(mysql["private_recovery_row"], "CAPTURED_RAW_ROW")
             self.assertFalse(mysql["credentials_emitted"])
+
             private = plan["private_recovery_metadata"]
             self.assertTrue(private["present"])
             self.assertIn("password", private["database_fields"])
@@ -94,6 +114,7 @@ class RestorePlanTest(unittest.TestCase):
             sentinel = existing / "DO_NOT_TOUCH.txt"
             sentinel.write_text("keep\n", encoding="utf-8")
             before = self.tree_snapshot(target)
+
             proc = self.run_plan(package, target)
             self.assertEqual(proc.returncode, 6)
             plan = json.loads(proc.stdout)
@@ -113,19 +134,23 @@ class RestorePlanTest(unittest.TestCase):
             base = Path(tmp)
             package = self.make_verified_package(base)
             archive_path = package / "files/site.tar.gz"
+
             with tarfile.open(archive_path, "w:gz") as archive:
                 good = b"safe\n"
                 good_info = tarfile.TarInfo("site/ok.txt")
                 good_info.size = len(good)
                 archive.addfile(good_info, io.BytesIO(good))
+
                 bad = b"escape\n"
                 bad_info = tarfile.TarInfo("site/../escape.txt")
                 bad_info.size = len(bad)
                 archive.addfile(bad_info, io.BytesIO(bad))
+
             self.reseal_package(package)
             target = base / "target-rootfs"
             target.mkdir()
             before = self.tree_snapshot(target)
+
             proc = self.run_plan(package, target)
             self.assertEqual(proc.returncode, 6)
             plan = json.loads(proc.stdout)
@@ -141,6 +166,7 @@ class RestorePlanTest(unittest.TestCase):
             target = base / "target-rootfs"
             target.mkdir()
             (package / "manifest.json").write_text("{}\n", encoding="utf-8")
+
             proc = self.run_plan(package, target)
             self.assertEqual(proc.returncode, 6)
             self.assertIn("failed fresh verification", proc.stderr)
@@ -153,10 +179,16 @@ class RestorePlanTest(unittest.TestCase):
             private_meta = package / "metadata/cloudpanel-private.json"
             private_meta.unlink()
             manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-            manifest["contents"]["metadata"]["cloudpanel_private_metadata"] = {"included": False,"status": "REMOVED_FOR_TEST","file": None,"tables": {}}
+            manifest["contents"]["metadata"]["cloudpanel_private_metadata"] = {
+                "included": False,
+                "status": "REMOVED_FOR_TEST",
+                "file": None,
+                "tables": {},
+            }
             package_engine.write_json_private(package / "manifest.replacement.json", manifest)
             os.replace(package / "manifest.replacement.json", package / "manifest.json")
             self.reseal_package(package)
+
             target = base / "target-rootfs"
             target.mkdir()
             proc = self.run_plan(package, target)
