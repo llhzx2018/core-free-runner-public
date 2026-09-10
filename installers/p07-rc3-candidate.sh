@@ -11,7 +11,7 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/${BASE_CHANNEL}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/${RC3_CHANNEL}/overlay"
 PACKAGE_NAME="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 EXPECTED_VERSION="VF Server Ops 0.1.0 RC3"
-EXPECTED_BUILD_ID="0.1.0-rc3-guided-init7"
+EXPECTED_BUILD_ID="0.1.0-rc3-guided-init8"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -81,7 +81,7 @@ fetch_overlay() {
 }
 
 say "下载并校验 RC3 增量..."
-fetch_overlay "BUILD_ID"                    "13705caa3d9560e547be923904fc375a10a9b3ad"
+fetch_overlay "BUILD_ID"                    "b29aa2c2ac909c84fd0e56718be64d63ff371016"
 fetch_overlay "bin/vfops-user"              "bd3cb33f4a7b6811aa81528d6e9f1b410d2a12be"
 fetch_overlay "bin/vfops-auto-backup"       "cae9e02e802ce78f3f31ff521f4004ba01bbd748"
 fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab82e0b8"
@@ -92,6 +92,7 @@ fetch_overlay "lib/package_core.py"          "a997b70ab0450df193977d8e449dd604c3
 fetch_overlay "lib/package.py"               "1c0b73c6f72883fb6fb304436a01e1e84b12201a"
 fetch_overlay "lib/backup_frontend.py"       "4e3f4d3f1f76b2a301bad5d0c9aad68e5a1c2c23"
 fetch_overlay "lib/diagnostics.py"           "7f5d8f763e04c9178352cecd94612dc165abb018"
+fetch_overlay "lib/restore.py"               "bc698febb2e9df920f3396963c7e63ac8a04e977"
 
 say "安装前自检..."
 chmod +x "$SRC_DIR/bin/vfops" "$SRC_DIR/bin/vfops-user" "$SRC_DIR/bin/vfops-auto-backup" "$SRC_DIR/bin/vfops-storage-setup"
@@ -101,10 +102,11 @@ bash -n "$SRC_DIR/bin/vfops-auto-backup"
 bash -n "$SRC_DIR/bin/vfops-storage-setup"
 python3 -m py_compile "$SRC_DIR"/lib/*.py
 PYTHONPATH="$SRC_DIR/lib" python3 - <<'PY'
-import backup_frontend, package, package_core
+import backup_frontend, package, package_core, restore
 assert package.build_backup is backup_frontend.build_backup_with_discovery
 assert callable(package_core.build_backup)
 assert package_core.build_backup is not package.build_backup
+assert callable(restore.target_has_site)
 PY
 find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
@@ -141,6 +143,12 @@ grep -Fq 'O_NOFOLLOW' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 数据库�
 grep -Fq 'CloudPanel site path contains a symlink' "$SRC_DIR/lib/backup_frontend.py" || fail "RC3 数据库凭据扫描缺少站点路径约束。"
 grep -Fq 'DB_RECOVERY_DISCOVERY_FAILED' "$SRC_DIR/lib/diagnostics.py" || fail "RC3 数据库恢复凭据诊断缺失。"
 grep -Fq 'DB_EXPORT_FAILED' "$SRC_DIR/lib/diagnostics.py" || fail "RC3 数据库导出失败诊断缺失。"
+grep -Fq 'TARGET_SITE_ALREADY_EXISTS' "$SRC_DIR/lib/restore.py" || fail "RC3 恢复计划缺少 TARGET 冲突 blocker。"
+grep -Fq 'existing_site_overwrite_allowed' "$SRC_DIR/lib/restore.py" || fail "RC3 恢复计划缺少 no-overwrite contract。"
+grep -Fq 'os.path.lexists' "$SRC_DIR/lib/restore.py" || fail "RC3 恢复计划缺少目标路径占用检查。"
+if grep -Fq 'gates.append("OWNER_OVERWRITE_GATE_REQUIRED")' "$SRC_DIR/lib/restore.py"; then
+  fail "RC3 恢复计划仍错误允许 OWNER overwrite gate。"
+fi
 
 say "安装 P07 RC3 Candidate..."
 rm -rf "${INSTALL_DIR}.new"
@@ -199,7 +207,8 @@ for required in \
   "$INSTALL_DIR/lib/package_core.py" \
   "$INSTALL_DIR/lib/package.py" \
   "$INSTALL_DIR/lib/backup_frontend.py" \
-  "$INSTALL_DIR/lib/diagnostics.py"; do
+  "$INSTALL_DIR/lib/diagnostics.py" \
+  "$INSTALL_DIR/lib/restore.py"; do
   if [[ ! -f "$required" ]]; then
     rollback_install
     fail "RC3 运行文件缺失；已回滚。"
@@ -227,6 +236,7 @@ fi
 say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
 printf '数据库备份：兼容当前 CloudPanel schema；优先从网站现有配置安全恢复必要凭据，不额外持久化明文\n'
+printf '恢复预检：同名网站 / 目标目录冲突会在零写入检查阶段直接阻止，不再先显示 PASS\n'
 printf '自动备份：先真实验证本地 + Google + B2，再启用 Guarded Scheduler\n'
 printf '远程初始化：Google Device OAuth + B2 引导；也支持从已有 P07 服务器导入\n'
 printf '状态检查：Google + B2 实时健康 + 下一步指引\n'
