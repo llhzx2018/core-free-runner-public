@@ -1,0 +1,364 @@
+name: P01 V2.47.4 Preview Candidate Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v2474-preview-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2474-preview-candidate
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    if: github.head_ref == 'temp/p01-v2474-preview-gate-20260910'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: 1057a229073560b2315a99df7a7e231b89eb6d1e
+      SOURCE_TAG: v2.47.3
+      SOURCE_SHA: 62c3edc7178a01b1204811856a8fb7ca2b19ae21
+      SOURCE_VERSION: 2.47.3
+      TARGET_VERSION: 2.47.4
+      TARGET_BRANCH: release/v2.47.4-preview-20260910
+      EXPECTED_SCHEMA: '2026090401'
+      PREVIEW_TAG: v2.47.4-preview.1
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Exact live authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'PREVIEW_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'; exit 81; }
+          test -n "$RELEASE_TOKEN" || { echo 'PREVIEW_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING'; exit 82; }
+          current="$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')"
+          test "$current" = "$BASE_SHA" || { echo "PREVIEW_BLOCK=MAIN_DRIFT:${current}"; exit 83; }
+          source="$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/${SOURCE_TAG}" --jq '.object.sha')"
+          test "$source" = "$SOURCE_SHA" || { echo "PREVIEW_BLOCK=SOURCE_TAG_DRIFT:${source}"; exit 84; }
+          target="$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" --jq '.object.sha')"
+          test "$target" = "$BASE_SHA" || { echo "PREVIEW_BLOCK=TARGET_BRANCH_DRIFT:${target}"; exit 85; }
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}" --jq '.permissions.push')" = true
+          echo P01_V2474_PREVIEW_LIVE_AUTHORITY=PASS
+
+      - name: Checkout exact P01 release base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ env.RELEASE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 0
+          fetch-tags: true
+          path: vf-start
+
+      - name: Checkout exact V2.47.3 formal baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: baseline
+
+      - name: Checkout proven V2.47.0 artifact helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 1dd635d8e8d4485736458672fb7a5be397d94f89
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: helper
+
+      - name: Checkout proven artifact template
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 0439b0df027ae0bc6c21a8dbf91b066a564130f9
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: template
+
+      - name: Checkout proven Atomic primitives
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 0468b28ae57c368f80b03f85060318667bcc5834
+          persist-credentials: false
+          fetch-depth: 1
+          path: proven
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact three-point V2.47.4 preview bind
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git rev-parse "$SOURCE_TAG^{commit}")" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n ' < VERSION)" = "$SOURCE_VERSION"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "$SOURCE_VERSION"
+          grep -Fq "define('VF_VERSION', '$SOURCE_VERSION');" src/app/bootstrap.php
+          printf '%s\n' "$TARGET_VERSION" > VERSION
+          printf '%s\n' "$TARGET_VERSION" > src/VERSION.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/app/bootstrap.php')
+          s=p.read_text(encoding='utf-8')
+          old="define('VF_VERSION', '2.47.3');"
+          new="define('VF_VERSION', '2.47.4');"
+          if s.count(old) != 1:
+              raise SystemExit('VF_VERSION anchor mismatch')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          PY
+          git diff --name-only | sort >/tmp/p01-v2474-bind-files
+          printf '%s\n' VERSION src/VERSION.txt src/app/bootstrap.php | sort >/tmp/p01-v2474-bind-expected
+          diff -u /tmp/p01-v2474-bind-expected /tmp/p01-v2474-bind-files
+          test "$(git diff --numstat | awk '{a+=$1;d+=$2} END{print a":"d}')" = '3:3'
+          echo P01_V2474_PREVIEW_BIND_EXACT=PASS
+
+      - name: Schema migration syntax and changed contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          schema="$(php -r '$p=json_decode(file_get_contents("VF_PROJECT.json"),true); echo $p["working_schema_version"];')"
+          test "$schema" = "$EXPECTED_SCHEMA"
+          test -z "$(git diff --name-only "$SOURCE_TAG" "$BASE_SHA" -- src/migrations VF_PROJECT.json)"
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-v2474-php-lint.log
+          while IFS= read -r -d '' f; do node --check "$f" >/dev/null; done < <(find src -type f -name '*.js' -print0)
+          mapfile -t tests < <(git diff --name-only "$SOURCE_TAG" "$BASE_SHA" -- 'tests/unit/*.php' | sort)
+          test "${#tests[@]}" -gt 0
+          failures=0
+          : >/tmp/p01-v2474-unit-failures
+          for f in "${tests[@]}"; do
+            echo "RUN_RELEASE_UNIT=$f"
+            if php "$f"; then :; else echo "UNIT_FAIL=$f" | tee -a /tmp/p01-v2474-unit-failures; failures=$((failures+1)); fi
+          done
+          echo "P01_V2474_CHANGED_UNITS_TOTAL=${#tests[@]}"
+          if [ "$failures" -gt 0 ]; then cat /tmp/p01-v2474-unit-failures; exit 1; fi
+          echo P01_V2474_SCHEMA_SYNTAX_CHANGED_UNITS=PASS
+
+      - name: Core integrations
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/integration/p01_v2391_resource_groups_acceptance.php
+          php tests/integration/p01_books_catalog_acceptance.php
+          php tests/integration/p01_six_surface_authority_acceptance.php
+          echo P01_V2474_CORE_INTEGRATIONS=PASS
+
+      - name: Fresh install CLI verify and nine-surface HTTP smoke
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-v2474-preview-runtime
+          rm -rf "$RUNTIME"
+          cp -a src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18114 -t . >/tmp/p01-v2474-preview-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS -c /tmp/p01-v2474.cookies -b /tmp/p01-v2474.cookies http://127.0.0.1:18114/setup.php -o /tmp/p01-v2474-setup.html && break
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v2474-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}V2474x"
+          curl -fsS -c /tmp/p01-v2474.cookies -b /tmp/p01-v2474.cookies -X POST http://127.0.0.1:18114/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2.47.4 Preview' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" -o /tmp/p01-v2474-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-v2474-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v2474-verify.txt
+          for p in / /start.php /channels.php /watch.php /topics.php /courses.php /projects.php /tools.php /software.php; do
+            test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18114$p")" = 200
+          done
+          kill "$SERVER_PID" 2>/dev/null || true
+          trap - EXIT
+          echo P01_V2474_FRESH_RUNTIME=PASS
+
+      - name: Publish exact V2.47.4 preview candidate branch
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git diff --numstat | awk '{a+=$1;d+=$2} END{print a":"d}')" = '3:3'
+          git config user.name 'VictorForge Release Runner'
+          git config user.email 'llhzx2018@users.noreply.github.com'
+          git checkout -b p01-v2474-preview-candidate
+          git add VERSION src/VERSION.txt src/app/bootstrap.php
+          git commit -m 'release(P01): bind V2.47.4 preview candidate'
+          CANDIDATE_SHA="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}" --force-with-lease="refs/heads/${TARGET_BRANCH}:${BASE_SHA}"
+          echo "CANDIDATE_SHA=$CANDIDATE_SHA" >> "$GITHUB_ENV"
+          echo "P01_V2474_PREVIEW_CANDIDATE_SHA=$CANDIDATE_SHA"
+          echo P01_V2474_PREVIEW_CANDIDATE_PUBLISHED=PASS
+
+      - name: Build deterministic V2.47.4 preview install and update assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf formal candidate
+          cp -a vf-start formal
+          cp -a vf-start candidate
+          cp helper/scripts/_tmp_p01_v2470_formal_artifact_gate.sh /tmp/p01-v2474-preview-artifact-gate.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p=Path('/tmp/p01-v2474-preview-artifact-gate.sh')
+          s=p.read_text(encoding='utf-8')
+          candidate=os.environ['CANDIDATE_SHA']
+          run_id=os.environ['GITHUB_RUN_ID']
+          replacements=[
+            ('7f3492f70276d83efed371296d69709c1e991350',candidate),
+            ('b70971514ccf1c6b8f3793bfc5a2200cad47dfe9',candidate),
+            ('1bd95e8777e72f6cd89206ddb9daf934ad4e6b9e','62c3edc7178a01b1204811856a8fb7ca2b19ae21'),
+            ('33993725218',run_id),
+            ('BIND_PR=416','BIND_PR=0'),
+            ('OWNER_AUTHORIZED_V2470_RELEASE_CHAIN_20260906','OWNER_AUTHORIZED_V2474_PREVIEW_20260910'),
+            ('V2470','V2474'),
+            ('v2470','v2474'),
+          ]
+          for old,new in replacements:
+              if old not in s:
+                  raise SystemExit('missing V2.47.0 gate anchor: '+old)
+              s=s.replace(old,new)
+          s=s.replace('2.47.0','__P01_TARGET__').replace('2.46.4','2.47.3').replace('__P01_TARGET__','2.47.4')
+          old="src=src.replace(\"'release_type':'patch'\",\"'release_type':'minor'\")"
+          if old not in s:
+              raise SystemExit('release type anchor missing')
+          s=s.replace(old,"src=src.replace('V2.46.1 之后 Consolidated L2 Product Optimization 的正式发布版本。','V2.47.3 之后 R13-R20 第二层 UX/UI 全局收口的预览维护版本。')",1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          chmod +x /tmp/p01-v2474-preview-artifact-gate.sh
+          bash /tmp/p01-v2474-preview-artifact-gate.sh
+          ASSETS=/tmp/p01-v2474-formal-artifacts
+          test -f "$ASSETS/VF-Start-V2.47.4-FULL.zip"
+          test -f "$ASSETS/VF-Start-V2.47.4-FULL.zip.sha256"
+          test -f "$ASSETS/VF_Start_V2.47.4_UPDATE.zip"
+          test -f "$ASSETS/VF_Start_V2.47.4_UPDATE.zip.sha256"
+          (cd "$ASSETS" && sha256sum -c VF-Start-V2.47.4-FULL.zip.sha256 && sha256sum -c VF_Start_V2.47.4_UPDATE.zip.sha256)
+          echo P01_V2474_PREVIEW_ARTIFACT_GATE=PASS
+
+      - name: Publish or verify exact GitHub prerelease preview
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ASSETS=/tmp/p01-v2474-formal-artifacts
+          if gh api "repos/${PRODUCT_REPO}/git/ref/tags/${PREVIEW_TAG}" >/tmp/p01-v2474-preview-tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/p01-v2474-preview-tag.json)" = "$CANDIDATE_SHA"
+          else
+            gh api --method POST "repos/${PRODUCT_REPO}/git/refs" -f ref="refs/tags/${PREVIEW_TAG}" -f sha="$CANDIDATE_SHA" > /tmp/p01-v2474-preview-tag.json
+          fi
+          cat >/tmp/p01-v2474-preview-notes.md <<EOF
+          P01 · VF Start V2.47.4 Preview 1
+
+          - Exact candidate: ${CANDIDATE_SHA}
+          - Base main: ${BASE_SHA}
+          - Previous formal release: ${SOURCE_TAG} / ${SOURCE_SHA}
+          - Schema: ${EXPECTED_SCHEMA}
+          - Migration: NONE
+          - Automated candidate/install/update/runtime gates: PASS on Runner ${GITHUB_RUN_ID}
+          - OWNER Preview: PENDING — this prerelease exists specifically for visual/real-use review.
+          - Stable Distribution: NOT UPDATED
+          - Production: NOT WRITTEN / NOT VERIFIED
+          EOF
+          if gh release view "$PREVIEW_TAG" --repo "$PRODUCT_REPO" >/dev/null 2>&1; then
+            test "$(gh api "repos/${PRODUCT_REPO}/releases/tags/${PREVIEW_TAG}" --jq '.prerelease')" = true
+          else
+            gh release create "$PREVIEW_TAG" \
+              "$ASSETS/VF-Start-V2.47.4-FULL.zip" \
+              "$ASSETS/VF-Start-V2.47.4-FULL.zip.sha256" \
+              "$ASSETS/VF_Start_V2.47.4_UPDATE.zip" \
+              "$ASSETS/VF_Start_V2.47.4_UPDATE.zip.sha256" \
+              --repo "$PRODUCT_REPO" --title 'VF Start V2.47.4 Preview 1' --notes-file /tmp/p01-v2474-preview-notes.md --prerelease --verify-tag
+          fi
+          echo P01_V2474_PREVIEW_PRERELEASE_IDENTITY=PASS
+
+      - name: Independent remote byte readback
+        env:
+          GH_TOKEN: ${{ env.PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ASSETS=/tmp/p01-v2474-formal-artifacts
+          test "$(gh api "repos/${PRODUCT_REPO}/git/ref/tags/${PREVIEW_TAG}" --jq '.object.sha')" = "$CANDIDATE_SHA"
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${PREVIEW_TAG}" >/tmp/p01-v2474-preview-release.json
+          test "$(jq -r '.draft' /tmp/p01-v2474-preview-release.json)" = false
+          test "$(jq -r '.prerelease' /tmp/p01-v2474-preview-release.json)" = true
+          rm -rf /tmp/p01-v2474-preview-remote
+          mkdir -p /tmp/p01-v2474-preview-remote
+          gh release download "$PREVIEW_TAG" --repo "$PRODUCT_REPO" --dir /tmp/p01-v2474-preview-remote
+          LOCAL="$ASSETS" REMOTE=/tmp/p01-v2474-preview-remote python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os
+          local=Path(os.environ['LOCAL'])
+          remote=Path(os.environ['REMOTE'])
+          expected=[
+              'VF-Start-V2.47.4-FULL.zip',
+              'VF-Start-V2.47.4-FULL.zip.sha256',
+              'VF_Start_V2.47.4_UPDATE.zip',
+              'VF_Start_V2.47.4_UPDATE.zip.sha256',
+          ]
+          got=sorted(p.name for p in remote.iterdir() if p.is_file())
+          assert sorted(expected)==got, {'expected':sorted(expected),'got':got}
+          for name in expected:
+              a,b=local/name,remote/name
+              assert a.stat().st_size==b.stat().st_size
+              assert hashlib.sha256(a.read_bytes()).hexdigest()==hashlib.sha256(b.read_bytes()).hexdigest()
+              print(f'PREVIEW_ASSET={name}|{a.stat().st_size}|{hashlib.sha256(a.read_bytes()).hexdigest()}')
+          print('P01_V2474_PREVIEW_REMOTE_BYTE_IDENTITY=PASS')
+          PY
+          echo "PREVIEW_RELEASE_ID=$(jq -r '.id' /tmp/p01-v2474-preview-release.json)"
+          echo P01_V2474_PREVIEW_REMOTE_READBACK=PASS
+
+      - name: Build public-safe preview evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v2474-public-evidence
+          jq -n --arg base "$BASE_SHA" --arg candidate "${CANDIDATE_SHA:-}" --arg tag "$PREVIEW_TAG" --arg run_id "$GITHUB_RUN_ID" '{schema:"p01-preview-evidence/v1",project_id:"P01",version:"2.47.4",source_version:"2.47.3",schema_version:"2026090401",migration:"NONE",base_main:$base,candidate:$candidate,preview_tag:$tag,runner_run_id:$run_id,owner_preview:"PENDING",stable_distribution_updated:false,production_write:false}' > /tmp/p01-v2474-public-evidence/P01-V2.47.4-PREVIEW-EVIDENCE.json
+
+      - name: Upload public-safe preview evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: P01-V2.47.4-PREVIEW-EVIDENCE-${{ github.run_id }}
+          path: /tmp/p01-v2474-public-evidence/P01-V2.47.4-PREVIEW-EVIDENCE.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Final verdict
+        run: |
+          echo P01_V2474_PREVIEW_GATE=PASS
+          echo OWNER_PREVIEW=PENDING
+          echo STABLE_DISTRIBUTION_UPDATED=false
+          echo PRODUCTION_WRITE=false
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf vf-start baseline helper template proven formal candidate /tmp/p01-v2474-* /tmp/p01-v2474-formal-artifacts
