@@ -82,7 +82,7 @@ fetch_overlay() {
 
 say "下载并校验 RC3 guided-init9 完整基础运行时..."
 fetch_overlay "BUILD_ID"                    "62541d7c97ba0cf87ae0b2c46361d72a40dbe298"
-fetch_overlay "bin/vfops-user"              "1e5fa32cfc57fdc37faf69996bc1f71f3f34eb55"
+fetch_overlay "bin/vfops-user"              "71b35360d24fa2a4d8fc55ea1f3e2ae1598c5032"
 fetch_overlay "bin/vfops-site-ui"           "9b74fbfea635ecb28bf2cd452016705118fadaba"
 fetch_overlay "bin/vfops-migrate-ui"        "acd3230599fda6eb9f2901bf0ac68ec08964c18b"
 fetch_overlay "bin/vfops-cloudpanel-ui"     "a37d218a3ba0614a59a9e9c53230425215406cae"
@@ -91,7 +91,7 @@ fetch_overlay "bin/vfops-storage-setup"     "eabd9dc4d05e6ec9113507157344a5b5ab8
 fetch_overlay "lib/cloudpanel.py"           "fb9f7ab742d981a0fe180b1c2304afb81a6b3b48"
 fetch_overlay "lib/cloudpanel_site.py"      "3de08127e517c1a460706f64aa7fde9aa6b86f2b"
 fetch_overlay "lib/site_lifecycle.py"       "9a24156d87223de67aae57d744abed7a63fbce4a"
-fetch_overlay "lib/restore_as.py"           "c42b005c01103471c728678d38db5e9f9a8449d4"
+fetch_overlay "lib/restore_as.py"           "296373b81a1af46fbccd922926520b85cd49a9bf"
 fetch_overlay "lib/restore_as_verified.py"  "05897451b0f8e068271211f2052e2af9197f5736"
 fetch_overlay "lib/restore_apply.py"        "0a5aec9467b8da3290fbd93ad66b22bff816f124"
 fetch_overlay "lib/restore_apply_core.py"   "06cf797a3ff0948c5df65dfcf526f56037f6d461"
@@ -150,6 +150,7 @@ grep -Fq '6. CloudPanel 网站工具' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 
 grep -Fq 'vfops-site-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 网站模块路由缺失。"
 grep -Fq 'vfops-migrate-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 迁移模块路由缺失。"
 grep -Fq 'vfops-cloudpanel-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 CloudPanel 工具路由缺失。"
+grep -Fq '--build-id' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 缺少独立 build identity 输出。"
 
 grep -Fq 'restore_as_verified.py' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 未接入自动本机验证。"
 grep -Fq '无需先在 CloudPanel 手工创建空网站' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 仍要求人工预建站点。"
@@ -258,6 +259,10 @@ fi
 if [[ ! -f "$INSTALL_DIR/BUILD_ID" || "$(cat "$INSTALL_DIR/BUILD_ID")" != "$EXPECTED_BUILD_ID" ]]; then
   rollback_install
   fail "Build ID 自检不匹配；未保留失败的新版本。"
+fi
+if [[ "$($BIN_LINK --build-id 2>/dev/null)" != "$EXPECTED_BUILD_ID" ]]; then
+  rollback_install
+  fail "运行入口 Build ID 自检不匹配；未保留失败的新版本。"
 fi
 for required in \
   "$INSTALL_DIR/bin/vfops-site-ui" \
