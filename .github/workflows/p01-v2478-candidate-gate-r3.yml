@@ -1,0 +1,190 @@
+name: P01 V2.47.8 Candidate Gate R3
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v2478-candidate-gate-r3.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v2478-candidate-gate-r3
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.head_ref == 'temp/p01-v2478-candidate-gate-r3-20260911'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      ENGINEERING_SHA: 633b796dbb998347430f68f153183cc7ddb227ab
+      CANDIDATE_BRANCH: release/v2.47.8-candidate-20260911
+      CANDIDATE_SHA: c1806005c0f89d9794844124264cb15a7ffcb1fc
+      SOURCE_TAG: v2.47.7
+      SOURCE_SHA: 10b5946e63b4ab3f48f5c7abd7b5decb065312d0
+      TARGET_VERSION: 2.47.8
+      EXPECTED_SCHEMA: '2026090401'
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact authority and immutable candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$ENGINEERING_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${CANDIDATE_BRANCH}" --jq '.object.sha')" = "$CANDIDATE_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/${SOURCE_TAG}" --jq '.object.sha')" = "$SOURCE_SHA"
+          echo P01_V2478_R3_AUTHORITY=PASS
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact candidate identity and contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n ' < VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '${TARGET_VERSION}');" src/app/bootstrap.php
+          test "$(php -r '$p=json_decode(file_get_contents("VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$EXPECTED_SCHEMA"
+          mapfile -t changed < <(git diff --name-only "$ENGINEERING_SHA"..HEAD | sort)
+          printf '%s\n' "${changed[@]}" >/tmp/changed
+          printf '%s\n' CHANGELOG.md VERSION docs/release/V2.47.8_RELEASE_GATE.md src/VERSION.txt src/app/bootstrap.php >/tmp/expected
+          diff -u /tmp/expected /tmp/changed
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint
+          find src -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          php tests/unit/home_page_full_polish_contract.php | grep -Fx 'P01_HOME_PAGE_FULL_POLISH_CONTRACT=PASS'
+          php tests/unit/home_recent_operations_signal_contract.php | grep -Fx 'P01_HOME_RECENT_OPERATIONS_SIGNAL_CONTRACT=PASS'
+          php tests/unit/global_account_actions_contract.php | grep -Fx 'P01_R22_GLOBAL_ACCOUNT_ACTIONS_CONTRACT=PASS'
+          php tests/unit/update_csrf_recovery_contract.php | grep -Fx 'P01_UPDATE_CSRF_RECOVERY_CONTRACT=PASS'
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.8_RELEASE_GATE.md
+          echo P01_V2478_R3_STATIC=PASS
+
+      - name: Fresh install and representative data
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v2478-r3-runtime /tmp/p01-v2478-r3-pw
+          cp -a src /tmp/p01-v2478-r3-runtime
+          cd /tmp/p01-v2478-r3-runtime
+          php -S 127.0.0.1:18129 -t . >/tmp/p01-v2478-r3-server.log 2>&1 & echo $! >/tmp/p01-v2478-r3-server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-v2478-r3.cookies -b /tmp/p01-v2478-r3.cookies http://127.0.0.1:18129/setup.php -o /tmp/p01-v2478-r3-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v2478-r3-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}V2478r3x"; printf '%s' "$PASS" >/tmp/p01-v2478-r3.password
+          curl -fsS -L -c /tmp/p01-v2478-r3.cookies -b /tmp/p01-v2478-r3.cookies -X POST http://127.0.0.1:18129/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V2478 R3' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" -o /tmp/p01-v2478-r3-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          code=$(curl -sS -o /tmp/revisit -D /tmp/revisit.h -w '%{http_code}' http://127.0.0.1:18129/setup.php); test "$code" = 302
+          tr -d '\r' </tmp/revisit.h | grep -Eiq '^Location: /$'
+          php -r 'require "app/bootstrap.php"; require "app/SurfaceRepository.php"; $r=new VfRepository(vf_db()); $r->createCategory(["name"=>"V2478 R3 Category","is_private"=>true,"sort_order"=>0]); $x=$r->savePendingCapture(["url"=>"https://example.com/v2478-r3","title"=>"V2478 R3 Home Resource"],"mobile-quick-save"); if(empty($x["id"])) exit(2); echo "P01_V2478_R3_SEED=PASS\n";'
+          echo P01_V2478_R3_INSTALL=PASS
+
+      - name: Authenticated Home plus CSRF recovery semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v2478-r3-pw && cd /tmp/p01-v2478-r3-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import {chromium} from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18129/';
+          const password=fs.readFileSync('/tmp/p01-v2478-r3.password','utf8');
+          const browser=await chromium.launch({headless:true});
+          const ctx=await browser.newContext({viewport:{width:1291,height:797}});
+          const p=await ctx.newPage();
+          await p.goto(base+'start.php',{waitUntil:'networkidle'});
+          await p.click('.vf-global-account-actions [data-vf-auth-login]');
+          await p.fill('[data-vf-auth-dialog] input[name="password"]',password);
+          await p.click('[data-vf-auth-submit]');
+          await p.waitForSelector('.vf-global-account-actions a[href="settings.php"]',{timeout:15000});
+          await p.goto(base+'home.php',{waitUntil:'networkidle'});
+          await p.waitForSelector('#vfHomeModulesTitle');
+          const desktop=await p.evaluate(()=>{
+            const q=s=>document.querySelector(s),qa=s=>[...document.querySelectorAll(s)],r=s=>q(s)?.getBoundingClientRect()||null;
+            const mods=qa('.vf-home-module').map(x=>x.getBoundingClientRect());
+            const account=q('.vf-global-account-actions')?.getBoundingClientRect();
+            return {h1:q('.vf-home-command-head h1')?.textContent.trim(),summary:qa('.vf-home-summary>a').length,quick:qa('.vf-home-quick-grid>a,.vf-home-quick-grid>button').length,mods:mods.map(x=>({top:x.top,width:x.width})),focus:r('.vf-home-focus')?.width,quickW:r('.vf-home-quick')?.width,accountRight:account?.right,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+          });
+          const row=desktop.mods.filter(x=>Math.abs(x.top-desktop.mods[0].top)<2).length;
+          if(desktop.h1!=='今天从这里开始'||desktop.summary!==3||desktop.quick!==4||desktop.mods.length!==8||row!==4||desktop.focus<=desktop.quickW||desktop.accountRight<1260||desktop.overflow>1)throw new Error('desktop '+JSON.stringify(desktop));
+
+          await p.goto(base+'update.php',{waitUntil:'networkidle'});
+          const events=[];
+          p.on('response',r=>{const u=r.url();if(u.includes('api.php?action=update_check')||u.includes('api.php?action=bootstrap'))events.push({u,status:r.status()});});
+          const recovery=await p.evaluate(async()=>{
+            const r=await fetch('api.php?action=update_check',{method:'POST',headers:{'Accept':'application/json','X-CSRF-Token':'definitely-stale-v2478-r3'},credentials:'same-origin'});
+            let data=null;try{data=await r.json()}catch(e){}
+            return {status:r.status,ok:!!(data&&data.ok),error:data&&data.error?String(data.error):''};
+          });
+          await p.waitForTimeout(500);
+          const checks=events.filter(x=>x.u.includes('action=update_check'));
+          const refreshes=events.filter(x=>x.u.includes('action=bootstrap'));
+          if(checks.length!==2||checks[0].status!==419||checks[1].status===419||refreshes.length!==1||refreshes[0].status!==200)throw new Error('csrf '+JSON.stringify({recovery,events}));
+
+          await p.setViewportSize({width:390,height:844});
+          await p.goto(base+'home.php',{waitUntil:'networkidle'});
+          const mobile=await p.evaluate(()=>{
+            const qa=s=>[...document.querySelectorAll(s)],mods=qa('.vf-home-module').map(x=>x.getBoundingClientRect()),account=document.querySelector('.vf-global-account-actions')?.getBoundingClientRect();
+            return {mods:mods.map(x=>({top:x.top,width:x.width})),touch:qa('.vf-home-mobile-command form,.vf-home-mobile-command>a').map(x=>x.getBoundingClientRect().height),accountRight:account?.right,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth};
+          });
+          const mrow=mobile.mods.filter(x=>Math.abs(x.top-mobile.mods[0].top)<2).length;
+          if(mrow!==2||mobile.touch.length<2||mobile.touch.some(h=>h<43.5)||mobile.accountRight<375||mobile.overflow>1)throw new Error('mobile '+JSON.stringify(mobile));
+          console.log('P01_V2478_R3_BROWSER='+JSON.stringify({desktop,csrf:{recovery,events},mobile}));
+          await browser.close();
+          JS
+          node verify.mjs | tee /tmp/p01-v2478-r3-browser
+          grep -F 'P01_V2478_R3_BROWSER=' /tmp/p01-v2478-r3-browser
+          echo P01_V2478_R3_BROWSER_GATE=PASS
+
+      - name: Final verdict
+        run: |
+          echo PUBLIC_AUTHORITY_INSTALL=PASS
+          echo PUBLIC_AUTHORITY_SECURITY=PASS
+          echo PUBLIC_AUTHORITY_TESTING=PASS
+          echo PUBLIC_AUTHORITY_GIT=PASS
+          echo PUBLIC_AUTHORITY_UA_UI=PASS
+          echo PUBLIC_AUTHORITY_UPGRADE=PENDING_ARTIFACT_GATE
+          echo PUBLIC_AUTHORITY_DATA_SCHEMA=PENDING_ARTIFACT_GATE
+          echo OWNER_PREVIEW_RUNTIME_APPLICABILITY=N_A
+          echo OWNER_REAL_USE=POST_RELEASE_PENDING
+          echo P01_V2478_CANDIDATE_GATE=PASS
+          echo FORMAL_RELEASE=false
+          echo PRODUCTION=false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if test -f /tmp/p01-v2478-r3-server.pid; then kill "$(cat /tmp/p01-v2478-r3-server.pid)" 2>/dev/null || true; fi
+          rm -rf vf-start /tmp/p01-v2478-r3-* /tmp/changed /tmp/expected /tmp/php-lint
