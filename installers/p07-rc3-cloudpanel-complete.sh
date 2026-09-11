@@ -37,7 +37,7 @@ verify_installed_init10() {
   [[ "$($BIN_LINK --build-id 2>/dev/null || true)" == "$EXPECTED_BUILD_ID" ]] || return 1
   [[ -f "$INSTALL_DIR/BUILD_ID" ]] || return 1
   verify_git_blob "$INSTALL_DIR/BUILD_ID" "2e860375f5e801262bd200e5251c5524f5e2ec32" >/dev/null 2>&1 || return 1
-  verify_git_blob "$INSTALL_DIR/bin/vfops-cloudpanel-ui" "192e6e9ebc437f6a7d472242bf2bc661c8d07e19" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-cloudpanel-ui" "d3f9dea0e6bb6d80e45b69db51c547fcca06ad9c" >/dev/null 2>&1 || return 1
   verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_common.sh" "3d8409c0f8fa5227064ddde0113d9bb4ba4a03b7" >/dev/null 2>&1 || return 1
   verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_sites.sh" "dc1458efb9a669185b07171f7748959711ac59de" >/dev/null 2>&1 || return 1
   verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_ops.sh" "4eeedb7facfe709583476e3b84ebce00d0a8ab03" >/dev/null 2>&1 || return 1
@@ -107,7 +107,7 @@ fetch_overlay() {
 
 say "下载并校验 CloudPanel Foundation guided-init10..."
 fetch_overlay "BUILD_ID"                        "2e860375f5e801262bd200e5251c5524f5e2ec32"
-fetch_overlay "bin/vfops-cloudpanel-ui"         "192e6e9ebc437f6a7d472242bf2bc661c8d07e19"
+fetch_overlay "bin/vfops-cloudpanel-ui"         "d3f9dea0e6bb6d80e45b69db51c547fcca06ad9c"
 fetch_overlay "lib/cloudpanel_ui_common.sh"     "3d8409c0f8fa5227064ddde0113d9bb4ba4a03b7"
 fetch_overlay "lib/cloudpanel_ui_sites.sh"      "dc1458efb9a669185b07171f7748959711ac59de"
 fetch_overlay "lib/cloudpanel_ui_ops.sh"        "4eeedb7facfe709583476e3b84ebce00d0a8ab03"
@@ -117,7 +117,7 @@ for script in "$TMP_DIR/new/bin/vfops-cloudpanel-ui" "$TMP_DIR/new/lib/"cloudpan
   bash -n "$script" || fail "guided-init10 Shell 语法校验失败。"
 done
 BUNDLE="$(cat "$TMP_DIR/new/bin/vfops-cloudpanel-ui" "$TMP_DIR/new/lib/"cloudpanel_ui_*.sh)"
-for marker in '网站健康检查' '创建网站' '数据库工具' 'SSL / HTTPS' 'CloudPanel 安全' 'CloudPanel 用户' 'Vhost Templates' '基础能力自检'; do
+for marker in '网站健康检查' '创建网站' '数据库工具' 'SSL / HTTPS' 'CloudPanel 安全' 'CloudPanel 用户' 'Vhost 模板' '平台基础能力检查'; do
   grep -Fq "$marker" <<<"$BUNDLE" || fail "CloudPanel Foundation 缺少任务：$marker"
 done
 for forbidden in 'site:delete' 'db:delete' 'user:delete' 'REAL_PASS'; do
@@ -148,6 +148,6 @@ fi
 COMMITTED=1
 say "CloudPanel Foundation guided-init10 安装完成 ✓"
 printf '版本：%s\n' "$EXPECTED_VERSION"
-printf 'CloudPanel：网站详情 / 健康检查 / 五类建站 / 数据库 / SSL / 权限缓存 / Panel 安全 / 用户 / Vhost Templates / 基础自检\n'
+printf 'CloudPanel：网站详情 / 健康检查 / 五类建站 / 数据库 / SSL / 权限缓存 / Panel 安全 / 用户 / Vhost 模板 / 平台基础能力检查\n'
 printf '安全边界：普通入口不提供站点、数据库或用户删除；不改 DNS、不删 SOURCE、不覆盖 existing TARGET。\n'
 if [[ -t 0 && -t 1 && "${P07_NO_EXEC:-0}" != "1" ]]; then exec "$BIN_LINK"; fi
