@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CORE="$ROOT_DIR/bin/vfops"
+BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
+INV_FILE=""
+SELECTED_DOMAIN=""
+SSH_PREFLIGHT_STATE="UNKNOWN"
+
+cleanup() { [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true; }
+trap cleanup EXIT
+pause() { printf '\n按 Enter 返回...'; read -r _ || true; }
+
+load_inventory() {
+  cleanup
+  INV_FILE="$(mktemp -t p07-migrate-inventory.XXXXXX)"
+  "$CORE" inventory --compact >"$INV_FILE" 2>/dev/null
+}
+
+select_site() {
+  SELECTED_DOMAIN=""
+  load_inventory || { printf '\n无法读取 CloudPanel 网站。\n'; return 1; }
+  local count choice
+  count="$(python3 - "$INV_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+print(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else []))
+PY
+)"
+  [[ "$count" -gt 0 ]] || { printf '\n没有发现可迁移的网站。\n'; return 2; }
+  printf '\n请选择要迁移的网站\n----------------------------------------\n'
+  python3 - "$INV_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+for i,s in enumerate(p.get('sites',[]),1): print(f"  {i}. {s.get('domain','UNKNOWN')}")
+print('  0. 返回')
+PY
+  printf '\n请选择 [0-%s]：' "$count"; read -r choice || return 2
+  [[ "$choice" =~ ^[0-9]+$ ]] || { printf '请输入上面的数字。\n'; return 1; }
+  [[ "$choice" == 0 ]] && return 2
+  (( choice>=1 && choice<=count )) || { printf '选择超出范围。\n'; return 1; }
+  SELECTED_DOMAIN="$(python3 - "$INV_FILE" "$choice" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+print(p['sites'][int(sys.argv[2])-1]['domain'])
+PY
+)"
+}
+
+validate_ip() {
+  python3 - "$1" <<'PY' >/dev/null 2>&1
+import ipaddress,sys
+ipaddress.ip_address(sys.argv[1])
+PY
+}
+
+ssh_state_line() { printf '连接状态：%s\n' "$1"; }
+
+target_ssh_preflight() {
+  local target_ip="$1" domain="$2" output rc remote_cmd
+  SSH_PREFLIGHT_STATE="UNKNOWN"
+  command -v ssh >/dev/null 2>&1 || {
+    SSH_PREFLIGHT_STATE="UNREACHABLE"; ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf '原因：SOURCE 缺少 SSH 客户端。迁移尚未开始。\n'; return 13;
+  }
+  printf '\n[P07] 正在检查 SSH、CloudPanel 与同名网站冲突...\n'
+  set +e
+  output="$(ssh -p 22 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=1 "root@${target_ip}" "printf P07_SSH_READY" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    if printf '%s\n' "$output" | grep -Eqi 'permission denied|publickey|no supported authentication methods'; then
+      SSH_PREFLIGHT_STATE="NEEDS_KEY_SETUP"
+      printf '\nSOURCE 还没有 TARGET 的 SSH Key 登录权限。\n'; ssh_state_line "$SSH_PREFLIGHT_STATE"
+      printf '迁移尚未开始，也没有创建迁移备份。\n'; return 10
+    fi
+    SSH_PREFLIGHT_STATE="UNREACHABLE"
+    printf '\n无法连接新服务器：%s\n' "$target_ip"; ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf '请检查 IP、22 端口、防火墙或服务器是否在线。\n'; return 13
+  fi
+
+  remote_cmd="set -eu; command -v clpctl >/dev/null 2>&1 || exit 43; test -f /home/clp/htdocs/app/data/db.sq3 || exit 43; for p in /home/*/htdocs/${domain}; do [ ! -e \"\$p\" ] || exit 42; done"
+  set +e
+  output="$(ssh -p 22 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=1 "root@${target_ip}" "$remote_cmd" 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 42 ]]; then
+    SSH_PREFLIGHT_STATE="TARGET_SITE_CONFLICT"
+    printf '\nTARGET 已存在同名网站：%s\n' "$domain"; ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf 'P07 不会覆盖。迁移尚未开始。\n'; return 12
+  fi
+  if [[ $rc -eq 43 ]]; then
+    SSH_PREFLIGHT_STATE="TARGET_NOT_CLOUDPANEL"
+    printf '\nTARGET 可以 SSH 登录，但没有检测到可用 CloudPanel。\n'; ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf '请先安装 CloudPanel。迁移尚未开始。\n'; return 11
+  fi
+  if [[ $rc -ne 0 ]]; then
+    SSH_PREFLIGHT_STATE="UNREACHABLE"; ssh_state_line "$SSH_PREFLIGHT_STATE"
+    printf 'TARGET 检查中断。迁移尚未开始。\n'; return 13
+  fi
+  SSH_PREFLIGHT_STATE="READY"; ssh_state_line "$SSH_PREFLIGHT_STATE"
+  printf 'SSH Key：READY ✓\nCloudPanel：READY ✓\n同名网站冲突：未发现 ✓\n'
+}
+
+prepare_target_ssh_key() {
+  local target_ip="$1" ssh_dir="${HOME:-/root}/.ssh"
+  command -v ssh-copy-id >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 || {
+    printf '\n缺少 openssh-client，无法自动准备连接。\n'; return 1;
+  }
+  mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"
+  if ! compgen -G "$ssh_dir/id_*.pub" >/dev/null; then
+    printf '\n[P07] 正在为 SOURCE 生成 SSH Key...\n'
+    ssh-keygen -q -t ed25519 -f "$ssh_dir/id_ed25519" -N '' -C 'p07-vf-server-ops' || return 1
+    chmod 600 "$ssh_dir/id_ed25519"; chmod 644 "$ssh_dir/id_ed25519.pub"
+  fi
+  printf '\n如果系统询问 root 密码，请输入 TARGET 的 root 密码。\n'
+  printf '密码只交给系统 ssh-copy-id；P07 不读取、不保存。\n'
+  ssh-copy-id -o StrictHostKeyChecking=accept-new "root@${target_ip}" || return 1
+  printf '\nSSH Key 已发送到 TARGET ✓\n'
+}
+
+backup_identity() {
+  python3 - "$1" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads((Path(sys.argv[1])/'manifest.json').read_text(encoding='utf-8'))
+print(f"{d['site']['domain']}\t{d['backup_id']}")
+PY
+}
+
+migrate_site() {
+  printf '\n[P07] 正在读取源服务器网站...\n'
+  local rc target_ip preflight_rc setup_choice confirm output package identity domain backup_id migration_output
+  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
+
+  printf '\n迁移网站：%s\n' "$SELECTED_DOMAIN"
+  while true; do
+    printf 'TARGET 服务器 IP（输入 0 返回）：'; read -r target_ip || return 0
+    [[ "$target_ip" == 0 ]] && return 0
+    if [[ -z "$target_ip" ]]; then printf '没有输入 IP；输入 0 可返回。\n'; continue; fi
+    validate_ip "$target_ip" && break
+    printf 'IP 格式无效，请重新输入。\n'
+  done
+
+  printf '\n[1/3] 检查 TARGET...\n'
+  if ! target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
+    preflight_rc=$?
+    if [[ $preflight_rc -eq 10 ]]; then
+      printf '\n  1. 现在准备 SOURCE → TARGET SSH Key\n  0. 返回\n请选择 [0-1]：'
+      read -r setup_choice || return 0
+      [[ "$setup_choice" == 1 ]] || return 0
+      prepare_target_ssh_key "$target_ip" || { pause; return 0; }
+      printf '\n[P07] 重新检查 TARGET...\n'
+      target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN" || { pause; return 0; }
+    else
+      pause; return 0
+    fi
+  fi
+
+  printf '\nP07 将：创建迁移备份 → SSH 传输 → TARGET 自动建站 → 恢复 → Runtime → 技术验证。\n'
+  printf 'DNS 不会修改，SOURCE 不会删除。开始迁移？[y/N]：'
+  read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return 0; }
+
+  printf '\n[2/3] 创建并验证迁移备份...\n'
+  if ! output="$("$CORE" backup --site "$SELECTED_DOMAIN" --kind pre_migration --output-dir "$BACKUP_DIR" 2>&1)"; then
+    printf '\n迁移备份没有完成。SOURCE 未修改。\n%s\n' "$output" >&2; pause; return 0
+  fi
+  package="$(printf '%s\n' "$output" | tail -n1)"
+  identity="$(backup_identity "$package")"; IFS=$'\t' read -r domain backup_id <<<"$identity"
+
+  printf '\n[3/3] 正在传输、恢复 Runtime 并做技术验证...\n'
+  if migration_output="$("$CORE" migrate transfer-new-site --package "$package" --target-host "$target_ip" \
+    --target-ip "$target_ip" --ssh-user root --ssh-port 22 --confirm "MIGRATE_NEW_SITE:${domain}:${backup_id}" 2>&1)"; then
+    printf '\n迁移技术验证完成 ✓\n网站：%s\nTARGET：%s · READY\n' "$domain" "$target_ip"
+    printf '当前流量：仍在 SOURCE\nDNS：未修改\nSOURCE：保留\n'
+    printf '下一步：确认 TARGET 网站后，再单独决定 DNS 切换。\n'
+  else
+    printf '\n迁移没有完成。SOURCE 与迁移备份仍保留；DNS 未修改。\n%s\n' "$migration_output" >&2
+  fi
+  pause
+}
+
+migrate_site
