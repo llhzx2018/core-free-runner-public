@@ -109,7 +109,11 @@ def rewrite_wordpress_config(path: Path, database: str, username: str, password:
     except OSError as exc:
         raise RestoreAsError("WordPress wp-config.php cannot be read") from exc
 
-    replacements = {"DB_NAME": database, "DB_USER": username, "DB_PASSWORD": password}
+    replacements = {
+        "DB_NAME": database,
+        "DB_USER": username,
+        "DB_PASSWORD": password,
+    }
     text = original
     for key, value in replacements.items():
         pattern = re.compile(
@@ -187,45 +191,61 @@ def rewrite_dotenv(path: Path, database: str, username: str, password: str, sour
         key, prefix, old_value = parsed
         new_value: str | None = None
         if key in DB_NAME_KEYS:
-            new_value = _env_quote_like(old_value, database); mapped_db = True
+            new_value = _env_quote_like(old_value, database)
+            mapped_db = True
         elif key in DB_USER_KEYS:
-            new_value = _env_quote_like(old_value, username); mapped_user = True
+            new_value = _env_quote_like(old_value, username)
+            mapped_user = True
         elif key in DB_PASS_KEYS:
-            new_value = _env_quote_like(old_value, password); mapped_pass = True
+            new_value = _env_quote_like(old_value, password)
+            mapped_pass = True
         elif key in DB_URL_KEYS:
             new_value = _env_quote_like(old_value, _rewrite_database_url(old_value, database, username, password).strip("'\""))
             mapped_db = mapped_user = mapped_pass = True
         elif key in SITE_URL_KEYS and source_domain in old_value:
             new_value = old_value.replace(source_domain, target_domain)
         if new_value is None:
-            out.append(line); continue
-        out.append(prefix + new_value); changed = True
+            out.append(line)
+            continue
+        out.append(prefix + new_value)
+        changed = True
     if not changed or not (mapped_db and mapped_user and mapped_pass):
         return False
     fd, temp_name = tempfile.mkstemp(prefix=".vfops-env-", dir=path.parent)
     temp = Path(temp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.writelines(out); handle.flush(); os.fsync(handle.fileno())
-        os.chmod(temp, mode); os.replace(temp, path)
+            handle.writelines(out)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
     return True
 
 
 def locate_wordpress_config(site: Path) -> Path | None:
-    for candidate in (site / "wp-config.php", site / "public" / "wp-config.php"):
+    candidates = [site / "wp-config.php", site / "public" / "wp-config.php"]
+    for candidate in candidates:
         if candidate.is_file() and not candidate.is_symlink():
             return candidate
     return None
 
 
-def rewrite_application_database_config(staged_site: Path, source_domain: str, target_domain: str,
-                                        database: str, username: str, password: str) -> tuple[str, Path | None]:
+def rewrite_application_database_config(
+    staged_site: Path,
+    source_domain: str,
+    target_domain: str,
+    database: str,
+    username: str,
+    password: str,
+) -> tuple[str, Path | None]:
     wp_config = locate_wordpress_config(staged_site)
     if wp_config is not None:
         rewrite_wordpress_config(wp_config, database, username, password)
         return "WORDPRESS_WP_CONFIG", wp_config
+
     for name in ENV_NAMES:
         for candidate in (staged_site / name, staged_site / "public" / name):
             if candidate.is_file() and not candidate.is_symlink():
@@ -239,7 +259,8 @@ def verify_imported_database(package_dir: Path, source_database: str, target_dat
     source_ref = None
     for item in entries if isinstance(entries, list) else []:
         if isinstance(item, dict) and str(item.get("database", "")) == source_database:
-            source_ref = str(item.get("file", "")); break
+            source_ref = str(item.get("file", ""))
+            break
     if not source_ref:
         raise RestoreAsError("source database dump is unavailable")
     source = restore_plan.safe_package_path(package_dir, source_ref)
@@ -266,8 +287,15 @@ def _run_wp(site_user: str, wp_root: Path, args: list[str], *, runuser: str = "r
     return proc.stdout.strip()
 
 
-def reconcile_wordpress_domain(site_user: str, wp_root: Path, source_domain: str, target_domain: str,
-                               *, runuser: str = "runuser", wp: str = "wp") -> dict[str, str]:
+def reconcile_wordpress_domain(
+    site_user: str,
+    wp_root: Path,
+    source_domain: str,
+    target_domain: str,
+    *,
+    runuser: str = "runuser",
+    wp: str = "wp",
+) -> dict[str, str]:
     home = _run_wp(site_user, wp_root, ["option", "get", "home"], runuser=runuser, wp=wp)
     siteurl = _run_wp(site_user, wp_root, ["option", "get", "siteurl"], runuser=runuser, wp=wp)
     old_values = []
@@ -281,9 +309,13 @@ def reconcile_wordpress_domain(site_user: str, wp_root: Path, source_domain: str
         if not parts.scheme or not parts.netloc:
             raise RestoreAsError("WordPress source URL is invalid")
         target = urlunsplit((parts.scheme, target_domain, parts.path, "", "")).rstrip("/")
-        _run_wp(site_user, wp_root,
-                ["search-replace", old, target, "--all-tables-with-prefix", "--skip-columns=guid", "--precise"],
-                runuser=runuser, wp=wp)
+        _run_wp(
+            site_user,
+            wp_root,
+            ["search-replace", old, target, "--all-tables-with-prefix", "--skip-columns=guid", "--precise"],
+            runuser=runuser,
+            wp=wp,
+        )
     new_home = _run_wp(site_user, wp_root, ["option", "get", "home"], runuser=runuser, wp=wp)
     new_siteurl = _run_wp(site_user, wp_root, ["option", "get", "siteurl"], runuser=runuser, wp=wp)
     if target_domain not in new_home or target_domain not in new_siteurl:
@@ -291,8 +323,16 @@ def reconcile_wordpress_domain(site_user: str, wp_root: Path, source_domain: str
     return {"home": new_home, "siteurl": new_siteurl}
 
 
-def restore_as(package_dir: Path, target_domain: str, target_root: Path, clpctl: str, confirm: str,
-               *, runuser: str = "runuser", wp: str = "wp") -> dict[str, Any]:
+def restore_as(
+    package_dir: Path,
+    target_domain: str,
+    target_root: Path,
+    clpctl: str,
+    confirm: str,
+    *,
+    runuser: str = "runuser",
+    wp: str = "wp",
+) -> dict[str, Any]:
     package_dir = package_dir.resolve()
     fresh = package_engine.verify_package(package_dir)
     if fresh.get("status") != "PASS":
@@ -308,34 +348,50 @@ def restore_as(package_dir: Path, target_domain: str, target_root: Path, clpctl:
     identity = site_lifecycle.derive_target_identity(target_domain, backup_id)
     final_site = restore_plan.target_path(target_root, identity.site_root)
     parent = final_site.parent
-    archive = restore_plan.safe_package_path(package_dir, str(manifest.get("contents", {}).get("files_archive", "")))
+    archive_rel = str(manifest.get("contents", {}).get("files_archive", ""))
+    archive = restore_plan.safe_package_path(package_dir, archive_rel)
     archive_check = restore_plan.inspect_archive(archive)
     if archive_check.get("blockers"):
         raise RestoreAsError("site archive failed extraction safety checks")
+
     mysql_entries = manifest.get("contents", {}).get("mysql", [])
     if not isinstance(mysql_entries, list):
         raise RestoreAsError("MySQL manifest is invalid")
     if len(mysql_entries) > 1:
         raise RestoreAsError("Restore-As currently refuses ambiguous multi-database applications")
 
-    created_site = False; created_databases: list[str] = []; staging: Path | None = None
-    bootstrap_dir: Path | None = None; committed = False; failure_stage = "TARGET_PREFLIGHT"
-    app_kind = "NO_DATABASE"; config_rel: str | None = None; target_database: str | None = None
-    target_db_user: str | None = None; target_db_password: str | None = None
-    wp_root: Path | None = None; wordpress_urls: dict[str, str] | None = None
+    created_site = False
+    created_databases: list[str] = []
+    staging: Path | None = None
+    bootstrap_dir: Path | None = None
+    committed = False
+    failure_stage = "TARGET_PREFLIGHT"
+    app_kind = "NO_DATABASE"
+    config_rel: str | None = None
+    target_database: str | None = None
+    target_db_user: str | None = None
+    target_db_password: str | None = None
+    wp_root: Path | None = None
+    wordpress_urls: dict[str, str] | None = None
 
     try:
         failure_stage = "CLOUDPANEL_SITE_CREATE"
-        site_lifecycle.create_site(source_site, identity, clpctl=clpctl,
-                                   vhost_template=source_vhost_template(package_dir, manifest))
+        site_lifecycle.create_site(
+            source_site,
+            identity,
+            clpctl=clpctl,
+            vhost_template=source_vhost_template(package_dir, manifest),
+        )
         created_site = True
         if not final_site.is_dir():
             raise RestoreAsError("CloudPanel site creation did not create expected target root")
 
         failure_stage = "SITE_FILES_STAGE"
-        staging = Path(tempfile.mkdtemp(prefix=f".vfops-restore-as-{backup_id}-", dir=parent)); os.chmod(staging, 0o700)
+        staging = Path(tempfile.mkdtemp(prefix=f".vfops-restore-as-{backup_id}-", dir=parent))
+        os.chmod(staging, 0o700)
         staged_site = staging / "site"
         restore_apply.extract_site_archive(archive, staged_site)
+
         source_site_root = restore_plan.safe_absolute_site_path(str(source_site.get("site_root", "")))
         files_check = verify_engine.verify_files(package_dir, manifest, staged_site, source_site_root)
         sqlite_check = verify_engine.verify_sqlite(package_dir, manifest, staged_site, source_site_root)
@@ -346,20 +402,36 @@ def restore_as(package_dir: Path, target_domain: str, target_root: Path, clpctl:
         if mysql_entries:
             source_database = str(mysql_entries[0].get("database", ""))
             dump = restore_plan.safe_package_path(package_dir, str(mysql_entries[0].get("file", "")))
-            target_database, target_db_user, target_db_password = site_lifecycle.derive_database_identity(target_domain, backup_id, 1)
-            cloudpanel.add_database(target_domain, target_database, target_db_user, target_db_password, clpctl=clpctl)
+            target_database, target_db_user, target_db_password = site_lifecycle.derive_database_identity(
+                target_domain, backup_id, 1
+            )
+            cloudpanel.add_database(
+                target_domain,
+                target_database,
+                target_db_user,
+                target_db_password,
+                clpctl=clpctl,
+            )
             created_databases.append(target_database)
             cloudpanel.import_database(target_database, dump, clpctl=clpctl)
             verify_imported_database(package_dir, source_database, target_database, clpctl)
+
             failure_stage = "APPLICATION_CONFIG_REMAP"
-            app_kind, config_path = rewrite_application_database_config(staged_site, source_domain, target_domain,
-                                                                         target_database, target_db_user, target_db_password)
+            app_kind, config_path = rewrite_application_database_config(
+                staged_site,
+                source_domain,
+                target_domain,
+                target_database,
+                target_db_user,
+                target_db_password,
+            )
             config_rel = config_path.relative_to(staged_site).as_posix() if config_path else None
             if app_kind == "WORDPRESS_WP_CONFIG" and config_path is not None:
                 wp_root = final_site / config_path.parent.relative_to(staged_site)
 
         failure_stage = "SITE_OWNERSHIP_RECONCILIATION"
         restore_new.reconcile_site_ownership(staged_site, final_site)
+
         failure_stage = "SITE_ATOMIC_COMMIT"
         bootstrap_dir = parent / f".vfops-bootstrap-as-{backup_id}"
         if bootstrap_dir.exists():
@@ -368,13 +440,21 @@ def restore_as(package_dir: Path, target_domain: str, target_root: Path, clpctl:
         try:
             os.replace(staged_site, final_site)
         except Exception:
-            os.replace(bootstrap_dir, final_site); bootstrap_dir = None; raise
+            os.replace(bootstrap_dir, final_site)
+            bootstrap_dir = None
+            raise
         committed = True
 
         if app_kind == "WORDPRESS_WP_CONFIG" and wp_root is not None:
             failure_stage = "WORDPRESS_DOMAIN_REMAP"
-            wordpress_urls = reconcile_wordpress_domain(identity.site_user, wp_root, source_domain, target_domain,
-                                                        runuser=runuser, wp=wp)
+            wordpress_urls = reconcile_wordpress_domain(
+                identity.site_user,
+                wp_root,
+                source_domain,
+                target_domain,
+                runuser=runuser,
+                wp=wp,
+            )
 
         failure_stage = "POST_RESTORE_PERMISSIONS"
         try:
@@ -383,48 +463,78 @@ def restore_as(package_dir: Path, target_domain: str, target_root: Path, clpctl:
             raise RestoreAsError("CloudPanel permission reconciliation failed") from exc
 
         if bootstrap_dir and bootstrap_dir.exists():
-            shutil.rmtree(bootstrap_dir); bootstrap_dir = None
+            shutil.rmtree(bootstrap_dir)
+            bootstrap_dir = None
 
         return {
-            "schema": RESULT_SCHEMA, "status": "RESTORE_AS_VERIFIED", "backup_id": backup_id,
-            "source_domain": source_domain, "target_domain": target_domain,
-            "target_site_user": identity.site_user, "target_site_root": identity.site_root,
-            "application_config_mode": app_kind, "application_config_file": config_rel,
-            "target_database": target_database, "target_database_user": target_db_user,
-            "database_import_verified_before_transform": bool(mysql_entries), "wordpress_urls": wordpress_urls,
+            "schema": RESULT_SCHEMA,
+            "status": "RESTORE_AS_VERIFIED",
+            "backup_id": backup_id,
+            "source_domain": source_domain,
+            "target_domain": target_domain,
+            "target_site_user": identity.site_user,
+            "target_site_root": identity.site_root,
+            "application_config_mode": app_kind,
+            "application_config_file": config_rel,
+            "target_database": target_database,
+            "target_database_user": target_db_user,
+            "database_import_verified_before_transform": bool(mysql_entries),
+            "wordpress_urls": wordpress_urls,
             "source_ssl_reused": source_domain == target_domain,
-            "ssl_status": "SOURCE_DOMAIN_CERTIFICATE_NOT_REUSED; DNS_REQUIRED_FOR_NEW_CERTIFICATE" if source_domain != target_domain
-                          else "SOURCE_DOMAIN_RESTORE_AS; CERTIFICATE_RECONCILIATION_DEFERRED",
-            "runtime_metadata_status": "DEFERRED_FOR_IDENTITY_REMAP", "dns_changed": False,
-            "source_deleted": False, "existing_site_overwrite_allowed": False, "secrets_emitted": False,
+            "ssl_status": "SOURCE_DOMAIN_CERTIFICATE_NOT_REUSED; DNS_REQUIRED_FOR_NEW_CERTIFICATE"
+            if source_domain != target_domain
+            else "SOURCE_DOMAIN_RESTORE_AS; CERTIFICATE_RECONCILIATION_DEFERRED",
+            "runtime_metadata_status": "DEFERRED_FOR_IDENTITY_REMAP",
+            "dns_changed": False,
+            "source_deleted": False,
+            "existing_site_overwrite_allowed": False,
+            "secrets_emitted": False,
         }
     except Exception as exc:
-        if committed and final_site.exists(): shutil.rmtree(final_site, ignore_errors=True)
+        if committed and final_site.exists():
+            shutil.rmtree(final_site, ignore_errors=True)
         if bootstrap_dir and bootstrap_dir.exists() and not final_site.exists():
-            try: os.replace(bootstrap_dir, final_site); bootstrap_dir = None
-            except OSError: pass
-        for database in reversed(created_databases): site_lifecycle.cleanup_database(database, clpctl=clpctl)
-        if created_site: site_lifecycle.cleanup_site(target_domain, clpctl=clpctl)
+            try:
+                os.replace(bootstrap_dir, final_site)
+                bootstrap_dir = None
+            except OSError:
+                pass
+        for database in reversed(created_databases):
+            site_lifecycle.cleanup_database(database, clpctl=clpctl)
+        if created_site:
+            site_lifecycle.cleanup_site(target_domain, clpctl=clpctl)
         reason = exc if isinstance(exc, RestoreAsError) else exc.__class__.__name__
         raise RestoreAsError(f"Restore-As failed; stage={failure_stage}; reason={reason}") from exc
     finally:
-        if staging and staging.exists(): shutil.rmtree(staging, ignore_errors=True)
+        if staging and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="VF Server Ops restore a verified backup as a new CloudPanel site")
-    parser.add_argument("--package", required=True); parser.add_argument("--target-domain", required=True)
+    parser.add_argument("--package", required=True)
+    parser.add_argument("--target-domain", required=True)
     parser.add_argument("--target-root", default="/")
     parser.add_argument("--clpctl", default=os.environ.get("VFOPS_CLPCTL", "clpctl"))
     parser.add_argument("--runuser", default=os.environ.get("VFOPS_RUNUSER", "runuser"))
-    parser.add_argument("--wp", default=os.environ.get("VFOPS_WP", "wp")); parser.add_argument("--confirm", required=True)
+    parser.add_argument("--wp", default=os.environ.get("VFOPS_WP", "wp"))
+    parser.add_argument("--confirm", required=True)
     args = parser.parse_args()
     try:
-        result = restore_as(Path(args.package), args.target_domain, Path(args.target_root), args.clpctl, args.confirm,
-                            runuser=args.runuser, wp=args.wp)
+        result = restore_as(
+            Path(args.package),
+            args.target_domain,
+            Path(args.target_root),
+            args.clpctl,
+            args.confirm,
+            runuser=args.runuser,
+            wp=args.wp,
+        )
     except (RestoreAsError, cloudpanel.CloudPanelError, site_lifecycle.SiteLifecycleError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=os.sys.stderr); return 14
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)); return 0
+        print(f"ERROR: {exc}", file=os.sys.stderr)
+        return 14
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
