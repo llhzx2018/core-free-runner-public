@@ -48,6 +48,35 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("P07 不会覆盖", text)
         self.assertIn("DNS：未修改", text)
 
+    def test_restore_ui_persists_secret_safe_result_evidence(self) -> None:
+        text = (ROOT / "bin/vfops-site-ui").read_text(encoding="utf-8")
+        self.assertIn("VFOPS_EVIDENCE_DIR", text)
+        self.assertIn("/var/lib/vf-server-ops/evidence/restore-as", text)
+        self.assertIn('install -d -m 700 "$EVIDENCE_DIR"', text)
+        self.assertIn('install -m 600 "$result_file" "$evidence_file"', text)
+        for marker in (
+            "P07_RESTORE_AS_VERIFIED=",
+            "P07_RESTORE_SOURCE_DOMAIN=",
+            "P07_RESTORE_TARGET_DOMAIN=",
+            "P07_RESTORE_LOCAL_VERIFY=",
+            "P07_RESTORE_TLS_MODE=",
+            "P07_RESTORE_DNS_CHANGED=0",
+            "P07_RESTORE_SOURCE_DELETED=0",
+            "P07_RESTORE_EXISTING_TARGET_OVERWRITE=0",
+            "P07_RESTORE_EVIDENCE=",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("P07_R1_RESTORE_AS=PASS", text)
+        self.assertNotIn("REAL_PASS", text)
+
+    def test_restore_ui_preserves_selection_return_codes(self) -> None:
+        text = (ROOT / "bin/vfops-site-ui").read_text(encoding="utf-8")
+        self.assertNotIn("if ! select_site; then rc=$?", text)
+        self.assertNotIn("if ! select_backup; then rc=$?", text)
+        self.assertIn("if select_site; then", text)
+        self.assertIn("if select_backup; then", text)
+        self.assertIn("[[ $rc -eq 2 ]] && return 0", text)
+
     def test_cloudpanel_tools_do_not_expose_destructive_delete_actions(self) -> None:
         text = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
         self.assertIn("修复网站权限", text)

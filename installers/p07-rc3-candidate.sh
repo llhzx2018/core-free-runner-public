@@ -83,7 +83,7 @@ fetch_overlay() {
 say "下载并校验 RC3 guided-init9 完整基础运行时..."
 fetch_overlay "BUILD_ID"                    "62541d7c97ba0cf87ae0b2c46361d72a40dbe298"
 fetch_overlay "bin/vfops-user"              "71b35360d24fa2a4d8fc55ea1f3e2ae1598c5032"
-fetch_overlay "bin/vfops-site-ui"           "9b74fbfea635ecb28bf2cd452016705118fadaba"
+fetch_overlay "bin/vfops-site-ui"           "e1c210466dbfdcd81a41e1af3a40bc074866de35"
 fetch_overlay "bin/vfops-migrate-ui"        "acd3230599fda6eb9f2901bf0ac68ec08964c18b"
 fetch_overlay "bin/vfops-cloudpanel-ui"     "a37d218a3ba0614a59a9e9c53230425215406cae"
 fetch_overlay "bin/vfops-auto-backup"       "cae9e02e802ce78f3f31ff521f4004ba01bbd748"
@@ -157,6 +157,12 @@ grep -Fq '无需先在 CloudPanel 手工创建空网站' "$SRC_DIR/bin/vfops-sit
 grep -Fq '失败会回滚本次新建目标' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 缺少失败回滚 UX。"
 grep -Fq 'RESTORE_AS:' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 显式确认契约缺失。"
 grep -Fq '按原域名恢复' "$SRC_DIR/bin/vfops-site-ui" || fail "原域恢复入口缺失。"
+grep -Fq 'P07_RESTORE_AS_VERIFIED=' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 缺少固定结果摘要。"
+grep -Fq '/var/lib/vf-server-ops/evidence/restore-as' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 缺少本机 evidence 路径。"
+grep -Fq 'install -m 600 "$result_file" "$evidence_file"' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As evidence 权限不是 0600。"
+if grep -Fq 'REAL_PASS' "$SRC_DIR/bin/vfops-site-ui"; then
+  fail "Restore-As UI 不得把 Machine/未知环境冒充 Real PASS。"
+fi
 
 grep -Fq 'TARGET_SITE_CONFLICT' "$SRC_DIR/bin/vfops-migrate-ui" || fail "迁移缺少 TARGET 冲突保护。"
 grep -Fq 'DNS：未修改' "$SRC_DIR/bin/vfops-migrate-ui" || fail "迁移缺少 DNS 不修改边界。"
@@ -313,6 +319,7 @@ say "安装完成 ✓"
 printf '版本：%s\n' "$VERSION_OUT"
 printf '基础功能：网站概览 / 备份 / Restore-As / 原域恢复 / 跨 VPS 迁移 / 双远程灾备 / CloudPanel 网站工具\n'
 printf 'Restore-As：自动创建 TARGET 网站与数据库；自动恢复文件、导入数据库、重写应用配置并做本机 Host/SNI 验证\n'
+printf 'Restore-As 结果：成功后保存本机 0600 evidence，并输出固定 P07_RESTORE_* 摘要\n'
 printf '安全边界：不改 DNS、不删除 SOURCE、不覆盖已存在 TARGET、不复用 SOURCE 域名证书\n'
 printf '失败处理：只回滚本次新建 TARGET 资源；SOURCE 保留\n'
 printf '自动备份：先真实验证本地 + Google + B2，再启用 Guarded Scheduler\n'

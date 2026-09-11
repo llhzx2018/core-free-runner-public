@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE="$ROOT_DIR/bin/vfops"
 BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
+EVIDENCE_DIR="${VFOPS_EVIDENCE_DIR:-/var/lib/vf-server-ops/evidence/restore-as}"
 INV_FILE=""
 SELECTED_BACKUP=""
 SELECTED_DOMAIN=""
@@ -85,7 +86,14 @@ PY
 backup_site() {
   printf '\n[P07] 正在读取 CloudPanel 网站...\n'
   local rc output path size
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
+  if select_site; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
   printf '\n将备份：%s\n保存：%s\n开始备份？[Y/n]：' "$SELECTED_DOMAIN" "$BACKUP_DIR"
   local yn; read -r yn || return 0
   [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]] || return 0
@@ -158,19 +166,31 @@ from pathlib import Path
 import site_lifecycle
 try:
     site_lifecycle.ensure_domain_available(Path('/'),sys.argv[1])
-except Exception as exc:
+except Exception:
     print('BLOCKED')
     raise SystemExit(1)
 print('READY')
 PY
 }
 
+persist_restore_as_evidence() {
+  local result_file="$1" target_domain="$2" timestamp safe_target evidence_file
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  safe_target="$(printf '%s' "$target_domain" | tr -c 'A-Za-z0-9._-' '_')"
+  install -d -m 700 "$EVIDENCE_DIR" || return 1
+  evidence_file="$EVIDENCE_DIR/${timestamp}_${safe_target}.json"
+  install -m 600 "$result_file" "$evidence_file" || return 1
+  printf '%s\n' "$evidence_file"
+}
+
 render_restore_as_result() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-NOT_SAVED}" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
+evidence=sys.argv[2]
 v=p.get('local_verification',{}) if isinstance(p.get('local_verification'),dict) else {}
 sni=v.get('sni',{}) if isinstance(v.get('sni'),dict) else {}
+tls_mode=sni.get('mode','UNKNOWN')
 print('\n恢复为新网站完成 ✓')
 print(f"原网站：{p.get('source_domain','UNKNOWN')} · 保留")
 print(f"新网站：{p.get('target_domain','UNKNOWN')} · CloudPanel 已自动创建")
@@ -178,17 +198,28 @@ print(f"新 Site User：{p.get('target_site_user','UNKNOWN')}")
 print(f"数据库：{'已创建并验证' if p.get('target_database') else '无 MySQL'}")
 print(f"应用配置：{p.get('application_config_mode','UNKNOWN')}")
 print(f"本机验证：{'PASS' if v.get('status') == 'PASS' else 'UNKNOWN'} · 文件 / DB / Host / SNI")
-print(f"TLS：{'本机 SNI 已验证' if sni.get('mode') == 'LOCAL_HTTPS_SNI' else '目标 vhost 已验证，证书待 DNS 就绪后申请'}")
+print(f"TLS：{'本机 SNI 已验证' if tls_mode == 'LOCAL_HTTPS_SNI' else '目标 vhost 已验证，证书待 DNS 就绪后申请'}")
 print(f"SSL：{p.get('ssl_status','UNKNOWN')}")
 print(f"Runtime：{p.get('runtime_metadata_status','UNKNOWN')}")
 print('DNS：未修改')
 print('原网站：未删除、未覆盖')
 print('无需先在 CloudPanel 手工创建空网站。')
+print('\nP07 Restore-As 结果摘要')
+print('----------------------------------------')
+print(f"P07_RESTORE_AS_VERIFIED={'PASS' if p.get('status') == 'RESTORE_AS_VERIFIED' else 'UNKNOWN'}")
+print(f"P07_RESTORE_SOURCE_DOMAIN={p.get('source_domain','UNKNOWN')}")
+print(f"P07_RESTORE_TARGET_DOMAIN={p.get('target_domain','UNKNOWN')}")
+print(f"P07_RESTORE_LOCAL_VERIFY={'PASS' if v.get('status') == 'PASS' else 'UNKNOWN'}")
+print(f"P07_RESTORE_TLS_MODE={tls_mode}")
+print('P07_RESTORE_DNS_CHANGED=0')
+print('P07_RESTORE_SOURCE_DELETED=0')
+print('P07_RESTORE_EXISTING_TARGET_OVERWRITE=0')
+print(f"P07_RESTORE_EVIDENCE={evidence}")
 PY
 }
 
 restore_as_new_site() {
-  local source_domain="$1" backup_id="$2" target_domain confirm tmp rc
+  local source_domain="$1" backup_id="$2" target_domain confirm tmp rc evidence
   while true; do
     printf '\n恢复为新网站（推荐，可在本机测试）\n'
     printf '原网站：%s\n' "$source_domain"
@@ -211,6 +242,7 @@ restore_as_new_site() {
   done
   printf '\nP07 将自动创建 CloudPanel 新站、生成独立 Site User/数据库身份、恢复文件和数据库。\n'
   printf '恢复后会自动完成本机文件、数据库、Host 与 SNI/vhost 验证；失败会回滚本次新建目标。\n'
+  printf '成功结果会以 0600 权限保存在本机 evidence 目录，便于后续 Gate 读回。\n'
   printf '旧域名证书不会复制给新域名；DNS 不会修改；原网站不会删除。\n'
   printf '开始恢复为 %s？[y/N]：' "$target_domain"
   read -r confirm || return 0
@@ -231,7 +263,14 @@ restore_as_new_site() {
     rm -f "$tmp" "${tmp}.err"
     pause; return 0
   fi
-  render_restore_as_result "$tmp"
+  evidence="NOT_SAVED"
+  if evidence="$(persist_restore_as_evidence "$tmp" "$target_domain")"; then
+    :
+  else
+    evidence="NOT_SAVED"
+    printf '\n警告：恢复已验证成功，但本机 evidence 文件保存失败。\n' >&2
+  fi
+  render_restore_as_result "$tmp" "$evidence"
   rm -f "$tmp" "${tmp}.err"
   pause
 }
@@ -259,7 +298,14 @@ restore_original_domain() {
 
 restore_menu() {
   local rc identity source_domain backup_id choice
-  if ! select_backup; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
+  if select_backup; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
   identity="$(backup_identity "$SELECTED_BACKUP")"; IFS=$'\t' read -r source_domain backup_id <<<"$identity"
   while true; do
     cat <<EOF
