@@ -1,0 +1,179 @@
+name: P01 Update CSRF Resync Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-update-csrf-resync-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  updater:
+    if: github.head_ref == 'temp/p01-update-csrf-resync-gate-20260911'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: 10b5946e63b4ab3f48f5c7abd7b5decb065312d0
+      HEAD_SHA: 6d84c2fe5f0ff783166e411b6dbb08d36e252c0c
+      TARGET_BRANCH: fix/p01-update-csrf-resync-20260911
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact authority and bounded scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$BASE_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" --jq '.object.sha')" = "$HEAD_SHA"
+          GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.files[].filename' | sort >/tmp/p01-update-files.txt
+          printf '%s\n' src/assets/update.js src/update.php tests/unit/update_csrf_recovery_contract.php >/tmp/p01-update-expected.txt
+          diff -u /tmp/p01-update-expected.txt /tmp/p01-update-files.txt
+          echo P01_UPDATE_CSRF_SCOPE=PASS
+
+      - name: Checkout exact product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.HEAD_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Static contracts and Fresh Install
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          php -l src/update.php
+          php -l tests/unit/update_csrf_recovery_contract.php
+          node --check src/assets/update.js
+          php tests/unit/update_csrf_recovery_contract.php | tee /tmp/p01-update-contract.log
+          grep -Fx 'P01_UPDATE_CSRF_RECOVERY_CONTRACT=PASS' /tmp/p01-update-contract.log
+          rm -rf /tmp/p01-update-runtime /tmp/p01-update.cookies /tmp/p01-update-setup.html
+          cp -a src /tmp/p01-update-runtime
+          cd /tmp/p01-update-runtime
+          php -S 127.0.0.1:18129 -t . >/tmp/p01-update-server.log 2>&1 & echo $! >/tmp/p01-update-server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-update.cookies -b /tmp/p01-update.cookies http://127.0.0.1:18129/setup.php -o /tmp/p01-update-setup.html; then break; fi
+            sleep 1
+          done
+          test -s /tmp/p01-update-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-update-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}CsrfX"; printf '%s' "$PASS" >/tmp/p01-update.password
+          curl -fsS -L -c /tmp/p01-update.cookies -b /tmp/p01-update.cookies -X POST http://127.0.0.1:18129/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start CSRF Gate' \
+            --data-urlencode "admin_password=$PASS" \
+            --data-urlencode "admin_password_confirm=$PASS" \
+            -o /tmp/p01-update-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_UPDATE_CSRF_INSTALL=PASS
+
+      - name: Authenticated stale-token recovery in Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-update-pw && mkdir -p /tmp/p01-update-pw && cd /tmp/p01-update-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18129/';
+          const password=fs.readFileSync('/tmp/p01-update.password','utf8');
+          const browser=await chromium.launch({headless:true});
+          const ctx=await browser.newContext({viewport:{width:1291,height:797}});
+          const page=await ctx.newPage();
+
+          await page.goto(base+'start.php',{waitUntil:'networkidle'});
+          await page.locator('.vf-global-account-actions [data-vf-auth-login]').click();
+          await page.fill('[data-vf-auth-dialog] input[name="password"]',password);
+          await page.click('[data-vf-auth-submit]');
+          await page.waitForSelector('.vf-global-account-actions a[href="settings.php"]',{timeout:15000});
+
+          await page.goto(base+'update.php',{waitUntil:'networkidle'});
+          await page.waitForSelector('#checkUpdate');
+          const stale=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+          if(!stale)throw new Error('missing initial csrf');
+
+          const relogin=await page.evaluate(async password=>{
+            const r=await fetch('api.php?action=login',{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({password})});
+            return {status:r.status,data:await r.json()};
+          },password);
+          if(relogin.status!==200||!relogin.data?.ok||!relogin.data?.csrf)throw new Error('relogin failed '+JSON.stringify(relogin));
+          if(relogin.data.csrf===stale)throw new Error('csrf did not rotate');
+          const domStillStale=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+          if(domStillStale!==stale)throw new Error('fixture failed: DOM token unexpectedly changed');
+
+          const events=[];
+          page.on('response',response=>{
+            const url=response.url();
+            if(url.includes('api.php?action=update_check'))events.push({kind:'check',status:response.status()});
+            if(url.includes('api.php?action=bootstrap&vf_csrf_refresh='))events.push({kind:'refresh',status:response.status()});
+          });
+
+          await page.click('#checkUpdate');
+          await page.waitForFunction(()=>{
+            const text=(document.querySelector('#updateState')?.textContent||'').trim();
+            const err=(document.querySelector('#updateError')?.textContent||'').trim();
+            return !window.vfUpdateBusy && text!=='正在检查更新…' && !err.includes('CSRF 校验失败');
+          },null,{timeout:25000});
+          await page.waitForTimeout(350);
+
+          const fresh=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+          const state=(await page.locator('#updateState').textContent()||'').trim();
+          const error=(await page.locator('#updateError').textContent()||'').trim();
+          const first419=events.some(x=>x.kind==='check'&&x.status===419);
+          const refresh200=events.some(x=>x.kind==='refresh'&&x.status===200);
+          const recoveredCheck=events.some(x=>x.kind==='check'&&x.status!==419);
+          if(!first419)throw new Error('expected stale-token 419 '+JSON.stringify(events));
+          if(!refresh200)throw new Error('missing csrf refresh '+JSON.stringify(events));
+          if(!recoveredCheck)throw new Error('missing one-shot retry '+JSON.stringify(events));
+          if(fresh!==relogin.data.csrf)throw new Error('DOM csrf not resynced');
+          if(error.includes('CSRF 校验失败')||state==='检查更新失败。')throw new Error('UI remained in csrf failure '+JSON.stringify({state,error,events}));
+          console.log('P01_UPDATE_CSRF_BROWSER='+JSON.stringify({staleRotated:stale!==fresh,state,error,events}));
+          await browser.close();
+          JS
+          node verify.mjs | tee /tmp/p01-update-browser.log
+          grep -F 'P01_UPDATE_CSRF_BROWSER=' /tmp/p01-update-browser.log
+          echo P01_UPDATE_CSRF_BROWSER_GATE=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          echo P01_UPDATE_CSRF_RESYNC_GATE=PASS
+          echo TESTING_GATE=PASS
+          echo INSTALL_GATE=PASS
+          echo UA_UI_MACHINE=PASS
+          echo CSRF_SERVER_GUARD=UNCHANGED
+          echo DATA_SCHEMA_CHANGE=NONE
+          echo RELEASE_WRITE=false
+          echo PRODUCTION_WRITE=false
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-update-server.pid; then kill "$(cat /tmp/p01-update-server.pid)" 2>/dev/null || true; fi
+          rm -rf vf-start /tmp/p01-update-*
