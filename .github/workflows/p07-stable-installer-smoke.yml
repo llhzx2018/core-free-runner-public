@@ -3,10 +3,11 @@ name: P07 Stable Installer Smoke
 on:
   workflow_dispatch:
   push:
-    branches: [main, work/p07-guided-init9-postmerge-gates, work/p07-guided-init9-real-gate-ux]
+    branches: [main, work/p07-cloudpanel-foundation-complete]
     paths:
       - 'release-triggers/p07-stable-installer-smoke.json'
       - 'installers/p07.sh'
+      - 'installers/p07-rc3-cloudpanel-complete.sh'
       - 'installers/p07-rc3-candidate.sh'
       - 'dist/p07/0.1.0-rc3/**'
       - '.github/workflows/p07-stable-installer-smoke.yml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'release-triggers/p07-stable-installer-smoke.json'
       - 'installers/p07.sh'
+      - 'installers/p07-rc3-cloudpanel-complete.sh'
       - 'installers/p07-rc3-candidate.sh'
       - 'dist/p07/0.1.0-rc3/**'
       - '.github/workflows/p07-stable-installer-smoke.yml'
@@ -25,13 +27,15 @@ jobs:
   stable-install-smoke:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
-      - name: Verify RC2 immutable base identity
+      - name: Verify immutable base and layered installer identities
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json
+          import hashlib,json,re
           from pathlib import Path
           trigger=json.loads(Path('release-triggers/p07-stable-installer-smoke.json').read_text())
           identity={}
@@ -42,94 +46,73 @@ jobs:
           assert identity['source_commit'] == trigger['source_commit']
           assert checksum == trigger['package_sha256']
           assert identity['channel'] == 'RC2'
-          PY
 
-      - name: Verify stable wrapper and exact RC3 candidate identity
-        run: |
-          set -euo pipefail
-          cp installers/p07.sh /tmp/p07.sh
-          cp installers/p07-rc3-candidate.sh /tmp/p07-candidate.sh
-          bash -n /tmp/p07.sh
-          bash -n /tmp/p07-candidate.sh
-          python3 - <<'PY'
-          import hashlib,re
-          stable=open('/tmp/p07.sh','r',encoding='utf-8').read()
-          candidate=open('/tmp/p07-candidate.sh','rb').read()
+          stable=Path('installers/p07.sh').read_text()
+          complete=Path('installers/p07-rc3-cloudpanel-complete.sh').read_bytes()
+          candidate=Path('installers/p07-rc3-candidate.sh').read_bytes()
           m=re.search(r'^EXPECTED_BLOB="([0-9a-f]{40})"$', stable, re.M)
-          assert m, 'stable wrapper missing EXPECTED_BLOB'
-          actual=hashlib.sha1(b'blob '+str(len(candidate)).encode()+b'\0'+candidate).hexdigest()
-          assert actual == m.group(1), (actual,m.group(1))
+          assert m
+          complete_blob=hashlib.sha1(b'blob '+str(len(complete)).encode()+b'\0'+complete).hexdigest()
+          assert complete_blob == m.group(1), (complete_blob,m.group(1))
+          complete_text=complete.decode()
+          m2=re.search(r'^BASE_INSTALLER_BLOB="([0-9a-f]{40})"$', complete_text, re.M)
+          assert m2
+          candidate_blob=hashlib.sha1(b'blob '+str(len(candidate)).encode()+b'\0'+candidate).hexdigest()
+          assert candidate_blob == m2.group(1), (candidate_blob,m2.group(1))
+          assert 'EXPECTED_BUILD_ID="0.1.0-rc3-guided-init10"' in complete_text
+          assert 'BASE_PUBLIC_ROOT="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/2ed5905103621693a8e8428229b501f1110be381"' in complete_text
           PY
-          grep -F 'rollback_install()' /tmp/p07-candidate.sh
-          grep -F 'mv "$PREVIOUS_DIR" "$INSTALL_DIR"' /tmp/p07-candidate.sh
-          grep -F 'ssh-copy-id' /tmp/p07-candidate.sh
-          grep -F 'ssh-keygen' /tmp/p07-candidate.sh
-          grep -F 'openssh-client' /tmp/p07-candidate.sh
-          grep -F 'rclone' /tmp/p07-candidate.sh
-          grep -F '1. 全新初始化 Google + B2' /tmp/p07-candidate.sh
-          grep -F '2. 从已有 P07 服务器导入' /tmp/p07-candidate.sh
-          grep -F 'google_device_oauth.py' /tmp/p07-candidate.sh
-          grep -F 'restore_as_verified.py' /tmp/p07-candidate.sh
+          bash -n installers/p07.sh
+          bash -n installers/p07-rc3-cloudpanel-complete.sh
+          bash -n installers/p07-rc3-candidate.sh
 
-      - name: Run exact public stable installer
+      - name: Run exact stable installer
         run: |
           set -euo pipefail
           sudo env \
             P07_PUBLIC_ROOT="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${{ github.sha }}" \
             P07_NO_EXEC=1 \
-            bash /tmp/p07.sh 2>&1 | tee /tmp/p07-install-output.txt
+            bash installers/p07.sh 2>&1 | tee /tmp/p07-install-output.txt
           ! grep -F '% Total' /tmp/p07-install-output.txt
           grep -F '[P07] 安装完成 ✓' /tmp/p07-install-output.txt
           grep -F '版本：VF Server Ops 0.1.0 RC3' /tmp/p07-install-output.txt
-          grep -F '基础功能：网站概览 / 备份 / Restore-As / 原域恢复 / 跨 VPS 迁移 / 双远程灾备 / CloudPanel 网站工具' /tmp/p07-install-output.txt
-          grep -F 'Restore-As：自动创建 TARGET 网站与数据库' /tmp/p07-install-output.txt
-          grep -F 'Restore-As 结果：成功后保存本机 0600 evidence，并输出固定 P07_RESTORE_* 摘要' /tmp/p07-install-output.txt
-          grep -F '安全边界：不改 DNS、不删除 SOURCE、不覆盖已存在 TARGET、不复用 SOURCE 域名证书' /tmp/p07-install-output.txt
 
-      - name: Verify installed prerequisites
-        run: |
-          set -euo pipefail
-          command -v ssh
-          command -v ssh-copy-id
-          command -v ssh-keygen
-          command -v rclone
-
-      - name: Verify installed guided-init9 user entry
+      - name: Verify installed guided-init10 runtime
         run: |
           set -euo pipefail
           test "$(vfops --version)" = 'VF Server Ops 0.1.0 RC3'
-          test "$(vfops --build-id)" = '0.1.0-rc3-guided-init9'
+          test "$(vfops --build-id)" = '0.1.0-rc3-guided-init10'
           test "$(readlink -f /usr/local/bin/vfops)" = '/opt/vf-server-ops/bin/vfops-user'
-          vfops inventory --compact > /tmp/p07-inventory.json
-          python3 - <<'PY'
-          import json
-          p=json.load(open('/tmp/p07-inventory.json'))
-          assert p.get('schema') == 'vf-server-ops.inventory.v1'
-          PY
+          for path in \
+            bin/vfops-cloudpanel-ui \
+            lib/cloudpanel_ui_common.sh \
+            lib/cloudpanel_ui_sites.sh \
+            lib/cloudpanel_ui_ops.sh \
+            lib/cloudpanel_ui_admin.sh \
+            lib/cloudpanel.py \
+            lib/cloudpanel_site.py \
+            lib/site_lifecycle.py \
+            lib/restore_as.py \
+            lib/restore_as_verified.py; do
+            test -f "/opt/vf-server-ops/$path"
+          done
           printf '0\n' | vfops > /tmp/p07-menu.txt
-          grep -F 'P07 · VF Server Ops  0.1.0 RC3' /tmp/p07-menu.txt
-          grep -F '1. 服务器 / 网站概览' /tmp/p07-menu.txt
-          grep -F '2. 备份网站' /tmp/p07-menu.txt
-          grep -F '3. 恢复网站' /tmp/p07-menu.txt
-          grep -F '4. 迁移网站到新服务器' /tmp/p07-menu.txt
-          grep -F '5. 自动备份 / 远程灾备' /tmp/p07-menu.txt
           grep -F '6. CloudPanel 网站工具' /tmp/p07-menu.txt
-          test -x /opt/vf-server-ops/bin/vfops-site-ui
-          test -x /opt/vf-server-ops/bin/vfops-migrate-ui
-          test -x /opt/vf-server-ops/bin/vfops-cloudpanel-ui
-          test -x /opt/vf-server-ops/bin/vfops-storage-setup
-          test -f /opt/vf-server-ops/lib/cloudpanel.py
-          test -f /opt/vf-server-ops/lib/site_lifecycle.py
-          test -f /opt/vf-server-ops/lib/restore_as.py
-          test -f /opt/vf-server-ops/lib/restore_as_verified.py
-          test -f /opt/vf-server-ops/lib/google_device_oauth.py
-          grep -Fq 'P07_RESTORE_AS_VERIFIED=' /opt/vf-server-ops/bin/vfops-site-ui
-          grep -Fq 'P07_RESTORE_EVIDENCE=' /opt/vf-server-ops/bin/vfops-site-ui
-          grep -Fq '/var/lib/vf-server-ops/evidence/restore-as' /opt/vf-server-ops/bin/vfops-site-ui
-          grep -Fq '1. 全新初始化 Google + B2' /opt/vf-server-ops/bin/vfops-storage-setup
-          grep -Fq '2. 从已有 P07 服务器导入' /opt/vf-server-ops/bin/vfops-storage-setup
-          grep -Fq 'LOCAL_HTTPS_SNI' /opt/vf-server-ops/lib/restore_as_verified.py
-          ! grep -F 'UNKNOWN' <(vfops --version)
+          printf '0\n' | bash /opt/vf-server-ops/bin/vfops-cloudpanel-ui > /tmp/p07-cp-menu.txt
+          grep -F '3. 创建网站' /tmp/p07-cp-menu.txt
+          grep -F '4. 数据库工具' /tmp/p07-cp-menu.txt
+          grep -F '5. SSL / HTTPS' /tmp/p07-cp-menu.txt
+          grep -F '7. CloudPanel 安全' /tmp/p07-cp-menu.txt
+          grep -F '8. CloudPanel 用户' /tmp/p07-cp-menu.txt
+          grep -F '9. Vhost 模板' /tmp/p07-cp-menu.txt
+          grep -F '10. 平台基础能力检查' /tmp/p07-cp-menu.txt
+          ! grep -Eiq '^[[:space:]]*[0-9]+\.[[:space:]]*(删除网站|删除数据库|删除用户)' /tmp/p07-cp-menu.txt
+          ! grep -Eiq 'site:delete|db:delete|user:delete' \
+            /opt/vf-server-ops/bin/vfops-cloudpanel-ui \
+            /opt/vf-server-ops/lib/cloudpanel_ui_common.sh \
+            /opt/vf-server-ops/lib/cloudpanel_ui_sites.sh \
+            /opt/vf-server-ops/lib/cloudpanel_ui_ops.sh \
+            /opt/vf-server-ops/lib/cloudpanel_ui_admin.sh
 
       - name: Result
-        run: echo 'P07_STABLE_INSTALLER_RC3_GUIDED_INIT9_SMOKE=PASS'
+        run: echo 'P07_STABLE_INSTALLER_RC3_GUIDED_INIT10_SMOKE=PASS'

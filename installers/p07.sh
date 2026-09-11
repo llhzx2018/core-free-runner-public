@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
-INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-candidate.sh"
-EXPECTED_BLOB="92e5f0079294ca22bc77b7e7f48d64d779de263d"
+INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-cloudpanel-complete.sh"
+EXPECTED_BLOB="a98aa0a79d9ca3c5c5050e1505184c5b86208aa0"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 

@@ -40,14 +40,14 @@ class SiteLifecycleTests(unittest.TestCase):
 
     def test_all_supported_runtime_types_route_to_adapter(self) -> None:
         cases = [
-            ({"runtime": {"type": "static"}}, "add_static_site"),
-            ({"runtime": {"type": "nodejs", "version": "22", "app_port": 3000}}, "add_nodejs_site"),
-            ({"runtime": {"type": "python", "version": "3.13", "app_port": 8000}}, "add_python_site"),
-            ({"runtime": {"type": "reverse_proxy", "app_port": 8080}}, "add_reverse_proxy_site"),
+            ({"runtime": {"type": "static"}}, "add_static_site", "static.example.com"),
+            ({"runtime": {"type": "nodejs", "version": "22", "app_port": 3000}}, "add_nodejs_site", "nodejs.example.com"),
+            ({"runtime": {"type": "python", "version": "3.13", "app_port": 8000}}, "add_python_site", "python.example.com"),
+            ({"runtime": {"type": "reverse_proxy", "app_port": 8080}}, "add_reverse_proxy_site", "proxy.example.com"),
         ]
-        for source, method in cases:
+        for source, method, domain in cases:
             with self.subTest(method=method):
-                identity = site_lifecycle.derive_target_identity(f"{method}.example.com", method)
+                identity = site_lifecycle.derive_target_identity(domain, method)
                 with mock.patch.object(site_lifecycle.cloudpanel, method) as call:
                     site_lifecycle.create_site(source, identity)
                 call.assert_called_once()

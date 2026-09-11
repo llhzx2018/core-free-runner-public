@@ -2,171 +2,44 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CORE="$ROOT_DIR/bin/vfops"
-INV_FILE=""
-SELECTED_INDEX=""
-
-cleanup() { [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true; }
-trap cleanup EXIT
-pause() { printf '\n按 Enter 返回...'; read -r _ || true; }
-
-load_inventory() {
-  cleanup
-  INV_FILE="$(mktemp -t p07-cp-tools.XXXXXX)"
-  "$CORE" inventory --compact >"$INV_FILE" 2>/dev/null
-}
-
-select_site() {
-  SELECTED_INDEX=""
-  load_inventory || { printf '\n无法读取 CloudPanel 网站。\n'; return 1; }
-  local count choice
-  count="$(python3 - "$INV_FILE" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8'))
-print(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else []))
-PY
-)"
-  [[ "$count" -gt 0 ]] || { printf '\n没有发现 CloudPanel 网站。\n'; return 2; }
-  printf '\n请选择网站\n----------------------------------------\n'
-  python3 - "$INV_FILE" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8'))
-for i,s in enumerate(p.get('sites',[]),1): print(f"  {i}. {s.get('domain','UNKNOWN')}")
-print('  0. 返回')
-PY
-  printf '\n请选择 [0-%s]：' "$count"; read -r choice || return 2
-  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
-  [[ "$choice" == 0 ]] && return 2
-  (( choice>=1 && choice<=count )) || return 1
-  SELECTED_INDEX="$choice"
-}
-
-site_fields() {
-  python3 - "$INV_FILE" "$SELECTED_INDEX" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8')); s=p['sites'][int(sys.argv[2])-1]
-r=s.get('runtime',{}) if isinstance(s.get('runtime'),dict) else {}
-ssl=s.get('ssl',{}) if isinstance(s.get('ssl'),dict) else {}
-mysql=s.get('mysql_databases'); sqlite=s.get('sqlite_paths')
-print(s.get('domain','UNKNOWN'))
-print(s.get('site_user','UNKNOWN'))
-print(s.get('site_root','UNKNOWN'))
-print(s.get('document_root','UNKNOWN'))
-print(r.get('type','UNKNOWN'))
-print(r.get('version','UNKNOWN'))
-print(len(mysql) if isinstance(mysql,list) else -1)
-print(len(sqlite) if isinstance(sqlite,list) else -1)
-print('YES' if ssl.get('configured') is True else ('NO' if ssl.get('configured') is False else 'UNKNOWN'))
-print(ssl.get('days_remaining','UNKNOWN'))
-PY
-}
-
-show_site_details() {
-  local rc fields domain user root docroot runtime version mysql sqlite ssl days
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
-  mapfile -t fields < <(site_fields)
-  domain="${fields[0]}"; user="${fields[1]}"; root="${fields[2]}"; docroot="${fields[3]}"
-  runtime="${fields[4]}"; version="${fields[5]}"; mysql="${fields[6]}"; sqlite="${fields[7]}"; ssl="${fields[8]}"; days="${fields[9]}"
-  printf '\n网站详情\n----------------------------------------\n'
-  printf '域名：%s\nSite User：%s\nSite Root：%s\nDocument Root：%s\n' "$domain" "$user" "$root" "$docroot"
-  printf 'Runtime：%s %s\nMySQL：%s\nSQLite：%s\nSSL：%s\nSSL 剩余天数：%s\n' "$runtime" "$version" "$mysql" "$sqlite" "$ssl" "$days"
-  printf '读取方式：只读，不修改网站。\n'
-  pause
-}
-
-repair_permissions() {
-  local rc fields domain user root confirm
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
-  mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"; root="${fields[2]}"
-  if [[ "$user" == UNKNOWN || "$root" == UNKNOWN ]]; then printf '网站用户/目录无法安全识别，已停止。\n'; pause; return 0; fi
-  printf '\n将使用 CloudPanel Site User 权限修复：%s\n路径：%s\n' "$domain" "$root"
-  printf '目录权限 770，文件权限 660；不会删除文件。继续？[y/N]：'; read -r confirm || return 0
-  [[ "$confirm" =~ ^[Yy]$ ]] || return 0
-  if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$root" <<'PY'
-import sys
-import cloudpanel_site
-cloudpanel_site.reset_permissions(sys.argv[1],sys.argv[2])
-PY
-  then
-    printf '\n权限修复完成 ✓\n'
-  else
-    printf '\n权限修复没有完成；网站文件未被 P07 删除。\n' >&2
-  fi
-  pause
-}
-
-purge_varnish() {
-  local rc fields domain user confirm
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
-  mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"
-  [[ "$user" != UNKNOWN ]] || { printf 'Site User 无法识别，已停止。\n'; pause; return 0; }
-  printf '\n将清理 %s 的 Varnish 缓存（如果该站点启用了 Varnish）。\n' "$domain"
-  printf '不会删除网站文件。继续？[Y/n]：'; read -r confirm || return 0
-  [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]] || return 0
-  if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" <<'PY'
-import sys
-import cloudpanel_site
-cloudpanel_site.purge_varnish(sys.argv[1],'all')
-PY
-  then
-    printf '\nVarnish 缓存已清理 ✓\n'
-  else
-    printf '\nVarnish 清理未完成；可能该网站未启用 Varnish。网站文件未修改。\n' >&2
-  fi
-  pause
-}
-
-ssl_status() {
-  local rc fields domain ssl days
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
-  mapfile -t fields < <(site_fields); domain="${fields[0]}"; ssl="${fields[8]}"; days="${fields[9]}"
-  printf '\nSSL 状态\n----------------------------------------\n域名：%s\n配置：%s\n剩余天数：%s\n' "$domain" "$ssl" "$days"
-  printf '这里仅检查状态，不申请证书、不修改 DNS。\n'
-  pause
-}
-
-platform_status() {
-  printf '\nCloudPanel 基础能力\n----------------------------------------\n'
-  if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
-import cloudpanel
-try:
-    print('CLI：READY')
-    print('版本：'+cloudpanel.version())
-    templates=cloudpanel.list_vhost_templates().strip().splitlines()
-    print('Vhost Templates：READY' if templates else 'Vhost Templates：EMPTY/UNKNOWN')
-    print('站点生命周期：模块已加载')
-    print('数据库生命周期：模块已加载')
-    print('SSL / Vhost：模块已加载')
-except Exception:
-    print('CLI：NOT_READY')
-    raise
-PY
-  then :; else printf 'CloudPanel 基础能力检查没有完成。\n' >&2; fi
-  printf '说明：此检查不修改 DNS、不删除网站。\n'
-  pause
-}
+source "$ROOT_DIR/lib/cloudpanel_ui_common.sh"
+source "$ROOT_DIR/lib/cloudpanel_ui_sites.sh"
+source "$ROOT_DIR/lib/cloudpanel_ui_ops.sh"
+source "$ROOT_DIR/lib/cloudpanel_ui_admin.sh"
 
 while true; do
   cat <<'EOF'
 
 CloudPanel 网站工具
 ----------------------------------------
-  1. 查看网站详情
-  2. 修复网站权限
-  3. 清理 Varnish 缓存
-  4. 查看 SSL 状态
-  5. 检查 CloudPanel 基础能力
+  1. 网站详情
+  2. 网站健康检查
+  3. 创建网站
+  4. 数据库工具
+  5. SSL / HTTPS
+  6. 权限 / 缓存
+  7. CloudPanel 安全
+  8. CloudPanel 用户
+  9. Vhost 模板
+ 10. 平台基础能力检查
   0. 返回
 
+说明：删除网站 / 删除数据库 / 删除用户不在普通入口中。
+      P07 不自动修改 DNS，不删除 SOURCE，不覆盖已有 TARGET。
 EOF
-  printf '请选择 [0-5]：'; read -r choice || exit 0
+  printf '请选择 [0-10]：'; read -r choice || exit 0
   case "$choice" in
     1) show_site_details ;;
-    2) repair_permissions ;;
-    3) purge_varnish ;;
-    4) ssl_status ;;
-    5) platform_status ;;
+    2) site_health ;;
+    3) create_site ;;
+    4) database_tools ;;
+    5) ssl_tools ;;
+    6) maintenance_tools ;;
+    7) panel_security ;;
+    8) panel_users ;;
+    9) vhost_tools ;;
+    10) platform_status ;;
     0) exit 0 ;;
-    *) printf '请输入 0-5。\n' ;;
+    *) printf '请输入 0-10。\n' ;;
   esac
 done

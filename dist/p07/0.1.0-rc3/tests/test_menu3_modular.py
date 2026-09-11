@@ -77,15 +77,35 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("if select_backup; then", text)
         self.assertIn("[[ $rc -eq 2 ]] && return 0", text)
 
-    def test_cloudpanel_tools_do_not_expose_destructive_delete_actions(self) -> None:
-        text = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
-        self.assertIn("修复网站权限", text)
-        self.assertIn("清理 Varnish 缓存", text)
-        self.assertIn("查看 SSL 状态", text)
-        self.assertNotIn("site:delete", text)
-        self.assertNotIn("db:delete", text)
-        self.assertNotIn("  6. 删除网站", text)
-        self.assertNotIn("  6. 删除数据库", text)
+    def test_cloudpanel_tools_complete_bundle_preserves_no_delete_boundary(self) -> None:
+        paths = [
+            ROOT / "bin/vfops-cloudpanel-ui",
+            ROOT / "lib/cloudpanel_ui_common.sh",
+            ROOT / "lib/cloudpanel_ui_sites.sh",
+            ROOT / "lib/cloudpanel_ui_ops.sh",
+            ROOT / "lib/cloudpanel_ui_admin.sh",
+        ]
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        for marker in (
+            "创建 CloudPanel 网站",
+            "数据库工具",
+            "SSL / HTTPS",
+            "修复网站权限",
+            "清理 Varnish 缓存",
+            "CloudPanel 安全",
+            "CloudPanel 用户",
+            "Vhost Templates",
+        ):
+            self.assertIn(marker, text)
+        for forbidden in (
+            "site:delete",
+            "db:delete",
+            "user:delete",
+            "cloudpanel.delete_site",
+            "cloudpanel.delete_database",
+            "cloudpanel.delete_panel_user",
+        ):
+            self.assertNotIn(forbidden, text)
 
     def test_migration_preserves_source_dns_and_target_collision_boundaries(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
