@@ -1,0 +1,209 @@
+name: P01 R23 Home Workbench Gate R2
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-r23-home-workbench-gate-r2.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-r23-home-workbench-gate-r2
+  cancel-in-progress: false
+
+jobs:
+  home:
+    if: github.head_ref == 'temp/p01-r23-home-workbench-gate-20260911'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: 10b5946e63b4ab3f48f5c7abd7b5decb065312d0
+      HEAD_SHA: 241388f7bfc9e4141ee325ff7c68d7f8adc1e91a
+      TARGET_BRANCH: work/p01-r23-home-workbench-20260911
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact authority and bounded scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$BASE_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" --jq '.object.sha')" = "$HEAD_SHA"
+          GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.files[].filename' | sort >/tmp/p01-r23-files.txt
+          cat >/tmp/p01-r23-expected.txt <<'EOF'
+          src/app/FunctionalHome.php
+          src/assets/workspace-home.css
+          tests/unit/home_page_full_polish_contract.php
+          EOF
+          diff -u /tmp/p01-r23-expected.txt /tmp/p01-r23-files.txt
+          echo P01_R23_R2_SCOPE=PASS
+
+      - name: Checkout exact R23 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.HEAD_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Static and relevant regression contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          php -l src/app/FunctionalHome.php
+          php -l tests/unit/home_page_full_polish_contract.php
+          node --check src/assets/surface-home.js
+          php tests/unit/home_page_full_polish_contract.php | tee /tmp/p01-r23-home-contract.log
+          grep -Fx 'P01_HOME_PAGE_FULL_POLISH_CONTRACT=PASS' /tmp/p01-r23-home-contract.log
+          php tests/unit/home_recent_operations_signal_contract.php | grep -Fx 'P01_HOME_RECENT_OPERATIONS_SIGNAL_CONTRACT=PASS'
+          php tests/unit/global_account_actions_contract.php | grep -Fx 'P01_R22_GLOBAL_ACCOUNT_ACTIONS_CONTRACT=PASS'
+          ! grep -Eq '健康度|完成率|[0-9]+%' src/app/FunctionalHome.php
+          echo P01_R23_R2_STATIC=PASS
+
+      - name: Fresh install runtime
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-r23-runtime /tmp/p01-r23.cookies /tmp/p01-r23-setup.html
+          cp -a src /tmp/p01-r23-runtime
+          cd /tmp/p01-r23-runtime
+          php -S 127.0.0.1:18128 -t . >/tmp/p01-r23-server.log 2>&1 & echo $! >/tmp/p01-r23-server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-r23.cookies -b /tmp/p01-r23.cookies http://127.0.0.1:18128/setup.php -o /tmp/p01-r23-setup.html; then break; fi
+            sleep 1
+          done
+          test -s /tmp/p01-r23-setup.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-r23-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}R23x"; printf '%s' "$PASS" >/tmp/p01-r23.password
+          curl -fsS -L -c /tmp/p01-r23.cookies -b /tmp/p01-r23.cookies -X POST http://127.0.0.1:18128/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Start R23 Gate' \
+            --data-urlencode "admin_password=$PASS" \
+            --data-urlencode "admin_password_confirm=$PASS" \
+            -o /tmp/p01-r23-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          code=$(curl -sS -o /tmp/p01-r23-revisit -D /tmp/p01-r23-revisit.h -w '%{http_code}' http://127.0.0.1:18128/setup.php)
+          test "$code" = 302
+          tr -d '\r' </tmp/p01-r23-revisit.h | grep -Eiq '^Location: /$'
+          echo P01_R23_R2_FRESH_INSTALL=PASS
+
+      - name: Authenticated desktop and mobile Home
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-r23-pw && mkdir -p /tmp/p01-r23-pw && cd /tmp/p01-r23-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'node:fs';
+          const base='http://127.0.0.1:18128/';
+          const password=fs.readFileSync('/tmp/p01-r23.password','utf8');
+          const browser=await chromium.launch({headless:true});
+          const ctx=await browser.newContext({viewport:{width:1291,height:797}});
+          const p=await ctx.newPage();
+          await p.goto(base+'start.php',{waitUntil:'networkidle'});
+          await p.locator('.vf-global-account-actions [data-vf-auth-login]').click();
+          await p.fill('[data-vf-auth-dialog] input[name="password"]',password);
+          await p.click('[data-vf-auth-submit]');
+          await p.waitForSelector('.vf-global-account-actions a[href="settings.php"]',{timeout:15000});
+
+          await p.goto(base+'quick-save.php',{waitUntil:'networkidle'});
+          await p.fill('input[name="url"]','https://example.com/r23-home-gate');
+          await p.fill('input[name="title"]','R23 Home Gate Resource');
+          await Promise.all([
+            p.waitForURL(/quick-save\.php\?saved=1/,{timeout:15000}),
+            p.click('button[type="submit"]'),
+          ]);
+
+          await p.goto(base+'home.php',{waitUntil:'networkidle'});
+          await p.waitForSelector('#vfHomeModulesTitle');
+          const desktop=await p.evaluate(()=>{
+            const q=s=>document.querySelector(s),qa=s=>[...document.querySelectorAll(s)];
+            const rect=s=>q(s)?.getBoundingClientRect()||null;
+            const moduleRects=qa('.vf-home-module').map(x=>x.getBoundingClientRect());
+            const account=q('.vf-global-account-actions')?.getBoundingClientRect()||null;
+            return {
+              h1:q('.vf-home-command-head h1')?.textContent?.trim(),
+              summary:qa('.vf-home-summary>a').map(x=>x.textContent.replace(/\s+/g,' ').trim()),
+              quick:qa('.vf-home-quick-grid>a,.vf-home-quick-grid>button').map(x=>x.textContent.replace(/\s+/g,' ').trim()),
+              modules:qa('.vf-home-module').map(x=>x.textContent.replace(/\s+/g,' ').trim()),
+              board:rect('.vf-home-board'),focus:rect('.vf-home-focus'),quickRect:rect('.vf-home-quick'),
+              modulesTop:rect('.vf-home-modules')?.top,activityTop:rect('.vf-home-activity-section')?.top,
+              moduleRects:moduleRects.map(r=>({top:r.top,left:r.left,width:r.width})),
+              accountRight:account?.right,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+            };
+          });
+          if(desktop.h1!=='今天从这里开始')throw new Error('desktop h1 '+JSON.stringify(desktop));
+          if(desktop.summary.length!==3||!desktop.summary[0].includes('1全部资源')||!desktop.summary[1].includes('1待整理'))throw new Error('desktop summary '+JSON.stringify(desktop));
+          if(desktop.quick.length!==4||desktop.modules.length!==8)throw new Error('desktop counts '+JSON.stringify(desktop));
+          if(!desktop.board||!desktop.focus||!desktop.quickRect||desktop.focus.width<=desktop.quickRect.width)throw new Error('desktop board '+JSON.stringify(desktop));
+          const firstTop=desktop.moduleRects[0]?.top;const firstRow=desktop.moduleRects.filter(r=>Math.abs(r.top-firstTop)<2);
+          if(firstRow.length!==4)throw new Error('desktop module columns '+JSON.stringify(desktop));
+          if((desktop.modulesTop??9999)>610||(desktop.activityTop??9999)>820)throw new Error('desktop density '+JSON.stringify(desktop));
+          if((desktop.accountRight??0)<1260||desktop.overflow>1)throw new Error('desktop shell '+JSON.stringify(desktop));
+
+          await p.setViewportSize({width:390,height:844});
+          await p.goto(base+'home.php',{waitUntil:'networkidle'});
+          const mobile=await p.evaluate(()=>{
+            const qa=s=>[...document.querySelectorAll(s)];
+            const moduleRects=qa('.vf-home-module').map(x=>x.getBoundingClientRect());
+            const account=document.querySelector('.vf-global-account-actions')?.getBoundingClientRect()||null;
+            return {
+              modules:moduleRects.map(r=>({top:r.top,left:r.left,width:r.width})),
+              touch:qa('.vf-home-mobile-command form,.vf-home-mobile-command>a').map(x=>x.getBoundingClientRect().height),
+              accountRight:account?.right,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,
+            };
+          });
+          const mobileTop=mobile.modules[0]?.top;const mobileRow=mobile.modules.filter(r=>Math.abs(r.top-mobileTop)<2);
+          if(mobileRow.length!==2)throw new Error('mobile module columns '+JSON.stringify(mobile));
+          if(mobile.touch.length<2||mobile.touch.some(h=>h<43.5))throw new Error('mobile touch '+JSON.stringify(mobile));
+          if((mobile.accountRight??0)<360||mobile.overflow>1)throw new Error('mobile shell '+JSON.stringify(mobile));
+          console.log('P01_R23_R2_BROWSER='+JSON.stringify({desktop,mobile}));
+          await browser.close();
+          JS
+          node verify.mjs | tee /tmp/p01-r23-browser.log
+          grep -F 'P01_R23_R2_BROWSER=' /tmp/p01-r23-browser.log
+          echo P01_R23_R2_UA_UI=PASS
+
+      - name: Final verdict
+        shell: bash
+        run: |
+          echo P01_R23_HOME_WORKBENCH_GATE_R2=PASS
+          echo TESTING_GATE=PASS
+          echo INSTALL_GATE=PASS
+          echo UA_UI_MACHINE=PASS
+          echo DATA_SCHEMA_CHANGE=NONE
+          echo RELEASE_WRITE=false
+          echo PRODUCTION_WRITE=false
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-r23-server.pid; then kill "$(cat /tmp/p01-r23-server.pid)" 2>/dev/null || true; fi
+          rm -rf vf-start /tmp/p01-r23-*
