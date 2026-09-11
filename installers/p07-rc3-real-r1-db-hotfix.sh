@@ -2,6 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${P07_INSTALL_DIR:-/opt/vf-server-ops}"
+PREVIOUS_DIR="${P07_PREVIOUS_DIR:-/opt/vf-server-ops.previous}"
 BIN_LINK="${P07_BIN_LINK:-/usr/local/bin/vfops}"
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/0.1.0-rc3/overlay"
@@ -49,19 +50,25 @@ fi
 
 [[ ${EUID:-$(id -u)} -eq 0 || "${P07_ALLOW_NONROOT:-0}" == "1" ]] || fail "请使用 root 运行。"
 TMP_DIR="$(mktemp -d -t p07-init11-install.XXXXXX)"
-PRE_RUN_SNAPSHOT="$TMP_DIR/pre-run"
-HAD_PRE_RUN=0
+PRE_RUN_INSTALL="$TMP_DIR/pre-run-install"
+PRE_RUN_PREVIOUS="$TMP_DIR/pre-run-previous"
+HAD_INSTALL=0
+HAD_PREVIOUS=0
 COMMITTED=0
 if [[ -e "$INSTALL_DIR" ]]; then
-  HAD_PRE_RUN=1
-  cp -a "$INSTALL_DIR" "$PRE_RUN_SNAPSHOT"
+  HAD_INSTALL=1
+  cp -a "$INSTALL_DIR" "$PRE_RUN_INSTALL"
+fi
+if [[ -e "$PREVIOUS_DIR" ]]; then
+  HAD_PREVIOUS=1
+  cp -a "$PREVIOUS_DIR" "$PRE_RUN_PREVIOUS"
 fi
 
 restore_pre_run() {
   say "guided-init11 未完成，正在恢复执行前版本..."
-  rm -rf "$INSTALL_DIR" 2>/dev/null || true
-  if [[ "$HAD_PRE_RUN" -eq 1 && -e "$PRE_RUN_SNAPSHOT" ]]; then
-    mv "$PRE_RUN_SNAPSHOT" "$INSTALL_DIR"
+  rm -rf "$INSTALL_DIR" "$PREVIOUS_DIR" 2>/dev/null || true
+  if [[ "$HAD_INSTALL" -eq 1 && -e "$PRE_RUN_INSTALL" ]]; then
+    mv "$PRE_RUN_INSTALL" "$INSTALL_DIR"
     if [[ -f "$INSTALL_DIR/bin/vfops-user" ]]; then
       mkdir -p "$(dirname "$BIN_LINK")"
       ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK"
@@ -69,9 +76,15 @@ restore_pre_run() {
       mkdir -p "$(dirname "$BIN_LINK")"
       ln -sfn "$INSTALL_DIR/bin/vfops" "$BIN_LINK"
     fi
-    say "已恢复执行前版本。"
   else
     rm -f "$BIN_LINK" 2>/dev/null || true
+  fi
+  if [[ "$HAD_PREVIOUS" -eq 1 && -e "$PRE_RUN_PREVIOUS" ]]; then
+    mv "$PRE_RUN_PREVIOUS" "$PREVIOUS_DIR"
+  fi
+  if [[ "$HAD_INSTALL" -eq 1 ]]; then
+    say "已恢复执行前版本。"
+  else
     say "执行前没有 P07，已清理未完成的新安装。"
   fi
 }
@@ -91,7 +104,7 @@ say "准备已验证 guided-init10 基线..."
 curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "$BASE_INSTALLER_URL" -o "$TMP_DIR/base-installer.sh" || fail "guided-init10 基线安装器下载失败。"
 bash -n "$TMP_DIR/base-installer.sh" || fail "guided-init10 基线安装器语法校验失败。"
 verify_git_blob "$TMP_DIR/base-installer.sh" "$BASE_INSTALLER_BLOB" || fail "guided-init10 基线安装器身份校验失败。"
-P07_PUBLIC_ROOT="$BASE_PUBLIC_ROOT" P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 bash "$TMP_DIR/base-installer.sh" || fail "guided-init10 基线安装失败。"
+P07_PUBLIC_ROOT="$BASE_PUBLIC_ROOT" P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_PREVIOUS_DIR="$PREVIOUS_DIR" bash "$TMP_DIR/base-installer.sh" || fail "guided-init10 基线安装失败。"
 [[ "$($BIN_LINK --build-id 2>/dev/null || true)" == "0.1.0-rc3-guided-init10" ]] || fail "guided-init10 基线安装后身份不匹配。"
 
 fetch_overlay() {
