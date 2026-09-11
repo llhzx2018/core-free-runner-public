@@ -1,0 +1,142 @@
+name: P01 R24 Pending Inbox Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-r24-pending-inbox-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inbox:
+    if: github.head_ref == 'temp/p01-r24-pending-inbox-gate-20260911'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: c1806005c0f89d9794844124264cb15a7ffcb1fc
+      HEAD_SHA: f7a7cba9775bb6b32b895e36ffebb6ffe787dad9
+      TARGET_BRANCH: work/p01-r24-pending-inbox-20260911
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact authority and bounded scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$BASE_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" --jq '.object.sha')" = "$HEAD_SHA"
+          GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.files[].filename' | sort >/tmp/files
+          printf '%s\n' \
+            docs/authority/ACCEPTANCE_MATRIX.md \
+            docs/authority/P01_FUNCTIONAL_CONTRACT_20260829.md \
+            docs/authority/SSOT.md \
+            src/assets/admin-resource-manager.js \
+            src/assets/pending-inbox-ux.css \
+            src/assets/pending-inbox-ux.js \
+            tests/unit/pending_inbox_presentation_contract.php | sort >/tmp/expected
+          diff -u /tmp/expected /tmp/files
+          echo P01_R24_AUTHORITY=PASS
+
+      - name: Checkout exact R24 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.HEAD_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Static contracts and no schema drift
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/pending_inbox_presentation_contract.php | grep -Fx 'P01_PENDING_INBOX_PRESENTATION_CONTRACT=PASS'
+          node --check src/assets/admin-resource-manager.js
+          node --check src/assets/pending-inbox-ux.js
+          php -l src/surface-manager.php
+          test "$(cat VERSION)" = '2.47.8'
+          test "$(cat src/VERSION.txt)" = '2.47.8'
+          echo P01_R24_STATIC=PASS
+          echo DATA_SCHEMA_CHANGE=NONE
+
+      - name: Fresh Install and representative Pending seed
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/r24 && cp -a src /tmp/r24 && cd /tmp/r24
+          php -S 127.0.0.1:18129 -t . >/tmp/r24-server.log 2>&1 & echo $! >/tmp/r24-server.pid
+          for i in $(seq 1 30); do curl -fsS -c /tmp/r24.cookies -b /tmp/r24.cookies http://127.0.0.1:18129/setup.php -o /tmp/r24-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/r24-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}R24x"; printf '%s' "$PASS" >/tmp/r24.password
+          curl -fsS -L -c /tmp/r24.cookies -b /tmp/r24.cookies -X POST http://127.0.0.1:18129/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start R24 Gate' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" -o /tmp/r24-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require "app/bootstrap.php"; require "app/SurfaceRepository.php"; $r=new VfRepository(vf_db()); $r->createCategory(["name"=>"R24 Legacy Bucket","is_private"=>true,"sort_order"=>0]); $db=vf_db(); $q=$db->prepare("SELECT id FROM categories WHERE name=? ORDER BY id DESC LIMIT 1"); $q->execute(["R24 Legacy Bucket"]); $cid=(int)$q->fetchColumn(); if($cid<=0) exit(2); $x=$r->savePendingCapture(["url"=>"https://example.com/r24-pending-inbox","title"=>"R24 Pending Inbox Resource"],"mobile-quick-save"); $id=(int)($x["id"]??0); if($id<=0) exit(3); $db->prepare("UPDATE links SET category_id=? WHERE id=?")->execute([$cid,$id]); $check=$db->prepare("SELECT is_pending,category_id FROM links WHERE id=?"); $check->execute([$id]); $row=$check->fetch(PDO::FETCH_ASSOC); if(!$row||(int)$row["is_pending"]!==1||(int)$row["category_id"]!==$cid) exit(4); echo "P01_R24_SEED=PASS\n";'
+          echo P01_R24_INSTALL=PASS
+
+      - name: Authenticated Pending Inbox UX and canonical exit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/r24-pw && mkdir -p /tmp/r24-pw && cd /tmp/r24-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';
+          const base='http://127.0.0.1:18129/',password=fs.readFileSync('/tmp/r24.password','utf8');
+          const browser=await chromium.launch({headless:true}),ctx=await browser.newContext({viewport:{width:1291,height:797}}),p=await ctx.newPage();
+          await p.goto(base+'start.php',{waitUntil:'networkidle'});await p.locator('.vf-global-account-actions [data-vf-auth-login]').click();await p.fill('[data-vf-auth-dialog] input[name="password"]',password);await p.click('[data-vf-auth-submit]');await p.waitForSelector('.vf-global-account-actions a[href="settings.php"]');
+          await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});await p.waitForSelector('.vf-pending-inbox-intro');
+          const d=await p.evaluate(()=>{const q=s=>document.querySelector(s),qa=s=>[...document.querySelectorAll(s)],row=q('.vf-resource-pending-row'),copy=row?.querySelector('.vf-resource-copy');return{h1:q('h1')?.textContent.trim(),intro:q('.vf-pending-inbox-copy strong')?.textContent.trim(),introBody:q('.vf-pending-inbox-copy p')?.textContent.trim(),count:q('.vf-pending-inbox-count strong')?.textContent.trim(),groups:qa('.vf-rail-subgroup-label').map(x=>x.textContent.trim()),firstResourceLink:qa('[data-vf-nav-group="resources"] .vf-rail-subitem')[0]?.textContent.trim(),status:copy?.querySelector('small')?.textContent.trim(),suggestion:copy?.querySelector('em')?.textContent.trim(),destination:row?.querySelector('.vf-inbox-destination>span')?.textContent.trim(),badge:row?.querySelector('.vf-resource-confidence')?.textContent.trim(),legacyInStatus:(copy?.querySelector('small')?.textContent||'').includes('R24 Legacy Bucket'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}});
+          if(d.h1!=='待整理收件箱'||d.intro!=='待整理不是正式分类'||!d.introBody.includes('确认后')||d.count!=='1'||JSON.stringify(d.groups)!==JSON.stringify(['系统收件箱','资源库','业务分类','治理'])||d.firstResourceLink!=='待整理收件箱'||!d.status.includes('状态：待整理')||d.legacyInStatus||!d.suggestion.startsWith('AI 建议去向：')||d.destination!=='正式去向（导航分类）'||d.overflow>1)throw new Error('desktop '+JSON.stringify(d));
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});await p.waitForSelector('.vf-pending-inbox-intro');
+          const m=await p.evaluate(()=>({status:document.querySelector('.vf-resource-pending-row .vf-resource-copy small')?.textContent.trim(),destination:document.querySelector('.vf-inbox-destination>span')?.textContent.trim(),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));
+          if(!m.status?.includes('状态：待整理')||m.destination!=='正式去向（导航分类）'||m.overflow>1)throw new Error('mobile '+JSON.stringify(m));
+          await p.setViewportSize({width:1291,height:797});await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});await p.waitForSelector('.vf-resource-pending-row');
+          const row=p.locator('.vf-resource-pending-row').first();await row.locator('button[value="organize_category"]').click();await p.waitForLoadState('networkidle');await p.waitForSelector('.vf-pending-inbox-intro');
+          const after=await p.evaluate(()=>({rows:document.querySelectorAll('.vf-resource-pending-row').length,empty:document.body.textContent.includes('待整理已经清空'),count:document.querySelector('.vf-pending-inbox-count strong')?.textContent.trim(),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));
+          if(after.rows!==0||!after.empty||after.count!=='0'||after.overflow>1)throw new Error('after '+JSON.stringify(after));
+          console.log('P01_R24_BROWSER='+JSON.stringify({desktop:d,mobile:m,after}));await browser.close();
+          JS
+          node verify.mjs | tee /tmp/r24-browser.log
+          grep -F 'P01_R24_BROWSER=' /tmp/r24-browser.log
+          echo P01_R24_UA_UI=PASS
+
+      - name: Confirm canonical mutation cleared Pending
+        working-directory: /tmp/r24
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -r 'require "app/bootstrap.php"; $db=vf_db(); $q=$db->prepare("SELECT is_pending FROM links WHERE url=? AND lifecycle_state=\"active\""); $q->execute(["https://example.com/r24-pending-inbox"]); $v=$q->fetchColumn(); if($v===false||(int)$v!==0) exit(2); echo "P01_R24_PENDING_EXIT=PASS\n";'
+
+      - name: Final verdict
+        run: |
+          echo P01_R24_PENDING_INBOX_GATE=PASS
+          echo TESTING_GATE=PASS
+          echo INSTALL_GATE=PASS
+          echo UA_UI_MACHINE=PASS
+          echo DATA_SCHEMA_CHANGE=NONE
+          echo RELEASE_WRITE=false
+          echo PRODUCTION_WRITE=false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          test ! -f /tmp/r24-server.pid || kill "$(cat /tmp/r24-server.pid)" 2>/dev/null || true
+          rm -rf vf-start /tmp/r24 /tmp/r24-*
