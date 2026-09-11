@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
-INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-real-r1-db-hotfix.sh"
-EXPECTED_BLOB="7fb9667b0c0d2d07f3b9bcce3f50cede844f2219"
+INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-real-r1-dbadd-hotfix.sh"
+EXPECTED_BLOB="d733c7bc7b62e6ed81103855dc7f4f74619618a9"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 

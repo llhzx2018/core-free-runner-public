@@ -19,13 +19,21 @@ class SiteLifecycleTests(unittest.TestCase):
         self.assertIn("/htdocs/restore.example.com", identity.site_root)
         self.assertGreaterEqual(len(identity.site_password), 24)
 
-    def test_database_identity_is_short_and_deterministic_except_password(self) -> None:
+    def test_database_identity_is_short_deterministic_and_cloudpanel_safe(self) -> None:
         a = site_lifecycle.derive_database_identity("restore.example.com", "backup-123", 1)
         b = site_lifecycle.derive_database_identity("restore.example.com", "backup-123", 1)
+        c = site_lifecycle.derive_database_identity("restore.example.com", "backup-123", 2)
         self.assertEqual(a[:2], b[:2])
         self.assertNotEqual(a[2], b[2])
+        self.assertNotEqual(a[:2], c[:2])
         self.assertLessEqual(len(a[0]), 32)
         self.assertLessEqual(len(a[1]), 32)
+        self.assertTrue(a[0].isalnum())
+        self.assertTrue(a[1].isalnum())
+        self.assertNotIn("_", a[0])
+        self.assertNotIn("_", a[1])
+        self.assertNotIn("-", a[0])
+        self.assertNotIn("-", a[1])
 
     def test_php_site_creation_uses_cloudpanel_adapter(self) -> None:
         identity = site_lifecycle.derive_target_identity("restore.example.com", "b1")
