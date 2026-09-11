@@ -24,7 +24,8 @@ class Menu3ModularTests(unittest.TestCase):
             "3. 恢复网站",
             "4. 迁移网站到新服务器",
             "5. 自动备份 / 远程灾备",
-            "6. CloudPanel 网站工具",
+            "6. 网站管理",
+            "7. CloudPanel 管理",
         ):
             self.assertIn(text, proc.stdout)
 
@@ -34,6 +35,8 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("vfops-migrate-ui", text)
         self.assertIn("vfops-auto-backup", text)
         self.assertIn("vfops-cloudpanel-ui", text)
+        self.assertIn('run_module "$CLOUDPANEL_UI" site', text)
+        self.assertIn('run_module "$CLOUDPANEL_UI" admin', text)
         self.assertIn("--advanced", text)
 
     def test_restore_ui_exposes_restore_as_and_preserves_no_overwrite(self) -> None:
@@ -87,11 +90,13 @@ class Menu3ModularTests(unittest.TestCase):
         ]
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         for marker in (
-            "创建 CloudPanel 网站",
-            "数据库工具",
-            "SSL / HTTPS",
+            "网站管理",
+            "数据库清单",
+            "新增数据库",
+            "SSL 状态",
             "修复网站权限",
             "清理 Varnish 缓存",
+            "CloudPanel 管理",
             "CloudPanel 安全",
             "CloudPanel 用户",
             "Vhost Templates",
@@ -106,6 +111,15 @@ class Menu3ModularTests(unittest.TestCase):
             "cloudpanel.delete_panel_user",
         ):
             self.assertNotIn(forbidden, text)
+
+    def test_cloudpanel_site_management_selects_once_and_can_change_explicitly(self) -> None:
+        parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
+        common = (ROOT / "lib/cloudpanel_ui_common.sh").read_text(encoding="utf-8")
+        self.assertIn("网站只选择一次", parent)
+        self.assertIn("98. 更换网站", parent)
+        self.assertIn("0. 返回 P07 主菜单", parent)
+        self.assertIn('SELECTED_DOMAIN=""', common)
+        self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', common)
 
     def test_migration_preserves_source_dns_and_target_collision_boundaries(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")

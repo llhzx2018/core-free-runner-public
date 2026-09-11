@@ -2,6 +2,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE="$ROOT_DIR/bin/vfops"
 INV_FILE=""
 SELECTED_INDEX=""
+SELECTED_DOMAIN=""
 SELECTED_DATABASE=""
 SECRET_VALUE=""
 
@@ -12,6 +13,12 @@ cleanup() {
 trap cleanup EXIT
 pause() { printf '\n按 Enter 返回...'; read -r _ || true; }
 
+clear_site_selection() {
+  SELECTED_INDEX=""
+  SELECTED_DOMAIN=""
+  SELECTED_DATABASE=""
+}
+
 load_inventory() {
   [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true
   INV_FILE="$(mktemp -t p07-cp-tools.XXXXXX)"
@@ -19,9 +26,31 @@ load_inventory() {
 }
 
 select_site() {
+  local count choice resolved
+
+  if [[ -n "$SELECTED_DOMAIN" ]]; then
+    load_inventory || { printf '\n无法刷新 CloudPanel 网站。\n'; clear_site_selection; return 1; }
+    resolved="$(python3 - "$INV_FILE" "$SELECTED_DOMAIN" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+wanted=sys.argv[2].strip().lower().rstrip('.')
+for i,s in enumerate(p.get('sites',[]),1):
+    if str(s.get('domain','')).lower().rstrip('.') == wanted:
+        print(i)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+)" || true
+    if [[ "$resolved" =~ ^[1-9][0-9]*$ ]]; then
+      SELECTED_INDEX="$resolved"
+      return 0
+    fi
+    printf '\n当前网站已不在 CloudPanel inventory 中，请重新选择。\n'
+    clear_site_selection
+  fi
+
   SELECTED_INDEX=""
   load_inventory || { printf '\n无法读取 CloudPanel 网站。\n'; return 1; }
-  local count choice
   count="$(python3 - "$INV_FILE" <<'PY'
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
@@ -43,6 +72,13 @@ PY
   [[ "$choice" == 0 ]] && return 2
   (( choice>=1 && choice<=count )) || return 1
   SELECTED_INDEX="$choice"
+  SELECTED_DOMAIN="$(python3 - "$INV_FILE" "$SELECTED_INDEX" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+print(p['sites'][int(sys.argv[2])-1].get('domain','UNKNOWN'))
+PY
+)"
+  [[ -n "$SELECTED_DOMAIN" && "$SELECTED_DOMAIN" != UNKNOWN ]]
 }
 
 site_fields() {
