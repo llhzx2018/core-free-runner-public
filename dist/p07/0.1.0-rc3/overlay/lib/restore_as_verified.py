@@ -53,6 +53,9 @@ def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str
         f"{domain}:{port}:127.0.0.1",
     ]
     if scheme == "https":
+        # The target certificate is intentionally not copied from SOURCE. Before DNS
+        # is ready CloudPanel may expose a local/default certificate, so TLS identity
+        # is not trusted here; --resolve still exercises target-domain SNI routing.
         command.append("--insecure")
     command.append(f"{scheme}://{domain}/")
     proc = _run(command)
@@ -76,6 +79,7 @@ def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
 
 
 def _cloudpanel_error_detail(exc: BaseException) -> tuple[str, str] | None:
+    """Return bounded operation/exit evidence without leaking CLI output or secrets."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -87,13 +91,26 @@ def _cloudpanel_error_detail(exc: BaseException) -> tuple[str, str] | None:
     return None
 
 
-def _database_compat_context(package_dir: Path, target_domain: str, target_root: Path):
+def _database_compat_context(
+    package_dir: Path,
+    target_domain: str,
+    target_root: Path,
+):
+    """Stage DB IO inside the target Site User home for real CloudPanel compatibility.
+
+    CloudPanel's documented migration flow performs db:import/db:export from a Site
+    User-readable directory. P07 backup packages are intentionally root-private, so
+    the verified wrapper exposes only a private temporary copy owned exactly like the
+    newly created target site. No SQL content is printed and the staging directory is
+    removed after the restore attempt.
+    """
     manifest = restore_as.load_manifest(package_dir)
     backup_id = str(manifest.get("backup_id", ""))
     identity = site_lifecycle.derive_target_identity(target_domain, backup_id)
     root = target_root.resolve()
     final_site = (root / identity.site_root.lstrip("/")).resolve(strict=False)
     site_home = final_site.parent.parent
+
     original_import = restore_as.cloudpanel.import_database
     original_export = restore_as.cloudpanel.export_database
     workdir: Path | None = None
@@ -112,6 +129,7 @@ def _database_compat_context(package_dir: Path, target_domain: str, target_root:
         try:
             os.chown(path, owner.st_uid, owner.st_gid)
         except PermissionError:
+            # Synthetic/non-root Machine tests may already run as the target owner.
             current = path.stat()
             if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
                 shutil.rmtree(path, ignore_errors=True)
@@ -165,7 +183,13 @@ def _database_compat_context(package_dir: Path, target_domain: str, target_root:
     return CompatContext()
 
 
-def verify_local_restore(target_root: Path, result: dict[str, Any], *, curl: str = "/usr/bin/curl", nginx: str = "/usr/sbin/nginx") -> dict[str, Any]:
+def verify_local_restore(
+    target_root: Path,
+    result: dict[str, Any],
+    *,
+    curl: str = "/usr/bin/curl",
+    nginx: str = "/usr/sbin/nginx",
+) -> dict[str, Any]:
     source_domain = cloudpanel.validate_domain(str(result.get("source_domain", "")))
     target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
     if source_domain == target_domain:
@@ -174,6 +198,7 @@ def verify_local_restore(target_root: Path, result: dict[str, Any], *, curl: str
         raise RestoreAsVerificationError("Restore-As safety result is not fail-closed")
     if result.get("existing_site_overwrite_allowed") is not False or result.get("source_ssl_reused") is not False:
         raise RestoreAsVerificationError("Restore-As overwrite/TLS safety result is invalid")
+
     site_root = str(result.get("target_site_root", ""))
     if not site_root.startswith("/home/"):
         raise RestoreAsVerificationError("target site root is invalid")
@@ -186,21 +211,44 @@ def verify_local_restore(target_root: Path, result: dict[str, Any], *, curl: str
     file_count = sum(1 for item in final_site.rglob("*") if item.is_file() and not item.is_symlink())
     if file_count < 1:
         raise RestoreAsVerificationError("restored site contains no files")
+
     http_rc, http_code = _http_code(curl, target_domain, "http", 80)
     if http_rc != 0 or not _valid_http_code(http_code):
         raise RestoreAsVerificationError("local Host routing verification failed")
+
     https_rc, https_code = _http_code(curl, target_domain, "https", 443)
     if https_rc == 0 and _valid_http_code(https_code):
-        sni = {"status": "PASS", "mode": "LOCAL_HTTPS_SNI", "http_code": https_code, "certificate_trust": "NOT_ASSERTED_UNTIL_TARGET_DNS_CERTIFICATE"}
+        sni = {
+            "status": "PASS",
+            "mode": "LOCAL_HTTPS_SNI",
+            "http_code": https_code,
+            "certificate_trust": "NOT_ASSERTED_UNTIL_TARGET_DNS_CERTIFICATE",
+        }
     elif _nginx_has_target_vhost(nginx, target_domain):
-        sni = {"status": "PASS", "mode": "TARGET_VHOST_PRESENT_TLS_DEFERRED", "http_code": None, "certificate_trust": "DEFERRED_UNTIL_TARGET_DNS_CERTIFICATE"}
+        # DNS may not yet point at this server and no target-domain certificate is
+        # installed by Restore-As. The vhost identity is still verified locally;
+        # certificate issuance remains explicitly deferred rather than reusing SOURCE.
+        sni = {
+            "status": "PASS",
+            "mode": "TARGET_VHOST_PRESENT_TLS_DEFERRED",
+            "http_code": None,
+            "certificate_trust": "DEFERRED_UNTIL_TARGET_DNS_CERTIFICATE",
+        }
     else:
         raise RestoreAsVerificationError("local SNI/vhost verification failed")
+
     return {
         "status": "PASS",
         "files": {"status": "PASS", "file_count": file_count},
-        "database": {"status": "PASS" if result.get("database_import_verified_before_transform") else "NOT_APPLICABLE", "source_match_before_transform": bool(result.get("database_import_verified_before_transform"))},
-        "application": {"status": "PASS", "mode": result.get("application_config_mode", "UNKNOWN"), "wordpress_urls": result.get("wordpress_urls")},
+        "database": {
+            "status": "PASS" if result.get("database_import_verified_before_transform") else "NOT_APPLICABLE",
+            "source_match_before_transform": bool(result.get("database_import_verified_before_transform")),
+        },
+        "application": {
+            "status": "PASS",
+            "mode": result.get("application_config_mode", "UNKNOWN"),
+            "wordpress_urls": result.get("wordpress_urls"),
+        },
         "host": {"status": "PASS", "mode": "LOCAL_HTTP_RESOLVE", "http_code": http_code},
         "sni": sni,
         "dns_changed": False,
@@ -219,19 +267,41 @@ def _rollback_verified_target(result: dict[str, Any], *, clpctl: str) -> dict[st
     return {"database": db_ok, "site": site_ok}
 
 
-def restore_as_verified(package_dir: Path, target_domain: str, target_root: Path, clpctl: str, confirm: str, *, runuser: str = "runuser", wp: str = "wp", curl: str = "/usr/bin/curl", nginx: str = "/usr/sbin/nginx") -> dict[str, Any]:
+def restore_as_verified(
+    package_dir: Path,
+    target_domain: str,
+    target_root: Path,
+    clpctl: str,
+    confirm: str,
+    *,
+    runuser: str = "runuser",
+    wp: str = "wp",
+    curl: str = "/usr/bin/curl",
+    nginx: str = "/usr/sbin/nginx",
+) -> dict[str, Any]:
     package_dir = package_dir.resolve()
     target_root = target_root.resolve()
     target_domain = cloudpanel.validate_domain(target_domain)
     with _database_compat_context(package_dir, target_domain, target_root):
-        result = restore_as.restore_as(package_dir, target_domain, target_root, clpctl, confirm, runuser=runuser, wp=wp)
+        result = restore_as.restore_as(
+            package_dir,
+            target_domain,
+            target_root,
+            clpctl,
+            confirm,
+            runuser=runuser,
+            wp=wp,
+        )
     try:
         local = verify_local_restore(target_root, result, curl=curl, nginx=nginx)
     except Exception as exc:
         rollback = _rollback_verified_target(result, clpctl=clpctl)
         rollback_status = "PASS" if all(rollback.values()) else "PARTIAL"
         reason = exc if isinstance(exc, RestoreAsVerificationError) else exc.__class__.__name__
-        raise RestoreAsVerificationError(f"Restore-As local verification failed; rollback={rollback_status}; reason={reason}") from exc
+        raise RestoreAsVerificationError(
+            f"Restore-As local verification failed; rollback={rollback_status}; reason={reason}"
+        ) from exc
+
     final = dict(result)
     final["schema"] = RESULT_SCHEMA
     final["status"] = "RESTORE_AS_VERIFIED"
@@ -254,8 +324,24 @@ def main() -> int:
     parser.add_argument("--confirm", required=True)
     args = parser.parse_args()
     try:
-        result = restore_as_verified(Path(args.package), args.target_domain, Path(args.target_root), args.clpctl, args.confirm, runuser=args.runuser, wp=args.wp, curl=args.curl, nginx=args.nginx)
-    except (RestoreAsVerificationError, restore_as.RestoreAsError, cloudpanel.CloudPanelError, site_lifecycle.SiteLifecycleError, ValueError) as exc:
+        result = restore_as_verified(
+            Path(args.package),
+            args.target_domain,
+            Path(args.target_root),
+            args.clpctl,
+            args.confirm,
+            runuser=args.runuser,
+            wp=args.wp,
+            curl=args.curl,
+            nginx=args.nginx,
+        )
+    except (
+        RestoreAsVerificationError,
+        restore_as.RestoreAsError,
+        cloudpanel.CloudPanelError,
+        site_lifecycle.SiteLifecycleError,
+        ValueError,
+    ) as exc:
         print(f"ERROR: {exc}", file=os.sys.stderr)
         detail = _cloudpanel_error_detail(exc)
         if detail is not None:
