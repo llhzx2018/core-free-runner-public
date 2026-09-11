@@ -49,9 +49,11 @@ def derive_target_identity(domain: str, seed: str) -> TargetSiteIdentity:
 def derive_database_identity(domain: str, seed: str, index: int) -> tuple[str, str, str]:
     domain = cloudpanel.validate_domain(domain)
     token = _stable_token(f"db:{domain}:{seed}:{index}", 10)
-    # Keep names intentionally short for MySQL/MariaDB compatibility.
-    database = cloudpanel.validate_name(f"p07_{token}_{index}", "database")
-    username = cloudpanel.validate_name(f"p07u_{token[:8]}_{index}", "database user")
+    # CloudPanel's database-name validation rejects underscores on real installs.
+    # Keep generated Restore-As identities strictly ASCII alphanumeric so they are
+    # accepted consistently by CloudPanel, MySQL/MariaDB and application configs.
+    database = cloudpanel.validate_name(f"p07{token}{index}", "database")
+    username = cloudpanel.validate_name(f"p07u{token[:8]}{index}", "database user")
     password = secrets.token_urlsafe(30)
     return database, username, password
 
