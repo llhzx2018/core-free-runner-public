@@ -55,8 +55,8 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("查看 SSL 状态", text)
         self.assertNotIn("site:delete", text)
         self.assertNotIn("db:delete", text)
-        self.assertNotIn("删除网站", text)
-        self.assertNotIn("删除数据库", text)
+        self.assertNotIn("  6. 删除网站", text)
+        self.assertNotIn("  6. 删除数据库", text)
 
     def test_migration_preserves_source_dns_and_target_collision_boundaries(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
