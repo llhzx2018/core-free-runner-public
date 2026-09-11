@@ -2,6 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${P07_INSTALL_DIR:-/opt/vf-server-ops}"
+PREVIOUS_DIR="${P07_PREVIOUS_DIR:-/opt/vf-server-ops.previous}"
 BIN_LINK="${P07_BIN_LINK:-/usr/local/bin/vfops}"
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 RC3_URL="${PUBLIC_ROOT}/dist/p07/0.1.0-rc3/overlay"
@@ -51,7 +52,40 @@ fi
 
 [[ ${EUID:-$(id -u)} -eq 0 || "${P07_ALLOW_NONROOT:-0}" == "1" ]] || fail "请使用 root 运行。"
 TMP_DIR="$(mktemp -d -t p07-init10-install.XXXXXX)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+HAD_PRE_RUN=0
+BASE_INSTALLED=0
+COMMITTED=0
+[[ -e "$INSTALL_DIR" ]] && HAD_PRE_RUN=1
+
+restore_pre_run() {
+  say "guided-init10 未完成，正在恢复执行前版本..."
+  rm -rf "$INSTALL_DIR" 2>/dev/null || true
+  if [[ "$HAD_PRE_RUN" -eq 1 && -e "$PREVIOUS_DIR" ]]; then
+    mv "$PREVIOUS_DIR" "$INSTALL_DIR" 2>/dev/null || true
+    if [[ -f "$INSTALL_DIR/bin/vfops-user" ]]; then
+      mkdir -p "$(dirname "$BIN_LINK")" 2>/dev/null || true
+      ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK" 2>/dev/null || true
+    elif [[ -f "$INSTALL_DIR/bin/vfops" ]]; then
+      mkdir -p "$(dirname "$BIN_LINK")" 2>/dev/null || true
+      ln -sfn "$INSTALL_DIR/bin/vfops" "$BIN_LINK" 2>/dev/null || true
+    fi
+    say "已恢复执行前版本。"
+  else
+    rm -f "$BIN_LINK" 2>/dev/null || true
+    say "执行前没有 P07，已清理未完成的新安装。"
+  fi
+}
+
+finish() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$rc" -ne 0 && "$BASE_INSTALLED" -eq 1 && "$COMMITTED" -eq 0 ]]; then
+    restore_pre_run
+  fi
+  rm -rf "$TMP_DIR" 2>/dev/null || true
+  exit "$rc"
+}
+trap finish EXIT
 
 say "准备已验证 guided-init9 基线..."
 curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "$BASE_INSTALLER_URL" -o "$TMP_DIR/base-installer.sh" || fail "guided-init9 基线安装器下载失败。"
@@ -59,6 +93,10 @@ bash -n "$TMP_DIR/base-installer.sh" || fail "guided-init9 基线安装器语法
 verify_git_blob "$TMP_DIR/base-installer.sh" "$BASE_INSTALLER_BLOB" || fail "guided-init9 基线安装器身份校验失败。"
 P07_PUBLIC_ROOT="$BASE_PUBLIC_ROOT" P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 bash "$TMP_DIR/base-installer.sh" || fail "guided-init9 基线安装失败。"
 [[ "$($BIN_LINK --build-id 2>/dev/null || true)" == "0.1.0-rc3-guided-init9" ]] || fail "guided-init9 基线安装后身份不匹配。"
+BASE_INSTALLED=1
+if [[ "$HAD_PRE_RUN" -eq 1 && ! -e "$PREVIOUS_DIR" ]]; then
+  fail "guided-init9 基线未保留执行前版本，已停止。"
+fi
 
 fetch_overlay() {
   local rel="$1" blob="$2"
@@ -90,21 +128,6 @@ grep -Fq 'P07_SECRET="$SECRET_VALUE"' <<<"$BUNDLE" || fail "CloudPanel secret ha
 grep -Fq 'TARGET 已存在，P07 不会覆盖' <<<"$BUNDLE" || fail "CloudPanel TARGET collision guard 缺失。"
 grep -Fq -- '--resolve "$domain:443:127.0.0.1"' <<<"$BUNDLE" || fail "CloudPanel 本机 HTTPS SNI 健康检查缺失。"
 
-mkdir -p "$TMP_DIR/old/bin" "$TMP_DIR/old/lib"
-cp "$INSTALL_DIR/BUILD_ID" "$TMP_DIR/old/BUILD_ID"
-cp "$INSTALL_DIR/bin/vfops-cloudpanel-ui" "$TMP_DIR/old/bin/vfops-cloudpanel-ui"
-for rel in cloudpanel_ui_common.sh cloudpanel_ui_sites.sh cloudpanel_ui_ops.sh cloudpanel_ui_admin.sh; do
-  [[ -f "$INSTALL_DIR/lib/$rel" ]] && cp "$INSTALL_DIR/lib/$rel" "$TMP_DIR/old/lib/$rel" || true
-done
-
-rollback_overlay() {
-  cp "$TMP_DIR/old/BUILD_ID" "$INSTALL_DIR/BUILD_ID" 2>/dev/null || true
-  cp "$TMP_DIR/old/bin/vfops-cloudpanel-ui" "$INSTALL_DIR/bin/vfops-cloudpanel-ui" 2>/dev/null || true
-  for rel in cloudpanel_ui_common.sh cloudpanel_ui_sites.sh cloudpanel_ui_ops.sh cloudpanel_ui_admin.sh; do
-    if [[ -f "$TMP_DIR/old/lib/$rel" ]]; then cp "$TMP_DIR/old/lib/$rel" "$INSTALL_DIR/lib/$rel"; else rm -f "$INSTALL_DIR/lib/$rel"; fi
-  done
-}
-
 say "升级 CloudPanel Foundation..."
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/lib"
 cp "$TMP_DIR/new/BUILD_ID" "$INSTALL_DIR/BUILD_ID"
@@ -112,15 +135,17 @@ cp "$TMP_DIR/new/bin/vfops-cloudpanel-ui" "$INSTALL_DIR/bin/vfops-cloudpanel-ui"
 cp "$TMP_DIR/new/lib/"cloudpanel_ui_*.sh "$INSTALL_DIR/lib/"
 chmod +x "$INSTALL_DIR/bin/vfops-cloudpanel-ui"
 
+if [[ "${P07_INIT10_TEST_FAIL:-0}" == "1" ]]; then
+  fail "guided-init10 注入测试失败。"
+fi
 if ! verify_installed_init10; then
-  rollback_overlay
-  fail "guided-init10 自检失败；已恢复 guided-init9 CloudPanel UI。"
+  fail "guided-init10 自检失败。"
 fi
 if ! printf '0\n' | "$INSTALL_DIR/bin/vfops-cloudpanel-ui" >/dev/null 2>&1; then
-  rollback_overlay
-  fail "CloudPanel UI 启动自检失败；已恢复 guided-init9 CloudPanel UI。"
+  fail "CloudPanel UI 启动自检失败。"
 fi
 
+COMMITTED=1
 say "CloudPanel Foundation guided-init10 安装完成 ✓"
 printf '版本：%s\n' "$EXPECTED_VERSION"
 printf 'CloudPanel：网站详情 / 健康检查 / 五类建站 / 数据库 / SSL / 权限缓存 / Panel 安全 / 用户 / Vhost Templates / 基础自检\n'
