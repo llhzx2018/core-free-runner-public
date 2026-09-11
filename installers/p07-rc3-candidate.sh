@@ -150,7 +150,7 @@ grep -Fq '6. CloudPanel 网站工具' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 
 grep -Fq 'vfops-site-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 网站模块路由缺失。"
 grep -Fq 'vfops-migrate-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 迁移模块路由缺失。"
 grep -Fq 'vfops-cloudpanel-ui' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 CloudPanel 工具路由缺失。"
-grep -Fq '--build-id' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 缺少独立 build identity 输出。"
+grep -Fq -- '--build-id' "$SRC_DIR/bin/vfops-user" || fail "Menu 3 缺少独立 build identity 输出。"
 
 grep -Fq 'restore_as_verified.py' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 未接入自动本机验证。"
 grep -Fq '无需先在 CloudPanel 手工创建空网站' "$SRC_DIR/bin/vfops-site-ui" || fail "Restore-As 仍要求人工预建站点。"
