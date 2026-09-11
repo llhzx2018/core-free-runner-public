@@ -30,8 +30,8 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
             "权限 / 缓存",
             "CloudPanel 安全",
             "CloudPanel 用户",
-            "Vhost Templates",
-            "基础能力自检",
+            "Vhost 模板",
+            "平台基础能力检查",
         ):
             self.assertIn(label, self.parent)
 
