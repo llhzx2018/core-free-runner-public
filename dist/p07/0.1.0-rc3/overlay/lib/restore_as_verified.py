@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 from typing import Any, Sequence
 
 import cloudpanel
@@ -74,6 +76,111 @@ def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
         if domain.lower() in names:
             return True
     return False
+
+
+def _cloudpanel_error_detail(exc: BaseException) -> tuple[str, str] | None:
+    """Return bounded operation/exit evidence without leaking CLI output or secrets."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, cloudpanel.CloudPanelError):
+            exit_code = "UNKNOWN" if current.returncode is None else str(current.returncode)
+            return current.operation, exit_code
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _database_compat_context(
+    package_dir: Path,
+    target_domain: str,
+    target_root: Path,
+):
+    """Stage DB IO inside the target Site User home for real CloudPanel compatibility.
+
+    CloudPanel's documented migration flow performs db:import/db:export from a Site
+    User-readable directory. P07 backup packages are intentionally root-private, so
+    the verified wrapper exposes only a private temporary copy owned exactly like the
+    newly created target site. No SQL content is printed and the staging directory is
+    removed after the restore attempt.
+    """
+    manifest = restore_as.load_manifest(package_dir)
+    backup_id = str(manifest.get("backup_id", ""))
+    identity = site_lifecycle.derive_target_identity(target_domain, backup_id)
+    root = target_root.resolve()
+    final_site = (root / identity.site_root.lstrip("/")).resolve(strict=False)
+    site_home = final_site.parent.parent
+
+    original_import = restore_as.cloudpanel.import_database
+    original_export = restore_as.cloudpanel.export_database
+    workdir: Path | None = None
+
+    def ensure_workdir() -> Path:
+        nonlocal workdir
+        if workdir is not None:
+            return workdir
+        if not final_site.is_dir() or final_site.is_symlink():
+            raise RestoreAsVerificationError("target site is unavailable for private database staging")
+        if not site_home.is_dir() or site_home.is_symlink():
+            raise RestoreAsVerificationError("target Site User home is unavailable")
+        owner = final_site.stat()
+        path = Path(tempfile.mkdtemp(prefix=".vfops-restore-as-db-", dir=site_home))
+        os.chmod(path, 0o700)
+        try:
+            os.chown(path, owner.st_uid, owner.st_gid)
+        except PermissionError:
+            # Synthetic/non-root Machine tests may already run as the target owner.
+            current = path.stat()
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                shutil.rmtree(path, ignore_errors=True)
+                raise
+        workdir = path
+        return path
+
+    def stage_input(source: Path) -> Path:
+        directory = ensure_workdir()
+        suffix = ".sql.gz" if str(source).endswith(".sql.gz") else ".sql"
+        target = directory / f"import{suffix}"
+        shutil.copyfile(source, target)
+        os.chmod(target, 0o600)
+        owner = final_site.stat()
+        try:
+            os.chown(target, owner.st_uid, owner.st_gid)
+        except PermissionError:
+            current = target.stat()
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                raise
+        return target
+
+    def compat_import(database: str, dump: str | Path, *, clpctl: str = "clpctl") -> None:
+        staged = stage_input(Path(dump))
+        original_import(database, staged, clpctl=clpctl)
+
+    def compat_export(database: str, output: str | Path, *, clpctl: str = "clpctl") -> Path:
+        directory = ensure_workdir()
+        requested = Path(output)
+        suffix = ".sql.gz" if str(requested).endswith(".sql.gz") else ".sql"
+        staged = directory / f"verify{suffix}"
+        original_export(database, staged, clpctl=clpctl)
+        requested.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(staged, requested)
+        os.chmod(requested, 0o600)
+        return requested
+
+    class CompatContext:
+        def __enter__(self):
+            restore_as.cloudpanel.import_database = compat_import
+            restore_as.cloudpanel.export_database = compat_export
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            restore_as.cloudpanel.import_database = original_import
+            restore_as.cloudpanel.export_database = original_export
+            if workdir is not None:
+                shutil.rmtree(workdir, ignore_errors=True)
+            return False
+
+    return CompatContext()
 
 
 def verify_local_restore(
@@ -172,15 +279,19 @@ def restore_as_verified(
     curl: str = "/usr/bin/curl",
     nginx: str = "/usr/sbin/nginx",
 ) -> dict[str, Any]:
-    result = restore_as.restore_as(
-        package_dir,
-        target_domain,
-        target_root,
-        clpctl,
-        confirm,
-        runuser=runuser,
-        wp=wp,
-    )
+    package_dir = package_dir.resolve()
+    target_root = target_root.resolve()
+    target_domain = cloudpanel.validate_domain(target_domain)
+    with _database_compat_context(package_dir, target_domain, target_root):
+        result = restore_as.restore_as(
+            package_dir,
+            target_domain,
+            target_root,
+            clpctl,
+            confirm,
+            runuser=runuser,
+            wp=wp,
+        )
     try:
         local = verify_local_restore(target_root, result, curl=curl, nginx=nginx)
     except Exception as exc:
@@ -232,6 +343,11 @@ def main() -> int:
         ValueError,
     ) as exc:
         print(f"ERROR: {exc}", file=os.sys.stderr)
+        detail = _cloudpanel_error_detail(exc)
+        if detail is not None:
+            operation, exit_code = detail
+            print(f"P07_CLOUDPANEL_OPERATION={operation}", file=os.sys.stderr)
+            print(f"P07_CLOUDPANEL_EXIT={exit_code}", file=os.sys.stderr)
         return 15
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
