@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import tempfile
@@ -106,7 +107,15 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 "host": {"status": "PASS", "mode": "LOCAL_HTTP_RESOLVE", "http_code": "200"},
                 "sni": {"status": "PASS", "mode": "LOCAL_HTTPS_SNI", "http_code": "200"},
             }
-            with mock.patch.object(restore_as_verified.restore_as, "restore_as", return_value=engine), mock.patch.object(
+            with mock.patch.object(
+                restore_as_verified,
+                "_database_compat_context",
+                return_value=nullcontext(),
+            ), mock.patch.object(
+                restore_as_verified.restore_as,
+                "restore_as",
+                return_value=engine,
+            ), mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
                 return_value=local,
@@ -130,7 +139,15 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             sentinel = source / "SOURCE_SENTINEL"
             sentinel.write_text("preserve\n", encoding="utf-8")
             engine = self.base_result(root)
-            with mock.patch.object(restore_as_verified.restore_as, "restore_as", return_value=engine), mock.patch.object(
+            with mock.patch.object(
+                restore_as_verified,
+                "_database_compat_context",
+                return_value=nullcontext(),
+            ), mock.patch.object(
+                restore_as_verified.restore_as,
+                "restore_as",
+                return_value=engine,
+            ), mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
                 side_effect=restore_as_verified.RestoreAsVerificationError("probe failed"),
