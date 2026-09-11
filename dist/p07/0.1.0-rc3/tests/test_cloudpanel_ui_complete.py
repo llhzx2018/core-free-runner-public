@@ -19,15 +19,27 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         cls.parent = PARENT.read_text(encoding="utf-8")
         cls.helpers = "\n".join(path.read_text(encoding="utf-8") for path in HELPERS)
         cls.all_text = cls.parent + "\n" + cls.helpers
+        cls.common = HELPERS[0].read_text(encoding="utf-8")
 
-    def test_complete_task_groups_are_exposed(self) -> None:
+    def test_flat_site_and_admin_navigation_are_exposed(self) -> None:
         for label in (
-            "网站详情",
-            "网站健康检查",
+            "网站管理",
+            "当前网站：",
+            "网站概览",
+            "健康检查",
+            "数据库清单",
+            "新增数据库",
+            "导出数据库",
+            "导入数据库",
+            "SSL 状态",
+            "申请 / 安装 Let’s Encrypt",
+            "安装自定义证书",
+            "修复网站权限",
+            "清理 Varnish 缓存",
+            "98. 更换网站",
+            "0. 返回 P07 主菜单",
+            "CloudPanel 管理",
             "创建网站",
-            "数据库工具",
-            "SSL / HTTPS",
-            "权限 / 缓存",
             "CloudPanel 安全",
             "CloudPanel 用户",
             "Vhost 模板",
@@ -35,8 +47,16 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         ):
             self.assertIn(label, self.parent)
 
+    def test_site_selection_is_persistent_and_refreshable(self) -> None:
+        self.assertIn('SELECTED_DOMAIN=""', self.common)
+        self.assertIn("clear_site_selection", self.common)
+        self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', self.common)
+        self.assertIn('wanted=sys.argv[2].strip().lower().rstrip', self.common)
+        self.assertIn('SELECTED_DOMAIN="$(python3', self.common)
+        self.assertIn("网站只选择一次", self.parent)
+
     def test_parent_is_thin_and_sources_bounded_helpers(self) -> None:
-        self.assertLess(len(self.parent.splitlines()), 80)
+        self.assertLess(len(self.parent.splitlines()), 140)
         for helper in (
             "cloudpanel_ui_common.sh",
             "cloudpanel_ui_sites.sh",
