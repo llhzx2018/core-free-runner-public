@@ -49,6 +49,7 @@ def derive_target_identity(domain: str, seed: str) -> TargetSiteIdentity:
 def derive_database_identity(domain: str, seed: str, index: int) -> tuple[str, str, str]:
     domain = cloudpanel.validate_domain(domain)
     token = _stable_token(f"db:{domain}:{seed}:{index}", 10)
+    # Keep names intentionally short for MySQL/MariaDB compatibility.
     database = cloudpanel.validate_name(f"p07_{token}_{index}", "database")
     username = cloudpanel.validate_name(f"p07u_{token[:8]}_{index}", "database user")
     password = secrets.token_urlsafe(30)
@@ -74,6 +75,8 @@ def ensure_domain_available(root: Path, domain: str) -> None:
     domain = cloudpanel.validate_domain(domain)
     if find_site(root, domain) is not None:
         raise SiteLifecycleError("target domain already exists in CloudPanel")
+    # Defense in depth: reject an existing htdocs directory even when inventory cannot
+    # associate it to a site. We do not delete or reuse such directories.
     for candidate in (root.resolve() / "home").glob(f"*/htdocs/{domain}") if (root.resolve() / "home").is_dir() else []:
         if candidate.exists() or candidate.is_symlink():
             raise SiteLifecycleError("target domain path already exists")
@@ -95,26 +98,43 @@ def create_site(
         if runtime_type == "php":
             if not version or version == "UNKNOWN":
                 raise SiteLifecycleError("PHP version is unavailable")
-            cloudpanel.add_php_site(identity.domain, version, identity.site_user, identity.site_password,
-                                    vhost_template=vhost_template or "Generic", clpctl=clpctl)
+            cloudpanel.add_php_site(
+                identity.domain,
+                version,
+                identity.site_user,
+                identity.site_password,
+                vhost_template=vhost_template or "Generic",
+                clpctl=clpctl,
+            )
         elif runtime_type in {"static", "static_html"}:
             cloudpanel.add_static_site(identity.domain, identity.site_user, identity.site_password, clpctl=clpctl)
         elif runtime_type in {"nodejs", "node_js"}:
             if not version or version == "UNKNOWN" or app_port in (None, "UNKNOWN"):
                 raise SiteLifecycleError("Node.js runtime metadata is incomplete")
-            cloudpanel.add_nodejs_site(identity.domain, version, app_port, identity.site_user, identity.site_password, clpctl=clpctl)
+            cloudpanel.add_nodejs_site(
+                identity.domain, version, app_port, identity.site_user, identity.site_password, clpctl=clpctl
+            )
         elif runtime_type == "python":
             if not version or version == "UNKNOWN" or app_port in (None, "UNKNOWN"):
                 raise SiteLifecycleError("Python runtime metadata is incomplete")
-            cloudpanel.add_python_site(identity.domain, version, app_port, identity.site_user, identity.site_password, clpctl=clpctl)
+            cloudpanel.add_python_site(
+                identity.domain, version, app_port, identity.site_user, identity.site_password, clpctl=clpctl
+            )
         elif runtime_type in {"reverse_proxy", "reverseproxy"}:
             if app_port in (None, "UNKNOWN"):
                 raise SiteLifecycleError("reverse proxy port is unavailable")
-            cloudpanel.add_reverse_proxy_site(identity.domain, f"http://127.0.0.1:{int(app_port)}",
-                                              identity.site_user, identity.site_password, clpctl=clpctl)
+            cloudpanel.add_reverse_proxy_site(
+                identity.domain,
+                f"http://127.0.0.1:{int(app_port)}",
+                identity.site_user,
+                identity.site_password,
+                clpctl=clpctl,
+            )
         else:
             raise SiteLifecycleError(f"unsupported CloudPanel runtime: {runtime_type or 'UNKNOWN'}")
     except (cloudpanel.CloudPanelError, ValueError) as exc:
+        if isinstance(exc, SiteLifecycleError):
+            raise
         raise SiteLifecycleError("CloudPanel site creation failed") from exc
 
 
