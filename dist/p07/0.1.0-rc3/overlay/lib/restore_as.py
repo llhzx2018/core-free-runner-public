@@ -334,15 +334,18 @@ def restore_as(
     wp: str = "wp",
 ) -> dict[str, Any]:
     package_dir = package_dir.resolve()
+    target_domain = cloudpanel.validate_domain(target_domain)
     fresh = package_engine.verify_package(package_dir)
     if fresh.get("status") != "PASS":
         raise RestoreAsError("backup package failed fresh verification")
     manifest = load_manifest(package_dir)
     source_site = manifest.get("site", {}) if isinstance(manifest.get("site"), dict) else {}
     source_domain = cloudpanel.validate_domain(str(source_site.get("domain", "")))
-    target_domain = cloudpanel.validate_domain(target_domain)
     target_root = require_target(target_root, manifest, target_domain, confirm)
-    site_lifecycle.ensure_domain_available(target_root, target_domain)
+    try:
+        site_lifecycle.ensure_domain_available(target_root, target_domain)
+    except site_lifecycle.SiteLifecycleError as exc:
+        raise RestoreAsError(str(exc)) from exc
 
     backup_id = str(manifest.get("backup_id", ""))
     identity = site_lifecycle.derive_target_identity(target_domain, backup_id)
