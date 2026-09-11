@@ -51,6 +51,9 @@ def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str
         f"{domain}:{port}:127.0.0.1",
     ]
     if scheme == "https":
+        # The target certificate is intentionally not copied from SOURCE. Before DNS
+        # is ready CloudPanel may expose a local/default certificate, so TLS identity
+        # is not trusted here; --resolve still exercises target-domain SNI routing.
         command.append("--insecure")
     command.append(f"{scheme}://{domain}/")
     proc = _run(command)
@@ -115,6 +118,9 @@ def verify_local_restore(
             "certificate_trust": "NOT_ASSERTED_UNTIL_TARGET_DNS_CERTIFICATE",
         }
     elif _nginx_has_target_vhost(nginx, target_domain):
+        # DNS may not yet point at this server and no target-domain certificate is
+        # installed by Restore-As. The vhost identity is still verified locally;
+        # certificate issuance remains explicitly deferred rather than reusing SOURCE.
         sni = {
             "status": "PASS",
             "mode": "TARGET_VHOST_PRESENT_TLS_DEFERRED",
