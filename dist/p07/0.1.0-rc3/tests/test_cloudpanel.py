@@ -73,13 +73,56 @@ class CloudPanelAdapterTests(unittest.TestCase):
         self.assertIn("--subjectAlternativeName=example.com", run.call_args_list[1].args[0])
 
     def test_permissions_varnish_and_template_helpers(self) -> None:
-        with self._ok("Generic\n") as run:
+        with tempfile.TemporaryDirectory() as td, self._ok("Generic\n") as run:
+            template = Path(td) / "template.tpl"
+            template.write_text("#{}\nserver {}\n", encoding="utf-8")
+            cloudpanel.import_vhost_templates()
             cloudpanel.list_vhost_templates()
+            cloudpanel.add_vhost_template("My Application", template)
+            cloudpanel.view_vhost_template("My Application")
+            cloudpanel.delete_vhost_template("My Application")
             cloudpanel.reset_permissions("/home/example/htdocs/www.example.com", directories="750", files="640")
             cloudpanel.purge_varnish("all")
         self.assertEqual([c.args[0][1] for c in run.call_args_list], [
-            "vhost-templates:list", "system:permissions:reset", "varnish-cache:purge"
+            "vhost-templates:import",
+            "vhost-templates:list",
+            "vhost-template:add",
+            "vhost-template:view",
+            "vhost-template:delete",
+            "system:permissions:reset",
+            "varnish-cache:purge",
         ])
+
+    def test_panel_user_lifecycle_and_security_commands(self) -> None:
+        with self._ok("john.doe\n") as run:
+            cloudpanel.add_panel_user(
+                "john.doe",
+                "john@example.com",
+                "John",
+                "Doe",
+                "secret",
+                role="user",
+                sites=["www.example.com"],
+            )
+            cloudpanel.list_panel_users()
+            cloudpanel.reset_panel_user_password("john.doe", "new-secret")
+            cloudpanel.disable_panel_user_mfa("john.doe")
+            cloudpanel.delete_panel_user("john.doe")
+            cloudpanel.enable_panel_basic_auth("gate", "auth-secret")
+            cloudpanel.disable_panel_basic_auth()
+            cloudpanel.update_cloudflare_ips()
+        commands = [call.args[0][1] for call in run.call_args_list]
+        self.assertEqual(commands, [
+            "user:add",
+            "user:list",
+            "user:reset:password",
+            "user:disable:mfa",
+            "user:delete",
+            "cloudpanel:enable:basic-auth",
+            "cloudpanel:disable:basic-auth",
+            "cloudflare:update:ips",
+        ])
+        self.assertIn("--sites=www.example.com", run.call_args_list[0].args[0])
 
     def test_delete_site_requires_explicit_force_flag(self) -> None:
         with self._ok() as run:
@@ -96,6 +139,10 @@ class CloudPanelAdapterTests(unittest.TestCase):
                 cloudpanel.add_nodejs_site("node.example.com", "22", 70000, "node", "pw")
             with self.assertRaises(ValueError):
                 cloudpanel.add_database("www.example.com", "bad/name", "user", "pw")
+            with self.assertRaises(ValueError):
+                cloudpanel.add_panel_user("user", "not-an-email", "A", "B", "pw")
+            with self.assertRaises(ValueError):
+                cloudpanel.add_panel_user("user", "u@example.com", "A", "B", "pw", role="owner")
         run.assert_not_called()
 
     def test_failures_never_echo_command_output_or_secret(self) -> None:
