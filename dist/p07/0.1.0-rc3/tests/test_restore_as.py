@@ -174,6 +174,7 @@ class RestoreAsTests(unittest.TestCase):
             package = self.make_package(base)
             target = self.make_target(base)
             identity, patches = self.common_patches(target, package, wp=False)
+            # Do not call WordPress domain reconciliation for dotenv applications.
             result = self._run_with_patches(
                 patches,
                 lambda _entered: restore_as.restore_as(
@@ -324,6 +325,7 @@ class RestoreAsTests(unittest.TestCase):
                 return True
 
             cleanup_site_patch = mock.patch.object(restore_as.site_lifecycle, "cleanup_site", side_effect=cleanup_site)
+            # Replace the WordPress success patch with a failure patch.
             patches[-2] = mock.patch.object(
                 restore_as,
                 "reconcile_wordpress_domain",
