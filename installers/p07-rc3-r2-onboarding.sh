@@ -122,6 +122,7 @@ grep -Fq '查看准备教程' "$TMP_DIR/new/bin/vfops-storage-setup" || fail "gu
 ! grep -Fq '"client_secret": client_secret' "$TMP_DIR/new/lib/google_device_oauth.py" || fail "guided-init15 Device OAuth 仍发送 client_secret。"
 
 say "升级 R2 一键远程初始化..."
+mkdir -p "$INSTALL_DIR/tests"
 cp "$TMP_DIR/new/BUILD_ID" "$INSTALL_DIR/BUILD_ID"
 cp "$TMP_DIR/new/bin/vfops-storage-setup" "$INSTALL_DIR/bin/vfops-storage-setup"
 cp "$TMP_DIR/new/lib/google_device_oauth.py" "$INSTALL_DIR/lib/google_device_oauth.py"
