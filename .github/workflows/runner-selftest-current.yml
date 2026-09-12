@@ -1,78 +1,251 @@
-name: Public Runner Current Self Test
+name: S01 C02 1.21.865 Runtime Formal Release
 
 on:
-  push:
+  pull_request:
     branches: [main]
-  workflow_dispatch:
+    paths:
+      - '.github/workflows/runner-selftest-current.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: s01-c02-121865-runtime-release-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
-  selftest:
+  formal-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
+    env:
+      OPS_REPO: llhzx2018/vf-tools-ops
+      OPS_SHA: d84234c73265c96d8fa308314f8447124157ed7c
+      VERSION: 1.21.865
+      TAG: v1.21.865
+      ASSET: vf-tools-ops_V1.21.865.zip
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Checkout public runner control repository
+      - name: Checkout exact formal Ops source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
         with:
-          fetch-depth: 1
+          repository: llhzx2018/vf-tools-ops
+          ref: d84234c73265c96d8fa308314f8447124157ed7c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
           persist-credentials: false
 
-      - name: Hosted runner allocation proof
+      - name: Verify exact source identity and release preconditions
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "RUNNER_OS=$RUNNER_OS"
-          uname -a
-          php -v || true
-          python3 --version
-          echo 'PUBLIC_RUNNER_ALLOCATION=PASS'
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(cat ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.865' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.865'" ops/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'S01-MATURE-ADMIN-R8-VISUAL-FIDELITY'" ops/vf-ops.php
+          if gh release view "$TAG" --repo "$OPS_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+          if gh api "repos/$OPS_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists" >&2
+            exit 1
+          fi
+          echo 'S01_C02_121865_RELEASE_PRECONDITIONS=PASS'
 
-      - name: Verify main push came from merged PR
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          VF_PUSH_SHA: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/check_main_push_provenance.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$VF_PUSH_SHA"
-          echo 'MAIN_PUSH_PROVENANCE=PASS' >> "$GITHUB_ENV"
-
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        shell: bash
-        run: python3 scripts/check_estate_anti_drift.py --live
-
-      - name: Build public-safe receipt
+      - name: Re-run R8 source safety contracts
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p evidence/runner
-          PROVENANCE="${MAIN_PUSH_PROVENANCE:-NOT_APPLICABLE}"
-          cat > evidence/runner/PUBLIC_RUNNER_CURRENT.txt <<EOF
-          PUBLIC_RUNNER_ALLOCATION=PASS
-          ESTATE_ANTI_DRIFT=PASS
-          MAIN_PUSH_PROVENANCE=$PROVENANCE
-          RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
-          PRIVATE_SOURCE_USED=GOV_DOC_AUTHORITY_ONLY
-          SECRET_USED=REGISTERED_PRIVATE_READ_CAPABILITY
-          PRIVATE_SOURCE_PERSISTED=NO
-          MAIN_WRITE=NO
-          USER_MANUAL_EXECUTION_REQUIRED=NO
+          php -l ops/vf-ops.php
+          php -l ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php
+          php ops/tests/s01-mature-admin-r8-visual-fidelity-contract.php
+          php ops/tests/top-domains-visible-ui-contract.php
+          echo 'S01_C02_121865_FORMAL_SOURCE_GATE=PASS'
+
+      - name: Stage exact Runtime Authority only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage dist
+          mkdir -p stage/vf-ops dist
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+
+          src=Path('ops')
+          dst=Path('stage/vf-ops')
+          banned_segments={'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'}
+          banned_ext={'.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp'}
+          allowed_root={'vf-ops.php','uninstall.php'}
+          allowed_dirs={'includes','assets','languages','config'}
+          selected=[]
+
+          for path in sorted(src.rglob('*')):
+              if path.is_symlink():
+                  rel=path.relative_to(src).as_posix()
+                  parts=[p.lower() for p in Path(rel).parts]
+                  could_runtime=(len(parts)==1 and rel in allowed_root) or (len(parts)>1 and parts[0] in allowed_dirs)
+                  if could_runtime:
+                      raise SystemExit(f'runtime symlink forbidden: {rel}')
+                  continue
+              if not path.is_file():
+                  continue
+              rel=path.relative_to(src).as_posix()
+              parts=list(Path(rel).parts)
+              lowers=[p.lower() for p in parts]
+              if any(p in banned_segments for p in lowers):
+                  continue
+              if path.suffix.lower() in banned_ext:
+                  continue
+              if any(p.startswith('.env') for p in lowers) or lowers[-1]=='wp-config.php':
+                  continue
+              runtime=(len(parts)==1 and rel in allowed_root) or (len(parts)>1 and parts[0] in allowed_dirs)
+              if not runtime:
+                  continue
+              target=dst/rel
+              target.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(path,target)
+              selected.append(rel)
+
+          if 'vf-ops.php' not in selected or not selected:
+              raise SystemExit('runtime stage incomplete')
+
+          hashes={}
+          for rel in sorted(selected):
+              hashes[rel]=hashlib.sha256((dst/rel).read_bytes()).hexdigest()
+          canonical=b''.join(rel.encode('utf-8')+b'\x00'+hashes[rel].encode('ascii')+b'\n' for rel in sorted(hashes))
+          fingerprint=hashlib.sha256(canonical).hexdigest()
+          Path('/tmp/runtime_count').write_text(str(len(hashes)))
+          Path('/tmp/runtime_fingerprint').write_text(fingerprint)
+          print(f'RUNTIME_FILE_COUNT={len(hashes)}')
+          print(f'RUNTIME_FINGERPRINT_SHA256={fingerprint}')
+          PY
+          test -f stage/vf-ops/vf-ops.php
+          test "$(find stage/vf-ops -type l | wc -l)" = '0'
+          echo 'S01_C02_121865_RUNTIME_STAGE=PASS'
+
+      - name: Validate staged Runtime and PHP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('stage/vf-ops')
+          banned={'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'}
+          banned_ext={'.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp'}
+          allowed_root={'vf-ops.php','uninstall.php'}
+          allowed_dirs={'includes','assets','languages','config'}
+          for p in root.rglob('*'):
+              if not p.is_file(): continue
+              rel=p.relative_to(root).as_posix()
+              parts=list(Path(rel).parts); low=[x.lower() for x in parts]
+              assert not any(x in banned for x in low), rel
+              assert p.suffix.lower() not in banned_ext, rel
+              assert not any(x.startswith('.env') for x in low), rel
+              assert low[-1] != 'wp-config.php', rel
+              assert (len(parts)==1 and rel in allowed_root) or (len(parts)>1 and parts[0] in allowed_dirs), rel
+          print('RUNTIME_POLICY=PASS')
+          PY
+          grep -Fq 'Version: 1.21.865' stage/vf-ops/vf-ops.php
+          while IFS= read -r -d '' phpfile; do php -l "$phpfile" >/dev/null; done < <(find stage/vf-ops -type f -name '*.php' -print0)
+          echo 'S01_C02_121865_RUNTIME_VALIDATION=PASS'
+
+      - name: Build WordPress UPDATE ZIP and package gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd stage && zip -X -q -r "../dist/$ASSET" vf-ops)
+          test -s "dist/$ASSET"
+          unzip -Z1 "dist/$ASSET" > /tmp/zip.list
+          test "$(grep -c '^vf-ops/vf-ops.php$' /tmp/zip.list)" = '1'
+          test "$(awk -F/ 'NF && $1!="vf-ops" {bad++} END{print bad+0}' /tmp/zip.list)" = '0'
+          ! grep -q '^vf-ops/vf-ops/' /tmp/zip.list
+          ! grep -Eqi '(^|/)(\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)' /tmp/zip.list
+          ! grep -Eqi '\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$' /tmp/zip.list
+          ! grep -Eqi '(^|/)\.env([^/]*$|/)|(^|/)wp-config\.php$' /tmp/zip.list
+          rm -rf /tmp/vf-ops-readback && mkdir -p /tmp/vf-ops-readback
+          unzip -q "dist/$ASSET" -d /tmp/vf-ops-readback
+          grep -Fq 'Version: 1.21.865' /tmp/vf-ops-readback/vf-ops/vf-ops.php
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('/tmp/vf-ops-readback/vf-ops')
+          files=sorted(p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file())
+          hashes={rel:hashlib.sha256((root/rel).read_bytes()).hexdigest() for rel in files}
+          canonical=b''.join(rel.encode()+b'\x00'+hashes[rel].encode()+b'\n' for rel in files)
+          fingerprint=hashlib.sha256(canonical).hexdigest()
+          assert len(hashes)==int(Path('/tmp/runtime_count').read_text())
+          assert fingerprint==Path('/tmp/runtime_fingerprint').read_text().strip()
+          print('ZIP_RUNTIME_SNAPSHOT=PASS')
+          PY
+          sha256sum "dist/$ASSET" | tee /tmp/asset.sha256
+          stat -c '%s' "dist/$ASSET" | tee /tmp/asset.bytes
+          echo 'S01_C02_121865_PACKAGE_GATE=PASS'
+
+      - name: Create formal v1.21.865 release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count="$(cat /tmp/runtime_count)"
+          fingerprint="$(cat /tmp/runtime_fingerprint)"
+          cat > /tmp/release-notes.md <<EOF
+          S01-C02 Mature Admin R8 Visual Fidelity.
+          Exact main source: $OPS_SHA
+          Structural R8 Gate: 34671575907 PASS
+          Final 1.21.865 Gate: 34671641913 PASS
+          Runtime package root: vf-ops/
+          Runtime files: $count
+          Runtime fingerprint SHA256: $fingerprint
+
+          Product Shell R3 makes the six-domain shell lighter and flatter. Mature Pages R8 reduces card-wall weight, keeps three compact Tools maintenance actions plus one full-width primary front-end action, turns the Tools state into a compact strip, and renders the Quality four-stage flow as a connected journey.
+
+          Schema remains 6.0.0; physical locator remains vf-ops/vf-ops.php; locator_cutover remains false.
+          Production: NOT_RUN
+          Static: NOT_RUN
+          Online/User visual acceptance: NOT_RUN until installed and reviewed in real WordPress.
           EOF
+          gh release create "$TAG" "dist/$ASSET#VF Tools Ops $VERSION Runtime-only WordPress update ZIP" \
+            --repo "$OPS_REPO" \
+            --target "$OPS_SHA" \
+            --title "VF Tools Ops V$VERSION" \
+            --notes-file /tmp/release-notes.md
+          echo 'S01_C02_121865_RELEASE_CREATE=PASS'
 
-      - name: Upload public-safe receipt
+      - name: Independent Release and asset readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_json="$(gh api "repos/$OPS_REPO/releases/tags/$TAG")"
+          test "$(jq -r '.tag_name' <<<"$release_json")" = "$TAG"
+          test "$(jq -r '.draft' <<<"$release_json")" = 'false'
+          test "$(jq -r '.prerelease' <<<"$release_json")" = 'false'
+          asset_id="$(jq -r --arg name "$ASSET" '.assets[] | select(.name==$name) | .id' <<<"$release_json")"
+          asset_size="$(jq -r --arg name "$ASSET" '.assets[] | select(.name==$name) | .size' <<<"$release_json")"
+          asset_digest="$(jq -r --arg name "$ASSET" '.assets[] | select(.name==$name) | .digest // empty' <<<"$release_json")"
+          published_at="$(jq -r '.published_at' <<<"$release_json")"
+          local_size="$(cat /tmp/asset.bytes)"
+          local_sha="$(awk '{print $1}' /tmp/asset.sha256)"
+          test -n "$asset_id"
+          test "$asset_size" = "$local_size"
+          if [ -n "$asset_digest" ]; then test "$asset_digest" = "sha256:$local_sha"; fi
+          tag_json="$(gh api "repos/$OPS_REPO/git/ref/tags/$TAG")"
+          test "$(jq -r '.object.sha' <<<"$tag_json")" = "$OPS_SHA"
+          rm -rf /tmp/release-readback && mkdir -p /tmp/release-readback
+          gh release download "$TAG" --repo "$OPS_REPO" --pattern "$ASSET" --dir /tmp/release-readback --clobber
+          test "$(sha256sum "/tmp/release-readback/$ASSET" | awk '{print $1}')" = "$local_sha"
+          test "$(stat -c '%s' "/tmp/release-readback/$ASSET")" = "$local_size"
+          unzip -Z1 "/tmp/release-readback/$ASSET" | grep -q '^vf-ops/vf-ops.php$'
+          printf 'TAG=%s\nSOURCE_SHA=%s\nASSET=%s\nASSET_ID=%s\nBYTES=%s\nSHA256=%s\nRUNTIME_FILE_COUNT=%s\nRUNTIME_FINGERPRINT_SHA256=%s\nPUBLISHED_AT=%s\n' \
+            "$TAG" "$OPS_SHA" "$ASSET" "$asset_id" "$local_size" "$local_sha" "$(cat /tmp/runtime_count)" "$(cat /tmp/runtime_fingerprint)" "$published_at" | tee /tmp/S01_C02_121865_RELEASE_RECEIPT.txt
+          echo 'S01_C02_121865_FORMAL_RELEASE=PASS'
+
+      - name: Upload public-safe release receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
         with:
-          name: public-runner-current-selftest-${{ github.run_id }}
-          path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
+          name: s01-c02-121865-runtime-release-${{ github.run_id }}
+          path: /tmp/S01_C02_121865_RELEASE_RECEIPT.txt
           if-no-files-found: error
           retention-days: 14
