@@ -25,7 +25,7 @@ def friendly_oauth_error(code: str, phase: str = "token") -> str:
     code = (code or "unknown_error").strip()
     if phase == "device":
         mapping = {
-            "invalid_client": "Google OAuth Client ID 无效；没有修改配置。请确认使用你自己的 TVs and Limited Input devices Client。",
+            "invalid_client": "Google OAuth Client ID 无效；没有修改配置。请确认使用 TVs and Limited Input devices 类型的 Client。",
             "unauthorized_client": "这个 Google OAuth Client 不能使用 Device Authorization；没有修改配置。请确认 Client 类型为 TVs and Limited Input devices。",
             "invalid_request": "Google 拒绝了 Device OAuth 请求；请检查 Client ID 后重新进入初始化。",
             "access_denied": "Google Device OAuth 请求被拒绝；没有修改配置。",
@@ -34,7 +34,7 @@ def friendly_oauth_error(code: str, phase: str = "token") -> str:
         mapping = {
             "access_denied": "Google 授权已被拒绝；没有修改配置。重新进入初始化后可以再次授权。",
             "expired_token": "Google 一次性授权已过期；没有修改配置。请重新进入初始化获取新的授权代码。",
-            "invalid_client": "Google OAuth Client ID / Secret 验证失败；没有修改配置。请检查你自己的 OAuth Client 信息。",
+            "invalid_client": "Google OAuth Client ID 验证失败；没有修改配置。请检查你自己的 OAuth Client。",
             "unauthorized_client": "这个 Google OAuth Client 不能完成 Device Authorization；没有修改配置。请确认 Client 类型为 TVs and Limited Input devices。",
             "invalid_grant": "Google 授权会话已经失效；没有修改配置。请重新进入初始化获取新的授权代码。",
             "invalid_request": "Google 授权请求无效；没有修改配置。请重新进入初始化。",
@@ -74,7 +74,11 @@ def post_form(url: str, payload: dict[str, str], timeout: int = 20) -> dict[str,
     return data
 
 
-def authorize(client_id: str, client_secret: str) -> dict[str, str]:
+def authorize(client_id: str) -> dict[str, str]:
+    client_id = client_id.strip()
+    if not client_id:
+        raise OAuthError("Google OAuth Client ID 不能为空；没有修改配置。")
+
     device = post_form(DEVICE_ENDPOINT, {"client_id": client_id, "scope": DRIVE_SCOPE})
     device_code = str(device.get("device_code") or "")
     user_code = str(device.get("user_code") or "")
@@ -86,6 +90,7 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
         raise OAuthError("Google OAuth 返回的等待时间异常；没有修改配置。") from exc
     if not device_code or not user_code:
         raise OAuthError(friendly_oauth_error(str(device.get("error") or "device_authorization_failed"), phase="device"))
+
     print("", file=sys.stderr)
     print("Google 官方浏览器授权", file=sys.stderr)
     print("----------------------------------------", file=sys.stderr)
@@ -93,11 +98,15 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
     print(f"2. 输入一次性代码：{user_code}", file=sys.stderr)
     print("3. 在 Google 页面确认授权；P07 会在这里自动继续。", file=sys.stderr)
     print("", file=sys.stderr)
+
     deadline = time.monotonic() + expires_in
     current_interval = interval
     slow_down_notified = False
     while time.monotonic() < deadline:
-        token = post_form(TOKEN_ENDPOINT, {"client_id": client_id, "client_secret": client_secret, "device_code": device_code, "grant_type": GRANT_TYPE})
+        token = post_form(
+            TOKEN_ENDPOINT,
+            {"client_id": client_id, "device_code": device_code, "grant_type": GRANT_TYPE},
+        )
         error = str(token.get("error") or "")
         if error == "authorization_pending":
             time.sleep(current_interval)
@@ -111,6 +120,7 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
             continue
         if error:
             raise OAuthError(friendly_oauth_error(error))
+
         access_token = str(token.get("access_token") or "")
         refresh_token = str(token.get("refresh_token") or "")
         token_type = str(token.get("token_type") or "Bearer")
@@ -122,6 +132,7 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
             raise OAuthError("Google 授权完成但没有返回可复用的 Refresh Token；没有修改配置。请重新授权。")
         expiry = (datetime.now(timezone.utc) + timedelta(seconds=token_expires)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         return {"access_token": access_token, "token_type": token_type, "refresh_token": refresh_token, "expiry": expiry}
+
     raise OAuthError("Google 授权等待超时；没有修改配置。请重新进入初始化获取新的授权代码。")
 
 
@@ -130,17 +141,14 @@ def main() -> int:
     parser.add_argument("--client-id", required=True)
     args = parser.parse_args()
     client_id = args.client_id.strip()
-    client_secret = sys.stdin.readline().rstrip("\r\n")
-    if not client_id or not client_secret:
-        print("ERROR: Google OAuth Client ID / Secret 不能为空。", file=sys.stderr)
+    if not client_id:
+        print("ERROR: Google OAuth Client ID 不能为空。", file=sys.stderr)
         return 13
     try:
-        token = authorize(client_id, client_secret)
+        token = authorize(client_id)
     except OAuthError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 13
-    finally:
-        client_secret = ""
     print(json.dumps(token, ensure_ascii=False, separators=(",", ":")))
     return 0
 
