@@ -27,7 +27,7 @@ class GoogleDeviceOAuthTests(unittest.TestCase):
         expected = {
             "access_denied": "已被拒绝",
             "expired_token": "已过期",
-            "invalid_client": "Client ID",
+            "invalid_client": "Client ID / Client Secret",
             "unauthorized_client": "TVs and Limited Input devices",
             "invalid_grant": "已经失效",
             "temporarily_unavailable": "暂时不可用",
@@ -38,12 +38,36 @@ class GoogleDeviceOAuthTests(unittest.TestCase):
                 self.assertIn(text, message)
                 self.assertIn("没有修改配置", message)
 
+    def test_device_request_uses_client_id_only_and_token_poll_uses_secret(self) -> None:
+        success = {
+            "access_token": "ACCESS_SECRET",
+            "refresh_token": "REFRESH_SECRET",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def fake_post(url: str, payload: dict[str, str], timeout: int = 20):
+            calls.append((url, payload.copy()))
+            return self._device() if len(calls) == 1 else success
+
+        with mock.patch.object(oauth, "post_form", side_effect=fake_post), \
+             mock.patch.object(oauth.time, "monotonic", side_effect=[100.0, 100.0]):
+            token = oauth.authorize("CLIENT", "CLIENT_SECRET_VALUE")
+
+        self.assertEqual(token["refresh_token"], "REFRESH_SECRET")
+        self.assertEqual(calls[0][0], oauth.DEVICE_ENDPOINT)
+        self.assertNotIn("client_secret", calls[0][1])
+        self.assertEqual(calls[1][0], oauth.TOKEN_ENDPOINT)
+        self.assertEqual(calls[1][1].get("client_secret"), "CLIENT_SECRET_VALUE")
+
     def test_access_denied_is_fail_closed(self) -> None:
         with mock.patch.object(oauth, "post_form", side_effect=[self._device(), {"error": "access_denied"}]), \
              mock.patch.object(oauth.time, "monotonic", side_effect=[100.0, 100.0]):
             with self.assertRaises(oauth.OAuthError) as ctx:
-                oauth.authorize("CLIENT")
+                oauth.authorize("CLIENT", "CLIENT_SECRET_VALUE")
         self.assertIn("已被拒绝", str(ctx.exception))
+        self.assertNotIn("CLIENT_SECRET_VALUE", str(ctx.exception))
 
     def test_slow_down_is_automatic_and_then_succeeds(self) -> None:
         success = {
@@ -67,35 +91,41 @@ class GoogleDeviceOAuthTests(unittest.TestCase):
              mock.patch.object(oauth.time, "monotonic", side_effect=[100.0, 100.0, 100.0]), \
              mock.patch.object(oauth.time, "sleep") as sleep, \
              contextlib.redirect_stderr(stderr):
-            token = oauth.authorize("CLIENT")
+            token = oauth.authorize("CLIENT", "CLIENT_SECRET_VALUE")
         self.assertEqual(token["refresh_token"], "REFRESH_SECRET")
         sleep.assert_called_once_with(6)
         self.assertIn("已自动放慢等待", stderr.getvalue())
-        for _url, payload in calls:
-            self.assertNotIn("client_secret", payload)
+        self.assertNotIn("CLIENT_SECRET_VALUE", stderr.getvalue())
+        self.assertNotIn("client_secret", calls[0][1])
+        self.assertEqual(calls[1][1].get("client_secret"), "CLIENT_SECRET_VALUE")
+        self.assertEqual(calls[2][1].get("client_secret"), "CLIENT_SECRET_VALUE")
 
     def test_timeout_has_recovery_next_action(self) -> None:
         with mock.patch.object(oauth, "post_form", return_value=self._device(expires_in=1)), \
              mock.patch.object(oauth.time, "monotonic", side_effect=[10.0, 12.0]):
             with self.assertRaises(oauth.OAuthError) as ctx:
-                oauth.authorize("CLIENT")
+                oauth.authorize("CLIENT", "CLIENT_SECRET_VALUE")
         message = str(ctx.exception)
         self.assertIn("超时", message)
         self.assertIn("重新进入初始化", message)
+        self.assertNotIn("CLIENT_SECRET_VALUE", message)
 
     def test_network_error_does_not_echo_request_payload(self) -> None:
         with mock.patch.object(oauth.urllib.request, "urlopen", side_effect=OSError("SYNTH_SECRET_NETWORK_DETAIL")):
             with self.assertRaises(oauth.OAuthError) as ctx:
-                oauth.post_form(oauth.TOKEN_ENDPOINT, {"client_id": "DO_NOT_ECHO"})
+                oauth.post_form(oauth.TOKEN_ENDPOINT, {"client_id": "DO_NOT_ECHO", "client_secret": "SECRET_DO_NOT_ECHO"})
         message = str(ctx.exception)
         self.assertIn("网络请求失败", message)
         self.assertNotIn("DO_NOT_ECHO", message)
+        self.assertNotIn("SECRET_DO_NOT_ECHO", message)
         self.assertNotIn("SYNTH_SECRET_NETWORK_DETAIL", message)
 
-    def test_blank_client_id_fails_before_network(self) -> None:
+    def test_blank_client_id_or_secret_fails_before_network(self) -> None:
         with mock.patch.object(oauth, "post_form") as post:
             with self.assertRaises(oauth.OAuthError):
-                oauth.authorize("   ")
+                oauth.authorize("   ", "SECRET")
+            with self.assertRaises(oauth.OAuthError):
+                oauth.authorize("CLIENT", "   ")
         post.assert_not_called()
 
 
