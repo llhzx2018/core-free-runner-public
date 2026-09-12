@@ -119,11 +119,12 @@ PY
   done
 }
 
+# Advanced/internal helper. Ordinary users do not see this menu.
 vhost_tools() {
   while true; do
     cat <<'EOF2'
 
-Vhost Templates
+Vhost Templates（高级）
 ----------------------------------------
   1. 查看模板
   2. 刷新官方模板
@@ -134,34 +135,55 @@ EOF2
     printf '请选择 [0-4]：'; read -r choice || return 0
     case "$choice" in
       1)
-        PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY' || true
-import cloudpanel
-print(cloudpanel.list_vhost_templates(),end='')
+        if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
+import sys,cloudpanel
+try:
+    print(cloudpanel.list_vhost_templates(),end='')
+except Exception:
+    print('模板清单读取未完成。', file=sys.stderr)
+    raise SystemExit(1)
 PY
+        then :; else printf '模板清单读取未完成。\n' >&2; fi
         pause ;;
       2)
         printf '刷新模板不会删除网站。继续？[Y/n]：'; read -r confirm || true
         if [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]]; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
-import cloudpanel
-cloudpanel.import_vhost_templates()
+import sys,cloudpanel
+try:
+    cloudpanel.import_vhost_templates()
+except Exception:
+    print('模板刷新未完成。', file=sys.stderr)
+    raise SystemExit(1)
 PY
           then printf '\n模板已刷新 ✓\n'; else printf '\n模板刷新未完成。\n' >&2; fi
         fi
         pause ;;
       3)
         printf '模板名：'; read -r name || continue
-        PYTHONPATH="$ROOT_DIR/lib" python3 - "$name" <<'PY' || true
+        if [[ -z "${name//[[:space:]]/}" ]]; then printf '模板名不能为空。\n' >&2; pause; continue; fi
+        if PYTHONPATH="$ROOT_DIR/lib" python3 - "$name" <<'PY'
 import sys,cloudpanel
-print(cloudpanel.view_vhost_template(sys.argv[1]),end='')
+try:
+    print(cloudpanel.view_vhost_template(sys.argv[1]),end='')
+except Exception:
+    print('模板读取未完成，请检查模板名。', file=sys.stderr)
+    raise SystemExit(1)
 PY
+        then :; else :; fi
         pause ;;
       4)
         printf '模板名：'; read -r name || continue
+        if [[ -z "${name//[[:space:]]/}" ]]; then printf '模板名不能为空。\n' >&2; pause; continue; fi
         printf '本地文件或 HTTPS URL：'; read -r source || continue
+        if [[ -z "${source//[[:space:]]/}" ]]; then printf '模板来源不能为空。\n' >&2; pause; continue; fi
         if PYTHONPATH="$ROOT_DIR/lib" python3 - "$name" "$source" <<'PY'
 import sys,cloudpanel
-cloudpanel.add_vhost_template(sys.argv[1],sys.argv[2])
+try:
+    cloudpanel.add_vhost_template(sys.argv[1],sys.argv[2])
+except Exception:
+    print('模板添加未完成，请检查模板名和来源。', file=sys.stderr)
+    raise SystemExit(1)
 PY
         then printf '\n自定义模板已添加 ✓\n'; else printf '\n模板添加未完成。\n' >&2; fi
         pause ;;
@@ -178,7 +200,7 @@ import cloudpanel
 print('CLI：READY')
 print('版本：'+cloudpanel.version())
 templates=cloudpanel.list_vhost_templates().strip().splitlines()
-print('Vhost Templates：READY' if templates else 'Vhost Templates：EMPTY/UNKNOWN')
+print('Vhost 配置模板：READY（建站自动使用）' if templates else 'Vhost 配置模板：EMPTY/UNKNOWN')
 print('站点类型：PHP / Static / Node.js / Python / Reverse Proxy')
 print('数据库：ADD / EXPORT / IMPORT')
 print('SSL：STATUS / LETS_ENCRYPT / CUSTOM_CERT')
