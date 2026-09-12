@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,18 +16,22 @@ class StorageOnboardingUXTests(unittest.TestCase):
         cls.oauth = OAUTH.read_text(encoding="utf-8")
 
     def test_first_screen_is_preparation_first(self) -> None:
-        self.assertIn("首次使用前只需要准备", self.setup)
-        self.assertIn("Google：OAuth Client ID", self.setup)
+        self.assertIn("首次使用前请先准备", self.setup)
+        self.assertIn("Google：OAuth Client ID + Client Secret", self.setup)
         self.assertIn("B2：Bucket + Application Key ID + Application Key", self.setup)
         self.assertIn("Recovery Key：P07 自动生成，无需提前准备", self.setup)
         self.assertIn("已准备好，一键初始化 Google + B2", self.setup)
-        self.assertIn("查看准备教程", self.setup)
+        self.assertIn("查看完整准备教程", self.setup)
 
     def test_google_tutorial_is_embedded_before_secret_prompts(self) -> None:
-        self.assertIn("https://console.cloud.google.com/", self.setup)
+        tutorial = self.setup.find("https://console.cloud.google.com/")
+        secret_prompt = self.setup.find("OAuth Client Secret（输入不回显）")
+        self.assertGreaterEqual(tutorial, 0)
+        self.assertGreater(secret_prompt, tutorial)
         self.assertIn("Google Drive API", self.setup)
         self.assertIn("TVs and Limited Input devices", self.setup)
-        self.assertIn("P07 不再要求 Client Secret", self.setup)
+        self.assertIn("Client ID + Client Secret", self.setup)
+        self.assertIn("不回显、不写日志、不放命令行参数", self.setup)
 
     def test_b2_tutorial_is_embedded_and_specific(self) -> None:
         self.assertIn("https://secure.backblaze.com/", self.setup)
@@ -51,17 +54,20 @@ class StorageOnboardingUXTests(unittest.TestCase):
         self.assertGreaterEqual(health, 0)
         self.assertGreater(reveal, health)
 
-    def test_google_device_oauth_no_longer_uses_client_secret(self) -> None:
-        self.assertRegex(self.oauth, r"def authorize\(client_id: str\)")
-        self.assertNotIn('"client_secret": client_secret', self.oauth)
-        self.assertNotIn("sys.stdin.readline", self.oauth)
-        self.assertNotIn("Client ID / Secret", self.oauth)
+    def test_google_secret_is_hidden_and_not_passed_in_argv(self) -> None:
+        self.assertIn("GOOGLE_CLIENT_SECRET", self.setup)
+        self.assertIn("IFS= read -rs client_secret", self.setup)
+        self.assertIn("printf '%s\\n' \"$client_secret\" | python3 \"$GOOGLE_OAUTH_HELPER\" --client-id \"$client_id\"", self.setup)
+        self.assertNotIn("--client-secret", self.setup)
+        self.assertIn("google_client_secret_obscured", self.setup)
+        self.assertIn("client_secret\\0%s\\0", self.setup)
 
-    def test_setup_does_not_prompt_for_google_client_secret(self) -> None:
-        prompt_lines = [line for line in self.setup.splitlines() if "printf" in line or "read " in line]
-        joined = "\n".join(prompt_lines)
-        self.assertNotIn("Client Secret（输入不回显）", joined)
-        self.assertNotRegex(joined, re.compile(r"GOOGLE_CLIENT_SECRET"))
+    def test_google_oauth_contract_uses_secret_only_for_token_polling(self) -> None:
+        self.assertRegex(self.oauth, r"def authorize\(client_id: str, client_secret: str\)")
+        self.assertIn('DEVICE_ENDPOINT, {"client_id": client_id, "scope": DRIVE_SCOPE}', self.oauth)
+        self.assertIn('"client_secret": client_secret', self.oauth)
+        self.assertIn("client_secret = sys.stdin.readline()", self.oauth)
+        self.assertNotIn("--client-secret", self.oauth)
 
     def test_existing_source_import_and_safety_routes_remain(self) -> None:
         self.assertIn("从已有 P07 服务器导入", self.setup)
@@ -70,6 +76,7 @@ class StorageOnboardingUXTests(unittest.TestCase):
         self.assertIn("SOURCE：保留", self.setup)
         self.assertIn("rollback_fresh", self.setup)
         self.assertIn("rollback_target", self.setup)
+        self.assertIn("TARGET 安装后复核失败，正在恢复安装前配置", self.setup)
 
 
 if __name__ == "__main__":
