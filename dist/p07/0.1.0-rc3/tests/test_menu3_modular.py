@@ -99,9 +99,12 @@ class Menu3ModularTests(unittest.TestCase):
             "CloudPanel 管理",
             "CloudPanel 安全",
             "CloudPanel 用户",
-            "Vhost Templates",
+            "Vhost Templates（高级）",
         ):
             self.assertIn(marker, text)
+        parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
+        self.assertNotIn("  4. Vhost 模板", parent)
+        self.assertIn("Vhost 模板由 CloudPanel / P07 自动处理", parent)
         for forbidden in (
             "site:delete",
             "db:delete",
