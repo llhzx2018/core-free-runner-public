@@ -3,7 +3,7 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-rc3-r2-onboarding.sh"
-EXPECTED_BLOB="66e6eeae6d2123c318cd755365e299b04e61eac4"
+EXPECTED_BLOB="d670d80fb811da16957d5c347d175433b6f14451"
 
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -25,7 +25,7 @@ bash -n "$TMP" || fail "CloudPanel 运维模块安装器语法校验失败。"
 
 python3 - "$TMP" "$EXPECTED_BLOB" <<'PY' || fail "CloudPanel 运维模块安装器身份校验失败。"
 import hashlib,sys
-path,expected=sys.argv[1],sys.argv[2]
+path,expected=sys.argv[1:]
 data=open(path,'rb').read()
 actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
 if actual != expected:
