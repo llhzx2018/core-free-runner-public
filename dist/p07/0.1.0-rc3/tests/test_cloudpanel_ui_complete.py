@@ -20,6 +20,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         cls.helpers = "\n".join(path.read_text(encoding="utf-8") for path in HELPERS)
         cls.all_text = cls.parent + "\n" + cls.helpers
         cls.common = HELPERS[0].read_text(encoding="utf-8")
+        cls.admin = HELPERS[3].read_text(encoding="utf-8")
 
     def test_flat_site_and_admin_navigation_are_exposed(self) -> None:
         for label in (
@@ -42,10 +43,27 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
             "创建网站",
             "CloudPanel 安全",
             "CloudPanel 用户",
-            "Vhost 模板",
             "平台基础能力检查",
         ):
             self.assertIn(label, self.parent)
+        self.assertNotIn("  4. Vhost 模板", self.parent)
+        self.assertIn("Vhost 模板由 CloudPanel / P07 自动处理", self.parent)
+
+    def test_vhost_maintenance_is_retained_as_advanced_internal_capability(self) -> None:
+        self.assertIn("vhost_tools()", self.admin)
+        self.assertIn("Vhost Templates（高级）", self.admin)
+        for adapter in (
+            "cloudpanel.list_vhost_templates",
+            "cloudpanel.import_vhost_templates",
+            "cloudpanel.view_vhost_template",
+            "cloudpanel.add_vhost_template",
+        ):
+            self.assertIn(adapter, self.admin)
+        self.assertIn("模板名不能为空。", self.admin)
+        self.assertIn("模板来源不能为空。", self.admin)
+        self.assertIn("模板读取未完成，请检查模板名。", self.admin)
+        self.assertIn("模板添加未完成，请检查模板名和来源。", self.admin)
+        self.assertNotIn("vhost_tools ;;", self.parent)
 
     def test_site_selection_is_persistent_and_refreshable(self) -> None:
         self.assertIn('SELECTED_DOMAIN=""', self.common)
