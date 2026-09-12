@@ -1,0 +1,155 @@
+name: P01 R25 Resource Quality Gate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-r25-resource-quality-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    if: github.head_ref == 'temp/p01-r25-resource-quality-gate-20260911'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: 08bce2a2de782a0a8bed48cb000fb41faa5da590
+      HEAD_SHA: 9010d970aadb07bb63968c843e0326a6b5cdbad9
+      TARGET_BRANCH: work/p01-r25-resource-quality-20260911
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact authority and scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$BASE_SHA"
+          test "$(GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${TARGET_BRANCH}" --jq '.object.sha')" = "$HEAD_SHA"
+          GH_TOKEN="$PRIVATE_READ_TOKEN" gh api "repos/${PRODUCT_REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '.files[].filename' | sort >/tmp/r25-files
+          cat >/tmp/r25-expected <<'EOF'
+          docs/authority/ACCEPTANCE_MATRIX.md
+          docs/authority/P01_FUNCTIONAL_CONTRACT_20260829.md
+          docs/authority/SSOT.md
+          src/app/Platform/Platform.php
+          src/app/ResourceCapturePolicy.php
+          src/app/ResourceClassificationPolicy.php
+          src/app/SurfaceRepository.php
+          src/app/WorkspaceViewCatalog.php
+          src/quick-save.php
+          tests/unit/pending_workspace_visibility_contract.php
+          tests/unit/resource_capture_self_link_contract.php
+          tests/unit/resource_classification_policy_contract.php
+          tests/unit/resource_quality_governance_contract.php
+          EOF
+          sed -i 's/^          //' /tmp/r25-expected
+          diff -u /tmp/r25-expected /tmp/r25-files
+          echo P01_R25_AUTHORITY=PASS
+
+      - name: Checkout exact R25 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.HEAD_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Syntax and focused contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l src/app/ResourceCapturePolicy.php
+          php -l src/app/ResourceClassificationPolicy.php
+          php -l src/app/SurfaceRepository.php
+          php -l src/app/WorkspaceViewCatalog.php
+          php -l src/app/Platform/Platform.php
+          php -l src/quick-save.php
+          php tests/unit/pending_workspace_visibility_contract.php | grep -Fx 'P01_PENDING_WORKSPACE_VISIBILITY_CONTRACT=PASS'
+          php tests/unit/resource_capture_self_link_contract.php | grep -Fx 'P01_RESOURCE_CAPTURE_SELF_LINK_CONTRACT=PASS'
+          php tests/unit/resource_classification_policy_contract.php | grep -Fx 'P01_RESOURCE_CLASSIFICATION_POLICY_CONTRACT=PASS'
+          php tests/unit/resource_quality_governance_contract.php | grep -Fx 'P01_RESOURCE_QUALITY_GOVERNANCE_CONTRACT=PASS'
+          echo P01_R25_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh Install and pending fixture
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/r25 && cp -a src /tmp/r25 && cd /tmp/r25
+          php -S 127.0.0.1:18129 -t . >/tmp/r25-server.log 2>&1 & echo $! >/tmp/r25-server.pid
+          for i in $(seq 1 30); do curl -fsS -c /tmp/r25.cookies -b /tmp/r25.cookies http://127.0.0.1:18129/setup.php -o /tmp/r25-setup.html && break || sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/r25-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}R25x"; printf '%s' "$PASS" >/tmp/r25.password
+          curl -fsS -L -c /tmp/r25.cookies -b /tmp/r25.cookies -X POST http://127.0.0.1:18129/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start R25 Gate' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" -o /tmp/r25-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          php -r '
+            require "app/bootstrap.php"; require "app/SurfaceRepository.php";
+            $db=vf_db();$r=new VfRepository($db);
+            $cat=$r->createCategory(["name"=>"成人收藏","is_private"=>true,"sort_order"=>0]);
+            $cid=(int)($cat["id"]??0); if($cid<=0) exit(21);
+            $x=$r->savePendingCapture(["url"=>"https://xiaoheimi.cc/index.php/vod/detail/id/8691.html","title"=>"渗透 - 小宝影院 - 在线视频"],"mobile-quick-save");
+            $id=(int)($x["id"]??0); if($id<=0) exit(22);
+            $s=$db->prepare("UPDATE links SET category_id=? WHERE id=?");$s->execute([$cid,$id]);
+            file_put_contents("/tmp/r25.fixture",json_encode(["id"=>$id,"category"=>$cid],JSON_UNESCAPED_SLASHES));
+            $surface=new VfSurfaceRepository($db);$suggest=$surface->suggestions(100);$found=null;foreach($suggest as $v){if((int)$v["link_id"]===$id){$found=$v;break;}}
+            if(!$found||($found["surface"]??"")!=="watch"||($found["confidence"]??0)<94) exit(23);
+            echo "P01_R25_FIXTURE=PASS\n";'
+          echo P01_R25_INSTALL=PASS
+
+      - name: Authenticated Pending isolation browser proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/r25-pw && mkdir -p /tmp/r25-pw && cd /tmp/r25-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import { chromium } from 'playwright';import fs from 'node:fs';
+          const base='http://127.0.0.1:18129/',password=fs.readFileSync('/tmp/r25.password','utf8');
+          const fixture=JSON.parse(fs.readFileSync('/tmp/r25.fixture','utf8'));
+          const browser=await chromium.launch({headless:true}),ctx=await browser.newContext({viewport:{width:1291,height:797}}),p=await ctx.newPage();
+          await p.goto(base+'start.php',{waitUntil:'networkidle'});await p.locator('.vf-global-account-actions [data-vf-auth-login]').click();await p.fill('[data-vf-auth-dialog] input[name="password"]',password);await p.click('[data-vf-auth-submit]');await p.waitForSelector('.vf-global-account-actions a[href="settings.php"]');
+          await p.goto(base+'start.php?category='+fixture.category,{waitUntil:'networkidle'});
+          const startText=await p.locator('body').innerText();if(startText.includes('渗透 - 小宝影院 - 在线视频'))throw new Error('pending leaked into formal Start category');
+          await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});
+          const inboxText=await p.locator('body').innerText();if(!inboxText.includes('渗透 - 小宝影院 - 在线视频'))throw new Error('pending missing from Inbox');
+          if(!inboxText.includes('影视'))throw new Error('Watch suggestion not visible in Inbox');
+          const geom=await p.evaluate(()=>({overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));if(geom.overflow>1)throw new Error('desktop overflow '+JSON.stringify(geom));
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});const mobile=await p.evaluate(()=>({overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));if(mobile.overflow>1)throw new Error('mobile overflow '+JSON.stringify(mobile));
+          console.log('P01_R25_BROWSER='+JSON.stringify({formalStartExcluded:true,inboxVisible:true,desktop:geom,mobile}));await browser.close();
+          JS
+          node verify.mjs | tee /tmp/r25-browser.log
+          grep -F 'P01_R25_BROWSER=' /tmp/r25-browser.log
+          echo P01_R25_UA_UI=PASS
+
+      - name: Final verdict
+        run: |
+          echo P01_R25_RESOURCE_QUALITY_GATE=PASS
+          echo TESTING_GATE=PASS
+          echo INSTALL_GATE=PASS
+          echo UA_UI_MACHINE=PASS
+          echo DATA_SCHEMA_CHANGE=NONE
+          echo PRODUCTION_DATA_WRITE=false
+          echo RELEASE_WRITE=false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          test ! -f /tmp/r25-server.pid || kill "$(cat /tmp/r25-server.pid)" 2>/dev/null || true
+          rm -rf vf-start /tmp/r25 /tmp/r25-* /tmp/r25-pw
