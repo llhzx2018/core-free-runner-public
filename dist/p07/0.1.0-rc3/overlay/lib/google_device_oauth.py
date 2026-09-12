@@ -82,6 +82,7 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
     if not client_secret:
         raise OAuthError("Google OAuth Client Secret 不能为空；没有修改配置。")
 
+    # Google Device Authorization request identifies the client with client_id.
     device = post_form(DEVICE_ENDPOINT, {"client_id": client_id, "scope": DRIVE_SCOPE})
     device_code = str(device.get("device_code") or "")
     user_code = str(device.get("user_code") or "")
@@ -106,6 +107,7 @@ def authorize(client_id: str, client_secret: str) -> dict[str, str]:
     current_interval = interval
     slow_down_notified = False
     while time.monotonic() < deadline:
+        # Google token polling for this OAuth client uses both client_id and client_secret.
         token = post_form(
             TOKEN_ENDPOINT,
             {
