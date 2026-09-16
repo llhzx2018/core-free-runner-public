@@ -72,54 +72,42 @@ jobs:
           while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src -type f -name '*.php' -print0 | sort -z)
           echo "PASS all staged runtime PHP syntax"
 
-      - name: Establish runtime fingerprint continuity
+      - name: Establish canonical runtime authority continuity
         id: fp
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/theme-old"
           git -C theme worktree add -q --detach "$RUNNER_TEMP/theme-old" v1.35.24
-          python3 - "$RUNNER_TEMP/theme-old/src" theme/src "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" <<'PY'
-          import hashlib, pathlib, sys
-          old=pathlib.Path(sys.argv[1]); new=pathlib.Path(sys.argv[2]); out=pathlib.Path(sys.argv[3]); summary=pathlib.Path(sys.argv[4])
-          expected='683fff47035d69f994e163f16d0d193095cebd5ecaad5a6f56942ff2e1b32f58'
-          def files(root):
-              return sorted((p for p in root.rglob('*') if p.is_file()), key=lambda p:p.relative_to(root).as_posix())
-          def algs(root):
-              fs=files(root)
-              rows=[]
-              for p in fs:
-                  rel=p.relative_to(root).as_posix(); hx=hashlib.sha256(p.read_bytes()).hexdigest()
-                  rows.append((rel,hx,p))
-              vals={}
-              vals['A_sha256sum_dot']=hashlib.sha256(''.join(f'{hx}  ./{rel}\n' for rel,hx,_ in rows).encode()).hexdigest()
-              vals['B_sha256sum_rel']=hashlib.sha256(''.join(f'{hx}  {rel}\n' for rel,hx,_ in rows).encode()).hexdigest()
-              vals['C_rel_null_hex']=hashlib.sha256(''.join(f'{rel}\0{hx}\n' for rel,hx,_ in rows).encode()).hexdigest()
-              h=hashlib.sha256()
-              for rel,hx,_ in rows: h.update(rel.encode()); h.update(b'\0'); h.update(bytes.fromhex(hx))
-              vals['D_rel_null_digest']=h.hexdigest()
-              h=hashlib.sha256()
-              for rel,_,p in rows: h.update(rel.encode()); h.update(b'\0'); h.update(p.read_bytes())
-              vals['E_rel_null_bytes']=h.hexdigest()
-              return vals, len(fs)
-          oldvals, oldcount=algs(old)
-          matches=[k for k,v in oldvals.items() if v==expected]
-          with summary.open('a',encoding='utf-8') as s:
-              s.write('### Runtime fingerprint continuity\n')
-              s.write(f'- old runtime files: {oldcount}\n')
-              for k,v in oldvals.items(): s.write(f'- {k}: `{v}`\n')
-          if oldcount != 455 or not matches:
-              raise SystemExit('No runtime fingerprint algorithm matched 1.35.24 Authority')
-          alg=matches[0]
-          newvals, newcount=algs(new)
-          newfp=newvals[alg]
-          with out.open('a',encoding='utf-8') as f:
-              f.write(f'algorithm={alg}\n')
-              f.write(f'runtime_files={newcount}\n')
-              f.write(f'runtime_fingerprint={newfp}\n')
-          with summary.open('a',encoding='utf-8') as s:
-              s.write(f'- matched algorithm: `{alg}`\n- new runtime files: {newcount}\n- new runtime fingerprint: `{newfp}`\n')
-          PY
+          cat >"$RUNNER_TEMP/theme-authority.php" <<'PHP'
+          <?php
+          define('ABSPATH','/');
+          class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1]);
+          if ($s instanceof WP_Error) { fwrite(STDERR,"AUTHORITY_ERROR\n"); exit(1); }
+          unset($s['files']);
+          echo json_encode($s, JSON_UNESCAPED_SLASHES), "\n";
+          PHP
+          php "$RUNNER_TEMP/theme-authority.php" "$RUNNER_TEMP/theme-old/src" >"$RUNNER_TEMP/old-authority.json"
+          php "$RUNNER_TEMP/theme-authority.php" theme/src >"$RUNNER_TEMP/new-authority.json"
+          test "$(jq -r '.file_count' "$RUNNER_TEMP/old-authority.json")" = '455'
+          test "$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/old-authority.json")" = '683fff47035d69f994e163f16d0d193095cebd5ecaad5a6f56942ff2e1b32f58'
+          test "$(jq -r '.component_id' "$RUNNER_TEMP/new-authority.json")" = 'S01-C01'
+          test "$(jq -r '.runtime_contract' "$RUNNER_TEMP/new-authority.json")" = 'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          NEW_FILES="$(jq -r '.file_count' "$RUNNER_TEMP/new-authority.json")"
+          NEW_FP="$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/new-authority.json")"
+          test "$NEW_FILES" -ge 1
+          test "${#NEW_FP}" = '64'
+          echo "runtime_files=$NEW_FILES" >> "$GITHUB_OUTPUT"
+          echo "runtime_fingerprint=$NEW_FP" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Runtime Authority continuity'
+            echo '- 1.35.24 Authority: 455 / `683fff47035d69f994e163f16d0d193095cebd5ecaad5a6f56942ff2e1b32f58`'
+            echo "- 1.35.25 runtime files: $NEW_FILES"
+            echo "- 1.35.25 runtime fingerprint: \`$NEW_FP\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "PASS canonical Runtime Authority continuity"
 
       - name: Build deterministic WordPress Theme ZIP
         id: build
@@ -132,6 +120,10 @@ jobs:
           rm -rf "$TMP"
           mkdir -p "$ROOT"
           cp -a theme/src/. "$ROOT/"
+          find "$ROOT" -type l -print -quit | (! grep -q .)
+          php "$RUNNER_TEMP/theme-authority.php" "$ROOT" >"$RUNNER_TEMP/staged-authority.json"
+          test "$(jq -r '.file_count' "$RUNNER_TEMP/staged-authority.json")" = "${{ steps.fp.outputs.runtime_files }}"
+          test "$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/staged-authority.json")" = "${{ steps.fp.outputs.runtime_fingerprint }}"
           python3 - "$ROOT" "$ZIP" <<'PY'
           import pathlib,sys,zipfile
           root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
@@ -146,18 +138,23 @@ jobs:
           PY
           BYTES="$(stat -c '%s' "$ZIP")"
           SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
-          FILES="$(find "$ROOT" -type f | wc -l | tr -d ' ')"
-          test "$FILES" = "${{ steps.fp.outputs.runtime_files }}"
+          PACKAGE_FILES="$(find "$ROOT" -type f | wc -l | tr -d ' ')"
+          test "$BYTES" -gt 0
+          test "${#SHA}" = '64'
           unzip -tq "$ZIP" >/dev/null
           test "$(unzip -Z1 "$ZIP" | cut -d/ -f1 | sort -u)" = 'vf-tools-theme'
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
           echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "### Release package" >> "$GITHUB_STEP_SUMMARY"
-          echo "- bytes: $BYTES" >> "$GITHUB_STEP_SUMMARY"
-          echo "- sha256: \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- runtime files: $FILES" >> "$GITHUB_STEP_SUMMARY"
-          echo "- runtime fingerprint: \`${{ steps.fp.outputs.runtime_fingerprint }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "package_files=$PACKAGE_FILES" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Release package'
+            echo "- bytes: $BYTES"
+            echo "- sha256: \`$SHA\`"
+            echo "- package files: $PACKAGE_FILES"
+            echo "- runtime files: ${{ steps.fp.outputs.runtime_files }}"
+            echo "- runtime fingerprint: \`${{ steps.fp.outputs.runtime_fingerprint }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "PASS deterministic package gate"
 
       - name: Create formal private release
