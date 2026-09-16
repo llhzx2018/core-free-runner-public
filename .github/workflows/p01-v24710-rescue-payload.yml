@@ -1,0 +1,95 @@
+name: P01 V2.47.10 Rescue Payload Extract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v24710-rescue-payload.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v24710-rescue-payload
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    if: github.head_ref == 'temp/p01-v24710-rescue-payload-20260916'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      FORMAL_SHA: 972541fd06c66044105ec1b19cf7738c340c90c1
+      RELEASE_TAG: v2.47.10
+      RELEASE_ID: '389699263'
+      UPDATE_ASSET: VF_Start_V2.47.10_UPDATE.zip
+      UPDATE_BYTES: '1847940'
+      UPDATE_SHA256: 7abb7cd71429c551274d7d4651bf185e3e46990f51fcab1db74d3a9b55b3f1f9
+      REPAIR_NAME: repair-v2.47.10.php
+      PAYLOAD_BRANCH: temp/rescue-payload-v24710-20260916
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Exact release preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$FORMAL_SHA"
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')" = "$FORMAL_SHA"
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/releases/tags/${RELEASE_TAG}" --jq '.id')" = "$RELEASE_ID"
+          echo P01_RESCUE_RELEASE_PREFLIGHT=PASS
+
+      - name: Download and verify formal UPDATE
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-rescue && mkdir -p /tmp/p01-rescue
+          gh release download "$RELEASE_TAG" --repo "$PRODUCT_REPO" --pattern "$UPDATE_ASSET" --dir /tmp/p01-rescue
+          test "$(stat -c '%s' "/tmp/p01-rescue/$UPDATE_ASSET")" = "$UPDATE_BYTES"
+          test "$(sha256sum "/tmp/p01-rescue/$UPDATE_ASSET" | awk '{print $1}')" = "$UPDATE_SHA256"
+          test "$(unzip -Z1 "/tmp/p01-rescue/$UPDATE_ASSET" | wc -l | tr -d ' ')" = 1
+          unzip -Z1 "/tmp/p01-rescue/$UPDATE_ASSET" | grep -Fxq "$REPAIR_NAME"
+          unzip -p "/tmp/p01-rescue/$UPDATE_ASSET" "$REPAIR_NAME" > "/tmp/p01-rescue/$REPAIR_NAME"
+          test -s "/tmp/p01-rescue/$REPAIR_NAME"
+          php -l "/tmp/p01-rescue/$REPAIR_NAME"
+          php "/tmp/p01-rescue/$REPAIR_NAME" --self-test | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          sha256sum "/tmp/p01-rescue/$REPAIR_NAME" | tee /tmp/p01-rescue/repair.sha256
+          echo P01_RESCUE_FORMAL_UPDATE=PASS
+
+      - name: Checkout private payload branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PAYLOAD_BRANCH }}
+          token: ${{ env.RELEASE_TOKEN }}
+          persist-credentials: true
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Publish verified repair to temporary private branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C vf-start rev-parse HEAD)" = "$FORMAL_SHA"
+          mkdir -p vf-start/rescue_payload
+          cp "/tmp/p01-rescue/$REPAIR_NAME" "vf-start/rescue_payload/$REPAIR_NAME"
+          cp /tmp/p01-rescue/repair.sha256 vf-start/rescue_payload/repair-v2.47.10.php.sha256
+          git -C vf-start config user.name 'VF Release Bot'
+          git -C vf-start config user.email 'vf-release@users.noreply.github.com'
+          git -C vf-start add rescue_payload
+          git -C vf-start commit -m 'chore(rescue): stage verified v2.47.10 repair payload'
+          git -C vf-start push origin "HEAD:${PAYLOAD_BRANCH}"
+          echo "PAYLOAD_SHA=$(git -C vf-start rev-parse HEAD)"
+          echo P01_RESCUE_PRIVATE_PAYLOAD=PASS
+
+      - name: Final rescue payload verdict
+        run: |
+          echo P01_V24710_RESCUE_PAYLOAD_GATE=PASS
+          echo PRODUCTION=false
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/p01-rescue vf-start
