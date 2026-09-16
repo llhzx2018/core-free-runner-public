@@ -1,4 +1,4 @@
-name: P01 V2.47.10 Rescue Payload Extract
+name: P01 V2.47.10 Single-File Rescue Gate
 
 on:
   pull_request:
@@ -13,10 +13,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  extract:
+  rescue:
     if: github.head_ref == 'temp/p01-v24710-rescue-payload-20260916'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       PRODUCT_REPO: llhzx2018/vf-start
       FORMAL_SHA: 972541fd06c66044105ec1b19cf7738c340c90c1
@@ -26,11 +26,14 @@ jobs:
       UPDATE_BYTES: '1847940'
       UPDATE_SHA256: 7abb7cd71429c551274d7d4651bf185e3e46990f51fcab1db74d3a9b55b3f1f9
       REPAIR_NAME: repair-v2.47.10.php
-      PAYLOAD_BRANCH: temp/rescue-payload-v24710-20260916
+      REPAIR_SHA256: fa7dd5744ad556b72700e1158e84e99ed9581692c3331c1cc1a9e5d8a3c87216
+      TEMPLATE_SHA: c16368b8ab51b945e3273c15823a757ed6ff50ea
+      TEMPLATE_PATH: tools/rescue/P01_V2479_TO_V24710_RESCUE.template.php
+      RESCUE_ASSET: P01_V2479_TO_V24710_RESCUE.php
       RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
 
     steps:
-      - name: Exact release preflight
+      - name: Exact release and template preflight
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -38,9 +41,20 @@ jobs:
           test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$FORMAL_SHA"
           test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')" = "$FORMAL_SHA"
           test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/releases/tags/${RELEASE_TAG}" --jq '.id')" = "$RELEASE_ID"
-          echo P01_RESCUE_RELEASE_PREFLIGHT=PASS
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/fix/p01-local-update-rescue-20260916" --jq '.object.sha')" = "$TEMPLATE_SHA"
+          echo P01_RESCUE_PREFLIGHT=PASS
 
-      - name: Download and verify formal UPDATE
+      - name: Checkout exact rescue template
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.TEMPLATE_SHA }}
+          token: ${{ env.RELEASE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Download and verify formal UPDATE payload
         env:
           GH_TOKEN: ${{ env.RELEASE_TOKEN }}
         shell: bash
@@ -54,41 +68,122 @@ jobs:
           unzip -Z1 "/tmp/p01-rescue/$UPDATE_ASSET" | grep -Fxq "$REPAIR_NAME"
           unzip -p "/tmp/p01-rescue/$UPDATE_ASSET" "$REPAIR_NAME" > "/tmp/p01-rescue/$REPAIR_NAME"
           test -s "/tmp/p01-rescue/$REPAIR_NAME"
+          test "$(sha256sum "/tmp/p01-rescue/$REPAIR_NAME" | awk '{print $1}')" = "$REPAIR_SHA256"
           php -l "/tmp/p01-rescue/$REPAIR_NAME"
           php "/tmp/p01-rescue/$REPAIR_NAME" --self-test | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
-          sha256sum "/tmp/p01-rescue/$REPAIR_NAME" | tee /tmp/p01-rescue/repair.sha256
-          echo P01_RESCUE_FORMAL_UPDATE=PASS
+          echo P01_RESCUE_FORMAL_PAYLOAD=PASS
 
-      - name: Checkout private payload branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: llhzx2018/vf-start
-          ref: ${{ env.PAYLOAD_BRANCH }}
-          token: ${{ env.RELEASE_TOKEN }}
-          persist-credentials: true
-          fetch-depth: 1
-          path: vf-start
-
-      - name: Publish verified repair to temporary private branch
+      - name: Build exact single-file rescue
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C vf-start rev-parse HEAD)" = "$FORMAL_SHA"
-          mkdir -p vf-start/rescue_payload
-          cp "/tmp/p01-rescue/$REPAIR_NAME" "vf-start/rescue_payload/$REPAIR_NAME"
-          cp /tmp/p01-rescue/repair.sha256 vf-start/rescue_payload/repair-v2.47.10.php.sha256
-          git -C vf-start config user.name 'VF Release Bot'
-          git -C vf-start config user.email 'vf-release@users.noreply.github.com'
-          git -C vf-start add rescue_payload
-          git -C vf-start commit -m 'chore(rescue): stage verified v2.47.10 repair payload'
-          git -C vf-start push origin "HEAD:${PAYLOAD_BRANCH}"
-          echo "PAYLOAD_SHA=$(git -C vf-start rev-parse HEAD)"
-          echo P01_RESCUE_PRIVATE_PAYLOAD=PASS
+          TEMPLATE="vf-start/$TEMPLATE_PATH"
+          REPAIR="/tmp/p01-rescue/$REPAIR_NAME"
+          OUT="/tmp/p01-rescue/$RESCUE_ASSET"
+          test -f "$TEMPLATE"
+          test "$(git -C vf-start rev-parse HEAD)" = "$TEMPLATE_SHA"
+          REPAIR_BYTES="$(stat -c '%s' "$REPAIR")"
+          export TEMPLATE REPAIR OUT REPAIR_BYTES REPAIR_SHA256
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, hashlib
+          template=Path(os.environ['TEMPLATE']).read_bytes()
+          repair=Path(os.environ['REPAIR']).read_bytes()
+          marker=b'<?php __halt_compiler();'
+          assert template.endswith(marker), 'template must end exactly at halt marker'
+          assert template.count(b'__VF_RESCUE_REPAIR_BYTES__') == 1
+          assert template.count(b'__VF_RESCUE_REPAIR_SHA256__') == 1
+          template=template.replace(b'__VF_RESCUE_REPAIR_BYTES__', str(len(repair)).encode())
+          template=template.replace(b'__VF_RESCUE_REPAIR_SHA256__', hashlib.sha256(repair).hexdigest().encode())
+          out=template+repair
+          Path(os.environ['OUT']).write_bytes(out)
+          assert out[len(template):] == repair
+          assert hashlib.sha256(repair).hexdigest() == os.environ['REPAIR_SHA256']
+          print('RESCUE_REPAIR_BYTES='+str(len(repair)))
+          print('RESCUE_TOTAL_BYTES='+str(len(out)))
+          print('RESCUE_SHA256='+hashlib.sha256(out).hexdigest())
+          PY
+          php -l "$OUT"
+          ! grep -aFq 'VF_PRIVATE_READ_TOKEN' "$OUT"
+          ! grep -aFq 'VF_RELEASE_WRITE_TOKEN' "$OUT"
+          ! grep -aFq 'curl_init(' "$OUT"
+          ! grep -aFq 'shell_exec(' "$OUT"
+          ! grep -aFq 'passthru(' "$OUT"
+          grep -aFq "const VF_RESCUE_SOURCE_VERSION = '2.47.9';" "$OUT"
+          grep -aFq "const VF_RESCUE_TARGET_VERSION = '2.47.10';" "$OUT"
+          grep -aFq 'vf_is_admin()' "$OUT"
+          grep -aFq 'hash_equals(vf_csrf_token(), $providedCsrf)' "$OUT"
+          grep -aFq "(new VfBackupManager(\$db))->create(" "$OUT"
+          grep -aFq 'VfAtomicPackage::run(VF_ROOT)' "$OUT"
+          grep -aFq 'if ($success) @unlink(__FILE__);' "$OUT"
+          sha256sum "$OUT" > "/tmp/p01-rescue/$RESCUE_ASSET.sha256"
+          echo P01_SINGLE_FILE_RESCUE_BUILD=PASS
 
-      - name: Final rescue payload verdict
+      - name: Verify halt-offset payload contract
+        shell: bash
         run: |
-          echo P01_V24710_RESCUE_PAYLOAD_GATE=PASS
+          set -Eeuo pipefail
+          cat >/tmp/p01-rescue/halt-probe.php <<'PHP'
+          <?php echo __COMPILER_HALT_OFFSET__, "\n"; __halt_compiler();PAYLOAD
+          PHP
+          OFFSET="$(php /tmp/p01-rescue/halt-probe.php | tr -d '\r\n ')"
+          python3 - "$OFFSET" <<'PY'
+          from pathlib import Path
+          import sys
+          b=Path('/tmp/p01-rescue/halt-probe.php').read_bytes()
+          off=int(sys.argv[1])
+          assert b[off:].startswith(b'PAYLOAD')
+          print('PHP_HALT_OFFSET_CONTRACT=PASS')
+          PY
+          export RESCUE="/tmp/p01-rescue/$RESCUE_ASSET" REPAIR="/tmp/p01-rescue/$REPAIR_NAME" REPAIR_SHA256
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, hashlib
+          rescue=Path(os.environ['RESCUE']).read_bytes()
+          repair=Path(os.environ['REPAIR']).read_bytes()
+          marker=b'<?php __halt_compiler();'
+          pos=rescue.rfind(marker)
+          assert pos >= 0
+          embedded=rescue[pos+len(marker):]
+          assert embedded == repair
+          assert hashlib.sha256(embedded).hexdigest()==os.environ['REPAIR_SHA256']
+          print('P01_RESCUE_EMBEDDED_PAYLOAD=PASS')
+          PY
+
+      - name: Upload rescue as private V2.47.10 release auxiliary asset
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh release upload "$RELEASE_TAG" "/tmp/p01-rescue/$RESCUE_ASSET" "/tmp/p01-rescue/$RESCUE_ASSET.sha256" --repo "$PRODUCT_REPO" --clobber
+          echo P01_RESCUE_RELEASE_ASSET_UPLOAD=PASS
+
+      - name: Independent remote readback
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-rescue/readback
+          gh release download "$RELEASE_TAG" --repo "$PRODUCT_REPO" --pattern "$RESCUE_ASSET*" --dir /tmp/p01-rescue/readback
+          cmp "/tmp/p01-rescue/$RESCUE_ASSET" "/tmp/p01-rescue/readback/$RESCUE_ASSET"
+          cmp "/tmp/p01-rescue/$RESCUE_ASSET.sha256" "/tmp/p01-rescue/readback/$RESCUE_ASSET.sha256"
+          (cd /tmp/p01-rescue/readback && sha256sum -c "$RESCUE_ASSET.sha256")
+          php -l "/tmp/p01-rescue/readback/$RESCUE_ASSET"
+          echo "REMOTE_RESCUE_BYTES=$(stat -c '%s' "/tmp/p01-rescue/readback/$RESCUE_ASSET")"
+          echo "REMOTE_RESCUE_SHA256=$(sha256sum "/tmp/p01-rescue/readback/$RESCUE_ASSET" | awk '{print $1}')"
+          echo P01_RESCUE_REMOTE_BYTES=PASS
+
+      - name: Final rescue verdict
+        run: |
+          echo FORMAL_UPDATE_PAYLOAD=PASS
+          echo SINGLE_FILE_RESCUE_BUILD=PASS
+          echo EMBEDDED_PAYLOAD_IDENTITY=PASS
+          echo ADMIN_CSRF_BACKUP_ATOMIC_CONTRACT=PASS
+          echo PRIVATE_RELEASE_AUXILIARY_ASSET=PASS
           echo PRODUCTION=false
+          echo P01_V2479_TO_V24710_SINGLE_FILE_RESCUE_GATE=PASS
 
       - name: Cleanup
         if: always()
