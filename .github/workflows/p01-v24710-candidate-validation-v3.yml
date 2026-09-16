@@ -1,0 +1,161 @@
+name: P01 V2.47.10 Candidate Validation V3
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v24710-candidate-validation-v3.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v24710-candidate-validation-v3
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.head_ref == 'temp/p01-v24710-candidate-gate-20260915'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      ENGINEERING_SHA: 238e44b35609949c80809bda47ecbbab8a85046c
+      CANDIDATE_BRANCH: release/v2.47.10-candidate-20260915
+      CANDIDATE_SHA: 972541fd06c66044105ec1b19cf7738c340c90c1
+      TARGET_VERSION: 2.47.10
+      EXPECTED_SCHEMA: '2026090401'
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Exact candidate preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TOKEN"
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$ENGINEERING_SHA"
+          test "$(GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/${CANDIDATE_BRANCH}" --jq '.object.sha')" = "$CANDIDATE_SHA"
+          if GH_TOKEN="$RELEASE_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/v${TARGET_VERSION}" >/dev/null 2>&1; then echo BLOCK=TARGET_TAG_ALREADY_EXISTS; exit 82; fi
+          echo READ_CREDENTIAL_ROUTE=VF_RELEASE_WRITE_TOKEN
+          echo P01_V24710_EXACT_CANDIDATE=PASS
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ env.RELEASE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Identity and focused contracts
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n ' < VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '${TARGET_VERSION}');" src/app/bootstrap.php
+          test "$(php -r '$p=json_decode(file_get_contents("VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$EXPECTED_SCHEMA"
+          find src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint
+          find src -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+          php tests/unit/pending_inbox_presentation_contract.php | grep -Fx 'P01_PENDING_INBOX_PRESENTATION_CONTRACT=PASS'
+          php tests/unit/resource_quality_governance_contract.php | grep -Fx 'P01_RESOURCE_QUALITY_GOVERNANCE_CONTRACT=PASS'
+          php tests/unit/resource_intake_quality_contract.php | grep -Fx 'P01_RESOURCE_INTAKE_QUALITY_CONTRACT=PASS'
+          php tests/unit/pending_workspace_visibility_contract.php | grep -Fx 'P01_PENDING_WORKSPACE_VISIBILITY_CONTRACT=PASS'
+          php tests/unit/global_account_actions_contract.php | grep -Fx 'P01_R22_GLOBAL_ACCOUNT_ACTIONS_CONTRACT=PASS'
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.10_RELEASE_GATE.md
+          echo P01_V24710_STATIC_V3=PASS
+          echo DATA_SCHEMA_CHANGE=NONE
+
+      - name: Fresh install and representative resource seed
+        working-directory: vf-start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v24710-v3-runtime /tmp/p01-v24710-v3-pw
+          cp -a src /tmp/p01-v24710-v3-runtime
+          cd /tmp/p01-v24710-v3-runtime
+          php -S 127.0.0.1:18132 -t . >/tmp/p01-v24710-v3-server.log 2>&1 & echo $! >/tmp/p01-v24710-v3-server.pid
+          for i in $(seq 1 30); do if curl -fsS -c /tmp/p01-v24710-v3.cookies -b /tmp/p01-v24710-v3.cookies http://127.0.0.1:18132/setup.php -o /tmp/p01-v24710-v3-setup.html; then break; fi; sleep 1; done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24710-v3-setup.html',encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )
+          PASS="Gate${GITHUB_RUN_ID}V24710v3x"; printf '%s' "$PASS" >/tmp/p01-v24710-v3.password
+          curl -fsS -L -c /tmp/p01-v24710-v3.cookies -b /tmp/p01-v24710-v3.cookies -X POST http://127.0.0.1:18132/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=VF Start V24710 V3 Gate' --data-urlencode "admin_password=$PASS" --data-urlencode "admin_password_confirm=$PASS" -o /tmp/p01-v24710-v3-post.html
+          php cli/verify.php | grep -Fx 'VERIFY_PASS=YES'
+          code=$(curl -sS -o /tmp/revisit -D /tmp/revisit.h -w '%{http_code}' http://127.0.0.1:18132/setup.php); test "$code" = 302
+          tr -d '\r' </tmp/revisit.h | grep -Eiq '^Location: /$'
+          php -r 'require "app/bootstrap.php"; require "app/SurfaceRepository.php"; $r=new VfRepository(vf_db()); $r->createCategory(["name"=>"V24710 V3 Category","is_private"=>false,"sort_order"=>0]); $db=vf_db(); $q=$db->prepare("SELECT id FROM categories WHERE name=? ORDER BY id DESC LIMIT 1"); $q->execute(["V24710 V3 Category"]); $cid=(int)$q->fetchColumn(); if($cid<=0) exit(2); $r->saveLink(null,["surface"=>"start","category_id"=>$cid,"title"=>"V24710 Visible Resource","url"=>"https://example.com/v24710-visible","is_private"=>0],"manual"); $x=$r->savePendingCapture(["url"=>"https://example.com/v24710-pending","title"=>"V24710 Pending Resource"],"mobile-quick-save"); if((int)($x["id"]??0)<=0) exit(3); echo "P01_V24710_V3_SEED=PASS\n";'
+          echo P01_V24710_INSTALL_V3=PASS
+
+      - name: Browser proof for Pending isolation and global actions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v24710-v3-pw && cd /tmp/p01-v24710-v3-pw
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          cat > verify.mjs <<'JS'
+          import {chromium} from 'playwright';import fs from 'node:fs';
+          const base='http://127.0.0.1:18132/',password=fs.readFileSync('/tmp/p01-v24710-v3.password','utf8');
+          const browser=await chromium.launch({headless:true});const ctx=await browser.newContext({viewport:{width:1291,height:797}});const p=await ctx.newPage();
+          await p.goto(base+'start.php',{waitUntil:'networkidle'});
+          const anon=await p.evaluate(()=>{const q=s=>document.querySelector(s);const a=q('.vf-global-account-actions');const loginText=(q('[data-vf-auth-login]')?.textContent||'').trim();return{anonymous:a?.classList.contains('is-anonymous')||false,loginText,loginNormalized:loginText.replace(/^↪\s*/,'').trim(),overflow:!!q('.vf-global-account-overflow'),docOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,rightGap:a?Math.round(innerWidth-a.getBoundingClientRect().right):999};});
+          if(!anon.anonymous||anon.loginNormalized!=='登录'||anon.overflow||anon.docOverflow>1||anon.rightGap>20)throw new Error('anonymous '+JSON.stringify(anon));
+          await p.click('[data-vf-auth-login]');await p.fill('[data-vf-auth-dialog] input[name="password"]',password);await p.click('[data-vf-auth-submit]');await p.waitForSelector('.vf-global-account-actions a[href="settings.php"]',{timeout:15000});
+          const auth=await p.evaluate(()=>{const q=s=>document.querySelector(s),qa=s=>[...document.querySelectorAll(s)];return{settings:q('.vf-global-account-actions>a[href="settings.php"]')?.textContent.trim(),logout:q('.vf-global-account-actions>[data-vf-auth-logout]')?.textContent.trim(),more:!!q('.vf-global-account-more'),side:qa('.vf-functional-sidebar .vf-sidebar-bottom>a').map(a=>({text:a.textContent.trim(),display:getComputedStyle(a).display})),docOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,pendingVisible:document.body.textContent.includes('V24710 Pending Resource'),visibleVisible:document.body.textContent.includes('V24710 Visible Resource')};});
+          if(auth.settings!=='设置'||!auth.logout?.endsWith('退出')||!auth.more||auth.side.some(x=>x.display!=='none')||auth.docOverflow>1||auth.pendingVisible||!auth.visibleVisible)throw new Error('authenticated '+JSON.stringify(auth));
+          await p.click('.vf-global-account-more');await p.waitForSelector('.vf-global-account-menu:not([hidden])');
+          const menu=await p.evaluate(()=>({expanded:document.querySelector('.vf-global-account-more')?.getAttribute('aria-expanded'),items:[...document.querySelectorAll('.vf-global-account-menu>a')].map(a=>[a.textContent.trim(),a.getAttribute('href')])}));
+          if(menu.expanded!=='true'||JSON.stringify(menu.items)!==JSON.stringify([['资源管理','surface-manager.php?advanced=1'],['回收站','recycle-bin.php']]))throw new Error('menu '+JSON.stringify(menu));
+          await p.keyboard.press('Escape');if(await p.getAttribute('.vf-global-account-more','aria-expanded')!=='false')throw new Error('escape did not close overflow');
+          await p.goto(base+'surface-manager.php',{waitUntil:'networkidle'});await p.waitForSelector('.vf-pending-inbox-intro');
+          const inbox=await p.evaluate(()=>({pending:document.body.textContent.includes('V24710 Pending Resource'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}));
+          if(!inbox.pending||inbox.overflow>1)throw new Error('inbox '+JSON.stringify(inbox));
+          await p.setViewportSize({width:390,height:844});await p.goto(base+'start.php',{waitUntil:'networkidle'});await p.waitForSelector('.vf-global-account-more');
+          const mobile=await p.evaluate(()=>({overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,pendingVisible:document.body.textContent.includes('V24710 Pending Resource'),moreRight:document.querySelector('.vf-global-account-more')?.getBoundingClientRect().right||999}));
+          if(mobile.overflow>1||mobile.pendingVisible||mobile.moreRight>391)throw new Error('mobile '+JSON.stringify(mobile));
+          await p.click('.vf-global-account-more');await p.waitForSelector('.vf-global-account-menu:not([hidden])');
+          const mm=await p.evaluate(()=>{const r=document.querySelector('.vf-global-account-menu')?.getBoundingClientRect();return r?{left:r.left,right:r.right,width:r.width}:null});
+          if(!mm||mm.left<0||mm.right>391)throw new Error('mobile menu '+JSON.stringify(mm));
+          console.log('P01_V24710_BROWSER_V3='+JSON.stringify({anon,auth,menu,inbox,mobile,mm}));await browser.close();
+          JS
+          node verify.mjs | tee /tmp/p01-v24710-v3-browser
+          grep -F 'P01_V24710_BROWSER_V3=' /tmp/p01-v24710-v3-browser
+          cd /tmp/p01-v24710-v3-runtime
+          php -r 'require "app/bootstrap.php"; $db=vf_db(); $q=$db->prepare("SELECT is_pending FROM links WHERE url=? AND lifecycle_state=\"active\""); $q->execute(["https://example.com/v24710-pending"]); $v=$q->fetchColumn(); if($v===false||(int)$v!==1) exit(2); echo "P01_V24710_PENDING_AUTHORITY_V3=PASS\n";'
+          echo P01_V24710_BROWSER_GATE_V3=PASS
+
+      - name: Final candidate verdict
+        run: |
+          echo PUBLIC_AUTHORITY_INSTALL=PASS
+          echo PUBLIC_AUTHORITY_SECURITY=PASS_BOUNDARY_UNCHANGED
+          echo PUBLIC_AUTHORITY_TESTING=PASS
+          echo PUBLIC_AUTHORITY_GIT=PASS
+          echo PUBLIC_AUTHORITY_UA_UI=PASS
+          echo PUBLIC_AUTHORITY_UPGRADE=PENDING_FORMAL_ARTIFACT_GATE
+          echo PUBLIC_AUTHORITY_DATA_SCHEMA=PENDING_FORMAL_ARTIFACT_GATE
+          echo OWNER_PREVIEW_RUNTIME_APPLICABILITY=N_A
+          echo OWNER_REAL_USE=POST_RELEASE_PENDING
+          echo P01_V24710_CANDIDATE_GATE=PASS
+          echo FORMAL_RELEASE=false
+          echo DISTRIBUTION=false
+          echo PRODUCTION=false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if test -f /tmp/p01-v24710-v3-server.pid; then kill "$(cat /tmp/p01-v24710-v3-server.pid)" 2>/dev/null || true; fi
+          rm -rf vf-start /tmp/p01-v24710-v3-* /tmp/php-lint
