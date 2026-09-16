@@ -1,0 +1,111 @@
+name: S01 Theme 1.35.25 Authority Report
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout runner branch
+        uses: actions/checkout@v4
+
+      - name: Clone exact Theme main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          rm -rf theme
+          mkdir theme
+          cd theme
+          git init -q
+          git remote add origin https://github.com/llhzx2018/vf-tools-theme.git
+          AUTH="$(printf 'x-access-token:%s' "$VF_RELEASE_WRITE_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git checkout --detach refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = '9eaaa558323613f4d688b7c50a27fdf120fa6f48'
+
+      - name: Compute canonical Runtime Authority
+        id: authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >"$RUNNER_TEMP/theme-authority.php" <<'PHP'
+          <?php
+          define('ABSPATH','/');
+          class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1]);
+          if ($s instanceof WP_Error) { fwrite(STDERR,"AUTHORITY_ERROR\n"); exit(1); }
+          unset($s['files']);
+          echo json_encode($s, JSON_UNESCAPED_SLASHES), "\n";
+          PHP
+          JSON="$(php "$RUNNER_TEMP/theme-authority.php" theme/src)"
+          FILES="$(jq -r '.file_count' <<<"$JSON")"
+          FP="$(jq -r '.fingerprint_sha256' <<<"$JSON")"
+          test "$(jq -r '.component_id' <<<"$JSON")" = 'S01-C01'
+          test "$(jq -r '.runtime_contract' <<<"$JSON")" = 'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          test "$FILES" -ge 1
+          test "${#FP}" = 64
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
+
+      - name: Read exact Release identity
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api repos/llhzx2018/vf-tools-theme/releases/tags/v1.35.25)"
+          python3 - "$JSON" "$GITHUB_OUTPUT" <<'PY'
+          import json,sys
+          x=json.loads(sys.argv[1]); out=sys.argv[2]
+          assert x['tag_name']=='v1.35.25'
+          assert x['target_commitish']=='9eaaa558323613f4d688b7c50a27fdf120fa6f48'
+          assert x['draft'] is False and x['prerelease'] is False
+          assets=[a for a in x.get('assets',[]) if a.get('name')=='vf-tools-theme_V1.35.25.zip']
+          assert len(assets)==1
+          a=assets[0]
+          digest=str(a.get('digest') or '')
+          assert digest.startswith('sha256:')
+          with open(out,'a',encoding='utf-8') as f:
+              f.write(f'release_id={x["id"]}\n')
+              f.write(f'asset_id={a["id"]}\n')
+              f.write(f'bytes={a["size"]}\n')
+              f.write(f'sha256={digest.split(":",1)[1]}\n')
+              f.write(f'published_at={x["published_at"]}\n')
+          PY
+
+      - name: Publish safe authority receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat <<EOF
+          S01-C01 Theme 1.35.25 Authority Receipt
+
+          - source: \`9eaaa558323613f4d688b7c50a27fdf120fa6f48\`
+          - release: \`v1.35.25\`
+          - release_id: \`${{ steps.release.outputs.release_id }}\`
+          - asset_id: \`${{ steps.release.outputs.asset_id }}\`
+          - asset_bytes: \`${{ steps.release.outputs.bytes }}\`
+          - asset_sha256: \`${{ steps.release.outputs.sha256 }}\`
+          - runtime_files: \`${{ steps.authority.outputs.files }}\`
+          - runtime_fingerprint: \`${{ steps.authority.outputs.fingerprint }}\`
+          - released_at: \`${{ steps.release.outputs.published_at }}\`
+
+          Canonical Runtime Authority class: \`VF_Theme_Runtime_Authority_V1::snapshot()\`.
+          EOF
+          )
+          gh pr comment 880 --repo llhzx2018/core-free-runner-public --body "$BODY"
+          echo "PASS authority receipt published"
