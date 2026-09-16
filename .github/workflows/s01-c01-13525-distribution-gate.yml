@@ -1,0 +1,142 @@
+name: S01 C01 1.35.25 Distribution Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@v4
+
+      - name: Resolve governed core-updates read credential
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          choose=''
+          for candidate_name in VF_PRIVATE_READ_TOKEN VF_RELEASE_WRITE_TOKEN; do
+            candidate="${!candidate_name:-}"
+            [ -n "$candidate" ] || continue
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $candidate" https://api.github.com/repos/llhzx2018/core-updates || true)"
+            if [ "$code" = '200' ]; then choose="$candidate_name"; break; fi
+          done
+          [ -n "$choose" ] || { echo 'No governed token can read core-updates' >&2; exit 1; }
+          echo "token_name=$choose" >> "$GITHUB_OUTPUT"
+          echo "PASS governed core-updates credential: $choose"
+
+      - name: Checkout exact core-updates candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.auth.outputs.token_name }}" = 'VF_PRIVATE_READ_TOKEN' ]; then TOKEN="$VF_PRIVATE_READ_TOKEN"; else TOKEN="$VF_RELEASE_WRITE_TOKEN"; fi
+          rm -rf core-updates
+          mkdir core-updates
+          cd core-updates
+          git init -q
+          git remote add origin https://github.com/llhzx2018/core-updates.git
+          AUTH="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            refs/heads/release/s01-c01-13525-distribution-20260916:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/main)" = '841885b66c9613d1a75f099d1b4a9d6c71c0a2d1'
+          test "$(git rev-parse refs/remotes/origin/candidate)" = '359cfcf2e25a3c0ebc7db922b9c5ed8774a3981e'
+          git checkout --detach refs/remotes/origin/candidate
+          echo 'PASS exact distribution candidate checkout'
+
+      - name: Exact one-file scope fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          actual="$(git diff --name-only refs/remotes/origin/main...HEAD)"
+          test "$actual" = 'projects/S01-C01.json'
+          echo 'PASS exact one-file manifest scope'
+
+      - name: Exact 1.35.25 manifest identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          python3 - <<'PY'
+          import json
+          p=json.load(open('projects/S01-C01.json',encoding='utf-8'))
+          assert p['schema_version']=='wp-component-1.0'
+          assert p['project_id']=='S01' and p['component_id']=='S01-C01'
+          assert p['component_type']=='THEME' and p['package_slug']=='vf-tools-theme'
+          assert p['enabled'] is True
+          assert p['target_version']=='1.35.25'
+          expected=[f'1.35.{n}' for n in range(8,25)]
+          assert p['from_versions']==expected, p['from_versions']
+          assert p['repository']=='llhzx2018/vf-tools-theme'
+          assert p['release_tag']=='v1.35.25'
+          assert p['asset_name']=='vf-tools-theme_V1.35.25.zip'
+          assert p['asset_bytes']==1817193
+          assert p['asset_sha256']=='9324275fb3b9908795a08e3f1212f086bdda8c60ba0ff4c910e861fbd0d29d57'
+          assert p['runtime_contract']=='VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          assert p['runtime_files']==455
+          assert p['runtime_fingerprint']=='e2daf2f15b40e442ac017099f14d40cbe153ff173bca3a9a6e8c22e93c788c46'
+          assert p['released_at']=='2026-09-16T07:47:15Z'
+          print('PASS exact S01-C01 1.35.25 identity')
+          PY
+
+      - name: Manifest Contract Audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          python3 scripts/check_manifest_contract.py
+
+      - name: PHP syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          echo 'PASS Update Core PHP syntax'
+
+      - name: Update Core V1 regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          php update-core/php/tests/run.php
+
+      - name: Release metadata readback matches manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api repos/llhzx2018/vf-tools-theme/releases/tags/v1.35.25)"
+          python3 - "$JSON" core-updates/projects/S01-C01.json <<'PY'
+          import json,sys
+          r=json.loads(sys.argv[1]); m=json.load(open(sys.argv[2],encoding='utf-8'))
+          assert r['tag_name']==m['release_tag']
+          assert r['target_commitish']=='9eaaa558323613f4d688b7c50a27fdf120fa6f48'
+          assert r['draft'] is False and r['prerelease'] is False
+          assets=[a for a in r.get('assets',[]) if a.get('name')==m['asset_name']]
+          assert len(assets)==1
+          a=assets[0]
+          assert int(a['size'])==m['asset_bytes']
+          assert str(a.get('digest') or '')=='sha256:'+m['asset_sha256']
+          assert r['published_at']==m['released_at']
+          print('PASS Release metadata exact readback')
+          PY
+
+      - name: Secret fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core-updates
+          ! grep -RInE '(ghp_|github_pat_|Authorization:[[:space:]]*Bearer|VF_PRIVATE_READ_TOKEN[[:space:]]*=|VF_RELEASE_WRITE_TOKEN[[:space:]]*=)' projects/S01-C01.json
+          echo 'PASS public-safe manifest secret fence'
