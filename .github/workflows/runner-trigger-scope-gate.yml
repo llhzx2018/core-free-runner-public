@@ -13,72 +13,147 @@ permissions:
   contents: read
 
 jobs:
-  p01_formal_release:
+  p01_stable_channel_gate:
     if: github.event_name == 'pull_request' && github.head_ref == 'temp/p01-v24711-update-recovery-20260916'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      EXACT_SHA: 252ca51215e7e4411741e2f53d0bcc68f37614f2
-      EXACT_TREE: 1e6fe31f03ed871e68b3153b7e5c1e81099d1cf7
-      SOURCE_SHA: 972541fd06c66044105ec1b19cf7738c340c90c1
-      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      CORE_UPDATES_SHA: 3046a7275cda89b9aba33e0053407e1475123292
+      PRODUCT_SHA: 252ca51215e7e4411741e2f53d0bcc68f37614f2
+      RELEASE_ID: '390634431'
+      UPDATE_ASSET_ID: '570067458'
+      UPDATE_BYTES: '1882483'
+      UPDATE_SHA256: c743c1d2434f448839c356cf138e9a4dece464ec6d15caa7027c6e3b41614fa6
+      SOURCE_ACCESS_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Formal release authorization boundary
+      - name: Read-only credential boundary
         shell: bash
         run: |
           set -Eeuo pipefail
-          test -n "$VF_RELEASE_WRITE_TOKEN"
-          echo PRIOR_EXACT_MACHINE_GATE_RUN=35212399949
-          echo PRIOR_EXACT_MACHINE_GATE_JOB=p01_exact_source
-          echo PRIOR_EXACT_MACHINE_GATE=PASS
+          test -n "$SOURCE_ACCESS_TOKEN"
+          echo RELEASE_WRITE_OPERATION=NO
           echo PRODUCTION_WRITE=NO
 
-      - name: Checkout temporary release harness
+      - name: Checkout exact core-updates candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-          path: runner
-
-      - name: Checkout exact gated P01 main source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: llhzx2018/vf-start
-          ref: ${{ env.EXACT_SHA }}
-          token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CORE_UPDATES_SHA }}
           persist-credentials: false
           fetch-depth: 1
-          path: vf-start
+          path: core-updates
 
-      - name: Checkout exact V2.47.10 source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: llhzx2018/vf-start
-          ref: ${{ env.SOURCE_SHA }}
-          token: ${{ env.VF_RELEASE_WRITE_TOKEN }}
-          persist-credentials: false
-          fetch-depth: 1
-          path: baseline
-
-      - name: Rebuild exact deterministic bytes and publish formal release
+      - name: Manifest contract and Update Core regression gate
         shell: bash
-        env:
-          P01_EXACT_SHA: ${{ env.EXACT_SHA }}
-          P01_EXACT_TREE: ${{ env.EXACT_TREE }}
-          P01_SOURCE_SHA: ${{ env.SOURCE_SHA }}
-          RUNNER_ROOT: ${{ github.workspace }}/runner
-          P01_ROOT: ${{ github.workspace }}/vf-start
-          BASELINE_ROOT: ${{ github.workspace }}/baseline
-        run: bash runner/scripts/p01-v24711-formal-release.sh
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_UPDATES_SHA"
+          cd core-updates
+          python3 scripts/check_manifest_contract.py | tee /tmp/p01-channel-manifest-contract.json
+          find update-core/php -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-channel-php-lint.log
+          php update-core/php/tests/run.php | tee /tmp/p01-channel-update-core.log
+          python3 - <<'PY'
+          import json
+          m=json.load(open('projects/P01.json'))
+          assert m['schema_version']=='1.0'
+          assert m['project_id']=='P01' and m['component_id']=='APP'
+          assert m['enabled'] is True and m['update_type']=='ATOMIC'
+          assert m['current_version']=='2.47.10'
+          assert m['target_version']=='2.47.11'
+          assert m['from_versions']==['2.47.10']
+          assert m['schema_from']=='2026090401' and m['schema_to']=='2026090401'
+          assert m['repository']=='llhzx2018/vf-start'
+          assert m['release_tag']=='v2.47.11'
+          assert m['release_id']==390634431
+          assert m['product_identity']=='252ca51215e7e4411741e2f53d0bcc68f37614f2'
+          assert m['asset_name']=='VF_Start_V2.47.11_UPDATE.zip'
+          assert m['asset_bytes']==1882483
+          assert m['asset_sha256']=='c743c1d2434f448839c356cf138e9a4dece464ec6d15caa7027c6e3b41614fa6'
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          print('P01_STABLE_MANIFEST_EXACT_HOP=PASS')
+          print('P01_STABLE_SCHEMA_NO_MIGRATION=PASS')
+          PY
+          echo P01_UPDATE_CORE_REGRESSION=PASS
 
-      - name: Upload public-safe formal release receipt
+      - name: Formal Release and remote UPDATE asset readback gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          api='https://api.github.com/repos/llhzx2018/vf-start'
+          curl --fail-with-body -sS -L \
+            -H "Authorization: Bearer $SOURCE_ACCESS_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/releases/tags/v2.47.11" -o /tmp/p01-release.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p01-release.json'))
+          assert d['id']==390634431
+          assert d['tag_name']=='v2.47.11'
+          assert d['target_commitish']=='252ca51215e7e4411741e2f53d0bcc68f37614f2'
+          assert d['draft'] is False and d['prerelease'] is False
+          a=[x for x in d['assets'] if x['name']=='VF_Start_V2.47.11_UPDATE.zip']
+          assert len(a)==1
+          a=a[0]
+          assert a['id']==570067458
+          assert a['size']==1882483
+          assert a.get('digest')=='sha256:c743c1d2434f448839c356cf138e9a4dece464ec6d15caa7027c6e3b41614fa6'
+          print('P01_REMOTE_RELEASE_IDENTITY=PASS')
+          PY
+          curl --fail-with-body -sS -L \
+            -H "Authorization: Bearer $SOURCE_ACCESS_TOKEN" \
+            -H 'Accept: application/octet-stream' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api/releases/assets/$UPDATE_ASSET_ID" -o /tmp/P01_UPDATE.zip
+          test "$(stat -c '%s' /tmp/P01_UPDATE.zip)" = "$UPDATE_BYTES"
+          test "$(sha256sum /tmp/P01_UPDATE.zip | awk '{print $1}')" = "$UPDATE_SHA256"
+          python3 - <<'PY'
+          import json,hashlib,os
+          m=json.load(open('core-updates/projects/P01.json'))
+          b=open('/tmp/P01_UPDATE.zip','rb').read()
+          assert len(b)==m['asset_bytes']
+          assert hashlib.sha256(b).hexdigest()==m['asset_sha256']
+          print('P01_REMOTE_ASSET_BYTES_SHA=PASS')
+          print('P01_MANIFEST_REMOTE_ASSET_MATCH=PASS')
+          PY
+
+      - name: Public-safe stable channel receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence/runner
+          cat > evidence/runner/P01_V24711_STABLE_CHANNEL_GATE.txt <<'EOF'
+          CORE_UPDATES_CANDIDATE_SHA=3046a7275cda89b9aba33e0053407e1475123292
+          P01_EXACT_SOURCE_SHA=252ca51215e7e4411741e2f53d0bcc68f37614f2
+          VERSION=2.47.11
+          FROM_VERSION=2.47.10
+          SCHEMA=2026090401
+          MIGRATION=NONE
+          RELEASE_ID=390634431
+          UPDATE_ASSET_ID=570067458
+          UPDATE_BYTES=1882483
+          UPDATE_SHA256=c743c1d2434f448839c356cf138e9a4dece464ec6d15caa7027c6e3b41614fa6
+          MANIFEST_CONTRACT=PASS
+          UPDATE_CORE_REGRESSION=PASS
+          STABLE_MANIFEST_EXACT_HOP=PASS
+          REMOTE_RELEASE_IDENTITY=PASS
+          REMOTE_ASSET_BYTES_SHA=PASS
+          MANIFEST_REMOTE_ASSET_MATCH=PASS
+          RELEASE_WRITE_OPERATION=NO
+          PRODUCTION=NOT_TESTED
+          P01_V24711_STABLE_CHANNEL_GATE=PASS
+          EOF
+          cat evidence/runner/P01_V24711_STABLE_CHANNEL_GATE.txt
+
+      - name: Upload public-safe stable channel receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: p01-v24711-formal-release-${{ github.run_id }}
-          path: runner/evidence/runner/P01_V24711_FORMAL_RELEASE.txt
+          name: p01-v24711-stable-channel-${{ github.run_id }}
+          path: evidence/runner/P01_V24711_STABLE_CHANNEL_GATE.txt
           if-no-files-found: error
           retention-days: 14
 
-      - name: Cleanup release credential working copies
+      - name: Cleanup private release bytes
         if: always()
         shell: bash
-        run: rm -rf vf-start baseline /tmp/p01-v24711-formal-release /tmp/remote-VF-* /tmp/remote-P01_* /tmp/p01-*.json /tmp/p01-*.err
+        run: rm -rf core-updates /tmp/P01_UPDATE.zip /tmp/p01-release.json /tmp/p01-channel-*
