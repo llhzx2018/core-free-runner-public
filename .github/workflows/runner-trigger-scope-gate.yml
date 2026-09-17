@@ -37,3 +37,359 @@ jobs:
         env:
           VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: python scripts/check_estate_anti_drift.py --live
+
+  p01_exact_source:
+    if: github.event_name == 'pull_request' && github.head_ref == 'temp/p01-v24711-update-recovery-20260916'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      EXACT_SHA: 95d120cbdd9d09c207a16af8a147c349304c8db1
+      SOURCE_SHA: 972541fd06c66044105ec1b19cf7738c340c90c1
+      TARGET_VERSION: 2.47.11
+      SOURCE_VERSION: 2.47.10
+      EXPECTED_SCHEMA: '2026090401'
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Registered read-only credential preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo P01_READ_ONLY_CREDENTIAL_ROUTE=PASS
+
+      - name: Checkout exact V2.47.11 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.EXACT_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+          path: vf-start
+
+      - name: Checkout exact V2.47.10 stable baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.SOURCE_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: baseline
+
+      - name: Checkout proven formal artifact helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 1dd635d8e8d4485736458672fb7a5be397d94f89
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: helper
+
+      - name: Checkout proven artifact template
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 0439b0df027ae0bc6c21a8dbf91b066a564130f9
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: template
+
+      - name: Checkout proven Atomic primitives
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 0468b28ae57c368f80b03f85060318667bcc5834
+          persist-credentials: false
+          fetch-depth: 1
+          path: proven
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact source, PHP lint, recovery contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C vf-start rev-parse HEAD)" = "$EXACT_SHA"
+          test "$(git -C baseline rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n ' < vf-start/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < vf-start/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '2.47.11');" vf-start/src/app/bootstrap.php
+          test "$(php -r '$p=json_decode(file_get_contents("vf-start/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$EXPECTED_SCHEMA"
+          test -z "$(git -C vf-start diff --name-only "$SOURCE_SHA"..HEAD -- src/migrations/)"
+          find vf-start/src -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-v24711-php-lint.log
+          php vf-start/tests/unit/update_recovery_contract.php | tee /tmp/p01-v24711-recovery-contract.log
+          grep -Fx 'P01_UPDATE_RECOVERY_CONTRACT=PASS' /tmp/p01-v24711-recovery-contract.log
+          echo P01_V24711_PHP_LINT=PASS
+          echo P01_V24711_SCHEMA_NO_MIGRATION=PASS
+
+      - name: Fresh install and managed authorization runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          R=/tmp/p01-v24711-fresh
+          rm -rf "$R" /tmp/p01-v24711-fresh.*
+          cp -a vf-start/src "$R"
+          php -S 127.0.0.1:19821 -t "$R" >/tmp/p01-v24711-fresh.server 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-v24711-fresh.cookies -b /tmp/p01-v24711-fresh.cookies http://127.0.0.1:19821/setup.php -o /tmp/p01-v24711-fresh.setup; then break; fi
+            sleep .25
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24711-fresh.setup',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-v24711-fresh.cookies -b /tmp/p01-v24711-fresh.cookies -X POST http://127.0.0.1:19821/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=V24711 Exact Source Gate' \
+            --data-urlencode 'admin_password=V24711ExactMachineGate!' \
+            --data-urlencode 'admin_password_confirm=V24711ExactMachineGate!' \
+            -o /tmp/p01-v24711-fresh.post
+          test -f "$R/app/.runtime.php"
+          php "$R/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          code="$(curl -sS -o /tmp/p01-v24711-credential-anon.body -D /tmp/p01-v24711-credential-anon.headers -w '%{http_code}' http://127.0.0.1:19821/update-credential.php)"
+          test "$code" = 302
+          grep -Eiq '^Location:[[:space:]]*\./?[[:space:]]*$' /tmp/p01-v24711-credential-anon.headers
+          R="$R" php <<'PHP'
+          <?php
+          $r=getenv('R');
+          require $r.'/app/bootstrap.php';
+          require $r.'/app/UpdateCredentialStore.php';
+          require $r.'/app/CoreUpdates/GitHubClient.php';
+          $store=new VfUpdateCredentialStore();
+          $managed='synthetic_P01_read_token_24711_machine';
+          $store->save($managed);
+          $path=VF_PRIVATE_ROOT.'/update-auth/github-read-token';
+          clearstatcache(true,$path);
+          if(!is_file($path)||is_link($path)) exit(10);
+          if((fileperms($path)&0777)!==0600) exit(11);
+          $status=$store->status();
+          if(($status['source']??'')!=='managed'||empty($status['configured'])) exit(12);
+          putenv('VF_PRIVATE_READ_TOKEN=synthetic_stale_environment_token_24711');
+          $client=new \CoreUpdates\GitHubClient((string)getenv('VF_PRIVATE_READ_TOKEN'));
+          $rp=(new ReflectionClass($client))->getProperty('token');
+          $rp->setAccessible(true);
+          if($rp->getValue($client)!==$managed) exit(13);
+          $store->clear();
+          $target=VF_PRIVATE_ROOT.'/update-auth/symlink-target';
+          file_put_contents($target,"do-not-read\n");
+          if(!symlink($target,$path)) exit(14);
+          if($store->managedToken()!=='') exit(15);
+          $rejected=false;
+          try{$store->clear();}catch(RuntimeException $e){$rejected=true;}
+          if(!$rejected) exit(16);
+          @unlink($path); @unlink($target);
+          echo "P01_MANAGED_TOKEN_PRIVATE_0600=PASS\n";
+          echo "P01_MANAGED_OVERRIDES_STALE_ENV=PASS\n";
+          echo "P01_MANAGED_SYMLINK_REJECTION=PASS\n";
+          PHP
+          echo P01_UPDATE_CREDENTIAL_ADMIN_ONLY=PASS
+          echo P01_V24711_FRESH_INSTALL=PASS
+
+      - name: Deterministic package, strict 2.47.10 to 2.47.11, data preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf formal candidate
+          cp -a vf-start formal
+          cp -a vf-start candidate
+          cp helper/scripts/_tmp_p01_v2470_formal_artifact_gate.sh /tmp/p01-v24711-artifact-gate.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p=Path('/tmp/p01-v24711-artifact-gate.sh')
+          s=p.read_text(encoding='utf-8')
+          repl=[
+            ('7f3492f70276d83efed371296d69709c1e991350',os.environ['EXACT_SHA']),
+            ('b70971514ccf1c6b8f3793bfc5a2200cad47dfe9',os.environ['EXACT_SHA']),
+            ('1bd95e8777e72f6cd89206ddb9daf934ad4e6b9e',os.environ['SOURCE_SHA']),
+            ('33993725218',os.environ['GITHUB_RUN_ID']),
+            ('BIND_PR=416','BIND_PR=883'),
+            ('OWNER_AUTHORIZED_V2470_RELEASE_CHAIN_20260906','OWNER_AUTHORIZED_V24711_MACHINE_GATE_20260917'),
+            ('V2470','V24711'),('v2470','v24711')]
+          for a,b in repl:
+              if a not in s: raise SystemExit('missing helper anchor '+a)
+              s=s.replace(a,b)
+          s=s.replace('2.47.0','__TARGET__').replace('2.46.4',os.environ['SOURCE_VERSION']).replace('__TARGET__',os.environ['TARGET_VERSION'])
+          old="src=src.replace(\"'release_type':'patch'\",\"'release_type':'minor'\")"
+          if old not in s: raise SystemExit('release-type helper anchor missing')
+          s=s.replace(old,"src=src.replace('V2.46.1 之后 Consolidated L2 Product Optimization 的正式发布版本。','V2.47.10 之后更新授权恢复与 HTTP 401/403 收口的正式发布版本。')",1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          chmod +x /tmp/p01-v24711-artifact-gate.sh
+          bash /tmp/p01-v24711-artifact-gate.sh | tee /tmp/p01-v24711-artifact.log
+          grep -Fx 'P01_V24711_FORMAL_ARTIFACT_GATE=PASS' /tmp/p01-v24711-artifact.log
+          ASSETS=/tmp/p01-v24711-formal-artifacts
+          FULL="$ASSETS/VF-Start-V2.47.11-FULL.zip"
+          UPDATE="$ASSETS/VF_Start_V2.47.11_UPDATE.zip"
+          for f in "$FULL" "$FULL.sha256" "$UPDATE" "$UPDATE.sha256" "$ASSETS/repair-v2.47.11.php"; do test -f "$f"; done
+          (cd "$ASSETS" && sha256sum -c VF-Start-V2.47.11-FULL.zip.sha256 && sha256sum -c VF_Start_V2.47.11_UPDATE.zip.sha256)
+          test "$(unzip -p "$FULL" VERSION.txt | tr -d '\r\n ')" = "$TARGET_VERSION"
+          unzip -p "$FULL" release-manifest.json >/tmp/p01-v24711-release-manifest.json
+          jq -e --arg t "$TARGET_VERSION" --arg s "$SOURCE_VERSION" --arg schema "$EXPECTED_SCHEMA" '.version==$t and .source_version==$s and .schema_version==$schema and .source_schema_version==$schema and .schema_change==false and (.schema_migrations|length)==0 and .runtime_data_included==false and .seed_user_business_data_included==false and .update.backup_required==true and .update.rollback_supported==true and .update.single_hop==true and (.update.supported_from==[$s])' /tmp/p01-v24711-release-manifest.json >/dev/null
+          test "$(unzip -Z1 "$UPDATE" | wc -l | tr -d ' ')" = 1
+          unzip -Z1 "$UPDATE" | grep -Fxq repair-v2.47.11.php
+          php "$ASSETS/repair-v2.47.11.php" --self-test | jq -e '.ok==true and .global_barrier==true and .interruption_recovery==true' >/dev/null
+          ! unzip -Z1 "$FULL" | grep -Eq '(^|/)(private|backups|uploads|runtime-data)(/|$)'
+          echo P01_V24711_PACKAGE_IDENTITY=PASS
+          echo P01_V24710_TO_V24711_STRICT_UPGRADE=PASS
+          echo P01_V24711_DATA_PRESERVATION=PASS
+
+      - name: Actual backup restore and failure rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ASSETS=/tmp/p01-v24711-formal-artifacts
+          REPAIR="$ASSETS/repair-v2.47.11.php"
+          install_instance(){
+            local root="$1" port="$2" title="$3" prefix="$4"
+            php -S "127.0.0.1:$port" -t "$root" >"/tmp/${prefix}.server" 2>&1 & local pid=$!
+            for _ in $(seq 1 40); do if curl -fsS -c "/tmp/${prefix}.cookies" -b "/tmp/${prefix}.cookies" "http://127.0.0.1:$port/setup.php" -o "/tmp/${prefix}.setup"; then break; fi; sleep .25; done
+            local csrf
+            csrf="$(python3 - "/tmp/${prefix}.setup" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s);assert m;print(m.group(1))
+          PY
+          )"
+            curl -fsS -c "/tmp/${prefix}.cookies" -b "/tmp/${prefix}.cookies" -X POST "http://127.0.0.1:$port/setup.php" --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=$title" --data-urlencode 'admin_password=V24711MachineRollback!' --data-urlencode 'admin_password_confirm=V24711MachineRollback!' -o "/tmp/${prefix}.post"
+            kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+            test -f "$root/app/.runtime.php"
+            php "$root/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          }
+
+          B=/tmp/p01-v24711-backup-restore
+          rm -rf "$B"; cp -a baseline/src "$B"; install_instance "$B" 19831 'V24711 Backup Restore' p01v24711br
+          B="$B" php <<'PHP'
+          <?php
+          require getenv('B').'/app/bootstrap.php';
+          $r=new VfRepository(vf_db());
+          $c=$r->createCategory(['name'=>'V24711 Preserve','description'=>'machine backup restore','is_private'=>1]);
+          $r->saveLink(null,['category_id'=>$c,'title'=>'V24711 Preserve Link','url'=>'https://example.com/v24711-preserve','is_private'=>1]);
+          $b=(new VfBackupManager(vf_db()))->create('V24711 pre-upgrade machine','pre-update',true);
+          file_put_contents('/tmp/p01-v24711-backup-key',(string)$b['backup_key']);
+          echo "P01_V24711_PRE_UPGRADE_BACKUP=PASS\n";
+          PHP
+          php "$REPAIR" --run="$B" | jq -e '.ok==true and .already_current==false' >/dev/null
+          test "$(tr -d '\r\n ' < "$B/VERSION.txt")" = "$TARGET_VERSION"
+          B="$B" php <<'PHP'
+          <?php
+          require getenv('B').'/app/bootstrap.php';
+          $d=vf_db();
+          if((int)$d->query("SELECT COUNT(*) FROM links WHERE title='V24711 Preserve Link'")->fetchColumn()!==1) exit(20);
+          $k=trim((string)file_get_contents('/tmp/p01-v24711-backup-key'));
+          $v=(new VfBackupManager($d))->verify($k);
+          if(($v['validation_status']??'')!=='valid') exit(21);
+          $r=new VfRepository($d);
+          $c=$r->createCategory(['name'=>'V24711 Post Mutation','is_private'=>1]);
+          $r->saveLink(null,['category_id'=>$c,'title'=>'V24711 Must Disappear','url'=>'https://example.com/v24711-post','is_private'=>1]);
+          echo "P01_V24711_POST_UPGRADE_MUTATION=PASS\n";
+          PHP
+          B="$B" php <<'PHP'
+          <?php
+          require getenv('B').'/app/bootstrap.php';
+          $k=trim((string)file_get_contents('/tmp/p01-v24711-backup-key'));
+          $x=VfBackupManager::performRestore($k);
+          if(empty($x['restored'])||($x['integrity']??'')!=='ok'||(int)($x['foreign_key_errors']??-1)!==0) exit(22);
+          echo "P01_V24711_PRODUCT_RESTORE_EXECUTED=PASS\n";
+          PHP
+          B="$B" php <<'PHP'
+          <?php
+          require getenv('B').'/app/bootstrap.php';
+          $d=vf_db();
+          if(VF_VERSION!=='2.47.11') exit(23);
+          if((int)$d->query("SELECT COUNT(*) FROM links WHERE title='V24711 Preserve Link'")->fetchColumn()!==1) exit(24);
+          if((int)$d->query("SELECT COUNT(*) FROM links WHERE title='V24711 Must Disappear'")->fetchColumn()!==0) exit(25);
+          if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok') exit(26);
+          echo "P01_V24711_BACKUP_RESTORE_DATA_SEMANTICS=PASS\n";
+          PHP
+          php "$B/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_V24711_BACKUP_RESTORE=PASS
+
+          R=/tmp/p01-v24711-failure-rollback
+          rm -rf "$R"; cp -a baseline/src "$R"; install_instance "$R" 19832 'V24711 Failure Rollback' p01v24711rb
+          R="$R" php <<'PHP'
+          <?php
+          require getenv('R').'/app/bootstrap.php';
+          $r=new VfRepository(vf_db());
+          $c=$r->createCategory(['name'=>'V24711 Rollback Sentinel','is_private'=>1]);
+          $r->saveLink(null,['category_id'=>$c,'title'=>'V24711 Rollback Link','url'=>'https://example.org/v24711-rollback','is_private'=>1]);
+          PHP
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$REPAIR" --run="$R" >/tmp/p01-v24711-rollback.out 2>/tmp/p01-v24711-rollback.err
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n ' < "$R/VERSION.txt")" = "$SOURCE_VERSION"
+          php "$REPAIR" --verify-source="$R" | jq -e '.ok==true' >/dev/null
+          R="$R" php <<'PHP'
+          <?php
+          require getenv('R').'/app/bootstrap.php';
+          $d=vf_db();
+          if(VF_VERSION!=='2.47.10') exit(30);
+          if((int)$d->query("SELECT COUNT(*) FROM links WHERE title='V24711 Rollback Link'")->fetchColumn()!==1) exit(31);
+          if(strtolower((string)$d->query('PRAGMA integrity_check')->fetchColumn())!=='ok') exit(32);
+          echo "P01_V24711_ROLLBACK_DATA_PRESERVED=PASS\n";
+          PHP
+          php "$R/cli/verify.php" | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_V24711_FAILURE_ROLLBACK=PASS
+
+      - name: Public-safe exact-source receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence/runner
+          cat > evidence/runner/P01_V24711_EXACT_SOURCE.txt <<EOF
+          P01_EXACT_SOURCE_SHA=$EXACT_SHA
+          P01_SOURCE_STABLE_SHA=$SOURCE_SHA
+          P01_TARGET_VERSION=$TARGET_VERSION
+          P01_SOURCE_VERSION=$SOURCE_VERSION
+          P01_SCHEMA=$EXPECTED_SCHEMA
+          PHP_LINT=PASS
+          UPDATE_RECOVERY_CONTRACT=PASS
+          FRESH_INSTALL=PASS
+          ADMIN_ONLY_CREDENTIAL_ROUTE=PASS
+          MANAGED_PRIVATE_0600=PASS
+          MANAGED_SYMLINK_REJECTION=PASS
+          MANAGED_OVERRIDES_STALE_ENV=PASS
+          HTTP_401_403_RECOVERY_CONTRACT=PASS
+          STALE_LATEST_CONTRACT=PASS
+          STRICT_SINGLE_HOP_UPGRADE=PASS
+          DATA_PRESERVATION=PASS
+          BACKUP_RESTORE=PASS
+          FAILURE_ROLLBACK=PASS
+          PACKAGE_IDENTITY=PASS
+          MIGRATION=NONE
+          PRIVATE_SOURCE_PERSISTED=NO
+          RELEASE_WRITE_CAPABILITY_USED=NO
+          PRODUCTION=NOT_TESTED
+          P01_V24711_EXACT_SOURCE_MACHINE_GATE=PASS
+          EOF
+          cat evidence/runner/P01_V24711_EXACT_SOURCE.txt
+
+      - name: Upload public-safe receipt only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p01-v24711-exact-source-${{ github.run_id }}
+          path: evidence/runner/P01_V24711_EXACT_SOURCE.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup private worktree bytes
+        if: always()
+        shell: bash
+        run: rm -rf vf-start baseline helper template proven formal candidate /tmp/p01-v24711-*
