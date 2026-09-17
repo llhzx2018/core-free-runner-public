@@ -1,0 +1,53 @@
+name: S01 Upgrade Acquisition Control
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify control credential can read update authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          for repo in core-updates vf-tools-theme; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" "https://api.github.com/repos/llhzx2018/$repo" || true)"
+            echo "CHECK ${repo} HTTP ${code}"
+            test "$code" = "200"
+          done
+      - name: Simulate Theme 1.35.24 to 1.35.26 acquisition
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" \
+            'https://api.github.com/repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main' \
+            | jq -r '.content' | tr -d '\n' | base64 -d > manifest.json
+          test "$(jq -r '.target_version' manifest.json)" = '1.35.26'
+          jq -e '.from_versions | index("1.35.24") != null' manifest.json >/dev/null
+          repo="$(jq -r '.repository' manifest.json)"
+          tag="$(jq -r '.release_tag' manifest.json)"
+          asset="$(jq -r '.asset_name' manifest.json)"
+          bytes="$(jq -r '.asset_bytes' manifest.json)"
+          sha="$(jq -r '.asset_sha256' manifest.json)"
+          curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" \
+            "https://api.github.com/repos/${repo}/releases/tags/${tag}" > release.json
+          asset_id="$(jq -r --arg n "$asset" '.assets[] | select(.name == $n) | .id' release.json | head -n1)"
+          test -n "$asset_id" && test "$asset_id" != null
+          curl -fsSL -L -H 'Accept: application/octet-stream' -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" \
+            "https://api.github.com/repos/${repo}/releases/assets/${asset_id}" -o theme.zip
+          test "$(stat -c '%s' theme.zip)" = "$bytes"
+          test "$(sha256sum theme.zip | awk '{print $1}')" = "$sha"
+          unzip -tq theme.zip >/dev/null
+          test "$(unzip -Z1 theme.zip | cut -d/ -f1 | sort -u)" = 'vf-tools-theme'
+          unzip -p theme.zip vf-tools-theme/style.css | grep -Fq 'Version: 1.35.26'
+          echo 'PASS control: Theme 1.35.24 -> 1.35.26 manifest/release/asset acquisition path'
