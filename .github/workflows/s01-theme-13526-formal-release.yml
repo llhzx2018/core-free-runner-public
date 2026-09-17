@@ -1,0 +1,199 @@
+name: S01 Theme 1.35.26 Formal Release
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout runner branch
+        uses: actions/checkout@v4
+
+      - name: Verify governed release credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_RELEASE_WRITE_TOKEN:-}"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_RELEASE_WRITE_TOKEN" https://api.github.com/repos/llhzx2018/vf-tools-theme || true)"
+          test "$code" = "200"
+          echo "PASS governed release credential can read Theme repository"
+
+      - name: Clone exact Theme release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf theme
+          mkdir theme
+          cd theme
+          git init -q
+          git remote add origin https://github.com/llhzx2018/vf-tools-theme.git
+          AUTH="$(printf 'x-access-token:%s' "$VF_RELEASE_WRITE_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            refs/tags/v1.35.25:refs/tags/v1.35.25
+          git checkout --detach refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "42a4d894033762e4e82c73a2cb46fb24395e3c3d"
+          test "$(cat VERSION)" = "1.35.26"
+          grep -Fq 'Version: 1.35.26' src/style.css
+          grep -Fq 'V1.35.26_S01_UPDATE_CENTER_MATURE_ADMIN_UI' src/style.css
+          echo "PASS exact Theme main source"
+
+      - name: Exact release scope fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd theme
+          test "$(git rev-parse HEAD^1)" = "9eaaa558323613f4d688b7c50a27fdf120fa6f48"
+          test "$(git rev-parse HEAD^2)" = "f63ddfa8322ab7e9e53c28398c5e7672f96a77fe"
+          actual="$(git diff --name-only HEAD^1 HEAD | sort)"
+          expected="$(printf '%s\n' \
+            VERSION \
+            src/assets/css/admin/admin-update-center.css \
+            src/style.css \
+            tests/update-center-human-language-contract.php \
+            tests/update-refresh-policy-contract.php | sort)"
+          test "$actual" = "$expected"
+          echo "PASS release source is the gated five-file product change"
+
+      - name: Runtime PHP and UI contract gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd theme
+          php tests/update-center-human-language-contract.php
+          php tests/update-refresh-policy-contract.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find src -type f -name '*.php' -print0 | sort -z)
+          echo "PASS runtime PHP + mature update-center contracts"
+
+      - name: Canonical Runtime Authority continuity
+        id: fp
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/theme-old"
+          git -C theme worktree add -q --detach "$RUNNER_TEMP/theme-old" v1.35.25
+          cat >"$RUNNER_TEMP/theme-authority.php" <<'PHP'
+          <?php
+          define('ABSPATH','/');
+          class WP_Error { public function __construct(...$x){} }
+          require $argv[1].'/inc/update/class-vf-theme-runtime-authority-v1.php';
+          $s=VF_Theme_Runtime_Authority_V1::snapshot($argv[1]);
+          if ($s instanceof WP_Error) { fwrite(STDERR,"AUTHORITY_ERROR\n"); exit(1); }
+          unset($s['files']);
+          echo json_encode($s, JSON_UNESCAPED_SLASHES), "\n";
+          PHP
+          php "$RUNNER_TEMP/theme-authority.php" "$RUNNER_TEMP/theme-old/src" >"$RUNNER_TEMP/old-authority.json"
+          php "$RUNNER_TEMP/theme-authority.php" theme/src >"$RUNNER_TEMP/new-authority.json"
+          test "$(jq -r '.file_count' "$RUNNER_TEMP/old-authority.json")" = '455'
+          test "$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/old-authority.json")" = 'e2daf2f15b40e442ac017099f14d40cbe153ff173bca3a9a6e8c22e93c788c46'
+          test "$(jq -r '.component_id' "$RUNNER_TEMP/new-authority.json")" = 'S01-C01'
+          test "$(jq -r '.runtime_contract' "$RUNNER_TEMP/new-authority.json")" = 'VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1'
+          NEW_FILES="$(jq -r '.file_count' "$RUNNER_TEMP/new-authority.json")"
+          NEW_FP="$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/new-authority.json")"
+          test "$NEW_FILES" -ge 1
+          test "${#NEW_FP}" = '64'
+          echo "runtime_files=$NEW_FILES" >> "$GITHUB_OUTPUT"
+          echo "runtime_fingerprint=$NEW_FP" >> "$GITHUB_OUTPUT"
+          echo "PASS canonical Runtime Authority continuity"
+
+      - name: Build deterministic WordPress Theme ZIP
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP="$RUNNER_TEMP/vf-theme-13526"
+          ROOT="$TMP/vf-tools-theme"
+          ZIP="$TMP/vf-tools-theme_V1.35.26.zip"
+          rm -rf "$TMP"
+          mkdir -p "$ROOT"
+          cp -a theme/src/. "$ROOT/"
+          find "$ROOT" -type l -print -quit | (! grep -q .)
+          php "$RUNNER_TEMP/theme-authority.php" "$ROOT" >"$RUNNER_TEMP/staged-authority.json"
+          test "$(jq -r '.file_count' "$RUNNER_TEMP/staged-authority.json")" = "${{ steps.fp.outputs.runtime_files }}"
+          test "$(jq -r '.fingerprint_sha256' "$RUNNER_TEMP/staged-authority.json")" = "${{ steps.fp.outputs.runtime_fingerprint }}"
+          python3 - "$ROOT" "$ZIP" <<'PY'
+          import pathlib,sys,zipfile
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+                  rel=pathlib.PurePosixPath('vf-tools-theme')/p.relative_to(root)
+                  info=zipfile.ZipInfo(str(rel),date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.create_system=3
+                  info.external_attr=(p.stat().st_mode & 0xFFFF) << 16
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          PY
+          BYTES="$(stat -c '%s' "$ZIP")"
+          SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
+          PACKAGE_FILES="$(find "$ROOT" -type f | wc -l | tr -d ' ')"
+          test "$BYTES" -gt 0
+          test "${#SHA}" = '64'
+          unzip -tq "$ZIP" >/dev/null
+          test "$(unzip -Z1 "$ZIP" | cut -d/ -f1 | sort -u)" = 'vf-tools-theme'
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "bytes=$BYTES" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "package_files=$PACKAGE_FILES" >> "$GITHUB_OUTPUT"
+          echo "PASS deterministic package gate"
+
+      - name: Create formal private release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.35.26 --repo llhzx2018/vf-tools-theme >/dev/null 2>&1; then
+            echo 'Release v1.35.26 already exists; refusing overwrite.' >&2
+            exit 31
+          fi
+          NOTES=$(cat <<EOF
+          S01-C01 Mature Admin V6 unified update-center UI release.
+
+          Exact source: 42a4d894033762e4e82c73a2cb46fb24395e3c3d
+          Product Gate: 35207144151 PASS
+          Runtime files: ${{ steps.fp.outputs.runtime_files }}
+          Runtime fingerprint: ${{ steps.fp.outputs.runtime_fingerprint }}
+
+          Scope: compact operational admin layout, canonical #0891b2 accent, unified component status list, warning-tone attention states, responsive/focus-visible closure. Existing 1.35.25 fresh-receipt and update-discovery logic is unchanged. No second VF update menu; no Ops/M3U8 ownership change. Production install / Static / FINAL_ONLINE_PASS are NOT_RUN.
+          EOF
+          )
+          gh release create v1.35.26 "${{ steps.build.outputs.zip }}#vf-tools-theme_V1.35.26.zip" \
+            --repo llhzx2018/vf-tools-theme \
+            --target 42a4d894033762e4e82c73a2cb46fb24395e3c3d \
+            --title 'VF Tools Theme V1.35.26' \
+            --notes "$NOTES"
+          echo "PASS release created"
+
+      - name: Independent release and asset readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api repos/llhzx2018/vf-tools-theme/releases/tags/v1.35.26)"
+          python3 - "$JSON" "${{ steps.build.outputs.bytes }}" "${{ steps.build.outputs.sha256 }}" <<'PY'
+          import json,sys
+          x=json.loads(sys.argv[1]); exp_bytes=int(sys.argv[2]); exp_sha=sys.argv[3]
+          assert x['tag_name']=='v1.35.26' and x['draft'] is False and x['prerelease'] is False
+          assert x['target_commitish']=='42a4d894033762e4e82c73a2cb46fb24395e3c3d'
+          assets=[a for a in x.get('assets',[]) if a.get('name')=='vf-tools-theme_V1.35.26.zip']
+          assert len(assets)==1
+          a=assets[0]; assert int(a['size'])==exp_bytes
+          digest=str(a.get('digest') or '')
+          if digest: assert digest=='sha256:'+exp_sha
+          PY
+          rm -rf "$RUNNER_TEMP/release-readback"
+          mkdir -p "$RUNNER_TEMP/release-readback"
+          gh release download v1.35.26 --repo llhzx2018/vf-tools-theme --pattern 'vf-tools-theme_V1.35.26.zip' --dir "$RUNNER_TEMP/release-readback"
+          DL="$RUNNER_TEMP/release-readback/vf-tools-theme_V1.35.26.zip"
+          test "$(stat -c '%s' "$DL")" = "${{ steps.build.outputs.bytes }}"
+          test "$(sha256sum "$DL" | awk '{print $1}')" = "${{ steps.build.outputs.sha256 }}"
+          echo "PASS independent release asset readback"
