@@ -1,0 +1,115 @@
+name: S01 Private Read Upgrade Smoke
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout runner branch
+        uses: actions/checkout@v4
+
+      - name: Verify private-read token access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VF_PRIVATE_READ_TOKEN:-}"
+          for repo in core-updates vf-tools-theme vf-tools-ops vf-tools-m3u8; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
+              "https://api.github.com/repos/llhzx2018/$repo" || true)"
+            test "$code" = "200"
+          done
+          echo "PASS VF_PRIVATE_READ_TOKEN can read all S01 private update repositories"
+
+      - name: Read live S01 distribution manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke/manifests
+          for component in S01-C01 S01-C02 S01-C03; do
+            curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
+              "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/${component}.json?ref=main" \
+              | jq -r '.content' | tr -d '\n' | base64 -d > "smoke/manifests/${component}.json"
+            jq -e '.schema_version == "wp-component-1.0" and .enabled == true' "smoke/manifests/${component}.json" >/dev/null
+          done
+          test "$(jq -r '.target_version' smoke/manifests/S01-C01.json)" = "1.35.26"
+          test "$(jq -r '.target_version' smoke/manifests/S01-C02.json)" = "1.21.871"
+          test "$(jq -r '.target_version' smoke/manifests/S01-C03.json)" = "1.25.31"
+          jq -e '.from_versions | index("1.35.24") != null' smoke/manifests/S01-C01.json >/dev/null
+          jq -e '.from_versions | index("1.21.870") != null' smoke/manifests/S01-C02.json >/dev/null
+          jq -e '.from_versions | index("1.25.30") != null' smoke/manifests/S01-C03.json >/dev/null
+          echo "PASS live manifests and upgrade eligibility"
+
+      - name: Download and verify distributed upgrade assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke/assets smoke/unpacked
+
+          fetch_asset() {
+            local manifest="$1"
+            local key="$2"
+            local repo tag asset expected_bytes expected_sha release_json asset_id out root identity_file identity_needle
+            repo="$(jq -r '.repository' "$manifest")"
+            tag="$(jq -r '.release_tag' "$manifest")"
+            asset="$(jq -r '.asset_name' "$manifest")"
+            expected_bytes="$(jq -r '.asset_bytes' "$manifest")"
+            expected_sha="$(jq -r '.asset_sha256' "$manifest")"
+            release_json="smoke/${key}-release.json"
+            curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
+              "https://api.github.com/repos/${repo}/releases/tags/${tag}" > "$release_json"
+            asset_id="$(jq -r --arg n "$asset" '.assets[] | select(.name == $n) | .id' "$release_json" | head -n1)"
+            test -n "$asset_id" && test "$asset_id" != "null"
+            out="smoke/assets/${asset}"
+            curl -fsSL -L \
+              -H 'Accept: application/octet-stream' \
+              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
+              "https://api.github.com/repos/${repo}/releases/assets/${asset_id}" -o "$out"
+            test "$(stat -c '%s' "$out")" = "$expected_bytes"
+            test "$(sha256sum "$out" | awk '{print $1}')" = "$expected_sha"
+            unzip -tq "$out" >/dev/null
+            root="$(unzip -Z1 "$out" | cut -d/ -f1 | sort -u)"
+            case "$key" in
+              c01)
+                test "$root" = "vf-tools-theme"
+                identity_file="vf-tools-theme/style.css"
+                identity_needle="Version: 1.35.26"
+                ;;
+              c02)
+                test "$root" = "vf-ops"
+                identity_file="vf-ops/vf-ops.php"
+                identity_needle="Version: 1.21.871"
+                ;;
+              c03)
+                test "$root" = "vf-tool-m3u8"
+                identity_file="vf-tool-m3u8/vf-tool-m3u8.php"
+                identity_needle="Version: 1.25.31"
+                ;;
+            esac
+            unzip -p "$out" "$identity_file" | grep -Fq "$identity_needle"
+            echo "PASS $key authenticated asset acquisition + bytes/SHA/ZIP/version"
+          }
+
+          fetch_asset smoke/manifests/S01-C01.json c01
+          fetch_asset smoke/manifests/S01-C02.json c02
+          fetch_asset smoke/manifests/S01-C03.json c03
+
+      - name: Upgrade acquisition result
+        shell: bash
+        run: |
+          echo "PASS S01 private-read upgrade acquisition smoke"
+          echo "This validates authenticated manifest discovery and release-asset acquisition only; it does not claim Production WordPress installation."
