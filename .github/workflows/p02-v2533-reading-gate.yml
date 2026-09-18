@@ -1,0 +1,262 @@
+name: P02 V2.5.33 Reading Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'triggers/p02-v2533-reading-gate.txt'
+      - '.github/workflows/p02-v2533-reading-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REF: 58948d53f52c5896441ba974946987dcc405af64
+      BASELINE_REF: v2.5.32
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Require registered capability
+        run: test -n "$RELEASE_TOKEN"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: product
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.BASELINE_REF }}
+          token: ${{ env.RELEASE_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source and repository contracts
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < product/VERSION)" = 2.5.33
+          test "$(tr -d '\r\n' < baseline/VERSION)" = 2.5.32
+          bash product/scripts/verify-repository.sh
+          node --check product/public/assets/app.js
+          node --check product/public/assets/editor-enhancements.js
+          while IFS= read -r test; do
+            echo "RUN $test"
+            (cd product && node "$test")
+          done < <(sed -n 's/^[[:space:]]*run: node \(tests\/unit\/[^ ]*\.mjs\).*$/\1/p' product/.github/workflows/repository-health.yml)
+          echo EXACT_PRODUCT_SOURCE=PASS
+          echo REPOSITORY_CONTRACTS=PASS
+
+      - name: Deterministic candidate packaging
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/build-candidate.py --out build/candidate-a --source-version 2.5.32 --source-commit "$PRODUCT_REF" --source-ref work/p02-inkstone-reading-ui-20260918
+          python3 scripts/build-candidate.py --out build/candidate-b --source-version 2.5.32 --source-commit "$PRODUCT_REF" --source-ref work/p02-inkstone-reading-ui-20260918
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          for root in ('build/candidate-a','build/candidate-b'):
+              assert Path(root).is_dir()
+          def m(root):
+              out={}
+              for p in sorted(Path(root).rglob('*')):
+                  if p.is_file():
+                      rel=p.relative_to(root).as_posix()
+                      out[rel]=(p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest())
+              return out
+          a,b=m('build/candidate-a'),m('build/candidate-b')
+          assert a==b,(set(a)^set(b))
+          assert any(x.endswith('UPDATE_CANDIDATE.zip') for x in a)
+          assert any(x.endswith('FULL_CANDIDATE.zip') for x in a)
+          assert any(x.endswith('ATOMIC_CANDIDATE.zip') for x in a)
+          print('DETERMINISTIC_CANDIDATE=PASS')
+          print('CANDIDATE_FILES='+str(len(a)))
+          PY
+          unzip -p build/candidate-a/VF_Library_V2.5.33_UPDATE_CANDIDATE.zip atomic-manifest.json > "$RUNNER_TEMP/atomic-manifest.json"
+          jq -e '.source_version=="2.5.32" and .target_version=="2.5.33" and .source_schema==2401 and .target_schema==2401' "$RUNNER_TEMP/atomic-manifest.json" >/dev/null
+          test "$(unzip -p build/candidate-a/VF_Library_V2.5.33_UPDATE_CANDIDATE.zip payload/VERSION.txt | tr -d '\r\n')" = 2.5.33
+          echo UPDATE_PACKAGE_IDENTITY=PASS
+
+      - name: Install runtime and Chromium
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip sqlite3 >/dev/null
+          cd "$RUNNER_TEMP"
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.55.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Fresh install and real reading UX
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/p02-v2533-site"
+          mkdir -p "$SITE"
+          bash product/scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S 127.0.0.1:18753 -t "$SITE" >"$RUNNER_TEMP/v2533-php.log" 2>&1 &
+          SERVER_PID=$!
+          echo "$SERVER_PID" > "$RUNNER_TEMP/v2533.pid"
+          sleep 1
+          curl -fsS -c "$RUNNER_TEMP/v2533-cookies" http://127.0.0.1:18753/setup.php > "$RUNNER_TEMP/v2533-setup.html"
+          CSRF="$(python3 - "$RUNNER_TEMP/v2533-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$CSRF"
+          curl -sS -D "$RUNNER_TEMP/v2533-setup.headers" -o /dev/null -b "$RUNNER_TEMP/v2533-cookies"             -H 'Origin: http://127.0.0.1:18753' -H 'Referer: http://127.0.0.1:18753/setup.php'             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'password=P02-V2533-Reading-Test!'             --data-urlencode 'password_confirm=P02-V2533-Reading-Test!'             http://127.0.0.1:18753/setup.php
+          grep -Eq '^HTTP/.* 303' "$RUNNER_TEMP/v2533-setup.headers"
+          cat > "$RUNNER_TEMP/v2533-visual.cjs" <<'JS'
+          const {chromium}=require('playwright');
+          const assert=(ok,msg)=>{if(!ok)throw new Error(msg)};
+          const near=(v,t,d=1)=>Math.abs(v-t)<=d;
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1000}});
+            const base='http://127.0.0.1:18753';
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            await page.click('[data-open-login]');
+            await page.fill('input[name="password"]','P02-V2533-Reading-Test!');
+            await page.click('#loginSubmit');
+            await page.waitForFunction(()=>document.querySelector('#accountBtn')?.textContent.includes('退出'));
+            const id=await page.evaluate(async()=>{
+              const s=await fetch('/api.php?action=session').then(r=>r.json());
+              const csrf=s.csrf;
+              const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.ok===false)throw Error(a+JSON.stringify(j));return j};
+              const cat=await post('category_save',{name:'Reading Gate'});
+              const item=await post('content_save',{category_id:cat.id,title:'长文阅读舒适度验收',content:'# 第一章\n\n这是一段用于验证阅读字号、行距和内容宽度的正文。'.repeat(20)+'\n\n## 第二章\n\n继续验证段落节奏与标题层级。'.repeat(12),content_mode:'article',content_format:'markdown',primary_action:'read',description:'',tags:'',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]});
+              return item.id;
+            });
+            await page.reload({waitUntil:'networkidle'});
+            const open=page.locator('[data-open="'+id+'"]');
+            if(await open.count()) await open.first().click(); else await page.locator('[data-notebook-item="'+id+'"]').first().click();
+            await page.waitForSelector('.notebook-reader-document>.markdown-body,.reader-page-document>.markdown-body',{state:'visible'});
+            const baseline=await page.evaluate(()=>{
+              const doc=document.querySelector('.notebook-reader-document>.markdown-body,.reader-page-document>.markdown-body');
+              const container=document.querySelector('.notebook-reader-body,.reader-page-document');
+              const side=document.querySelector('.sidebar');
+              const list=document.querySelector('.notebook-list-pane');
+              const main=document.querySelector('.main');
+              const s=getComputedStyle(doc);
+              return {font:parseFloat(s.fontSize),line:parseFloat(s.lineHeight),width:container.getBoundingClientRect().width,sidebar:side?.getBoundingClientRect().width||0,list:list?.getBoundingClientRect().width||0,bg:getComputedStyle(main).backgroundColor,editorDefault:localStorage.getItem('vftb-editor-font-size')};
+            });
+            assert(near(baseline.font,16,.2),'READER_FONT_'+baseline.font);
+            assert(near(baseline.line,26.4,.8),'READER_LINE_'+baseline.line);
+            assert(baseline.width>500&&baseline.width<760,'READER_STANDARD_WIDTH_'+baseline.width);
+            assert(near(baseline.sidebar,244,2),'SIDEBAR_WIDTH_'+baseline.sidebar);
+            if(baseline.list>0)assert(near(baseline.list,328,3),'LIST_WIDTH_'+baseline.list);
+            assert(baseline.bg==='rgb(253, 252, 250)','PAPER_SURFACE_'+baseline.bg);
+            assert(baseline.editorDefault==='15','EDITOR_DEFAULT_'+baseline.editorDefault);
+            await page.evaluate(()=>adjustReaderScale(1));
+            const zoom=await page.evaluate(()=>parseFloat(getComputedStyle(document.querySelector('.notebook-reader-document>.markdown-body,.reader-page-document>.markdown-body')).fontSize));
+            assert(zoom>baseline.font,'READER_ZOOM_NOT_WORKING');
+            await page.evaluate(()=>changeReaderPreference('width','wide'));
+            const wide=await page.evaluate(()=>document.querySelector('.notebook-reader-body,.reader-page-document').getBoundingClientRect().width);
+            assert(wide>baseline.width,'READER_WIDTH_PREF_NOT_WORKING');
+            await page.evaluate(()=>changeReaderPreference('line','compact'));
+            const compact=await page.evaluate(()=>parseFloat(getComputedStyle(document.querySelector('.notebook-reader-document>.markdown-body,.reader-page-document>.markdown-body')).lineHeight));
+            assert(compact<baseline.line,'READER_LINE_PREF_NOT_WORKING');
+            await page.setViewportSize({width:390,height:844});
+            await page.reload({waitUntil:'networkidle'});
+            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
+            assert(overflow<=1,'MOBILE_OVERFLOW_'+overflow);
+            console.log('FRESH_INSTALL=PASS');
+            console.log('READER_BASELINE=PASS');
+            console.log('READER_PREFERENCES=PASS');
+            console.log('PAPER_SURFACE=PASS');
+            console.log('DESKTOP_DENSITY=PASS');
+            console.log('MOBILE_390_OVERFLOW=NONE');
+            await browser.close();
+          })().catch(e=>{console.error(e.stack||e);process.exit(1)});
+          JS
+          cd "$RUNNER_TEMP"
+          node v2533-visual.cjs
+          kill "$SERVER_PID"
+          wait "$SERVER_PID" 2>/dev/null || true
+
+      - name: Real V2.5.32 to V2.5.33 online-update path
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/p02-v2532-upgrade"
+          mkdir -p "$SITE"
+          bash baseline/scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          php -S 127.0.0.1:18754 -t "$SITE" >"$RUNNER_TEMP/v2532-php.log" 2>&1 &
+          SERVER_PID=$!
+          sleep 1
+          curl -fsS -c "$RUNNER_TEMP/v2532-cookies" http://127.0.0.1:18754/setup.php > "$RUNNER_TEMP/v2532-setup.html"
+          CSRF="$(python3 - "$RUNNER_TEMP/v2532-setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read();m=re.search(r'name="setup_csrf" value="([^"]+)"',s);print(m.group(1) if m else '')
+          PY
+          )"
+          curl -sS -D "$RUNNER_TEMP/v2532-setup.headers" -o /dev/null -b "$RUNNER_TEMP/v2532-cookies"             -H 'Origin: http://127.0.0.1:18754' -H 'Referer: http://127.0.0.1:18754/setup.php'             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'password=P02-V2533-Upgrade-Test!'             --data-urlencode 'password_confirm=P02-V2533-Upgrade-Test!'             http://127.0.0.1:18754/setup.php
+          grep -Eq '^HTTP/.* 303' "$RUNNER_TEMP/v2532-setup.headers"
+          cat > "$RUNNER_TEMP/v2532-seed.cjs" <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');
+          (async()=>{const browser=await chromium.launch({headless:true});const page=await browser.newPage();const base='http://127.0.0.1:18754';await page.goto(base+'/',{waitUntil:'networkidle'});await page.click('[data-open-login]');await page.fill('input[name="password"]','P02-V2533-Upgrade-Test!');await page.click('#loginSubmit');await page.waitForFunction(()=>document.querySelector('#accountBtn')?.textContent.includes('退出'));const marker=await page.evaluate(async()=>{const s=await fetch('/api.php?action=session').then(r=>r.json()),csrf=s.csrf;const post=async(a,b)=>{const r=await fetch('/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.ok===false)throw Error(JSON.stringify(j));return j};const cat=await post('category_save',{name:'Upgrade Preserve'});const item=await post('content_save',{category_id:cat.id,title:'V2532 Preserve Marker',content:'P02-V2533-DATA-PRESERVE-MARKER',content_mode:'article',content_format:'markdown',primary_action:'read',description:'',tags:'',aliases:'',is_favorite:false,is_pinned:false,status:'active',attachment_ids:[]});return {id:item.id}});fs.writeFileSync(process.env.RUNNER_TEMP+'/v2532-marker.json',JSON.stringify(marker));await browser.close()})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd "$RUNNER_TEMP" && node v2532-seed.cjs
+          PKG="$GITHUB_WORKSPACE/product/build/candidate-a/VF_Library_V2.5.33_UPDATE_CANDIDATE.zip"
+          python3 - "$PKG" "$PRODUCT_REF" "$RUNNER_TEMP/v2533-core-manifest.json" <<'PY'
+          import json,hashlib,os,sys
+          pkg,ref,out=sys.argv[1:]
+          raw=open(pkg,'rb').read()
+          m={
+            'schema_version':'1.0','project_id':'P02','component_id':'APP','enabled':True,
+            'current_version':'2.5.32','target_version':'2.5.33','update_type':'ATOMIC',
+            'from_versions':['2.5.32'],'schema_from':'2401','schema_to':'2401',
+            'repository':'llhzx2018/vf-library','release_tag':'v2.5.33-rc.1','release_id':1,
+            'product_identity':ref,'asset_name':'VF_Library_V2.5.33_UPDATE.zip',
+            'asset_bytes':len(raw),'asset_sha256':hashlib.sha256(raw).hexdigest(),
+            'backup_required':True,'rollback_supported':True,'released_at':'2026-09-18T00:00:00Z',
+            'release_summary':'P02 V2.5.33 reading comfort candidate'
+          }
+          open(out,'w',encoding='utf-8').write(json.dumps(m,ensure_ascii=False))
+          PY
+          cat > "$RUNNER_TEMP/v2533-upgrade.php" <<'PHP'
+          <?php
+          $site=$argv[1];$manifest=json_decode(file_get_contents($argv[2]),true);$pkg=$argv[3];
+          require $site.'/app/bootstrap.php';require_once $site.'/app/UpdateService.php';
+          $svc=new VfLibraryUpdateService(fn()=>$manifest,function($m,$dest)use($pkg){return copy($pkg,$dest);},fn()=>2401);
+          $check=$svc->check(true);if(($check['core']['status']??'')!=='AVAILABLE')throw new RuntimeException('update not available: '.json_encode($check));
+          $result=$svc->execute();if(($result['result']??'')!=='success')throw new RuntimeException('update failed: '.json_encode($result));
+          echo json_encode($result,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE),"\n";
+          PHP
+          php "$RUNNER_TEMP/v2533-upgrade.php" "$SITE" "$RUNNER_TEMP/v2533-core-manifest.json" "$PKG"
+          test "$(cat "$SITE/VERSION.txt")" = 2.5.33
+          cat > "$RUNNER_TEMP/v2533-post.cjs" <<'JS'
+          const {chromium}=require('playwright');const fs=require('fs');const marker=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+'/v2532-marker.json'));
+          (async()=>{const browser=await chromium.launch({headless:true});const page=await browser.newPage();const base='http://127.0.0.1:18754';await page.goto(base+'/',{waitUntil:'networkidle'});await page.click('[data-open-login]');await page.fill('input[name="password"]','P02-V2533-Upgrade-Test!');await page.click('#loginSubmit');await page.waitForFunction(()=>document.querySelector('#accountBtn')?.textContent.includes('退出'));const row=await page.evaluate(async id=>fetch('/api.php?action=content_get&id='+id).then(r=>r.json()),marker.id);if(!row?.data?.item?.content?.includes('P02-V2533-DATA-PRESERVE-MARKER'))throw Error('DATA_NOT_PRESERVED');const css=await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--reader-content-max').trim());if(css!=='72ch')throw Error('TARGET_UI_NOT_ACTIVE_'+css);await browser.close();console.log('POST_UPGRADE_DATA=PASS');console.log('POST_UPGRADE_UI=PASS')})().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          cd "$RUNNER_TEMP" && node v2533-post.cjs
+          DB="$(find "$RUNNER_TEMP" -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) | head -1 || true)"
+          if [ -n "$DB" ]; then test "$(sqlite3 "$DB" 'PRAGMA integrity_check;')" = ok; fi
+          kill "$SERVER_PID"
+          wait "$SERVER_PID" 2>/dev/null || true
+          echo V2532_TO_V2533_ONLINE_UPDATE=PASS
+          echo SCHEMA_MIGRATION=N_A_SAME_SCHEMA
+          echo DATA_PRESERVATION=PASS
+
+      - name: Gate summary
+        run: |
+          echo P02_V2533_EXACT_SOURCE="$PRODUCT_REF"
+          echo P02_V2533_MACHINE_GATE=PASS
+          echo RELEASE_WRITE=NO
+          echo PRODUCTION_WRITE=NO
