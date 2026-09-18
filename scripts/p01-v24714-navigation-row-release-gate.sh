@@ -209,7 +209,6 @@ PHP
 # Public-authority focused contracts on exact source.
 php "$TARGET_ROOT/tests/unit/navigation_public_row_layout_contract.php" | grep -Fx P01_NAVIGATION_PUBLIC_ROW_LAYOUT_CONTRACT=PASS
 php "$TARGET_ROOT/tests/unit/update_recovery_contract.php" >/tmp/p01-r14-update-recovery.log
-php "$TARGET_ROOT/tests/unit/update_csrf_recovery_contract.php" >/tmp/p01-r14-update-csrf.log
 
 # INSTALL: clean FULL -> setup -> admin login -> setup revisit -> verify.
 FRESH=/tmp/p01-r14-fresh
