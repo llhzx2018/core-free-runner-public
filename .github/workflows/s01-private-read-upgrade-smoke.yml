@@ -1,4 +1,4 @@
-name: S01 Private Read Upgrade Smoke
+name: S01 C02 C03 Formal Release Carrier
 
 on:
   pull_request:
@@ -8,109 +8,278 @@ permissions:
   contents: read
 
 jobs:
-  upgrade-smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  ops-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     env:
-      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      REPO: llhzx2018/vf-tools-ops
+      SHA: a986bb85736e044c2ef45251614026712c069c69
+      VERSION: 1.21.872
+      TAG: v1.21.872
+      ASSET: vf-tools-ops_V1.21.872.zip
     steps:
-      - name: Checkout runner branch
-        uses: actions/checkout@v4
+      - name: Checkout exact Ops main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: a986bb85736e044c2ef45251614026712c069c69
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          path: ops
+          persist-credentials: false
 
-      - name: Verify private-read token access
+      - name: Verify Ops source and contracts
         shell: bash
         run: |
-          set -euo pipefail
-          test -n "${VF_PRIVATE_READ_TOKEN:-}"
-          for repo in core-updates vf-tools-theme vf-tools-ops vf-tools-m3u8; do
-            code="$(curl -sS -o /dev/null -w '%{http_code}' \
-              -H 'Accept: application/vnd.github+json' \
-              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
-              "https://api.github.com/repos/llhzx2018/$repo" || true)"
-            echo "CHECK ${repo} HTTP ${code}"
-            test "$code" = "200"
-          done
-          echo "PASS VF_PRIVATE_READ_TOKEN can read all S01 private update repositories"
+          set -Eeuo pipefail
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C ops rev-parse HEAD)" = "$SHA"
+          test "$(cat ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.872' ops/vf-ops.php
+          php ops/tests/s01-update-center-state-contract.php
+          php ops/tests/s01-v6-r4-content-seo-contract.php
+          php ops/tests/s01-v6-r41-content-seo-closure-contract.php
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "release already exists" >&2
+            exit 1
+          fi
+          echo OPS_SOURCE_CONTRACTS=PASS
 
-      - name: Read live S01 distribution manifests
+      - name: Build Ops runtime package
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p smoke/manifests
-          for component in S01-C01 S01-C02 S01-C03; do
-            curl -fsSL \
-              -H 'Accept: application/vnd.github+json' \
-              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
-              "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/${component}.json?ref=main" \
-              | jq -r '.content' | tr -d '\n' | base64 -d > "smoke/manifests/${component}.json"
-            jq -e '.schema_version == "wp-component-1.0" and .enabled == true' "smoke/manifests/${component}.json" >/dev/null
-          done
-          test "$(jq -r '.target_version' smoke/manifests/S01-C01.json)" = "1.35.26"
-          test "$(jq -r '.target_version' smoke/manifests/S01-C02.json)" = "1.21.871"
-          test "$(jq -r '.target_version' smoke/manifests/S01-C03.json)" = "1.25.31"
-          jq -e '.from_versions | index("1.35.24") != null' smoke/manifests/S01-C01.json >/dev/null
-          jq -e '.from_versions | index("1.21.870") != null' smoke/manifests/S01-C02.json >/dev/null
-          jq -e '.from_versions | index("1.25.30") != null' smoke/manifests/S01-C03.json >/dev/null
-          echo "PASS live manifests and upgrade eligibility"
+          set -Eeuo pipefail
+          rm -rf stage-ops dist-ops
+          mkdir -p stage-ops/vf-ops dist-ops
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          src=Path('ops')
+          dst=Path('stage-ops/vf-ops')
+          root_files={'vf-ops.php','uninstall.php'}
+          root_dirs={'includes','assets','languages','config'}
+          banned={'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'}
+          bad_ext={'.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp'}
+          chosen=[]
+          for p in sorted(src.rglob('*')):
+              if not p.is_file():
+                  continue
+              rel=p.relative_to(src).as_posix()
+              parts=rel.split('/')
+              low=[x.lower() for x in parts]
+              if any(x in banned for x in low):
+                  continue
+              if p.suffix.lower() in bad_ext:
+                  continue
+              runtime=(len(parts)==1 and rel in root_files) or (len(parts)>1 and parts[0] in root_dirs)
+              if not runtime:
+                  continue
+              if p.is_symlink():
+                  raise SystemExit('runtime symlink forbidden: '+rel)
+              q=dst/rel
+              q.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copy2(p,q)
+              chosen.append(rel)
+          if 'vf-ops.php' not in chosen:
+              raise SystemExit('vf-ops.php missing')
+          rows=[]
+          for rel in sorted(chosen):
+              rows.append((rel,hashlib.sha256((dst/rel).read_bytes()).hexdigest()))
+          canonical=b''.join(rel.encode()+bytes([0])+sha.encode()+bytes([10]) for rel,sha in rows)
+          fp=hashlib.sha256(canonical).hexdigest()
+          Path('/tmp/ops_count').write_text(str(len(rows)))
+          Path('/tmp/ops_fp').write_text(fp)
+          print('OPS_RUNTIME_FILES='+str(len(rows)))
+          print('OPS_RUNTIME_FINGERPRINT='+fp)
+          PY
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find stage-ops/vf-ops -type f -name '*.php' -print0)
+          (cd stage-ops && zip -X -q -r "../dist-ops/$ASSET" vf-ops)
+          unzip -tq "dist-ops/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist-ops/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist-ops/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.872'
+          sha256sum "dist-ops/$ASSET" > /tmp/ops_sha
+          stat -c '%s' "dist-ops/$ASSET" > /tmp/ops_bytes
+          echo OPS_PACKAGE=PASS
 
-      - name: Download and verify distributed upgrade assets
+      - name: Publish Ops release
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p smoke/assets smoke/unpacked
+          set -Eeuo pipefail
+          cat > /tmp/notes.md <<EOF
+          S01-C02 1.21.872 Unified Update Center semantic-state repair.
+          Exact merged main source: $SHA
+          Fixes semantic update-state authority and preserves the single Theme-owned update-center model.
+          Runtime files: $(cat /tmp/ops_count)
+          Runtime fingerprint SHA256: $(cat /tmp/ops_fp)
+          Production WordPress installation is not claimed.
+          EOF
+          gh release create "$TAG" "dist-ops/$ASSET" --repo "$REPO" --target "$SHA" --title "VF Tools Ops V$VERSION" --notes-file /tmp/notes.md
+          j="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          aid="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          rbytes="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .size' <<<"$j")"
+          lbytes="$(cat /tmp/ops_bytes)"
+          lsha="$(awk '{print $1}' /tmp/ops_sha)"
+          test -n "$aid" && test "$aid" != null
+          test "$rbytes" = "$lbytes"
+          test "$(jq -r '.object.sha' <<<"$(gh api "repos/$REPO/git/ref/tags/$TAG")")" = "$SHA"
+          rm -rf /tmp/ops-readback && mkdir -p /tmp/ops-readback
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir /tmp/ops-readback --clobber
+          test "$(sha256sum "/tmp/ops-readback/$ASSET" | awk '{print $1}')" = "$lsha"
+          cat > /tmp/ops-release-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$SHA
+          TAG=$TAG
+          ASSET=$ASSET
+          ASSET_ID=$aid
+          BYTES=$lbytes
+          SHA256=$lsha
+          RUNTIME_FILES=$(cat /tmp/ops_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/ops_fp)
+          PUBLISHED_AT=$(jq -r '.published_at' <<<"$j")
+          EOF
+          cat /tmp/ops-release-receipt.txt
+          echo OPS_FORMAL_RELEASE=PASS
 
-          fetch_asset() {
-            local manifest="$1"
-            local key="$2"
-            local repo tag asset expected_bytes expected_sha release_json asset_id out root identity_file identity_needle
-            repo="$(jq -r '.repository' "$manifest")"
-            tag="$(jq -r '.release_tag' "$manifest")"
-            asset="$(jq -r '.asset_name' "$manifest")"
-            expected_bytes="$(jq -r '.asset_bytes' "$manifest")"
-            expected_sha="$(jq -r '.asset_sha256' "$manifest")"
-            release_json="smoke/${key}-release.json"
-            curl -fsSL \
-              -H 'Accept: application/vnd.github+json' \
-              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
-              "https://api.github.com/repos/${repo}/releases/tags/${tag}" > "$release_json"
-            asset_id="$(jq -r --arg n "$asset" '.assets[] | select(.name == $n) | .id' "$release_json" | head -n1)"
-            test -n "$asset_id" && test "$asset_id" != "null"
-            out="smoke/assets/${asset}"
-            curl -fsSL -L \
-              -H 'Accept: application/octet-stream' \
-              -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" \
-              "https://api.github.com/repos/${repo}/releases/assets/${asset_id}" -o "$out"
-            test "$(stat -c '%s' "$out")" = "$expected_bytes"
-            test "$(sha256sum "$out" | awk '{print $1}')" = "$expected_sha"
-            unzip -tq "$out" >/dev/null
-            root="$(unzip -Z1 "$out" | cut -d/ -f1 | sort -u)"
-            case "$key" in
-              c01)
-                test "$root" = "vf-tools-theme"
-                identity_file="vf-tools-theme/style.css"
-                identity_needle="Version: 1.35.26"
-                ;;
-              c02)
-                test "$root" = "vf-ops"
-                identity_file="vf-ops/vf-ops.php"
-                identity_needle="Version: 1.21.871"
-                ;;
-              c03)
-                test "$root" = "vf-tool-m3u8"
-                identity_file="vf-tool-m3u8/vf-tool-m3u8.php"
-                identity_needle="Version: 1.25.31"
-                ;;
-            esac
-            unzip -p "$out" "$identity_file" | grep -Fq "$identity_needle"
-            echo "PASS $key authenticated asset acquisition + bytes/SHA/ZIP/version"
-          }
+      - name: Upload Ops receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121872-release-${{ github.run_id }}
+          path: /tmp/ops-release-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
 
-          fetch_asset smoke/manifests/S01-C01.json c01
-          fetch_asset smoke/manifests/S01-C02.json c02
-          fetch_asset smoke/manifests/S01-C03.json c03
+  m3u8-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      REPO: llhzx2018/vf-tools-m3u8
+      SHA: cd5e0e7d957fd67f39eb05e438fecc1e761312f8
+      VERSION: 1.25.32
+      TAG: v1.25.32
+      ASSET: vf-tools-m3u8_V1.25.32.zip
+    steps:
+      - name: Checkout exact M3U8 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: cd5e0e7d957fd67f39eb05e438fecc1e761312f8
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 1
+          path: m3u8
+          persist-credentials: false
 
-      - name: Upgrade acquisition result
+      - name: Verify M3U8 source and contracts
         shell: bash
         run: |
-          echo "PASS S01 private-read upgrade acquisition smoke"
-          echo "This validates authenticated manifest discovery and release-asset acquisition only; it does not claim Production WordPress installation."
+          set -Eeuo pipefail
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$SHA"
+          test "$(cat m3u8/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.25.32' m3u8/src/vf-tool-m3u8.php
+          php m3u8/tests/unit/update-refresh-policy-contract.php
+          php m3u8/tests/provider-dashboard-visible-ui-contract.php
+          php m3u8/tests/unit/package-physical-locator-contract.php
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "release already exists" >&2
+            exit 1
+          fi
+          echo M3_SOURCE_CONTRACTS=PASS
+
+      - name: Build M3U8 package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage-m3 dist-m3
+          mkdir -p stage-m3/vf-tool-m3u8 dist-m3
+          cp -a m3u8/src/. stage-m3/vf-tool-m3u8/
+          test "$(find stage-m3/vf-tool-m3u8 -type l | wc -l)" = "0"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('stage-m3/vf-tool-m3u8')
+          banned={'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'}
+          def runtime(rel):
+              parts=rel.split('/')
+              low=[x.lower() for x in parts]
+              if any(x in banned for x in low):
+                  return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}:
+                  return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')):
+                  return False
+              if len(parts)==1:
+                  return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+          rows=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if runtime(rel):
+                  rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canonical=b''.join(rel.encode()+bytes([0])+sha.encode()+bytes([10]) for rel,sha in rows)
+          fp=hashlib.sha256(canonical).hexdigest()
+          Path('/tmp/m3_count').write_text(str(len(rows)))
+          Path('/tmp/m3_fp').write_text(fp)
+          print('M3_RUNTIME_FILES='+str(len(rows)))
+          print('M3_RUNTIME_FINGERPRINT='+fp)
+          PY
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find stage-m3/vf-tool-m3u8 -type f -name '*.php' -print0)
+          (cd stage-m3 && zip -X -q -r "../dist-m3/$ASSET" vf-tool-m3u8)
+          unzip -tq "dist-m3/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist-m3/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-tool-m3u8"
+          unzip -p "dist-m3/$ASSET" vf-tool-m3u8/vf-tool-m3u8.php | grep -Fq 'Version: 1.25.32'
+          sha256sum "dist-m3/$ASSET" > /tmp/m3_sha
+          stat -c '%s' "dist-m3/$ASSET" > /tmp/m3_bytes
+          echo M3_PACKAGE=PASS
+
+      - name: Publish M3U8 release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/notes.md <<EOF
+          S01-C03 1.25.32 Unified Update Center semantic-state repair.
+          Exact merged main source: $SHA
+          Prevents wrapper-only manual-check completion from overwriting semantic discovery state and requires fresh refresh evidence.
+          M3U8 migration remains CLOSED.
+          Runtime files: $(cat /tmp/m3_count)
+          Runtime fingerprint SHA256: $(cat /tmp/m3_fp)
+          Production WordPress installation is not claimed.
+          EOF
+          gh release create "$TAG" "dist-m3/$ASSET" --repo "$REPO" --target "$SHA" --title "VF Tools M3U8 V$VERSION" --notes-file /tmp/notes.md
+          j="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          aid="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          rbytes="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .size' <<<"$j")"
+          lbytes="$(cat /tmp/m3_bytes)"
+          lsha="$(awk '{print $1}' /tmp/m3_sha)"
+          test -n "$aid" && test "$aid" != null
+          test "$rbytes" = "$lbytes"
+          test "$(jq -r '.object.sha' <<<"$(gh api "repos/$REPO/git/ref/tags/$TAG")")" = "$SHA"
+          rm -rf /tmp/m3-readback && mkdir -p /tmp/m3-readback
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir /tmp/m3-readback --clobber
+          test "$(sha256sum "/tmp/m3-readback/$ASSET" | awk '{print $1}')" = "$lsha"
+          cat > /tmp/m3-release-receipt.txt <<EOF
+          COMPONENT=S01-C03
+          VERSION=$VERSION
+          SOURCE_SHA=$SHA
+          TAG=$TAG
+          ASSET=$ASSET
+          ASSET_ID=$aid
+          BYTES=$lbytes
+          SHA256=$lsha
+          RUNTIME_FILES=$(cat /tmp/m3_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/m3_fp)
+          PUBLISHED_AT=$(jq -r '.published_at' <<<"$j")
+          EOF
+          cat /tmp/m3-release-receipt.txt
+          echo M3_FORMAL_RELEASE=PASS
+
+      - name: Upload M3U8 receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-12532-release-${{ github.run_id }}
+          path: /tmp/m3-release-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
