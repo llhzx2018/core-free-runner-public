@@ -1,78 +1,321 @@
-name: Public Runner Current Self Test
+name: S01 C02 C03 Update Center Formal Release
 
 on:
-  push:
+  pull_request:
     branches: [main]
-  workflow_dispatch:
+    paths:
+      - '.github/workflows/runner-selftest-current.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: s01-c02-c03-update-center-release-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
-  selftest:
+  ops-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 25
+    env:
+      OPS_REPO: llhzx2018/vf-tools-ops
+      OPS_SHA: a986bb85736e044c2ef45251614026712c069c69
+      BASE_SHA: 23a84186d6af03f10f5bc43d478cd3216940b28b
+      VERSION: 1.21.872
+      TAG: v1.21.872
+      ASSET: vf-tools-ops_V1.21.872.zip
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Checkout public runner control repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+      - name: Checkout exact Ops main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 1
+          repository: llhzx2018/vf-tools-ops
+          ref: a986bb85736e044c2ef45251614026712c069c69
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: ops
           persist-credentials: false
 
-      - name: Hosted runner allocation proof
+      - name: Verify exact Ops identity and scope
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "RUNNER_OS=$RUNNER_OS"
-          uname -a
-          php -v || true
-          python3 --version
-          echo 'PUBLIC_RUNNER_ALLOCATION=PASS'
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(cat ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.872' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.872'" ops/vf-ops.php
+          mapfile -t changed < <(git -C ops diff --name-only "$BASE_SHA" "$OPS_SHA" | sort)
+          expected="$(printf '%s
+' VERSION includes/wp-update/class-vf-ops-update-admin-v1.php tests/s01-update-center-state-contract.php tests/s01-v6-r4-content-seo-contract.php tests/s01-v6-r41-content-seo-closure-contract.php vf-ops.php | sort)"
+          test "$(printf '%s
+' "${changed[@]}")" = "$expected"
+          if gh release view "$TAG" --repo "$OPS_REPO" >/dev/null 2>&1; then echo "Release exists" >&2; exit 1; fi
+          if gh api "repos/$OPS_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then echo "Tag exists" >&2; exit 1; fi
+          echo OPS_RELEASE_IDENTITY=PASS
 
-      - name: Verify main push came from merged PR
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          VF_PUSH_SHA: ${{ github.sha }}
-        run: |
-          set -Eeuo pipefail
-          python3 scripts/check_main_push_provenance.py \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$VF_PUSH_SHA"
-          echo 'MAIN_PUSH_PROVENANCE=PASS' >> "$GITHUB_ENV"
-
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        shell: bash
-        run: python3 scripts/check_estate_anti_drift.py --live
-
-      - name: Build public-safe receipt
+      - name: Re-run Ops contracts and syntax
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p evidence/runner
-          PROVENANCE="${MAIN_PUSH_PROVENANCE:-NOT_APPLICABLE}"
-          cat > evidence/runner/PUBLIC_RUNNER_CURRENT.txt <<EOF
-          PUBLIC_RUNNER_ALLOCATION=PASS
-          ESTATE_ANTI_DRIFT=PASS
-          MAIN_PUSH_PROVENANCE=$PROVENANCE
-          RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
-          PRIVATE_SOURCE_USED=GOV_DOC_AUTHORITY_ONLY
-          SECRET_USED=REGISTERED_PRIVATE_READ_CAPABILITY
-          PRIVATE_SOURCE_PERSISTED=NO
-          MAIN_WRITE=NO
-          USER_MANUAL_EXECUTION_REQUIRED=NO
+          php ops/tests/s01-update-center-state-contract.php
+          php ops/tests/s01-v6-r4-content-seo-contract.php
+          php ops/tests/s01-v6-r41-content-seo-closure-contract.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops -type f -name '*.php' -not -path 'ops/.git/*' -print0 | sort -z)
+          echo OPS_RELEASE_CONTRACTS=PASS
+
+      - name: Stage Ops Runtime Authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage-ops dist-ops
+          mkdir -p stage-ops/vf-ops dist-ops
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          src=Path('ops'); dst=Path('stage-ops/vf-ops')
+          banned_segments={'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'}
+          banned_ext={'.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp'}
+          allowed_root={'vf-ops.php','uninstall.php'}
+          allowed_dirs={'includes','assets','languages','config'}
+          selected=[]
+          for path in sorted(src.rglob('*')):
+              if path.is_symlink():
+                  rel=path.relative_to(src).as_posix()
+                  parts=[p.lower() for p in Path(rel).parts]
+                  runtime=(len(parts)==1 and rel in allowed_root) or (len(parts)>1 and parts[0] in allowed_dirs)
+                  if runtime: raise SystemExit(f'runtime symlink forbidden: {rel}')
+                  continue
+              if not path.is_file(): continue
+              rel=path.relative_to(src).as_posix(); parts=list(Path(rel).parts); low=[p.lower() for p in parts]
+              if any(p in banned_segments for p in low): continue
+              if path.suffix.lower() in banned_ext: continue
+              if any(p.startswith('.env') for p in low) or low[-1]=='wp-config.php': continue
+              runtime=(len(parts)==1 and rel in allowed_root) or (len(parts)>1 and parts[0] in allowed_dirs)
+              if not runtime: continue
+              target=dst/rel; target.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(path,target); selected.append(rel)
+          if 'vf-ops.php' not in selected or not selected: raise SystemExit('runtime stage incomplete')
+          hashes={rel:hashlib.sha256((dst/rel).read_bytes()).hexdigest() for rel in sorted(selected)}
+          canonical=b''.join(rel.encode()+b'\x00'+hashes[rel].encode()+b'\n' for rel in sorted(hashes))
+          Path('/tmp/ops_count').write_text(str(len(hashes)))
+          Path('/tmp/ops_fp').write_text(hashlib.sha256(canonical).hexdigest())
+          print('OPS_RUNTIME_FILES='+str(len(hashes)))
+          print('OPS_RUNTIME_FINGERPRINT='+hashlib.sha256(canonical).hexdigest())
+          PY
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find stage-ops/vf-ops -type f -name '*.php' -print0)
+          (cd stage-ops && zip -X -q -r "../dist-ops/$ASSET" vf-ops)
+          test -s "dist-ops/$ASSET"
+          unzip -tq "dist-ops/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist-ops/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist-ops/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.872'
+          sha256sum "dist-ops/$ASSET" | tee /tmp/ops_asset.sha256
+          stat -c '%s' "dist-ops/$ASSET" | tee /tmp/ops_asset.bytes
+          echo OPS_RUNTIME_PACKAGE=PASS
+
+      - name: Create Ops formal release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count="$(cat /tmp/ops_count)"
+          fp="$(cat /tmp/ops_fp)"
+          cat > /tmp/ops-notes.md <<EOF
+          S01-C02 1.21.872 Unified Update Center semantic-state repair.
+          Exact main source: $OPS_SHA
+          Fixes update-center state authority so prior refresh PASS/FAIL no longer overwrites current semantic discovery state.
+          Runtime package root: vf-ops/
+          Runtime files: $count
+          Runtime fingerprint SHA256: $fp
+          Product/Git/Release only. Production WordPress installation is not claimed.
           EOF
+          gh release create "$TAG" "dist-ops/$ASSET#VF Tools Ops $VERSION Runtime-only WordPress update ZIP" --repo "$OPS_REPO" --target "$OPS_SHA" --title "VF Tools Ops V$VERSION" --notes-file /tmp/ops-notes.md
+          echo OPS_RELEASE_CREATE=PASS
 
-      - name: Upload public-safe receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+      - name: Ops release readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          j="$(gh api "repos/$OPS_REPO/releases/tags/$TAG")"
+          aid="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          remote_bytes="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .size' <<<"$j")"
+          published="$(jq -r '.published_at' <<<"$j")"
+          local_bytes="$(cat /tmp/ops_asset.bytes)"
+          local_sha="$(awk '{print $1}' /tmp/ops_asset.sha256)"
+          test -n "$aid" && test "$aid" != null
+          test "$remote_bytes" = "$local_bytes"
+          test "$(jq -r '.object.sha' <<<"$(gh api "repos/$OPS_REPO/git/ref/tags/$TAG")")" = "$OPS_SHA"
+          rm -rf /tmp/ops-readback && mkdir -p /tmp/ops-readback
+          gh release download "$TAG" --repo "$OPS_REPO" --pattern "$ASSET" --dir /tmp/ops-readback --clobber
+          test "$(sha256sum "/tmp/ops-readback/$ASSET" | awk '{print $1}')" = "$local_sha"
+          printf 'COMPONENT=S01-C02
+VERSION=%s
+SOURCE_SHA=%s
+TAG=%s
+ASSET=%s
+ASSET_ID=%s
+BYTES=%s
+SHA256=%s
+RUNTIME_FILES=%s
+RUNTIME_FINGERPRINT=%s
+PUBLISHED_AT=%s
+' "$VERSION" "$OPS_SHA" "$TAG" "$ASSET" "$aid" "$local_bytes" "$local_sha" "$(cat /tmp/ops_count)" "$(cat /tmp/ops_fp)" "$published" | tee /tmp/ops-release-receipt.txt
+          echo OPS_FORMAL_RELEASE=PASS
+
+      - name: Upload Ops release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: public-runner-current-selftest-${{ github.run_id }}
-          path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
+          name: s01-c02-121872-release-${{ github.run_id }}
+          path: /tmp/ops-release-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  m3u8-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      M3_REPO: llhzx2018/vf-tools-m3u8
+      M3_SHA: cd5e0e7d957fd67f39eb05e438fecc1e761312f8
+      BASE_SHA: c164a9cc37fde9eee810fb417f98dfe2a02240e8
+      VERSION: 1.25.32
+      TAG: v1.25.32
+      ASSET: vf-tools-m3u8_V1.25.32.zip
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact M3U8 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: cd5e0e7d957fd67f39eb05e438fecc1e761312f8
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          fetch-depth: 0
+          path: m3u8
+          persist-credentials: false
+
+      - name: Verify exact M3U8 identity and scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3_SHA"
+          test "$(cat m3u8/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.25.32' m3u8/src/vf-tool-m3u8.php
+          mapfile -t changed < <(git -C m3u8 diff --name-only "$BASE_SHA" "$M3_SHA" | sort)
+          expected="$(printf '%s
+' VERSION src/includes/update/class-vf-m3u8-update-admin-v1.php src/vf-tool-m3u8.php tests/provider-dashboard-visible-ui-contract.php tests/unit/dashboard-human-language-contract.php tests/unit/host-recovery-human-language-contract.php tests/unit/package-physical-locator-contract.php tests/unit/recovery-runtime-human-language-followup-contract.php tests/unit/settings-human-language-followup-contract.php tests/unit/update-refresh-policy-contract.php tests/unit/visible-console-v2-contract.php | sort)"
+          test "$(printf '%s
+' "${changed[@]}")" = "$expected"
+          if gh release view "$TAG" --repo "$M3_REPO" >/dev/null 2>&1; then echo "Release exists" >&2; exit 1; fi
+          if gh api "repos/$M3_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then echo "Tag exists" >&2; exit 1; fi
+          echo M3_RELEASE_IDENTITY=PASS
+
+      - name: Re-run M3U8 contracts and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php m3u8/tests/unit/update-refresh-policy-contract.php
+          php m3u8/tests/provider-dashboard-visible-ui-contract.php
+          php m3u8/tests/unit/dashboard-human-language-contract.php
+          php m3u8/tests/unit/host-recovery-human-language-contract.php
+          php m3u8/tests/unit/package-physical-locator-contract.php
+          php m3u8/tests/unit/recovery-runtime-human-language-followup-contract.php
+          php m3u8/tests/unit/settings-human-language-followup-contract.php
+          php m3u8/tests/unit/visible-console-v2-contract.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find m3u8/src -type f -name '*.php' -print0 | sort -z)
+          echo M3_RELEASE_CONTRACTS=PASS
+
+      - name: Build M3U8 package and Runtime Authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage-m3 dist-m3
+          mkdir -p stage-m3/vf-tool-m3u8 dist-m3
+          cp -a m3u8/src/. stage-m3/vf-tool-m3u8/
+          test "$(find stage-m3/vf-tool-m3u8 -type l | wc -l)" = "0"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('stage-m3/vf-tool-m3u8')
+          def is_runtime(rel):
+              parts=rel.replace('\\','/').split('/')
+              low=[x.lower() for x in parts]
+              if any(x in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in low): return False
+              b=parts[-1].lower()
+              if b in {'readme.md','changelog.md','license','license.txt','package_profile.json'}: return False
+              if b.endswith(('.sql','.sqlite','.sqlite3','.db','.log','.zip','.tar','.gz','.bak','.tmp')): return False
+              if len(parts)==1: return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+              return parts[0] in {'admin','config','includes','public','templates','tools'}
+          rows=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if is_runtime(rel): rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canonical=''.join(f'{p}\0{h}\n' for p,h in rows).encode()
+          fp=hashlib.sha256(canonical).hexdigest()
+          Path('/tmp/m3_count').write_text(str(len(rows)))
+          Path('/tmp/m3_fp').write_text(fp)
+          print('M3_RUNTIME_FILES='+str(len(rows)))
+          print('M3_RUNTIME_FINGERPRINT='+fp)
+          PY
+          (cd stage-m3 && zip -X -q -r "../dist-m3/$ASSET" vf-tool-m3u8)
+          test -s "dist-m3/$ASSET"
+          unzip -tq "dist-m3/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist-m3/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-tool-m3u8"
+          unzip -p "dist-m3/$ASSET" vf-tool-m3u8/vf-tool-m3u8.php | grep -Fq 'Version: 1.25.32'
+          sha256sum "dist-m3/$ASSET" | tee /tmp/m3_asset.sha256
+          stat -c '%s' "dist-m3/$ASSET" | tee /tmp/m3_asset.bytes
+          echo M3_RUNTIME_PACKAGE=PASS
+
+      - name: Create M3U8 formal release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          count="$(cat /tmp/m3_count)"
+          fp="$(cat /tmp/m3_fp)"
+          cat > /tmp/m3-notes.md <<EOF
+          S01-C03 1.25.32 Unified Update Center semantic-state repair.
+          Exact main source: $M3_SHA
+          Prevents wrapper-only manual-check completion from overwriting the component semantic discovery state and requires fresh attempt evidence.
+          Package root: vf-tool-m3u8/
+          Runtime files: $count
+          Runtime fingerprint SHA256: $fp
+          M3U8 migration remains CLOSED; Provider schema/domain ownership is unchanged.
+          Product/Git/Release only. Production WordPress installation is not claimed.
+          EOF
+          gh release create "$TAG" "dist-m3/$ASSET#VF Tools M3U8 $VERSION WordPress update ZIP" --repo "$M3_REPO" --target "$M3_SHA" --title "VF Tools M3U8 V$VERSION" --notes-file /tmp/m3-notes.md
+          echo M3_RELEASE_CREATE=PASS
+
+      - name: M3U8 release readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          j="$(gh api "repos/$M3_REPO/releases/tags/$TAG")"
+          aid="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          remote_bytes="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .size' <<<"$j")"
+          published="$(jq -r '.published_at' <<<"$j")"
+          local_bytes="$(cat /tmp/m3_asset.bytes)"
+          local_sha="$(awk '{print $1}' /tmp/m3_asset.sha256)"
+          test -n "$aid" && test "$aid" != null
+          test "$remote_bytes" = "$local_bytes"
+          test "$(jq -r '.object.sha' <<<"$(gh api "repos/$M3_REPO/git/ref/tags/$TAG")")" = "$M3_SHA"
+          rm -rf /tmp/m3-readback && mkdir -p /tmp/m3-readback
+          gh release download "$TAG" --repo "$M3_REPO" --pattern "$ASSET" --dir /tmp/m3-readback --clobber
+          test "$(sha256sum "/tmp/m3-readback/$ASSET" | awk '{print $1}')" = "$local_sha"
+          printf 'COMPONENT=S01-C03
+VERSION=%s
+SOURCE_SHA=%s
+TAG=%s
+ASSET=%s
+ASSET_ID=%s
+BYTES=%s
+SHA256=%s
+RUNTIME_FILES=%s
+RUNTIME_FINGERPRINT=%s
+PUBLISHED_AT=%s
+' "$VERSION" "$M3_SHA" "$TAG" "$ASSET" "$aid" "$local_bytes" "$local_sha" "$(cat /tmp/m3_count)" "$(cat /tmp/m3_fp)" "$published" | tee /tmp/m3-release-receipt.txt
+          echo M3_FORMAL_RELEASE=PASS
+
+      - name: Upload M3U8 release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-12532-release-${{ github.run_id }}
+          path: /tmp/m3-release-receipt.txt
           if-no-files-found: error
           retention-days: 14
