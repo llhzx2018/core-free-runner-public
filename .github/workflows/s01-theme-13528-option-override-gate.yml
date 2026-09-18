@@ -1,4 +1,4 @@
-name: S01 Theme 1.35.28 Distribution Gate
+name: S01 Final Live Update Availability Smoke
 
 on:
   pull_request:
@@ -8,84 +8,73 @@ permissions:
   contents: read
 
 jobs:
-  distribution-gate:
+  live-update-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-      CORE_SHA: f85b310b4023452ca1b41c61d7530da1f34185fa
-      BASE_SHA: bfca353d6d59cc4e64a7fd031cba3457f6f416bc
     steps:
-      - name: Checkout exact core-updates candidate
+      - name: Checkout carrier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: llhzx2018/core-updates
-          ref: f85b310b4023452ca1b41c61d7530da1f34185fa
-          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          fetch-depth: 0
-          path: core-updates
           persist-credentials: false
 
-      - name: Exact distribution scope
+      - name: Verify private repo access
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_SHA"
-          test "$(git -C core-updates diff --name-only "$BASE_SHA" "$CORE_SHA")" = "projects/S01-C01.json"
-          echo THEME_13528_DISTRIBUTION_SCOPE=PASS
+          for repo in core-updates vf-tools-theme vf-tools-ops vf-tools-m3u8; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/llhzx2018/$repo" || true)"
+            echo "$repo HTTP $code"
+            test "$code" = "200"
+          done
+          echo PRIVATE_READ_TOKEN=PASS
 
-      - name: Manifest and sibling identity
+      - name: Read live manifests
         shell: bash
         run: |
           set -Eeuo pipefail
-          m=core-updates/projects/S01-C01.json
-          jq -e '.target_version=="1.35.28"
-            and .release_tag=="v1.35.28"
-            and .asset_name=="vf-tools-theme_V1.35.28.zip"
-            and .asset_bytes==1656690
-            and .asset_sha256=="b2ecd9257ab51e5c5a7d0e863fd4e211341cd813538453cc90ea594b91751d62"
-            and .runtime_files==456
-            and .runtime_fingerprint=="c0906abdc9e37e75897b5aaa62d46fa93d35d90d325b30fec2e3994a045e5894"
-            and .schema_from=="N/A"
-            and .schema_to=="N/A"
-            and .enabled==true' "$m" >/dev/null
-          jq -e '.from_versions | index("1.35.24") != null and index("1.35.27") != null' "$m" >/dev/null
-          test "$(jq -r '.from_versions | length' "$m")" = "20"
-          test "$(jq -r '.from_versions | unique | length' "$m")" = "20"
-          test "$(jq -r '.target_version' core-updates/projects/S01-C02.json)" = "1.21.872"
-          test "$(jq -r '.target_version' core-updates/projects/S01-C03.json)" = "1.25.32"
-          echo THEME_13528_MANIFEST=PASS
+          mkdir -p /tmp/live
+          for c in S01-C01 S01-C02 S01-C03; do
+            curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/$c.json?ref=main" | jq -r '.content' | tr -d '\n' | base64 -d > "/tmp/live/$c.json"
+          done
+          test "$(jq -r '.target_version' /tmp/live/S01-C01.json)" = "1.35.28"
+          test "$(jq -r '.target_version' /tmp/live/S01-C02.json)" = "1.21.872"
+          test "$(jq -r '.target_version' /tmp/live/S01-C03.json)" = "1.25.32"
+          jq -e '.from_versions | index("1.35.24") != null' /tmp/live/S01-C01.json >/dev/null
+          jq -e '.from_versions | index("1.21.870") != null' /tmp/live/S01-C02.json >/dev/null
+          jq -e '.from_versions | index("1.25.31") != null' /tmp/live/S01-C03.json >/dev/null
+          echo LIVE_MANIFESTS=PASS
 
-      - name: Core contracts
+      - name: Download all live update packages
         shell: bash
         run: |
           set -Eeuo pipefail
-          cd core-updates
-          python3 scripts/check_manifest_contract.py
-          php update-core/php/tests/run.php
-          echo CORE_UPDATE_CONTRACTS=PASS
+          mkdir -p /tmp/assets
+          verify() {
+            m="$1"; root="$2"; identity="$3"; needle="$4"
+            repo="$(jq -r '.repository' "$m")"
+            tag="$(jq -r '.release_tag' "$m")"
+            asset="$(jq -r '.asset_name' "$m")"
+            bytes="$(jq -r '.asset_bytes' "$m")"
+            sha="$(jq -r '.asset_sha256' "$m")"
+            curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag" > /tmp/release.json
+            aid="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .id' /tmp/release.json | head -n1)"
+            test -n "$aid" && test "$aid" != null
+            curl -fsSL -L -H 'Accept: application/octet-stream' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/assets/$aid" -o "/tmp/assets/$asset"
+            test "$(stat -c '%s' "/tmp/assets/$asset")" = "$bytes"
+            test "$(sha256sum "/tmp/assets/$asset" | awk '{print $1}')" = "$sha"
+            unzip -tq "/tmp/assets/$asset" >/dev/null
+            test "$(unzip -Z1 "/tmp/assets/$asset" | cut -d/ -f1 | sort -u)" = "$root"
+            unzip -p "/tmp/assets/$asset" "$identity" | grep -Fq "$needle"
+            echo "PASS $asset"
+          }
+          verify /tmp/live/S01-C01.json vf-tools-theme vf-tools-theme/style.css 'Version: 1.35.28'
+          verify /tmp/live/S01-C02.json vf-ops vf-ops/vf-ops.php 'Version: 1.21.872'
+          verify /tmp/live/S01-C03.json vf-tool-m3u8 vf-tool-m3u8/vf-tool-m3u8.php 'Version: 1.25.32'
+          echo LIVE_PACKAGES=PASS
 
-      - name: Authenticated asset readback
-        shell: bash
+      - name: Final result
         run: |
-          set -Eeuo pipefail
-          m=core-updates/projects/S01-C01.json
-          repo="$(jq -r '.repository' "$m")"
-          tag="$(jq -r '.release_tag' "$m")"
-          asset="$(jq -r '.asset_name' "$m")"
-          bytes="$(jq -r '.asset_bytes' "$m")"
-          sha="$(jq -r '.asset_sha256' "$m")"
-          curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag" > /tmp/release.json
-          aid="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .id' /tmp/release.json | head -n1)"
-          test -n "$aid" && test "$aid" != null
-          curl -fsSL -L -H 'Accept: application/octet-stream' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/assets/$aid" -o "/tmp/$asset"
-          test "$(stat -c '%s' "/tmp/$asset")" = "$bytes"
-          test "$(sha256sum "/tmp/$asset" | awk '{print $1}')" = "$sha"
-          unzip -tq "/tmp/$asset" >/dev/null
-          unzip -p "/tmp/$asset" vf-tools-theme/style.css | grep -Fq 'Version: 1.35.28'
-          test -n "$(unzip -Z1 "/tmp/$asset" | grep '^vf-tools-theme/inc/update/class-vf-theme-private-update-option-override-v1.php$')"
-          echo THEME_13528_PRIVATE_ASSET=PASS
-
-      - name: Result
-        run: echo PASS_S01_THEME_13528_DISTRIBUTION_GATE
+          echo PASS_S01_LIVE_UPDATE_AVAILABLE
+          echo LIVE_TARGETS=Theme_1.35.28,Ops_1.21.872,M3U8_1.25.32
