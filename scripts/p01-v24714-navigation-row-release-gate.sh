@@ -34,7 +34,7 @@ s=p.read_text(encoding='utf-8')
 
 s=s.replace('VERSION = "2.47.11"', 'VERSION = "2.47.14"', 1)
 s=s.replace('SOURCE_VERSION = "2.47.10"', 'SOURCE_VERSION = "2.47.13"', 1)
-s=s.replace("BRIDGE_NAME = "P01_V24710_AUTH_BRIDGE.php"\n", "", 1)
+s=s.replace('BRIDGE_NAME = "P01_V24710_AUTH_BRIDGE.php"\\n', '', 1)
 
 old="    base = load_base(here / 'p01-build-release.py')\n    base.VERSION = VERSION"
 new="    base = load_base(here / 'p01-build-release.py')\n    v2 = load_base(here / 'p01-build-release-v2.py')\n    base.VERSION = VERSION"
