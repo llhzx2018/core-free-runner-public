@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      PRODUCT_REF: 38e14aea0d8b4f2d678fc528e1760d990b96ab94
+      PRODUCT_REF: f34edd1cf511770e8d25030b5064cdb642a47672
       BASELINE_REF: v2.5.32
       RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
 
@@ -97,100 +97,22 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-zip sqlite3 >/dev/null
-          cd "$RUNNER_TEMP"
-          npm init -y >/dev/null 2>&1
-          npm install playwright@1.55.0 >/dev/null 2>&1
+          cd "$GITHUB_WORKSPACE/product"
+          if [ ! -f package.json ]; then npm init -y >/dev/null 2>&1; fi
+          npm install --no-save playwright@1.55.0 >/dev/null 2>&1
           npx playwright install --with-deps chromium >/dev/null
 
-      - name: Fresh install and real reading UX
+      - name: Fresh install and real UX browser gate
+        working-directory: product
+        env:
+          VF_UX_E2E_PORT: "18753"
         run: |
           set -Eeuo pipefail
-          SITE="$RUNNER_TEMP/p02-v2533-site"
-          mkdir -p "$SITE"
-          bash product/scripts/build-deploy-tree.sh "$SITE" >/dev/null
-          php -S 127.0.0.1:18753 -t "$SITE" >"$RUNNER_TEMP/v2533-php.log" 2>&1 &
-          SERVER_PID=$!
-          echo "$SERVER_PID" > "$RUNNER_TEMP/v2533.pid"
-          sleep 1
-          curl -fsS -c "$RUNNER_TEMP/v2533-cookies" http://127.0.0.1:18753/setup.php > "$RUNNER_TEMP/v2533-setup.html"
-          CSRF="$(python3 - "$RUNNER_TEMP/v2533-setup.html" <<'PY'
-          import re,sys
-          s=open(sys.argv[1],encoding='utf-8').read()
-          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
-          print(m.group(1) if m else '')
-          PY
-          )"
-          test -n "$CSRF"
-          curl -sS -D "$RUNNER_TEMP/v2533-setup.headers" -o /dev/null -b "$RUNNER_TEMP/v2533-cookies"             -H 'Origin: http://127.0.0.1:18753' -H 'Referer: http://127.0.0.1:18753/setup.php'             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'password=P02-V2533-Reading-Test!'             --data-urlencode 'password_confirm=P02-V2533-Reading-Test!'             http://127.0.0.1:18753/setup.php
-          grep -Eq '^HTTP/.* 303' "$RUNNER_TEMP/v2533-setup.headers"
-          cat > "$RUNNER_TEMP/v2533-visual.cjs" <<'JS'
-          const {chromium}=require('playwright');
-          const assert=(ok,msg)=>{if(!ok)throw new Error(msg)};
-          const near=(v,t,d=1)=>Math.abs(v-t)<=d;
-          (async()=>{
-            const browser=await chromium.launch({headless:true});
-            const page=await browser.newPage({viewport:{width:1440,height:1000}});
-            const base='http://127.0.0.1:18753';
-            await page.goto(base+'/',{waitUntil:'networkidle'});
-            const unlock=page.locator('[data-open-login]').first();
-            if(await unlock.count()){
-              await unlock.click();
-              await page.locator('#loginForm input[name="password"]').fill('P02-V2533-Reading-Test!');
-              await page.locator('#loginSubmit').click();
-              await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth)});
-            }
-            const id=await page.evaluate(async()=>{
-              const session=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();
-              const csrf=session.csrf;
-              const post=async(action,body)=>{const r=await fetch('/api.php?action='+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});const j=await r.json();if(!r.ok||!j.ok)throw Error(action+': '+JSON.stringify(j));return j};
-              const cat=await post('category_save',{name:'Reading Gate',description:'V2.5.33 machine reading gate',icon:'folder'});
-              const item=await post('content_save',{category_id:cat.id,title:'长文阅读舒适度验收',content:'# 第一章\n\n'+('这是一段用于验证阅读字号、行距和内容宽度的正文。\n\n'.repeat(32))+'## 第二章\n\n'+('继续验证段落节奏与标题层级。\n\n'.repeat(20)),content_mode:'article',content_format:'markdown',primary_action:'read',status:'active'});
-              return item.id;
-            });
-            await page.evaluate(id=>openReader(id),id);
-            await page.waitForSelector('.reader-page');
-            await page.waitForSelector('.reader-page-document>.markdown-body',{state:'visible'});
-            const baseline=await page.evaluate(()=>{
-              const doc=document.querySelector('.reader-page-document>.markdown-body');
-              const container=document.querySelector('.reader-page-document');
-              const side=document.querySelector('.sidebar');
-              const main=document.querySelector('.main');
-              const st=getComputedStyle(doc);
-              return {font:parseFloat(st.fontSize),line:parseFloat(st.lineHeight),width:container.getBoundingClientRect().width,sidebar:side?.getBoundingClientRect().width||0,bg:getComputedStyle(main).backgroundColor,editorDefault:localStorage.getItem('vftb-editor-font-size')};
-            });
-            assert(near(baseline.font,16,.2),'READER_FONT_'+baseline.font);
-            assert(near(baseline.line,26.4,.8),'READER_LINE_'+baseline.line);
-            assert(baseline.width>450&&baseline.width<800,'READER_STANDARD_WIDTH_'+baseline.width);
-            assert(near(baseline.sidebar,244,3),'SIDEBAR_WIDTH_'+baseline.sidebar);
-            assert(baseline.bg==='rgb(253, 252, 250)','PAPER_SURFACE_'+baseline.bg);
-            assert(baseline.editorDefault==='15','EDITOR_DEFAULT_'+baseline.editorDefault);
-            await page.evaluate(()=>adjustReaderScale(1));
-            const zoom=await page.evaluate(()=>parseFloat(getComputedStyle(document.querySelector('.reader-page-document>.markdown-body')).fontSize));
-            assert(zoom>baseline.font,'READER_ZOOM_NOT_WORKING');
-            await page.evaluate(()=>adjustReaderScale(-1));
-            await page.evaluate(()=>changeReaderPreference('width','wide'));
-            const wide=await page.evaluate(()=>document.querySelector('.reader-page-document').getBoundingClientRect().width);
-            assert(wide>baseline.width,'READER_WIDTH_PREF_NOT_WORKING');
-            await page.evaluate(()=>changeReaderPreference('line','compact'));
-            const compact=await page.evaluate(()=>parseFloat(getComputedStyle(document.querySelector('.reader-page-document>.markdown-body')).lineHeight));
-            assert(compact<baseline.line,'READER_LINE_PREF_NOT_WORKING');
-            await page.setViewportSize({width:390,height:844});
-            await page.waitForTimeout(150);
-            const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
-            assert(overflow<=3,'MOBILE_OVERFLOW_'+overflow);
-            console.log('FRESH_INSTALL=PASS');
-            console.log('READER_BASELINE=PASS');
-            console.log('READER_PREFERENCES=PASS');
-            console.log('PAPER_SURFACE=PASS');
-            console.log('DESKTOP_DENSITY=PASS');
-            console.log('MOBILE_390_OVERFLOW=NONE');
-            await browser.close();
-          })().catch(e=>{console.error(e.stack||e);process.exit(1)});
-          JS
-          cd "$RUNNER_TEMP"
-          node v2533-visual.cjs
-          kill "$SERVER_PID"
-          wait "$SERVER_PID" 2>/dev/null || true
+          bash scripts/ux-browser-reverify.sh
+          echo FRESH_INSTALL=PASS
+          echo SETUP_REVISIT_LOCK=PASS
+          echo READER_REAL_BROWSER=PASS
+          echo MOBILE_390_OVERFLOW=PASS
 
       - name: Real V2.5.32 to V2.5.33 online-update path
         run: |
