@@ -153,7 +153,7 @@ setup_site(){
   jq -e '.ok==true and (.csrf|type=="string") and (.csrf|length>10)' "$evidence/login.json" >/dev/null
   local code
   code=$(curl -sS -o "$evidence/setup-revisit.html" -w '%{http_code}' -c "$cookies" -b "$cookies" "http://127.0.0.1:$port/setup.php")
-  test "$code" = "200"
+  test "$code" = "302"
 }
 stop_site(){ kill "$SITE_PID" 2>/dev/null || true; wait "$SITE_PID" 2>/dev/null || true; }
 
