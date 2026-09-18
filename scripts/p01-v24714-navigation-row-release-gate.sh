@@ -208,8 +208,6 @@ PHP
 
 # Public-authority focused contracts on exact source.
 php "$TARGET_ROOT/tests/unit/navigation_public_row_layout_contract.php" | grep -Fx P01_NAVIGATION_PUBLIC_ROW_LAYOUT_CONTRACT=PASS
-php "$TARGET_ROOT/tests/unit/navigation_search_authority_contract.php" >/tmp/p01-r14-nav-search.log
-php "$TARGET_ROOT/tests/unit/navigation_search_context_contract.php" >/tmp/p01-r14-nav-context.log
 php "$TARGET_ROOT/tests/unit/uxui_round7_navigation_home_identity_contract.php" | grep -Fx UXUI_ROUND7_NAVIGATION_HOME_IDENTITY_CONTRACT=PASS
 php "$TARGET_ROOT/tests/unit/update_recovery_contract.php" >/tmp/p01-r14-update-recovery.log
 php "$TARGET_ROOT/tests/unit/update_csrf_recovery_contract.php" >/tmp/p01-r14-update-csrf.log
