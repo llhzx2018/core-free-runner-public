@@ -132,9 +132,9 @@ if ! grep -Fq "$MARKER" <<<"$BODY"; then
   BODY="$BODY
 
 Atomic Asset Hotfix R1
-- Corrected UPDATE asset only; product source/tag unchanged at `$EXACT_SHA`.
-- Machine proof: Public Runner `$PROOF_RUN` PASS.
-- Corrected UPDATE: `$UPDATE` / $NEW_UPDATE_BYTES bytes / SHA-256 `$NEW_UPDATE_SHA`.
+- Corrected UPDATE asset only; product source/tag unchanged at $EXACT_SHA.
+- Machine proof: Public Runner $PROOF_RUN PASS.
+- Corrected UPDATE: $UPDATE / $NEW_UPDATE_BYTES bytes / SHA-256 $NEW_UPDATE_SHA.
 - FULL and authorization bridge bytes unchanged.
 - Production remains separate and is not changed by this publication repair."
   api --method PATCH "repos/${P01_REPO}/releases/${RELEASE_ID}" -f body="$BODY" >/dev/null
