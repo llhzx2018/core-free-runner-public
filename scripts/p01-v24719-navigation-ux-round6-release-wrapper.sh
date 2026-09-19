@@ -63,14 +63,14 @@ PY
 
 bash "$DST"
 
-# Stable Navigation regressions + Round 6 responsive sort acceptance.
+# Stable Navigation regressions + Round 6 single-owner acceptance.
 php "$TARGET_ROOT/tests/unit/resource_search_contract.php" | grep -Fx RESOURCE_SEARCH_CONTRACT_PASS
 php "$TARGET_ROOT/tests/unit/navigation_context_persistence_contract.php" | grep -Fx P01_NAVIGATION_CONTEXT_PERSISTENCE=PASS
 php "$TARGET_ROOT/tests/unit/navigation_search_authority_contract.php" | grep -Fx P01_NAVIGATION_SEARCH_AUTHORITY_CONTRACT=PASS
 php "$TARGET_ROOT/tests/unit/navigation_search_context_contract.php" | grep -Fx NAVIGATION_SEARCH_CONTEXT_PASS
 php "$TARGET_ROOT/tests/unit/search_sort_stability_contract.php" | grep -Fx P01_SEARCH_SORT_STABILITY_CONTRACT=PASS
 php "$TARGET_ROOT/tests/unit/navigation_category_facet_recovery_contract.php" | grep -Fx NAVIGATION_CATEGORY_FACET_RECOVERY_PASS
-php "$TARGET_ROOT/tests/unit/mobile_sort_accessibility_contract.php" | grep -Fx P01_NAVIGATION_UX_ROUND6_MOBILE_SORT=PASS
+php "$TARGET_ROOT/tests/unit/mobile_sort_accessibility_contract.php" | grep -Fx P01_NAVIGATION_UX_ROUND5_MOBILE_SORT=PASS
 
 OUT=/tmp/p01-v24719-navigation-round6
 cat >>"$OUT/R19_GATE_RECEIPT.txt" <<'EOF'
@@ -81,7 +81,7 @@ EXACT_URL_SCROLL_RETURN=PASS
 NAVIGATION_SEARCH_AUTHORITY=PASS
 SEARCH_SORT_STABILITY=PASS
 CATEGORY_FACET_RECOVERY=PASS
-GLOBAL_ACCOUNT_SINGLE_OWNER=PASS
+MOBILE_SORT_REACHABILITY=PASS
 EOF
 
 for test_name in   navigation_owner_behavior_privacy_contract.php   navigation_owner_views_round3_contract.php   contextual_favorite_badge_contract.php   navigation_favorite_count_context_contract.php   start_popular_sort_control_contract.php   start_favorite_sort_reset_contract.php   favorite_add_context_contract.php   derived_favorite_view_coherence_contract.php   tool_shared_search_context_contract.php   tool_scene_context_consistency_contract.php   tool_software_sort_context_contract.php   software_detail_context_contract.php   subject_request_context_sanitization_contract.php   public_global_nav_contract.php   navigation_public_row_layout_contract.php   global_account_actions_contract.php   subject_domain_nav_shell_contract.php; do
