@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 P01_ROOT="${P01_ROOT:?missing P01_ROOT}"
-EXPECTED="b4d51cc71db371a9211d873ff2fcb455b88335c1"
+EXPECTED="a7fd9c9a5b65d771b9693f4cfdccf232ce4122b6"
 test "$(git -C "$P01_ROOT" rev-parse HEAD)" = "$EXPECTED"
 test "$(tr -d '\r\n ' < "$P01_ROOT/VERSION")" = "2.47.15"
 
