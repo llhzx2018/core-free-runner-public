@@ -250,6 +250,75 @@ def github_outputs(spec: dict[str, Any]) -> str:
     return "\n".join(rows) + "\n"
 
 
+def audit_rendered(text: str, spec: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    mapping = variables(spec)
+
+    # Repeated version lanes may still contain the previous target as a valid
+    # source version. Therefore audit only target-owned identity positions
+    # instead of banning the old version globally.
+    yaml_keys = {
+        "TARGET_REPO": "REPOSITORY",
+        "TARGET_VERSION": "TARGET_VERSION",
+        "TARGET_SHA": "TARGET_SHA",
+        "TARGET_TREE": "TARGET_TREE",
+        "TARGET_TAG": "TARGET_TAG",
+        "TARGET_VERSION_COMPACT": "TARGET_VERSION_COMPACT",
+        "SCHEMA_VERSION": "SCHEMA_VERSION",
+        "CANDIDATE_RUN": "CANDIDATE_RUN",
+    }
+    seen_target_version = False
+    seen_target_sha = False
+    for key, mapping_key in yaml_keys.items():
+        pattern = re.compile(
+            rf"(?m)^\\s*{re.escape(key)}\\s*:\\s*[\"']?([^\\s#\"']+)"
+        )
+        for match in pattern.finditer(text):
+            actual = match.group(1)
+            expected = mapping[mapping_key]
+            if actual != expected:
+                failures.append(f"IDENTITY_MISMATCH:{key}:expected={expected}:actual={actual}")
+            if key == "TARGET_VERSION":
+                seen_target_version = True
+            if key == "TARGET_SHA":
+                seen_target_sha = True
+
+    cli_patterns = {
+        "TARGET_VERSION": re.compile(r"--target-version\\s+[\"']?([0-9]+\\.[0-9]+\\.[0-9]+)"),
+        "TARGET_SHA": re.compile(r"--source-sha\\s+[\"']?([0-9a-f]{40})"),
+        "TARGET_TREE": re.compile(r"--source-tree\\s+[\"']?([0-9a-f]{40})"),
+    }
+    for key, pattern in cli_patterns.items():
+        expected = mapping[key]
+        if not expected:
+            continue
+        for match in pattern.finditer(text):
+            actual = match.group(1)
+            if actual != expected:
+                failures.append(f"IDENTITY_MISMATCH:{key}:expected={expected}:actual={actual}")
+
+    if not seen_target_version:
+        failures.append("MISSING_RENDERED_BINDING:TARGET_VERSION")
+    if not seen_target_sha:
+        failures.append("MISSING_RENDERED_BINDING:TARGET_SHA")
+    return sorted(set(failures))
+
+
+def audit_payload(path: Path, text: str, spec: dict[str, Any]) -> dict[str, Any]:
+    failures = audit_rendered(text, spec)
+    if failures:
+        raise ContractError(";".join(failures))
+    return {
+        "schema": "vf-ephemeral-lane-render-audit/v1",
+        "status": "PASS",
+        "input": path.as_posix(),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "target_version": spec["target_version"],
+        "target_sha": spec["target_sha"],
+        "source_versions": spec["source_versions"],
+    }
+
+
 def payload(spec: dict[str, Any]) -> dict[str, Any]:
     public = dict(spec)
     public["previous_lane"] = dict(spec["previous_lane"])
@@ -279,6 +348,10 @@ def main() -> int:
     output_p = sub.add_parser("github-output")
     output_p.add_argument("--spec", type=Path, required=True)
 
+    audit_p = sub.add_parser("audit-rendered")
+    audit_p.add_argument("--spec", type=Path, required=True)
+    audit_p.add_argument("--input", type=Path, required=True)
+
     args = parser.parse_args()
     try:
         spec = load_spec(args.spec)
@@ -287,6 +360,10 @@ def main() -> int:
             return 0
         if args.command == "github-output":
             print(github_outputs(spec), end="")
+            return 0
+        if args.command == "audit-rendered":
+            rendered = args.input.read_text(encoding="utf-8")
+            print(json.dumps(audit_payload(args.input, rendered, spec), ensure_ascii=False, sort_keys=True))
             return 0
         template = args.template.read_text(encoding="utf-8")
         rendered = render(template, spec)
