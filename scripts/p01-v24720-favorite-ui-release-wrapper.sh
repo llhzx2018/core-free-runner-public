@@ -115,12 +115,13 @@ for(const route of routes){
 await navigate('watch.php');
 const toggle=async()=>{
   const out=await send('Runtime.evaluate',{
-    expression:"(async()=>{const b=document.querySelector('[data-favorite-id]');if(!b)return 'NO_FAVORITE_BUTTON';b.click();await new Promise(r=>setTimeout(r,850));return {toast:document.querySelector('.vf-workspace-toast')?.textContent||'NO_TOAST',favorite:b.dataset.favorite||''}})()",
+    expression:"(async()=>{const b=document.querySelector('[data-favorite-id]');if(!b)return 'NO_FAVORITE_BUTTON';b.click();await new Promise(r=>setTimeout(r,850));const all=Array.from(document.querySelectorAll('.vf-workspace-toast'));return {toast:all.at(-1)?.textContent||'NO_TOAST',favorite:b.dataset.favorite||''}})()",
     awaitPromise:true,returnByValue:true
   });
   return out.result?.value||{};
 };
 console.log('FAVORITE_ADD',JSON.stringify(await toggle()));
+await sleep(3000);
 console.log('FAVORITE_REMOVE',JSON.stringify(await toggle()));
 await sleep(300);
 console.log('P01_BROWSER_RUNTIME_EXCEPTION_COUNT='+exceptions.length);
