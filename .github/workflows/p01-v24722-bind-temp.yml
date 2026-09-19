@@ -1,0 +1,125 @@
+name: p01-v24722-bind-temp
+
+on:
+  push:
+    branches:
+      - run/p01-v24722-bind
+
+permissions:
+  contents: read
+
+jobs:
+  bind-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 40a6aaa1cc508095283f6f92e4f3169f680c6c5f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Checkout engineering base
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 1ab5c3fec97a934d807ef20e921c2d1702c7eaa5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: base
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact bind scope and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C target rev-parse HEAD)" = "40a6aaa1cc508095283f6f92e4f3169f680c6c5f"
+          test "$(git -C base rev-parse HEAD)" = "1ab5c3fec97a934d807ef20e921c2d1702c7eaa5"
+          test "$(cat target/VERSION)" = "2.47.22"
+          test "$(cat target/src/VERSION.txt)" = "2.47.22"
+          grep -Fq "define('VF_VERSION', '2.47.22');" target/src/app/bootstrap.php
+          test "$(cat base/VERSION)" = "2.47.21"
+          test -f target/docs/release/V2.47.22_RELEASE_GATE.md
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V24722_BIND_SCOPE_SYNTAX=PASS
+
+      - name: Focused navigation contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          php tests/unit/admin_overview_ia_contract.php
+          php tests/unit/data_recovery_desktop_disclosure_contract.php
+          php tests/unit/admin_visual_system_r3_contract.php
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.22_RELEASE_GATE.md
+          grep -Fq 'NO_UNKNOWN_APPLICABILITY = YES' docs/release/V2.47.22_RELEASE_GATE.md
+          echo P01_V24722_BIND_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install baseline and authenticated smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-v24722-runtime
+          cp -a target/src /tmp/p01-v24722-runtime
+          cd /tmp/p01-v24722-runtime
+          php -S 127.0.0.1:18103 -t . >/tmp/p01-v24722-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; rm -rf /tmp/p01-v24722-runtime /tmp/p01-v24722-*' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS -c /tmp/p01-v24722.cookies -b /tmp/p01-v24722.cookies http://127.0.0.1:18103/setup.php -o /tmp/p01-v24722-setup.html && break
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24722-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v24722.cookies -b /tmp/p01-v24722.cookies -X POST http://127.0.0.1:18103/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF V24722 Bind'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-v24722-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v24722-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24722-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v24722-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v24722-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-v24722-baseline.txt
+
+          python3 - <<PY >/tmp/p01-v24722-login.json
+          import json
+          print(json.dumps({"password": """$TEST_PASSWORD"""}))
+          PY
+          curl -fsS -c /tmp/p01-v24722.cookies -b /tmp/p01-v24722.cookies -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18103/api.php?action=login' --data-binary @/tmp/p01-v24722-login.json             -o /tmp/p01-v24722-login-result.json
+          grep -F '"ok":true' /tmp/p01-v24722-login-result.json >/dev/null
+
+          for page in manage.php resources.php data.php system.php settings.php update.php system-health.php; do
+            curl -fsS -c /tmp/p01-v24722.cookies -b /tmp/p01-v24722.cookies "http://127.0.0.1:18103/$page" -o "/tmp/p01-v24722-$page.html"
+          done
+          test "$(grep -o 'class="vf-rail-item' /tmp/p01-v24722-manage.php.html | wc -l | tr -d ' ')" = "5"
+          ! grep -F 'vf-rail-submenu' /tmp/p01-v24722-manage.php.html >/dev/null
+          ! grep -F 'vf-admin-eyebrow' /tmp/p01-v24722-update.php.html >/dev/null
+          grep -F '<h1>资源</h1>' /tmp/p01-v24722-resources.php.html >/dev/null
+          grep -F '<h1>数据</h1>' /tmp/p01-v24722-data.php.html >/dev/null
+          grep -F '<h1>系统</h1>' /tmp/p01-v24722-system.php.html >/dev/null
+          grep -F '<h1>运行健康</h1>' /tmp/p01-v24722-system-health.php.html >/dev/null
+          echo P01_V24722_BIND_FRESH_AUTH_SMOKE=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_V24722_BOUND_CANDIDATE_GATE=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
