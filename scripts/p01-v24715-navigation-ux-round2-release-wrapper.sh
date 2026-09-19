@@ -7,6 +7,19 @@ set -Eeuo pipefail
 : "${PROVEN_ROOT:?missing PROVEN_ROOT}"
 : "${OLD_GATE_ROOT:?missing OLD_GATE_ROOT}"
 
+dump_gate_logs(){
+  rc=$?
+  echo "P01_V24715_RELEASE_WRAPPER_RC=$rc" >&2
+  for log in /tmp/p01-r15-*-evidence/server.log /tmp/p01-r15-public-ui-server.log; do
+    if [ -f "$log" ]; then
+      echo "===== $log =====" >&2
+      cat "$log" >&2 || true
+    fi
+  done
+  exit "$rc"
+}
+trap dump_gate_logs ERR
+
 SRC="$OLD_GATE_ROOT/scripts/p01-v24714-navigation-row-release-gate.sh"
 DST=/tmp/p01-v24715-release-gate.sh
 cp "$SRC" "$DST"
