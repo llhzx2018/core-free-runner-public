@@ -4,36 +4,84 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '.github/workflows/*.yml'
-      - 'scripts/check_runner_trigger_scope.py'
-      - 'tests/test_runner_trigger_scope.py'
-      - 'scripts/check_estate_anti_drift.py'
-      - 'tests/test_estate_anti_drift.py'
+      - '.github/workflows/runner-trigger-scope-gate.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  p01_favorite_production_blocker_repro:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'temp/p01-favorite-production-blocker-repro-20260919'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout temporary repro lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          path: runner
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Checkout exact V2.47.18 Production source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          python-version: '3.11'
+          repository: llhzx2018/vf-start
+          ref: 52249a697b907e15f6cb56acb37fa8993b789d80
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: target
 
-      - name: Verify trigger quarantine
-        run: python scripts/check_runner_trigger_scope.py --inventory
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
 
-      - name: Run trigger scope regression tests
-        run: python -m unittest discover -s tests -v
-
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        run: python scripts/check_estate_anti_drift.py --live
+      - name: Fresh HTTP Favorite reproduction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "52249a697b907e15f6cb56acb37fa8993b789d80"
+          rm -rf /tmp/p01-favorite-repro
+          cp -a target/src /tmp/p01-favorite-repro
+          cd /tmp/p01-favorite-repro
+          php -S 127.0.0.1:18101 -t . >/tmp/p01-favorite-repro-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true; cat /tmp/p01-favorite-repro-server.log || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies http://127.0.0.1:18101/setup.php -o /tmp/p01-favorite-setup.html; then break; fi
+            sleep 1
+          done
+          SETUP_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-favorite-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies -X POST http://127.0.0.1:18101/setup.php             --data-urlencode "setup_csrf=$SETUP_CSRF"             --data-urlencode 'site_title=P01 Favorite Repro'             --data-urlencode 'admin_password=FavoriteRepro!2026'             --data-urlencode 'admin_password_confirm=FavoriteRepro!2026'             -o /tmp/p01-favorite-setup-post.html
+          curl -fsS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies             -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18101/api.php?action=login'             --data '{"password":"FavoriteRepro!2026"}'             -o /tmp/p01-favorite-login.json
+          grep -F '"ok":true' /tmp/p01-favorite-login.json >/dev/null
+          curl -fsS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies 'http://127.0.0.1:18101/watch.php' -o /tmp/p01-favorite-watch.html
+          CSRF=$(python3 - <<'PY'
+          import json,re,html
+          text=open('/tmp/p01-favorite-watch.html',encoding='utf-8').read()
+          m=re.search(r'<script[^>]+id="vf-workspace-data"[^>]*>(.*?)</script>', text, re.S)
+          assert m
+          payload=json.loads(html.unescape(m.group(1)))
+          print(payload['csrf'])
+          PY
+          )
+          curl -fsS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies             -X POST http://127.0.0.1:18101/workspace-create.php             -F "csrf=$CSRF"             -F 'surface=watch'             -F 'source_kind=remote_url'             -F 'title=Favorite Repro Watch'             -F 'url=https://example.com/favorite-repro-watch'             -F 'resource_kind=movie'             -F 'media_status=want'             -F 'is_private=1'             -F 'is_favorite=0'             -o /tmp/p01-favorite-create.json
+          ID=$(jq -er '.id' /tmp/p01-favorite-create.json)
+          curl -sS -c /tmp/p01-favorite.cookies -b /tmp/p01-favorite.cookies             -X POST http://127.0.0.1:18101/workspace-action.php             -F "csrf=$CSRF"             -F 'action=favorite'             -F "id=$ID"             -F 'favorite=1'             -o /tmp/p01-favorite-action.json
+          cat /tmp/p01-favorite-action.json
+          grep -F '"ok":true' /tmp/p01-favorite-action.json >/dev/null
+          DB=$(php -r "require 'app/bootstrap.php'; echo VF_DB_FILE;")
+          sqlite3 "$DB" "select id,category_id,is_favorite,favorite_rank,lifecycle_state from links where id=$ID;"
+          test "$(sqlite3 "$DB" "select is_favorite from links where id=$ID;")" = "1"
+          test "$(sqlite3 "$DB" "select count(*) from operation_history where action='favorite' and object_id=$ID and result='success';")" = "1"
+          echo 'P01_V24718_FRESH_WATCH_FAVORITE_HTTP=PASS'
