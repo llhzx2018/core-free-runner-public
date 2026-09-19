@@ -83,7 +83,7 @@ EOF
 # Round 4 owner behavior / privacy / context contracts.
 for test_name in \
   navigation_owner_behavior_privacy_contract.php \
-  navigation_owner_views_round4_contract.php \
+  navigation_owner_views_round3_contract.php \
   contextual_favorite_badge_contract.php \
   navigation_favorite_count_context_contract.php \
   start_popular_sort_control_contract.php \
