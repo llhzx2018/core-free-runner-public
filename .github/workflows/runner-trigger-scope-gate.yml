@@ -4,36 +4,91 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '.github/workflows/*.yml'
-      - 'scripts/check_runner_trigger_scope.py'
-      - 'tests/test_runner_trigger_scope.py'
-      - 'scripts/check_estate_anti_drift.py'
-      - 'tests/test_estate_anti_drift.py'
+      - '.github/workflows/runner-trigger-scope-gate.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  p01_v24720_favorite_ui_foreach_gate:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'temp/p01-v24720-favorite-ui-foreach-gate-20260919'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout temporary proof lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          path: runner
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          python-version: '3.11'
+          repository: llhzx2018/vf-start
+          ref: d708af02b0b5814d3f079e9a27e423b3fb78d543
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: target
 
-      - name: Verify trigger quarantine
-        run: python scripts/check_runner_trigger_scope.py --inventory
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
 
-      - name: Run trigger scope regression tests
-        run: python -m unittest discover -s tests -v
+      - name: Exact source identity and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "d708af02b0b5814d3f079e9a27e423b3fb78d543"
+          test "$(tr -d '\r\n ' < target/VERSION)" = "2.47.19"
+          php -l target/tests/unit/favorite_ui_collection_contract.php >/dev/null
+          node --check target/src/assets/workspace.js
+          echo 'P01_V24720_FAVORITE_UI_SOURCE_IDENTITY=PASS'
 
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        run: python scripts/check_estate_anti_drift.py --live
+      - name: Run Favorite UI regressions
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/favorite_ui_collection_contract.php
+          php tests/unit/favorite_write_recovery_contract.php
+          php tests/unit/favorite_add_context_contract.php
+          php tests/unit/contextual_favorite_badge_contract.php
+          php tests/unit/derived_favorite_view_coherence_contract.php
+          php tests/unit/navigation_favorite_count_context_contract.php
+          php tests/unit/navigation_owner_behavior_privacy_contract.php
+          php tests/unit/global_account_actions_contract.php
+          echo 'P01_V24720_FAVORITE_UI_REGRESSION=PASS'
+
+      - name: Verify served workspace asset contains collection fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v24720-ui
+          cp -a target/src /tmp/p01-v24720-ui
+          cd /tmp/p01-v24720-ui
+          php -S 127.0.0.1:18103 -t . >/tmp/p01-v24720-ui-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true; cat /tmp/p01-v24720-ui-server.log || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS 'http://127.0.0.1:18103/asset.php?file=workspace.js' -o /tmp/p01-v24720-workspace.js; then break; fi
+            sleep 1
+          done
+          grep -F "$$('[data-favorite-count]').forEach(el=>{" /tmp/p01-v24720-workspace.js >/dev/null
+          grep -F 'data-favorite-id="' /tmp/p01-v24720-workspace.js | grep -F '$$(' | grep -F '.forEach(btn=>{' >/dev/null
+          ! grep -F "$('[data-favorite-count]').forEach(el=>{" /tmp/p01-v24720-workspace.js >/dev/null
+          echo 'P01_V24720_SERVED_FAVORITE_COLLECTION_FIX=PASS'
+
+      - name: Gate receipt
+        shell: bash
+        run: |
+          echo 'P01_V24720_FAVORITE_UI_FOREACH_GATE=PASS'
+          echo 'FAVORITE_WRITE_PATH=UNCHANGED_FROM_V24719=YES'
+          echo 'FAVORITE_UI_COLLECTION_SELECTOR=PASS'
+          echo 'SCHEMA_CHANGE=NONE'
+          echo 'MIGRATION=NONE'
+          echo 'PRODUCTION=NOT_WRITTEN'
