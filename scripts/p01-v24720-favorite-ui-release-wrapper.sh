@@ -33,7 +33,7 @@ pairs=[
 ("TARGET_SHA=421e7b5df1e48db768b39470fc99580330a07c0f","TARGET_SHA=83ca94662dd8bc053dea0ef94bc0e6ef0d587234"),
 ("TARGET_TREE=598eaae633ef485dd2eef1330a9370cb46f90506","TARGET_TREE=0de1caa05e148281d8c8db99d88a57e37fc01587"),
 ("SOURCE_SHA=e714cfe540ad39202c2cb558e5c0a370ef6d6502","SOURCE_SHA=aabaa35728f776c0db3785f67eb7812e0a0374ee"),
-("SOURCE_VERSION=2.47.13","SOURCE_VERSION=2.47.20"),
+("SOURCE_VERSION=2.47.13","SOURCE_VERSION=2.47.19"),
 ("TARGET_VERSION=2.47.14","TARGET_VERSION=2.47.20"),
 ("OUT=/tmp/p01-v24714-navigation","OUT=/tmp/p01-v24720-navigation-favorite-ui"),
 ("BUILD=/tmp/p01-v24714-navigation-builder","BUILD=/tmp/p01-v24720-navigation-favorite-ui-builder"),
@@ -50,7 +50,7 @@ pairs=[
 ("/tmp/p01-v24714-navigation-rebuild","/tmp/p01-v24720-navigation-favorite-ui-rebuild"),
 ("P01_V24714_NAVIGATION_ROW_RELEASE_GATE=PASS","P01_V24720_NAVIGATION_UX_FAVORITE_UI_RELEASE_GATE=PASS"),
 ("R14_GATE_RECEIPT.txt","R20_GATE_RECEIPT.txt"),
-("V24713_TO_V24714_ATOMIC_UPGRADE=PASS","V24718_TO_V24720_ATOMIC_UPGRADE=PASS"),
+("V24713_TO_V24714_ATOMIC_UPGRADE=PASS","V24719_TO_V24720_ATOMIC_UPGRADE=PASS"),
 ("OWNER_PREVIEW_RUNTIME_REASON=bounded corrective layout bug; no new product shape or interaction contract","OWNER_PREVIEW_RUNTIME_REASON=bounded Favorite UI collection runtime fix; no new product shape, data, auth, or IA contract"),
 ]
 for a,b in pairs:
