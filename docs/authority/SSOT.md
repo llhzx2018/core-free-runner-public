@@ -65,6 +65,22 @@ ONE-OFF PROJECT WORKFLOW
 
 一次性 Workflow 失败可修复/重跑，但不能为了“留下证据”把临时代码永久合入 main。
 
+### 5.1 Repeated Lane Identity
+
+同一 Candidate / Formal Release / Discovery 形状跨版本重复使用时，Version、Source SHA/Tree、from_versions 等动态 identity 必须优先收敛为一次性 Lane spec，而不是散落在 Workflow 多处手工替换。Current helper：\`scripts/ephemeral_lane_spec.py\`。
+
+固定边界：
+
+\`\`\`text
+single lane spec = dynamic execution input, not Current Truth Store
+reusable renderer/helper = allowed in main after reuse decision
+project-specific test/release logic = may remain temporary
+Secret Value = never stored in lane spec
+rendered one-off workflow = still CLOSE WITHOUT MERGE by default
+\`\`\`
+
+目标是减少复制版本 Workflow、旧版本残留、Harness 假失败与 Agent token 消耗，同时不建立新的 Runtime / Runner / Release 平台。
+
 ## 6. Failure Semantics
 
 ```text
