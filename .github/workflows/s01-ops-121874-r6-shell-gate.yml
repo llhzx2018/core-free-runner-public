@@ -1,4 +1,4 @@
-name: S01 Ops 1.21.874 R6 Global Shell Gate
+name: S01 Ops 1.21.874 Formal Release
 
 on:
   pull_request:
@@ -8,52 +8,148 @@ permissions:
   contents: read
 
 jobs:
-  gate:
+  formal-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
-      CANDIDATE_SHA: 02fc59f1c633ef16b4f577a0fb7073bc212bdea1
+      OPS_REPO: llhzx2018/vf-tools-ops
+      OPS_SHA: d5b9737d5334f0f9afb19672bb76cbc678987930
       BASE_SHA: 8d63c75773ea2dd9c096356dbb4791d0cfbc8de9
-      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VERSION: 1.21.874
+      TAG: v1.21.874
+      ASSET: vf-tools-ops_V1.21.874.zip
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Checkout exact Ops candidate
+      - name: Checkout exact merged Ops main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-tools-ops
-          ref: 02fc59f1c633ef16b4f577a0fb7073bc212bdea1
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          ref: d5b9737d5334f0f9afb19672bb76cbc678987930
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
           fetch-depth: 0
           path: ops
           persist-credentials: false
 
-      - name: Exact identity and scope
+      - name: Verify release identity and scope
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE_SHA"
-          test "$(cat ops/VERSION)" = "1.21.874"
+          test -n "${GH_TOKEN:-}"
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(cat ops/VERSION)" = "$VERSION"
           grep -Fq 'Version: 1.21.874' ops/vf-ops.php
           grep -Fq "S01-MATURE-ADMIN-V6-R6-GLOBAL-SHELL-CLOSURE" ops/vf-ops.php
-          actual="$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort)"
+          actual="$(git -C ops diff --name-only "$BASE_SHA" "$OPS_SHA" | sort)"
           expected="$(printf '%s\n'             VERSION             vf-ops.php             includes/s01/v6-landing-shell.php             includes/s01/tool-workbench.php             tests/s01-v6-r6-global-shell-closure-contract.php | sort)"
           test "$actual" = "$expected"
-          echo OPS_121874_SCOPE=PASS
-
-      - name: Contract and PHP syntax
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+          if gh release view "$TAG" --repo "$OPS_REPO" >/dev/null 2>&1; then
+            echo "release exists" >&2; exit 1
+          fi
+          if gh api "repos/$OPS_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag exists" >&2; exit 1
+          fi
           php ops/tests/s01-v6-r6-global-shell-closure-contract.php
-          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops -type f -name '*.php' -print0 | sort -z)
-          echo OPS_121874_PHP=PASS
+          echo OPS_121874_RELEASE_IDENTITY=PASS
 
-      - name: Ownership boundary
+      - name: Build Runtime Authority package
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" --             includes/wp-update             includes/v6             includes/site-release             includes/publish-workflow             includes/system-governance | wc -l)" = "0"
-          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' ops/includes/s01 ops/vf-ops.php
-          echo OPS_121874_BOUNDARY=PASS
+          rm -rf stage-ops dist-ops
+          mkdir -p stage-ops/vf-ops dist-ops
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, shutil
+          src=Path('ops')
+          dst=Path('stage-ops/vf-ops')
+          def runtime(rel):
+              rel=rel.replace('\\','/').lstrip('/')
+              if not rel or '../' in rel: return False
+              import re
+              if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)', rel, re.I): return False
+              if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$', rel, re.I): return False
+              if '/' not in rel: return rel in {'vf-ops.php','uninstall.php'}
+              return rel.startswith(('includes/','assets/','languages/','config/'))
+          rows=[]
+          for p in sorted((x for x in src.rglob('*') if x.is_file()), key=lambda x:x.relative_to(src).as_posix()):
+              rel=p.relative_to(src).as_posix()
+              if not runtime(rel): continue
+              if p.is_symlink(): raise SystemExit('runtime symlink forbidden: '+rel)
+              q=dst/rel; q.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,q)
+              rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          if 'vf-ops.php' not in {r for r,_ in rows}: raise SystemExit('plugin main missing')
+          canonical=b''.join(rel.encode()+bytes([0])+sha.encode()+bytes([10]) for rel,sha in rows)
+          fp=hashlib.sha256(canonical).hexdigest()
+          Path('/tmp/ops_count').write_text(str(len(rows)))
+          Path('/tmp/ops_fp').write_text(fp)
+          print('OPS_RUNTIME_FILES='+str(len(rows)))
+          print('OPS_RUNTIME_FINGERPRINT='+fp)
+          PY
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find stage-ops/vf-ops -type f -name '*.php' -print0 | sort -z)
+          (cd stage-ops && zip -X -q -r "../dist-ops/$ASSET" vf-ops)
+          unzip -tq "dist-ops/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist-ops/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist-ops/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.874'
+          sha256sum "dist-ops/$ASSET" | tee /tmp/ops_sha
+          stat -c '%s' "dist-ops/$ASSET" | tee /tmp/ops_bytes
+          echo OPS_121874_RUNTIME_PACKAGE=PASS
 
-      - name: Result
-        run: echo PASS_S01_OPS_121874_R6_GLOBAL_SHELL_GATE
+      - name: Create formal release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/notes.md <<EOF
+          S01-C02 1.21.874 Mature Admin V6 R6 Global Shell Closure.
+          Exact merged main source: $OPS_SHA
+
+          Consolidates the migrated V6 landings and standalone Tools workbench onto one canonical server-rendered VF brand + six-domain navigation owner. Removes duplicated Tools shell markup, normalizes desktop/mobile active-state and accessibility metadata, and replaces the stale R4.1 asset identity with stable Mature Admin V6 identity.
+
+          No Provider runtime ownership, update transport, release state, Cloudflare execution, schema or business/data services are changed.
+
+          Runtime files: $(cat /tmp/ops_count)
+          Runtime fingerprint SHA256: $(cat /tmp/ops_fp)
+          Product/Git/Release only. Production installation is not claimed.
+          EOF
+          gh release create "$TAG" "dist-ops/$ASSET#VF Tools Ops $VERSION Runtime Authority ZIP"             --repo "$OPS_REPO" --target "$OPS_SHA" --title "VF Tools Ops V$VERSION" --notes-file /tmp/notes.md
+          echo OPS_121874_RELEASE_CREATE=PASS
+
+      - name: Independent release readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          j="$(gh api "repos/$OPS_REPO/releases/tags/$TAG")"
+          aid="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .id' <<<"$j")"
+          rb="$(jq -r --arg n "$ASSET" '.assets[] | select(.name==$n) | .size' <<<"$j")"
+          lb="$(cat /tmp/ops_bytes)"
+          ls="$(awk '{print $1}' /tmp/ops_sha)"
+          test -n "$aid" && test "$aid" != null
+          test "$rb" = "$lb"
+          test "$(jq -r '.object.sha' <<<"$(gh api "repos/$OPS_REPO/git/ref/tags/$TAG")")" = "$OPS_SHA"
+          rm -rf /tmp/readback && mkdir -p /tmp/readback
+          gh release download "$TAG" --repo "$OPS_REPO" --pattern "$ASSET" --dir /tmp/readback --clobber
+          test "$(sha256sum "/tmp/readback/$ASSET" | awk '{print $1}')" = "$ls"
+          unzip -tq "/tmp/readback/$ASSET" >/dev/null
+          unzip -p "/tmp/readback/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.874'
+          cat > /tmp/ops-release-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$OPS_SHA
+          TAG=$TAG
+          ASSET=$ASSET
+          ASSET_ID=$aid
+          BYTES=$lb
+          SHA256=$ls
+          RUNTIME_FILES=$(cat /tmp/ops_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/ops_fp)
+          PUBLISHED_AT=$(jq -r '.published_at' <<<"$j")
+          EOF
+          cat /tmp/ops-release-receipt.txt
+          echo OPS_121874_FORMAL_RELEASE=PASS
+
+      - name: Upload release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121874-release-${{ github.run_id }}
+          path: /tmp/ops-release-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
