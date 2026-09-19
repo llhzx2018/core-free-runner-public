@@ -42,7 +42,7 @@ await page.waitForSelector('.notebook-list-pane');
 await page.locator('.notebook-title-row').first().click();
 await page.waitForSelector('.article-workspacebar');
 await page.screenshot({path:out+'/02-notebook-reader.png',fullPage:true});
-await page.locator('[data-workspace-mode="edit"]').click();
+await page.locator('[data-workspace-command="edit"]').click();
 await page.waitForTimeout(250);
 await page.screenshot({path:out+'/03-editor.png',fullPage:true});
 await page.locator('#settingsBtn').click();
