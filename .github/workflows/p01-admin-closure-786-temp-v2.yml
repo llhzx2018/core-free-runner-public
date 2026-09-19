@@ -1,0 +1,129 @@
+name: p01-admin-closure-786-temp-v2
+
+on:
+  push:
+    branches:
+      - run/p01-admin-closure-786
+
+permissions:
+  contents: read
+
+jobs:
+  p01-admin-closure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact private P01 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 71056cfe3fd8beb9916d3c69b7b4ad3632ceef80
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: vf-start
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "71056cfe3fd8beb9916d3c69b7b4ad3632ceef80"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_ADMIN_CLOSURE_SYNTAX_PASS
+
+      - name: Focused admin contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd vf-start
+          php tests/unit/admin_overview_ia_contract.php
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          php tests/unit/advanced_manager_daily_entry_contract.php
+          php tests/unit/admin_visual_system_r3_contract.php
+          echo P01_ADMIN_CLOSURE_FOCUSED_CONTRACTS_PASS
+
+      - name: Fresh install and baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          echo "TEST_PASSWORD=$TEST_PASSWORD" >> "$GITHUB_ENV"
+
+          rm -rf /tmp/p01-admin-closure-runtime
+          cp -a vf-start/src /tmp/p01-admin-closure-runtime
+          cd /tmp/p01-admin-closure-runtime
+          php -S 127.0.0.1:18097 -t . >/tmp/p01-admin-closure-server.log 2>&1 &
+          echo $! >/tmp/p01-admin-closure-server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-admin.cookies -b /tmp/p01-admin.cookies http://127.0.0.1:18097/setup.php -o /tmp/p01-admin-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-admin-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-admin.cookies -b /tmp/p01-admin.cookies -X POST http://127.0.0.1:18097/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Admin Closure Gate' \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            -o /tmp/p01-admin-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-admin-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-admin-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-admin-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-admin-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-admin-baseline.txt
+          echo P01_ADMIN_CLOSURE_FRESH_BASELINE_PASS
+
+      - name: Authenticated admin overview HTTP smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=http://127.0.0.1:18097
+          python3 - <<'PY' >/tmp/p01-admin-login.json
+          import json, os
+          print(json.dumps({"password": os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-admin.cookies -b /tmp/p01-admin.cookies \
+            -H 'Content-Type: application/json' \
+            -X POST "$BASE/api.php?action=login" \
+            --data-binary @/tmp/p01-admin-login.json \
+            -o /tmp/p01-admin-login-result.json
+          grep -F '"ok":true' /tmp/p01-admin-login-result.json >/dev/null
+
+          STATUS=$(curl -sS -o /tmp/p01-manage.html -w '%{http_code}' -c /tmp/p01-admin.cookies -b /tmp/p01-admin.cookies "$BASE/manage.php")
+          test "$STATUS" = "200"
+          grep -F 'data-vf-group="overview"' /tmp/p01-manage.html >/dev/null
+          grep -F '>概览<' /tmp/p01-manage.html >/dev/null
+          grep -F '>资源<' /tmp/p01-manage.html >/dev/null
+          grep -F '>数据<' /tmp/p01-manage.html >/dev/null
+          grep -F '>系统<' /tmp/p01-manage.html >/dev/null
+          grep -F '>设置<' /tmp/p01-manage.html >/dev/null
+          grep -F '不制造健康度或进度分数' /tmp/p01-manage.html >/dev/null
+
+          STATUS2=$(curl -sS -o /tmp/p01-system.html -w '%{http_code}' -c /tmp/p01-admin.cookies -b /tmp/p01-admin.cookies "$BASE/system.php")
+          test "$STATUS2" = "200"
+          grep -F '维护与诊断工具' /tmp/p01-system.html >/dev/null
+          echo P01_ADMIN_CLOSURE_AUTHENTICATED_HTTP_PASS
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/p01-admin-closure-server.pid ]; then kill "$(cat /tmp/p01-admin-closure-server.pid)" 2>/dev/null || true; fi
+          rm -rf /tmp/p01-admin-closure-runtime /tmp/p01-admin.cookies /tmp/p01-admin-*.html /tmp/p01-admin-*.json /tmp/p01-admin-*.txt
+          echo P01_ADMIN_CLOSURE_CLEANUP_DONE
