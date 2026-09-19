@@ -16,6 +16,7 @@
 | Transient Private Checkout on Hosted Runner | ALLOWED WITH SECRET + CLEANUP |
 | One-off Workflow / PR | ALLOWED / CLOSE WITHOUT MERGE DEFAULT |
 | Reusable Harness Main Adoption | REQUIRE EXPLICIT REUSE DECISION |
+| Repeated Version Lane Identity | SINGLE-SOURCE SPEC / NO RAW COPY-REPLACE |
 | Machine PASS Self-sign by AI | FORBIDDEN |
 | Runner Failure = Product Failure | FORBIDDEN CLASSIFICATION |
 | Third Long-term Test Space | NOT ALLOWED BY DEFAULT |
