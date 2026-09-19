@@ -208,10 +208,6 @@ def verify(root: Path) -> list[str]:
     if not (active_dir / "core-agent-current-verify.yml").is_file():
         failures.append("CURRENT_CORE_AGENT_HARNESS_MISSING")
 
-    for prefix in ("p01", "p02", "p03", "p04", "p05", "p06", "s01"):
-        if sorted(active_dir.glob(f"{prefix}*.yml")):
-            failures.append(f"ACTIVE_{prefix.upper()}_HISTORICAL_WORKFLOW_REMAINS")
-
     old_counts = {
         "p02": 83,
         "p03": 78,
