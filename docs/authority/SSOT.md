@@ -93,6 +93,19 @@ Current Self Test -> current runner allocation / provenance / current shared hel
 
 真实共享安全合同可以被多个 Gate 显式调用；普通测试模块不得因为目录位置被机械耦合进所有 Gate。
 
+## 5.3 Release-capable Trigger Boundary
+
+含 `VF_RELEASE_WRITE_TOKEN` / `gh release create` 等正式 Release 写能力的 Workflow 不得以“任意分支 push + 仅 paths 过滤”作为触发边界。
+
+```text
+release-capable + push -> dedicated branches REQUIRED
+historical exact-version release workflow -> workflow_dispatch preferred
+workflow maintenance != release authorization
+path match alone != formal release gate
+```
+
+该规则只约束触发边界，不把 Merge / Release / Distribution / Production 合并为一个阶段。
+
 ## 6. Failure Semantics
 
 ```text
