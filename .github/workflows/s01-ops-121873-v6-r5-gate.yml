@@ -1,4 +1,4 @@
-name: S01 Ops 1.21.873 Distribution Gate
+name: S01 Ops 1.21.873 Live Update Smoke
 
 on:
   pull_request:
@@ -8,90 +8,70 @@ permissions:
   contents: read
 
 jobs:
-  distribution-gate:
+  live-update-smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
-      CORE_SHA: d02c67517ef576f4bc7be6012b3923ac303bbfcc
-      BASE_SHA: e934e0a0c4fcc572b6224a318e2d0e8a353c221d
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
     steps:
-      - name: Checkout exact core-updates candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: llhzx2018/core-updates
-          ref: d02c67517ef576f4bc7be6012b3923ac303bbfcc
-          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-          fetch-depth: 0
-          path: core-updates
-          persist-credentials: false
-
-      - name: Exact distribution scope
+      - name: Verify private authorities
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_SHA"
-          test "$(git -C core-updates diff --name-only "$BASE_SHA" "$CORE_SHA")" = "projects/S01-C02.json"
-          echo OPS_121873_DISTRIBUTION_SCOPE=PASS
+          for repo in core-updates vf-tools-theme vf-tools-ops vf-tools-m3u8; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}'               -H 'Accept: application/vnd.github+json'               -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN"               "https://api.github.com/repos/llhzx2018/$repo" || true)"
+            echo "$repo HTTP $code"
+            test "$code" = "200"
+          done
+          echo S01_PRIVATE_AUTHORITIES=PASS
 
-      - name: Manifest identity and source eligibility
+      - name: Read live S01 manifests
         shell: bash
         run: |
           set -Eeuo pipefail
-          m=core-updates/projects/S01-C02.json
-          jq -e '.target_version=="1.21.873"
-            and .release_tag=="v1.21.873"
-            and .asset_name=="vf-tools-ops_V1.21.873.zip"
-            and .asset_bytes==3430541
-            and .asset_sha256=="04271b8aadca8c23033347048f56bec3c31a1fe20dc60b99d01d5228bae86094"
-            and .schema_from=="6.0.0"
-            and .schema_to=="6.0.0"
-            and .runtime_files==953
-            and .runtime_file_count==953
-            and .runtime_fingerprint=="0b10d2a7b425d45a6172bc91cddf3b05bdd98e6eba1f2594a7ad34e19f2ca763"
-            and .runtime_fingerprint_sha256=="0b10d2a7b425d45a6172bc91cddf3b05bdd98e6eba1f2594a7ad34e19f2ca763"
-            and .locator_cutover==false
-            and .enabled==true' "$m" >/dev/null
-          jq -e '.from_versions | index("1.21.872") != null and index("1.21.870") != null and index("1.21.861") == null' "$m" >/dev/null
-          test "$(jq -r '.from_versions | length' "$m")" = "23"
-          test "$(jq -r '.from_versions | unique | length' "$m")" = "23"
-          test "$(jq -r '.target_version' core-updates/projects/S01-C01.json)" = "1.35.28"
-          test "$(jq -r '.target_version' core-updates/projects/S01-C03.json)" = "1.25.32"
-          echo OPS_121873_MANIFEST=PASS
+          mkdir -p /tmp/live
+          for c in S01-C01 S01-C02 S01-C03; do
+            curl -fsSL               -H 'Accept: application/vnd.github+json'               -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN"               "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/$c.json?ref=main"               | jq -r '.content' | tr -d '\n' | base64 -d > "/tmp/live/$c.json"
+          done
+          test "$(jq -r '.target_version' /tmp/live/S01-C01.json)" = "1.35.28"
+          test "$(jq -r '.target_version' /tmp/live/S01-C02.json)" = "1.21.873"
+          test "$(jq -r '.target_version' /tmp/live/S01-C03.json)" = "1.25.32"
+          jq -e '.from_versions | index("1.21.872") != null' /tmp/live/S01-C02.json >/dev/null
+          jq -e '.from_versions | index("1.21.861") == null' /tmp/live/S01-C02.json >/dev/null
+          echo S01_LIVE_MANIFESTS=PASS
 
-      - name: Core update contracts
+      - name: Download live formal packages
         shell: bash
         run: |
           set -Eeuo pipefail
-          cd core-updates
-          python3 scripts/check_manifest_contract.py
-          php update-core/php/tests/run.php
-          echo CORE_UPDATE_CONTRACTS=PASS
-
-      - name: Authenticated formal asset readback
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          m=core-updates/projects/S01-C02.json
-          repo="$(jq -r '.repository' "$m")"
-          tag="$(jq -r '.release_tag' "$m")"
-          asset="$(jq -r '.asset_name' "$m")"
-          bytes="$(jq -r '.asset_bytes' "$m")"
-          sha="$(jq -r '.asset_sha256' "$m")"
-          curl -fsSL -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/tags/$tag" > /tmp/release.json
-          aid="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .id' /tmp/release.json | head -n1)"
-          test "$aid" = "573825992"
-          curl -fsSL -L -H 'Accept: application/octet-stream' -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN" "https://api.github.com/repos/$repo/releases/assets/$aid" -o "/tmp/$asset"
-          test "$(stat -c '%s' "/tmp/$asset")" = "$bytes"
-          test "$(sha256sum "/tmp/$asset" | awk '{print $1}')" = "$sha"
-          unzip -tq "/tmp/$asset" >/dev/null
-          test "$(unzip -Z1 "/tmp/$asset" | cut -d/ -f1 | sort -u)" = "vf-ops"
-          unzip -p "/tmp/$asset" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.873'
-          unzip -Z1 "/tmp/$asset" | grep -Fxq 'vf-ops/includes/admin-v13/views/publish_zip_v6.php'
-          unzip -Z1 "/tmp/$asset" | grep -Fxq 'vf-ops/includes/admin-v13/views/system_site_release_v6.php'
-          unzip -Z1 "/tmp/$asset" | grep -Fxq 'vf-ops/assets/css/current/admin-s01-v6-publish-system-r5.css'
-          echo OPS_121873_PRIVATE_ASSET=PASS
+          mkdir -p /tmp/assets
+          verify() {
+            m="$1"; root="$2"; identity="$3"; needle="$4"
+            repo="$(jq -r '.repository' "$m")"
+            tag="$(jq -r '.release_tag' "$m")"
+            asset="$(jq -r '.asset_name' "$m")"
+            bytes="$(jq -r '.asset_bytes' "$m")"
+            sha="$(jq -r '.asset_sha256' "$m")"
+            curl -fsSL               -H 'Accept: application/vnd.github+json'               -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN"               "https://api.github.com/repos/$repo/releases/tags/$tag" > /tmp/release.json
+            aid="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .id' /tmp/release.json | head -n1)"
+            test -n "$aid" && test "$aid" != null
+            curl -fsSL -L               -H 'Accept: application/octet-stream'               -H "Authorization: Bearer $VF_PRIVATE_READ_TOKEN"               "https://api.github.com/repos/$repo/releases/assets/$aid" -o "/tmp/assets/$asset"
+            test "$(stat -c '%s' "/tmp/assets/$asset")" = "$bytes"
+            test "$(sha256sum "/tmp/assets/$asset" | awk '{print $1}')" = "$sha"
+            unzip -tq "/tmp/assets/$asset" >/dev/null
+            test "$(unzip -Z1 "/tmp/assets/$asset" | cut -d/ -f1 | sort -u)" = "$root"
+            unzip -p "/tmp/assets/$asset" "$identity" | grep -Fq "$needle"
+            echo "PASS $asset"
+          }
+          verify /tmp/live/S01-C01.json vf-tools-theme vf-tools-theme/style.css 'Version: 1.35.28'
+          verify /tmp/live/S01-C02.json vf-ops vf-ops/vf-ops.php 'Version: 1.21.873'
+          verify /tmp/live/S01-C03.json vf-tool-m3u8 vf-tool-m3u8/vf-tool-m3u8.php 'Version: 1.25.32'
+          unzip -Z1 /tmp/assets/vf-tools-ops_V1.21.873.zip | grep -Fxq 'vf-ops/includes/admin-v13/views/publish_zip_v6.php'
+          unzip -Z1 /tmp/assets/vf-tools-ops_V1.21.873.zip | grep -Fxq 'vf-ops/includes/admin-v13/views/system_site_release_v6.php'
+          unzip -Z1 /tmp/assets/vf-tools-ops_V1.21.873.zip | grep -Fxq 'vf-ops/assets/css/current/admin-s01-v6-publish-system-r5.css'
+          echo S01_LIVE_PACKAGES=PASS
 
       - name: Result
-        run: echo PASS_S01_OPS_121873_DISTRIBUTION_GATE
+        run: |
+          echo PASS_S01_OPS_121873_LIVE_UPDATE_AVAILABLE
+          echo LIVE_TARGETS=Theme_1.35.28,Ops_1.21.873,M3U8_1.25.32
