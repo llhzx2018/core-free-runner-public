@@ -1,0 +1,211 @@
+name: S01 Ops 1.21.882 R14 Candidate Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      CANDIDATE_SHA: be196518d8590564290f270e261dc5bf243366b4
+      BASE_SHA: 43ea49f1d38f856ef5d1c89d0a17b5d5a13c4fbb
+      VERSION: 1.21.882
+      PREVIOUS_VERSION: 1.21.881
+      PREVIOUS_TAG: v1.21.881
+      ASSET: vf-tools-ops_V1.21.882.zip
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.881.zip
+    steps:
+      - name: Checkout exact Ops candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: be196518d8590564290f270e261dc5bf243366b4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Exact identity and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.882' ops/vf-ops.php
+          grep -Fq 'S01-MATURE-ADMIN-V6-R14-MOBILE-NAVIGATION-CLOSURE' ops/vf-ops.php
+          actual="$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            VERSION \
+            assets/css/current/admin-s01-v6-shell-r1.css \
+            assets/js/admin-s01-domain-shell-r1.js \
+            includes/s01/v6-landing-shell.php \
+            tests/s01-v6-r14-mobile-navigation-closure-contract.php \
+            vf-ops.php | sort)"
+          test "$actual" = "$expected"
+          echo PASS_EXACT_IDENTITY_AND_SCOPE
+
+      - name: R14 contract and full PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php ops/tests/s01-v6-r14-mobile-navigation-closure-contract.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops -type f -name '*.php' -print0 | sort -z)
+          echo PASS_R14_CONTRACT_AND_PHP
+
+      - name: Mobile navigation lifecycle assertions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('ops')
+          shell=(root/'includes/s01/v6-landing-shell.php').read_text(encoding='utf-8')
+          js=(root/'assets/js/admin-s01-domain-shell-r1.js').read_text(encoding='utf-8')
+          css=(root/'assets/css/current/admin-s01-v6-shell-r1.css').read_text(encoding='utf-8')
+          changelog=(root/'CHANGELOG.md').read_text(encoding='utf-8')
+
+          assert '切换业务域，当前：' in shell
+          for s in [
+              "summary.setAttribute('aria-label', '切换业务域，当前：' + label)",
+              'function closeMobileDomainNav(details, restoreFocus)',
+              "event.key !== 'Escape'",
+              'closeMobileDomainNav(details, true)',
+              "document.addEventListener('pointerdown'",
+              'if (!details.contains(event.target))',
+              "window.matchMedia('(min-width: 961px)')",
+              "document.addEventListener('vfops:saas-soft-refreshed', boot)"
+          ]:
+              assert s in js, s
+
+          summary = css[css.index('.vf-v6-domain-mobile > summary,'):]
+          assert 'min-height: 44px !important;' in summary[:1400]
+          links = css[css.index('.vf-v6-domain-mobile > nav > a,'):]
+          assert 'min-height: 44px !important;' in links[:900]
+          assert '## V1.21.882 · Mature Admin V6 R14 Mobile Navigation Closure' in changelog
+          assert 'projectExistingShell(page);' in js
+          assert 'projectSidebar(page);' in js
+          assert 'projectAdminBar();' in js
+          print('PASS_R14_MOBILE_NAVIGATION_LIFECYCLE')
+          PY
+
+      - name: Ownership updater and routing fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- \
+            includes/wp-update \
+            includes/v6 \
+            includes/site-release \
+            includes/publish-workflow \
+            includes/system-governance | wc -l)" = "0"
+          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' \
+            ops/includes/s01/v6-landing-shell.php \
+            ops/assets/js/admin-s01-domain-shell-r1.js \
+            ops/assets/css/current/admin-s01-v6-shell-r1.css \
+            ops/vf-ops.php
+          echo PASS_BOUNDARY_AND_SECURITY
+
+      - name: Build deterministic Runtime Authority package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage1 stage2 dist
+          mkdir -p stage1/vf-ops stage2/vf-ops dist
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,shutil
+          src=Path('ops')
+          def runtime(rel):
+              rel=rel.replace('\\','/').lstrip('/')
+              if not rel or '../' in rel: return False
+              if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)', rel, re.I): return False
+              if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$', rel, re.I): return False
+              if '/' not in rel: return rel in {'vf-ops.php','uninstall.php'}
+              return rel.startswith(('includes/','assets/','languages/','config/'))
+          rows=[]
+          for p in sorted((x for x in src.rglob('*') if x.is_file()), key=lambda x:x.relative_to(src).as_posix()):
+              rel=p.relative_to(src).as_posix()
+              if not runtime(rel): continue
+              if p.is_symlink(): raise SystemExit('runtime symlink forbidden: '+rel)
+              b=p.read_bytes()
+              rows.append((rel,hashlib.sha256(b).hexdigest()))
+              for stage in (Path('stage1/vf-ops'),Path('stage2/vf-ops')):
+                  q=stage/rel; q.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,q)
+          canonical=b''.join(rel.encode()+b'\0'+sha.encode()+b'\n' for rel,sha in rows)
+          Path('/tmp/runtime_count').write_text(str(len(rows)))
+          Path('/tmp/runtime_fp').write_text(hashlib.sha256(canonical).hexdigest())
+          Path('/tmp/runtime_files.txt').write_text('\n'.join(r for r,_ in rows)+'\n')
+          print('RUNTIME_FILES='+str(len(rows)))
+          print('RUNTIME_FINGERPRINT='+hashlib.sha256(canonical).hexdigest())
+          PY
+          (cd stage1 && zip -X -q -r "../dist/$ASSET" vf-ops)
+          (cd stage2 && zip -X -q -r "../dist/rebuild-$ASSET" vf-ops)
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.882'
+          sha256sum "dist/$ASSET" | awk '{print $1}' > /tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" > /tmp/asset_bytes
+          echo PASS_DETERMINISTIC_RUNTIME_PACKAGE
+
+      - name: Previous release compatibility and rollback gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          unzip -p "previous/$PREVIOUS_ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.881'
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sed 's#^vf-ops/##' | sort > /tmp/prev_files.txt
+          sort /tmp/runtime_files.txt > /tmp/new_files.txt
+          comm -13 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/added.txt
+          comm -23 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/removed.txt
+          test ! -s /tmp/added.txt
+          test ! -s /tmp/removed.txt
+          test "$(wc -l < /tmp/new_files.txt | tr -d ' ')" = "$(wc -l < /tmp/prev_files.txt | tr -d ' ')"
+          echo "ROLLBACK_ASSET=$PREVIOUS_TAG/$PREVIOUS_ASSET"
+          echo PASS_PREVIOUS_RELEASE_COMPATIBILITY_AND_ROLLBACK
+
+      - name: Candidate receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/candidate-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$CANDIDATE_SHA
+          BASE_RELEASE=$PREVIOUS_TAG
+          ASSET=$ASSET
+          BYTES=$(cat /tmp/asset_bytes)
+          SHA256=$(cat /tmp/asset_sha)
+          RUNTIME_FILES=$(cat /tmp/runtime_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)
+          RUNTIME_ADDED=NONE
+          RUNTIME_REMOVED=NONE
+          SCHEMA=6.0.0_UNCHANGED
+          DATA_MIGRATION=NONE
+          OWNER_REAL_USE=POST_RELEASE_NOT_RUN
+          P3_004=DEFERRED_UNVERIFIED
+          RESULT=PASS
+          EOF
+          cat /tmp/candidate-receipt.txt
+          echo PASS_S01_OPS_121882_CANDIDATE_GATE
+
+      - name: Upload exact tested candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121882-candidate-${{ github.run_id }}
+          path: |
+            dist/vf-tools-ops_V1.21.882.zip
+            /tmp/candidate-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
