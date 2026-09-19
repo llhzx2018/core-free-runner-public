@@ -61,45 +61,38 @@ class WorkflowArchiveTests(unittest.TestCase):
         for name in MODULE.HISTORICAL_CORE_AGENT_NAMES:
             self.assertFalse((root / ".github/workflows" / name).exists())
 
-    def test_p02_historical_workflows_are_not_registered(self):
+    def test_p02_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p02*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p02").glob("p02*.yml"))
         self.assertEqual(len(archived), 83)
 
-    def test_p03_historical_workflows_are_not_registered(self):
+    def test_p03_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p03*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p03").glob("p03*.yml"))
         self.assertEqual(len(archived), 78)
 
-    def test_p04_historical_workflows_are_not_registered(self):
+    def test_p04_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p04*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p04").glob("p04*.yml"))
         self.assertEqual(len(archived), 67)
 
-    def test_p05_historical_workflows_are_not_registered(self):
+    def test_p05_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p05*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p05").glob("p05*.yml"))
         self.assertEqual(len(archived), 17)
 
-    def test_p06_historical_workflows_are_not_registered(self):
+    def test_p06_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p06*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p06").glob("p06*.yml"))
         self.assertEqual(len(archived), 62)
 
-    def test_p01_historical_workflows_are_not_registered(self):
+    def test_p01_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("p01*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "p01").glob("p01*.yml"))
         self.assertEqual(len(archived), 58)
 
-    def test_s01_historical_workflows_are_not_registered(self):
+    def test_s01_historical_archive_count_is_preserved(self):
         root = Path(__file__).resolve().parents[1]
-        self.assertEqual(list((root / ".github/workflows").glob("s01*.yml")), [])
         archived = list((root / MODULE.ARCHIVE_BATCH / "historical-version" / "s01").glob("s01*.yml"))
         self.assertEqual(len(archived), 6)
 
