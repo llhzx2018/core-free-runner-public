@@ -1,0 +1,119 @@
+name: p01-v24721-bind-temp
+
+on:
+  push:
+    branches:
+      - run/p01-v24721-bind
+
+permissions:
+  contents: read
+
+jobs:
+  bind-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: c7c162227473c2fb1c9ae5b416d7e78153215dec
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout engineering base
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 65289cc77713575192fee399185c638c2326eb7d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: base
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, simplexml, mbstring, openssl
+          coverage: none
+
+      - name: Exact bind scope and syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C target rev-parse HEAD)" = "c7c162227473c2fb1c9ae5b416d7e78153215dec"
+          test "$(cat target/VERSION)" = "2.47.21"
+          test "$(cat target/src/VERSION.txt)" = "2.47.21"
+          grep -Fq "define('VF_VERSION', '2.47.21');" target/src/app/bootstrap.php
+          git -C base remote add candidate ../target
+          git -C base fetch candidate HEAD:candidate
+          mapfile -t changed < <(git -C base diff --name-only HEAD..candidate | sort)
+          printf '%s\n' "${changed[@]}" >/tmp/p01-v24721-bind-files.txt
+          diff -u <(printf '%s\n' VERSION docs/release/V2.47.21_RELEASE_GATE.md src/VERSION.txt src/app/bootstrap.php | sort) /tmp/p01-v24721-bind-files.txt
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V24721_BIND_SCOPE_SYNTAX=PASS
+
+      - name: Focused backend contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target
+          php tests/unit/admin_overview_ia_contract.php
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          php tests/unit/advanced_manager_daily_entry_contract.php
+          php tests/unit/admin_visual_system_r3_contract.php
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.21_RELEASE_GATE.md
+          grep -Fq 'NO_UNKNOWN_APPLICABILITY = YES' docs/release/V2.47.21_RELEASE_GATE.md
+          echo P01_V24721_BIND_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install baseline and authenticated smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-v24721-runtime
+          cp -a target/src /tmp/p01-v24721-runtime
+          cd /tmp/p01-v24721-runtime
+          php -S 127.0.0.1:18098 -t . >/tmp/p01-v24721-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; rm -rf /tmp/p01-v24721-runtime /tmp/p01-v24721-*' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS -c /tmp/p01-v24721.cookies -b /tmp/p01-v24721.cookies http://127.0.0.1:18098/setup.php -o /tmp/p01-v24721-setup.html && break
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24721-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v24721.cookies -b /tmp/p01-v24721.cookies -X POST http://127.0.0.1:18098/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF V24721 Bind'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-v24721-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v24721-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24721-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v24721-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v24721-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-v24721-baseline.txt
+          python3 - <<PY >/tmp/p01-v24721-login.json
+          import json
+          print(json.dumps({"password": """$TEST_PASSWORD"""}))
+          PY
+          curl -fsS -c /tmp/p01-v24721.cookies -b /tmp/p01-v24721.cookies -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18098/api.php?action=login' --data-binary @/tmp/p01-v24721-login.json             -o /tmp/p01-v24721-login-result.json
+          grep -F '"ok":true' /tmp/p01-v24721-login-result.json >/dev/null
+          curl -fsS -c /tmp/p01-v24721.cookies -b /tmp/p01-v24721.cookies http://127.0.0.1:18098/manage.php -o /tmp/p01-v24721-manage.html
+          grep -F 'data-vf-group="overview"' /tmp/p01-v24721-manage.html >/dev/null
+          grep -F '不制造健康度或进度分数' /tmp/p01-v24721-manage.html >/dev/null
+          echo P01_V24721_BIND_FRESH_AUTH_SMOKE=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_V24721_BOUND_CANDIDATE_GATE=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
