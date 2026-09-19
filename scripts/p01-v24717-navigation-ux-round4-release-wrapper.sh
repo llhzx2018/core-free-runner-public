@@ -49,7 +49,7 @@ pairs=[
 ("/tmp/p01-v24714-navigation-rebuild","/tmp/p01-v24717-navigation-round4-rebuild"),
 ("P01_V24714_NAVIGATION_ROW_RELEASE_GATE=PASS","P01_V24717_NAVIGATION_UX_ROUND4_RELEASE_GATE=PASS"),
 ("R14_GATE_RECEIPT.txt","R17_GATE_RECEIPT.txt"),
-("V24713_TO_V24714_ATOMIC_UPGRADE=PASS","V24715_TO_V24717_ATOMIC_UPGRADE=PASS"),
+("V24713_TO_V24714_ATOMIC_UPGRADE=PASS","V24716_TO_V24717_ATOMIC_UPGRADE=PASS"),
 ("OWNER_PREVIEW_RUNTIME_REASON=bounded corrective layout bug; no new product shape or interaction contract","OWNER_PREVIEW_RUNTIME_REASON=implementation-only shell ownership simplification; no new product shape, IA, auth boundary, or interaction contract"),
 ]
 for a,b in pairs:
