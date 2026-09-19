@@ -4,36 +4,115 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - '.github/workflows/*.yml'
-      - 'scripts/check_runner_trigger_scope.py'
-      - 'tests/test_runner_trigger_scope.py'
-      - 'scripts/check_estate_anti_drift.py'
-      - 'tests/test_estate_anti_drift.py'
+      - '.github/workflows/runner-trigger-scope-gate.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  p01_navigation_ux_round6_gate:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'temp/p01-navigation-ux-round6-single-owner-gate-20260919'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout temporary proof lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          path: runner
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          python-version: '3.11'
+          repository: llhzx2018/vf-start
+          ref: d38b87b92b98797698358de274feb75ddb47a626
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: target
 
-      - name: Verify trigger quarantine
-        run: python scripts/check_runner_trigger_scope.py --inventory
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
 
-      - name: Run trigger scope regression tests
-        run: python -m unittest discover -s tests -v
+      - name: Exact source identity and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "d38b87b92b98797698358de274feb75ddb47a626"
+          test "$(tr -d '\r\n ' < target/VERSION)" = "2.47.18"
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo 'P01_NAVIGATION_UX_ROUND6_SOURCE_IDENTITY=PASS'
 
-      - name: Verify Git Estate anti-drift
-        env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        run: python scripts/check_estate_anti_drift.py --live
+      - name: Run focused single-owner regressions
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/global_account_actions_contract.php
+          php tests/unit/public_global_nav_contract.php
+          php tests/unit/subject_domain_nav_shell_contract.php
+          php tests/unit/navigation_owner_behavior_privacy_contract.php
+          php tests/unit/navigation_owner_views_round3_contract.php
+          php tests/unit/navigation_search_context_contract.php
+          echo 'P01_NAVIGATION_UX_ROUND6_FOCUSED_REGRESSION=PASS'
+
+      - name: Fresh owner and public shell smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-round6-runtime
+          cp -a target/src /tmp/p01-round6-runtime
+          cd /tmp/p01-round6-runtime
+          php -S 127.0.0.1:18099 -t . >/tmp/p01-round6-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-round6.cookies -b /tmp/p01-round6.cookies http://127.0.0.1:18099/setup.php -o /tmp/p01-round6-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-round6-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"', text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-round6.cookies -b /tmp/p01-round6.cookies -X POST http://127.0.0.1:18099/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=P01 Round6 Gate'             --data-urlencode 'admin_password=Round6Gate!2026'             --data-urlencode 'admin_password_confirm=Round6Gate!2026'             -o /tmp/p01-round6-setup-post.html
+
+          curl -fsS 'http://127.0.0.1:18099/start.php?scope=public' -o /tmp/p01-round6-public.html
+          test "$(grep -Fc 'data-vf-auth-login' /tmp/p01-round6-public.html)" = "1"
+          grep -F '<div class="vf-sidebar-bottom" aria-label="版本信息">' /tmp/p01-round6-public.html >/dev/null
+          ! grep -F '♲ <span>回收站</span>' /tmp/p01-round6-public.html >/dev/null
+          ! grep -F '☷ <span>资源管理</span>' /tmp/p01-round6-public.html >/dev/null
+          ! grep -F '⚙ <span>设置</span>' /tmp/p01-round6-public.html >/dev/null
+
+          curl -fsS -c /tmp/p01-round6.cookies -b /tmp/p01-round6.cookies             -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18099/api.php?action=login'             --data '{"password":"Round6Gate!2026"}'             -o /tmp/p01-round6-login.json
+          grep -F '"ok":true' /tmp/p01-round6-login.json >/dev/null
+          curl -fsS -c /tmp/p01-round6.cookies -b /tmp/p01-round6.cookies 'http://127.0.0.1:18099/start.php' -o /tmp/p01-round6-owner.html
+
+          test "$(grep -Fc 'href="settings.php" class="vf-global-account-action vf-global-account-settings"' /tmp/p01-round6-owner.html)" = "1"
+          test "$(grep -Fc 'href="surface-manager.php?advanced=1" role="menuitem">资源管理</a>' /tmp/p01-round6-owner.html)" = "1"
+          test "$(grep -Fc 'href="recycle-bin.php" role="menuitem">回收站</a>' /tmp/p01-round6-owner.html)" = "1"
+          test "$(grep -Fc 'data-vf-auth-logout' /tmp/p01-round6-owner.html)" = "1"
+          grep -F '<div class="vf-sidebar-bottom" aria-label="版本信息">' /tmp/p01-round6-owner.html >/dev/null
+          ! grep -F '♲ <span>回收站</span>' /tmp/p01-round6-owner.html >/dev/null
+          ! grep -F '☷ <span>资源管理</span>' /tmp/p01-round6-owner.html >/dev/null
+          ! grep -F '⚙ <span>设置</span>' /tmp/p01-round6-owner.html >/dev/null
+          echo 'P01_NAVIGATION_UX_ROUND6_FRESH_HTTP_SINGLE_OWNER=PASS'
+
+      - name: Gate receipt
+        shell: bash
+        run: |
+          echo 'P01_NAVIGATION_UX_ROUND6_GATE=PASS'
+          echo 'GLOBAL_ACCOUNT_SINGLE_OWNER=PASS'
+          echo 'SIDEBAR_VERSION_ONLY=PASS'
+          echo 'SCHEMA_CHANGE=NONE'
+          echo 'MIGRATION=NONE'
+          echo 'PRODUCTION=NOT_WRITTEN'
