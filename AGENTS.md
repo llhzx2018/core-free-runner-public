@@ -65,7 +65,7 @@ Public 禁止持久化：私人源码、PRIVATE_DATA、真实数据库、Product
 
 `main` 只承载 Current Runner 基线与已裁决为可复用的公共 Harness。禁止 Force Push / History Rewrite。
 
-重复版本 Lane 若只是沿用同一验证形状并替换 Version / SHA / Tree / from_versions，不得继续靠全文搜索替换旧 Workflow。优先使用 \`scripts/ephemeral_lane_spec.py\` 把 Lane identity 收敛到单一 spec，再由模板/Workflow 消费；产品专用验证逻辑仍可保持在临时 Lane，不因此升级为永久通用 Workflow。
+重复版本 Lane 若只是沿用同一验证形状并替换 Version / SHA / Tree / from_versions，不得继续靠全文搜索替换旧 Workflow。优先使用 `scripts/ephemeral_lane_spec.py` 把 Lane identity 收敛到单一 spec，再由模板/Workflow 消费；在触发 Runner 前必须执行 `audit-rendered` 对最终 Workflow 做 target-owned identity preflight，旧版本仍可作为 source version，但不得残留在 TARGET_VERSION / TARGET_SHA / --target-version 等目标身份位置。产品专用验证逻辑仍可保持在临时 Lane，不因此升级为永久通用 Workflow。
 
 一次性项目验证默认：
 

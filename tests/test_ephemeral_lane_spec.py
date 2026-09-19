@@ -130,6 +130,57 @@ class EphemeralLaneSpecTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("IDENTITY_LITERAL_IN_TEMPLATE:2.5.38", result.stdout)
 
+    def test_audit_rendered_accepts_previous_target_as_source_only(self):
+        spec = self.write_spec()
+        rendered = self.dir / "candidate.yml"
+        rendered.write_text(
+            "env:\n"
+            "  TARGET_REPO: llhzx2018/vf-library\n"
+            "  TARGET_VERSION: 2.5.39\n"
+            "  TARGET_SHA: 65a988761b9f398b7031ea889c51a8a054844099\n"
+            "steps:\n"
+            "  - run: |\n"
+            "      build --target-version 2.5.39 --source-version 2.5.38\n",
+            encoding="utf-8",
+        )
+        result = self.run_cmd("audit-rendered", "--spec", spec, "--input", rendered)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["target_version"], "2.5.39")
+
+    def test_audit_rendered_rejects_stale_target_binding(self):
+        spec = self.write_spec()
+        rendered = self.dir / "bad-target.yml"
+        rendered.write_text(
+            "env:\n"
+            "  TARGET_REPO: llhzx2018/vf-library\n"
+            "  TARGET_VERSION: 2.5.38\n"
+            "  TARGET_SHA: 65a988761b9f398b7031ea889c51a8a054844099\n"
+            "steps:\n"
+            "  - run: build --target-version 2.5.39\n",
+            encoding="utf-8",
+        )
+        result = self.run_cmd("audit-rendered", "--spec", spec, "--input", rendered)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("IDENTITY_MISMATCH:TARGET_VERSION", result.stdout)
+
+    def test_audit_rendered_rejects_stale_target_cli_literal(self):
+        spec = self.write_spec()
+        rendered = self.dir / "bad-cli.yml"
+        rendered.write_text(
+            "env:\n"
+            "  TARGET_REPO: llhzx2018/vf-library\n"
+            "  TARGET_VERSION: 2.5.39\n"
+            "  TARGET_SHA: 65a988761b9f398b7031ea889c51a8a054844099\n"
+            "steps:\n"
+            "  - run: build --target-version 2.5.38 --source-version 2.5.38\n",
+            encoding="utf-8",
+        )
+        result = self.run_cmd("audit-rendered", "--spec", spec, "--input", rendered)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("IDENTITY_MISMATCH:TARGET_VERSION", result.stdout)
+
     def test_rejects_target_inside_source_versions(self):
         bad = dict(self.spec)
         bad["source_versions"] = ["2.5.38", "2.5.39"]

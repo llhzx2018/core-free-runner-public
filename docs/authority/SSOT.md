@@ -67,7 +67,7 @@ ONE-OFF PROJECT WORKFLOW
 
 ### 5.1 Repeated Lane Identity
 
-同一 Candidate / Formal Release / Discovery 形状跨版本重复使用时，Version、Source SHA/Tree、from_versions 等动态 identity 必须优先收敛为一次性 Lane spec，而不是散落在 Workflow 多处手工替换。Current helper：\`scripts/ephemeral_lane_spec.py\`。
+同一 Candidate / Formal Release / Discovery 形状跨版本重复使用时，Version、Source SHA/Tree、from_versions 等动态 identity 必须优先收敛为一次性 Lane spec，而不是散落在 Workflow 多处手工替换。Current helper：`scripts/ephemeral_lane_spec.py`。最终生成/修改后的 Workflow 在触发 Runner 前必须再执行 `audit-rendered`；该 preflight 只审计 target-owned identity，不会把仍合法存在于 `source_versions` 的上一版本误判为残留。
 
 固定边界：
 
