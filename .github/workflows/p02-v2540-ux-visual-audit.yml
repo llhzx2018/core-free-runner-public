@@ -1,0 +1,141 @@
+name: P02 V2.5.40 UX Visual Audit
+
+on:
+  push:
+    branches:
+      - run/p02-v2540-ux-visual-audit-20260919
+    paths:
+      - '.github/workflows/p02-v2540-ux-visual-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact private P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: c20e6fec28358a1cf2c3fe3b68b5cc85eacc90a4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install runtime and Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Build synthetic site and capture UI states
+        shell: bash
+        working-directory: product
+        env:
+          VF_UX_E2E_PORT: "18090"
+          VF_UX_E2E_PASSWORD: "VF-Visual-Audit-Only!"
+        run: |
+          set -Eeuo pipefail
+          ROOT="$PWD"
+          RUN_ROOT="$RUNNER_TEMP/p02-v2540-visual"
+          SITE="$RUN_ROOT/site"
+          COOKIE="$RUN_ROOT/cookies.txt"
+          BASE_URL="http://127.0.0.1:${VF_UX_E2E_PORT}"
+          mkdir -p "$RUN_ROOT/screens"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S "127.0.0.1:${VF_UX_E2E_PORT}" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do
+            curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break
+            sleep .25
+          done
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+import html,re,sys
+s=open(sys.argv[1],encoding='utf-8').read()
+m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+if not m: raise SystemExit('setup csrf missing')
+print(html.unescape(m.group(1)))
+PY
+)"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL"             --data-urlencode "setup_csrf=$SETUP_CSRF"             --data-urlencode "password=$VF_UX_E2E_PASSWORD"             --data-urlencode "password_confirm=$VF_UX_E2E_PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = "303"
+          export VF_UX_E2E_BASE_URL="$BASE_URL"
+          export VF_UX_E2E_VERSION="$(tr -d '\r\n' < VERSION)"
+          node tests/e2e/p02_ux_task_flow.mjs >/dev/null
+
+          node --input-type=module <<'NODE'
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+const base=process.env.VF_UX_E2E_BASE_URL;
+const password=process.env.VF_UX_E2E_PASSWORD;
+const out=process.env.RUNNER_TEMP+'/p02-v2540-visual/screens';
+fs.mkdirSync(out,{recursive:true});
+const browser=await chromium.launch({headless:true});
+const context=await browser.newContext({viewport:{width:1440,height:900}});
+const page=await context.newPage();
+async function login(){
+  await page.goto(base+'/',{waitUntil:'networkidle'});
+  const unlock=page.locator('[data-open-login]').first();
+  if(await unlock.count()){
+    await page.waitForFunction(()=>typeof openLogin==='function');
+    await page.evaluate(()=>openLogin());
+    await page.locator('#loginForm input[name="password"]').fill(password);
+    await page.locator('#loginSubmit').click();
+    await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
+  }
+  await page.waitForFunction(()=>document.body.classList.contains('v2537-desktop-shell'));
+}
+await login();
+await page.screenshot({path:out+'/01-list-1440.png',fullPage:true});
+const listMenu=page.locator('#listWorkbenchMenuTrigger');
+if(await listMenu.count()){
+  await listMenu.click();
+  await page.waitForSelector('.workbench-menu-context');
+  await page.screenshot({path:out+'/02-list-menu-1440.png',fullPage:true});
+  await page.keyboard.press('Escape');
+}
+await page.evaluate(()=>setContentView('notebook'));
+await page.waitForSelector('.notebook-list-pane');
+const first=page.locator('.notebook-title-row').first();
+if(await first.count())await first.click();
+await page.waitForSelector('.article-workspacebar');
+await page.screenshot({path:out+'/03-reader-1440.png',fullPage:true});
+const edit=page.locator('[data-workspace-command="edit"]');
+if(await edit.count()){
+  await edit.click();
+  await page.waitForSelector('.article-workspace.mode-edit');
+  await page.screenshot({path:out+'/04-editor-1440.png',fullPage:true});
+}
+const read=page.locator('[data-workspace-command="read"]');
+if(await read.count())await read.click();
+await page.locator('#settingsBtn').click();
+await page.waitForSelector('.settings-page');
+await page.screenshot({path:out+'/05-settings-1440.png',fullPage:true});
+await page.locator('#settingsBack').click();
+await page.setViewportSize({width:1024,height:768});
+await page.waitForTimeout(150);
+await page.screenshot({path:out+'/06-medium-1024.png',fullPage:true});
+await page.setViewportSize({width:390,height:844});
+await page.waitForFunction(()=>!document.body.classList.contains('v2537-desktop-shell'));
+await page.waitForTimeout(150);
+await page.screenshot({path:out+'/07-mobile-390.png',fullPage:true});
+await browser.close();
+console.log('P02_V2540_VISUAL_AUDIT_CAPTURE=PASS');
+NODE
+
+      - name: Upload synthetic visual audit
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0
+        with:
+          name: p02-v2540-ux-visual-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/p02-v2540-visual/screens/*.png
+          if-no-files-found: error
+          retention-days: 7
