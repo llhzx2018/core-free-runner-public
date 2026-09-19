@@ -1,0 +1,201 @@
+name: S01 Ops 1.21.880 R12 Candidate Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      CANDIDATE_SHA: f22aa6dfd50ee8729481780b1c8d31e114524622
+      BASE_SHA: 17d939df8c2ace13c4a8135004c5b81eaa116498
+      VERSION: 1.21.880
+      PREVIOUS_VERSION: 1.21.879
+      PREVIOUS_TAG: v1.21.879
+      ASSET: vf-tools-ops_V1.21.880.zip
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.879.zip
+    steps:
+      - name: Checkout exact Ops candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: f22aa6dfd50ee8729481780b1c8d31e114524622
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Exact identity and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.880' ops/vf-ops.php
+          grep -Fq 'S01-MATURE-ADMIN-V6-R12-DESTRUCTIVE-DIALOG-CLOSURE' ops/vf-ops.php
+          actual="$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            VERSION \
+            assets/js/admin-publish-zip.js \
+            includes/admin-v13/views/publish_zip_v6.php \
+            tests/s01-v6-r12-destructive-dialog-closure-contract.php \
+            vf-ops.php | sort)"
+          test "$actual" = "$expected"
+          echo PASS_EXACT_IDENTITY_AND_SCOPE
+
+      - name: R12 contract and full PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php ops/tests/s01-v6-r12-destructive-dialog-closure-contract.php
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops -type f -name '*.php' -print0 | sort -z)
+          echo PASS_R12_CONTRACT_AND_PHP
+
+      - name: Interaction lifecycle and boundary assertions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('ops')
+          view=(root/'includes/admin-v13/views/publish_zip_v6.php').read_text(encoding='utf-8')
+          js=(root/'assets/js/admin-publish-zip.js').read_text(encoding='utf-8')
+          main=(root/'vf-ops.php').read_text(encoding='utf-8')
+          changelog=(root/'CHANGELOG.md').read_text(encoding='utf-8')
+
+          assert 'aria-labelledby="vf-zip-cleanup-title"' in view
+          assert 'aria-describedby="vf-zip-cleanup-description vf-zip-cleanup-message"' in view
+          assert 'role="status" aria-live="polite"' in view
+          assert 'data-vf-zip-cleanup-confirm disabled' in view
+          assert "var runtimeVersion='1.21.880';" in js
+          assert 'var opener=null' in js
+          assert "phrase.addEventListener('input',syncConfirmation)" in js
+          assert "confirm.disabled=!ready" in js
+          assert "dialog.addEventListener('close',restoreOpener)" in js
+          assert "dialog.addEventListener('cancel',function(event){event.preventDefault();close();})" in js
+          assert "action:'vf_ops_publish_zip_cleanup_v121709'" in js
+          assert "confirmation:value" in js
+          assert "value!=='清理临时文件'" in js
+          assert '## V1.21.880 · Mature Admin V6 R12 Destructive Dialog Closure' in changelog
+          assert "VF_OPS_VERSION', '1.21.880'" in main
+          print('PASS_R12_INTERACTION_AND_BOUNDARY')
+          PY
+
+      - name: Ownership and updater fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- \
+            includes/wp-update \
+            includes/v6 \
+            includes/site-release \
+            includes/publish-workflow \
+            includes/system-governance | wc -l)" = "0"
+          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' \
+            ops/includes/admin-v13/views/publish_zip_v6.php ops/assets/js/admin-publish-zip.js ops/vf-ops.php
+          echo PASS_BOUNDARY_AND_SECURITY
+
+      - name: Build deterministic Runtime Authority package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage1 stage2 dist
+          mkdir -p stage1/vf-ops stage2/vf-ops dist
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,shutil
+          src=Path('ops')
+          def runtime(rel):
+              rel=rel.replace('\\','/').lstrip('/')
+              if not rel or '../' in rel: return False
+              if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)', rel, re.I): return False
+              if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$', rel, re.I): return False
+              if '/' not in rel: return rel in {'vf-ops.php','uninstall.php'}
+              return rel.startswith(('includes/','assets/','languages/','config/'))
+          rows=[]
+          for p in sorted((x for x in src.rglob('*') if x.is_file()), key=lambda x:x.relative_to(src).as_posix()):
+              rel=p.relative_to(src).as_posix()
+              if not runtime(rel): continue
+              if p.is_symlink(): raise SystemExit('runtime symlink forbidden: '+rel)
+              b=p.read_bytes()
+              rows.append((rel,hashlib.sha256(b).hexdigest()))
+              for stage in (Path('stage1/vf-ops'),Path('stage2/vf-ops')):
+                  q=stage/rel; q.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,q)
+          canonical=b''.join(rel.encode()+b'\0'+sha.encode()+b'\n' for rel,sha in rows)
+          Path('/tmp/runtime_count').write_text(str(len(rows)))
+          Path('/tmp/runtime_fp').write_text(hashlib.sha256(canonical).hexdigest())
+          Path('/tmp/runtime_files.txt').write_text('\n'.join(r for r,_ in rows)+'\n')
+          print('RUNTIME_FILES='+str(len(rows)))
+          print('RUNTIME_FINGERPRINT='+hashlib.sha256(canonical).hexdigest())
+          PY
+          (cd stage1 && zip -X -q -r "../dist/$ASSET" vf-ops)
+          (cd stage2 && zip -X -q -r "../dist/rebuild-$ASSET" vf-ops)
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.880'
+          sha256sum "dist/$ASSET" | awk '{print $1}' > /tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" > /tmp/asset_bytes
+          echo PASS_DETERMINISTIC_RUNTIME_PACKAGE
+
+      - name: Previous release compatibility and rollback gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          unzip -p "previous/$PREVIOUS_ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.879'
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sed 's#^vf-ops/##' | sort > /tmp/prev_files.txt
+          sort /tmp/runtime_files.txt > /tmp/new_files.txt
+          comm -13 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/added.txt
+          comm -23 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/removed.txt
+          test ! -s /tmp/added.txt
+          test ! -s /tmp/removed.txt
+          test "$(wc -l < /tmp/new_files.txt | tr -d ' ')" = "$(wc -l < /tmp/prev_files.txt | tr -d ' ')"
+          echo "ROLLBACK_ASSET=$PREVIOUS_TAG/$PREVIOUS_ASSET"
+          echo PASS_PREVIOUS_RELEASE_COMPATIBILITY_AND_ROLLBACK
+
+      - name: Candidate receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/candidate-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$CANDIDATE_SHA
+          BASE_RELEASE=$PREVIOUS_TAG
+          ASSET=$ASSET
+          BYTES=$(cat /tmp/asset_bytes)
+          SHA256=$(cat /tmp/asset_sha)
+          RUNTIME_FILES=$(cat /tmp/runtime_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)
+          RUNTIME_ADDED=NONE
+          RUNTIME_REMOVED=NONE
+          SCHEMA=6.0.0_UNCHANGED
+          DATA_MIGRATION=NONE
+          OWNER_REAL_USE=POST_RELEASE_NOT_RUN
+          P3_004=DEFERRED_UNVERIFIED
+          RESULT=PASS
+          EOF
+          cat /tmp/candidate-receipt.txt
+          echo PASS_S01_OPS_121880_CANDIDATE_GATE
+
+      - name: Upload exact tested candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121880-candidate-${{ github.run_id }}
+          path: |
+            dist/vf-tools-ops_V1.21.880.zip
+            /tmp/candidate-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
