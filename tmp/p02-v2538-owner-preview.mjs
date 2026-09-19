@@ -11,8 +11,8 @@ const page=await context.newPage();
 await page.goto(base+'/',{waitUntil:'networkidle'});
 const unlock=page.locator('[data-open-login]').first();
 if(await unlock.count()){
-  await page.waitForFunction(()=>typeof document.querySelector('[data-open-login]')?.onclick==='function');
-  await unlock.click();
+  await page.waitForFunction(()=>typeof openLogin==='function');
+  await page.evaluate(()=>openLogin());
   await page.waitForSelector('#loginForm input[name="password"]');
   await page.locator('#loginForm input[name="password"]').fill(password);
   await page.locator('#loginSubmit').click();
