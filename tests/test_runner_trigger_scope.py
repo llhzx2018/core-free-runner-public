@@ -30,6 +30,32 @@ class RunnerTriggerScopeTests(unittest.TestCase):
         self.assertTrue(state["pull_request"])
         self.assertFalse(state["paths"])
 
+    def test_release_write_push_requires_branch_boundary(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = root / ".github/workflows/release.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "name: release\non:\n  push:\n    paths: ['.github/workflows/release.yml']\n"
+                "jobs:\n  release:\n    steps:\n      - run: gh release create v1.0.0 asset.zip\n",
+                encoding="utf-8",
+            )
+            failures = MODULE.verify_release_trigger_safety(root)
+        self.assertEqual(failures, ["RELEASE_PUSH_WITHOUT_BRANCH_BOUNDARY:release.yml"])
+
+    def test_release_write_dedicated_branch_push_is_allowed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = root / ".github/workflows/release.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "name: release\non:\n  push:\n    branches: ['release/example']\n"
+                "jobs:\n  release:\n    steps:\n      - run: gh release create v1.0.0 asset.zip\n",
+                encoding="utf-8",
+            )
+            failures = MODULE.verify_release_trigger_safety(root)
+        self.assertEqual(failures, [])
+
     def test_manual_workflow_is_not_a_pull_request_trigger(self):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "workflow.yml"

@@ -65,6 +65,47 @@ ONE-OFF PROJECT WORKFLOW
 
 一次性 Workflow 失败可修复/重跑，但不能为了“留下证据”把临时代码永久合入 main。
 
+### 5.1 Repeated Lane Identity
+
+同一 Candidate / Formal Release / Discovery 形状跨版本重复使用时，Version、Source SHA/Tree、from_versions 等动态 identity 必须优先收敛为一次性 Lane spec，而不是散落在 Workflow 多处手工替换。Current helper：\`scripts/ephemeral_lane_spec.py\`。
+
+固定边界：
+
+\`\`\`text
+single lane spec = dynamic execution input, not Current Truth Store
+reusable renderer/helper = allowed in main after reuse decision
+project-specific test/release logic = may remain temporary
+Secret Value = never stored in lane spec
+rendered one-off workflow = still CLOSE WITHOUT MERGE by default
+\`\`\`
+
+目标是减少复制版本 Workflow、旧版本残留、Harness 假失败与 Agent token 消耗，同时不建立新的 Runtime / Runner / Release 平台。
+
+## 5.2 Gate Ownership Isolation
+
+基础设施 Gate 只执行自己拥有的检查域，禁止用全目录 test discovery 把无关模块失败传播成当前 Gate FAIL。
+
+```text
+Trigger Scope Gate -> trigger scope + estate safety only
+Workflow Archive Gate -> archive integrity + active/archive collision only
+Current Self Test -> current runner allocation / provenance / current shared helpers
+```
+
+真实共享安全合同可以被多个 Gate 显式调用；普通测试模块不得因为目录位置被机械耦合进所有 Gate。
+
+## 5.3 Release-capable Trigger Boundary
+
+含 `VF_RELEASE_WRITE_TOKEN` / `gh release create` 等正式 Release 写能力的 Workflow 不得以“任意分支 push + 仅 paths 过滤”作为触发边界。
+
+```text
+release-capable + push -> dedicated branches REQUIRED
+historical exact-version release workflow -> workflow_dispatch preferred
+workflow maintenance != release authorization
+path match alone != formal release gate
+```
+
+该规则只约束触发边界，不把 Merge / Release / Distribution / Production 合并为一个阶段。
+
 ## 6. Failure Semantics
 
 ```text

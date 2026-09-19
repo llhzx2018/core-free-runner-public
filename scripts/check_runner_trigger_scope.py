@@ -28,6 +28,7 @@ def event_block(path: Path) -> str:
 def classify(path: Path) -> dict[str, bool]:
     block = event_block(path)
     return {
+        "push": "push:" in block,
         "pull_request": "pull_request:" in block,
         "workflow_dispatch": "workflow_dispatch:" in block,
         "paths": "paths:" in block,
@@ -50,12 +51,32 @@ def verify_quarantine(root: Path) -> list[str]:
     return failures
 
 
+def release_capable(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    return "VF_RELEASE_WRITE_TOKEN" in text or "gh release create" in text
+
+
+def verify_release_trigger_safety(root: Path) -> list[str]:
+    failures: list[str] = []
+    workflow_root = root / ".github" / "workflows"
+    paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
+    for path in paths:
+        if not release_capable(path):
+            continue
+        state = classify(path)
+        if state["push"] and not state["branches"]:
+            failures.append(f"RELEASE_PUSH_WITHOUT_BRANCH_BOUNDARY:{path.name}")
+    return failures
+
+
 def inventory(root: Path) -> dict[str, object]:
     workflow_root = root / ".github" / "workflows"
     paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
     pull_request_count = 0
     unscoped_pull_request_count = 0
     manual_count = 0
+    release_capable_count = 0
+    release_unscoped_push_paths: list[str] = []
     unscoped_pull_request_paths: list[str] = []
     identities: list[str] = []
     for path in paths:
@@ -67,6 +88,10 @@ def inventory(root: Path) -> dict[str, object]:
                 unscoped_pull_request_paths.append(path.name)
         if state["workflow_dispatch"]:
             manual_count += 1
+        if release_capable(path):
+            release_capable_count += 1
+            if state["push"] and not state["branches"]:
+                release_unscoped_push_paths.append(path.name)
         identities.append(f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()}")
     return {
         "schema": "core-free-runner-trigger-inventory/v1",
@@ -75,6 +100,9 @@ def inventory(root: Path) -> dict[str, object]:
         "unscoped_pull_request_workflow_count": unscoped_pull_request_count,
         "unscoped_pull_request_workflows": unscoped_pull_request_paths,
         "workflow_dispatch_count": manual_count,
+        "release_capable_workflow_count": release_capable_count,
+        "release_unscoped_push_count": len(release_unscoped_push_paths),
+        "release_unscoped_push_workflows": release_unscoped_push_paths,
         "inventory_sha256": hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest(),
     }
 
@@ -85,7 +113,7 @@ def main() -> int:
     parser.add_argument("--inventory", action="store_true")
     args = parser.parse_args()
     root = args.root.resolve()
-    failures = verify_quarantine(root)
+    failures = verify_quarantine(root) + verify_release_trigger_safety(root)
     payload = inventory(root) if args.inventory else {}
     payload.update({
         "quarantined_workflow_count": len(QUARANTINED_WORKFLOWS),

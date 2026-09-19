@@ -16,6 +16,9 @@
 | Transient Private Checkout on Hosted Runner | ALLOWED WITH SECRET + CLEANUP |
 | One-off Workflow / PR | ALLOWED / CLOSE WITHOUT MERGE DEFAULT |
 | Reusable Harness Main Adoption | REQUIRE EXPLICIT REUSE DECISION |
+| Repeated Version Lane Identity | SINGLE-SOURCE SPEC / NO RAW COPY-REPLACE |
+| Gate Ownership Isolation | PASS / NO GLOBAL TEST-DISCOVERY COUPLING |
+| Release-capable Trigger Boundary | PUSH REQUIRES DEDICATED BRANCH / HISTORICAL EXACT RELEASE PREFERS MANUAL |
 | Machine PASS Self-sign by AI | FORBIDDEN |
 | Runner Failure = Product Failure | FORBIDDEN CLASSIFICATION |
 | Third Long-term Test Space | NOT ALLOWED BY DEFAULT |
