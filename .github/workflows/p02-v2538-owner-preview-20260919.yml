@@ -1,0 +1,117 @@
+name: P02 V2.5.38 Owner Preview Gate
+
+on:
+  push:
+    branches:
+      - task/p02-v2538-owner-preview-20260919
+    paths:
+      - '.github/workflows/p02-v2538-owner-preview-20260919.yml'
+      - 'tmp/p02-v2538-owner-preview.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  owner-preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_SHA: b2c2c11ffcff92dd66fb813d028aa8971f83c668
+      TARGET_VERSION: 2.5.38
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip, curl, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P02 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Verify exact candidate and repository
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '\r\n' < product/VERSION)" = "$TARGET_VERSION"
+          cd product
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          while IFS= read -r cmd; do
+            test -n "$cmd"
+            eval "$cmd"
+          done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          node --check public/assets/app.js
+          node --check public/assets/editor-enhancements.js
+          node --check tests/e2e/p02_ux_task_flow.mjs
+          node --check tests/e2e/p02_v2537_inkstone_shell.mjs
+          echo P02_V2538_REPOSITORY_UNIT_GATE=PASS
+
+      - name: Real Chromium UX gate
+        run: |
+          set -Eeuo pipefail
+          cd product
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          bash scripts/ux-browser-reverify.sh
+          echo P02_V2538_REAL_CHROMIUM_GATE=PASS
+
+      - name: Build exact owner preview and screenshots
+        run: |
+          set -Eeuo pipefail
+          OUT="$RUNNER_TEMP/p02-v2538-owner-preview"
+          SITE="$RUNNER_TEMP/p02-v2538-site"
+          mkdir -p "$OUT" "$SITE"
+          cd product
+          bash scripts/build-deploy-tree.sh "$SITE" >/dev/null
+          test "$(cat "$SITE/VERSION.txt")" = "$TARGET_VERSION"
+          PW="P02-V2538-PREVIEW-${GITHUB_RUN_ID}!"
+          PORT=22538
+          php -d display_errors=0 -S 127.0.0.1:$PORT -t "$SITE" >"$RUNNER_TEMP/p02-v2538-preview-php.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do
+            curl -fsS "http://127.0.0.1:$PORT/setup.php" >/dev/null 2>&1 && break
+            sleep .25
+          done
+          curl -fsS -c "$RUNNER_TEMP/p02-v2538-cookie" "http://127.0.0.1:$PORT/setup.php" > "$RUNNER_TEMP/p02-v2538-setup"
+          CSRF=$(python3 - "$RUNNER_TEMP/p02-v2538-setup" <<'PY'
+          import re,html,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          assert m
+          print(html.unescape(m.group(1)))
+          PY
+          )
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$RUNNER_TEMP/p02-v2538-cookie" -c "$RUNNER_TEMP/p02-v2538-cookie" -H "Origin: http://127.0.0.1:$PORT" --data-urlencode "setup_csrf=$CSRF" --data-urlencode "password=$PW" --data-urlencode "password_confirm=$PW" "http://127.0.0.1:$PORT/setup.php")" = 303
+          PREVIEW_BASE="http://127.0.0.1:$PORT" PREVIEW_PASSWORD="$PW" PREVIEW_OUT="$OUT/screenshots" node "$GITHUB_WORKSPACE/tmp/p02-v2538-owner-preview.mjs"
+          (cd "$SITE" && zip -qr "$OUT/P02_V2.5.38_OWNER_PREVIEW_FULL.zip" .)
+          git rev-parse HEAD > "$OUT/SOURCE_SHA.txt"
+          git show -s --format=%T HEAD > "$OUT/SOURCE_TREE.txt"
+          cat > "$OUT/OWNER_PREVIEW_README.txt" <<EOF
+          P02 VF Library V2.5.38 OWNER PREVIEW
+          Exact source: $PRODUCT_SHA
+          Purpose: OWNER_REAL_USE_PREVIEW_ONLY
+          Formal Release: NOT_EXECUTED
+          Update Channel: NOT_PUBLISHED
+          Production Write: NO
+          Required Owner gate: PASS or FAIL after real-use of this exact candidate.
+          EOF
+          (cd "$OUT" && sha256sum P02_V2.5.38_OWNER_PREVIEW_FULL.zip screenshots/*.png > SHA256SUMS.txt)
+          echo P02_V2538_OWNER_PREVIEW_BUNDLE=PASS
+
+      - name: Upload owner preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: P02_V2538_OWNER_PREVIEW
+          path: ${{ runner.temp }}/p02-v2538-owner-preview/
+          retention-days: 1
+          if-no-files-found: error
