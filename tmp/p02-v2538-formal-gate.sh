@@ -24,7 +24,7 @@ echo 'P02_PUBLIC_AUTHORITY_OBSERVABILITY=N_A_RELEASE_ONLY'
 echo 'P02_PUBLIC_AUTHORITY_PERFORMANCE=N_A'
 echo 'P02_PUBLIC_AUTHORITY_NO_UNKNOWN=YES'
 grep -F 'DYNAMIC_TRUTH_NOT_STORED_HERE' "$PRODUCT/docs/authority/CURRENT.md" >/dev/null
-jq -e 'has("candidate_version")|not and has("production_version")|not and has("release_tag")|not' "$PRODUCT/VF_PROJECT.json" >/dev/null
+jq -e '((has("candidate_version")|not) and (has("production_version")|not) and (has("release_tag")|not))' "$PRODUCT/VF_PROJECT.json" >/dev/null
 echo P02_PRE_RELEASE_AUTHORITY_DRIFT_GATE=PASS
 
 cd "$PRODUCT"
