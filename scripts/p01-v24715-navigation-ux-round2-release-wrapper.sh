@@ -30,7 +30,7 @@ pairs=[
 ("/tmp/p01-v24714-navigation-builder/gate.py","/tmp/p01-v24715-navigation-round2-builder/gate.py"),
 ('VERSION = "2.47.14"','VERSION = "2.47.15"'),
 ('SOURCE_VERSION = "2.47.13"','SOURCE_VERSION = "2.47.14"'),
-("public const SOURCE_VERSION='2.47.13';\\n    public const TARGET_VERSION='2.47.14';","public const SOURCE_VERSION='2.47.14';\\n    public const TARGET_VERSION='2.47.15';"),
+("public const SOURCE_VERSION='2.47.13';\\\\n    public const TARGET_VERSION='2.47.14';","public const SOURCE_VERSION='2.47.14';\\\\n    public const TARGET_VERSION='2.47.15';"),
 ("V2.47.14 fixes logged-out Navigation row layout width while preserving Atomic update safety.","V2.47.15 improves Navigation search and context persistence while preserving Atomic update safety."),
 ("/tmp/p01-v24714-navigation-rebuild","/tmp/p01-v24715-navigation-round2-rebuild"),
 ("P01_V24714_NAVIGATION_ROW_RELEASE_GATE=PASS","P01_V24715_NAVIGATION_UX_ROUND2_RELEASE_GATE=PASS"),
