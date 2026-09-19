@@ -43,7 +43,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
         path.write_text(json.dumps(payload or self.spec), encoding="utf-8")
         return path
 
-    def run(self, *args):
+    def run_cmd(self, *args):
         return subprocess.run(
             ["python3", str(SCRIPT), *map(str, args)],
             cwd=ROOT,
@@ -54,14 +54,14 @@ class EphemeralLaneSpecTests(unittest.TestCase):
 
     def test_validate_and_github_output(self):
         spec = self.write_spec()
-        result = self.run("validate", "--spec", spec)
+        result = self.run_cmd("validate", "--spec", spec)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "PASS")
         self.assertEqual(payload["variables"]["TARGET_VERSION_COMPACT"], "2539")
         self.assertEqual(payload["variables"]["SOURCE_VERSIONS_CSV"], "2.5.35,2.5.36,2.5.37,2.5.38")
 
-        result = self.run("github-output", "--spec", spec)
+        result = self.run_cmd("github-output", "--spec", spec)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("repository=llhzx2018/vf-library\n", result.stdout)
         self.assertIn("target_version=2.5.39\n", result.stdout)
@@ -85,7 +85,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
             "  TARGET_PORT: {{TARGET_PORT}}\n",
             encoding="utf-8",
         )
-        first = self.run("render", "--spec", spec, "--template", template, "--output", output)
+        first = self.run_cmd("render", "--spec", spec, "--template", template, "--output", output)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         content = output.read_text(encoding="utf-8")
         self.assertIn("TARGET_VERSION: 2.5.39", content)
@@ -94,7 +94,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
         sha1 = json.loads(first.stdout)["sha256"]
 
         second_output = self.dir / "workflow-2.yml"
-        second = self.run("render", "--spec", spec, "--template", template, "--output", second_output)
+        second = self.run_cmd("render", "--spec", spec, "--template", template, "--output", second_output)
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(sha1, json.loads(second.stdout)["sha256"])
         self.assertEqual(output.read_bytes(), second_output.read_bytes())
@@ -110,7 +110,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
             "  TARGET_SHA: {{TARGET_SHA}}\n",
             encoding="utf-8",
         )
-        result = self.run("render", "--spec", spec, "--template", template, "--output", output)
+        result = self.run_cmd("render", "--spec", spec, "--template", template, "--output", output)
         self.assertEqual(result.returncode, 2)
         self.assertIn("IDENTITY_LITERAL_IN_TEMPLATE:2.5.39", result.stdout)
 
@@ -126,7 +126,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
             "  OLD_VERSION: 2.5.38\n",
             encoding="utf-8",
         )
-        result = self.run("render", "--spec", spec, "--template", template, "--output", output)
+        result = self.run_cmd("render", "--spec", spec, "--template", template, "--output", output)
         self.assertEqual(result.returncode, 2)
         self.assertIn("IDENTITY_LITERAL_IN_TEMPLATE:2.5.38", result.stdout)
 
@@ -134,7 +134,7 @@ class EphemeralLaneSpecTests(unittest.TestCase):
         bad = dict(self.spec)
         bad["source_versions"] = ["2.5.38", "2.5.39"]
         spec = self.write_spec(bad)
-        result = self.run("validate", "--spec", spec)
+        result = self.run_cmd("validate", "--spec", spec)
         self.assertEqual(result.returncode, 2)
         self.assertIn("target version must not be a source", result.stdout)
 
