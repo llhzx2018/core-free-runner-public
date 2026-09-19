@@ -81,6 +81,18 @@ rendered one-off workflow = still CLOSE WITHOUT MERGE by default
 
 目标是减少复制版本 Workflow、旧版本残留、Harness 假失败与 Agent token 消耗，同时不建立新的 Runtime / Runner / Release 平台。
 
+## 5.2 Gate Ownership Isolation
+
+基础设施 Gate 只执行自己拥有的检查域，禁止用全目录 test discovery 把无关模块失败传播成当前 Gate FAIL。
+
+```text
+Trigger Scope Gate -> trigger scope + estate safety only
+Workflow Archive Gate -> archive integrity + active/archive collision only
+Current Self Test -> current runner allocation / provenance / current shared helpers
+```
+
+真实共享安全合同可以被多个 Gate 显式调用；普通测试模块不得因为目录位置被机械耦合进所有 Gate。
+
 ## 6. Failure Semantics
 
 ```text
