@@ -15,6 +15,9 @@
 | Secret Value in Git / Log / Artifact / Evidence | FORBIDDEN |
 | Transient Private Checkout on Hosted Runner | ALLOWED WITH SECRET + CLEANUP |
 | One-off Workflow / PR | ALLOWED / CLOSE WITHOUT MERGE DEFAULT |
+| One-off Lane Done Condition | EVIDENCE READBACK + CLASSIFICATION + SAME-TASK PR CLOSE WHEN NO NEXT RERUN/GATE |
+| Closed temporary PR as provenance | ALLOWED / PREFERRED OVER LONG-LIVED OPEN PR |
+| Temporary branch deletion | SEPARATE DESTRUCTIVE CLEANUP / NOT IMPLIED |
 | Reusable Harness Main Adoption | REQUIRE EXPLICIT REUSE DECISION |
 | Repeated Version Lane Identity | SINGLE-SOURCE SPEC + PRE-TRIGGER `audit-rendered` / NO RAW COPY-REPLACE |
 | Gate Ownership Isolation | PASS / NO GLOBAL TEST-DISCOVERY COUPLING |
