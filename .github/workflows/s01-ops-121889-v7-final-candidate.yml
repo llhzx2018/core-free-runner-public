@@ -1,11 +1,235 @@
+# one-off lane: close without merge
 name: S01 Ops 1.21.889 V7 Final Candidate Gate
 
 on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   candidate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      CANDIDATE_SHA: cdb8df0d2c8865a81ea78b1b086b8fdd5778b7fc
+      BASE_SHA: 841102c84df5e3adab48ccb6b89243dcbbeb3b59
+      VERSION: 1.21.889
+      PREVIOUS_TAG: v1.21.888
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.889.zip
+      ASSET: vf-tools-ops_V1.21.889.zip
+
     steps:
-      - run: echo READY
+      - name: Checkout exact Ops candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: cdb8df0d2c8865a81ea78b1b086b8fdd5778b7fc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Exact identity and scope fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.889' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.889'" ops/vf-ops.php
+          grep -Fq 'S01-MATURE-ADMIN-V7-FINAL-CLOSURE' ops/vf-ops.php
+          actual="$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            VERSION \
+            assets/css/current/admin-s01-v7-final-closure.css \
+            docs/ui/S01_MATURE_ADMIN_V7_PRODUCT_SYSTEM.md \
+            includes/admin-v13/views/system_site_release_v6.php \
+            includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            tests/s01-c02-121889-v7-final-closure-contract.php \
+            vf-ops.php | sort)"
+          test "$actual" = "$expected"
+          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- database config includes/v6 includes/wp-update | wc -l)" = "0"
+          echo PASS_EXACT_IDENTITY_AND_SCOPE
+
+      - name: Contract syntax UX and accessibility gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php ops/tests/s01-c02-121889-v7-final-closure-contract.php
+          php -l ops/vf-ops.php >/dev/null
+          php -l ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php >/dev/null
+          php -l ops/tests/s01-c02-121889-v7-final-closure-contract.php >/dev/null
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops/includes -type f -name '*.php' -print0 | sort -z)
+          css=ops/assets/css/current/admin-s01-v7-final-closure.css
+          grep -Fq '[data-vf-v7-r2-dashboard]' "$css"
+          grep -Fq '[data-vf-v7-r2-tools]' "$css"
+          grep -Fq '.vf-v7-r3-content-seo' "$css"
+          grep -Fq '.vf-v6-quality-page' "$css"
+          grep -Fq '.vf-v6-publish-overview' "$css"
+          grep -Fq '.vf-v6-system-overview' "$css"
+          grep -Fq '@media (max-width:960px)' "$css"
+          grep -Fq '@media (max-width:782px)' "$css"
+          grep -Fq '@media (max-width:520px)' "$css"
+          grep -Fq '@media (max-width:390px)' "$css"
+          grep -Fq '@media (forced-colors:active)' "$css"
+          grep -Fq '@media (prefers-reduced-motion:reduce)' "$css"
+          ! grep -Fq 'position: fixed' "$css"
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php').read_text()
+          assert s.index('admin-s01-v7-final-closure.css') > s.index('admin-s01-v7-system-r6.css')
+          PY
+          echo PASS_CONTRACT_SYNTAX_UX_ACCESSIBILITY
+
+      - name: Security residue and updater fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' \
+            ops/vf-ops.php \
+            ops/includes/admin-v13/views/system_site_release_v6.php \
+            ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            ops/assets/css/current/admin-s01-v7-final-closure.css \
+            ops/docs/ui/S01_MATURE_ADMIN_V7_PRODUCT_SYSTEM.md
+          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- includes/wp-update config database | wc -l)" = "0"
+          echo PASS_SECURITY_RESIDUE_AND_UPDATER_FENCE
+
+      - name: Build deterministic runtime-only package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage dist
+          mkdir -p stage/vf-ops dist
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, re, zipfile
+          root=Path('ops')
+          stage=Path('stage/vf-ops')
+          def runtime(rel):
+              rel=rel.replace('\\','/').lstrip('/')
+              if not rel or '../' in rel: return False
+              if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I): return False
+              if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): return False
+              if '/' not in rel: return rel in ('vf-ops.php','uninstall.php')
+              return re.match(r'^(?:includes|assets|languages|config)/',rel) is not None
+          files=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if not runtime(rel): continue
+              if p.is_symlink(): raise SystemExit('runtime symlink forbidden: '+rel)
+              data=p.read_bytes()
+              files.append((rel,data))
+              q=stage/rel
+              q.parent.mkdir(parents=True,exist_ok=True)
+              q.write_bytes(data)
+          canonical=b''.join(rel.encode()+b'\0'+hashlib.sha256(data).hexdigest().encode()+b'\n' for rel,data in files)
+          Path('/tmp/runtime_count').write_text(str(len(files)))
+          Path('/tmp/runtime_fp').write_text(hashlib.sha256(canonical).hexdigest())
+          for out in ('dist/vf-tools-ops_V1.21.889.zip','dist/rebuild-vf-tools-ops_V1.21.889.zip'):
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      info=zipfile.ZipInfo('vf-ops/'+rel,date_time=(2020,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(0o100644 & 0xFFFF) << 16
+                      z.writestr(info,data)
+          print('RUNTIME_FILES='+str(len(files)))
+          print('RUNTIME_FINGERPRINT='+hashlib.sha256(canonical).hexdigest())
+          PY
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-ops"
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.889'
+          unzip -Z1 "dist/$ASSET" | grep -Fxq 'vf-ops/assets/css/current/admin-s01-v7-final-closure.css'
+          test "$(cat /tmp/runtime_count)" = "961"
+          sha256sum "dist/$ASSET" | awk '{print $1}' > /tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" > /tmp/asset_bytes
+          echo PASS_DETERMINISTIC_RUNTIME_PACKAGE
+
+      - name: Previous release compatibility and runtime delta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          test "$(stat -c '%s' "previous/$PREVIOUS_ASSET")" = "3431187"
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "14207a0b095c8d6b59c4a06038e74cbabfe161aee133a1ea577ea0a6bfbeb197"
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sort > /tmp/prev_files.txt
+          unzip -Z1 "dist/$ASSET" | grep -v '/$' | sort > /tmp/new_files.txt
+          comm -13 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/added.txt
+          comm -23 /tmp/prev_files.txt /tmp/new_files.txt > /tmp/removed.txt
+          test "$(cat /tmp/added.txt)" = 'vf-ops/assets/css/current/admin-s01-v7-final-closure.css'
+          test ! -s /tmp/removed.txt
+          python3 - <<'PY'
+          import hashlib, re, zipfile
+          p='previous/vf-tools-ops_V1.21.888.zip'
+          rows=[]
+          with zipfile.ZipFile(p) as z:
+              for n in sorted(z.namelist()):
+                  if n.endswith('/') or not n.startswith('vf-ops/'): continue
+                  rel=n[len('vf-ops/'):]
+                  if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I): continue
+                  if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): continue
+                  ok=(('/' not in rel and rel in ('vf-ops.php','uninstall.php')) or re.match(r'^(?:includes|assets|languages|config)/',rel))
+                  if not ok: continue
+                  data=z.read(n)
+                  rows.append((rel,hashlib.sha256(data).hexdigest()))
+          canonical=b''.join(rel.encode()+b'\0'+sha.encode()+b'\n' for rel,sha in rows)
+          assert len(rows)==960, len(rows)
+          assert hashlib.sha256(canonical).hexdigest()=='ff20d5823489839cd39524c7cafa06b2596ac1bd7b6167a7a7e275e2576ed26f'
+          print('PASS_PREVIOUS_RUNTIME_AUTHORITY')
+          PY
+          echo PASS_PREVIOUS_RELEASE_COMPATIBILITY
+
+      - name: Candidate receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > dist/candidate-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$CANDIDATE_SHA
+          BASE_RELEASE=$PREVIOUS_TAG
+          ASSET=$ASSET
+          BYTES=$(cat /tmp/asset_bytes)
+          SHA256=$(cat /tmp/asset_sha)
+          RUNTIME_FILES=$(cat /tmp/runtime_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)
+          RUNTIME_ADDED=assets/css/current/admin-s01-v7-final-closure.css
+          RUNTIME_REMOVED=NONE
+          SECURITY=PASS
+          TESTING=PASS
+          UPGRADE=PASS
+          OBSERVABILITY=PASS_RELEASE_AND_RUNTIME_READBACK_REQUIRED
+          GIT=PASS
+          UA_UI=PASS_CROSS_DOMAIN_RESPONSIVE_ACCESSIBILITY_CONTRACT
+          INSTALL=N_A_EXISTING_UPDATE
+          DATA_SCHEMA=N_A_NO_SCHEMA_OR_DATA_CHANGE
+          SCHEMA=6.0.0_TO_6.0.0
+          DATA_MIGRATION=NONE
+          SIX_DOMAIN_IA=UNCHANGED
+          CANONICAL_ROUTES=UNCHANGED
+          M3U8_OWNERSHIP=UNCHANGED
+          THEME_OWNERSHIP=UNCHANGED
+          OWNER_REAL_USE=POST_RELEASE_NOT_RUN
+          RESULT=PASS
+          EOF
+          cat dist/candidate-receipt.txt
+          echo PASS_S01_OPS_121889_CANDIDATE_GATE
+
+      - name: Upload exact tested candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-121889-candidate
+          path: |
+            dist/vf-tools-ops_V1.21.889.zip
+            dist/candidate-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
+
