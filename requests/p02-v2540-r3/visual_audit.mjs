@@ -22,13 +22,15 @@ async function login(){
     await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
     const staleUnlock=await page.locator('.login-panel').count();
     if(staleUnlock)throw new Error('authenticated shell still exposes unlock card');
-    await page.waitForSelector('#pageRoot.library-list-page');
+    await page.waitForFunction(()=>!document.querySelector('.login-panel')&&!document.querySelector('.app-boot-state'));
   }
   await page.waitForFunction(()=>document.body.classList.contains('v2537-desktop-shell'));
 }
 
 try{
   await login();
+  await page.evaluate(()=>setContentView('list'));
+  await page.waitForSelector('#pageRoot.library-list-page');
   await page.screenshot({path:out+'/01-list-1440.png',fullPage:true});
   const listMenu=page.locator('#listWorkbenchMenuTrigger');
   if(await listMenu.count()){
