@@ -21,6 +21,8 @@
 | Release-capable Trigger Boundary | PUSH REQUIRES DEDICATED BRANCH / HISTORICAL EXACT RELEASE PREFERS MANUAL |
 | Machine PASS Self-sign by AI | FORBIDDEN |
 | Runner Failure = Product Failure | FORBIDDEN CLASSIFICATION |
+| Private Hosted CI `runner_name=null + steps=[]` with healthy Public Runner | `BLOCKED_INFRA_PRIVATE_HOSTED` / NO PRODUCT FAIL / NO REPEAT EMPTY RERUN |
+| Specific Billing / Budget / Payment Cause from zero-step fingerprint alone | NOT_PROVEN |
 | Third Long-term Test Space | NOT ALLOWED BY DEFAULT |
 | develop Sandbox Divergence | RECORDED / DO NOT MECHANICALLY MERGE |
 | Runtime/Product Version Change by Rebaseline | NO |
