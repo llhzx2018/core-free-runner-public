@@ -266,6 +266,150 @@ jobs:
           echo 'P01_CURRENT_ADMIN_HTTP=PASS'
           echo 'P01_CURRENT_RUNTIME_BASELINE=PASS'
 
+      - name: Synthetic browser UA UI gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-current-readiness-runtime
+          test -f "$RUNTIME/app/.runtime.php"
+
+          php -S 127.0.0.1:18145 -t "$RUNTIME" >/tmp/p01-browser-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18145/manage.php -o /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          BROWSER_DIR=/tmp/p01-browser-gate
+          rm -rf "$BROWSER_DIR"
+          mkdir -p "$BROWSER_DIR"
+          cd "$BROWSER_DIR"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+
+          cat > gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+
+          const base='http://127.0.0.1:18145/';
+          const viewports=[
+            {name:'390',width:390,height:844},
+            {name:'768',width:768,height:1024},
+            {name:'1024',width:1024,height:768},
+            {name:'1440',width:1440,height:900},
+            {name:'1920',width:1920,height:1080},
+          ];
+          const pages=[
+            ['manage.php','overview'],
+            ['surface-manager.php','resources'],
+            ['links-admin.php','resources'],
+            ['transfer.php','data'],
+            ['data-safety.php','data'],
+            ['browser-helper.php','browser'],
+            ['system-health.php','system'],
+            ['plugins.php','system'],
+            ['system-info.php','system'],
+            ['system-baseline.php','system'],
+            ['update.php','update'],
+            ['settings.php','settings'],
+          ];
+          const expectedTop=[
+            ['概览','manage.php'],
+            ['资源','surface-manager.php'],
+            ['数据','transfer.php'],
+            ['浏览器助手','browser-helper.php'],
+            ['系统','system-health.php'],
+            ['在线升级','update.php'],
+            ['设置','settings.php'],
+          ];
+
+          const browser=await chromium.launch({headless:true});
+          let checked=0;
+          try{
+            for(const vp of viewports){
+              const context=await browser.newContext({viewport:{width:vp.width,height:vp.height}});
+              const login=await context.request.post(base+'api.php?action=login',{
+                data:{password:'CurrentReadiness!2026'}
+              });
+              if(login.status()!==200) throw new Error('login failed viewport='+vp.name+' status='+login.status());
+              const loginJson=await login.json();
+              if(!loginJson?.ok) throw new Error('login response not ok viewport='+vp.name);
+
+              for(const [route,group] of pages){
+                const page=await context.newPage();
+                const pageErrors=[];
+                const consoleErrors=[];
+                page.on('pageerror',err=>pageErrors.push(String(err?.message||err)));
+                page.on('console',msg=>{if(msg.type()==='error')consoleErrors.push(msg.text());});
+
+                const response=await page.goto(base+route,{waitUntil:'networkidle',timeout:30000});
+                if(!response || response.status()!==200) throw new Error(route+' HTTP '+(response?.status()??'NO_RESPONSE')+' viewport='+vp.name);
+                await page.waitForTimeout(150);
+
+                const shell=await page.locator('body').getAttribute('data-vf-admin-shell');
+                const actualGroup=await page.locator('body').getAttribute('data-vf-group');
+                if(shell!=='server') throw new Error(route+' shell='+shell+' viewport='+vp.name);
+                if(actualGroup!==group) throw new Error(route+' group='+actualGroup+' expected='+group+' viewport='+vp.name);
+
+                const geometry=await page.evaluate(()=>({
+                  width:window.innerWidth,
+                  scrollWidth:document.documentElement.scrollWidth,
+                  bodyScrollWidth:document.body.scrollWidth
+                }));
+                if(geometry.scrollWidth>geometry.width+2 || geometry.bodyScrollWidth>geometry.width+2){
+                  throw new Error(route+' document-overflow viewport='+vp.name+' '+JSON.stringify(geometry));
+                }
+
+                const activeTop=await page.locator('.vf-rail-section > .vf-rail-item.active').count();
+                if(activeTop!==1) throw new Error(route+' active-top-count='+activeTop+' viewport='+vp.name);
+
+                if(route==='manage.php'){
+                  const top=await page.locator('.vf-rail-section > .vf-rail-item').evaluateAll(nodes=>nodes.map(a=>({
+                    label:(a.querySelector('span')?.textContent||'').trim(),
+                    href:(a.getAttribute('href')||'').trim()
+                  })));
+                  if(JSON.stringify(top)!==JSON.stringify(expectedTop)){
+                    throw new Error('top-nav mismatch viewport='+vp.name+' actual='+JSON.stringify(top));
+                  }
+
+                  if(vp.width===390){
+                    await page.locator('.vf-admin-menu-button').click();
+                    const opened=await page.locator('body').evaluate(el=>el.classList.contains('vf-rail-open'));
+                    if(!opened) throw new Error('mobile rail did not open');
+                    await page.locator('.vf-admin-backdrop').click({position:{x:2,y:2}});
+                    const closed=await page.locator('body').evaluate(el=>!el.classList.contains('vf-rail-open'));
+                    if(!closed) throw new Error('mobile rail did not close');
+                  }
+                }
+
+                if(pageErrors.length) throw new Error(route+' pageerror viewport='+vp.name+' '+pageErrors.join(' | '));
+                if(consoleErrors.length) throw new Error(route+' console-error viewport='+vp.name+' '+consoleErrors.join(' | '));
+
+                checked++;
+                await page.close();
+              }
+              await context.close();
+            }
+          } finally {
+            await browser.close();
+          }
+
+          console.log('P01_UI_EVIDENCE_VIEWPORTS=390,768,1024,1440,1920');
+          console.log('P01_UI_SCENE_CHECK_COUNT='+checked);
+          console.log('P01_UI_TOP_LEVEL_NAV=PASS');
+          console.log('P01_UI_SPECIAL_CAPABILITIES=PASS');
+          console.log('P01_UI_DOCUMENT_OVERFLOW=PASS');
+          console.log('P01_UI_CONSOLE_PAGEERROR=PASS');
+          console.log('P01_UI_MOBILE_RAIL=PASS');
+          console.log('P01_SYNTHETIC_BROWSER_UA_UI=PASS');
+          JS
+
+          node gate.mjs
+
       - name: No-schema-delta fence from released baseline
         if: always()
         shell: bash
