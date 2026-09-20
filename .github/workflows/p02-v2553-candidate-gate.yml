@@ -1,0 +1,288 @@
+name: P02 V2.5.53 Candidate Gate
+
+on:
+  push:
+    branches:
+      - run/p02-v2553-candidate-20260920
+    paths:
+      - '.github/workflows/p02-v2553-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      TARGET_REPO: llhzx2018/vf-library
+      TARGET_SHA: e0afdb745a61f8bf21d7d81c734a589bc3194fe8
+      TARGET_VERSION: 2.5.53
+      TARGET_SCHEMA: "2401"
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: e0afdb745a61f8bf21d7d81c734a589bc3194fe8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Release applicability receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'PUBLIC_AUTHORITY_APPLICABILITY INSTALL=REQUIRED SECURITY=REQUIRED TESTING=REQUIRED UPGRADE=REQUIRED DATA_SCHEMA=REQUIRED GIT=REQUIRED UA_UI=REQUIRED'
+          echo 'PUBLIC_AUTHORITY_APPLICABILITY API_PROVIDER=N_A SEO=N_A CRON_JOB=N_A NOTIFICATION=N_A OBSERVABILITY=N_A PERFORMANCE=N_A'
+          echo 'P02_OWNER_PREVIEW_RUNTIME_APPLICABILITY=N_A'
+          echo P02_V2553_PUBLIC_AUTHORITY_RELEASE_GATE=PASS
+
+      - name: Install PHP and browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Verify exact source and repository contracts
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          bash scripts/verify-repository.sh
+          for t in tests/unit/p02_*.mjs; do
+            node "$t"
+          done
+          echo P02_V2553_SOURCE_AND_UNIT_GATE=PASS
+
+      - name: Clean FULL first-run and real Chromium UX gate
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          bash scripts/ux-browser-reverify.sh
+          echo P02_V2553_INSTALL_UI_BROWSER_GATE=PASS
+
+      - name: Deterministic multi-source update and repair build
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2553-candidate"
+          rm -rf "$TMP"
+          mkdir -p "$TMP/build1" "$TMP/build2"
+          bash scripts/build-deploy-tree.sh "$TMP/deploy1"
+          bash scripts/build-deploy-tree.sh "$TMP/deploy2"
+          STAMP="$(git show -s --format=%cI HEAD)"
+          for n in 1 2; do
+            python3 scripts/build-multisource-update.py \
+              --deploy-root "$TMP/deploy${n}" \
+              --output "$TMP/build${n}/VF_Library_V2.5.53_UPDATE.zip" \
+              --target-version 2.5.53 \
+              --source-version 2.5.35 \
+              --source-version 2.5.36 \
+              --source-version 2.5.37 \
+              --source-version 2.5.38 \
+              --source-version 2.5.39 \
+              --source-version 2.5.40 \
+              --source-version 2.5.41 \
+              --source-schema 2401 \
+              --target-schema 2401 \
+              --timestamp "$STAMP"
+            python3 scripts/build-multisource-repair.py \
+              --deploy-root "$TMP/deploy${n}" \
+              --template scripts/repair-template.php \
+              --output "$TMP/build${n}/repair-v2.5.53.php" \
+              --target-version 2.5.53 \
+              --source-version 2.5.35 \
+              --source-version 2.5.36 \
+              --source-version 2.5.37 \
+              --source-version 2.5.38 \
+              --source-version 2.5.39 \
+              --source-version 2.5.40 \
+              --source-version 2.5.41 \
+              --schema 2401
+          done
+          cmp "$TMP/build1/VF_Library_V2.5.53_UPDATE.zip" "$TMP/build2/VF_Library_V2.5.53_UPDATE.zip"
+          cmp "$TMP/build1/repair-v2.5.53.php" "$TMP/build2/repair-v2.5.53.php"
+          unzip -t "$TMP/build1/VF_Library_V2.5.53_UPDATE.zip" >/dev/null
+          php -l "$TMP/build1/repair-v2.5.53.php" >/dev/null
+          echo "P02_V2553_UPDATE_SHA256=$(sha256sum "$TMP/build1/VF_Library_V2.5.53_UPDATE.zip" | awk '{print $1}')"
+          echo P02_V2553_DETERMINISTIC_BUILD_GATE=PASS
+
+      - name: Direct upgrade matrix 2.5.35 / 2.5.36 / 2.5.37 / 2.5.38 / 2.5.39 / 2.5.40 / 2.5.41
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2553-candidate"
+          REPAIR="$TMP/build1/repair-v2.5.53.php"
+          PIDS=()
+          WORKTREES=()
+          cleanup() {
+            for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+            for w in "${WORKTREES[@]:-}"; do git worktree remove --force "$w" >/dev/null 2>&1 || true; done
+          }
+          trap cleanup EXIT
+
+          setup_site() {
+            local base="$1" cookie="$2" pass="$3" page="$4"
+            curl -fsS -c "$cookie" "$base/setup.php" > "$page"
+            local token
+            token="$(python3 - "$page" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('setup csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+            local code
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -b "$cookie" -c "$cookie" -H "Origin: $base" \
+              --data-urlencode "setup_csrf=$token" \
+              --data-urlencode "password=$pass" \
+              --data-urlencode "password_confirm=$pass" "$base/setup.php")"
+            test "$code" = 303
+          }
+
+          run_upgrade() {
+            local src="$1" port="$2"
+            local oldsrc="$TMP/old-${src}" site="$TMP/site-${src}" cookie="$TMP/cookie-${src}.txt"
+            local base="http://127.0.0.1:${port}" pass="VF-P02-${src}-${GITHUB_RUN_ID}!"
+            echo "P02_V2553_UPGRADE_${src}_WORKTREE_START"
+            git worktree add --detach "$oldsrc" "v${src}"
+            WORKTREES+=("$oldsrc")
+            echo "P02_V2553_UPGRADE_${src}_BUILD_START"
+            bash "$oldsrc/scripts/build-deploy-tree.sh" "$site"
+            echo "P02_V2553_UPGRADE_${src}_BUILD_PASS"
+            php "$site/cli/check-requirements.php"
+            echo "P02_V2553_UPGRADE_${src}_RUNTIME_REQUIREMENTS_PASS"
+            php -d display_errors=0 -S "127.0.0.1:${port}" -t "$site" >"$TMP/server-${src}.log" 2>&1 &
+            local pid=$!
+            PIDS+=("$pid")
+            for _ in $(seq 1 80); do
+              if curl -fsS "$base/setup.php" >/dev/null 2>&1; then break; fi
+              sleep .25
+            done
+            kill -0 "$pid"
+            echo "P02_V2553_UPGRADE_${src}_SETUP_START"
+            if ! setup_site "$base" "$cookie" "$pass" "$TMP/setup-${src}.html"; then
+              cat "$TMP/setup-${src}.html" || true
+              cat "$TMP/server-${src}.log" || true
+              exit 41
+            fi
+            echo "P02_V2553_UPGRADE_${src}_SETUP_PASS"
+
+            echo "P02_V2553_UPGRADE_${src}_SEED_START"
+            php -d display_errors=1 -r '
+              require $argv[1]."/app/bootstrap.php";
+              $d=vftb_db();$n=gmdate("c");
+              $q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");
+              $q->execute(["Upgrade ".$argv[2],"fixture","folder",100,$n,$n]);$c=(int)$d->lastInsertId();
+              $q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
+              $q->execute([$c,"UPGRADE_SENTINEL_".$argv[2],"fixture","preserve ".$argv[2],"quick","plain","copy","active","[]","[]",$n,$n]);
+              $itemId=(int)$d->lastInsertId();(new VfLibrarySearchService($d))->upsertItem($itemId);
+              $scratch=["version"=>1,"next_id"=>2,"tabs"=>[["id"=>1,"title"=>"Scratch ".$argv[2],"content"=>"SCRATCH_".$argv[2]."_SENTINEL","is_open"=>true,"is_pinned"=>true,"sort_order"=>100,"cursor_pos"=>0,"scroll_top"=>0,"created_at"=>$n,"updated_at"=>$n,"closed_at"=>null]]];
+              $q=$d->prepare("INSERT INTO system_settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at");
+              $q->execute(["scratch_tabs_state_v1",json_encode($scratch,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$n]);
+            ' "$site" "$src"
+            echo "P02_V2553_UPGRADE_${src}_SEED_PASS"
+
+            cp "$REPAIR" "$site/repair-v2.5.53.php"
+            echo "P02_V2553_UPGRADE_${src}_REPAIR_FORM_START"
+            if ! curl -fsS -b "$cookie" -c "$cookie" "$base/repair-v2.5.53.php" > "$TMP/repair-form-${src}.html"; then
+              cat "$TMP/server-${src}.log" || true
+              exit 42
+            fi
+            echo "P02_V2553_UPGRADE_${src}_REPAIR_FORM_PASS"
+            local csrf
+            csrf="$(python3 - "$TMP/repair-form-${src}.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="csrf" value="([^"]+)"',s)
+          if not m: raise SystemExit('repair csrf missing')
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+            echo "P02_V2553_UPGRADE_${src}_REPAIR_EXEC_START"
+            if ! curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" \
+              --data-urlencode action=upgrade --data-urlencode "csrf=$csrf" \
+              "$base/repair-v2.5.53.php" > "$TMP/repair-result-${src}.html"; then
+              cat "$TMP/repair-result-${src}.html" || true
+              cat "$TMP/server-${src}.log" || true
+              exit 43
+            fi
+            cat "$TMP/repair-result-${src}.html"
+            grep -q '升级完成' "$TMP/repair-result-${src}.html"
+            echo "P02_V2553_UPGRADE_${src}_REPAIR_RESULT_PASS"
+            if test -e "$site/repair-v2.5.53.php"; then
+              echo "repair file still present after successful repair" >&2
+              ls -l "$site/repair-v2.5.53.php" >&2 || true
+              exit 44
+            fi
+            echo "P02_V2553_UPGRADE_${src}_REPAIR_SELF_CLEAN_PASS"
+            actual_version="$(tr -d '\r\n' < "$site/VERSION.txt")"
+            echo "P02_V2553_UPGRADE_${src}_VERSION=${actual_version}"
+            test "$actual_version" = 2.5.53
+            echo "P02_V2553_UPGRADE_${src}_VERSION_PASS"
+
+            echo "P02_V2553_UPGRADE_${src}_POSTCHECK_START"
+            php -d display_errors=1 -r '
+              require $argv[1]."/app/bootstrap.php";$d=vftb_db();
+              if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(2);
+              $q=$d->prepare("SELECT content FROM text_items WHERE title=?");
+              $q->execute(["UPGRADE_SENTINEL_".$argv[2]]);
+              if($q->fetchColumn()!=="preserve ".$argv[2])exit(3);
+              $q=$d->prepare("SELECT setting_value FROM system_settings WHERE setting_key=?");
+              $q->execute(["scratch_tabs_state_v1"]);$v=(string)$q->fetchColumn();
+              if(strpos($v,"SCRATCH_".$argv[2]."_SENTINEL")===false)exit(4);
+              if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(5);
+              if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(6);
+              $n=gmdate("c");$q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) SELECT id,?,?,?,?,?,?,?,?,?,?,? FROM text_categories ORDER BY id LIMIT 1");
+              $q->execute(["POST_UPGRADE_WRITE_".$argv[2],"fixture","write ok","quick","plain","copy","active","[]","[]",$n,$n]);
+              $itemId=(int)$d->lastInsertId();(new VfLibrarySearchService($d))->upsertItem($itemId);
+            ' "$site" "$src"
+            echo "P02_V2553_UPGRADE_${src}_POSTCHECK_PASS"
+
+            local private_root backup_dir
+            private_root="$(php -r 'require $argv[1]."/app/bootstrap.php";echo VFTB_PRIVATE_ROOT;' "$site")"
+            backup_dir="$(php -r 'require $argv[1]."/app/bootstrap.php";echo VFTB_BACKUP_DIR;' "$site")"
+            echo "P02_V2553_UPGRADE_${src}_PRIVATE_ROOT=${private_root}"
+            echo "P02_V2553_UPGRADE_${src}_BACKUP_DIR=${backup_dir}"
+            test -d "$backup_dir"
+            echo "P02_V2553_UPGRADE_${src}_BACKUP_DIR_PASS"
+            find "$backup_dir" -maxdepth 2 -print
+            find "$backup_dir" -maxdepth 1 -type d -name 'atomic-pre-operation-*' -print -quit | grep -q .
+            echo "P02_V2553_UPGRADE_${src}_PREOP_BACKUP_PASS"
+            ! find "$private_root" -maxdepth 1 -type d -name '.atomic-rollback-*' -print -quit | grep -q .
+            echo "P02_V2553_UPGRADE_${src}_ROLLBACK_RESIDUE_CLEAN_PASS"
+            ( cd "$site" && php cli/verify.php ) > "$TMP/verify-${src}.json"
+            cat "$TMP/verify-${src}.json"
+            python3 - "$TMP/verify-${src}.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x.get('ok') is True and int(x.get('schema_version',0))==2401,x
+          PY
+            echo "P02_V2553_DIRECT_UPGRADE_${src}=PASS"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            git worktree remove --force "$oldsrc" >/dev/null
+          }
+
+          run_upgrade 2.5.35 18235
+          run_upgrade 2.5.36 18236
+          run_upgrade 2.5.37 18237
+          run_upgrade 2.5.38 18238
+          run_upgrade 2.5.39 18239
+          run_upgrade 2.5.40 18240
+          run_upgrade 2.5.41 18241
+          trap - EXIT
+          echo P02_V2553_SOURCE_SET_MATRIX=PASS
+          echo P02_V2553_CANDIDATE_GATE=PASS
