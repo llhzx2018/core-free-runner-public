@@ -1,0 +1,99 @@
+name: P02 V2.5.50 Auth Feedback Gate
+
+on:
+  push:
+    branches:
+      - run/p02-v2550-auth-feedback-20260920
+    paths:
+      - '.github/workflows/p02-v2550-auth-feedback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_SHA: 79b20c4618fa02442a4654608eddd0faca650733
+      TARGET_VERSION: 2.5.50
+      VF_UX_E2E_PORT: "18098"
+      VF_UX_E2E_PASSWORD: "VF-Auth-Feedback-Only!"
+    steps:
+      - name: Checkout exact P02 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 79b20c4618fa02442a4654608eddd0faca650733
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install runtime and Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Verify source contracts
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          bash scripts/verify-repository.sh
+          node tests/unit/p02_v2542_inkstone_reference_contract.mjs
+          node tests/unit/p02_v2543_editor_list_continuity.mjs
+          node tests/unit/p02_v2544_full_list_density.mjs
+          node tests/unit/p02_v2545_settings_form_convergence.mjs
+          node tests/unit/p02_v2546_mobile_settings_convergence.mjs
+          node tests/unit/p02_v2547_note_rail_quiet_state.mjs
+          node tests/unit/p02_v2548_workspace_toolbar_convergence.mjs
+          node tests/unit/p02_v2549_sidebar_command_convergence.mjs
+          node tests/unit/p02_v2550_auth_feedback_convergence.mjs
+          node tests/unit/p02_candidate_version_identity_contract.mjs
+          echo P02_V2550_AUTH_FEEDBACK_SOURCE_GATE=PASS
+
+      - name: Build synthetic site
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-v2550"
+          SITE="$RUN_ROOT/site"
+          COOKIE="$RUN_ROOT/cookies.txt"
+          BASE_URL="http://127.0.0.1:${VF_UX_E2E_PORT}"
+          mkdir -p "$RUN_ROOT"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S "127.0.0.1:${VF_UX_E2E_PORT}" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          echo $! > "$RUN_ROOT/php.pid"
+          for _ in $(seq 1 80); do curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 -c 'import html,re,sys; s=open(sys.argv[1],encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s); print(html.unescape(m.group(1))) if m else (_ for _ in ()).throw(SystemExit("setup csrf missing"))' "$RUN_ROOT/setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$VF_UX_E2E_PASSWORD" --data-urlencode "password_confirm=$VF_UX_E2E_PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = "303"
+          echo P02_V2550_SYNTHETIC_SITE=PASS
+
+      - name: Real Chromium auth and feedback regression
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          export VF_UX_E2E_BASE_URL="http://127.0.0.1:${VF_UX_E2E_PORT}"
+          export VF_UX_E2E_VERSION="$TARGET_VERSION"
+          node tests/e2e/p02_v2550_auth_feedback.mjs
+          bash scripts/ux-browser-reverify.sh
+          echo P02_V2550_AUTH_FEEDBACK_BROWSER_GATE=PASS
+
+      - name: Stop synthetic site
+        if: always()
+        shell: bash
+        run: |
+          pid_file="$RUNNER_TEMP/p02-v2550/php.pid"
+          if [ -f "$pid_file" ]; then kill "$(cat "$pid_file")" 2>/dev/null || true; fi
