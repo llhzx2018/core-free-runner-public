@@ -1,0 +1,128 @@
+name: p01-v24728-bind-temp
+
+on:
+  push:
+    branches:
+      - run/p01-v24728-bind
+
+permissions:
+  contents: read
+
+jobs:
+  bind-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ee905716f594103bc08a653f4e5fcb78ffc84bcb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Checkout engineering base
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 5c9af67be5f14c6606278fd03b1be78d7ff9b66e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: base
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact bind scope and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "ee905716f594103bc08a653f4e5fcb78ffc84bcb"
+          test "$(git -C base rev-parse HEAD)" = "5c9af67be5f14c6606278fd03b1be78d7ff9b66e"
+          test "$(cat target/VERSION)" = "2.47.28"
+          test "$(cat target/src/VERSION.txt)" = "2.47.28"
+          grep -Fq "define('VF_VERSION', '2.47.28');" target/src/app/bootstrap.php
+          test "$(cat base/VERSION)" = "2.47.27"
+          test -f target/docs/release/V2.47.28_RELEASE_GATE.md
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_V24728_BIND_SCOPE_SYNTAX=PASS
+
+      - name: Focused contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          php tests/unit/admin_resource_browse_edit_r5_contract.php
+          php tests/unit/admin_visual_system_r4_contract.php
+          php tests/unit/admin_rail_action_only_contract.php
+          php tests/unit/advanced_manager_daily_entry_contract.php
+          php tests/unit/atomic_runtime_cache_contract.php
+          php tests/unit/update_recovery_contract.php
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.28_RELEASE_GATE.md
+          grep -Fq 'NO_UNKNOWN_APPLICABILITY = YES' docs/release/V2.47.28_RELEASE_GATE.md
+          echo P01_V24728_BIND_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install baseline and authenticated R5 smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-v24728-runtime
+          cp -a target/src /tmp/p01-v24728-runtime
+          cd /tmp/p01-v24728-runtime
+          php -S 127.0.0.1:18110 -t . >/tmp/p01-v24728-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; rm -rf /tmp/p01-v24728-runtime /tmp/p01-v24728-*' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS -c /tmp/p01-v24728.cookies -b /tmp/p01-v24728.cookies http://127.0.0.1:18110/setup.php -o /tmp/p01-v24728-setup.html && break
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24728-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v24728.cookies -b /tmp/p01-v24728.cookies -X POST http://127.0.0.1:18110/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF V24728 Bind'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-v24728-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v24728-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24728-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v24728-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v24728-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-v24728-baseline.txt
+          php -r 'require "app/bootstrap.php"; $r=new VfRepository(vf_db()); $cid=$r->createCategory(["name"=>"Runner 分类"]); $r->saveLink(null,["surface"=>"start","category_id"=>$cid,"title"=>"Runner Resource","url"=>"https://example.com"]);'
+
+          python3 - <<PY >/tmp/p01-v24728-login.json
+          import json
+          print(json.dumps({"password": """$TEST_PASSWORD"""}))
+          PY
+          curl -fsS -c /tmp/p01-v24728.cookies -b /tmp/p01-v24728.cookies -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18110/api.php?action=login' --data-binary @/tmp/p01-v24728-login.json             -o /tmp/p01-v24728-login-result.json
+          grep -F '"ok":true' /tmp/p01-v24728-login-result.json >/dev/null
+
+          curl -fsS -c /tmp/p01-v24728.cookies -b /tmp/p01-v24728.cookies 'http://127.0.0.1:18110/surface-manager.php?advanced=1' -o /tmp/p01-v24728-all.html
+          grep -F '<h1>全部资源</h1>' /tmp/p01-v24728-all.html >/dev/null
+          grep -F '先浏览和筛选；只有需要修改时才展开某一条。' /tmp/p01-v24728-all.html >/dev/null
+          grep -F 'class="vf-resource-editor-details"' /tmp/p01-v24728-all.html >/dev/null
+          grep -F 'class="vf-resource-editor-summary"' /tmp/p01-v24728-all.html >/dev/null
+          grep -F 'data-resource-editor-close' /tmp/p01-v24728-all.html >/dev/null
+          grep -F '>保存更改</button>' /tmp/p01-v24728-all.html >/dev/null
+          ! grep -F 'class="vf-resource-editor-details" open' /tmp/p01-v24728-all.html >/dev/null
+
+          ID=$(grep -o 'name="link_id" value="[0-9]*"' /tmp/p01-v24728-all.html | head -1 | grep -o '[0-9]*')
+          curl -fsS -c /tmp/p01-v24728.cookies -b /tmp/p01-v24728.cookies "http://127.0.0.1:18110/surface-manager.php?advanced=1&resource_id=$ID" -o /tmp/p01-v24728-focus.html
+          grep -F 'class="vf-resource-editor-details" open' /tmp/p01-v24728-focus.html >/dev/null
+          echo P01_V24728_BIND_FRESH_AUTH_SMOKE=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_V24728_BOUND_CANDIDATE_GATE=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
