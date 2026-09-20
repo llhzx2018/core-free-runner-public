@@ -16,6 +16,7 @@ jobs:
     timeout-minutes: 30
     env:
       P01_SHA: 243d4cfb3083d0c2afb3c0d060bc26458177a3c0
+      P01_RELEASE_BASELINE_SHA: 3394e056ce9c0f6ba3667a67a8bc5ae1c4c513b0
       P01_SCHEMA: '2026090401'
     steps:
       - name: Verify private-read capability
@@ -36,6 +37,16 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           path: target
+
+      - name: Checkout released V2.47.38 baseline transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_RELEASE_BASELINE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: baseline
 
       - name: Setup PHP 8.4
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
@@ -135,6 +146,40 @@ jobs:
           fi
           echo "$failures" >/tmp/p01-current-unit-failure-count
 
+      - name: Released baseline unit inventory comparison
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd baseline
+          count=0
+          failures=0
+          : >/tmp/p01-baseline-unit-failures.txt
+          while IFS= read -r test_file; do
+            count=$((count+1))
+            if php "$test_file" >/dev/null 2>&1; then
+              :
+            else
+              failures=$((failures+1))
+              echo "$test_file" >>/tmp/p01-baseline-unit-failures.txt
+            fi
+          done < <(find tests/unit -maxdepth 1 -type f -name '*.php' | sort)
+          echo "P01_RELEASE_BASELINE_UNIT_TEST_COUNT=$count"
+          echo "P01_RELEASE_BASELINE_UNIT_FAILURE_COUNT=$failures"
+          echo "$failures" >/tmp/p01-baseline-unit-failure-count
+
+          sort -u /tmp/p01-current-unit-failures.txt >/tmp/p01-current-unit-failures.sorted.txt
+          sort -u /tmp/p01-baseline-unit-failures.txt >/tmp/p01-baseline-unit-failures.sorted.txt
+          comm -23 /tmp/p01-current-unit-failures.sorted.txt /tmp/p01-baseline-unit-failures.sorted.txt >/tmp/p01-new-unit-failures.txt
+          comm -13 /tmp/p01-current-unit-failures.sorted.txt /tmp/p01-baseline-unit-failures.sorted.txt >/tmp/p01-resolved-unit-failures.txt
+          new_count="$(wc -l </tmp/p01-new-unit-failures.txt | tr -d ' ')"
+          resolved_count="$(wc -l </tmp/p01-resolved-unit-failures.txt | tr -d ' ')"
+          echo "P01_UNIT_NEW_FAILURE_COUNT=$new_count"
+          echo "P01_UNIT_RESOLVED_FAILURE_COUNT=$resolved_count"
+          if [ "$new_count" -gt 0 ]; then
+            sed 's#^#NEW_UNIT_FAILURE=#' /tmp/p01-new-unit-failures.txt
+          fi
+          echo "$new_count" >/tmp/p01-new-unit-failure-count
+
       - name: Fresh install and runtime verification
         if: always()
         shell: bash
@@ -214,17 +259,21 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          git -C target fetch --no-tags --depth=1 origin refs/tags/v2.47.38:refs/tags/v2.47.38
-          if git -C target diff --name-only v2.47.38 "$P01_SHA" | grep -E '(^|/)(migrations?|schema)(/|\.|$)'; then
-            echo 'UNEXPECTED_SCHEMA_OR_MIGRATION_DELTA' >&2
-            exit 1
-          fi
+          test "$(git -C baseline rev-parse HEAD)" = "$P01_RELEASE_BASELINE_SHA"
           test "$(python3 - <<'PY'
           import json
-          p=json.load(open('target/VF_PROJECT.json',encoding='utf-8'))
-          print(p['working_schema_version'])
+          current=json.load(open('target/VF_PROJECT.json',encoding='utf-8'))
+          baseline=json.load(open('baseline/VF_PROJECT.json',encoding='utf-8'))
+          assert str(current['working_schema_version'])=='2026090401'
+          assert str(baseline['working_schema_version'])=='2026090401'
+          print(current['working_schema_version'])
           PY
           )" = "$P01_SCHEMA"
+          diff -qr baseline/src/migrations target/src/migrations >/tmp/p01-migration-diff.txt || {
+            cat /tmp/p01-migration-diff.txt
+            echo 'UNEXPECTED_MIGRATION_DELTA' >&2
+            exit 1
+          }
           echo 'P01_CURRENT_SCHEMA_DELTA=NONE'
           echo 'P01_CURRENT_MACHINE_READINESS=PASS'
           echo 'RELEASE=NO'
@@ -237,10 +286,19 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          failures="$(cat /tmp/p01-current-unit-failure-count 2>/dev/null || echo 999)"
-          echo "P01_CURRENT_UNIT_DEBT_COUNT=$failures"
-          if [ "$failures" -ne 0 ]; then
-            echo 'P01_RELEASE_READINESS=BLOCKED_TEST_SUITE_AUTHORITY_RECONCILIATION'
+          current_failures="$(cat /tmp/p01-current-unit-failure-count 2>/dev/null || echo 999)"
+          baseline_failures="$(cat /tmp/p01-baseline-unit-failure-count 2>/dev/null || echo 999)"
+          new_failures="$(cat /tmp/p01-new-unit-failure-count 2>/dev/null || echo 999)"
+          echo "P01_CURRENT_UNIT_DEBT_COUNT=$current_failures"
+          echo "P01_RELEASE_BASELINE_UNIT_DEBT_COUNT=$baseline_failures"
+          echo "P01_NEW_UNIT_REGRESSION_COUNT=$new_failures"
+          if [ "$new_failures" -ne 0 ]; then
+            echo 'P01_RELEASE_READINESS=BLOCKED_NEW_UNIT_REGRESSION'
+            exit 1
+          fi
+          if [ "$current_failures" -ne 0 ]; then
+            echo 'P01_CURRENT_DELTA_REGRESSION=PASS'
+            echo 'P01_RELEASE_READINESS=BLOCKED_LEGACY_TEST_AUTHORITY_RECONCILIATION'
             exit 1
           fi
           echo 'P01_RELEASE_READINESS=MACHINE_PREVIEW_READY'
@@ -249,6 +307,6 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf target /tmp/p01-current-readiness-runtime
-          rm -f /tmp/p01-current-readiness* /tmp/p01-current-*.html
+          rm -rf target baseline /tmp/p01-current-readiness-runtime
+          rm -f /tmp/p01-current-readiness* /tmp/p01-current-*.html /tmp/p01-*-unit-*.txt /tmp/p01-migration-diff.txt
           echo 'P01_PRIVATE_SOURCE_CLEANUP=PASS'
