@@ -1,0 +1,121 @@
+name: S01-C02 1.21.911 Distribution + Page Rhythm Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORE_UPDATES_SHA: f483c7c82f6a20a2d4a89e16f25450c40b162edf
+      PRODUCT_SHA: bc80400be13c84d43096f94d413c72a09da0ee6a
+      VERSION: 1.21.911
+      TAG: v1.21.911
+      ASSET: vf-tools-ops_V1.21.911.zip
+      ASSET_BYTES: "3480003"
+      ASSET_SHA256: 2e22e053b96193b91399f9d21fc6d4b399c56dcb9b7b60fdbb4d2119245785ab
+      RUNTIME_FILES: "972"
+      RUNTIME_FINGERPRINT: af77130c9c07ae921f72eebe96187465d2eeca3ce525627f490dd72d9a75fa15
+
+    steps:
+      - name: Checkout exact core-updates candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: f483c7c82f6a20a2d4a89e16f25450c40b162edf
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: dist
+
+      - name: Checkout exact Ops source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: bc80400be13c84d43096f94d413c72a09da0ee6a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: ops
+
+      - name: Verify manifest and Update Core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C dist rev-parse HEAD)" = "$CORE_UPDATES_SHA"
+          python3 dist/scripts/check_manifest_contract.py >/tmp/manifest-audit.json
+          grep -Fq '"status": "PASS"' /tmp/manifest-audit.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('dist/projects/S01-C02.json').read_text())
+          assert m['target_version']==os.environ['VERSION']
+          assert m['release_tag']==os.environ['TAG']
+          assert m['asset_name']==os.environ['ASSET']
+          assert m['asset_bytes']==int(os.environ['ASSET_BYTES'])
+          assert m['asset_sha256']==os.environ['ASSET_SHA256']
+          assert m['runtime_files']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_file_count']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+          assert m['runtime_fingerprint_sha256']==os.environ['RUNTIME_FINGERPRINT']
+          assert '1.21.910' in m['from_versions']
+          assert m['schema_from']=='6.0.0' and m['schema_to']=='6.0.0'
+          print('PASS_MANIFEST')
+          PY
+          find dist/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php dist/update-core/php/tests/run.php
+
+      - name: Verify R21 + R22 visual contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$PRODUCT_SHA"
+          php ops/tests/s01-c02-121910-shell-single-authority-r21-contract.php
+          php ops/tests/s01-c02-121911-page-rhythm-consistency-r22-contract.php
+          python3 - <<'PY'
+          from pathlib import Path
+          page_files=[
+            'admin-s01-dashboard-r14.css',
+            'admin-s01-tools-r15.css',
+            'admin-s01-content-seo-r16.css',
+            'admin-s01-quality-r17.css',
+            'admin-s01-system-publish-r13.css',
+          ]
+          forbidden=[
+            '.vf-ops-v6-shell','.vf-v6-shell-header','.vf-v6-domain-nav',
+            '.vf-v6-domain-mobile','.vf-v6-brand-mark','.vf-v6-brand-copy',
+            '.vf-v8-current-domain',
+          ]
+          for name in page_files:
+              s=(Path('ops/assets/css/current')/name).read_text(encoding='utf-8')
+              for needle in forbidden:
+                  assert needle not in s, f'{name} owns {needle}'
+              for token in [
+                  'var(--vf-v6-page-content-max)',
+                  'var(--vf-v6-page-title-size)',
+                  'var(--vf-v6-page-kicker-size)',
+                  'var(--vf-v6-page-copy-size)',
+              ]:
+                  assert token in s, f'{name} missing {token}'
+          print('PASS_SHARED_VISUAL_AUTHORITY')
+          PY
+
+      - name: Verify Formal Release binding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/llhzx2018/vf-tools-ops/releases/tags/$TAG")"
+          test "$(jq -r '.target_commitish' <<<"$JSON")" = "$PRODUCT_SHA"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$JSON")" = "$ASSET_BYTES"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$JSON")" = "sha256:$ASSET_SHA256"
+          mkdir -p /tmp/release
+          gh release download "$TAG" --repo llhzx2018/vf-tools-ops --pattern "$ASSET" --dir /tmp/release
+          test "$(sha256sum "/tmp/release/$ASSET" | awk '{print $1}')" = "$ASSET_SHA256"
+          echo PASS_FORMAL_RELEASE_BINDING
