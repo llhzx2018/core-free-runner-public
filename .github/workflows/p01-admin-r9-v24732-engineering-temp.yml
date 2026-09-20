@@ -1,0 +1,153 @@
+name: p01-admin-r9-v24732-engineering-temp
+
+on:
+  push:
+    branches:
+      - run/p01-admin-r9-v24732-engineering
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 9316339dfcb303c791fe64697316efe6666977aa
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: vf-start
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source syntax and R9 contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "9316339dfcb303c791fe64697316efe6666977aa"
+          test "$(tr -d '\r\n ' < VERSION)" = "2.47.31"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php tests/unit/admin_rail_r7_contract.php
+          php tests/unit/pending_inbox_quiet_state_r7_contract.php
+          php tests/unit/system_health_runtime_r7_contract.php
+          php tests/unit/url_health_action_first_r7_contract.php
+          php tests/unit/url_health_table_fit_r8_contract.php
+          php tests/unit/url_health_freshness_r9_contract.php
+          php tests/unit/admin_resource_browse_edit_r5_contract.php
+          php tests/unit/admin_visual_system_r4_contract.php
+          php tests/unit/admin_navigation_task_separation_contract.php
+          php tests/unit/admin_settings_focus_contract.php
+          php tests/unit/admin_overview_actionable_health_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          echo P01_ADMIN_R9_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install and authenticated runtime smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-admin-r9
+          cp -a vf-start/src /tmp/p01-admin-r9
+          cd /tmp/p01-admin-r9
+          php -S 127.0.0.1:18116 -t . >/tmp/p01-admin-r9-server.log 2>&1 &
+          echo $! >/tmp/p01-admin-r9.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies http://127.0.0.1:18116/setup.php -o /tmp/p01-admin-r9-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-admin-r9-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies -X POST http://127.0.0.1:18116/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF Admin R9' \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            -o /tmp/p01-admin-r9-setup-post.html
+          php cli/verify.php | tee /tmp/p01-admin-r9-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-admin-r9-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-admin-r9-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-admin-r9-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-admin-r9-baseline.txt
+
+          TEST_PASSWORD="$TEST_PASSWORD" python3 - <<'PY' >/tmp/p01-admin-r9-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies \
+            -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18116/api.php?action=login' \
+            --data-binary @/tmp/p01-admin-r9-login.json -o /tmp/p01-admin-r9-login-result.json
+          grep -F '"ok":true' /tmp/p01-admin-r9-login-result.json >/dev/null
+
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/surface-manager.php' -o /tmp/p01-admin-r9-pending.html
+          grep -F '<h1>待整理收件箱</h1>' /tmp/p01-admin-r9-pending.html >/dev/null
+          grep -F '当前没有待整理网址' /tmp/p01-admin-r9-pending.html >/dev/null
+          grep -F '现在无需处理。' /tmp/p01-admin-r9-pending.html >/dev/null
+          ! grep -F 'surface-manager.php?mode=focus">连续处理' /tmp/p01-admin-r9-pending.html >/dev/null
+
+          php -r 'require "app/bootstrap.php"; require_once "app/Repository.php"; $r=new VfRepository(vf_db()); $cid=$r->createCategory(["name"=>"Runner 健康覆盖"]); $r->saveLink(null,["category_id"=>$cid,"title"=>"Runner Unchecked","url"=>"https://example.com"]);'
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/manage.php' -o /tmp/p01-admin-r9-manage.html
+          grep -F '网址健康需要处理' /tmp/p01-admin-r9-manage.html >/dev/null
+          grep -F '1 条尚未检查' /tmp/p01-admin-r9-manage.html >/dev/null
+          grep -F '未检查 1' /tmp/p01-admin-r9-manage.html >/dev/null
+
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/system-health.php' -o /tmp/p01-admin-r9-system.html
+          grep -F '正在检查运行状态…' /tmp/p01-admin-r9-system.html >/dev/null
+          grep -F '<strong>检查状态</strong><span>正在读取…</span>' /tmp/p01-admin-r9-system.html >/dev/null
+
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/api.php?action=system_status' -o /tmp/p01-admin-r9-system.json
+          grep -F '"ok":true' /tmp/p01-admin-r9-system.json >/dev/null
+
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/health.php' -o /tmp/p01-admin-r9-health.html
+          grep -F '默认只显示真正需要处理的异常' /tmp/p01-admin-r9-health.html >/dev/null
+          grep -F '<option value="attention">待处理（确认 / 疑似 / 暂时）</option><option value="">全部状态（含正常）</option>' /tmp/p01-admin-r9-health.html >/dev/null
+          grep -F 'id="jobProgress" hidden' /tmp/p01-admin-r9-health.html >/dev/null
+          grep -F 'id="jobFreshness"' /tmp/p01-admin-r9-health.html >/dev/null
+          grep -F 'function relativeAge(ts)' assets/health.js >/dev/null
+          grep -F 'progress.hidden=!active' assets/health.js >/dev/null
+          grep -F '最近一次网址检查数据' assets/health.js >/dev/null
+
+          grep -F 'function rowActions(i,backup,canPromote,canReplace)' assets/health.js >/dev/null
+          grep -F 'class="vf-health-row-more"' assets/health.js >/dev/null
+          grep -F 'P01 URL Health R8 — desktop table fits without horizontal clipping; row actions stay compact.' assets/admin-consolidation.css >/dev/null
+          grep -F '.table{width:100%!important;min-width:0!important;table-layout:fixed}' assets/admin-consolidation.css >/dev/null
+          ! grep -F '>打开网址</a><a class="btn" href="surfaces.php?edit_id=' assets/health.js >/dev/null
+
+          curl -fsS -c /tmp/p01-admin-r9.cookies -b /tmp/p01-admin-r9.cookies 'http://127.0.0.1:18116/asset.php?file=system.js&v=2.47.31' -o /tmp/p01-admin-r9-system.js
+          grep -F ',all=s=>Array.from(document.querySelectorAll(s))' /tmp/p01-admin-r9-system.js >/dev/null
+          ! grep -F ',$=s=>Array.from(document.querySelectorAll(s))' /tmp/p01-admin-r9-system.js >/dev/null
+
+          echo P01_ADMIN_R9_AUTH_HTTP=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_ADMIN_R9_EXACT_SOURCE_GATE=PASS
+          echo EXACT_SOURCE=9316339dfcb303c791fe64697316efe6666977aa
+          echo VERSION=2.47.31
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/p01-admin-r9.pid ]; then kill "$(cat /tmp/p01-admin-r9.pid)" 2>/dev/null || true; fi
+          rm -rf /tmp/p01-admin-r9 /tmp/p01-admin-r9-*
