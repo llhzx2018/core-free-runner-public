@@ -11,13 +11,19 @@ from typing import Any
 
 ARCHIVE_BATCH = Path("archive/workflows/2026-08")
 V10_MANIFEST_PATH = Path("archive/workflows/归档清单_V10.json")
-MANIFEST_PATH = Path("archive/workflows/归档清单_V11.json")
+V11_MANIFEST_PATH = Path("archive/workflows/归档清单_V11.json")
+MANIFEST_PATH = Path("archive/workflows/归档清单_V12.json")
 LATE_BATCH = ARCHIVE_BATCH / "late-active-v11"
 LATE_BATCH_SOURCE_COMMIT = "e90d10a76f01f6166ed49516d44a82019205fe84"
 LATE_BATCH_TREE_SHA = "fc14bb126badeacedd455f974d60b29105d34883"
 LATE_BATCH_ENTRY_COUNT = 86
+V12_BATCH = Path("archive/workflows/2026-09/historical-version/s01-v12")
+V12_BATCH_SOURCE_COMMIT = "cfd2d5fb4fd3c6d83768c082c1c7e40f506fd991"
+V12_BATCH_TREE_SHA = "d20283c8f6d061d24c58d4aab677209d4a89270d"
+V12_BATCH_ENTRY_COUNT = 4
 V10_ENTRY_COUNT = 421
-TOTAL_ENTRY_COUNT = V10_ENTRY_COUNT + LATE_BATCH_ENTRY_COUNT
+V11_ENTRY_COUNT = V10_ENTRY_COUNT + LATE_BATCH_ENTRY_COUNT
+TOTAL_ENTRY_COUNT = V11_ENTRY_COUNT + V12_BATCH_ENTRY_COUNT
 
 INVALID_NAMES = {
     "p01-22121-browser-reverify.yml",
@@ -96,7 +102,7 @@ def _late_files(root: Path) -> list[Path]:
     return sorted((root / LATE_BATCH).glob("*.yml"))
 
 
-def build_manifest(root: Path) -> dict[str, Any]:
+def build_v11_manifest(root: Path) -> dict[str, Any]:
     late_count = len(_late_files(root))
     return {
         "schema": "core-free-runner-workflow-archive/v11",
@@ -121,6 +127,37 @@ def build_manifest(root: Path) -> dict[str, Any]:
             "entry_count": late_count,
         },
         "active_current_workflows": sorted(V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT),
+    }
+
+
+def _v12_files(root: Path) -> list[Path]:
+    return sorted((root / V12_BATCH).glob("*.yml"))
+
+
+def build_manifest(root: Path) -> dict[str, Any]:
+    v12_count = len(_v12_files(root))
+    return {
+        "schema": "core-free-runner-workflow-archive/v12",
+        "batch": "2026-09",
+        "policy": "MOVE_ONLY_NO_CONTENT_CHANGE",
+        "entry_count": V11_ENTRY_COUNT + v12_count,
+        "category_counts": {
+            "temporary": 37,
+            "invalid-yaml": 2,
+            "historical-version": 382 + v12_count,
+            "late-active": LATE_BATCH_ENTRY_COUNT,
+        },
+        "base_manifest": {
+            "path": V11_MANIFEST_PATH.as_posix(),
+            "entry_count": V11_ENTRY_COUNT,
+        },
+        "delta": {
+            "archive_path": V12_BATCH.as_posix(),
+            "category": "historical-version",
+            "source_commit": V12_BATCH_SOURCE_COMMIT,
+            "git_tree_sha": V12_BATCH_TREE_SHA,
+            "entry_count": v12_count,
+        },
     }
 
 
@@ -170,6 +207,25 @@ def verify(root: Path) -> list[str]:
     if late_tree_sha is not None and late_tree_sha != LATE_BATCH_TREE_SHA:
         failures.append("LATE_BATCH_TREE_DRIFT")
 
+    v11_path = root / V11_MANIFEST_PATH
+    if not v11_path.is_file():
+        failures.append("V11_MANIFEST_MISSING")
+    else:
+        try:
+            actual_v11 = json.loads(v11_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            failures.append("V11_MANIFEST_INVALID_JSON")
+        else:
+            if actual_v11 != build_v11_manifest(root):
+                failures.append("V11_MANIFEST_DRIFT")
+
+    v12_files = _v12_files(root)
+    if len(v12_files) != V12_BATCH_ENTRY_COUNT:
+        failures.append("V12_BATCH_COUNT_NOT_4")
+    v12_tree_sha = _git_tree_sha(root, V12_BATCH)
+    if v12_tree_sha is not None and v12_tree_sha != V12_BATCH_TREE_SHA:
+        failures.append("V12_BATCH_TREE_DRIFT")
+
     manifest_path = root / MANIFEST_PATH
     if not manifest_path.is_file():
         failures.append("V11_MANIFEST_MISSING")
@@ -194,6 +250,10 @@ def verify(root: Path) -> list[str]:
         source = root / ".github/workflows" / path.name
         if source.exists() and path.name not in V11_ACTIVE_CURRENT_WORKFLOW_SNAPSHOT:
             failures.append(f"LATE_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
+    for path in v12_files:
+        source = root / ".github/workflows" / path.name
+        if source.exists():
+            failures.append(f"V12_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
 
     active_dir = root / ".github/workflows"
     active_temp = sorted(active_dir.glob("temp-*.yml"))
@@ -248,8 +308,11 @@ def main() -> int:
         "status": "PASS" if not failures else "FAIL",
         "archived": build_manifest(root).get("entry_count"),
         "v10_archived": build_v10_manifest(root).get("entry_count"),
+        "v11_archived": build_v11_manifest(root).get("entry_count"),
         "late_active_archived": len(_late_files(root)),
         "late_batch_tree_sha": _git_tree_sha(root, LATE_BATCH),
+        "v12_s01_archived": len(_v12_files(root)),
+        "v12_batch_tree_sha": _git_tree_sha(root, V12_BATCH),
         "failures": failures,
     }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
