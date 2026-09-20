@@ -118,6 +118,39 @@ Billing / Permission / Route Failure != Product Failure
 
 失败必须先分类 Product / Infrastructure / Credential / Routing / Test Harness / Environment。
 
+### 6.1 Private GitHub-hosted allocation block fingerprint
+
+当私有 VF 仓 native CI 的 Job 在任何 step 执行前失败时，不允许凭红色状态直接归因到产品代码。以下组合属于稳定的基础设施指纹：
+
+```text
+repository.private = true
+workflow run = created
+job.conclusion = failure
+job.runner_name = null / missing
+job.steps = []
+registered Public Runner = allocation healthy in the same operating window
+```
+
+满足时使用：
+
+```text
+BLOCKED_INFRA_PRIVATE_HOSTED
+```
+
+Routing：
+
+```text
+classify once
+→ do not repeatedly rerun the same empty native job
+→ do not edit product workflow solely to chase a green native check
+→ if independent Machine Proof is still required:
+   route exact source to core-free-runner-public
+   using transient private checkout + registered Runtime Secret
+→ preserve Public-safe evidence only
+```
+
+该分类只证明“GitHub-hosted private execution 未获得可执行 Runner”，不证明具体账户原因。Actions included minutes、budget、payment method、account policy 或其它 provider-side原因必须有独立账户级证据后才可命名；否则保持 `NOT_PROVEN`。
+
 ## 7. Secret / Credential Contract
 
 Credential 只通过 Actions Secrets / Runtime 注入。日志必须脱敏；任何 checkout URL、curl header、API response 或 exception 不得回显 Secret Value。
