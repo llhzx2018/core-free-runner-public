@@ -76,6 +76,17 @@ temporary branch / PR
 → CLOSE WITHOUT MERGE
 ```
 
+一次性 Lane 的 Done Condition 不是“Runner 已出结果”，而是：
+
+```text
+evidence readback complete
++ result classified
++ no further rerun needed
++ temporary PR closed in the same task chain
+```
+
+除非当前任务明确仍在等待下一次 rerun / OWNER decision / downstream Gate，否则不得把临时 PR 长期留在 OPEN 作为“历史记录”；历史由 closed PR / Run / Git 保存。关闭临时 PR 不等于删除 branch 或重写历史，branch 删除仍是独立 destructive cleanup。
+
 只有正式裁决为可复用公共能力的内容才允许进入 main；一次性验证不得长期扩张 Active Workflow Surface。
 
 ## 6. Machine Truth
