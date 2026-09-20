@@ -1,0 +1,126 @@
+name: p01-admin-r14-v24738-engineering-temp
+
+on:
+  push:
+    branches:
+      - run/p01-admin-r14-v24738-engineering
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 44cf33b66fda743af78eba0ad530e74a9565969a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p01
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "44cf33b66fda743af78eba0ad530e74a9565969a"
+          test "$(tr -d '\r\n ' < p01/VERSION)" = "2.47.37"
+          php -l p01/src/data-safety.php >/dev/null
+          php -l p01/src/app/BackupManager.php >/dev/null
+          php -l p01/src/app/SystemHealth.php >/dev/null
+          php -l p01/src/app/UpdateManager.php >/dev/null
+          node --check p01/src/assets/data-recovery.js
+          php p01/tests/unit/admin_data_safety_r14_runtime_retention_contract.php
+          php p01/tests/unit/admin_data_safety_r13_contract.php
+          php p01/tests/unit/admin_data_closure_contract.php
+          php p01/tests/unit/admin_navigation_consistency_contract.php
+          php p01/tests/unit/admin_secondary_nav_focus_contract.php
+          php p01/tests/unit/admin_backend_closure_contract.php
+          ! grep -P "(?<!\\$)\\$\\('\[data-(verify|protect|delete|restore|dr-verify|dr-protect|dr-delete|dr-restore)\]'\\)\\.forEach" p01/src/assets/data-recovery.js
+          grep -Fq "受保护恢复点不会自动清理" p01/src/data-safety.php
+          grep -Fq "不参与自动清理" p01/src/assets/data-recovery.js
+          echo P01_DATA_SAFETY_R14_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install authenticated data-safety smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-r14-runtime
+          cp -a p01/src /tmp/p01-r14-runtime
+          cd /tmp/p01-r14-runtime
+          php -S 127.0.0.1:18128 -t . >/tmp/p01-r14-server.log 2>&1 &
+          echo $! >/tmp/p01-r14.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies http://127.0.0.1:18128/setup.php -o /tmp/p01-r14-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-r14-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies -X POST http://127.0.0.1:18128/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF R14' \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            -o /tmp/p01-r14-setup-post.html
+          php cli/verify.php | tee /tmp/p01-r14-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-r14-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-r14-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-r14-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-r14-baseline.txt
+
+          TEST_PASSWORD="$TEST_PASSWORD" python3 - <<'PY' >/tmp/p01-r14-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies -H 'Content-Type: application/json' \
+            -X POST 'http://127.0.0.1:18128/api.php?action=login' --data-binary @/tmp/p01-r14-login.json \
+            -o /tmp/p01-r14-login-result.json
+          grep -F '"ok":true' /tmp/p01-r14-login-result.json >/dev/null
+
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies 'http://127.0.0.1:18128/data-safety.php' -o /tmp/p01-r14-data.html
+          grep -F '<h1>备份与恢复</h1>' /tmp/p01-r14-data.html >/dev/null
+          grep -F '受保护恢复点不会自动清理' /tmp/p01-r14-data.html >/dev/null
+          grep -F 'asset.php?file=data-recovery.js&amp;v=2.47.37' /tmp/p01-r14-data.html >/dev/null
+
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies 'http://127.0.0.1:18128/asset.php?file=data-recovery.js&v=2.47.37' -o /tmp/p01-r14-data.js
+          grep -F "$$('[data-verify]').forEach" /tmp/p01-r14-data.js >/dev/null
+          grep -F "$$('[data-dr-restore]').forEach" /tmp/p01-r14-data.js >/dev/null
+          grep -F '不参与自动清理' /tmp/p01-r14-data.js >/dev/null
+
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies 'http://127.0.0.1:18128/api.php?action=backup_policy' -o /tmp/p01-r14-policy.json
+          grep -F '"ok":true' /tmp/p01-r14-policy.json >/dev/null
+          curl -fsS -c /tmp/p01-r14.cookies -b /tmp/p01-r14.cookies 'http://127.0.0.1:18128/api.php?action=backup_list' -o /tmp/p01-r14-list.json
+          grep -F '"ok":true' /tmp/p01-r14-list.json >/dev/null
+          echo P01_DATA_SAFETY_R14_AUTH_HTTP=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_ADMIN_R14_EXACT_SOURCE_GATE=PASS
+          echo RETENTION_BEHAVIOR=UNCHANGED
+          echo PRODUCTION_BACKUP_DELETE=NONE
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/p01-r14.pid ]; then kill "$(cat /tmp/p01-r14.pid)" 2>/dev/null || true; fi
+          rm -rf p01 /tmp/p01-r14-*
