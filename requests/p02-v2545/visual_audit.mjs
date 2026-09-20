@@ -67,7 +67,7 @@ try{
   await page.waitForSelector('.settings-page');
   await page.waitForTimeout(120);
   await page.screenshot({path:out+'/08-mobile-settings-390.png',fullPage:true});
-  console.log('P02_V2546_VISUAL_AUDIT_CAPTURE=PASS');
+  console.log('P02_V2547_VISUAL_AUDIT_CAPTURE=PASS');
 } finally {
   await browser.close();
 }
