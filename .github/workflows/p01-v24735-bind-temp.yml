@@ -1,0 +1,129 @@
+name: p01-v24735-bind-temp
+
+on:
+  push:
+    branches:
+      - run/p01-v24735-bind
+
+permissions:
+  contents: read
+
+jobs:
+  bind-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: aba4e42bb7d0ccbef3ca7c935a502ff25ac53a29
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Checkout verified engineering base
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 4d13bb8e8cb59118b375a7f5844b9dc0dd02394d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: base
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact bind scope and contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "aba4e42bb7d0ccbef3ca7c935a502ff25ac53a29"
+          test "$(git -C base rev-parse HEAD)" = "4d13bb8e8cb59118b375a7f5844b9dc0dd02394d"
+          test "$(tr -d '\r\n ' < target/VERSION)" = "2.47.35"
+          test "$(tr -d '\r\n ' < target/src/VERSION.txt)" = "2.47.35"
+          grep -Fq "define('VF_VERSION', '2.47.35');" target/src/app/bootstrap.php
+          test "$(tr -d '\r\n ' < base/VERSION)" = "2.47.34"
+          test -f target/docs/release/V2.47.35_RELEASE_GATE.md
+          mapfile -t changed < <(git -C target diff --name-only 4d13bb8e8cb59118b375a7f5844b9dc0dd02394d..aba4e42bb7d0ccbef3ca7c935a502ff25ac53a29 | sort)
+          test "${#changed[@]}" = 4
+          printf '%s\n' "${changed[@]}" >/tmp/p01-v24735-bind-files.txt
+          grep -Fxq VERSION /tmp/p01-v24735-bind-files.txt
+          grep -Fxq src/VERSION.txt /tmp/p01-v24735-bind-files.txt
+          grep -Fxq src/app/bootstrap.php /tmp/p01-v24735-bind-files.txt
+          grep -Fxq docs/release/V2.47.35_RELEASE_GATE.md /tmp/p01-v24735-bind-files.txt
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          cd target
+          php tests/unit/admin_recycle_bin_r11_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' docs/release/V2.47.35_RELEASE_GATE.md
+          grep -Fq 'NO_UNKNOWN_APPLICABILITY = YES' docs/release/V2.47.35_RELEASE_GATE.md
+          grep -Fq 'PRE_RELEASE_AUTHORITY_DRIFT_GATE = PASS' docs/release/V2.47.35_RELEASE_GATE.md
+          echo P01_V24735_BIND_SCOPE_CONTRACTS=PASS
+
+      - name: Fresh install authenticated recycle-bin smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-v24735-runtime
+          cp -a target/src /tmp/p01-v24735-runtime
+          cd /tmp/p01-v24735-runtime
+          php -S 127.0.0.1:18123 -t . >/tmp/p01-v24735-server.log 2>&1 &
+          echo $! >/tmp/p01-v24735.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-v24735.cookies -b /tmp/p01-v24735.cookies http://127.0.0.1:18123/setup.php -o /tmp/p01-v24735-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24735-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v24735.cookies -b /tmp/p01-v24735.cookies -X POST http://127.0.0.1:18123/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF V24735'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-v24735-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v24735-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24735-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-v24735-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v24735-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-v24735-baseline.txt
+          TEST_PASSWORD="$TEST_PASSWORD" python3 - <<'PY' >/tmp/p01-v24735-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-v24735.cookies -b /tmp/p01-v24735.cookies -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18123/api.php?action=login' --data-binary @/tmp/p01-v24735-login.json             -o /tmp/p01-v24735-login-result.json
+          grep -F '"ok":true' /tmp/p01-v24735-login-result.json >/dev/null
+          curl -fsS -c /tmp/p01-v24735.cookies -b /tmp/p01-v24735.cookies 'http://127.0.0.1:18123/recycle-bin.php' -o /tmp/p01-v24735-recycle.html
+          grep -F 'id="surfaceFilter"' /tmp/p01-v24735-recycle.html >/dev/null
+          grep -F 'id="selectionBar" hidden' /tmp/p01-v24735-recycle.html >/dev/null
+          grep -F '永久删除是低频危险操作' /tmp/p01-v24735-recycle.html >/dev/null
+          ! grep -F 'data-surface=' /tmp/p01-v24735-recycle.html >/dev/null
+          grep -F 'asset.php?file=recycle-bin.js&amp;v=2.47.35' /tmp/p01-v24735-recycle.html >/dev/null
+          curl -fsS -c /tmp/p01-v24735.cookies -b /tmp/p01-v24735.cookies 'http://127.0.0.1:18123/asset.php?file=recycle-bin.js&v=2.47.35' -o /tmp/p01-v24735-recycle.js
+          grep -F 'function trashRowActions(x)' /tmp/p01-v24735-recycle.js >/dev/null
+          grep -F 'class="vf-recycle-row-more"><summary>更多</summary>' /tmp/p01-v24735-recycle.js >/dev/null
+          echo P01_V24735_BIND_AUTH_SMOKE=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_V24735_BOUND_CANDIDATE_GATE=PASS
+          echo ENGINEERING_GATE=35494770367
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/p01-v24735.pid ]; then kill "$(cat /tmp/p01-v24735.pid)" 2>/dev/null || true; fi
+          rm -rf target base /tmp/p01-v24735-*
