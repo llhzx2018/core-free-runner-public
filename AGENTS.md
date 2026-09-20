@@ -91,6 +91,24 @@ NOT_PROVEN    = 尚无独立 Machine Proof
 
 Harness / Assertion / Runner 故障必须与被测 Source FAIL 分开分类。
 
+私有仓 native GitHub-hosted CI 出现以下组合时，可直接归类为 `BLOCKED_INFRA_PRIVATE_HOSTED`：
+
+```text
+repository = private
+job conclusion = failure
+runner_name = null / missing
+steps = []
++ registered Public Runner allocation is healthy in the same operating window
+```
+
+命中该指纹后：
+
+- 不得把它写成 Product / Source FAIL；
+- 不得仅为了“让私有 CI 变绿”修改产品 Workflow；
+- 同一基础设施状态下不得机械重复 rerun 空 Job；
+- 当前任务若仍需要独立 Machine Proof，直接路由已注册 Public Runner 做 transient exact-private-source checkout；
+- `quota / budget / payment / account policy` 等具体根因，在没有账户级证据前保持 `NOT_PROVEN`，不得从零 step 现象反推成已证明 Billing 结论。
+
 ## 7. Safety / User Boundary
 
 Secret / Token 只通过 GitHub Actions Secrets / Runtime Injection 使用，不写入普通文件、Fixture、Artifact、日志或 Evidence。
