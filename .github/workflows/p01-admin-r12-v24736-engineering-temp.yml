@@ -1,0 +1,117 @@
+name: p01-admin-r12-v24736-engineering-temp
+
+on:
+  push:
+    branches:
+      - run/p01-admin-r12-v24736-engineering
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 7816173f1a4bb299f4b93ae63841490a04b4a466
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p01
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01 rev-parse HEAD)" = "7816173f1a4bb299f4b93ae63841490a04b4a466"
+          test "$(tr -d '\r\n ' < p01/VERSION)" = "2.47.35"
+          php -l p01/src/recycle-bin.php >/dev/null
+          node --check p01/src/assets/recycle-bin.js
+          php p01/tests/unit/admin_recycle_bin_r11_contract.php
+          php p01/tests/unit/admin_recycle_bin_r12_pagination_contract.php
+          php p01/tests/unit/admin_navigation_consistency_contract.php
+          php p01/tests/unit/admin_secondary_nav_focus_contract.php
+          php p01/tests/unit/admin_backend_closure_contract.php
+          echo P01_RECYCLE_BIN_R12_FOCUSED_CONTRACTS=PASS
+
+      - name: Fresh install authenticated recycle-bin smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-r12-runtime
+          cp -a p01/src /tmp/p01-r12-runtime
+          cd /tmp/p01-r12-runtime
+          php -S 127.0.0.1:18124 -t . >/tmp/p01-r12-server.log 2>&1 &
+          echo $! >/tmp/p01-r12.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-r12.cookies -b /tmp/p01-r12.cookies http://127.0.0.1:18124/setup.php -o /tmp/p01-r12-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-r12-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-r12.cookies -b /tmp/p01-r12.cookies -X POST http://127.0.0.1:18124/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=VF R12' \
+            --data-urlencode "admin_password=$TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$TEST_PASSWORD" \
+            -o /tmp/p01-r12-setup-post.html
+          php cli/verify.php | tee /tmp/p01-r12-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-r12-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-r12-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-r12-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-r12-baseline.txt
+
+          TEST_PASSWORD="$TEST_PASSWORD" python3 - <<'PY' >/tmp/p01-r12-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-r12.cookies -b /tmp/p01-r12.cookies -H 'Content-Type: application/json' \
+            -X POST 'http://127.0.0.1:18124/api.php?action=login' --data-binary @/tmp/p01-r12-login.json \
+            -o /tmp/p01-r12-login-result.json
+          grep -F '"ok":true' /tmp/p01-r12-login-result.json >/dev/null
+
+          curl -fsS -c /tmp/p01-r12.cookies -b /tmp/p01-r12.cookies 'http://127.0.0.1:18124/recycle-bin.php' -o /tmp/p01-r12-recycle.html
+          grep -F '<h1>回收站</h1>' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'id="surfaceFilter"' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'id="trashPager" hidden' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'id="trashRange"' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'id="trashPrev"' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'id="trashNext"' /tmp/p01-r12-recycle.html >/dev/null
+          grep -F 'asset.php?file=recycle-bin.js&amp;v=2.47.35' /tmp/p01-r12-recycle.html >/dev/null
+
+          curl -fsS -c /tmp/p01-r12.cookies -b /tmp/p01-r12.cookies 'http://127.0.0.1:18124/asset.php?file=recycle-bin.js&v=2.47.35' -o /tmp/p01-r12-recycle.js
+          grep -F 'page:0,pageSize:50' /tmp/p01-r12-recycle.js >/dev/null
+          grep -F 'function pageRows(rows)' /tmp/p01-r12-recycle.js >/dev/null
+          grep -F 'rows.slice(start,start+state.pageSize)' /tmp/p01-r12-recycle.js >/dev/null
+          grep -F "$('#trashNext').addEventListener('click'" /tmp/p01-r12-recycle.js >/dev/null
+          echo P01_RECYCLE_BIN_R12_AUTH_HTTP=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_ADMIN_R12_EXACT_SOURCE_GATE=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/p01-r12.pid ]; then kill "$(cat /tmp/p01-r12.pid)" 2>/dev/null || true; fi
+          rm -rf p01 /tmp/p01-r12-*
