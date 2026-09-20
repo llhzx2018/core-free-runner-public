@@ -1,0 +1,182 @@
+name: P01 Current Main Readiness R44
+
+on:
+  push:
+    branches:
+      - temp/p01-current-main-readiness-r44-20260920
+    paths:
+      - '.github/workflows/p01-current-main-readiness-r44.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-readiness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P01_SHA: c39c2bf4c1fcffa25ff305a175bb7b882a3d6654
+      P01_SCHEMA: '2026090401'
+    steps:
+      - name: Verify private-read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${PRIVATE_READ_TOKEN:-}"
+          echo 'VF_PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact P01 source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: target
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact source identity and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$P01_SHA"
+          VERSION="$(tr -d '\r\n' < target/VERSION)"
+          test "$VERSION" = "$(tr -d '\r\n' < target/src/VERSION.txt)"
+          grep -F "define('VF_VERSION', '$VERSION');" target/src/app/bootstrap.php >/dev/null
+          python3 - <<'PY'
+          import json
+          p=json.load(open('target/VF_PROJECT.json',encoding='utf-8'))
+          assert p['project_id']=='P01'
+          assert str(p['working_schema_version'])=='2026090401'
+          PY
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo "P01_CURRENT_EXACT_SOURCE=$P01_SHA"
+          echo "P01_CURRENT_VERSION=$VERSION"
+          echo 'P01_CURRENT_SYNTAX=PASS'
+
+      - name: Current unit contract sweep
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          count=0
+          while IFS= read -r test_file; do
+            php "$test_file" >/tmp/p01-current-unit-last.log
+            count=$((count+1))
+          done < <(find tests/unit -maxdepth 1 -type f -name '*.php' | sort)
+          test "$count" -gt 300
+          echo "P01_CURRENT_UNIT_TEST_COUNT=$count"
+          echo 'P01_CURRENT_UNIT_CONTRACTS=PASS'
+
+      - name: Fresh install and runtime verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-current-readiness-runtime
+          rm -rf "$RUNTIME" /tmp/p01-current-readiness.cookies /tmp/p01-current-readiness-admin.cookies
+          cp -a target/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18144 -t . >/tmp/p01-current-readiness-server.log 2>&1 &
+          SERVER_PID=$!
+          echo "$SERVER_PID" >/tmp/p01-current-readiness.pid
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-current-readiness.cookies -b /tmp/p01-current-readiness.cookies http://127.0.0.1:18144/setup.php -o /tmp/p01-current-readiness-setup.html; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          test "$READY" = 1
+
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-current-readiness-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+
+          curl -fsS -c /tmp/p01-current-readiness.cookies -b /tmp/p01-current-readiness.cookies             -X POST http://127.0.0.1:18144/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=P01 Current Readiness'             --data-urlencode 'admin_password=CurrentReadiness!2026'             --data-urlencode 'admin_password_confirm=CurrentReadiness!2026'             -o /tmp/p01-current-readiness-setup-post.html
+
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-current-readiness-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-current-readiness-verify.txt
+
+          php cli/baseline-verify.php | tee /tmp/p01-current-readiness-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-current-readiness-baseline.txt
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-current-readiness-baseline.txt
+          grep -Fx 'UNKNOWN_COUNT=0' /tmp/p01-current-readiness-baseline.txt
+
+          if [ -f cli/surface-verify.php ]; then
+            php cli/surface-verify.php | tee /tmp/p01-current-readiness-surface.txt
+            grep -Fx 'MULTI_SURFACE_PASS=YES' /tmp/p01-current-readiness-surface.txt
+            grep -Fx "WORKING_SCHEMA=$P01_SCHEMA" /tmp/p01-current-readiness-surface.txt
+          fi
+
+          LOGIN_CODE=$(curl -sS -c /tmp/p01-current-readiness-admin.cookies -b /tmp/p01-current-readiness-admin.cookies             -o /tmp/p01-current-readiness-login.json -w '%{http_code}'             -H 'Content-Type: application/json'             -X POST 'http://127.0.0.1:18144/api.php?action=login'             --data '{"password":"CurrentReadiness!2026"}')
+          test "$LOGIN_CODE" = 200
+          python3 - <<'PY'
+          import json
+          data=json.load(open('/tmp/p01-current-readiness-login.json',encoding='utf-8'))
+          assert data.get('ok') is True,data
+          PY
+
+          for page in             manage.php surface-manager.php links-admin.php health.php duplicates.php recycle-bin.php             transfer.php browser-helper.php data-safety.php system-health.php plugins.php system-info.php             system-baseline.php update.php settings.php; do
+            code=$(curl -sS -c /tmp/p01-current-readiness-admin.cookies -b /tmp/p01-current-readiness-admin.cookies               -o "/tmp/p01-current-${page//\//_}.html" -w '%{http_code}' "http://127.0.0.1:18144/$page")
+            test "$code" = 200
+            grep -F 'data-vf-admin-shell="server"' "/tmp/p01-current-${page//\//_}.html" >/dev/null
+          done
+
+          curl -fsS -c /tmp/p01-current-readiness-admin.cookies -b /tmp/p01-current-readiness-admin.cookies             http://127.0.0.1:18144/manage.php -o /tmp/p01-current-manage.html
+          grep -F 'href="browser-helper.php"' /tmp/p01-current-manage.html >/dev/null
+          grep -F '>浏览器助手<' /tmp/p01-current-manage.html >/dev/null
+          grep -F 'href="update.php"' /tmp/p01-current-manage.html >/dev/null
+          grep -F '>在线升级<' /tmp/p01-current-manage.html >/dev/null
+
+          echo 'P01_CURRENT_FRESH_INSTALL=PASS'
+          echo 'P01_CURRENT_ADMIN_HTTP=PASS'
+          echo 'P01_CURRENT_RUNTIME_BASELINE=PASS'
+
+      - name: No-schema-delta fence from released baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C target fetch --no-tags --depth=1 origin refs/tags/v2.47.38:refs/tags/v2.47.38
+          if git -C target diff --name-only v2.47.38 "$P01_SHA" | grep -E '(^|/)(migrations?|schema)(/|\.|$)'; then
+            echo 'UNEXPECTED_SCHEMA_OR_MIGRATION_DELTA' >&2
+            exit 1
+          fi
+          test "$(python3 - <<'PY'
+          import json
+          p=json.load(open('target/VF_PROJECT.json',encoding='utf-8'))
+          print(p['working_schema_version'])
+          PY
+          )" = "$P01_SCHEMA"
+          echo 'P01_CURRENT_SCHEMA_DELTA=NONE'
+          echo 'P01_CURRENT_MACHINE_READINESS=PASS'
+          echo 'RELEASE=NO'
+          echo 'TAG=NO'
+          echo 'DISTRIBUTION=NO'
+          echo 'PRODUCTION=NO'
+
+      - name: Cleanup private checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target /tmp/p01-current-readiness-runtime
+          rm -f /tmp/p01-current-readiness* /tmp/p01-current-*.html
+          echo 'P01_PRIVATE_SOURCE_CLEANUP=PASS'
