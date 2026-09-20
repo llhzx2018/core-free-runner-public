@@ -1,0 +1,121 @@
+name: p01-resource-r5-801-temp
+
+on:
+  push:
+    branches:
+      - run/p01-resource-r5-801
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 11d713686a0d7ef08b2e8b799abd3add4938dba9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: vf-start
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source syntax and contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "11d713686a0d7ef08b2e8b799abd3add4938dba9"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php tests/unit/admin_resource_browse_edit_r5_contract.php
+          php tests/unit/admin_visual_system_r4_contract.php
+          php tests/unit/admin_rail_action_only_contract.php
+          php tests/unit/advanced_manager_daily_entry_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          echo P01_RESOURCE_R5_CONTRACTS=PASS
+
+      - name: Fresh install and baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          echo "TEST_PASSWORD=$TEST_PASSWORD" >> "$GITHUB_ENV"
+          rm -rf /tmp/p01-resource-r5
+          cp -a vf-start/src /tmp/p01-resource-r5
+          cd /tmp/p01-resource-r5
+          php -S 127.0.0.1:18109 -t . >/tmp/p01-resource-r5-server.log 2>&1 &
+          echo $! >/tmp/p01-resource-r5.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-resource-r5.cookies -b /tmp/p01-resource-r5.cookies http://127.0.0.1:18109/setup.php -o /tmp/p01-resource-r5-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-resource-r5-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-resource-r5.cookies -b /tmp/p01-resource-r5.cookies -X POST http://127.0.0.1:18109/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF Resource R5'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-resource-r5-setup-post.html
+          php cli/verify.php | tee /tmp/p01-resource-r5-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-resource-r5-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-resource-r5-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-resource-r5-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-resource-r5-baseline.txt
+          echo P01_RESOURCE_R5_BASELINE=PASS
+
+      - name: Authenticated resource browser smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE=http://127.0.0.1:18109
+          python3 - <<'PY' >/tmp/p01-resource-r5-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-resource-r5.cookies -b /tmp/p01-resource-r5.cookies             -H 'Content-Type: application/json' -X POST "$BASE/api.php?action=login"             --data-binary @/tmp/p01-resource-r5-login.json             -o /tmp/p01-resource-r5-login-result.json
+          grep -F '"ok":true' /tmp/p01-resource-r5-login-result.json >/dev/null
+
+          curl -fsS -c /tmp/p01-resource-r5.cookies -b /tmp/p01-resource-r5.cookies "$BASE/surface-manager.php?advanced=1" -o /tmp/p01-resource-r5-all.html
+          grep -F '<h1>全部资源</h1>' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F '先浏览和筛选；只有需要修改时才展开某一条。' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F 'class="vf-resource-editor-details"' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F 'class="vf-resource-editor-summary"' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F 'class="vf-resource-editor-fields"' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F 'data-resource-editor-close' /tmp/p01-resource-r5-all.html >/dev/null
+          grep -F '>保存更改</button>' /tmp/p01-resource-r5-all.html >/dev/null
+          test "$(grep -o 'class="vf-resource-editor-row"' /tmp/p01-resource-r5-all.html | wc -l | tr -d ' ')" -ge 1
+
+          ID=$(grep -o 'name="link_id" value="[0-9]*"' /tmp/p01-resource-r5-all.html | head -1 | grep -o '[0-9]*')
+          test -n "$ID"
+          curl -fsS -c /tmp/p01-resource-r5.cookies -b /tmp/p01-resource-r5.cookies "$BASE/surface-manager.php?advanced=1&resource_id=$ID" -o /tmp/p01-resource-r5-focus.html
+          grep -F 'class="vf-resource-editor-details" open' /tmp/p01-resource-r5-focus.html >/dev/null
+
+          grep -F 'P01 Resource Browser R5 — browse first, edit on demand.' vf-start/src/assets/admin-resource-manager.css >/dev/null
+          grep -F "var details=savedRow.querySelector('.vf-resource-editor-details');if(details)details.open=true;" vf-start/src/assets/admin-resource-manager-core.js >/dev/null
+          echo P01_RESOURCE_R5_AUTH_HTTP=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_RESOURCE_R5_801=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/p01-resource-r5.pid ]; then kill "$(cat /tmp/p01-resource-r5.pid)" 2>/dev/null || true; fi
+          rm -rf /tmp/p01-resource-r5 /tmp/p01-resource-r5-*
