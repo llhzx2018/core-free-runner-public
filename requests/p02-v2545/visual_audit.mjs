@@ -63,7 +63,11 @@ try{
   await page.waitForFunction(()=>!document.body.classList.contains('v2537-desktop-shell'));
   await page.waitForTimeout(150);
   await page.screenshot({path:out+'/07-mobile-390.png',fullPage:true});
-  console.log('P02_V2545_VISUAL_AUDIT_CAPTURE=PASS');
+  await page.evaluate(()=>{state.settingsSection='basic';renderSettings({scrollTop:0});});
+  await page.waitForSelector('.settings-page');
+  await page.waitForTimeout(120);
+  await page.screenshot({path:out+'/08-mobile-settings-390.png',fullPage:true});
+  console.log('P02_V2546_VISUAL_AUDIT_CAPTURE=PASS');
 } finally {
   await browser.close();
 }
