@@ -65,6 +65,29 @@ ONE-OFF PROJECT WORKFLOW
 
 一次性 Workflow 失败可修复/重跑，但不能为了“留下证据”把临时代码永久合入 main。
 
+### 5.0 One-off Lane closure
+
+一次性 Runner Lane 在证据读回并完成 PASS / FAIL / BLOCKED 分类后，如果没有待执行的 rerun、OWNER decision 或下游 Gate，则必须在**同一任务链**关闭临时 PR：
+
+```text
+Machine result
+→ evidence readback
+→ classification
+→ close temporary PR without merge
+→ retain closed PR / Run / branch history for provenance
+```
+
+固定：
+
+```text
+Runner finished != Lane closed
+OPEN temporary PR != evidence archive
+closed PR = normal provenance
+branch deletion = separate destructive cleanup / not implied
+```
+
+不得把“以后可能还会用到”作为长期保持 OPEN 的默认理由；真正需要复用的能力应按 Reusable Harness Main Adoption 单独裁决。
+
 ### 5.1 Repeated Lane Identity
 
 同一 Candidate / Formal Release / Discovery 形状跨版本重复使用时，Version、Source SHA/Tree、from_versions 等动态 identity 必须优先收敛为一次性 Lane spec，而不是散落在 Workflow 多处手工替换。Current helper：`scripts/ephemeral_lane_spec.py`。最终生成/修改后的 Workflow 在触发 Runner 前必须再执行 `audit-rendered`；该 preflight 只审计 target-owned identity，不会把仍合法存在于 `source_versions` 的上一版本误判为残留。
