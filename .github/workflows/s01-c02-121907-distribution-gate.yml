@@ -1,0 +1,107 @@
+name: S01-C02 1.21.907 Distribution Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CORE_UPDATES_REPO: llhzx2018/core-updates
+      CORE_UPDATES_SHA: 2fbd6bc55bebe334b2ca44e8af13085769956673
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      PRODUCT_SHA: 10bfca7353b4a242e7840bb5e68f6390e71f7538
+      VERSION: 1.21.907
+      TAG: v1.21.907
+      ASSET: vf-tools-ops_V1.21.907.zip
+      ASSET_BYTES: "3479306"
+      ASSET_SHA256: fad2c71913208ddbdf2eb39dff25ebff2e1ddfb5d569e21f6694ed133743e953
+      RUNTIME_FILES: "972"
+      RUNTIME_FINGERPRINT: ae2c265e855da864d924874f20f3bd859fd420a1dd5a1fa3358994fb8a2e1f89
+
+    steps:
+      - name: Checkout exact core-updates candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/core-updates
+          ref: 2fbd6bc55bebe334b2ca44e8af13085769956673
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: dist
+
+      - name: Verify exact manifest and release binding
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C dist rev-parse HEAD)" = "$CORE_UPDATES_SHA"
+          python3 dist/scripts/check_manifest_contract.py >/tmp/manifest-audit.json
+          grep -Fq '"status": "PASS"' /tmp/manifest-audit.json
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('dist/projects/S01-C02.json').read_text())
+          assert m['target_version']==os.environ['VERSION']
+          assert m['release_tag']==os.environ['TAG']
+          assert m['asset_name']==os.environ['ASSET']
+          assert m['asset_bytes']==int(os.environ['ASSET_BYTES'])
+          assert m['asset_sha256']==os.environ['ASSET_SHA256']
+          assert m['runtime_files']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_file_count']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+          assert m['runtime_fingerprint_sha256']==os.environ['RUNTIME_FINGERPRINT']
+          assert '1.21.902' in m['from_versions']
+          assert m['schema_from']=='6.0.0' and m['schema_to']=='6.0.0'
+          assert m['backup_required'] is True
+          assert m['rollback_supported'] is True
+          assert m['locator_cutover'] is False
+          print('PASS_MANIFEST_EXACT_BINDING')
+          PY
+
+          php -v >/dev/null
+          find dist/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php dist/update-core/php/tests/run.php
+
+      - name: Remote Formal Release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/$PRODUCT_REPO/releases/tags/$TAG")"
+          test "$(jq -r '.target_commitish' <<<"$JSON")" = "$PRODUCT_SHA"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$JSON")" = "$ASSET_BYTES"
+          DIGEST="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$JSON")"
+          test "$DIGEST" = "sha256:$ASSET_SHA256"
+          mkdir -p /tmp/release
+          gh release download "$TAG" --repo "$PRODUCT_REPO" --pattern "$ASSET" --dir /tmp/release
+          test "$(sha256sum "/tmp/release/$ASSET" | awk '{print $1}')" = "$ASSET_SHA256"
+          test "$(stat -c '%s' "/tmp/release/$ASSET")" = "$ASSET_BYTES"
+          echo PASS_DISTRIBUTION_RELEASE_BINDING
+
+      - name: Distribution receipt
+        shell: bash
+        run: |
+          cat <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          CORE_UPDATES_SHA=$CORE_UPDATES_SHA
+          PRODUCT_SHA=$PRODUCT_SHA
+          TAG=$TAG
+          ASSET=$ASSET
+          ASSET_BYTES=$ASSET_BYTES
+          ASSET_SHA256=$ASSET_SHA256
+          RUNTIME_FILES=$RUNTIME_FILES
+          RUNTIME_FINGERPRINT=$RUNTIME_FINGERPRINT
+          MANIFEST_CONTRACT=PASS
+          UPDATE_CORE_REGRESSION=PASS
+          FORMAL_RELEASE_REMOTE_BINDING=PASS
+          PRODUCTION=NOT_CLAIMED
+          RESULT=PASS
+          EOF
