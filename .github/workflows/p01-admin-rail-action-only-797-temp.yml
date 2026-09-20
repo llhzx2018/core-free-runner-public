@@ -1,0 +1,135 @@
+name: p01-admin-rail-action-only-797-temp
+
+on:
+  push:
+    branches:
+      - run/p01-admin-rail-action-only-797
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 1bcea012492e92a3a0e940b56886a64f36ec9cda
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: vf-start
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "1bcea012492e92a3a0e940b56886a64f36ec9cda"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          echo P01_ADMIN_RAIL_ACTION_ONLY_SYNTAX=PASS
+
+      - name: Focused menu contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          php tests/unit/admin_rail_action_only_contract.php
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          php tests/unit/admin_backend_closure_contract.php
+          php tests/unit/advanced_manager_daily_entry_contract.php
+          echo P01_ADMIN_RAIL_ACTION_ONLY_CONTRACTS=PASS
+
+      - name: Fresh install and common baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          echo "TEST_PASSWORD=$TEST_PASSWORD" >> "$GITHUB_ENV"
+          rm -rf /tmp/p01-admin-rail-action-only
+          cp -a vf-start/src /tmp/p01-admin-rail-action-only
+          cd /tmp/p01-admin-rail-action-only
+          php -S 127.0.0.1:18107 -t . >/tmp/p01-admin-rail-action-only-server.log 2>&1 &
+          echo $! >/tmp/p01-admin-rail-action-only.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-admin-rail.cookies -b /tmp/p01-admin-rail.cookies http://127.0.0.1:18107/setup.php -o /tmp/p01-admin-rail-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-admin-rail-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-admin-rail.cookies -b /tmp/p01-admin-rail.cookies -X POST http://127.0.0.1:18107/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF Admin Rail Gate'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-admin-rail-setup-post.html
+          php cli/verify.php | tee /tmp/p01-admin-rail-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-admin-rail-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-admin-rail-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-admin-rail-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-admin-rail-baseline.txt
+          echo P01_ADMIN_RAIL_ACTION_ONLY_BASELINE=PASS
+
+      - name: Authenticated admin rail smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE=http://127.0.0.1:18107
+          python3 - <<'PY' >/tmp/p01-admin-rail-login.json
+          import json,os
+          print(json.dumps({"password":os.environ["TEST_PASSWORD"]}))
+          PY
+          curl -fsS -c /tmp/p01-admin-rail.cookies -b /tmp/p01-admin-rail.cookies             -H 'Content-Type: application/json' -X POST "$BASE/api.php?action=login"             --data-binary @/tmp/p01-admin-rail-login.json             -o /tmp/p01-admin-rail-login-result.json
+          grep -F '"ok":true' /tmp/p01-admin-rail-login-result.json >/dev/null
+
+          for page in surface-manager.php 'surface-manager.php?advanced=1' links-admin.php health.php recycle-bin.php transfer.php browser-helper.php data-safety.php system-health.php update.php plugins.php settings.php; do
+            safe=$(printf '%s' "$page" | tr '?=&/' '____')
+            curl -fsS -c /tmp/p01-admin-rail.cookies -b /tmp/p01-admin-rail.cookies "$BASE/$page" -o "/tmp/p01-admin-rail-$safe.html"
+          done
+
+          RESOURCE=/tmp/p01-admin-rail-surface-manager.php.html
+          for forbidden in 系统收件箱 资源库 业务分类 治理; do
+            ! grep -F "$forbidden" "$RESOURCE" >/dev/null
+          done
+          grep -F 'href="surface-manager.php"' "$RESOURCE" >/dev/null
+          grep -F 'href="surface-manager.php?advanced=1"' "$RESOURCE" >/dev/null
+          grep -F 'href="links-admin.php"' "$RESOURCE" >/dev/null
+          grep -F 'href="health.php"' "$RESOURCE" >/dev/null
+          grep -F 'href="recycle-bin.php"' "$RESOURCE" >/dev/null
+          test "$(grep -o 'class="vf-rail-subitem' "$RESOURCE" | wc -l | tr -d ' ')" = "5"
+
+          DATA=/tmp/p01-admin-rail-transfer.php.html
+          grep -F 'href="transfer.php"' "$DATA" >/dev/null
+          grep -F 'href="browser-helper.php"' "$DATA" >/dev/null
+          grep -F 'href="data-safety.php"' "$DATA" >/dev/null
+          test "$(grep -o 'class="vf-rail-subitem' "$DATA" | wc -l | tr -d ' ')" = "3"
+
+          SYSTEM=/tmp/p01-admin-rail-update.php.html
+          grep -F 'href="system-health.php"' "$SYSTEM" >/dev/null
+          grep -F 'href="update.php"' "$SYSTEM" >/dev/null
+          grep -F 'href="plugins.php"' "$SYSTEM" >/dev/null
+          test "$(grep -o 'class="vf-rail-subitem' "$SYSTEM" | wc -l | tr -d ' ')" = "3"
+
+          grep -F 'LEGACY_RAIL_HEADINGS' assets/admin-shell.js >/dev/null
+          grep -F 'normalizeAdminRail' assets/admin-shell.js >/dev/null
+          grep -F 'vf-asset-version' assets/admin-shell.js >/dev/null
+          echo P01_ADMIN_RAIL_ACTION_ONLY_HTTP=PASS
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/p01-admin-rail-action-only.pid ]; then kill "$(cat /tmp/p01-admin-rail-action-only.pid)" 2>/dev/null || true; fi
+          rm -rf /tmp/p01-admin-rail-action-only /tmp/p01-admin-rail-*
