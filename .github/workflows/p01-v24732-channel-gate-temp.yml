@@ -1,0 +1,119 @@
+name: p01-v24732-channel-gate-temp
+
+on:
+  push:
+    branches:
+      - release/p01-v24732-channel-gate
+
+permissions:
+  contents: read
+
+jobs:
+  channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CHANNEL_REPO: llhzx2018/core-updates
+      CHANNEL_SHA: 8eb913a6a83fca1b88ddef0743585996f92ebfe8
+      CHANNEL_BASE_SHA: 75cd32770f8e962698b7d3bdfcf442a8e1ed9d47
+      PRODUCT_REPO: llhzx2018/vf-start
+      FORMAL_SHA: 40642c161c437b439cd9fe34db4ed2f71f9e7c86
+      RELEASE_TAG: v2.47.32
+      RELEASE_ID: '392315593'
+      SOURCE_VERSION: 2.47.31
+      TARGET_VERSION: 2.47.32
+      EXPECTED_SCHEMA: '2026090401'
+      UPDATE_ASSET: VF_Start_V2.47.32_UPDATE.zip
+      UPDATE_BYTES: '1878583'
+      UPDATE_SHA256: 5339bee342b01608fd0e3251dbac20819c73ef7294f26b463ec1b8bb77605023
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Exact channel and formal release preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${CHANNEL_REPO}/git/ref/heads/release/p01-v24732-channel-20260920" --jq '.object.sha')" = "$CHANNEL_SHA"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${CHANNEL_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$CHANNEL_BASE_SHA"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/heads/main" --jq '.object.sha')" = "$FORMAL_SHA"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')" = "$FORMAL_SHA"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${PRODUCT_REPO}/releases/tags/${RELEASE_TAG}" --jq '.id')" = "$RELEASE_ID"
+          echo P01_V24732_CHANNEL_PREFLIGHT=PASS
+
+      - name: Checkout exact core-updates candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CHANNEL_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 2
+          path: core-updates
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Manifest contract and exact P01 mapping
+        working-directory: core-updates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$CHANNEL_SHA"
+          mapfile -t changed < <(git diff --name-only HEAD^ HEAD | sort)
+          test "${#changed[@]}" = 1
+          test "${changed[0]}" = projects/P01.json
+          python3 scripts/check_manifest_contract.py >/tmp/p01-v24732-manifest-audit.json
+          jq -e '.status=="PASS"' /tmp/p01-v24732-manifest-audit.json >/dev/null
+          jq -e --arg src "$SOURCE_VERSION" --arg dst "$TARGET_VERSION" --arg schema "$EXPECTED_SCHEMA" --arg tag "$RELEASE_TAG" --arg sha "$FORMAL_SHA" --arg asset "$UPDATE_ASSET" --arg digest "$UPDATE_SHA256" --argjson rid "$RELEASE_ID" --argjson bytes "$UPDATE_BYTES" '
+            .project_id=="P01" and .component_id=="APP" and .enabled==true and
+            .current_version==$src and .target_version==$dst and .update_type=="ATOMIC" and
+            .from_versions==[$src] and .schema_from==$schema and .schema_to==$schema and
+            .repository=="llhzx2018/vf-start" and .release_tag==$tag and .release_id==$rid and
+            .product_identity==$sha and .asset_name==$asset and .asset_bytes==$bytes and
+            .asset_sha256==$digest and .backup_required==true and .rollback_supported==true
+          ' projects/P01.json >/dev/null
+          ! grep -Eiq '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})' projects/P01.json
+          echo P01_V24732_MANIFEST_CONTRACT=PASS
+
+      - name: Update Core regression
+        working-directory: core-updates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find update-core/php/src update-core/php/tests -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-v24732-channel-php-lint
+          php update-core/php/tests/run.php | tee /tmp/p01-v24732-update-core-tests
+          echo P01_V24732_UPDATE_CORE=PASS
+
+      - name: Remote release asset and byte identity
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          META=$(gh api "repos/${PRODUCT_REPO}/releases/tags/${RELEASE_TAG}")
+          test "$(jq -r '.id' <<<"$META")" = "$RELEASE_ID"
+          test "$(jq -r '.draft' <<<"$META")" = false
+          test "$(jq -r '.prerelease' <<<"$META")" = false
+          test "$(jq -r --arg n "$UPDATE_ASSET" '.assets[]|select(.name==$n)|.size' <<<"$META")" = "$UPDATE_BYTES"
+          test "$(jq -r --arg n "$UPDATE_ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$META")" = "sha256:${UPDATE_SHA256}"
+          rm -rf /tmp/p01-v24732-channel-asset && mkdir -p /tmp/p01-v24732-channel-asset
+          gh release download "$RELEASE_TAG" --repo "$PRODUCT_REPO" --pattern "$UPDATE_ASSET" --dir /tmp/p01-v24732-channel-asset
+          test "$(stat -c '%s' "/tmp/p01-v24732-channel-asset/$UPDATE_ASSET")" = "$UPDATE_BYTES"
+          test "$(sha256sum "/tmp/p01-v24732-channel-asset/$UPDATE_ASSET" | awk '{print $1}')" = "$UPDATE_SHA256"
+          echo P01_V24732_REMOTE_UPDATE_ASSET=PASS
+
+      - name: Final stable channel verdict
+        run: |
+          echo CORE_UPDATES_MANIFEST_CONTRACT=PASS
+          echo UPDATE_CORE_REGRESSION=PASS
+          echo REMOTE_RELEASE_IDENTITY=PASS
+          echo P01_V24732_STABLE_CHANNEL_GATE=PASS
+          echo CHANNEL_PUBLISHED=false
+          echo PRODUCTION=false
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf core-updates /tmp/p01-v24732-*
