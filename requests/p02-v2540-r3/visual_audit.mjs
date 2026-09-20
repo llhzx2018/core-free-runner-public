@@ -20,6 +20,9 @@ async function login(){
     await page.locator('#loginForm input[name="password"]').fill(password);
     await page.locator('#loginSubmit').click();
     await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
+    const staleUnlock=await page.locator('.login-panel').count();
+    if(staleUnlock)throw new Error('authenticated shell still exposes unlock card');
+    await page.waitForSelector('#pageRoot.library-list-page');
   }
   await page.waitForFunction(()=>document.body.classList.contains('v2537-desktop-shell'));
 }
