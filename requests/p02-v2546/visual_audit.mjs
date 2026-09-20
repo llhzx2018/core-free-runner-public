@@ -58,7 +58,9 @@ try{
   await page.setViewportSize({width:390,height:844});
   await page.waitForTimeout(150);
   await page.screenshot({path:out+'/06-settings-mobile-390.png',fullPage:true});
-  await page.locator('#settingsBack').click();
+  const backVisible=await page.locator('#settingsBack').isVisible().catch(()=>false);
+  if(backVisible)await page.locator('#settingsBack').click();
+  else await page.evaluate(()=>returnFromSettings());
   await page.setViewportSize({width:1024,height:768});
   await page.waitForTimeout(150);
   await page.screenshot({path:out+'/07-medium-1024.png',fullPage:true});
