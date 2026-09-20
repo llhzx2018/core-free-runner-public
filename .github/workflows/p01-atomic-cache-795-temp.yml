@@ -1,0 +1,95 @@
+name: p01-atomic-cache-795-temp
+
+on:
+  push:
+    branches:
+      - run/p01-atomic-cache-795
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 5992af8480b276e096c2fee59e4b00235213de01
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: vf-start
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Exact source syntax and focused contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          test "$(git rev-parse HEAD)" = "5992af8480b276e096c2fee59e4b00235213de01"
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php tests/unit/atomic_runtime_cache_contract.php
+          php tests/unit/update_recovery_contract.php
+          php tests/unit/admin_secondary_nav_focus_contract.php
+          php tests/unit/admin_navigation_consistency_contract.php
+          echo P01_ATOMIC_CACHE_FOCUSED=PASS
+
+      - name: Fresh install and common baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TEST_PASSWORD=$(python3 -c "import secrets; print('Aa1!'+secrets.token_urlsafe(24))")
+          echo "::add-mask::$TEST_PASSWORD"
+          rm -rf /tmp/p01-atomic-cache
+          cp -a vf-start/src /tmp/p01-atomic-cache
+          cd /tmp/p01-atomic-cache
+          php -S 127.0.0.1:18106 -t . >/tmp/p01-atomic-cache-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true; rm -rf /tmp/p01-atomic-cache*' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-atomic-cache.cookies -b /tmp/p01-atomic-cache.cookies http://127.0.0.1:18106/setup.php -o /tmp/p01-atomic-cache-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-atomic-cache-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s); assert m; print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-atomic-cache.cookies -b /tmp/p01-atomic-cache.cookies -X POST http://127.0.0.1:18106/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF Atomic Cache Gate'             --data-urlencode "admin_password=$TEST_PASSWORD"             --data-urlencode "admin_password_confirm=$TEST_PASSWORD"             -o /tmp/p01-atomic-cache-setup-post.html
+          php cli/verify.php | tee /tmp/p01-atomic-cache-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-atomic-cache-verify.txt
+          php cli/baseline-verify.php | tee /tmp/p01-atomic-cache-baseline.txt
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-atomic-cache-baseline.txt
+          grep -Fx 'BASELINE_FULL_PASS=YES' /tmp/p01-atomic-cache-baseline.txt
+          echo P01_ATOMIC_CACHE_BASELINE=PASS
+
+      - name: Runtime helper direct execution
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd vf-start
+          php -d opcache.enable_cli=1 -r '
+            require "src/app/AtomicRuntimeCache.php";
+            $r=VfAtomicRuntimeCache::refresh("src");
+            if(!array_key_exists("opcache_available",$r)||!array_key_exists("files_checked",$r)||!array_key_exists("reset",$r)) exit(2);
+            echo "P01_ATOMIC_CACHE_DIRECT=PASS
+";
+          '
+          grep -Fq "VfAtomicRuntimeCache::refresh(\$this->root)" src/app/UpdateManager.php
+          ! grep -Fq "private function refreshRuntimeCodeCache" src/app/UpdateManager.php
+          echo P01_ATOMIC_CACHE_ENGINEERING_GATE=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_ATOMIC_CACHE_795=PASS
+          echo SCHEMA=2026090401
+          echo MIGRATION=NONE
+          echo PRODUCTION=NOT_WRITTEN
