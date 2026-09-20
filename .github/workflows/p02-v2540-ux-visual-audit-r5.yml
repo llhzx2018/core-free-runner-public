@@ -1,0 +1,86 @@
+name: P02 V2.5.40 UX Visual Audit R5
+
+on:
+  push:
+    branches:
+      - run/p02-v2540-ux-visual-audit-r5-20260920
+    paths:
+      - '.github/workflows/p02-v2540-ux-visual-audit-r5.yml'
+      - 'requests/p02-v2540-r5/visual_audit.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout runner control source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          path: runner
+
+      - name: Checkout exact private P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: f7a3bc485c2d96d70091f998b649f8426cd42d2d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install runtime and Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Build synthetic site and capture UI states
+        shell: bash
+        env:
+          VF_UX_E2E_PORT: "18093"
+          VF_UX_E2E_PASSWORD: "VF-Visual-Audit-Only!"
+        run: |
+          set -Eeuo pipefail
+          RUN_ROOT="$RUNNER_TEMP/p02-v2540-visual"
+          SITE="$RUN_ROOT/site"
+          COOKIE="$RUN_ROOT/cookies.txt"
+          BASE_URL="http://127.0.0.1:${VF_UX_E2E_PORT}"
+          mkdir -p "$RUN_ROOT/screens"
+          cd product
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S "127.0.0.1:${VF_UX_E2E_PORT}" -t "$SITE" >"$RUN_ROOT/php.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do
+            curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break
+            sleep .25
+          done
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 -c 'import html,re,sys; s=open(sys.argv[1],encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s); print(html.unescape(m.group(1))) if m else (_ for _ in ()).throw(SystemExit("setup csrf missing"))' "$RUN_ROOT/setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$VF_UX_E2E_PASSWORD" --data-urlencode "password_confirm=$VF_UX_E2E_PASSWORD" "$BASE_URL/setup.php")"
+          test "$STATUS" = "303"
+          export VF_UX_E2E_BASE_URL="$BASE_URL"
+          export VF_UX_E2E_VERSION="$(tr -d '\r\n' < VERSION)"
+          node tests/e2e/p02_ux_task_flow.mjs >/dev/null
+          export VF_VISUAL_OUTPUT="$RUN_ROOT/screens"
+          cp ../runner/requests/p02-v2540-r5/visual_audit.mjs tests/e2e/p02_v2540_visual_audit_tmp.mjs
+          node tests/e2e/p02_v2540_visual_audit_tmp.mjs
+          rm -f tests/e2e/p02_v2540_visual_audit_tmp.mjs
+          echo P02_V2540_VISUAL_AUDIT=PASS
+
+      - name: Upload synthetic visual audit
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p02-v2540-ux-visual-audit-${{ github.run_id }}
+          path: ${{ runner.temp }}/p02-v2540-visual/screens/*.png
+          if-no-files-found: error
+          retention-days: 7
