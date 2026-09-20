@@ -1,0 +1,296 @@
+name: S01 Ops 1.21.900 Readability R11 Release Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      CANDIDATE_SHA: 3058630573abd644852b2800bfc78f833c34bd7f
+      BASE_SHA: ff85e5fa17da9dbee064e3c19c847092aa14cf5d
+      VERSION: 1.21.900
+      PREVIOUS_TAG: v1.21.899
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.899.zip
+      ASSET: vf-tools-ops_V1.21.900.zip
+
+    steps:
+      - name: Checkout exact Ops main
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 3058630573abd644852b2800bfc78f833c34bd7f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Identity scope readability contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.900' ops/vf-ops.php
+          grep -Fq 'S01-SYSTEM-PUBLISH-R11' ops/vf-ops.php
+          actual="$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            VERSION \
+            assets/css/current/admin-s01-system-publish-r11.css \
+            includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            tests/s01-c02-121900-system-publish-readability-r11-contract.php \
+            vf-ops.php | sort)"
+          test "$actual" = "$expected"
+          test "$(git -C ops diff --name-only "$BASE_SHA" "$CANDIDATE_SHA" -- database config includes/v6 includes/wp-update includes/admin-v13/views | wc -l)" = "0"
+          php ops/tests/s01-c02-121900-system-publish-readability-r11-contract.php
+          php -l ops/vf-ops.php >/dev/null
+          php -l ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php >/dev/null
+          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' \
+            ops/vf-ops.php \
+            ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            ops/assets/css/current/admin-s01-system-publish-r11.css
+          echo PASS_IDENTITY_SCOPE_READABILITY
+
+      - name: Build deterministic runtime-only package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage dist
+          mkdir -p stage/vf-ops dist
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path('ops'); stage=Path('stage/vf-ops')
+          def runtime(rel):
+              rel=rel.replace('\\','/').lstrip('/')
+              if not rel or '../' in rel:return False
+              if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I):return False
+              if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I):return False
+              if '/' not in rel:return rel in ('vf-ops.php','uninstall.php')
+              return re.match(r'^(?:includes|assets|languages|config)/',rel) is not None
+          files=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()),key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if not runtime(rel):continue
+              if p.is_symlink():raise SystemExit('runtime symlink forbidden: '+rel)
+              data=p.read_bytes(); files.append((rel,data))
+              q=stage/rel; q.parent.mkdir(parents=True,exist_ok=True); q.write_bytes(data)
+          canonical=b''.join(rel.encode()+b'\0'+hashlib.sha256(data).hexdigest().encode()+b'\n' for rel,data in files)
+          Path('/tmp/runtime_count').write_text(str(len(files)))
+          Path('/tmp/runtime_fp').write_text(hashlib.sha256(canonical).hexdigest())
+          for out in ('dist/vf-tools-ops_V1.21.900.zip','dist/rebuild-vf-tools-ops_V1.21.900.zip'):
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      info=zipfile.ZipInfo('vf-ops/'+rel,date_time=(2020,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(0o100644 & 0xFFFF)<<16
+                      z.writestr(info,data)
+          PY
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.900'
+          unzip -Z1 "dist/$ASSET" | grep -Fxq 'vf-ops/assets/css/current/admin-s01-system-publish-r11.css'
+          ! unzip -Z1 "dist/$ASSET" | grep -Fxq 'vf-ops/assets/css/current/admin-s01-system-publish-r10.css'
+          test "$(cat /tmp/runtime_count)" = "968"
+          sha256sum "dist/$ASSET" | awk '{print $1}' >/tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" >/tmp/asset_bytes
+          echo PASS_PACKAGE
+
+      - name: Previous release compatibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sort >/tmp/prev.txt
+          unzip -Z1 "dist/$ASSET" | grep -v '/$' | sort >/tmp/new.txt
+          comm -13 /tmp/prev.txt /tmp/new.txt >/tmp/added.txt
+          comm -23 /tmp/prev.txt /tmp/new.txt >/tmp/removed.txt
+          test "$(cat /tmp/added.txt)" = 'vf-ops/assets/css/current/admin-s01-system-publish-r11.css'
+          test "$(cat /tmp/removed.txt)" = 'vf-ops/assets/css/current/admin-s01-system-publish-r10.css'
+          echo PASS_COMPAT
+
+      - name: Candidate receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > dist/candidate-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$CANDIDATE_SHA
+          ASSET=$ASSET
+          BYTES=$(cat /tmp/asset_bytes)
+          SHA256=$(cat /tmp/asset_sha)
+          RUNTIME_FILES=$(cat /tmp/runtime_count)
+          RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)
+          CHANGED_PAGES=SYSTEM,PUBLISH
+          VISUAL_AUTHORITY=V6_SHELL_PLUS_R11
+          TYPOGRAPHY_FLOOR=RAISED
+          LAYOUT_STRUCTURE=UNCHANGED
+          SCHEMA=6.0.0_TO_6.0.0
+          DATA_MIGRATION=NONE
+          SHARED_UPDATER=UNCHANGED
+          RESULT=PASS
+          EOF
+          cat dist/candidate-receipt.txt
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-121900-readability-r11-candidate
+          path: |
+            dist/vf-tools-ops_V1.21.900.zip
+            dist/candidate-receipt.txt
+          if-no-files-found: error
+          retention-days: 14
+
+
+  formal-release:
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      SOURCE_SHA: 3058630573abd644852b2800bfc78f833c34bd7f
+      VERSION: 1.21.900
+      TAG: v1.21.900
+      ASSET: vf-tools-ops_V1.21.900.zip
+
+    steps:
+      - name: Download exact tested candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: s01-c02-121900-readability-r11-candidate
+          path: tested
+
+      - name: Verify tested artifact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f "tested/$ASSET"
+          test -f tested/candidate-receipt.txt
+          grep -Fqx "VERSION=$VERSION" tested/candidate-receipt.txt
+          grep -Fqx "SOURCE_SHA=$SOURCE_SHA" tested/candidate-receipt.txt
+          grep -Fqx "ASSET=$ASSET" tested/candidate-receipt.txt
+          grep -Fqx 'RESULT=PASS' tested/candidate-receipt.txt
+          unzip -tq "tested/$ASSET" >/dev/null
+          unzip -p "tested/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.900'
+          echo PASS_EXACT_TESTED_ARTIFACT
+
+      - name: Create exact formal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release already exists; refusing overwrite." >&2
+            exit 31
+          fi
+          test "$(gh api "repos/$TARGET_REPO/commits/$SOURCE_SHA" --jq '.sha')" = "$SOURCE_SHA"
+          BYTES="$(stat -c '%s' "tested/$ASSET")"
+          SHA="$(sha256sum "tested/$ASSET" | awk '{print $1}')"
+          RUNTIME_FILES="$(awk -F= '$1=="RUNTIME_FILES"{print $2}' tested/candidate-receipt.txt)"
+          RUNTIME_FP="$(awk -F= '$1=="RUNTIME_FINGERPRINT"{print $2}' tested/candidate-receipt.txt)"
+          cat > /tmp/release-notes.md <<EOF
+          # VF Tools Ops V1.21.900
+
+          **S01-C02 · System + Publish Readability R11**
+
+          OWNER screenshot-driven typography correction after 1.21.899.
+
+          Changed pages only:
+          - System -> Site Environment
+          - Publish -> Static Publish
+
+          Product correction:
+          - desktop typography floor raised across titles, body copy, controls, tables, states and gate rows
+          - working text is readable on high-resolution desktop displays
+          - page structure and clean two-layer visual authority remain unchanged
+          - no new card layer introduced
+          - all business actions, nonces, routes and state remain unchanged
+
+          Safety:
+          - Six-domain IA unchanged
+          - Canonical routes unchanged
+          - Schema 6.0.0 -> 6.0.0
+          - Data Migration NONE
+          - M3U8 ownership unchanged
+          - Theme ownership unchanged
+          - Shared updater unchanged
+          - Rollback v1.21.899
+          - OWNER visual acceptance remains post-update
+
+          Exact asset:
+          - $ASSET
+          - Bytes $BYTES
+          - SHA-256 $SHA
+          - Runtime files $RUNTIME_FILES
+          - Runtime Fingerprint $RUNTIME_FP
+          EOF
+          created=0
+          cleanup(){ rc=$?; if [ "$rc" -ne 0 ] && [ "$created" -eq 1 ]; then gh release delete "$TAG" --repo "$TARGET_REPO" --cleanup-tag -y >/dev/null 2>&1 || true; fi; exit "$rc"; }
+          trap cleanup EXIT
+          gh release create "$TAG" "tested/$ASSET#VF Tools Ops $VERSION" \
+            --repo "$TARGET_REPO" \
+            --target "$SOURCE_SHA" \
+            --title "VF Tools Ops V$VERSION" \
+            --notes-file /tmp/release-notes.md
+          created=1
+          trap - EXIT
+          echo PASS_FORMAL_RELEASE_CREATED
+
+      - name: Independent remote release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$TAG")"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          REMOTE_BYTES="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$JSON")"
+          test -n "$RID" && test "$RID" != null
+          test -n "$AID" && test "$AID" != null
+          test "$REMOTE_BYTES" = "$(stat -c '%s' "tested/$ASSET")"
+          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SOURCE_SHA"
+          mkdir -p remote
+          gh release download "$TAG" --repo "$TARGET_REPO" --pattern "$ASSET" --dir remote
+          test "$(sha256sum "remote/$ASSET" | awk '{print $1}')" = "$(sha256sum "tested/$ASSET" | awk '{print $1}')"
+          cmp "tested/$ASSET" "remote/$ASSET"
+          cat > formal-release-receipt.txt <<EOF
+          COMPONENT=S01-C02
+          VERSION=$VERSION
+          SOURCE_SHA=$SOURCE_SHA
+          TAG=$TAG
+          RELEASE_ID=$RID
+          ASSET=$ASSET
+          ASSET_ID=$AID
+          BYTES=$REMOTE_BYTES
+          SHA256=$(sha256sum "remote/$ASSET" | awk '{print $1}')
+          RUNTIME_FILES=$(awk -F= '$1=="RUNTIME_FILES"{print $2}' tested/candidate-receipt.txt)
+          RUNTIME_FINGERPRINT=$(awk -F= '$1=="RUNTIME_FINGERPRINT"{print $2}' tested/candidate-receipt.txt)
+          REMOTE_READBACK=PASS
+          PRODUCTION=NOT_YET_CLAIMED
+          OWNER_VISUAL_ACCEPTANCE=OPEN
+          RESULT=PASS
+          EOF
+          cat formal-release-receipt.txt
+
+      - name: Upload formal release receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-121900-readability-r11-formal-release
+          path: formal-release-receipt.txt
+          if-no-files-found: error
+          retention-days: 30
