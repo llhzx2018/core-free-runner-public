@@ -39,7 +39,7 @@ SETUP_CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8"
 STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE_URL/setup.php")"
 test "$STATUS" = 303
 
-cp "$GITHUB_WORKSPACE/runner/requests/p02-v2581-r3-detail-audit/audit.mjs" "$PRODUCT_ROOT/tests/e2e/p02_v2581-r3_detail_audit_temp.mjs"
+cp "$GITHUB_WORKSPACE/runner/requests/p02-v2581-r3-audit/audit.mjs" "$PRODUCT_ROOT/tests/e2e/p02_v2581-r3_detail_audit_temp.mjs"
 export VF_AUDIT_BASE_URL="$BASE_URL"
 export VF_AUDIT_PASSWORD="$TEST_PASSWORD"
 node tests/e2e/p02_v2581-r3_detail_audit_temp.mjs
