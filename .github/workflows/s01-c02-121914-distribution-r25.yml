@@ -1,0 +1,94 @@
+name: S01-C02 1.21.914 Distribution R25 Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CORE_UPDATES_SHA: e61e987377e776397441dc0ea55a29bcc5eb0e03
+      PRODUCT_SHA: d2fec6cd857f744642f48090b40b650fb11c2ca2
+      TAG: v1.21.914
+      ASSET: vf-tools-ops_V1.21.914.zip
+      ASSET_BYTES: "3481703"
+      ASSET_SHA256: 9cc8fe54dff47529c381a190f240b059070a0d5c46e3b373a0f22330f289d4b6
+      RUNTIME_FILES: "972"
+      RUNTIME_FINGERPRINT: 3fd143d5c8cf65849ee78e1a62f0c466931185da0dba101575b29a137d9eaffa
+
+    steps:
+      - name: Checkout exact distribution candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: e61e987377e776397441dc0ea55a29bcc5eb0e03
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: dist
+          persist-credentials: false
+
+      - name: Checkout exact product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: d2fec6cd857f744642f48090b40b650fb11c2ca2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Verify manifest and Update Core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C dist rev-parse HEAD)" = "$CORE_UPDATES_SHA"
+          python3 dist/scripts/check_manifest_contract.py >/tmp/manifest-audit.json
+          grep -Fq '"status": "PASS"' /tmp/manifest-audit.json
+
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          m=json.loads(Path('dist/projects/S01-C02.json').read_text())
+          assert m['target_version']=='1.21.914'
+          assert m['release_tag']==os.environ['TAG']
+          assert m['asset_name']==os.environ['ASSET']
+          assert m['asset_bytes']==int(os.environ['ASSET_BYTES'])
+          assert m['asset_sha256']==os.environ['ASSET_SHA256']
+          assert m['runtime_files']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_file_count']==int(os.environ['RUNTIME_FILES'])
+          assert m['runtime_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+          assert m['runtime_fingerprint_sha256']==os.environ['RUNTIME_FINGERPRINT']
+          assert '1.21.913' in m['from_versions']
+          assert m['schema_from']=='6.0.0' and m['schema_to']=='6.0.0'
+          print('PASS_MANIFEST')
+          PY
+
+          find dist/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php dist/update-core/php/tests/run.php
+
+      - name: Verify R25 product contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$PRODUCT_SHA"
+          php ops/tests/s01-c02-121914-secondary-hierarchy-r25-contract.php
+
+      - name: Verify Formal Release binding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/llhzx2018/vf-tools-ops/releases/tags/$TAG")"
+          test "$(jq -r '.target_commitish' <<<"$JSON")" = "$PRODUCT_SHA"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$JSON")" = "$ASSET_BYTES"
+          test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$JSON")" = "sha256:$ASSET_SHA256"
+          mkdir -p /tmp/release
+          gh release download "$TAG" --repo llhzx2018/vf-tools-ops --pattern "$ASSET" --dir /tmp/release
+          test "$(sha256sum "/tmp/release/$ASSET" | awk '{print $1}')" = "$ASSET_SHA256"
+          echo PASS_DISTRIBUTION_R25
