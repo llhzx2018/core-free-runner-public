@@ -16,7 +16,8 @@ V12_MANIFEST_PATH = Path("archive/workflows/归档清单_V12.json")
 V13_MANIFEST_PATH = Path("archive/workflows/归档清单_V13.json")
 V14_MANIFEST_PATH = Path("archive/workflows/归档清单_V14.json")
 V15_MANIFEST_PATH = Path("archive/workflows/归档清单_V15.json")
-MANIFEST_PATH = Path("archive/workflows/归档清单_V16.json")
+V16_MANIFEST_PATH = Path("archive/workflows/归档清单_V16.json")
+MANIFEST_PATH = Path("archive/workflows/归档清单_V17.json")
 LATE_BATCH = ARCHIVE_BATCH / "late-active-v11"
 LATE_BATCH_SOURCE_COMMIT = "e90d10a76f01f6166ed49516d44a82019205fe84"
 LATE_BATCH_TREE_SHA = "fc14bb126badeacedd455f974d60b29105d34883"
@@ -41,13 +42,18 @@ V16_BATCH = Path("archive/workflows/2026-09/historical-version/p07-v16")
 V16_BATCH_SOURCE_COMMIT = "531d58c316d236bc78ef21d48e5ea526b714c9ee"
 V16_BATCH_TREE_SHA = "58e9eb2f527aa5c6178365bee09d37f26921cf3a"
 V16_BATCH_ENTRY_COUNT = 2
+V17_BATCH = Path("archive/workflows/2026-09/historical-version/public-infrastructure-v17")
+V17_BATCH_SOURCE_COMMIT = "5c23a096097807e1c248b7f320701617a6bd2983"
+V17_BATCH_TREE_SHA = "3ce024a10b075ca403cf1c204c2479da6152e0dd"
+V17_BATCH_ENTRY_COUNT = 1
 V10_ENTRY_COUNT = 421
 V11_ENTRY_COUNT = V10_ENTRY_COUNT + LATE_BATCH_ENTRY_COUNT
 V12_ENTRY_COUNT = V11_ENTRY_COUNT + V12_BATCH_ENTRY_COUNT
 V13_ENTRY_COUNT = V12_ENTRY_COUNT + V13_BATCH_ENTRY_COUNT
 V14_ENTRY_COUNT = V13_ENTRY_COUNT + V14_BATCH_ENTRY_COUNT
 V15_ENTRY_COUNT = V14_ENTRY_COUNT + V15_BATCH_ENTRY_COUNT
-TOTAL_ENTRY_COUNT = V15_ENTRY_COUNT + V16_BATCH_ENTRY_COUNT
+V16_ENTRY_COUNT = V15_ENTRY_COUNT + V16_BATCH_ENTRY_COUNT
+TOTAL_ENTRY_COUNT = V16_ENTRY_COUNT + V17_BATCH_ENTRY_COUNT
 
 INVALID_NAMES = {
     "p01-22121-browser-reverify.yml",
@@ -282,7 +288,7 @@ def _v16_files(root: Path) -> list[Path]:
     return sorted((root / V16_BATCH).glob("*.yml"))
 
 
-def build_manifest(root: Path) -> dict[str, Any]:
+def build_v16_manifest(root: Path) -> dict[str, Any]:
     v16_count = len(_v16_files(root))
     return {
         "schema": "core-free-runner-workflow-archive/v16",
@@ -305,6 +311,37 @@ def build_manifest(root: Path) -> dict[str, Any]:
             "source_commit": V16_BATCH_SOURCE_COMMIT,
             "git_tree_sha": V16_BATCH_TREE_SHA,
             "entry_count": v16_count,
+        },
+    }
+
+
+def _v17_files(root: Path) -> list[Path]:
+    return sorted((root / V17_BATCH).glob("*.yml"))
+
+
+def build_manifest(root: Path) -> dict[str, Any]:
+    v17_count = len(_v17_files(root))
+    return {
+        "schema": "core-free-runner-workflow-archive/v17",
+        "batch": "2026-09",
+        "policy": "MOVE_ONLY_NO_CONTENT_CHANGE",
+        "entry_count": V16_ENTRY_COUNT + v17_count,
+        "category_counts": {
+            "temporary": 37,
+            "invalid-yaml": 2,
+            "historical-version": 400 + v17_count,
+            "late-active": LATE_BATCH_ENTRY_COUNT,
+        },
+        "base_manifest": {
+            "path": V16_MANIFEST_PATH.as_posix(),
+            "entry_count": V16_ENTRY_COUNT,
+        },
+        "delta": {
+            "archive_path": V17_BATCH.as_posix(),
+            "category": "historical-version",
+            "source_commit": V17_BATCH_SOURCE_COMMIT,
+            "git_tree_sha": V17_BATCH_TREE_SHA,
+            "entry_count": v17_count,
         },
     }
 
@@ -450,20 +487,39 @@ def verify(root: Path) -> list[str]:
     if v16_tree_sha is not None and v16_tree_sha != V16_BATCH_TREE_SHA:
         failures.append("V16_BATCH_TREE_DRIFT")
 
+    v16_manifest_path = root / V16_MANIFEST_PATH
+    if not v16_manifest_path.is_file():
+        failures.append("V16_MANIFEST_MISSING")
+    else:
+        try:
+            actual_v16 = json.loads(v16_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            failures.append("V16_MANIFEST_INVALID_JSON")
+        else:
+            if actual_v16 != build_v16_manifest(root):
+                failures.append("V16_MANIFEST_DRIFT")
+
+    v17_files = _v17_files(root)
+    if len(v17_files) != V17_BATCH_ENTRY_COUNT:
+        failures.append("V17_BATCH_COUNT_NOT_1")
+    v17_tree_sha = _git_tree_sha(root, V17_BATCH)
+    if v17_tree_sha is not None and v17_tree_sha != V17_BATCH_TREE_SHA:
+        failures.append("V17_BATCH_TREE_DRIFT")
+
     manifest_path = root / MANIFEST_PATH
     if not manifest_path.is_file():
-        failures.append("V16_MANIFEST_MISSING")
+        failures.append("V17_MANIFEST_MISSING")
     else:
         try:
             actual = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            failures.append("V16_MANIFEST_INVALID_JSON")
+            failures.append("V17_MANIFEST_INVALID_JSON")
         else:
             expected = build_manifest(root)
             if actual != expected:
-                failures.append("V16_MANIFEST_DRIFT")
+                failures.append("V17_MANIFEST_DRIFT")
             if expected["entry_count"] != TOTAL_ENTRY_COUNT:
-                failures.append("TOTAL_ENTRY_COUNT_NOT_525")
+                failures.append("TOTAL_ENTRY_COUNT_NOT_526")
 
     for entry in expected_v10["entries"]:
         source = root / entry["source_path"]
@@ -494,6 +550,10 @@ def verify(root: Path) -> list[str]:
         source = root / ".github/workflows" / path.name
         if source.exists():
             failures.append(f"V16_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
+    for path in v17_files:
+        source = root / ".github/workflows" / path.name
+        if source.exists():
+            failures.append(f"V17_SOURCE_STILL_ACTIVE:.github/workflows/{path.name}")
 
     active_dir = root / ".github/workflows"
     active_temp = sorted(active_dir.glob("temp-*.yml"))
@@ -565,6 +625,9 @@ def main() -> int:
         "v15_batch_tree_sha": _git_tree_sha(root, V15_BATCH),
         "v16_p07_archived": len(_v16_files(root)),
         "v16_batch_tree_sha": _git_tree_sha(root, V16_BATCH),
+        "v17_archived": build_manifest(root).get("entry_count"),
+        "v17_public_infrastructure_archived": len(_v17_files(root)),
+        "v17_batch_tree_sha": _git_tree_sha(root, V17_BATCH),
         "failures": failures,
     }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
