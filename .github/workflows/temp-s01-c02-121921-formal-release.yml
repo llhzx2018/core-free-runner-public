@@ -1,0 +1,248 @@
+name: TEMP S01-C02 1.21.921 Formal Release
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      SOURCE_SHA: c37dc1cc4754a3792926f8f4a40e04e48fb36ad4
+      BASE_SHA: d2fec6cd857f744642f48090b40b650fb11c2ca2
+      VERSION: 1.21.921
+      TAG: v1.21.921
+      ASSET: vf-tools-ops_V1.21.921.zip
+      PREVIOUS_TAG: v1.21.914
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.914.zip
+
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: c37dc1cc4754a3792926f8f4a40e04e48fb36ad4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and UX UI gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.921' source/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.921'" source/vf-ops.php
+          grep -Fq 'S01-PUBLISH-COMPAT-VISUAL-CLOSURE-R32' source/vf-ops.php
+          php -l source/vf-ops.php
+          php -l source/includes/admin-v13/route-contract.php
+          php -l source/includes/views/admin-shell-tabs-parts/02-shell-navigation.php
+          php -l source/includes/views/admin-style-helpers/admin-s01-uiux-polish.php
+          php source/tests/s01-c02-121921-publish-compat-visual-r32-contract.php
+
+          test "$(git -C source diff --name-only "$BASE_SHA" "$SOURCE_SHA" -- database config includes/v6 includes/wp-update docs/authority | wc -l)" = "0"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path("source")
+          routes=(root/"includes/admin-v13/route-contract.php").read_text(encoding="utf-8")
+          nav=(root/"includes/views/admin-shell-tabs-parts/02-shell-navigation.php").read_text(encoding="utf-8")
+          ui=(root/"includes/views/admin-style-helpers/admin-s01-uiux-polish.php").read_text(encoding="utf-8")
+          r32=(root/"assets/css/current/admin-s01-compat-r32.css").read_text(encoding="utf-8")
+          entries=[]
+          for line in routes.splitlines():
+              m=re.match(r"^\s*'([^']+)'\s*=>.*?'view'=>'([^']+)'.*?'status'=>'([^']+)'", line)
+              if m:
+                  entries.append((m.group(1),m.group(2),m.group(3)))
+          canonical=[x for x in entries if x[2]!="migration_evidence"]
+          compat=[x for x in entries if x[2]=="migration_evidence"]
+          assert len(entries)==39
+          assert len(canonical)==26
+          assert len(compat)==13
+          assert len(canonical)+1+len(compat)==40
+          assert "vf_ops_v13_compat_route_url_v121920" in routes
+          assert "vf_ops_v13_compat_route_url_v121920" in nav
+          for asset in ("admin-s01-subpages-r27.css","admin-s01-subpages-r28.css","admin-s01-compat-r30.css","admin-s01-compat-r32.css"):
+              assert asset in ui
+          for cls in (".vf-publish-workbench",".vf-pending-head",".vf-pf-header",".vf-batches-head",".vf-history-head"):
+              assert cls in r32
+          assert r32.count("{")==r32.count("}")
+          print("40-Surface UX/UI source gate PASS")
+          PY
+
+      - name: Security source hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -RInE 'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY' \
+            source/vf-ops.php \
+            source/includes/admin-v13/route-contract.php \
+            source/includes/views/admin-shell-tabs-parts/02-shell-navigation.php \
+            source/includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            source/assets/css/current/admin-s01-compat-r30.css \
+            source/assets/css/current/admin-s01-compat-r32.css \
+            source/assets/css/current/admin-s01-subpages-r27.css \
+            source/assets/css/current/admin-s01-subpages-r28.css
+          test "$(git -C source diff --name-only "$BASE_SHA" "$SOURCE_SHA" -- '*.sql' '*.sqlite' '*.sqlite3' '*.db' '*.zip' '*.bak' '.env*' | wc -l)" = "0"
+
+      - name: Build deterministic runtime ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist rebuild
+          mkdir -p dist rebuild
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path("source")
+          def runtime(rel):
+              rel=rel.replace("\\","/").lstrip("/")
+              if not rel or "../" in rel:
+                  return False
+              if re.search(r"(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)",rel,re.I):
+                  return False
+              if re.search(r"\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$",rel,re.I):
+                  return False
+              if "/" not in rel:
+                  return rel in ("vf-ops.php","uninstall.php")
+              return re.match(r"^(?:includes|assets|languages|config)/",rel) is not None
+          files=[]
+          for p in sorted((x for x in root.rglob("*") if x.is_file()),key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if not runtime(rel):
+                  continue
+              if p.is_symlink():
+                  raise SystemExit("runtime symlink forbidden: "+rel)
+              files.append((rel,p.read_bytes()))
+          canonical=b"".join(rel.encode()+b"\0"+hashlib.sha256(data).hexdigest().encode()+b"\n" for rel,data in files)
+          Path("/tmp/runtime_count").write_text(str(len(files)))
+          Path("/tmp/runtime_fp").write_text(hashlib.sha256(canonical).hexdigest())
+          for out in ("dist/vf-tools-ops_V1.21.921.zip","rebuild/vf-tools-ops_V1.21.921.zip"):
+              with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      info=zipfile.ZipInfo("vf-ops/"+rel,date_time=(2020,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(0o100644 & 0xFFFF)<<16
+                      z.writestr(info,data)
+          PY
+          cmp "dist/$ASSET" "rebuild/$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.921'
+          sha256sum "dist/$ASSET" | awk '{print $1}' >/tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" >/tmp/asset_bytes
+
+      - name: Previous release upgrade compatibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          test "$(stat -c '%s' "previous/$PREVIOUS_ASSET")" = "3481703"
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "9cc8fe54dff47529c381a190f240b059070a0d5c46e3b373a0f22330f289d4b6"
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sort >/tmp/prev.txt
+          unzip -Z1 "dist/$ASSET" | grep -v '/$' | sort >/tmp/new.txt
+          test ! -s <(comm -23 /tmp/prev.txt /tmp/new.txt)
+          added="$(comm -13 /tmp/prev.txt /tmp/new.txt)"
+          expected="$(printf '%s\n' vf-ops/assets/css/current/admin-s01-compat-r30.css vf-ops/assets/css/current/admin-s01-compat-r32.css | sort)"
+          test "$added" = "$expected"
+
+      - name: Create formal GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release already exists; refusing overwrite." >&2
+            exit 31
+          fi
+          BYTES="$(cat /tmp/asset_bytes)"
+          SHA="$(cat /tmp/asset_sha)"
+          RUNTIME_FILES="$(cat /tmp/runtime_count)"
+          RUNTIME_FP="$(cat /tmp/runtime_fp)"
+          cat > /tmp/release-notes.md <<EOF
+          # VF Tools Ops V1.21.921
+
+          S01-C02 Full 40-Surface UX/UI Source Closure R26-R32.
+
+          - Canonical surfaces: 27 / 27
+          - Compatibility/history surfaces: 13 / 13
+          - OWNER discoverable surfaces: 40 / 40
+          - Hidden current surfaces: 0
+          - Hidden compatibility surfaces: 0
+          - Visually unmanaged discoverable surfaces: 0
+          - Shared One Shell and shared subpage visual authority retained
+          - Exact compatibility reachability retained
+          - Publish compatibility header scale/rhythm unified
+          - Schema/Data/write semantics/updater/component ownership unchanged
+          - Rollback baseline: v1.21.914
+          - OWNER Production visual acceptance remains post-update
+
+          Exact asset:
+          - $ASSET
+          - Bytes $BYTES
+          - SHA-256 $SHA
+          - Runtime files $RUNTIME_FILES
+          - Runtime Fingerprint $RUNTIME_FP
+          EOF
+          gh release create "$TAG" "dist/$ASSET#VF Tools Ops $VERSION" \
+            --repo "$TARGET_REPO" \
+            --target "$SOURCE_SHA" \
+            --title "VF Tools Ops V$VERSION" \
+            --notes-file /tmp/release-notes.md
+
+      - name: Remote release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$TAG")"
+          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SOURCE_SHA"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          test -n "$RID"
+          test -n "$AID"
+          mkdir -p remote
+          gh release download "$TAG" --repo "$TARGET_REPO" --pattern "$ASSET" --dir remote
+          cmp "dist/$ASSET" "remote/$ASSET"
+          echo "COMPONENT=S01-C02"
+          echo "VERSION=$VERSION"
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo "TAG=$TAG"
+          echo "RELEASE_ID=$RID"
+          echo "ASSET=$ASSET"
+          echo "ASSET_ID=$AID"
+          echo "BYTES=$(stat -c '%s' "remote/$ASSET")"
+          echo "SHA256=$(sha256sum "remote/$ASSET" | awk '{print $1}')"
+          echo "RUNTIME_FILES=$(cat /tmp/runtime_count)"
+          echo "RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)"
+          echo "PUBLIC_AUTHORITY_TESTING=PASS"
+          echo "PUBLIC_AUTHORITY_GIT=PASS"
+          echo "PUBLIC_AUTHORITY_UPGRADE=PASS"
+          echo "PUBLIC_AUTHORITY_SECURITY=PASS"
+          echo "PUBLIC_AUTHORITY_UA_UI=PASS"
+          echo "PUBLIC_AUTHORITY_INSTALL=N_A_COMPONENT_UPDATE"
+          echo "PUBLIC_AUTHORITY_DATA_SCHEMA=N_A_NO_CHANGE"
+          echo "PUBLIC_AUTHORITY_OBSERVABILITY=N_A_PRODUCTION_SEPARATE"
+          echo "OWNER_POST_RELEASE_REAL_USE=REQUIRED"
+          echo "REMOTE_READBACK=PASS"
+          echo "DISTRIBUTION=NOT_YET_CLAIMED"
+          echo "PRODUCTION=NOT_CLAIMED"
+          echo "RESULT=PASS"
+
+      - name: Remove transient private source
+        if: always()
+        shell: bash
+        run: rm -rf source previous dist rebuild remote
