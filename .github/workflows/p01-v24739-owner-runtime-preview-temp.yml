@@ -1,0 +1,128 @@
+name: p01-v24739-owner-runtime-preview-temp
+
+on:
+  push:
+    branches:
+      - preview/p01-v24739-runtime-20260921
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v24739-owner-runtime-preview
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PREVIEW_SHA: 761fb624c62e9ec16fe33e5f2f1e9f2c27738963
+      PREVIEW_VERSION: 2.47.39
+    steps:
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 761fb624c62e9ec16fe33e5f2f1e9f2c27738963
+          persist-credentials: false
+          fetch-depth: 1
+          path: vf-start
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Create clean ephemeral owner-preview runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C vf-start rev-parse HEAD)" = "$PREVIEW_SHA"
+          test "$(tr -d '\r\n ' < vf-start/VERSION)" = "$PREVIEW_VERSION"
+          PREVIEW_PASSWORD="Preview-$(openssl rand -hex 12)-A9!"
+          echo "$PREVIEW_PASSWORD" >/tmp/p01-preview-password
+          chmod 600 /tmp/p01-preview-password
+
+          php -S 127.0.0.1:8787 -t vf-start/src >/tmp/p01-php.log 2>&1 &
+          echo $! >/tmp/p01-php.pid
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8787/setup.php -c /tmp/p01-cookies -o /tmp/p01-setup.html; then break; fi
+            sleep 1
+          done
+          test -s /tmp/p01-setup.html
+
+          SETUP_CSRF="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-setup.html',encoding='utf-8').read()
+          m=re.search(r'name=["\x27]setup_csrf["\x27][^>]*value=["\x27]([^"\x27]+)',s)
+          if not m:
+              m=re.search(r'value=["\x27]([^"\x27]+)["\x27][^>]*name=["\x27]setup_csrf["\x27]',s)
+          if not m:
+              raise SystemExit('setup_csrf not found')
+          print(m.group(1))
+          PY
+          )"
+          test -n "$SETUP_CSRF"
+          curl -fsS -b /tmp/p01-cookies -c /tmp/p01-cookies             --data-urlencode "site_title=VF Start V2.47.39 Owner Preview"             --data-urlencode "admin_password=$PREVIEW_PASSWORD"             --data-urlencode "admin_password_confirm=$PREVIEW_PASSWORD"             --data-urlencode "setup_csrf=$SETUP_CSRF"             http://127.0.0.1:8787/setup.php -o /tmp/p01-install-result.html
+          grep -Eq '安装完成|开始使用|VF Start' /tmp/p01-install-result.html
+
+          LOGIN_JSON="$(python3 - <<'PY'
+          import json
+          p=open('/tmp/p01-preview-password').read().strip()
+          print(json.dumps({'password':p}))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-login-cookies -H 'Content-Type: application/json'             --data "$LOGIN_JSON"             'http://127.0.0.1:8787/api.php?action=login'             | tee /tmp/p01-login.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p01-login.json'))
+          assert d.get('ok') is True and d.get('csrf')
+          PY
+          curl -fsS -b /tmp/p01-login-cookies http://127.0.0.1:8787/manage.php -o /tmp/p01-manage.html
+          grep -Fq '概览' /tmp/p01-manage.html
+          echo P01_V24739_EPHEMERAL_RUNTIME=PASS
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8787 --no-autoupdate >/tmp/p01-cloudflared.log 2>&1 &
+          echo $! >/tmp/p01-cloudflared.pid
+
+          URL=""
+          for i in $(seq 1 60); do
+            URL="$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/p01-cloudflared.log | head -n1 || true)"
+            if [ -n "$URL" ]; then break; fi
+            sleep 1
+          done
+          test -n "$URL"
+          for i in $(seq 1 30); do
+            if curl -fsS "$URL/api.php?action=health" -o /tmp/p01-remote-health.json; then break; fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p01-remote-health.json'))
+          assert d.get('ok') is True and d.get('service') == 'VF Start'
+          PY
+          PASS="$(cat /tmp/p01-preview-password)"
+          echo "P01_OWNER_PREVIEW_URL=$URL"
+          echo "P01_OWNER_PREVIEW_PASSWORD=$PASS"
+          echo "P01_OWNER_PREVIEW_SOURCE=$PREVIEW_SHA"
+          echo "P01_OWNER_PREVIEW_VERSION=$PREVIEW_VERSION"
+          echo P01_OWNER_PREVIEW_TUNNEL=PASS
+          echo "Preview remains live for approximately 25 minutes from this point."
+          sleep 1500
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-cloudflared.pid; then kill "$(cat /tmp/p01-cloudflared.pid)" 2>/dev/null || true; fi
+          if test -f /tmp/p01-php.pid; then kill "$(cat /tmp/p01-php.pid)" 2>/dev/null || true; fi
+          rm -f /tmp/p01-preview-password /tmp/p01-cookies /tmp/p01-login-cookies
