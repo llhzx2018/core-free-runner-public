@@ -91,7 +91,7 @@ try{
 
   await page.evaluate(async()=>{await openSettings('security');});
   await page.waitForSelector('#passwordForm');
-  const passwordSemantics=await page.evaluate(()=>[...document.querySelectorAll('#passwordForm input')].map(el=>({name:el.name,ok:!!((el.labels&&el.labels.length)||el.getAttribute('aria-label')||el.getAttribute('aria-labelledby'))})));
+  const passwordSemantics=await page.evaluate(()=>[...document.querySelectorAll('#passwordForm input')].map(el=>({name:el.name,id:el.id,ok:!!(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')||(el.id&&document.querySelector('label[for="'+CSS.escape(el.id)+'"]'))||el.closest('label'))})));
   assert(passwordSemantics.length===3&&passwordSemantics.every(x=>x.ok),'password semantics missing '+JSON.stringify(passwordSemantics));
 
   await page.evaluate(async()=>{await openSettings('transfer');});
