@@ -23,13 +23,13 @@ class WorkflowArchiveTests(unittest.TestCase):
     def test_manifest_contains_only_public_safe_metadata(self):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
-        self.assertEqual(value["schema"], "core-free-runner-workflow-archive/v12")
-        self.assertEqual(value["entry_count"], 511)
-        self.assertEqual(value["category_counts"]["historical-version"], 386)
+        self.assertEqual(value["schema"], "core-free-runner-workflow-archive/v13")
+        self.assertEqual(value["entry_count"], 512)
+        self.assertEqual(value["category_counts"]["historical-version"], 387)
         self.assertEqual(value["category_counts"]["late-active"], 86)
-        self.assertEqual(value["base_manifest"]["path"], MODULE.V11_MANIFEST_PATH.as_posix())
-        self.assertEqual(value["delta"]["git_tree_sha"], MODULE.V12_BATCH_TREE_SHA)
-        self.assertEqual(value["delta"]["source_commit"], MODULE.V12_BATCH_SOURCE_COMMIT)
+        self.assertEqual(value["base_manifest"]["path"], MODULE.V12_MANIFEST_PATH.as_posix())
+        self.assertEqual(value["delta"]["git_tree_sha"], MODULE.V13_BATCH_TREE_SHA)
+        self.assertEqual(value["delta"]["source_commit"], MODULE.V13_BATCH_SOURCE_COMMIT)
 
         v10 = MODULE.build_v10_manifest(root)
         raw = json.dumps(v10, ensure_ascii=False)
@@ -57,6 +57,14 @@ class WorkflowArchiveTests(unittest.TestCase):
         archived = list((root / MODULE.V12_BATCH).glob("*.yml"))
         self.assertEqual(len(archived), MODULE.V12_BATCH_ENTRY_COUNT)
         self.assertEqual(MODULE._git_tree_sha(root, MODULE.V12_BATCH), MODULE.V12_BATCH_TREE_SHA)
+        active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
+        self.assertTrue(active.isdisjoint({path.name for path in archived}))
+
+    def test_v13_p07_batch_is_tree_locked_and_inactive(self):
+        root = Path(__file__).resolve().parents[1]
+        archived = list((root / MODULE.V13_BATCH).glob("*.yml"))
+        self.assertEqual(len(archived), MODULE.V13_BATCH_ENTRY_COUNT)
+        self.assertEqual(MODULE._git_tree_sha(root, MODULE.V13_BATCH), MODULE.V13_BATCH_TREE_SHA)
         active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
         self.assertTrue(active.isdisjoint({path.name for path in archived}))
 
