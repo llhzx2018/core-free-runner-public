@@ -1,0 +1,232 @@
+name: P02 V2.5.80 Formal Release
+
+on:
+  push:
+    branches:
+      - release/p02-v2580-formal-20260921
+    paths:
+      - '.github/workflows/p02-v2580-formal-release.yml'
+      - 'requests/p02-v2580/formal_builder.py'
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TARGET_REPO: llhzx2018/vf-library
+      TARGET_SHA: 01c6915a9843089064b539bb4811c70d993b9b8d
+      TARGET_TREE: 503212a538acb738e61a07be75a5c8e812ca2e41
+      CANDIDATE_SHA: 01c6915a9843089064b539bb4811c70d993b9b8d
+      CANDIDATE_RUN: "35575715561"
+      TARGET_VERSION: 2.5.80
+      TARGET_TAG: v2.5.80
+    steps:
+      - name: Checkout release harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact product main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 01c6915a9843089064b539bb4811c70d993b9b8d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install release and browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Verify formal source identity and authority coverage
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git show -s --format=%T HEAD)" = "$TARGET_TREE"
+          test "$(git show -s --format=%T "$CANDIDATE_SHA")" = "$TARGET_TREE"
+          git diff --exit-code "$CANDIDATE_SHA" "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          bash scripts/verify-repository.sh
+          echo 'OWNER_PREVIEW_RUNTIME_APPLICABILITY=N_A'
+          echo 'OWNER_PREVIEW_AUTHORITY=docs/authority/ACCEPTANCE_MATRIX.md'
+          echo 'PUBLIC_AUTHORITY_APPLICABILITY INSTALL=REQUIRED SECURITY=REQUIRED TESTING=REQUIRED UPGRADE=REQUIRED DATA_SCHEMA=REQUIRED GIT=REQUIRED UA_UI=REQUIRED API_PROVIDER=N_A SEO=N_A CRON_JOB=N_A NOTIFICATION=N_A OBSERVABILITY=N_A PERFORMANCE=N_A'
+          echo "P02_V2580_FORMAL_SOURCE_IDENTITY=PASS"
+          echo "P02_V2580_CANDIDATE_TREE_EQUIVALENCE=PASS"
+
+      - name: Re-run exact-tree browser and install UX gate
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r cmd; do
+            test -n "$cmd"
+            eval "$cmd"
+          done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          node --check public/assets/app.js
+          node --check public/assets/system-theme.js
+          node --check public/assets/v2537-inkstone-shell.js
+          git diff --check
+          bash scripts/ux-browser-reverify.sh
+          echo P02_V2580_FORMAL_BROWSER_GATE=PASS
+
+      - name: Build deterministic formal artifact sets twice
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2553-formal"
+          rm -rf "$TMP"
+          mkdir -p "$TMP"
+          TS="$(git -C product show -s --format=%cI "$TARGET_SHA")"
+          for n in 1 2; do
+            python3 runner/requests/p02-v2580/formal_builder.py \
+              --repo product \
+              --out "$TMP/build${n}" \
+              --version "$TARGET_VERSION" \
+              --source-version 2.5.53 \
+              --source-version 2.5.54 \
+              --source-sha "$TARGET_SHA" \
+              --source-tree "$TARGET_TREE" \
+              --timestamp "$TS" \
+              --candidate-run "$CANDIDATE_RUN" \
+              --formal-run "$GITHUB_RUN_ID"
+          done
+          diff -rq "$TMP/build1" "$TMP/build2"
+          (cd "$TMP/build1" && sha256sum -c SHA256SUMS.txt)
+          for z in "$TMP/build1"/*.zip; do unzip -t "$z" >/dev/null; done
+          php -l "$TMP/build1/repair-v2.5.80.php" >/dev/null
+          echo "FORMAL_DIR=$TMP/build1" >> "$GITHUB_ENV"
+          echo P02_V2580_DETERMINISTIC_FORMAL_BUILD=PASS
+
+      - name: Actual FULL package fresh-install gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SITE="${RUNNER_TEMP}/p02-v2580-full-site"
+          COOKIE="${RUNNER_TEMP}/p02-v2580-full.cookie"
+          rm -rf "$SITE"
+          mkdir -p "$SITE"
+          unzip -q "$FORMAL_DIR/VF_Library_V2.5.80_FULL.zip" -d "$SITE"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = 2.5.80
+          echo P02_V2580_FULL_EXTRACT=PASS
+          php -d display_errors=0 -S 127.0.0.1:18353 -t "$SITE" >"${RUNNER_TEMP}/p02-v2580-full-server.log" 2>&1 &
+          PID=$!
+          cleanup(){ kill "$PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 80); do curl -fsS http://127.0.0.1:18353/setup.php >/dev/null 2>&1 && break; sleep .25; done
+          kill -0 "$PID"
+          echo P02_V2580_FULL_SERVER=PASS
+          curl -fsS -c "$COOKIE" http://127.0.0.1:18353/setup.php >"${RUNNER_TEMP}/p02-v2553-setup.html"
+          echo P02_V2580_FULL_SETUP_GET=PASS
+          SETUP_CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s);assert m;print(html.unescape(m.group(1)))' "${RUNNER_TEMP}/p02-v2553-setup.html")"
+          PASS="VF-P02-FULL-${GITHUB_RUN_ID}!"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H 'Origin: http://127.0.0.1:18353' --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$PASS" --data-urlencode "password_confirm=$PASS" http://127.0.0.1:18353/setup.php)"
+          echo "P02_V2580_FULL_SETUP_POST_CODE=$CODE"
+          test "$CODE" = 303
+          echo P02_V2580_FULL_SETUP_POST=PASS
+          REVISIT_BODY="${RUNNER_TEMP}/p02-v2553-setup-revisit.html"
+          REVISIT="$(curl -sS -o "$REVISIT_BODY" -w '%{http_code}' -b "$COOKIE" http://127.0.0.1:18353/setup.php)"
+          echo "P02_V2580_FULL_SETUP_REVISIT_CODE=$REVISIT"
+          case "$REVISIT" in
+            303|404) ;;
+            *) cat "$REVISIT_BODY" || true; echo "setup revisit is not safely locked" >&2; exit 52 ;;
+          esac
+          ! grep -q 'name="setup_csrf"' "$REVISIT_BODY"
+          echo P02_V2580_FULL_SETUP_REVISIT=PASS
+          curl -fsS -b "$COOKIE" http://127.0.0.1:18353/api.php?action=session >"${RUNNER_TEMP}/p02-v2553-session.json"
+          cat "${RUNNER_TEMP}/p02-v2553-session.json"
+          CSRF="$(python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));assert x.get("ok") and x.get("site",{}).get("auth");assert x.get("version")=="2.5.80";print(x["csrf"])' "${RUNNER_TEMP}/p02-v2553-session.json")"
+          echo P02_V2580_FULL_SESSION=PASS
+          printf '%s' '{"name":"Formal FULL","description":"release gate","icon":"folder"}' >"${RUNNER_TEMP}/p02-v2553-cat.json"
+          curl -fsS -b "$COOKIE" -H 'Origin: http://127.0.0.1:18353' -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"${RUNNER_TEMP}/p02-v2553-cat.json" 'http://127.0.0.1:18353/api.php?action=category_save' >"${RUNNER_TEMP}/p02-v2553-cat.out"
+          cat "${RUNNER_TEMP}/p02-v2553-cat.out"
+          CID="$(python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));assert x.get("ok");print(x["id"])' "${RUNNER_TEMP}/p02-v2553-cat.out")"
+          echo "P02_V2580_FULL_CATEGORY_ID=$CID"
+          python3 -c 'import json,sys;json.dump({"category_id":int(sys.argv[2]),"title":"Formal FULL CRUD","content":"V2.5.80 release package write path","content_mode":"article","content_format":"markdown","primary_action":"read","status":"active"},open(sys.argv[1],"w"),ensure_ascii=False)' "${RUNNER_TEMP}/p02-v2553-item.json" "$CID"
+          curl -fsS -b "$COOKIE" -H 'Origin: http://127.0.0.1:18353' -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' --data-binary @"${RUNNER_TEMP}/p02-v2553-item.json" 'http://127.0.0.1:18353/api.php?action=content_save' >"${RUNNER_TEMP}/p02-v2553-item.out"
+          cat "${RUNNER_TEMP}/p02-v2553-item.out"
+          python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));assert x.get("ok") and x.get("item",{}).get("title")=="Formal FULL CRUD"' "${RUNNER_TEMP}/p02-v2553-item.out"
+          echo P02_V2580_FULL_CRUD=PASS
+          php -d display_errors=1 -r 'require $argv[1]."/app/bootstrap.php";require $argv[1]."/app/ScratchTabsService.php";$s=new VfLibraryScratchTabsService(vftb_db());$t=$s->create();$saved=$s->save((int)$t["id"],"FORMAL_FULL_SCRATCH",19,0);if(($saved["content"]??"")!=="FORMAL_FULL_SCRATCH")exit(2);' "$SITE"
+          echo P02_V2580_FULL_SCRATCH=PASS
+          if ! (cd "$SITE" && php cli/verify.php) >"${RUNNER_TEMP}/p02-v2580-full-verify.json"; then
+            cat "${RUNNER_TEMP}/p02-v2580-full-verify.json" || true
+            cat "${RUNNER_TEMP}/p02-v2580-full-server.log" || true
+            exit 51
+          fi
+          cat "${RUNNER_TEMP}/p02-v2580-full-verify.json"
+          python3 -c 'import json,sys;x=json.load(open(sys.argv[1]));assert x.get("ok") and int(x.get("schema_version",0))==2401' "${RUNNER_TEMP}/p02-v2580-full-verify.json"
+          trap - EXIT
+          cleanup
+          echo P02_V2580_FORMAL_FULL_INSTALL=PASS
+
+      - name: Create exact GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          if gh release view "$TARGET_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "release already exists; refusing overwrite" >&2
+            exit 31
+          fi
+          created=0
+          cleanup_release(){
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ "$created" -eq 1 ]; then
+              gh release delete "$TARGET_TAG" --repo "$TARGET_REPO" --cleanup-tag -y >/dev/null 2>&1 || true
+            fi
+            exit "$rc"
+          }
+          trap cleanup_release EXIT
+          gh release create "$TARGET_TAG" "$FORMAL_DIR"/* \
+            --repo "$TARGET_REPO" \
+            --target "$TARGET_SHA" \
+            --title "VF Library V$TARGET_VERSION" \
+            --notes-file "$FORMAL_DIR/VF_Library_V2.5.80_RELEASE_NOTES.md"
+          created=1
+          trap - EXIT
+          echo P02_V2580_GITHUB_RELEASE_CREATED=PASS
+
+      - name: Remote release asset and tag readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REMOTE="${RUNNER_TEMP}/p02-v2580-remote"
+          mkdir -p "$REMOTE"
+          JSON="$(gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}")"
+          RELEASE_ID="$(python3 -c 'import json,sys;x=json.loads(sys.argv[1]);assert x["tag_name"]=="v2.5.80" and not x["draft"] and not x["prerelease"];print(x["id"])' "$JSON")"
+          ASSET_COUNT="$(python3 -c 'import json,sys;x=json.loads(sys.argv[1]);print(len(x.get("assets",[])))' "$JSON")"
+          test "$ASSET_COUNT" = 8
+          TAG_SHA="$(gh api "repos/${TARGET_REPO}/git/ref/tags/${TARGET_TAG}" --jq '.object.sha')"
+          test "$TAG_SHA" = "$TARGET_SHA"
+          gh release download "$TARGET_TAG" --repo "$TARGET_REPO" --dir "$REMOTE"
+          for p in "$FORMAL_DIR"/*; do
+            name="$(basename "$p")"
+            test -f "$REMOTE/$name"
+            cmp "$p" "$REMOTE/$name"
+          done
+          UPDATE_BYTES="$(stat -c '%s' "$FORMAL_DIR/VF_Library_V2.5.80_UPDATE.zip")"
+          UPDATE_SHA="$(sha256sum "$FORMAL_DIR/VF_Library_V2.5.80_UPDATE.zip" | awk '{print $1}')"
+          echo "P02_V2580_RELEASE_ID=$RELEASE_ID"
+          echo "P02_V2580_TAG_SHA=$TAG_SHA"
+          echo "P02_V2580_UPDATE_BYTES=$UPDATE_BYTES"
+          echo "P02_V2580_UPDATE_SHA256=$UPDATE_SHA"
+          echo P02_V2580_REMOTE_RELEASE_READBACK=PASS
+          echo P02_V2580_FORMAL_RELEASE_GATE=PASS
