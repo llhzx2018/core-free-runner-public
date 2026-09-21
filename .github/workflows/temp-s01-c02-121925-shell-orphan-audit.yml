@@ -1,0 +1,210 @@
+name: TEMP S01-C02 1.21.925 Shell Orphan Audit
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact product
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: cb5fb4c97bc5b3bab7cff40e0fb4dd5fec597fe0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+          persist-credentials: false
+
+      - name: Full shell and orphan inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, collections
+          root=Path("product")
+          route_path=root/"includes/admin-v13/route-contract.php"
+          nav_path=root/"includes/views/admin-shell-tabs-parts/02-shell-navigation.php"
+          route=route_path.read_text(encoding="utf-8")
+          nav=nav_path.read_text(encoding="utf-8")
+
+          # 1) Route records
+          routes=[]
+          for line in route.splitlines():
+              m=re.match(r"^\s*'([^']+)'\s*=>\s*\[(.*)\],?\s*$",line)
+              if not m: continue
+              key,body=m.group(1),m.group(2)
+              def pick(n):
+                  mm=re.search(r"'"+re.escape(n)+r"'=>'([^']*)'",body)
+                  return mm.group(1) if mm else ""
+              view,asset=pick("view"),pick("asset")
+              if view and asset:
+                  routes.append({
+                      "key":key,"page":pick("page"),"tab":pick("tab"),
+                      "status":pick("status"),"view":"includes/"+view,
+                      "asset":"assets/css/"+asset
+                  })
+
+          route_views={r["view"] for r in routes}
+          route_keys={r["key"] for r in routes}
+          route_pages={r["page"] for r in routes}
+
+          # 2) Physical admin-v13 views
+          physical_views=sorted(
+              p.relative_to(root).as_posix()
+              for p in (root/"includes/admin-v13/views").rglob("*.php")
+          )
+          unowned_views=[p for p in physical_views if p not in route_views]
+
+          # 3) Discover likely direct-render page files anywhere under includes
+          likely_page_views=[]
+          for p in (root/"includes").rglob("*.php"):
+              rel=p.relative_to(root).as_posix()
+              txt=p.read_text(encoding="utf-8",errors="ignore")
+              score=0
+              if re.search(r"<h1\b",txt,re.I): score+=1
+              if re.search(r"<form\b",txt,re.I): score+=1
+              if "vf_ops_render_admin_open" in txt or "vf_ops_render_admin_close" in txt: score+=2
+              if re.search(r"admin\.php\?page=",txt): score+=1
+              if score>=2 and rel not in route_views:
+                  likely_page_views.append((rel,score))
+
+          # 4) WordPress menu registrations / page slugs
+          menu_refs=[]
+          for p in (root/"includes").rglob("*.php"):
+              txt=p.read_text(encoding="utf-8",errors="ignore")
+              rel=p.relative_to(root).as_posix()
+              for fn in ("add_menu_page","add_submenu_page"):
+                  for m in re.finditer(fn+r"\s*\((.*?)\);",txt,re.S):
+                      frag=re.sub(r"\s+"," ",m.group(1))[:500]
+                      slugs=re.findall(r"'(vf-[^']+)'",frag)
+                      menu_refs.append({"file":rel,"fn":fn,"slugs":slugs,"frag":frag})
+          menu_slugs=sorted({s for x in menu_refs for s in x["slugs"] if s.startswith("vf-")})
+
+          # 5) Direct admin.php?page links found in source
+          direct_links=collections.defaultdict(set)
+          pat=re.compile(r"admin\.php\?page=([A-Za-z0-9_-]+)(?:&(?:amp;)?tab=([A-Za-z0-9_-]+))?")
+          for p in (root/"includes").rglob("*.php"):
+              txt=p.read_text(encoding="utf-8",errors="ignore")
+              rel=p.relative_to(root).as_posix()
+              for m in pat.finditer(txt):
+                  direct_links[(m.group(1),m.group(2) or "")].add(rel)
+
+          # 6) Route-key discoverability in nav source
+          key_nav_occ={}
+          for r in routes:
+              # key occurrence in nav is a useful static signal; exact route arrays are generated in this file
+              key_nav_occ[r["key"]]=nav.count("'"+r["key"]+"'")+nav.count('"'+r["key"]+'"')
+
+          # 7) Shell/header family markers by route view
+          header_markers=[
+              "vf-v9-pagebar","vf-source-head","vf-online-head","vf-component-page-head",
+              "vf-export-page-head","vf-content-pagehead","vf-seo-pagehead","vf-publish",
+              "vf-system","vf-page-head","vf-pagehead","vf-v6-pagehead","vf-dashboard"
+          ]
+          route_header={}
+          render_open=[]
+          for r in routes:
+              p=root/r["view"]
+              txt=p.read_text(encoding="utf-8",errors="ignore")
+              markers=[m for m in header_markers if m in txt]
+              # collect literal classes containing head/header/pagebar/title
+              classes=[]
+              for m in re.finditer(r'class=["\']([^"\']+)["\']',txt):
+                  for c in m.group(1).split():
+                      if re.search(r"(head|header|pagebar|title)",c,re.I) and c.startswith("vf-"):
+                          if c not in classes: classes.append(c)
+              route_header[r["key"]]={
+                  "status":r["status"],"view":r["view"],
+                  "markers":markers,"header_classes":classes[:10],
+                  "calls_render_open":"vf_ops_render_admin_open" in txt,
+                  "calls_render_close":"vf_ops_render_admin_close" in txt,
+              }
+              if "vf_ops_render_admin_open" in txt: render_open.append(r["key"])
+
+          # 8) Group unique header signatures
+          sigs=collections.defaultdict(list)
+          for k,v in route_header.items():
+              sig=tuple(v["header_classes"][:3])
+              sigs[sig].append(k)
+
+          # 9) Direct links not represented in route page/tab pairs
+          route_pairs={(r["page"],r["tab"]) for r in routes}
+          unknown_links=[]
+          for pair,files in sorted(direct_links.items()):
+              if pair not in route_pairs and pair[0].startswith("vf-toolsite"):
+                  unknown_links.append({"page":pair[0],"tab":pair[1],"files":sorted(files)[:8]})
+
+          # 10) physical views referenced elsewhere but not route-owned
+          refs={}
+          for uv in unowned_views:
+              name=Path(uv).name
+              hits=[]
+              for p in (root/"includes").rglob("*.php"):
+                  if p.relative_to(root).as_posix()==uv: continue
+                  txt=p.read_text(encoding="utf-8",errors="ignore")
+                  if name in txt:
+                      hits.append(p.relative_to(root).as_posix())
+              refs[uv]=hits[:12]
+
+          print("=== SUMMARY ===")
+          print(json.dumps({
+              "route_records":len(routes),
+              "canonical":sum(r["status"]!="migration_evidence" for r in routes),
+              "compat":sum(r["status"]=="migration_evidence" for r in routes),
+              "physical_admin_v13_views":len(physical_views),
+              "unowned_admin_v13_views":len(unowned_views),
+              "menu_slugs":menu_slugs,
+              "route_pages":sorted(route_pages),
+              "routes_with_direct_render_open":len(render_open),
+              "unique_header_signatures":len(sigs),
+              "routes_with_zero_nav_key_occurrence":[k for k,n in key_nav_occ.items() if n==0],
+              "unknown_direct_admin_links":len(unknown_links),
+          },ensure_ascii=False,indent=2))
+
+          print("=== UNOWNED ADMIN V13 VIEWS ===")
+          for p in unowned_views:
+              print(json.dumps({"view":p,"referenced_by":refs[p]},ensure_ascii=False))
+
+          print("=== LIKELY PAGE VIEWS OUTSIDE ROUTE CONTRACT ===")
+          for x in sorted(likely_page_views):
+              print(json.dumps(x,ensure_ascii=False))
+
+          print("=== UNKNOWN DIRECT ADMIN LINKS ===")
+          for x in unknown_links:
+              print(json.dumps(x,ensure_ascii=False))
+
+          print("=== ROUTE NAV OCCURRENCE ===")
+          for r in routes:
+              print(json.dumps({
+                  "key":r["key"],"status":r["status"],
+                  "nav_occurrences":key_nav_occ[r["key"]]
+              },ensure_ascii=False))
+
+          print("=== HEADER SIGNATURE GROUPS ===")
+          for sig,keys in sorted(sigs.items(),key=lambda kv:(-len(kv[1]),str(kv[0]))):
+              print(json.dumps({"signature":sig,"count":len(keys),"routes":keys},ensure_ascii=False))
+
+          print("=== ROUTE HEADER DETAILS ===")
+          for k,v in route_header.items():
+              print(json.dumps({"key":k,**v},ensure_ascii=False))
+
+          print("=== MENU REGISTRATIONS ===")
+          for x in menu_refs:
+              if x["slugs"]:
+                  print(json.dumps(x,ensure_ascii=False))
+
+          print("RESULT=PASS_AUDIT_ONLY")
+          PY
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf product
