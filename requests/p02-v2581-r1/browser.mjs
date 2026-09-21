@@ -33,6 +33,7 @@ try{
   console.log('P02_V2581_SCRATCH_QUICK_ROUTE=PASS');
 
   for(const section of ['system','updates','backup']){
+    await page.goto(base+'/system-info.php',{waitUntil:'networkidle'});
     await page.goto(base+'/#settings='+section,{waitUntil:'networkidle'});
     await page.waitForSelector('#settingsPanel');
     const stateValue=await page.evaluate(()=>({mode:state.mode,section:state.settingsSection}));
