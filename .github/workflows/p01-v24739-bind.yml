@@ -1,0 +1,133 @@
+name: P01 V2.47.39 Bound Candidate
+
+on:
+  push:
+    branches:
+      - temp/p01-current-main-readiness-r44-20260920
+    paths:
+      - '.github/workflows/p01-v24739-bind.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CANDIDATE_SHA: 7d3f3a04a1e1c3a7212405337cfb463c23a25567
+      ENGINEERING_SHA: 0ad181a2a9b9508ede64702952d69c786f2d767a
+      TARGET_VERSION: 2.47.39
+      EXPECTED_SCHEMA: '2026090401'
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: target
+
+      - name: Checkout engineering source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.ENGINEERING_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: base
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Exact bind scope and release authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C base rev-parse HEAD)" = "$ENGINEERING_SHA"
+          mapfile -t changed < <(git -C target diff --name-only "$ENGINEERING_SHA..$CANDIDATE_SHA" | sort)
+          test "${#changed[@]}" = 4
+          printf '%s\n' "${changed[@]}" >/tmp/p01-v24739-bind-files
+          grep -Fxq VERSION /tmp/p01-v24739-bind-files
+          grep -Fxq src/VERSION.txt /tmp/p01-v24739-bind-files
+          grep -Fxq src/app/bootstrap.php /tmp/p01-v24739-bind-files
+          grep -Fxq docs/release/V2.47.39_RELEASE_GATE.md /tmp/p01-v24739-bind-files
+          test "$(tr -d '\r\n ' < target/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < target/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '$TARGET_VERSION');" target/src/app/bootstrap.php
+          test "$(php -r '$p=json_decode(file_get_contents("target/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$EXPECTED_SCHEMA"
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = REQUIRED' target/docs/release/V2.47.39_RELEASE_GATE.md
+          grep -Fq 'OWNER_PREVIEW_RUNTIME = PENDING' target/docs/release/V2.47.39_RELEASE_GATE.md
+          grep -Fq 'OWNER_REAL_USE = PENDING' target/docs/release/V2.47.39_RELEASE_GATE.md
+          grep -Fq 'FORMAL_RELEASE_READY = NO' target/docs/release/V2.47.39_RELEASE_GATE.md
+          grep -Fq 'PRE_RELEASE_AUTHORITY_DRIFT_GATE = PASS' target/docs/release/V2.47.39_RELEASE_GATE.md
+          grep -Fq 'NO_UNKNOWN_APPLICABILITY = YES' target/docs/release/V2.47.39_RELEASE_GATE.md
+          find target/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find target/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php target/tests/unit/release_authority_r44_contract.php
+          php target/tests/unit/readme_runtime_authority_r75_contract.php
+          php target/tests/unit/admin_visual_batch_r74_contract.php
+          php target/tests/unit/navigation_mobile_list_r73_contract.php
+          echo P01_V24739_BIND_SCOPE_AUTHORITY=PASS
+
+      - name: Fresh install and runtime identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-v24739-runtime
+          rm -rf "$RUNTIME" /tmp/p01-v24739.cookies
+          cp -a target/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18145 -t . >/tmp/p01-v24739-server.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-v24739.cookies -b /tmp/p01-v24739.cookies http://127.0.0.1:18145/setup.php -o /tmp/p01-v24739-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v24739-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          PASSWORD='CandidateOnly!2026'
+          curl -fsS -c /tmp/p01-v24739.cookies -b /tmp/p01-v24739.cookies -X POST http://127.0.0.1:18145/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=VF Candidate 24739'             --data-urlencode "admin_password=$PASSWORD"             --data-urlencode "admin_password_confirm=$PASSWORD"             -o /tmp/p01-v24739-setup-post.html
+          php cli/verify.php | tee /tmp/p01-v24739-verify
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24739-verify
+          php cli/baseline-verify.php | tee /tmp/p01-v24739-baseline
+          grep -Fx 'BASELINE_CORE_PASS=YES' /tmp/p01-v24739-baseline
+          grep -Fx 'DRIFT_COUNT=0' /tmp/p01-v24739-baseline
+          curl -fsS -c /tmp/p01-v24739.cookies -b /tmp/p01-v24739.cookies             -H 'Content-Type: application/json' -X POST 'http://127.0.0.1:18145/api.php?action=login'             --data '{"password":"CandidateOnly!2026"}' -o /tmp/p01-v24739-login.json
+          grep -F '"ok":true' /tmp/p01-v24739-login.json >/dev/null
+          curl -fsS -c /tmp/p01-v24739.cookies -b /tmp/p01-v24739.cookies http://127.0.0.1:18145/manage.php -o /tmp/p01-v24739-manage.html
+          grep -F 'data-vf-admin-shell="server"' /tmp/p01-v24739-manage.html >/dev/null
+          grep -F '2.47.39' /tmp/p01-v24739-manage.html >/dev/null
+          grep -F 'asset.php?file=admin-consolidation.css&amp;v=2.47.39' /tmp/p01-v24739-manage.html >/dev/null
+          echo P01_V24739_FRESH_INSTALL_IDENTITY=PASS
+
+      - name: Verdict
+        run: |
+          echo P01_V24739_BOUND_CANDIDATE_GATE=PASS
+          echo OWNER_PREVIEW_RUNTIME_APPLICABILITY=REQUIRED
+          echo OWNER_PREVIEW_RUNTIME=PENDING
+          echo OWNER_REAL_USE=PENDING
+          echo FORMAL_RELEASE_READY=NO
+          echo TAG=NO
+          echo RELEASE=NO
+          echo DISTRIBUTION=NO
+          echo PRODUCTION=NO
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf target base /tmp/p01-v24739-*
