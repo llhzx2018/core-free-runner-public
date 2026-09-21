@@ -83,17 +83,18 @@ try{
   console.log('P02_V2581_R2_EDITOR=PASS');
 
   // Settings semantic labels, including display/security/transfer.
+  await page.goto(base+'/system-info.php',{waitUntil:'networkidle'});
   await page.goto(base+'/#settings=display',{waitUntil:'networkidle'});
   await page.waitForSelector('#settingsPanel');
   const displaySemantics=await page.evaluate(()=>[...document.querySelectorAll('#settingsPanel input:not([type="hidden"]):not([type="file"]),#settingsPanel select,#settingsPanel textarea')].filter(el=>getComputedStyle(el).display!=='none').map(el=>({name:el.name||el.id,ok:!!(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')||(el.labels&&el.labels.length)||el.closest('label'))})));
   assert(displaySemantics.length&&displaySemantics.every(x=>x.ok),'display settings semantic labels missing '+JSON.stringify(displaySemantics));
 
-  await page.goto(base+'/#settings=security',{waitUntil:'networkidle'});
+  await page.evaluate(async()=>{await openSettings('security');});
   await page.waitForSelector('#passwordForm');
   const passwordSemantics=await page.evaluate(()=>[...document.querySelectorAll('#passwordForm input')].map(el=>({name:el.name,ok:!!((el.labels&&el.labels.length)||el.getAttribute('aria-label')||el.getAttribute('aria-labelledby'))})));
   assert(passwordSemantics.length===3&&passwordSemantics.every(x=>x.ok),'password semantics missing '+JSON.stringify(passwordSemantics));
 
-  await page.goto(base+'/#settings=transfer',{waitUntil:'networkidle'});
+  await page.evaluate(async()=>{await openSettings('transfer');});
   await page.waitForSelector('#jsonMode');
   const jsonName=await page.locator('#jsonMode').getAttribute('aria-label');
   assert(jsonName==='JSON 导入方式','JSON mode semantic label missing: '+jsonName);
@@ -124,6 +125,7 @@ try{
   console.log('P02_V2581_R2_STANDALONE_NAV=PASS');
 
   // Duplicate governance / comparison mobile detail typography.
+  await page.goto(base+'/system-info.php',{waitUntil:'networkidle'});
   await page.goto(base+'/#settings=transfer',{waitUntil:'networkidle'});
   await page.waitForSelector('#settingsPanel');
   await page.evaluate(async()=>{const b=document.createElement('button');b.id='r2AuditDuplicateButton';b.hidden=true;document.body.appendChild(b);await openDuplicateGovernance(b);});
