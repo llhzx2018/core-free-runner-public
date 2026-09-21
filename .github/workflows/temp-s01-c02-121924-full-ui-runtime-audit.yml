@@ -1,0 +1,158 @@
+name: TEMP S01-C02 1.21.924 Full UI Runtime Audit
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  full-ui-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: f3e4cdd9203a300e910040a6607f645c011a4373
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+          persist-credentials: false
+
+      - name: Full route view CSS runtime audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, json, sys
+
+          root=Path("product")
+          route_file=root/"includes/admin-v13/route-contract.php"
+          loader_file=root/"includes/views/admin-style-helpers/admin-s01-uiux-polish.php"
+
+          routes=[]
+          for line in route_file.read_text(encoding="utf-8").splitlines():
+              m=re.match(r"^\s*'([^']+)'\s*=>\s*\[(.*)\],?\s*$", line)
+              if not m:
+                  continue
+              key, body=m.group(1), m.group(2)
+              def pick(name):
+                  mm=re.search(r"'"+re.escape(name)+r"'=>'([^']*)'", body)
+                  return mm.group(1) if mm else ""
+              view,asset=pick("view"),pick("asset")
+              if view and asset:
+                  routes.append({
+                      "key":key,
+                      "page":pick("page"),
+                      "tab":pick("tab"),
+                      "status":pick("status"),
+                      "view":root/"includes"/view,
+                      "asset":root/"assets/css"/asset,
+                  })
+
+          assert len(routes)==39, len(routes)
+
+          ignored_prefixes=("vf-ops","vf-key","vf-action","vf-toolsite","vf-no-soft-nav","vf-busy-label")
+          dynamic_tokens={"vf-theme","vf-tool"}
+
+          report=[]
+          anomalies=[]
+          for r in routes:
+              if not r["view"].is_file():
+                  anomalies.append((r["key"],"VIEW_MISSING",str(r["view"])))
+                  continue
+              if not r["asset"].is_file():
+                  anomalies.append((r["key"],"ASSET_MISSING",str(r["asset"])))
+                  continue
+
+              view=r["view"].read_text(encoding="utf-8",errors="ignore")
+              css=r["asset"].read_text(encoding="utf-8",errors="ignore")
+
+              classes=[]
+              for cls in re.findall(r"\b(vf-[A-Za-z0-9_-]+)", view):
+                  if cls.startswith(ignored_prefixes) or cls in dynamic_tokens:
+                      continue
+                  if cls not in classes:
+                      classes.append(cls)
+              selectors=set(re.findall(r"\.([A-Za-z][A-Za-z0-9_-]*)", css))
+              covered=[x for x in classes if x in selectors]
+              missing=[x for x in classes if x not in selectors]
+              root_class=classes[0] if classes else ""
+              root_covered=(not root_class) or root_class in selectors
+              coverage=1.0 if not classes else len(covered)/len(classes)
+
+              # hard fail only on likely authority breaks, not helper/JS classes
+              if root_class and not root_covered:
+                  anomalies.append((r["key"],"ROOT_SELECTOR_MISSING",root_class,str(r["asset"])))
+              if len(classes)>=8 and coverage<0.45:
+                  anomalies.append((r["key"],"LOW_SELECTOR_COVERAGE",round(coverage,3),missing[:12]))
+
+              report.append({
+                  "key":r["key"],"status":r["status"],"root":root_class,
+                  "root_covered":root_covered,"coverage":round(coverage,3),
+                  "class_count":len(classes),"missing":missing[:8],
+                  "view":str(r["view"].relative_to(root)),
+                  "asset":str(r["asset"].relative_to(root)),
+              })
+
+          loader=loader_file.read_text(encoding="utf-8")
+          # Explicit landing page authorities must map to the current route asset or proven shared page authority.
+          authority_checks={
+              "dashboard":"assets/css/current/admin-s01-dashboard-r14.css",
+              "content_workflow":"assets/css/current/admin-s01-content-seo-r16.css",
+              "seo_planner":"assets/css/current/admin-s01-content-seo-r16.css",
+              "publish_zip":"assets/css/current/admin-s01-system-publish-r13.css",
+              "system_site_release":"assets/css/current/admin-s01-system-publish-r13.css",
+              "acceptance_overview":"assets/css/v13/acceptance/overview.css",
+          }
+          for key,path in authority_checks.items():
+              if path not in loader:
+                  anomalies.append((key,"LATE_LOADER_AUTHORITY_MISSING",path))
+
+          # R35 safety: retired Quality override may exist historically but must not be in active Quality cleanFiles block.
+          start=loader.find("if ($isQualityOverview) {")
+          block=loader[start:start+2200] if start>=0 else ""
+          if "assets/css/v13/acceptance/overview.css" not in block:
+              anomalies.append(("acceptance_overview","ACTIVE_LOADER_WRONG","current overview css absent"))
+          if "admin-s01-quality-r17.css" in block:
+              anomalies.append(("acceptance_overview","ACTIVE_LOADER_RETIRED","R17 still active"))
+
+          # Every canonical and compatibility route must receive shared shell/subpage floor unless explicitly early-returned landing.
+          for needle in [
+              "admin-s01-v6-shell-r1.css",
+              "admin-s01-subpages-r27.css",
+              "admin-s01-subpages-r28.css",
+              "admin-s01-compat-r30.css",
+              "admin-s01-compat-r32.css",
+          ]:
+              if needle not in loader:
+                  anomalies.append(("GLOBAL","SHARED_AUTHORITY_MISSING",needle))
+
+          print("=== S01-C02 FULL UI ROUTE AUDIT ===")
+          print("routes",len(report))
+          for row in sorted(report,key=lambda x:(x["root_covered"],x["coverage"])):
+              print(json.dumps(row,ensure_ascii=False))
+          print("=== ANOMALIES ===")
+          for a in anomalies:
+              print(json.dumps(a,ensure_ascii=False))
+
+          hard=[a for a in anomalies if a[1] in {
+              "VIEW_MISSING","ASSET_MISSING","ROOT_SELECTOR_MISSING",
+              "LOW_SELECTOR_COVERAGE","LATE_LOADER_AUTHORITY_MISSING",
+              "ACTIVE_LOADER_WRONG","ACTIVE_LOADER_RETIRED","SHARED_AUTHORITY_MISSING"
+          }]
+          if hard:
+              print("RESULT=FAIL")
+              sys.exit(2)
+          print("RESULT=PASS")
+          PY
+
+      - name: Remove transient checkout
+        if: always()
+        shell: bash
+        run: rm -rf product
