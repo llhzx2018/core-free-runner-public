@@ -1,0 +1,197 @@
+name: P02 V2.5.81 Post-Merge Candidate Gate
+
+on:
+  push:
+    branches:
+      - run/p02-v2581-post-merge-candidate-20260921
+    paths:
+      - '.github/workflows/p02-v2581-post-merge-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      TARGET_REPO: llhzx2018/vf-library
+      TARGET_SHA: bb84bcf6607be184da6ba2fd3e8bb9d43a1c6201
+      TARGET_VERSION: 2.5.81
+      TARGET_SCHEMA: "2401"
+      SOURCE_VERSION: 2.5.80
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install runtime and browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Exact source, manifest, unit and syntax gate
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          python3 - <<'PY'
+          import json
+          x=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert x['version']=='2.5.81', x
+          assert int(x['schema'])==2401, x
+          assert int(x['runtime_source_file_count'])>0, x
+          print('SOURCE_MANIFEST identity PASS')
+          PY
+          bash scripts/verify-repository.sh
+          while IFS= read -r cmd; do
+            test -n "$cmd"
+            eval "$cmd"
+          done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          for t in             tests/unit/p02_v2581_detail_bugfix_r1.mjs             tests/unit/p02_v2581_detail_bugfix_r2.mjs             tests/unit/p02_v2581_detail_bugfix_r3.mjs             tests/unit/p02_scratch_runtime_ownership_contract.mjs             tests/unit/p02_update_copy_native_ownership.mjs
+          do
+            node "$t"
+          done
+          while IFS= read -r -d '' f; do node --check "$f" >/dev/null; done < <(find public tests scripts -type f \( -name '*.js' -o -name '*.mjs' \) -print0)
+          git diff --check
+          echo P02_V2581_EXACT_SOURCE_UNIT_SYNTAX_GATE=PASS
+
+      - name: Fresh install, CRUD, Search, backup and maintenance gate
+        shell: bash
+        working-directory: product
+        env:
+          TEST_PASSWORD: VF-P02-MAINT-${{ github.run_id }}!
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-v2581-maintenance-evidence
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          echo P02_V2581_MAINTENANCE_GATE=PASS
+
+      - name: Real Chromium UX and Scratch gate
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          bash scripts/ux-browser-reverify.sh
+          echo P02_V2581_REAL_CHROMIUM_GATE=PASS
+
+      - name: Deterministic update and repair build
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2581-candidate"
+          rm -rf "$TMP"
+          mkdir -p "$TMP/build1" "$TMP/build2"
+          bash scripts/build-deploy-tree.sh "$TMP/deploy1"
+          bash scripts/build-deploy-tree.sh "$TMP/deploy2"
+          STAMP="$(git show -s --format=%cI HEAD)"
+          for n in 1 2; do
+            python3 scripts/build-multisource-update.py               --deploy-root "$TMP/deploy${n}"               --output "$TMP/build${n}/VF_Library_V2.5.81_UPDATE.zip"               --target-version 2.5.81               --source-version 2.5.80               --source-schema 2401               --target-schema 2401               --timestamp "$STAMP"
+            python3 scripts/build-multisource-repair.py               --deploy-root "$TMP/deploy${n}"               --template scripts/repair-template.php               --output "$TMP/build${n}/repair-v2.5.81.php"               --target-version 2.5.81               --source-version 2.5.80               --schema 2401
+          done
+          cmp "$TMP/build1/VF_Library_V2.5.81_UPDATE.zip" "$TMP/build2/VF_Library_V2.5.81_UPDATE.zip"
+          cmp "$TMP/build1/repair-v2.5.81.php" "$TMP/build2/repair-v2.5.81.php"
+          unzip -t "$TMP/build1/VF_Library_V2.5.81_UPDATE.zip" >/dev/null
+          php -l "$TMP/build1/repair-v2.5.81.php" >/dev/null
+          echo "P02_V2581_UPDATE_SHA256=$(sha256sum "$TMP/build1/VF_Library_V2.5.81_UPDATE.zip" | awk '{print $1}')"
+          echo P02_V2581_DETERMINISTIC_BUILD_GATE=PASS
+
+      - name: Direct upgrade 2.5.80 to 2.5.81 with preservation and post-upgrade search
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2581-candidate"
+          REPAIR="$TMP/build1/repair-v2.5.81.php"
+          OLDSRC="$TMP/old-2.5.80"
+          SITE="$TMP/site-2.5.80"
+          COOKIE="$TMP/cookie-2.5.80.txt"
+          BASE="http://127.0.0.1:18280"
+          PASS="VF-P02-2.5.80-${GITHUB_RUN_ID}!"
+          cleanup() {
+            kill "${PID:-}" 2>/dev/null || true
+            git worktree remove --force "$OLDSRC" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "$OLDSRC" v2.5.80
+          bash "$OLDSRC/scripts/build-deploy-tree.sh" "$SITE"
+          php "$SITE/cli/check-requirements.php"
+          php -d display_errors=0 -S 127.0.0.1:18280 -t "$SITE" >"$TMP/server-2.5.80.log" 2>&1 &
+          PID=$!
+          for _ in $(seq 1 80); do
+            curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break
+            sleep .25
+          done
+          kill -0 "$PID"
+
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "$TMP/setup.html"
+          SETUP_CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search("name=\\\"setup_csrf\\\" value=\\\"([^\\\"]+)\\\"",s);assert m;print(html.unescape(m.group(1)))' "$TMP/setup.html")"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE"             --data-urlencode "setup_csrf=$SETUP_CSRF"             --data-urlencode "password=$PASS"             --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")"
+          test "$CODE" = 303
+
+          php -d display_errors=1 -r '
+            require $argv[1]."/app/bootstrap.php";
+            $d=vftb_db();$n=gmdate("c");
+            $q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");
+            $q->execute(["Upgrade 2.5.80","fixture","folder",100,$n,$n]);$c=(int)$d->lastInsertId();
+            $q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
+            $q->execute([$c,"UPGRADE_SENTINEL_2.5.80","fixture","preserve 2.5.80","quick","plain","copy","active","[]","[]",$n,$n]);
+            $itemId=(int)$d->lastInsertId();(new VfLibrarySearchService($d))->upsertItem($itemId);
+            $scratch=["version"=>1,"next_id"=>2,"tabs"=>[["id"=>1,"title"=>"Scratch 2.5.80","content"=>"SCRATCH_2.5.80_SENTINEL","is_open"=>true,"is_pinned"=>true,"sort_order"=>100,"cursor_pos"=>0,"scroll_top"=>0,"created_at"=>$n,"updated_at"=>$n,"closed_at"=>null]]];
+            $q=$d->prepare("INSERT INTO system_settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at");
+            $q->execute(["scratch_tabs_state_v1",json_encode($scratch,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$n]);
+          ' "$SITE"
+
+          cp "$REPAIR" "$SITE/repair-v2.5.81.php"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" "$BASE/repair-v2.5.81.php" > "$TMP/repair-form.html"
+          CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search("name=\\\"csrf\\\" value=\\\"([^\\\"]+)\\\"",s);assert m;print(html.unescape(m.group(1)))' "$TMP/repair-form.html")"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE"             --data-urlencode action=upgrade --data-urlencode "csrf=$CSRF"             "$BASE/repair-v2.5.81.php" > "$TMP/repair-result.html"
+          grep -q '升级完成' "$TMP/repair-result.html"
+          test ! -e "$SITE/repair-v2.5.81.php"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = 2.5.81
+
+          php -d display_errors=1 -r '
+            require $argv[1]."/app/bootstrap.php";$d=vftb_db();
+            if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(2);
+            $q=$d->prepare("SELECT content FROM text_items WHERE title=?");
+            $q->execute(["UPGRADE_SENTINEL_2.5.80"]);
+            if($q->fetchColumn()!=="preserve 2.5.80")exit(3);
+            $q=$d->prepare("SELECT setting_value FROM system_settings WHERE setting_key=?");
+            $q->execute(["scratch_tabs_state_v1"]);$v=(string)$q->fetchColumn();
+            if(strpos($v,"SCRATCH_2.5.80_SENTINEL")===false)exit(4);
+            if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(5);
+            if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(6);
+            $n=gmdate("c");
+            $q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) SELECT id,?,?,?,?,?,?,?,?,?,?,? FROM text_categories ORDER BY id LIMIT 1");
+            $q->execute(["POST_UPGRADE_SEARCH_2.5.81","fixture","needle-after-upgrade-2581","quick","plain","copy","active","[]","[]",$n,$n]);
+            $itemId=(int)$d->lastInsertId();
+            $search=new VfLibrarySearchService($d);$search->upsertItem($itemId);
+            $items=$search->search("needle-after-upgrade-2581",20,0);
+            $ok=false;foreach($items as $it){if((int)($it["id"]??0)===$itemId){$ok=true;break;}}
+            if(!$ok)exit(7);
+          ' "$SITE"
+
+          PRIVATE_ROOT="$(php -r 'require $argv[1]."/app/bootstrap.php";echo VFTB_PRIVATE_ROOT;' "$SITE")"
+          BACKUP_DIR="$(php -r 'require $argv[1]."/app/bootstrap.php";echo VFTB_BACKUP_DIR;' "$SITE")"
+          test -d "$BACKUP_DIR"
+          find "$BACKUP_DIR" -maxdepth 1 -type d -name 'atomic-pre-operation-*' -print -quit | grep -q .
+          ! find "$PRIVATE_ROOT" -maxdepth 1 -type d -name '.atomic-rollback-*' -print -quit | grep -q .
+          ( cd "$SITE" && php cli/verify.php ) > "$TMP/verify.json"
+          python3 -c 'import json,sys;x=json.load(open(sys.argv[1],encoding="utf-8"));assert x.get("ok") is True and int(x.get("schema_version",0))==2401,x' "$TMP/verify.json"
+          echo P02_V2581_DIRECT_UPGRADE_2_5_80=PASS
+          echo P02_V2581_CANDIDATE_GATE=PASS
