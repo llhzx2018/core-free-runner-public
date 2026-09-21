@@ -1,0 +1,182 @@
+name: TEMP S01-C02 1.21.929 Formal Release
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      SOURCE_SHA: c4e1f8eb22e08708562bb6b3be6c13d90f5b9bb7
+      VERSION: 1.21.929
+      TAG: v1.21.929
+      ASSET: vf-tools-ops_V1.21.929.zip
+      PREVIOUS_TAG: v1.21.928
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.928.zip
+
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: c4e1f8eb22e08708562bb6b3be6c13d90f5b9bb7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Exact source and R40 gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.929' source/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.929'" source/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'S01-CSS-SHELL-AUTHORITY-R40'" source/vf-ops.php
+          php -l source/vf-ops.php
+          php source/tests/s01-c02-121929-css-shell-authority-r40-contract.php
+
+      - name: Build deterministic runtime ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist rebuild
+          mkdir -p dist rebuild
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path("source")
+          def runtime(rel):
+              rel=rel.replace("\\","/").lstrip("/")
+              if not rel or "../" in rel:
+                  return False
+              if re.search(r"(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)",rel,re.I):
+                  return False
+              if re.search(r"\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$",rel,re.I):
+                  return False
+              if "/" not in rel:
+                  return rel in ("vf-ops.php","uninstall.php")
+              return re.match(r"^(?:includes|assets|languages|config)/",rel) is not None
+
+          files=[]
+          for p in sorted((x for x in root.rglob("*") if x.is_file()),key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if not runtime(rel): continue
+              if p.is_symlink(): raise SystemExit("runtime symlink forbidden: "+rel)
+              files.append((rel,p.read_bytes()))
+
+          canonical=b"".join(rel.encode()+b"\0"+hashlib.sha256(data).hexdigest().encode()+b"\n" for rel,data in files)
+          Path("/tmp/runtime_count").write_text(str(len(files)))
+          Path("/tmp/runtime_fp").write_text(hashlib.sha256(canonical).hexdigest())
+          for out in ("dist/vf-tools-ops_V1.21.929.zip","rebuild/vf-tools-ops_V1.21.929.zip"):
+              with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      info=zipfile.ZipInfo("vf-ops/"+rel,date_time=(2020,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(0o100644 & 0xFFFF)<<16
+                      z.writestr(info,data)
+          PY
+          cmp "dist/$ASSET" "rebuild/$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.929'
+          test "$(cat /tmp/runtime_count)" = "975"
+          sha256sum "dist/$ASSET" | awk '{print $1}' >/tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" >/tmp/asset_bytes
+
+      - name: Existing-install upgrade compatibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          test "$(stat -c '%s' "previous/$PREVIOUS_ASSET")" = "3476334"
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "29cc456525b052de0dcd0b164c2003db70ae6cff703ba2b41030502ae38304ee"
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sort >/tmp/prev.txt
+          unzip -Z1 "dist/$ASSET" | grep -v '/$' | sort >/tmp/new.txt
+          test ! -s <(comm -23 /tmp/prev.txt /tmp/new.txt)
+          test ! -s <(comm -13 /tmp/prev.txt /tmp/new.txt)
+
+      - name: Create or verify formal GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          BYTES="$(cat /tmp/asset_bytes)"
+          SHA="$(cat /tmp/asset_sha)"
+          RUNTIME_FILES="$(cat /tmp/runtime_count)"
+          RUNTIME_FP="$(cat /tmp/runtime_fp)"
+
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$TAG")"
+            test "$(jq -r '.target_commitish' <<<"$JSON")" = "$SOURCE_SHA"
+            test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$JSON")" = "$BYTES"
+            test "$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$JSON")" = "sha256:$SHA"
+          else
+            cat >/tmp/release-notes.md <<EOF
+          # VF Tools Ops V1.21.929
+
+          S01-C02 CSS Shell Authority R40.
+
+          - One Global Shell CSS Authority across all current Ops page families.
+          - Eight loaded legacy visual layers no longer own Brand/Header/Domain Nav/Task Nav/Mobile Nav/Shell Main.
+          - R39 remains one PHP Shell renderer for all 40 OWNER-visible surfaces.
+          - R38 remains the single shared Page Header authority.
+          - Unknown admin-v13 View authority remains zero.
+          - Schema 6.0.0 unchanged; no data migration or write-semantic change.
+
+          Exact asset:
+          - $ASSET
+          - Bytes $BYTES
+          - SHA-256 $SHA
+          - Runtime files $RUNTIME_FILES
+          - Runtime Fingerprint $RUNTIME_FP
+          EOF
+
+            gh release create "$TAG" "dist/$ASSET#VF Tools Ops $VERSION" \
+              --repo "$TARGET_REPO" \
+              --target "$SOURCE_SHA" \
+              --title "VF Tools Ops V$VERSION" \
+              --notes-file /tmp/release-notes.md
+          fi
+
+      - name: Remote release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$TAG")"
+          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SOURCE_SHA"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          test -n "$RID"; test -n "$AID"
+          mkdir -p remote
+          gh release download "$TAG" --repo "$TARGET_REPO" --pattern "$ASSET" --dir remote
+          cmp "dist/$ASSET" "remote/$ASSET"
+          echo "COMPONENT=S01-C02"
+          echo "VERSION=$VERSION"
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo "TAG=$TAG"
+          echo "RELEASE_ID=$RID"
+          echo "ASSET=$ASSET"
+          echo "ASSET_ID=$AID"
+          echo "BYTES=$(stat -c '%s' "remote/$ASSET")"
+          echo "SHA256=$(sha256sum "remote/$ASSET" | awk '{print $1}')"
+          echo "RUNTIME_FILES=$(cat /tmp/runtime_count)"
+          echo "RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)"
+          echo "RESULT=PASS"
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf source previous dist rebuild remote
