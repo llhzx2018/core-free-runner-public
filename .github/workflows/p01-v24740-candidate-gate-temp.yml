@@ -1,0 +1,328 @@
+name: p01-v24740-candidate-gate-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v24740-candidate-gate-temp.yml'
+      - 'requests/p01-v24740-candidate-20260921.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v24740-candidate-gate-temp
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      LANE_SPEC: requests/p01-v24740-candidate-20260921.json
+    steps:
+      - name: Checkout public runner control source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate ephemeral lane identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$LANE_SPEC" | tee /tmp/lane.json
+          python3 scripts/ephemeral_lane_spec.py github-output --spec "$LANE_SPEC" >> "$GITHUB_ENV"
+          grep -F '"status": "PASS"' /tmp/lane.json >/dev/null
+
+      - name: Setup PHP and runtime tools
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd,opcache
+          coverage: none
+
+      - name: Resolve exact source and stable baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${repository}/git/ref/heads/main" --jq '.object.sha')" = "$target_sha"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/${repository}/git/ref/tags/v2.47.39" --jq '.object.sha')" = "761fb624c62e9ec16fe33e5f2f1e9f2c27738963"
+          if GH_TOKEN="$READ_TOKEN" gh api "repos/${repository}/git/ref/tags/${target_tag}" >/dev/null 2>&1; then
+            echo "TARGET_TAG_ALREADY_EXISTS"
+            exit 81
+          fi
+          if GH_TOKEN="$READ_TOKEN" gh api "repos/${repository}/releases/tags/${target_tag}" >/dev/null 2>&1; then
+            echo "TARGET_RELEASE_ALREADY_EXISTS"
+            exit 82
+          fi
+          GH_TOKEN="$READ_TOKEN" gh auth setup-git
+          GH_TOKEN="$READ_TOKEN" gh repo clone "$repository" candidate -- --filter=blob:none --no-checkout
+          git -C candidate fetch -q origin "$target_sha" --depth=1
+          git -C candidate checkout -q --detach "$target_sha"
+          git -C candidate fetch -q origin "761fb624c62e9ec16fe33e5f2f1e9f2c27738963" --depth=1
+          git -C candidate worktree add -q --detach ../baseline "761fb624c62e9ec16fe33e5f2f1e9f2c27738963"
+          test "$(git -C candidate rev-parse HEAD)" = "$target_sha"
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = "$target_tree"
+          test "$(git -C baseline rev-parse HEAD)" = "761fb624c62e9ec16fe33e5f2f1e9f2c27738963"
+          echo 'P01_V24740_EXACT_SOURCE=PASS'
+
+      - name: Exact identity syntax and focused contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$target_version"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$target_version"
+          grep -Fq "define('VF_VERSION', '${target_version}');" candidate/src/app/bootstrap.php
+          test "$(php -r '$p=json_decode(file_get_contents("candidate/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$schema_version"
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php candidate/tests/unit/display_visibility_settings_r77_contract.php
+          php candidate/tests/unit/browser_state_settings_r78_contract.php
+          php candidate/tests/unit/brand_shell_r79_contract.php
+          php candidate/tests/unit/engineering_consistency_r80_contract.php
+          php candidate/tests/unit/admin_special_primary_nav_r76_contract.php
+          php candidate/tests/unit/global_display_settings_authority_contract.php
+          php candidate/tests/unit/admin_navigation_consistency_contract.php
+          php candidate/tests/unit/release_authority_r44_contract.php
+          echo 'P01_V24740_FOCUSED_CONTRACTS=PASS'
+
+      - name: Canonical release regression against V2.47.39
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh "$GITHUB_WORKSPACE/candidate" "$GITHUB_WORKSPACE/baseline" | tee /tmp/canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/canonical.txt
+          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=0' /tmp/canonical.txt
+          grep -Fx 'P01_CANONICAL_CHANGED_FAILURE_COUNT=0' /tmp/canonical.txt
+          grep -Fx 'P01_CANONICAL_REMOVED_BASELINE_TEST_COUNT=0' /tmp/canonical.txt
+          echo 'P01_V24740_CANONICAL_REGRESSION=PASS'
+
+      - name: Integration contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          php tests/integration/p01_six_surface_authority_acceptance.php | tee /tmp/six-surface.txt
+          grep -Fx 'P01_SIX_SURFACE_AUTHORITY_ACCEPTANCE=PASS' /tmp/six-surface.txt
+          php tests/integration/p01_books_catalog_acceptance.php | tee /tmp/books.txt
+          grep -Fx 'P01_BOOK_CATALOG_ACCEPTANCE=PASS' /tmp/books.txt
+          php tests/integration/p01_v2391_resource_groups_acceptance.php | tee /tmp/groups.txt
+          grep -Fx 'P01_V2391_UNIFIED_RESOURCE_GROUPS_ACCEPTANCE=PASS' /tmp/groups.txt
+          echo 'P01_V24740_INTEGRATION=PASS'
+
+      - name: Fresh source runtime install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-v24740-runtime
+          rm -rf "$RUNTIME"
+          cp -a candidate/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:"$target_port" -t . >/tmp/p01-v24740-server.log 2>&1 &
+          echo $! >/tmp/p01-v24740-server.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-v24740.cookies -b /tmp/p01-v24740.cookies "http://127.0.0.1:$target_port/setup.php" -o /tmp/setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-v24740.cookies -b /tmp/p01-v24740.cookies -X POST "http://127.0.0.1:$target_port/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Kewaro Candidate Gate' \
+            --data-urlencode 'admin_password=CandidateGate!2026' \
+            --data-urlencode 'admin_password_confirm=CandidateGate!2026' \
+            -o /tmp/setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/verify.txt
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$target_port/setup.php")" = '302'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$target_port/surface-manager.php")" = '302'
+          curl -fsS "http://127.0.0.1:$target_port/" -o /tmp/public-home.html
+          grep -Fq '<title>首页 · Kewaro Candidate Gate</title>' /tmp/public-home.html
+          grep -Fq '<strong>Kewaro Candidate Gate</strong>' /tmp/public-home.html
+          grep -Fq '<small>个人导航</small>' /tmp/public-home.html
+          echo 'P01_V24740_CLEAN_SOURCE_RUNTIME=PASS'
+
+      - name: Browser runtime settings, brand, admin order and responsive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null
+          cat >/tmp/p01-v24740-browser.mjs <<'JS'
+          import { chromium } from 'playwright';
+          const port=process.env.TARGET_PORT || process.env.target_port;
+          const base='http://127.0.0.1:'+port+'/';
+          const password='CandidateGate!2026';
+          const browser=await chromium.launch({headless:true});
+          try {
+            const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+            const page=await ctx.newPage();
+            const errors=[];
+            page.on('pageerror',e=>errors.push(String(e)));
+            await page.goto(base,{waitUntil:'networkidle'});
+            await page.click('[data-vf-auth-login]');
+            await page.fill('[data-vf-auth-dialog] input[name="password"]',password);
+            await Promise.all([
+              page.waitForNavigation({waitUntil:'networkidle'}),
+              page.click('[data-vf-auth-submit]')
+            ]);
+            if(!(await page.url()).includes('127.0.0.1')) throw new Error('login navigation failed');
+
+            const save=async(payload)=>{
+              const result=await page.evaluate(async payload=>{
+                const boot=await fetch('api.php?action=bootstrap').then(r=>r.json());
+                const r=await fetch('api.php?action=settings_save',{
+                  method:'POST',
+                  credentials:'same-origin',
+                  headers:{'Content-Type':'application/json','X-CSRF-Token':String(boot.csrf||'')},
+                  body:JSON.stringify(payload)
+                });
+                return {status:r.status,json:await r.json().catch(()=>({}))};
+              },payload);
+              if(result.status!==200||result.json.ok!==true)throw new Error('settings_save failed '+JSON.stringify(result));
+            };
+
+            await save({
+              siteTitle:'Kewaro Candidate',
+              brandSubtitle:'候选副标题',
+              brandShowText:true,
+              defaultTheme:'dark',
+              sidebarExpand:'all',
+              rememberState:false,
+              showDescriptions:false,
+              showDomains:false
+            });
+            await page.goto(base+'start.php',{waitUntil:'networkidle'});
+            await page.evaluate(()=>localStorage.removeItem('vf-surface-theme'));
+            await page.reload({waitUntil:'networkidle'});
+            const runtime=await page.evaluate(()=>({
+              title:document.title,
+              theme:document.documentElement.dataset.theme,
+              defaultTheme:document.body.dataset.vfDefaultTheme,
+              sidebar:document.body.dataset.vfSidebarExpand,
+              remember:document.body.dataset.vfRememberState,
+              descriptions:document.body.dataset.vfShowDescriptions,
+              domains:document.body.dataset.vfShowDomains,
+              brand:document.querySelector('.vf-app-brand strong')?.textContent||'',
+              subtitle:document.querySelector('.vf-app-brand small')?.textContent||''
+            }));
+            if(runtime.title!=='导航 · Kewaro Candidate')throw new Error('configured title not applied '+JSON.stringify(runtime));
+            if(runtime.theme!=='dark'||runtime.defaultTheme!=='dark')throw new Error('default theme not applied '+JSON.stringify(runtime));
+            if(runtime.sidebar!=='all'||runtime.remember!=='0'||runtime.descriptions!=='0'||runtime.domains!=='0')throw new Error('browser-state/display flags not applied '+JSON.stringify(runtime));
+            if(runtime.brand!=='Kewaro Candidate'||runtime.subtitle!=='候选副标题')throw new Error('brand copy not applied '+JSON.stringify(runtime));
+
+            await page.goto(base+'manage.php',{waitUntil:'networkidle'});
+            const labels=await page.locator('.vf-rail-section > .vf-rail-item > span').allTextContents();
+            const expected=['概览','资源','数据','系统','浏览器助手','在线升级','设置'];
+            if(JSON.stringify(labels)!==JSON.stringify(expected))throw new Error('admin primary order mismatch '+JSON.stringify(labels));
+
+            await page.goto(base+'settings.php?section=home',{waitUntil:'networkidle'});
+            const settingsHtml=await page.content();
+            if(settingsHtml.includes('homeFavoritesLimit')||settingsHtml.includes('homeRecentLimit'))throw new Error('retired home quantity settings still visible');
+            if(!settingsHtml.includes('浏览现场'))throw new Error('browser-state task label missing');
+
+            const csrfStatus=await page.evaluate(async()=>{
+              const r=await fetch('api.php?action=settings_save',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({siteTitle:'Should Fail'})});
+              return r.status;
+            });
+            if(csrfStatus!==403)throw new Error('CSRF fail-closed missing: '+csrfStatus);
+
+            await save({siteTitle:'Kewaro Candidate',brandShowText:false});
+            await page.goto(base+'start.php',{waitUntil:'networkidle'});
+            if(await page.locator('.vf-app-brand strong').count())throw new Error('brand text toggle off not applied');
+            if(!(await page.locator('.vf-brand-mark').count()))throw new Error('brand mark disappeared with text toggle off');
+
+            await save({siteTitle:'Kewaro Candidate',brandSubtitle:'候选副标题',brandShowText:true});
+            for(const width of [390,1440]){
+              await page.setViewportSize({width,height:900});
+              await page.goto(base+'manage.php',{waitUntil:'networkidle'});
+              const overflow=await page.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+              if(overflow>1)throw new Error('admin overflow '+width+' delta='+overflow);
+            }
+
+            const publicCtx=await browser.newContext({viewport:{width:390,height:844}});
+            const publicPage=await publicCtx.newPage();
+            await publicPage.goto(base,{waitUntil:'networkidle'});
+            if((await publicPage.title())!=='首页 · Kewaro Candidate')throw new Error('public title not synchronized');
+            if((await publicPage.locator('.vf-public-home-brand strong').textContent())!=='Kewaro Candidate')throw new Error('public brand title not synchronized');
+            if((await publicPage.locator('.vf-public-home-brand small').textContent())!=='候选副标题')throw new Error('public subtitle not synchronized');
+            const publicOverflow=await publicPage.evaluate(()=>Math.max(document.documentElement.scrollWidth-document.documentElement.clientWidth,document.body.scrollWidth-document.body.clientWidth));
+            if(publicOverflow>1)throw new Error('public overflow 390 delta='+publicOverflow);
+            await publicCtx.close();
+
+            if(errors.length)throw new Error('page errors: '+errors.join(' | '));
+            console.log('P01_V24740_BROWSER_RUNTIME=PASS');
+          } finally {
+            await browser.close();
+          }
+          JS
+          TARGET_PORT="$target_port" node /tmp/p01-v24740-browser.mjs | tee /tmp/browser.txt
+          grep -Fx 'P01_V24740_BROWSER_RUNTIME=PASS' /tmp/browser.txt
+
+      - name: Data schema and repository safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(php -r '$p=json_decode(file_get_contents("candidate/VF_PROJECT.json"),true); echo $p["schema_version"];')" = "$schema_version"
+          test "$(php -r '$p=json_decode(file_get_contents("candidate/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$schema_version"
+          diff -u <(find baseline/src/migrations -maxdepth 1 -type f -printf '%f\n' | sort) <(find candidate/src/migrations -maxdepth 1 -type f -printf '%f\n' | sort)
+          if find candidate -type f \( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' -o -name '*.wal' -o -name '*.shm' -o -name '.env' \) | grep -q .; then
+            echo 'PRIVATE_OR_DB_FILE_IN_SOURCE'
+            exit 91
+          fi
+          echo 'P01_V24740_DATA_SCHEMA_SAFETY=PASS'
+
+      - name: Build public-safe candidate receipt
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence/p01
+          cat > evidence/p01/P01_V24740_CANDIDATE_RECEIPT.txt <<EOF
+          P01_V24740_CANDIDATE_SOURCE=$target_sha
+          P01_V24740_CANDIDATE_TREE=$target_tree
+          P01_V24740_VERSION=$target_version
+          P01_V24740_SCHEMA=$schema_version
+          P01_V24740_PREVIOUS_STABLE=2.47.39
+          P01_V24740_PREVIOUS_STABLE_SHA=761fb624c62e9ec16fe33e5f2f1e9f2c27738963
+          PUBLIC_AUTHORITY_INSTALL=REQUIRED_SOURCE_RUNTIME_CHECKED_FORMAL_FULL_PENDING
+          PUBLIC_AUTHORITY_SECURITY=REQUIRED
+          PUBLIC_AUTHORITY_TESTING=REQUIRED
+          PUBLIC_AUTHORITY_UPGRADE=REQUIRED_FORMAL_ATOMIC_PENDING
+          PUBLIC_AUTHORITY_DATA_SCHEMA=REQUIRED
+          PUBLIC_AUTHORITY_API_PROVIDER=N_A
+          PUBLIC_AUTHORITY_SEO=REQUIRED
+          PUBLIC_AUTHORITY_CRON_JOB=N_A
+          PUBLIC_AUTHORITY_NOTIFICATION=N_A
+          PUBLIC_AUTHORITY_OBSERVABILITY=N_A_NO_PRODUCTION_IN_THIS_LANE
+          PUBLIC_AUTHORITY_PERFORMANCE=N_A
+          PUBLIC_AUTHORITY_GIT=REQUIRED
+          PUBLIC_AUTHORITY_UA_UI=REQUIRED
+          OWNER_PREVIEW_RUNTIME=PENDING
+          OWNER_REAL_USE=PENDING
+          FORMAL_RELEASE=BLOCKED_UNTIL_OWNER_PREVIEW_AND_FORMAL_ARTIFACT_GATES
+          STABLE_CHANNEL=NOT_WRITTEN
+          PRODUCTION=NOT_WRITTEN
+          PRIVATE_SOURCE_PERSISTED=NO
+          PRIVATE_DATA_USED=NO
+          RELEASE_WRITE_USED=NO
+          EOF
+
+      - name: Upload public-safe receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v24740-candidate-receipt-${{ github.run_id }}
+          path: evidence/p01/P01_V24740_CANDIDATE_RECEIPT.txt
+          if-no-files-found: error
+          retention-days: 30
