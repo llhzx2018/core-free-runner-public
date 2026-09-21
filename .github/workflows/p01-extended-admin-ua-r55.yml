@@ -1,0 +1,225 @@
+name: P01 Extended Admin UA R55
+
+on:
+  push:
+    branches:
+      - temp/p01-extended-admin-ua-r55-20260921
+    paths:
+      - '.github/workflows/p01-extended-admin-ua-r55.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  extended-admin-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P01_SHA: 3011430afe6df878df1dbd945849b97e2ec125af
+    steps:
+      - name: Verify private-read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${PRIVATE_READ_TOKEN:-}"
+          echo 'VF_PRIVATE_READ_TOKEN_PRESENT=YES'
+
+      - name: Checkout exact P01 source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: target
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$P01_SHA"
+          RUNTIME=/tmp/p01-r55-runtime
+          rm -rf "$RUNTIME" /tmp/p01-r55*.cookies /tmp/p01-r55*.html
+          cp -a target/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18155 -t . >/tmp/p01-r55-server.log 2>&1 &
+          SERVER_PID=$!
+          echo "$SERVER_PID" >/tmp/p01-r55-server.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-r55.cookies -b /tmp/p01-r55.cookies http://127.0.0.1:18155/setup.php -o /tmp/p01-r55-setup.html; then
+              break
+            fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-r55-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-r55.cookies -b /tmp/p01-r55.cookies             -X POST http://127.0.0.1:18155/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=P01 R55 UA'             --data-urlencode 'admin_password=R55Browser!2026'             --data-urlencode 'admin_password_confirm=R55Browser!2026'             -o /tmp/p01-r55-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-r55-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-r55-verify.txt
+          echo 'P01_R55_FRESH_INSTALL=PASS'
+
+      - name: Extended synthetic browser UA UI gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-r55-runtime
+          SERVER_PID=$(cat /tmp/p01-r55-server.pid)
+          kill -0 "$SERVER_PID"
+          BROWSER_DIR=/tmp/p01-r55-browser
+          rm -rf "$BROWSER_DIR"
+          mkdir -p "$BROWSER_DIR"
+          cd "$BROWSER_DIR"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+
+          cat > gate.mjs <<'JS'
+          import { chromium } from 'playwright';
+
+          const base='http://127.0.0.1:18155/';
+          const viewports=[
+            {name:'390',width:390,height:844},
+            {name:'768',width:768,height:1024},
+            {name:'1024',width:1024,height:768},
+            {name:'1440',width:1440,height:900},
+            {name:'1920',width:1920,height:1080},
+          ];
+
+          const routes=[
+            ['health.php','resources'],
+            ['recycle-bin.php','resources'],
+            ['full-governance.php','resources'],
+            ['update-credential.php','update'],
+            ['workbench.php?route=rss.workspace','system'],
+            ['settings.php?section=brand','settings'],
+            ['settings.php?section=display','settings'],
+            ['settings.php?section=home','settings'],
+            ['settings.php?section=seo','settings'],
+            ['settings.php?section=account','settings'],
+          ];
+
+          const redirects=[
+            ['security.php','settings.php?section=account'],
+            ['icons.php','settings.php?section=display'],
+            ['jobs.php','system-health.php'],
+            ['system.php','system-health.php'],
+            ['governance.php','full-governance.php'],
+            ['tags.php','links-admin.php?notice=tags-retired'],
+            ['affiliate.php','links-admin.php?notice=affiliate-retired'],
+          ];
+
+          const browser=await chromium.launch({headless:true});
+          let routeChecks=0;
+          let redirectChecks=0;
+          try{
+            for(const vp of viewports){
+              const context=await browser.newContext({viewport:{width:vp.width,height:vp.height}});
+              const login=await context.request.post(base+'api.php?action=login',{
+                data:{password:'R55Browser!2026'}
+              });
+              if(login.status()!==200) throw new Error('login failed viewport='+vp.name);
+              const loginJson=await login.json();
+              if(!loginJson?.ok) throw new Error('login response not ok viewport='+vp.name);
+
+              for(const [route,group] of routes){
+                const page=await context.newPage();
+                const pageErrors=[];
+                const consoleErrors=[];
+                page.on('pageerror',err=>pageErrors.push(String(err?.message||err)));
+                page.on('console',msg=>{if(msg.type()==='error')consoleErrors.push(msg.text());});
+
+                const response=await page.goto(base+route,{waitUntil:'domcontentloaded',timeout:30000});
+                if(!response || response.status()!==200) throw new Error(route+' HTTP '+(response?.status()??'NO_RESPONSE')+' viewport='+vp.name);
+                await page.waitForTimeout(350);
+
+                const shell=await page.locator('body').getAttribute('data-vf-admin-shell');
+                const actualGroup=await page.locator('body').getAttribute('data-vf-group');
+                if(shell!=='server') throw new Error(route+' shell='+shell+' viewport='+vp.name);
+                if(actualGroup!==group) throw new Error(route+' group='+actualGroup+' expected='+group+' viewport='+vp.name);
+
+                const activeTop=await page.locator('.vf-rail-section > .vf-rail-item.active').count();
+                if(activeTop!==1) throw new Error(route+' active-top-count='+activeTop+' viewport='+vp.name);
+
+                const geometry=await page.evaluate(()=>({
+                  width:window.innerWidth,
+                  doc:document.documentElement.scrollWidth,
+                  body:document.body.scrollWidth
+                }));
+                if(geometry.doc>geometry.width+2 || geometry.body>geometry.width+2){
+                  throw new Error(route+' document-overflow viewport='+vp.name+' '+JSON.stringify(geometry));
+                }
+
+                if(route.startsWith('settings.php?section=')){
+                  const section=new URL(base+route).searchParams.get('section');
+                  const current=await page.locator('.vf-settings-tabs [aria-current="page"]').getAttribute('data-settings-section');
+                  const visible=await page.locator('[data-panel].active').getAttribute('data-panel');
+                  if(current!==section || visible!==section){
+                    throw new Error(route+' settings-state mismatch current='+current+' visible='+visible+' viewport='+vp.name);
+                  }
+                }
+
+                if(pageErrors.length) throw new Error(route+' pageerror viewport='+vp.name+' '+pageErrors.join(' | '));
+                if(consoleErrors.length) throw new Error(route+' console-error viewport='+vp.name+' '+consoleErrors.join(' | '));
+
+                routeChecks++;
+                await page.close();
+              }
+
+              for(const [route,target] of redirects){
+                const page=await context.newPage();
+                const response=await page.goto(base+route,{waitUntil:'domcontentloaded',timeout:30000});
+                if(!response || response.status()!==200) throw new Error(route+' final HTTP '+(response?.status()??'NO_RESPONSE')+' viewport='+vp.name);
+                const finalUrl=new URL(page.url());
+                const actual=finalUrl.pathname.replace(/^\//,'')+(finalUrl.search||'');
+                if(actual!==target){
+                  throw new Error(route+' redirect='+actual+' expected='+target+' viewport='+vp.name);
+                }
+                redirectChecks++;
+                await page.close();
+              }
+              await context.close();
+            }
+          } finally {
+            await browser.close();
+          }
+
+          console.log('P01_R55_VIEWPORTS=390,768,1024,1440,1920');
+          console.log('P01_R55_ROUTE_CHECK_COUNT='+routeChecks);
+          console.log('P01_R55_REDIRECT_CHECK_COUNT='+redirectChecks);
+          console.log('P01_R55_SETTINGS_SECTION_STATE=PASS');
+          console.log('P01_R55_ACTIVE_NAV_STATE=PASS');
+          console.log('P01_R55_DOCUMENT_OVERFLOW=PASS');
+          console.log('P01_R55_CONSOLE_PAGEERROR=PASS');
+          console.log('P01_R55_COMPAT_REDIRECTS=PASS');
+          console.log('P01_R55_EXTENDED_ADMIN_UA_UI=PASS');
+          JS
+
+          node gate.mjs
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/p01-r55-server.pid ]; then
+            kill "$(cat /tmp/p01-r55-server.pid)" 2>/dev/null || true
+          fi
+          rm -rf target /tmp/p01-r55-runtime /tmp/p01-r55-browser
+          rm -f /tmp/p01-r55*
+          echo 'P01_PRIVATE_SOURCE_CLEANUP=PASS'
