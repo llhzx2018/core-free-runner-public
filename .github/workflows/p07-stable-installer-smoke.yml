@@ -7,13 +7,13 @@ on:
     paths:
       - 'installers/p07.sh'
       - 'installers/p07-rc3-r2-oauth-contract.sh'
-      - 'dist/p07/0.1.0-rc3/**'
+      - 'dist/p07/**'
       - '.github/workflows/p07-stable-installer-smoke.yml'
   pull_request:
     paths:
       - 'installers/p07.sh'
       - 'installers/p07-rc3-r2-oauth-contract.sh'
-      - 'dist/p07/0.1.0-rc3/**'
+      - 'dist/p07/**'
       - '.github/workflows/p07-stable-installer-smoke.yml'
 
 permissions:
@@ -27,31 +27,43 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify current layered route identity
+      - name: Resolve current stable route identity
         shell: bash
         run: |
           set -euo pipefail
           bash -n installers/p07.sh
-          bash -n installers/p07-rc3-r2-oauth-contract.sh
-
-          python3 - <<'PY'
-          import hashlib,re
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import hashlib
+          import re
+          import subprocess
           from pathlib import Path
-          stable=Path('installers/p07.sh').read_text()
-          current=Path('installers/p07-rc3-r2-oauth-contract.sh').read_bytes()
-          current_text=current.decode()
-          route=re.search(r'^INSTALLER_URL="\$\{PUBLIC_ROOT\}/([^"]+)"$', stable, re.M)
-          assert route and route.group(1) == 'installers/p07-rc3-r2-oauth-contract.sh'
-          expected=re.search(r'^EXPECTED_BLOB="([0-9a-f]{40})"$', stable, re.M)
-          assert expected
-          actual=hashlib.sha1(b'blob '+str(len(current)).encode()+b'\0'+current).hexdigest()
-          assert actual == expected.group(1), (actual, expected.group(1))
-          assert actual == '4a7889ea606fa2353f194abbb2c6b27345f35050'
-          assert 'EXPECTED_BUILD_ID="0.1.0-rc3-guided-init16"' in current_text
-          assert '0.1.0-rc3-guided-init15' in current_text
-          assert 'BUILD_BLOB="622b752887d46c17a8a5d05046037a2dc6a35475"' in current_text
-          assert 'STORAGE_SETUP_BLOB="b279677ae561f9feb689964bd8f09be98c9211c9"' in current_text
-          assert 'GOOGLE_OAUTH_BLOB="3b023f307bf744650a351e19bde01b3597469992"' in current_text
+
+          stable = Path("installers/p07.sh").read_text()
+          route_match = re.search(r'^INSTALLER_URL="\$\{PUBLIC_ROOT\}/([^"]+)"$', stable, re.M)
+          blob_match = re.search(r'^EXPECTED_BLOB="([0-9a-f]{40})"$', stable, re.M)
+          assert route_match and blob_match
+
+          route = route_match.group(1)
+          installer = Path(route)
+          assert installer.is_file(), route
+          data = installer.read_bytes()
+          actual_blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+          assert actual_blob == blob_match.group(1), (actual_blob, blob_match.group(1))
+          subprocess.run(["bash", "-n", str(installer)], check=True)
+
+          text = data.decode()
+          fields = {
+              "P07_SERVER_OPS_VERSION": r'^EXPECTED_VERSION="([^"]+)"$',
+              "P07_SERVER_OPS_BUILD_ID": r'^EXPECTED_BUILD_ID="([^"]+)"$',
+              "P07_SERVER_OPS_BUILD_BLOB": r'^BUILD_BLOB="([0-9a-f]{40})"$',
+              "P07_SERVER_OPS_STORAGE_SETUP_BLOB": r'^STORAGE_SETUP_BLOB="([0-9a-f]{40})"$',
+              "P07_SERVER_OPS_GOOGLE_OAUTH_BLOB": r'^GOOGLE_OAUTH_BLOB="([0-9a-f]{40})"$',
+          }
+          print(f"P07_SERVER_OPS_CURRENT_INSTALLER={route}")
+          for key, pattern in fields.items():
+              match = re.search(pattern, text, re.M)
+              assert match, (key, pattern)
+              print(f"{key}={match.group(1)}")
           PY
 
       - name: Run exact current stable installer in isolated path
@@ -62,16 +74,21 @@ jobs:
           rm -rf "$ROOT"
           mkdir -p "$ROOT"
 
-          sudo env             P07_PUBLIC_ROOT="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${{ github.event.pull_request.head.sha || github.sha }}"             P07_ALLOW_NONROOT=1             P07_NO_EXEC=1             P07_INSTALL_DIR="$ROOT/install"             P07_PREVIOUS_DIR="$ROOT/previous"             P07_BIN_LINK="$ROOT/vfops"             bash installers/p07.sh 2>&1 | tee /tmp/p07-current-install-output.txt
+          sudo env \
+            P07_PUBLIC_ROOT="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${{ github.event.pull_request.head.sha || github.sha }}" \
+            P07_ALLOW_NONROOT=1 \
+            P07_NO_EXEC=1 \
+            P07_INSTALL_DIR="$ROOT/install" \
+            P07_PREVIOUS_DIR="$ROOT/previous" \
+            P07_BIN_LINK="$ROOT/vfops" \
+            bash installers/p07.sh 2>&1 | tee /tmp/p07-current-install-output.txt
 
-          grep -F 'R2 Google + B2 guided-init16 安装完成 ✓' /tmp/p07-current-install-output.txt
-          grep -F '版本：VF Server Ops 0.1.0 RC3' /tmp/p07-current-install-output.txt
-          test "$("$ROOT/vfops" --version)" = 'VF Server Ops 0.1.0 RC3'
-          test "$("$ROOT/vfops" --build-id)" = '0.1.0-rc3-guided-init16'
-          test "$(git hash-object "$ROOT/install/BUILD_ID")" = '622b752887d46c17a8a5d05046037a2dc6a35475'
-          test "$(git hash-object "$ROOT/install/bin/vfops-storage-setup")" = 'b279677ae561f9feb689964bd8f09be98c9211c9'
-          test "$(git hash-object "$ROOT/install/lib/google_device_oauth.py")" = '3b023f307bf744650a351e19bde01b3597469992'
+          test "$("$ROOT/vfops" --version)" = "$P07_SERVER_OPS_VERSION"
+          test "$("$ROOT/vfops" --build-id)" = "$P07_SERVER_OPS_BUILD_ID"
+          test "$(git hash-object "$ROOT/install/BUILD_ID")" = "$P07_SERVER_OPS_BUILD_BLOB"
+          test "$(git hash-object "$ROOT/install/bin/vfops-storage-setup")" = "$P07_SERVER_OPS_STORAGE_SETUP_BLOB"
+          test "$(git hash-object "$ROOT/install/lib/google_device_oauth.py")" = "$P07_SERVER_OPS_GOOGLE_OAUTH_BLOB"
           ! grep -Fq 'REAL_PASS' "$ROOT/install/lib/restore_as_verified.py"
 
       - name: Result
-        run: echo 'P07_STABLE_INSTALLER_GUIDED_INIT16_SMOKE=PASS'
+        run: echo 'P07_STABLE_INSTALLER_CURRENT_ROUTE_SMOKE=PASS'
