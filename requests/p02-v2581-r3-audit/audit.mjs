@@ -204,8 +204,13 @@ try{
     await page.waitForTimeout(180);
   });
 
-  // leave editor without mutations by discarding local draft state
+  // leave editor without mutations by discarding local draft state.
+  // Use a fresh app boot before Settings surface enumeration so the audit does
+  // not race setMode()'s intentionally fire-and-forget list reload.
   await page.evaluate(async()=>{ if(typeof clearEditorState==='function'){clearEditorState();state.editorItem=null;} await setMode('all','active'); });
+  await page.goto(base+'/system-info.php',{waitUntil:'networkidle'});
+  await page.goto(base+'/#settings=basic',{waitUntil:'networkidle'});
+  await page.waitForSelector('#settingsPanel');
 
   const settings=['basic','content','display','search','transfer','system','updates','backup','security'];
   const labels={basic:'设置/基础',content:'设置/内容分类',display:'设置/显示排序',search:'设置/搜索使用',transfer:'设置/导入导出',system:'设置/系统概览',updates:'设置/在线升级',backup:'设置/备份恢复',security:'设置/安全隐私'};
