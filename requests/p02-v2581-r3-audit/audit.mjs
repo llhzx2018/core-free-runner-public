@@ -70,6 +70,7 @@ async function audit(surface,profile){
 
     const fixed=[...document.querySelectorAll('*')].filter(el=>visible(el)&&['fixed','sticky'].includes(getComputedStyle(el).position));
     for(const el of fixed){
+      if(el.matches('#sidebar:not(.open)')) continue; // intentional closed mobile drawer
       const r=el.getBoundingClientRect();
       if(r.width>innerWidth+4||r.left<-6||r.right>innerWidth+6) out.push(['P2','FIXED_OFFSCREEN',sig(el)]);
     }
@@ -80,8 +81,10 @@ async function audit(surface,profile){
         const r=el.getBoundingClientRect();
         const type=(el.getAttribute('type')||'').toLowerCase();
         if(type==='hidden'||type==='file') continue;
-        if(r.height<40 && !el.closest('.notebook-title-row,.content-row')) out.push(['P3','MOBILE_SMALL_TARGET',sig(el)+' h='+Math.round(r.height)]);
-        if(['INPUT','SELECT','TEXTAREA'].includes(el.tagName)){
+        const touchOwner=(type==='checkbox'||type==='radio')?el.closest('label'):null;
+        const touchOwnerHeight=touchOwner?touchOwner.getBoundingClientRect().height:0;
+        if(r.height<40 && touchOwnerHeight<40 && !el.closest('.notebook-title-row,.content-row')) out.push(['P3','MOBILE_SMALL_TARGET',sig(el)+' h='+Math.round(r.height)]);
+        if(['INPUT','SELECT','TEXTAREA'].includes(el.tagName)&&type!=='checkbox'&&type!=='radio'){
           const fs=parseFloat(getComputedStyle(el).fontSize)||0;
           if(fs>0&&fs<16) out.push(['P3','MOBILE_FORM_FONT_LT16',sig(el)+' '+fs+'px']);
         }
@@ -90,8 +93,10 @@ async function audit(surface,profile){
 
     for(const el of interact){
       if(el.tagName==='INPUT'&&['hidden','file'].includes((el.getAttribute('type')||'').toLowerCase())) continue;
-      const name=(el.getAttribute('aria-label')||el.getAttribute('title')||el.textContent||el.getAttribute('placeholder')||el.getAttribute('value')||'').trim();
-      if(!name && !el.closest('label')) out.push(['P3','UNNAMED_CONTROL',sig(el)]);
+      const id=el.id||'';
+      const associatedLabel=id&&document.querySelector('label[for="'+CSS.escape(id)+'"]');
+      const name=(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')||el.getAttribute('title')||el.textContent||el.getAttribute('placeholder')||el.getAttribute('value')||'').trim();
+      if(!name && !associatedLabel && !el.closest('label')) out.push(['P3','UNNAMED_CONTROL',sig(el)]);
       if((el.scrollWidth>el.clientWidth+4||el.scrollHeight>el.clientHeight+6)&&['BUTTON','A'].includes(el.tagName)){
         const cs=getComputedStyle(el);
         if(cs.overflow!=='visible') out.push(['P3','CONTROL_CONTENT_CLIPPED',sig(el)+' '+el.scrollWidth+'x'+el.scrollHeight+' / '+el.clientWidth+'x'+el.clientHeight]);
@@ -160,8 +165,10 @@ try{
   await page.goto(base+'/?scratch=1',{waitUntil:'networkidle'});
   await page.waitForTimeout(500);
   if(await page.locator('#scratchWorkspaceV259').count()===0) add('P2','Scratch 直达入口','SCRATCH_QUICK_ROUTE_IGNORED','/?scratch=1 未自动打开临时页签工作台');
+  await page.evaluate(()=>localStorage.removeItem('vftb-scratch-workspace-open-v1'));
 
   for(const target of ['system','updates','backup']){
+    await page.goto(base+'/system-info.php',{waitUntil:'networkidle'});
     await page.evaluate(()=>{
       localStorage.setItem('vftb-mode','all');
       localStorage.setItem('vftb-status','active');
@@ -224,7 +231,7 @@ try{
 
   await page.setViewportSize({width:1440,height:900});
   await page.evaluate(async()=>{await openSettings('transfer');});
-  const dummy=await page.evaluateHandle(()=>{const b=document.createElement('button');b.textContent='audit';b.style.position='fixed';b.style.left='-9999px';document.body.appendChild(b);return b;});
+  const dummy=await page.evaluateHandle(()=>{const b=document.createElement('button');b.textContent='audit';b.hidden=true;document.body.appendChild(b);return b;});
   await page.evaluate(async b=>{await openDuplicateGovernance(b);},dummy);
   await page.waitForSelector('.duplicate-governance-modal');
   await audit('重复内容治理 · 1440','desktop');
