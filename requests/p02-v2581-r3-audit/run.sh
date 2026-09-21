@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 PRODUCT_ROOT="${1:?product root required}"
 PRODUCT_ROOT="$(cd "$PRODUCT_ROOT" && pwd)"
-EXPECTED_SHA="8495c509a3567a75d51be5a7ea15ac0d902d9c9c"
+EXPECTED_SHA="4bb56a876258010d210a11401d310deab4bc32c9"
 EXPECTED_VERSION="2.5.81"
 RUN_ROOT="${RUNNER_TEMP:-/tmp}/p02-v2581-r3-detail-audit-${GITHUB_RUN_ID:-local}-$$"
 SITE="$RUN_ROOT/site"
