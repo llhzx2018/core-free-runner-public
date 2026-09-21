@@ -1,0 +1,197 @@
+name: TEMP S01-C02 1.21.924 Formal Release
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      SOURCE_SHA: f3e4cdd9203a300e910040a6607f645c011a4373
+      PREVIOUS_SHA: 08619b50fb0dc90aecd22bb37f550780a131e0a4
+      VERSION: 1.21.924
+      TAG: v1.21.924
+      ASSET: vf-tools-ops_V1.21.924.zip
+      PREVIOUS_TAG: v1.21.923
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.923.zip
+
+    steps:
+      - name: Checkout exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: f3e4cdd9203a300e910040a6607f645c011a4373
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+
+      - name: Exact source and R35 gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(tr -d '\r\n' < source/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.924' source/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.924'" source/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'S01-QUALITY-AUTHORITY-LOADER-R35'" source/vf-ops.php
+          php -l source/vf-ops.php
+          php source/tests/s01-c02-121924-quality-authority-loader-r35-contract.php
+
+          actual="$(git -C source diff --name-only "$PREVIOUS_SHA" "$SOURCE_SHA" | sort)"
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            VERSION \
+            includes/views/admin-style-helpers/admin-s01-uiux-polish.php \
+            tests/s01-c02-121924-quality-authority-loader-r35-contract.php \
+            vf-ops.php | sort)"
+          test "$actual" = "$expected"
+          test "$(git -C source diff --name-only "$PREVIOUS_SHA" "$SOURCE_SHA" -- database config includes/v6 includes/wp-update docs/authority includes/admin-v13/services | wc -l)" = "0"
+
+      - name: Build deterministic runtime ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist rebuild
+          mkdir -p dist rebuild
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,re,zipfile
+          root=Path("source")
+          def runtime(rel):
+              rel=rel.replace("\\","/").lstrip("/")
+              if not rel or "../" in rel:
+                  return False
+              if re.search(r"(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)",rel,re.I):
+                  return False
+              if re.search(r"\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$",rel,re.I):
+                  return False
+              if "/" not in rel:
+                  return rel in ("vf-ops.php","uninstall.php")
+              return re.match(r"^(?:includes|assets|languages|config)/",rel) is not None
+
+          files=[]
+          for p in sorted((x for x in root.rglob("*") if x.is_file()),key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              if not runtime(rel):
+                  continue
+              if p.is_symlink():
+                  raise SystemExit("runtime symlink forbidden: "+rel)
+              files.append((rel,p.read_bytes()))
+
+          canonical=b"".join(rel.encode()+b"\0"+hashlib.sha256(data).hexdigest().encode()+b"\n" for rel,data in files)
+          Path("/tmp/runtime_count").write_text(str(len(files)))
+          Path("/tmp/runtime_fp").write_text(hashlib.sha256(canonical).hexdigest())
+
+          for out in ("dist/vf-tools-ops_V1.21.924.zip","rebuild/vf-tools-ops_V1.21.924.zip"):
+              with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      info=zipfile.ZipInfo("vf-ops/"+rel,date_time=(2020,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(0o100644 & 0xFFFF)<<16
+                      z.writestr(info,data)
+          PY
+
+          cmp "dist/$ASSET" "rebuild/$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          unzip -p "dist/$ASSET" vf-ops/vf-ops.php | grep -Fq 'Version: 1.21.924'
+          test "$(cat /tmp/runtime_count)" = "976"
+          sha256sum "dist/$ASSET" | awk '{print $1}' >/tmp/asset_sha
+          stat -c '%s' "dist/$ASSET" >/tmp/asset_bytes
+
+      - name: Previous release upgrade compatibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          test "$(stat -c '%s' "previous/$PREVIOUS_ASSET")" = "3496027"
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "b5f9eb89541d61c097262da0e8333cb05ecbed52d6b09de1c664e0a162f59915"
+          unzip -Z1 "previous/$PREVIOUS_ASSET" | grep -v '/$' | sort >/tmp/prev.txt
+          unzip -Z1 "dist/$ASSET" | grep -v '/$' | sort >/tmp/new.txt
+          test ! -s <(comm -23 /tmp/prev.txt /tmp/new.txt)
+          test ! -s <(comm -13 /tmp/prev.txt /tmp/new.txt)
+
+      - name: Create formal GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "Release already exists; refusing overwrite." >&2
+            exit 31
+          fi
+
+          BYTES="$(cat /tmp/asset_bytes)"
+          SHA="$(cat /tmp/asset_sha)"
+          RUNTIME_FILES="$(cat /tmp/runtime_count)"
+          RUNTIME_FP="$(cat /tmp/runtime_fp)"
+
+          cat >/tmp/release-notes.md <<EOF
+          # VF Tools Ops V1.21.924
+
+          S01-C02 Quality Authority Loader R35.
+
+          - Fixes the remaining Production CSS-loading defect on Quality → Acceptance Overview.
+          - Late UI loader now enqueues the current vf-v9 overview stylesheet as the actual page authority.
+          - Retired admin-s01-quality-r17.css is no longer the runtime authority for the canonical overview.
+          - Stable V6 shell + one page visual authority remains the visual model.
+          - Schema 6.0.0 unchanged; no data migration.
+          - No Controller, Service, Route, Permission, Write, Updater or Ownership change.
+
+          Exact asset:
+          - $ASSET
+          - Bytes $BYTES
+          - SHA-256 $SHA
+          - Runtime files $RUNTIME_FILES
+          - Runtime Fingerprint $RUNTIME_FP
+          EOF
+
+          gh release create "$TAG" "dist/$ASSET#VF Tools Ops $VERSION" \
+            --repo "$TARGET_REPO" \
+            --target "$SOURCE_SHA" \
+            --title "VF Tools Ops V$VERSION" \
+            --notes-file /tmp/release-notes.md
+
+      - name: Remote release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          JSON="$(gh api "repos/$TARGET_REPO/releases/tags/$TAG")"
+          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SOURCE_SHA"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          test -n "$RID"; test -n "$AID"
+          mkdir -p remote
+          gh release download "$TAG" --repo "$TARGET_REPO" --pattern "$ASSET" --dir remote
+          cmp "dist/$ASSET" "remote/$ASSET"
+
+          echo "COMPONENT=S01-C02"
+          echo "VERSION=$VERSION"
+          echo "SOURCE_SHA=$SOURCE_SHA"
+          echo "TAG=$TAG"
+          echo "RELEASE_ID=$RID"
+          echo "ASSET=$ASSET"
+          echo "ASSET_ID=$AID"
+          echo "BYTES=$(stat -c '%s' "remote/$ASSET")"
+          echo "SHA256=$(sha256sum "remote/$ASSET" | awk '{print $1}')"
+          echo "RUNTIME_FILES=$(cat /tmp/runtime_count)"
+          echo "RUNTIME_FINGERPRINT=$(cat /tmp/runtime_fp)"
+          echo "RESULT=PASS"
+
+      - name: Remove transient private checkout
+        if: always()
+        shell: bash
+        run: rm -rf source previous dist rebuild remote
