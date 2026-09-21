@@ -1,0 +1,146 @@
+name: TEMP S01-C02 1.21.924 Effective UI Audit
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  effective-ui-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: f3e4cdd9203a300e910040a6607f645c011a4373
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: product
+          persist-credentials: false
+
+      - name: Audit effective visual authority for all routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re,json,sys
+
+          root=Path("product")
+          route_text=(root/"includes/admin-v13/route-contract.php").read_text(encoding="utf-8")
+          loader=(root/"includes/views/admin-style-helpers/admin-s01-uiux-polish.php").read_text(encoding="utf-8")
+
+          shared_files=[
+              root/"assets/css/current/admin-s01-v6-shell-r1.css",
+              root/"assets/css/current/admin-s01-subpages-r27.css",
+              root/"assets/css/current/admin-s01-subpages-r28.css",
+          ]
+          compat_files=[
+              root/"assets/css/current/admin-s01-compat-r30.css",
+              root/"assets/css/current/admin-s01-compat-r32.css",
+          ]
+
+          explicit={
+              "dashboard":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/current/admin-s01-dashboard-r14.css"],
+              "content_workflow":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/current/admin-s01-content-seo-r16.css"],
+              "seo_planner":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/current/admin-s01-content-seo-r16.css"],
+              "publish_zip":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/current/admin-s01-system-publish-r13.css"],
+              "system_site_release":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/current/admin-s01-system-publish-r13.css"],
+              "acceptance_overview":[root/"assets/css/current/admin-s01-v6-shell-r1.css",root/"assets/css/v13/acceptance/overview.css"],
+          }
+
+          routes=[]
+          for line in route_text.splitlines():
+              m=re.match(r"^\s*'([^']+)'\s*=>\s*\[(.*)\],?\s*$",line)
+              if not m: continue
+              key,body=m.group(1),m.group(2)
+              def pick(n):
+                  mm=re.search(r"'"+re.escape(n)+r"'=>'([^']*)'",body)
+                  return mm.group(1) if mm else ""
+              if pick("view") and pick("asset"):
+                  routes.append({
+                      "key":key,"status":pick("status"),
+                      "view":root/"includes"/pick("view"),
+                      "asset":root/"assets/css"/pick("asset")
+                  })
+          assert len(routes)==39
+
+          def literal_classes(view):
+              vals=[]
+              # only literal class attributes; strip php fragments
+              for m in re.finditer(r'class=["\']([^"\']+)["\']',view):
+                  raw=m.group(1)
+                  if "<?" in raw: raw=raw.split("<?",1)[0]
+                  for cls in raw.split():
+                      if not re.fullmatch(r"vf-[A-Za-z0-9_-]+",cls): continue
+                      if cls.startswith(("vf-r2","vf-r3","vf-r4","vf-ops","vf-key","vf-action","vf-no-soft","vf-busy")): continue
+                      if cls not in vals: vals.append(cls)
+              return vals
+
+          def selectors(paths):
+              text="\n".join(p.read_text(encoding="utf-8",errors="ignore") for p in paths if p.is_file())
+              return set(re.findall(r"\.([A-Za-z][A-Za-z0-9_-]*)",text)),text
+
+          anomalies=[]
+          rows=[]
+          for r in routes:
+              view=r["view"].read_text(encoding="utf-8",errors="ignore")
+              classes=literal_classes(view)
+              if r["key"] in explicit:
+                  paths=explicit[r["key"]]
+              else:
+                  paths=[r["asset"],*shared_files]
+                  if r["status"]=="migration_evidence":
+                      paths+=compat_files
+              sels,text=selectors(paths)
+              covered=[c for c in classes if c in sels]
+              missing=[c for c in classes if c not in sels]
+              coverage=1 if not classes else len(covered)/len(classes)
+
+              # Prefer genuine structural page/workspace roots, not controls/status.
+              structural=[c for c in classes if re.search(r"(page|workspace|overview|dashboard|workbench|panel)$",c)]
+              root_ok=any(c in sels for c in structural) if structural else (coverage>=0.5)
+
+              rows.append((r["key"],r["status"],round(coverage,3),structural[:5],missing[:8]))
+              if not root_ok:
+                  anomalies.append((r["key"],"NO_STRUCTURAL_SELECTOR",structural[:8],missing[:12]))
+              if len(classes)>=10 and coverage<0.58:
+                  anomalies.append((r["key"],"LOW_EFFECTIVE_COVERAGE",round(coverage,3),missing[:12]))
+
+          print("=== EFFECTIVE ROUTE COVERAGE ===")
+          for row in sorted(rows,key=lambda x:x[2]):
+              print(json.dumps(row,ensure_ascii=False))
+          print("=== EFFECTIVE ANOMALIES ===")
+          for a in anomalies:
+              print(json.dumps(a,ensure_ascii=False))
+
+          # Quality child pages must retain their own route CSS; overview is explicit R35.
+          quality={
+              "acceptance_source":"assets/css/v13/acceptance/source.css",
+              "acceptance_online":"assets/css/v13/acceptance/online.css",
+              "acceptance_components":"assets/css/v13/acceptance/components.css",
+              "acceptance_export":"assets/css/v13/acceptance/export.css",
+          }
+          for key,path in quality.items():
+              if not (root/path).is_file():
+                  anomalies.append((key,"QUALITY_ROUTE_ASSET_MISSING",path))
+
+          # Special clean authority blocks must not accidentally target child routes.
+          if "$isQualityOverview = $routeKey === 'acceptance_overview';" not in loader:
+              anomalies.append(("acceptance_overview","R35_ROUTE_DETECTION_DRIFT"))
+
+          if anomalies:
+              print("RESULT=FAIL")
+              sys.exit(2)
+          print("RESULT=PASS")
+          PY
+
+      - name: Remove transient checkout
+        if: always()
+        shell: bash
+        run: rm -rf product
