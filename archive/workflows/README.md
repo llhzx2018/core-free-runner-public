@@ -12,15 +12,16 @@
 
 ## Current Archive Authority
 
-当前机器入口：[`归档清单_V13.json`](归档清单_V13.json)。
+当前机器入口：[`归档清单_V14.json`](归档清单_V14.json)。
 
-V13 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档都重新复制数百条历史元数据：
+V14 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档都重新复制数百条历史元数据：
 
 - `归档清单_V10.json`：封板基线，421 个历史 Workflow；每个条目继续按 bytes + SHA-256 + source commit 验证；它是 V11 的历史基线，不再是 Current manifest。
 - `2026-08/late-active-v11/`：V10 之后又进入 Active 注册区、但使命已经结束的 86 个 Workflow；从 `core-free-runner-public/main@e90d10a76f01f6166ed49516d44a82019205fe84` 原 blob 集合移动而来。
 - V11 对 2026-08 增量批次锁定 Git Tree SHA `fc14bb126badeacedd455f974d60b29105d34883`；其中 `active_current_workflows` 只是当时历史快照，不再作为 live allowlist。
 - V12 新增 `2026-09/historical-version/s01-v12/`，归档已被 Theme 1.35.31 明确 supersede 的 4 个 S01 exact-version / exact-SHA Workflow，并锁定独立 Git Tree 身份。
 - V13 新增 `2026-09/historical-version/p07-v13/`，归档已被 System Care RC12 Current Route 明确 supersede 的 RC10 Discovery Gate，并锁定独立 Git Tree 身份。
+- V14 新增 `2026-09/historical-version/p07-v14/`，归档 9 个仍锁定 guided-init14/更早 runtime identity 的 RC3 Workflow；当前 `p07-server-ops-rc3-r2-onboarding.yml` 继续保留为 guided-init16 Current Machine Gate。
 
 当前 Active Workflow Surface 是动态 Git Truth，由 Trigger Scope / Estate Gate 与任务对应 Authority 判断，不在 Archive Manifest / README 复制固定 allowlist。
 
@@ -34,3 +35,4 @@ V13 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档�
 - `2026-08/late-active-v11/`：V10 封板后再次堆入 Active 注册区、现按 Git Tree Exact Identity 收口的 86 个一次性/版本化 Gate。
 - `2026-09/historical-version/s01-v12/`：已被 S01 Theme 1.35.31 supersede 的 1.35.24 / SEO Reference exact-source Workflow，共 4 个。
 - `2026-09/historical-version/p07-v13/`：已被 System Care RC12 Current Route supersede 的 RC10 CloudPanel Discovery Smoke，共 1 个。
+- `2026-09/historical-version/p07-v14/`：P07 RC3 仍为 Current 产品线，但这些 9 个 Workflow 已被 guided-init16 Current Runtime supersede；仅归档旧 exact-identity wrappers，不归档 RC3 产品线本身。
