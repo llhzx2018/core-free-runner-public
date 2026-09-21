@@ -24,7 +24,7 @@ V17 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档�
 - V14 新增 `2026-09/historical-version/p07-v14/`，归档 9 个仍锁定 guided-init14/更早 runtime identity 的 RC3 Workflow；当前 `p07-server-ops-rc3-r2-onboarding.yml` 继续保留为 guided-init16 Current Machine Gate。
 - V15 新增 `2026-09/historical-version/p07-v15/`，归档已经退出当前唯一 Toolbox Slot2 路由的独立 Bench 0.9.0 Gate 与旧 VPSCheck Candidate Gate；当前 Slot2 由 Toolbox 的 VPS Audit V2.1.0 路由拥有。
 - V16 新增 `2026-09/historical-version/p07-v16/`，归档两个旧 release-trigger exact-source Network Node Gate（RC7 / RC1）；其仍有效的 static/upstream/ShellCheck 能力已并入 Current Package Gate，真实 Current public install/health/uninstall 继续由 Installer Smoke 负责。
-- V17 新增 `2026-09/historical-version/public-infrastructure-v17/`，Move-only 归档独立 `runner-workflow-archive-gate.yml`；其 passive archive 校验与测试已并入 `runner-trigger-scope-gate.yml`（Current Public Runner Governance Gate），减少每个 Workflow PR 的重复 Runner 分配。
+- V17 新增 `2026-09/historical-version/public-infrastructure-v17/`，Move-only 归档旧 `runner-workflow-archive-gate.yml`。后续 Authority 复核确认 SSOT §5.2 要求 Gate Ownership Isolation，因此 Current archive integrity 能力由新入口 `runner-archive-integrity-gate.yml` 独立承担；旧文件名保持被动历史，不重新激活。
 
 当前 Active Workflow Surface 是动态 Git Truth，由 Trigger Scope / Estate Gate 与任务对应 Authority 判断，不在 Archive Manifest / README 复制固定 allowlist。
 
@@ -41,4 +41,4 @@ V17 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档�
 - `2026-09/historical-version/p07-v14/`：P07 RC3 仍为 Current 产品线，但这些 9 个 Workflow 已被 guided-init16 Current Runtime supersede；仅归档旧 exact-identity wrappers，不归档 RC3 产品线本身。
 - `2026-09/historical-version/p07-v15/`：旧 Slot2 独立 Bench / VPSCheck Candidate 执行包装，共 2 个；当前普通用户 Slot2 继续由 P07 Toolbox → VPS Audit V2.1.0 路由。
 - `2026-09/historical-version/p07-v16/`：旧 Network Node RC7 / RC1 exact-source trigger Gate，共 2 个；Current Network Node 长期 Harness 收敛为 Package Gate + Installer Smoke。
-- `2026-09/historical-version/public-infrastructure-v17/`：被 Current Public Runner Governance Gate 替代的独立 Workflow Archive Gate，共 1 个；归档内容保持原 blob 不变。
+- `2026-09/historical-version/public-infrastructure-v17/`：旧 `runner-workflow-archive-gate.yml`，共 1 个；归档内容保持原 blob 不变。Current 使用 `runner-archive-integrity-gate.yml` 保持 Trigger Scope / Archive Integrity 两个 Gate 的职责隔离。

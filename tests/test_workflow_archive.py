@@ -108,6 +108,7 @@ class WorkflowArchiveTests(unittest.TestCase):
         active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
         self.assertTrue(active.isdisjoint({path.name for path in archived}))
         self.assertIn("runner-trigger-scope-gate.yml", active)
+        self.assertIn("runner-archive-integrity-gate.yml", active)
         self.assertNotIn("runner-workflow-archive-gate.yml", active)
 
     def test_current_core_agent_harness_remains_active(self):
