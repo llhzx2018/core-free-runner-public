@@ -12,9 +12,9 @@
 
 ## Current Archive Authority
 
-当前机器入口：[`归档清单_V14.json`](归档清单_V14.json)。
+当前机器入口：[`归档清单_V15.json`](归档清单_V15.json)。
 
-V14 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档都重新复制数百条历史元数据：
+V15 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档都重新复制数百条历史元数据：
 
 - `归档清单_V10.json`：封板基线，421 个历史 Workflow；每个条目继续按 bytes + SHA-256 + source commit 验证；它是 V11 的历史基线，不再是 Current manifest。
 - `2026-08/late-active-v11/`：V10 之后又进入 Active 注册区、但使命已经结束的 86 个 Workflow；从 `core-free-runner-public/main@e90d10a76f01f6166ed49516d44a82019205fe84` 原 blob 集合移动而来。
@@ -22,6 +22,7 @@ V14 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档�
 - V12 新增 `2026-09/historical-version/s01-v12/`，归档已被 Theme 1.35.31 明确 supersede 的 4 个 S01 exact-version / exact-SHA Workflow，并锁定独立 Git Tree 身份。
 - V13 新增 `2026-09/historical-version/p07-v13/`，归档已被 System Care RC12 Current Route 明确 supersede 的 RC10 Discovery Gate，并锁定独立 Git Tree 身份。
 - V14 新增 `2026-09/historical-version/p07-v14/`，归档 9 个仍锁定 guided-init14/更早 runtime identity 的 RC3 Workflow；当前 `p07-server-ops-rc3-r2-onboarding.yml` 继续保留为 guided-init16 Current Machine Gate。
+- V15 新增 `2026-09/historical-version/p07-v15/`，归档已经退出当前唯一 Toolbox Slot2 路由的独立 Bench 0.9.0 Gate 与旧 VPSCheck Candidate Gate；当前 Slot2 由 Toolbox 的 VPS Audit V2.1.0 路由拥有。
 
 当前 Active Workflow Surface 是动态 Git Truth，由 Trigger Scope / Estate Gate 与任务对应 Authority 判断，不在 Archive Manifest / README 复制固定 allowlist。
 
@@ -36,3 +37,4 @@ V14 延续“封板基线 + 增量 Git Tree”结构，避免每次新增归档�
 - `2026-09/historical-version/s01-v12/`：已被 S01 Theme 1.35.31 supersede 的 1.35.24 / SEO Reference exact-source Workflow，共 4 个。
 - `2026-09/historical-version/p07-v13/`：已被 System Care RC12 Current Route supersede 的 RC10 CloudPanel Discovery Smoke，共 1 个。
 - `2026-09/historical-version/p07-v14/`：P07 RC3 仍为 Current 产品线，但这些 9 个 Workflow 已被 guided-init16 Current Runtime supersede；仅归档旧 exact-identity wrappers，不归档 RC3 产品线本身。
+- `2026-09/historical-version/p07-v15/`：旧 Slot2 独立 Bench / VPSCheck Candidate 执行包装，共 2 个；当前普通用户 Slot2 继续由 P07 Toolbox → VPS Audit V2.1.0 路由。
