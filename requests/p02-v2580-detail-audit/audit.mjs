@@ -150,6 +150,32 @@ try{
   await login();
   const fixture=await seed();
 
+  // Explicit route-intent checks that generic geometry cannot catch.
+  await page.evaluate(()=>{
+    localStorage.removeItem('vftb-scratch-workspace-open-v1');
+    localStorage.setItem('vftb-mode','all');
+    localStorage.setItem('vftb-status','active');
+    localStorage.setItem('vftb-content-view','list');
+  });
+  await page.goto(base+'/?scratch=1',{waitUntil:'networkidle'});
+  await page.waitForTimeout(500);
+  if(await page.locator('#scratchWorkspaceV259').count()===0) add('P2','Scratch 直达入口','SCRATCH_QUICK_ROUTE_IGNORED','/?scratch=1 未自动打开临时页签工作台');
+
+  for(const target of ['system','updates','backup']){
+    await page.evaluate(()=>{
+      localStorage.setItem('vftb-mode','all');
+      localStorage.setItem('vftb-status','active');
+      localStorage.setItem('vftb-content-view','list');
+    });
+    await page.goto(base+'/#settings='+target,{waitUntil:'networkidle'});
+    await page.waitForTimeout(220);
+    const routed=await page.evaluate(t=>typeof state!=='undefined'&&state.mode==='settings'&&state.settingsSection===t,target).catch(()=>false);
+    if(!routed) add('P2','系统独立页返回入口','SETTINGS_DEEPLINK_IGNORED','#settings='+target+' 未路由到对应设置子页');
+  }
+  await page.goto(base+'/',{waitUntil:'networkidle'});
+  await page.waitForFunction(()=>typeof state!=='undefined'&&state.site&&state.site.auth);
+
+
   await desktopAndMobile('全部资料列表',async()=>{
     await page.evaluate(async()=>{await setMode('all','active'); if(state.contentView!=='list') await setContentView('list');});
     await page.waitForSelector('.content-row');
