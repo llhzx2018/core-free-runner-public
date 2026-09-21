@@ -1,0 +1,193 @@
+name: P02 V2.5.64 Dark Parity Audit
+
+on:
+  push:
+    branches:
+      - task/p02-v2564-dark-parity-audit-20260921
+    paths:
+      - '.github/workflows/p02-v2564-dark-parity-audit-20260921.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REF: f642e4fdeeb51f5d3d9dd56c0d3542fa79f0aac2
+      EXPECTED_VERSION: 2.5.64
+    steps:
+      - name: Require registered private read capability
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, sqlite3, zip, curl, mbstring, openssl
+          coverage: none
+
+      - name: Checkout exact P02 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.PRODUCT_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - name: Verify exact source identity
+        working-directory: product
+        run: |
+          test "$(git rev-parse HEAD)" = "$PRODUCT_REF"
+          test "$(tr -d '\r\n' < VERSION)" = "$EXPECTED_VERSION"
+          bash scripts/verify-repository.sh
+          echo P02_V2564_DARK_AUDIT_SOURCE=PASS
+
+      - name: Install Chromium harness
+        working-directory: product
+        run: |
+          npm install --no-save --no-package-lock playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Inject temporary dark parity probe
+        working-directory: product
+        run: |
+          cat > tests/e2e/p02_dark_parity_temp.mjs <<'EOF'
+          import { chromium } from 'playwright';
+
+          const base=process.env.VF_UX_E2E_BASE_URL;
+          const password=process.env.VF_UX_E2E_PASSWORD;
+          if(!base||!password)throw new Error('missing VF UX E2E environment');
+          const assert=(ok,msg)=>{if(!ok)throw new Error(msg);};
+
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:1440,height:900}});
+          const page=await context.newPage();
+          const errors=[];
+          page.on('pageerror',e=>errors.push(String(e)));
+
+          async function login(){
+            await page.goto(base+'/',{waitUntil:'networkidle'});
+            const unlock=page.locator('[data-open-login]').first();
+            if(await unlock.count()){
+              await page.waitForFunction(()=>typeof openLogin==='function');
+              await page.evaluate(()=>openLogin());
+              await page.waitForSelector('#loginForm input[name="password"]');
+              await page.locator('#loginForm input[name="password"]').fill(password);
+              await page.locator('#loginSubmit').click();
+              await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
+            }
+          }
+
+          const rgbWhite=value=>/^rgba?\(\s*255\s*,\s*255\s*,\s*255(?:\s*,\s*1)?\s*\)$/i.test(String(value||''));
+          const surfaceProbe=()=>page.evaluate(()=>{
+            const root=getComputedStyle(document.documentElement);
+            const cs=s=>{const n=document.querySelector(s);return n?getComputedStyle(n):null;};
+            const bg=s=>cs(s)?.backgroundColor||'';
+            const variable=name=>root.getPropertyValue(name).trim();
+            return {
+              theme:document.documentElement.getAttribute('data-theme')||'',
+              sunken:variable('--v2537-sunken'),
+              base:variable('--v2537-base'),
+              editor:variable('--v2537-editor'),
+              surface:variable('--v2537-surface'),
+              inset:variable('--v2537-inset'),
+              sidebar:bg('.sidebar'),
+              list:bg('.library-list-page'),
+              main:bg('.main'),
+              search:bg('.v2537-nav-search-slot .search-wrap'),
+              scroll:document.documentElement.scrollWidth,
+              client:document.documentElement.clientWidth,
+            };
+          });
+
+          try{
+            await login();
+            await page.waitForFunction(()=>document.body.classList.contains('v2537-desktop-shell'));
+
+            await page.evaluate(()=>{localStorage.setItem('vftb-theme','dark');location.reload();});
+            await page.waitForLoadState('networkidle');
+            await page.waitForFunction(()=>document.documentElement.getAttribute('data-theme')==='dark'&&document.body.classList.contains('v2537-desktop-shell'));
+            const dark=await surfaceProbe();
+            assert(dark.theme==='dark','dark theme did not activate '+JSON.stringify(dark));
+            assert(new Set([dark.sunken,dark.base,dark.editor,dark.surface]).size===4,'dark surface ladder collapsed '+JSON.stringify(dark));
+            assert(!rgbWhite(dark.sidebar)&&!rgbWhite(dark.list)&&!rgbWhite(dark.main)&&!rgbWhite(dark.search),'dark surface leaked white '+JSON.stringify(dark));
+            assert(dark.scroll<=dark.client+3,'dark desktop overflow '+JSON.stringify(dark));
+
+            await page.locator('#settingsBtn').click();
+            await page.waitForSelector('.settings-page');
+            const settingsDark=await page.evaluate(()=>{
+              const bg=s=>{const n=document.querySelector(s);return n?getComputedStyle(n).backgroundColor:'';};
+              const page=document.querySelector('.settings-page')?.getBoundingClientRect();
+              return {
+                nav:bg('.settings-nav'),
+                panel:bg('.settings-panel-wrap'),
+                width:page?.width||0,
+                height:page?.height||0,
+                scroll:document.documentElement.scrollWidth,
+                client:document.documentElement.clientWidth,
+              };
+            });
+            assert(!rgbWhite(settingsDark.nav)&&!rgbWhite(settingsDark.panel),'dark Settings leaked light surface '+JSON.stringify(settingsDark));
+            assert(settingsDark.width>=876&&settingsDark.width<=884&&settingsDark.height>=716&&settingsDark.height<=724,'dark Settings geometry drift '+JSON.stringify(settingsDark));
+            assert(settingsDark.scroll<=settingsDark.client+3,'dark Settings overflow '+JSON.stringify(settingsDark));
+            await page.locator('#settingsBack').click();
+
+            await page.setViewportSize({width:390,height:844});
+            await page.waitForTimeout(120);
+            const mobileDark=await page.evaluate(()=>({
+              theme:document.documentElement.getAttribute('data-theme')||'',
+              scroll:document.documentElement.scrollWidth,
+              client:document.documentElement.clientWidth,
+              sidebar:getComputedStyle(document.querySelector('.sidebar')).backgroundColor,
+            }));
+            assert(mobileDark.theme==='dark'&&!rgbWhite(mobileDark.sidebar),'dark mobile surface drift '+JSON.stringify(mobileDark));
+            assert(mobileDark.scroll<=mobileDark.client+3,'dark mobile overflow '+JSON.stringify(mobileDark));
+
+            await page.setViewportSize({width:1440,height:900});
+            await page.evaluate(()=>{localStorage.setItem('vftb-theme','light');location.reload();});
+            await page.waitForLoadState('networkidle');
+            await page.waitForFunction(()=>document.documentElement.getAttribute('data-theme')==='light');
+            const light=await surfaceProbe();
+            assert(light.theme==='light','light theme did not restore '+JSON.stringify(light));
+            assert(light.sidebar!==dark.sidebar&&light.list!==dark.list,'light/dark surfaces do not diverge '+JSON.stringify({light,dark}));
+            assert(light.scroll<=light.client+3,'light desktop overflow '+JSON.stringify(light));
+            assert(errors.length===0,'page errors '+errors.join(' | '));
+
+            console.log('P02_V2564_DARK_SURFACE_PARITY=PASS');
+            console.log('P02_V2564_DARK_SETTINGS_PARITY=PASS');
+            console.log('P02_V2564_DARK_MOBILE_PARITY=PASS');
+            console.log('P02_DARK_PARITY=PASS');
+          } finally {
+            await browser.close();
+          }
+          EOF
+
+          cp scripts/ux-browser-reverify.sh scripts/ux-browser-reverify-dark-temp.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/ux-browser-reverify-dark-temp.sh')
+          s=p.read_text()
+          needle="echo 'P02_UX_CSP_CONSOLE_CLEAN=PASS'"
+          insert="""node tests/e2e/p02_dark_parity_temp.mjs | tee "$RUN_ROOT/browser-dark-parity.log"
+          grep -Fx 'P02_DARK_PARITY=PASS' "$RUN_ROOT/browser-dark-parity.log"
+          """
+          if needle not in s:
+              raise SystemExit('dark audit injection point missing')
+          p.write_text(s.replace(needle,insert+needle))
+          PY
+          chmod +x scripts/ux-browser-reverify-dark-temp.sh
+
+      - name: Run baseline and dark parity Chromium audit
+        working-directory: product
+        run: |
+          bash scripts/ux-browser-reverify-dark-temp.sh
+          echo P02_V2564_DARK_PARITY_AUDIT=PASS
+
+      - name: Remove transient private checkout
+        if: always()
+        run: rm -rf product
