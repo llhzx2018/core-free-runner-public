@@ -1,0 +1,166 @@
+name: TEMP P01 Visual QA Evidence
+
+on:
+  push:
+    branches:
+      - temp/p01-current-main-readiness-r44-20260920
+    paths:
+      - .github/workflows/p01-visual-qa-evidence.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      P01_SHA: 73a43f58ab9b052bf437ff908fdfdacdd22c7d17
+    steps:
+      - name: Checkout exact P01 source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: target
+
+      - name: Setup PHP 8.4
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring,openssl,fileinfo,gd
+          coverage: none
+
+      - name: Capture visual QA screenshots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$P01_SHA"
+
+          RUNTIME=/tmp/p01-visual-runtime
+          OUT=/tmp/p01-visual-evidence
+          rm -rf "$RUNTIME" "$OUT" /tmp/p01-visual.cookies
+          cp -a target/src "$RUNTIME"
+          mkdir -p "$OUT"
+
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18150 -t . >/tmp/p01-visual-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-visual.cookies -b /tmp/p01-visual.cookies http://127.0.0.1:18150/setup.php -o /tmp/p01-visual-setup.html; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+          test "$READY" = 1
+
+          CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-visual-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          P01_VISUAL_ADMIN_PASSWORD=$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(24))
+          PY
+          )
+          export P01_VISUAL_ADMIN_PASSWORD
+
+          curl -fsS -c /tmp/p01-visual.cookies -b /tmp/p01-visual.cookies             -X POST http://127.0.0.1:18150/setup.php             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode 'site_title=P01 Visual QA'             --data-urlencode "admin_password=$P01_VISUAL_ADMIN_PASSWORD"             --data-urlencode "admin_password_confirm=$P01_VISUAL_ADMIN_PASSWORD"             -o /tmp/p01-visual-setup-post.html
+
+          test -f app/.runtime.php
+
+          BROWSER_DIR=/tmp/p01-visual-browser
+          rm -rf "$BROWSER_DIR"
+          mkdir -p "$BROWSER_DIR"
+          cd "$BROWSER_DIR"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund playwright@1.57.0 >/dev/null 2>&1
+          npx playwright install chromium >/dev/null
+
+          cat > capture.mjs <<'JS'
+          import { chromium } from 'playwright';
+
+          const base='http://127.0.0.1:18150/';
+          const output='/tmp/p01-visual-evidence';
+          const password=process.env.P01_VISUAL_ADMIN_PASSWORD;
+          if(!password) throw new Error('visual admin password missing');
+
+          const viewports=[
+            {name:'390',width:390,height:844},
+            {name:'1440',width:1440,height:900},
+          ];
+          const scenes=[
+            ['01-overview','manage.php'],
+            ['02-pending','surface-manager.php'],
+            ['03-all-resources','surface-manager.php?advanced=1'],
+            ['04-navigation','links-admin.php'],
+            ['05-categories','links-admin.php?workspace=categories'],
+            ['06-transfer','transfer.php'],
+            ['07-browser-helper','browser-helper.php'],
+            ['08-system-health','system-health.php'],
+            ['09-system-info','system-info.php'],
+            ['10-update','update.php'],
+            ['11-settings-display','settings.php?section=display'],
+          ];
+
+          const browser=await chromium.launch({headless:true});
+          try{
+            for(const vp of viewports){
+              const context=await browser.newContext({
+                viewport:{width:vp.width,height:vp.height},
+                reducedMotion:'reduce',
+              });
+              const login=await context.request.post(base+'api.php?action=login',{
+                data:{password}
+              });
+              if(login.status()!==200) throw new Error('visual login failed viewport='+vp.name+' status='+login.status());
+              const loginJson=await login.json();
+              if(!loginJson?.ok) throw new Error('visual login response not ok viewport='+vp.name);
+
+              for(const [slug,route] of scenes){
+                const page=await context.newPage();
+                const response=await page.goto(base+route,{waitUntil:'networkidle',timeout:30000});
+                if(!response || response.status()!==200) throw new Error(route+' visual HTTP '+(response?.status()??'NO_RESPONSE'));
+                await page.waitForTimeout(200);
+                await page.screenshot({
+                  path:output+'/'+slug+'-'+vp.name+'.png',
+                  fullPage:true,
+                  animations:'disabled'
+                });
+                await page.close();
+              }
+              await context.close();
+            }
+          } finally {
+            await browser.close();
+          }
+          console.log('P01_VISUAL_QA_SCREENSHOT_COUNT=22');
+          JS
+
+          node capture.mjs
+
+          {
+            echo "P01_SHA=$P01_SHA"
+            echo "VIEWPORTS=390,1440"
+            echo "SCENES=11"
+            echo "SCREENSHOTS=22"
+          } > "$OUT/MANIFEST.txt"
+
+      - name: Upload visual QA evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: p01-visual-qa-evidence
+          path: /tmp/p01-visual-evidence
+          if-no-files-found: error
+          retention-days: 7
