@@ -93,6 +93,80 @@ jobs:
           echo "P02_V2581_UPDATE_SHA256=$(sha256sum "$TMP/build1/VF_Library_V2.5.81_UPDATE.zip" | awk '{print $1}')"
           echo P02_V2581_DETERMINISTIC_BUILD_GATE=PASS
 
+      - name: Direct upgrade 2.5.54 to 2.5.81
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          TMP="${RUNNER_TEMP}/p02-v2581-candidate"
+          REPAIR="$TMP/build1/repair-v2.5.81.php"
+          OLDSRC="$TMP/old-2.5.54"
+          SITE="$TMP/site-2.5.54"
+          COOKIE="$TMP/cookie-2.5.54.txt"
+          BASE="http://127.0.0.1:18254"
+          PASS="VF-P02-2.5.54-${GITHUB_RUN_ID}!"
+          cleanup() {
+            kill "${PID:-}" 2>/dev/null || true
+            git worktree remove --force "$OLDSRC" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "$OLDSRC" v2.5.54
+          bash "$OLDSRC/scripts/build-deploy-tree.sh" "$SITE"
+          php "$SITE/cli/check-requirements.php"
+          php -d display_errors=0 -S 127.0.0.1:18254 -t "$SITE" >"$TMP/server-2.5.54.log" 2>&1 &
+          PID=$!
+          for _ in $(seq 1 80); do
+            curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break
+            sleep .25
+          done
+          kill -0 "$PID"
+
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "$TMP/setup-2.5.54.html"
+          SETUP_CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search("name=\\\"setup_csrf\\\" value=\\\"([^\\\"]+)\\\"",s);assert m;print(html.unescape(m.group(1)))' "$TMP/setup-2.5.54.html")"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" \
+            --data-urlencode "setup_csrf=$SETUP_CSRF" \
+            --data-urlencode "password=$PASS" \
+            --data-urlencode "password_confirm=$PASS" "$BASE/setup.php")"
+          test "$CODE" = 303
+
+          php -d display_errors=1 -r '
+            require $argv[1]."/app/bootstrap.php";
+            $d=vftb_db();$n=gmdate("c");
+            $q=$d->prepare("INSERT INTO text_categories(parent_id,name,description,icon,sort_order,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?)");
+            $q->execute(["Upgrade 2.5.54","fixture","folder",100,$n,$n]);$c=(int)$d->lastInsertId();
+            $q=$d->prepare("INSERT INTO text_items(category_id,title,description,content,content_mode,content_format,primary_action,status,aliases,tags,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
+            $q->execute([$c,"UPGRADE_SENTINEL_2.5.54","fixture","preserve 2.5.54","quick","plain","copy","active","[]","[]",$n,$n]);
+            $itemId=(int)$d->lastInsertId();(new VfLibrarySearchService($d))->upsertItem($itemId);
+            $scratch=["version"=>1,"next_id"=>2,"tabs"=>[["id"=>1,"title"=>"Scratch 2.5.54","content"=>"SCRATCH_2.5.54_SENTINEL","is_open"=>true,"is_pinned"=>true,"sort_order"=>100,"cursor_pos"=>0,"scroll_top"=>0,"created_at"=>$n,"updated_at"=>$n,"closed_at"=>null]]];
+            $q=$d->prepare("INSERT INTO system_settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at");
+            $q->execute(["scratch_tabs_state_v1",json_encode($scratch,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$n]);
+          ' "$SITE"
+
+          cp "$REPAIR" "$SITE/repair-v2.5.81.php"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" "$BASE/repair-v2.5.81.php" > "$TMP/repair-form-2.5.54.html"
+          CSRF="$(python3 -c 'import html,re,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search("name=\\\"csrf\\\" value=\\\"([^\\\"]+)\\\"",s);assert m;print(html.unescape(m.group(1)))' "$TMP/repair-form-2.5.54.html")"
+          curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" \
+            --data-urlencode action=upgrade --data-urlencode "csrf=$CSRF" \
+            "$BASE/repair-v2.5.81.php" > "$TMP/repair-result-2.5.54.html"
+          grep -q '升级完成' "$TMP/repair-result-2.5.54.html"
+          test ! -e "$SITE/repair-v2.5.81.php"
+          test "$(tr -d '\r\n' < "$SITE/VERSION.txt")" = 2.5.81
+
+          php -d display_errors=1 -r '
+            require $argv[1]."/app/bootstrap.php";$d=vftb_db();
+            if(VfLibrarySchemaMigration::currentVersion($d)!==2401)exit(2);
+            $q=$d->prepare("SELECT content FROM text_items WHERE title=?");$q->execute(["UPGRADE_SENTINEL_2.5.54"]);
+            if($q->fetchColumn()!=="preserve 2.5.54")exit(3);
+            $q=$d->prepare("SELECT setting_value FROM system_settings WHERE setting_key=?");$q->execute(["scratch_tabs_state_v1"]);
+            if(strpos((string)$q->fetchColumn(),"SCRATCH_2.5.54_SENTINEL")===false)exit(4);
+            if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(5);
+            if(count($d->query("PRAGMA foreign_key_check")->fetchAll())!==0)exit(6);
+          ' "$SITE"
+          ( cd "$SITE" && php cli/verify.php ) > "$TMP/verify-2.5.54.json"
+          python3 -c 'import json,sys;x=json.load(open(sys.argv[1],encoding="utf-8"));assert x.get("ok") is True and int(x.get("schema_version",0))==2401,x' "$TMP/verify-2.5.54.json"
+          echo P02_V2581_DIRECT_UPGRADE_2_5_54=PASS
+
       - name: Direct upgrade 2.5.80 to 2.5.81
         shell: bash
         working-directory: product
