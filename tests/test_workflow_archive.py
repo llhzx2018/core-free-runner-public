@@ -23,13 +23,13 @@ class WorkflowArchiveTests(unittest.TestCase):
     def test_manifest_contains_only_public_safe_metadata(self):
         root = Path(__file__).resolve().parents[1]
         value = MODULE.build_manifest(root)
-        self.assertEqual(value["schema"], "core-free-runner-workflow-archive/v16")
-        self.assertEqual(value["entry_count"], 525)
-        self.assertEqual(value["category_counts"]["historical-version"], 400)
+        self.assertEqual(value["schema"], "core-free-runner-workflow-archive/v17")
+        self.assertEqual(value["entry_count"], 526)
+        self.assertEqual(value["category_counts"]["historical-version"], 401)
         self.assertEqual(value["category_counts"]["late-active"], 86)
-        self.assertEqual(value["base_manifest"]["path"], MODULE.V15_MANIFEST_PATH.as_posix())
-        self.assertEqual(value["delta"]["git_tree_sha"], MODULE.V16_BATCH_TREE_SHA)
-        self.assertEqual(value["delta"]["source_commit"], MODULE.V16_BATCH_SOURCE_COMMIT)
+        self.assertEqual(value["base_manifest"]["path"], MODULE.V16_MANIFEST_PATH.as_posix())
+        self.assertEqual(value["delta"]["git_tree_sha"], MODULE.V17_BATCH_TREE_SHA)
+        self.assertEqual(value["delta"]["source_commit"], MODULE.V17_BATCH_SOURCE_COMMIT)
 
         v10 = MODULE.build_v10_manifest(root)
         raw = json.dumps(v10, ensure_ascii=False)
@@ -99,6 +99,16 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertIn("p07-network-node-installer-smoke.yml", active)
         self.assertNotIn("p07-network-node-gate.yml", active)
         self.assertNotIn("p07-network-node-real-install-gate.yml", active)
+
+    def test_v17_public_infrastructure_archive_gate_is_inactive(self):
+        root = Path(__file__).resolve().parents[1]
+        archived = list((root / MODULE.V17_BATCH).glob("*.yml"))
+        self.assertEqual(len(archived), MODULE.V17_BATCH_ENTRY_COUNT)
+        self.assertEqual(MODULE._git_tree_sha(root, MODULE.V17_BATCH), MODULE.V17_BATCH_TREE_SHA)
+        active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
+        self.assertTrue(active.isdisjoint({path.name for path in archived}))
+        self.assertIn("runner-trigger-scope-gate.yml", active)
+        self.assertNotIn("runner-workflow-archive-gate.yml", active)
 
     def test_current_core_agent_harness_remains_active(self):
         root = Path(__file__).resolve().parents[1]
