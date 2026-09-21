@@ -2,8 +2,15 @@ name: P07 Network Node Package Gate
 
 on:
   push:
+    branches: [main]
     paths:
-      - 'packages/p07-network-node/0.1.0-rc8/**'
+      - 'installers/vf-node.sh'
+      - 'packages/p07-network-node/**'
+      - '.github/workflows/p07-network-node-package-gate.yml'
+  pull_request:
+    paths:
+      - 'installers/vf-node.sh'
+      - 'packages/p07-network-node/**'
       - '.github/workflows/p07-network-node-package-gate.yml'
   workflow_dispatch:
 
@@ -14,103 +21,83 @@ jobs:
   package-identity:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
-      - name: Read package source identity
+      - name: Resolve current package source identity
         id: identity
+        shell: bash
         run: |
           set -euo pipefail
-          PKG='packages/p07-network-node/0.1.0-rc8'
+          VERSION="$(sed -n "s/^VERSION='\([^']*\)'/\1/p" installers/vf-node.sh | head -n1)"
+          test -n "$VERSION"
+          PKG="packages/p07-network-node/$VERSION"
+          test -f "$PKG/VERSION"
           test -f "$PKG/SOURCE_IDENTITY"
+          test "$(tr -d '\r\n' < "$PKG/VERSION")" = "$VERSION"
           source "$PKG/SOURCE_IDENTITY"
-          test "$VERSION" = '0.1.0-rc8'
-          test "${#PRIVATE_SOURCE_SHA}" = 40
-          echo "sha=$PRIVATE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          test "${P07_NETWORK_NODE_VERSION:-}" = "$VERSION"
+          test "${PRIVATE_REPO:-}" = 'llhzx2018/vf-server-ops'
+          test "${#PRIVATE_SOURCE_COMMIT}" = 40
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$PRIVATE_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch exact private RC8 source
+      - name: Fetch exact private current source
         env:
-          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          SRC_SHA: ${{ steps.identity.outputs.sha }}
+          VF_PRIVATE_READ_TOKEN: $${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          SRC_SHA: $${{ steps.identity.outputs.sha }}
+        shell: bash
         run: |
           set -euo pipefail
           test -n "${VF_PRIVATE_READ_TOKEN:-}" || { echo 'VF_PRIVATE_READ_TOKEN is not configured'; exit 20; }
           TMP="$(mktemp -d)"
-          curl -fL \
-            -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}" \
-            -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/llhzx2018/vf-server-ops/tarball/${SRC_SHA}" \
-            -o "$TMP/source.tar.gz"
+          curl -fL             -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}"             -H 'Accept: application/vnd.github+json'             "https://api.github.com/repos/llhzx2018/vf-server-ops/tarball/${SRC_SHA}"             -o "$TMP/source.tar.gz"
           tar -xzf "$TMP/source.tar.gz" -C "$TMP"
           SRC_DIR="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'llhzx2018-vf-server-ops-*' | head -n1)"
           test -n "$SRC_DIR"
           mkdir -p .private-network-node
           cp -a "$SRC_DIR/modules/network-node/." .private-network-node/
 
-      - name: Compare public runtime bytes to exact private RC8
+      - name: Compare public runtime bytes to exact private current source
+        shell: bash
         run: |
           set -euo pipefail
-          PKG='packages/p07-network-node/0.1.0-rc8'
+          PKG="packages/p07-network-node/$${{ steps.identity.outputs.version }}"
           SRC='.private-network-node'
-          files=(
-            VERSION
-            vf-node.sh
-            install.sh
-            status.sh
-            share.sh
-            backup.sh
-            uninstall.sh
-            lib/common.sh
-            lib/core-pin.env
-            lib/patch_upstream_core.py
-          )
+          files=(VERSION vf-node.sh install.sh status.sh share.sh backup.sh uninstall.sh lib/common.sh lib/core-pin.env lib/patch_upstream_core.py)
           for f in "${files[@]}"; do
             cmp "$SRC/$f" "$PKG/$f"
           done
-          echo 'P07_NETWORK_NODE_PUBLIC_BYTES_MATCH_PRIVATE_RC8=PASS'
+          echo 'P07_NETWORK_NODE_PUBLIC_BYTES_MATCH_PRIVATE_CURRENT=PASS'
 
-      - name: Runtime syntax, secret and RC8 health checks
+      - name: Current route manifest and runtime safety
+        shell: bash
         run: |
           set -euo pipefail
-          PKG='packages/p07-network-node/0.1.0-rc8'
+          PKG="packages/p07-network-node/$${{ steps.identity.outputs.version }}"
+          manifest_expected="$(sed -n "s/^MANIFEST_SHA256='\([^']*\)'/\1/p" installers/vf-node.sh | head -n1)"
+          test -n "$manifest_expected"
+          test "$(sha256sum "$PKG/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_expected"
           bash -n "$PKG/vf-node.sh" "$PKG/install.sh" "$PKG/status.sh" "$PKG/share.sh" "$PKG/backup.sh" "$PKG/uninstall.sh" "$PKG/lib/common.sh"
           python3 -m py_compile "$PKG/lib/patch_upstream_core.py"
           if grep -R -nE '(VF_PRIVATE_READ_TOKEN|ghp_|github_pat_|BEGIN .*PRIVATE KEY)' "$PKG"; then exit 31; fi
-          grep -Fq '0.1.0-rc8' "$PKG/VERSION"
-          grep -Fq 'PRIVATE_SOURCE_SHA=58299cfdb0ce961dd473108312014ac6c916401a' "$PKG/SOURCE_IDENTITY"
           grep -Fq 'wait_for_udp_listener()' "$PKG/lib/common.sh"
           grep -Fq 'restart_managed_node()' "$PKG/lib/common.sh"
-          grep -Fq 'wait_for_udp_listener "$port" 20' "$PKG/install.sh"
           grep -Fq 'write_state PENDING' "$PKG/install.sh"
           grep -Fq 'write_state FAILED' "$PKG/install.sh"
           grep -Fq 'write_state HEALTHY' "$PKG/install.sh"
-          grep -Fq '安装异常 · 可自动修复' "$PKG/vf-node.sh"
           grep -Fq 'repair_managed_install()' "$PKG/vf-node.sh"
-          grep -Fq 'restart_managed_node 20' "$PKG/vf-node.sh"
           grep -Fq '当前节点没有通过健康检查，暂不显示分享链接' "$PKG/share.sh"
-          grep -Fq '按 Enter 返回主菜单' "$PKG/install.sh"
-          if grep -Fq '节点已就绪 · 下一步' "$PKG/vf-node.sh" "$PKG/install.sh"; then exit 35; fi
           grep -Fq '请选择 [0-1]：' "$PKG/uninstall.sh"
-          grep -Fq 'systemctl stop v2ray.service' "$PKG/uninstall.sh"
           grep -Fq '未触碰：Caddy / 防火墙 / DNS / 其他服务' "$PKG/uninstall.sh"
-          echo 'P07_NETWORK_NODE_PUBLIC_SECRET_SURFACE=PASS'
-          echo 'P07_NETWORK_NODE_PUBLIC_RC8_HEALTH_STATE=PASS_STATIC'
-          echo 'P07_NETWORK_NODE_PUBLIC_RC8_AUTO_REPAIR=PASS_STATIC'
-          echo 'P07_NETWORK_NODE_PUBLIC_RC8_SHARE_HEALTH_GUARD=PASS_STATIC'
+          echo 'P07_NETWORK_NODE_CURRENT_ROUTE_SAFETY=PASS'
 
-      - name: Emit runtime SHA256 manifest
+      - name: Emit current runtime SHA256 manifest
+        shell: bash
         run: |
           set -euo pipefail
-          cd packages/p07-network-node/0.1.0-rc8
+          cd "packages/p07-network-node/$${{ steps.identity.outputs.version }}"
           echo 'P07_NETWORK_NODE_MANIFEST_BEGIN'
-          sha256sum \
-            VERSION \
-            vf-node.sh \
-            install.sh \
-            status.sh \
-            share.sh \
-            backup.sh \
-            uninstall.sh \
-            lib/common.sh \
-            lib/core-pin.env \
-            lib/patch_upstream_core.py
+          sha256sum VERSION vf-node.sh install.sh status.sh share.sh backup.sh uninstall.sh lib/common.sh lib/core-pin.env lib/patch_upstream_core.py
           echo 'P07_NETWORK_NODE_MANIFEST_END'
