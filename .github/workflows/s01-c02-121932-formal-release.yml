@@ -1,0 +1,246 @@
+name: S01-C02 1.21.932 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121932-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: db44417cd76ec1dd8b9369222209be0148ad550b
+      TARGET_VERSION: 1.21.932
+      RELEASE_TAG: v1.21.932
+      ASSET_NAME: vf-tools-ops_V1.21.932.zip
+      EXPECTED_ASSET_BYTES: "3404820"
+      EXPECTED_ASSET_SHA256: 307cbcedd92acd62c40eaa69fff8d3335350edd74e2301ca47d2405f7d3981e3
+      EXPECTED_RUNTIME_FILE_COUNT: "962"
+      EXPECTED_RUNTIME_FINGERPRINT: 95e5b91de9772663db3cbdaa51064bbad9018dd9400c80f08d320d3cd35de225
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Verify credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test -n "$RELEASE_WRITE_TOKEN"
+          echo "RELEASE_CREDENTIALS=PASS"
+
+      - name: Checkout exact product main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify exact source and R43
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '$TARGET_VERSION'" target/vf-ops.php
+          grep -Fq "S01-NAVIGATION-ROLE-REBASELINE-R43" target/vf-ops.php
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli >/dev/null
+          find target -type f -name '*.php' -not -path '*/vendor/*' -print0 | xargs -0 -n1 php -l > php-lint.log
+          php target/tests/s01-c02-121932-navigation-role-r43-contract.php | tee r43.log
+          node --check target/assets/js/admin-s01-domain-shell-r1.js
+          grep -Fq "R43 contract PASS" r43.log
+          echo "EXACT_RELEASE_SOURCE=PASS"
+          echo "PHP_FILES_LINTED=$(wc -l < php-lint.log | tr -d ' ')"
+          echo "R43_RELEASE_CONTRACT=PASS"
+          echo "JS_SYNTAX=PASS"
+
+      - name: Build deterministic runtime asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, os, re, stat, zipfile
+          from pathlib import Path
+          root=Path("target")
+          out=Path(os.environ["ASSET_NAME"])
+          forbidden_dir=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',re.I)
+          forbidden_ext=re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+          allowed_root={"vf-ops.php","uninstall.php"}
+          allowed_prefix=("includes/","assets/","languages/","config/")
+          files={}
+          for p in root.rglob("*"):
+              if not p.is_file(): continue
+              rel=p.relative_to(root).as_posix()
+              if forbidden_dir.search(rel) or forbidden_ext.search(rel): continue
+              if "/" not in rel and rel not in allowed_root: continue
+              if "/" in rel and not rel.startswith(allowed_prefix): continue
+              if p.is_symlink(): raise SystemExit("RUNTIME_SYMLINK_FORBIDDEN:"+rel)
+              files[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+          if "vf-ops.php" not in files: raise SystemExit("PLUGIN_MAIN_MISSING")
+          canonical=b"".join(rel.encode()+b"\0"+files[rel].encode()+b"\n" for rel in sorted(files))
+          fp=hashlib.sha256(canonical).hexdigest()
+          with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel in sorted(files):
+                  data=(root/rel).read_bytes()
+                  zi=zipfile.ZipInfo("vf-ops/"+rel,date_time=(1980,1,1,0,0,0))
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  zi.external_attr=(stat.S_IFREG|0o644)<<16
+                  z.writestr(zi,data)
+          sha=hashlib.sha256(out.read_bytes()).hexdigest()
+          size=out.stat().st_size
+          expected_count=int(os.environ["EXPECTED_RUNTIME_FILE_COUNT"])
+          if len(files)!=expected_count: raise SystemExit(f"RUNTIME_COUNT_DRIFT:{len(files)}")
+          if fp!=os.environ["EXPECTED_RUNTIME_FINGERPRINT"]: raise SystemExit("RUNTIME_FINGERPRINT_DRIFT:"+fp)
+          if size!=int(os.environ["EXPECTED_ASSET_BYTES"]): raise SystemExit(f"ASSET_BYTES_DRIFT:{size}")
+          if sha!=os.environ["EXPECTED_ASSET_SHA256"]: raise SystemExit("ASSET_SHA_DRIFT:"+sha)
+          print("PACKAGE_BUILD=PASS")
+          print("RUNTIME_FILE_COUNT="+str(len(files)))
+          print("RUNTIME_FINGERPRINT_SHA256="+fp)
+          print("ASSET_BYTES="+str(size))
+          print("ASSET_SHA256="+sha)
+          PY
+
+      - name: Assert tag and release absent or exact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/tmp/existing-release.json 2>/dev/null; then
+            echo "FORMAL_RELEASE_ALREADY_EXISTS"
+            EXISTING_TARGET="$(jq -r '.target_commitish // ""' /tmp/existing-release.json)"
+            test "$EXISTING_TARGET" = "$TARGET_SHA" || test "$EXISTING_TARGET" = "main"
+          else
+            echo "FORMAL_RELEASE_ABSENT=PASS"
+          fi
+
+      - name: Create formal tag release and exact asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "RELEASE_CREATE=SKIPPED_ALREADY_EXISTS"
+          else
+            cat > release-notes.md <<'MD'
+          S01-C02 · VF Tools Ops · V1.21.932
+
+          R43 Navigation Role Rebaseline:
+          - six persistent VF primary domains only
+          - no persistent secondary horizontal navigation
+          - no persistent tertiary navigation
+          - Content & SEO / Quality / System use one-layer transient flyouts
+          - Dashboard / Tools / Publish remain direct destinations
+          - all 26 formal OWNER routes remain discoverable
+          - Route Registry no longer auto-generates OWNER navigation
+          - R38/R39/R40/R41 single Shell authorities preserved
+          - Schema/Data/Write Semantics/Permission/Updater/Component Ownership unchanged
+
+          Exact source:
+          db44417cd76ec1dd8b9369222209be0148ad550b
+          MD
+            gh release create "$RELEASE_TAG" "$ASSET_NAME" \
+              --repo "$TARGET_REPOSITORY" \
+              --target "$TARGET_SHA" \
+              --title "VF Tools Ops V1.21.932" \
+              --notes-file release-notes.md
+            echo "RELEASE_CREATE=PASS"
+          fi
+
+      - name: Remote release asset readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          RELEASE_ID="$(jq -r '.id' release.json)"
+          TAG_TARGET="$(jq -r '.target_commitish' release.json)"
+          ASSET_ID="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .id' release.json)"
+          ASSET_SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .size' release.json)"
+          ASSET_DIGEST="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | (.digest // "")' release.json)"
+          PUBLISHED_AT="$(jq -r '.published_at' release.json)"
+          test -n "$RELEASE_ID"
+          test -n "$ASSET_ID"
+          test "$ASSET_SIZE" = "$EXPECTED_ASSET_BYTES"
+          if [ -n "$ASSET_DIGEST" ] && [ "$ASSET_DIGEST" != "null" ]; then
+            test "$ASSET_DIGEST" = "sha256:$EXPECTED_ASSET_SHA256"
+          fi
+          rm -rf readback && mkdir readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback --clobber
+          READBACK_SHA="$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')"
+          READBACK_BYTES="$(stat -c %s "readback/$ASSET_NAME")"
+          test "$READBACK_SHA" = "$EXPECTED_ASSET_SHA256"
+          test "$READBACK_BYTES" = "$EXPECTED_ASSET_BYTES"
+          REF_SHA="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$REF_SHA" = "$TARGET_SHA"
+          printf '%s\n' "$RELEASE_ID" > release-id.txt
+          printf '%s\n' "$ASSET_ID" > asset-id.txt
+          printf '%s\n' "$PUBLISHED_AT" > published-at.txt
+          echo "FORMAL_RELEASE_REMOTE_READBACK=PASS"
+          echo "RELEASE_ID=$RELEASE_ID"
+          echo "ASSET_ID=$ASSET_ID"
+          echo "TAG_TARGET=$REF_SHA"
+          echo "ASSET_BYTES=$READBACK_BYTES"
+          echo "ASSET_SHA256=$READBACK_SHA"
+          echo "PUBLISHED_AT=$PUBLISHED_AT"
+
+      - name: Build sanitized release evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          p={
+            "schema":"vf-release/s01-c02-formal-v1",
+            "version":os.environ["TARGET_VERSION"],
+            "tag":os.environ["RELEASE_TAG"],
+            "target_sha":os.environ["TARGET_SHA"],
+            "release_id":Path("release-id.txt").read_text().strip(),
+            "asset_id":Path("asset-id.txt").read_text().strip(),
+            "asset_name":os.environ["ASSET_NAME"],
+            "asset_bytes":int(os.environ["EXPECTED_ASSET_BYTES"]),
+            "asset_sha256":os.environ["EXPECTED_ASSET_SHA256"],
+            "runtime_file_count":int(os.environ["EXPECTED_RUNTIME_FILE_COUNT"]),
+            "runtime_fingerprint_sha256":os.environ["EXPECTED_RUNTIME_FINGERPRINT"],
+            "schema_from":"6.0.0",
+            "schema_to":"6.0.0",
+            "published_at":Path("published-at.txt").read_text().strip(),
+            "remote_readback_pass":True,
+            "private_source_persisted":False,
+            "secret_values_persisted":False
+          }
+          raw=json.dumps(p,sort_keys=True).encode()
+          p["evidence_sha256"]=hashlib.sha256(raw).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-121932-formal-release.json").write_text(json.dumps(p,indent=2,sort_keys=True),encoding="utf-8")
+          print("FORMAL_RELEASE_EVIDENCE_SHA256="+p["evidence_sha256"])
+          PY
+
+      - name: Remove private product bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target readback "$ASSET_NAME"
+          echo "PRIVATE_PRODUCT_BYTES_REMOVED=PASS"
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121932-formal-release-${{ github.run_id }}
+          path: evidence/s01-c02-121932-formal-release.json
+          if-no-files-found: error
+          retention-days: 14
