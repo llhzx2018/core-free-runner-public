@@ -150,6 +150,23 @@ try{
         record('candidate-mobile-domain',route,visible);
         if(!visible.ok)fail('CANDIDATE_MOBILE_ACTIVE_DOMAIN_'+(route||'index'),JSON.stringify(visible));
         if(route==='software.php'&&visible.marker!=='1')fail('CANDIDATE_SOFTWARE_ACTIVE_DOMAIN_MARKER',JSON.stringify(visible));
+        if(route==='start.php'){
+          const categoryControl=await page.evaluate(()=>{
+            const select=document.querySelector('.vf-mobile-functional-filters select[aria-label="导航分类"]');
+            const trigger=document.querySelector('.vf-mobile-category-trigger');
+            const isVisible=(el)=>{
+              if(!el)return false;
+              const style=getComputedStyle(el),rect=el.getBoundingClientRect();
+              return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0;
+            };
+            return {
+              enhanced:!!document.querySelector('.vf-mobile-functional-filters.is-picker-enhanced'),
+              selectVisible:isVisible(select),
+              triggerVisible:isVisible(trigger)
+            };
+          });
+          assert(categoryControl.enhanced&&categoryControl.triggerVisible&&!categoryControl.selectVisible,'r5_mobile_navigation_single_category_control',JSON.stringify(categoryControl));
+        }
         if(route==='channels.php'){
           const density=await page.evaluate(()=>{
             const stats=document.querySelector('.vf-channel-stats');
