@@ -300,6 +300,22 @@ try{
       assert(await overlay.locator('.vf-mobile-category-search input').isVisible(),'r5_mobile_navigation_picker_search_visible');
       await m.keyboard.press('Escape');
     }
+    if(route==='watch.php'){
+      const watchDensity=await m.evaluate(()=>{
+        const selects=[...document.querySelectorAll('.vf-watch-selects select')];
+        const tops=selects.map(el=>Math.round(el.getBoundingClientRect().top));
+        const first=document.querySelector('.vf-watch-library-card');
+        return {
+          count:selects.length,
+          topSpread:tops.length?Math.max(...tops)-Math.min(...tops):999,
+          firstCardTop:first?Math.round(first.getBoundingClientRect().top):0,
+          viewportHeight:window.innerHeight
+        };
+      });
+      assert(watchDensity.count===3,'r6_mobile_watch_three_advanced_filters_preserved',JSON.stringify(watchDensity));
+      assert(watchDensity.topSpread<=4,'r6_mobile_watch_filters_single_row',JSON.stringify(watchDensity));
+      assert(watchDensity.firstCardTop>0&&watchDensity.firstCardTop<=825,'r6_mobile_watch_first_card_early',JSON.stringify(watchDensity));
+    }
   }
 
   // Mobile owner account chrome: one persistent More trigger, low-frequency actions inside the menu.
