@@ -1,0 +1,222 @@
+name: S01-C02 1.21.939 Owner Preview
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121939-owner-preview.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  owner-preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: 9e15e5ad0ebb127b146b50731eeeaaf726f895e5
+      TARGET_VERSION: 1.21.939
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Checkout exact Ops candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+
+      - name: Verify exact candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" ops/vf-ops.php
+          echo "OWNER_PREVIEW_SOURCE_IDENTITY=PASS"
+
+      - name: Start disposable WordPress preview
+        id: preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          docker network create vf-preview-net >/dev/null
+          docker volume create vf-preview-wp >/dev/null
+
+          docker run -d --name vf-preview-db --network vf-preview-net \
+            -e MYSQL_ROOT_PASSWORD=preview-root \
+            -e MYSQL_DATABASE=wordpress \
+            -e MYSQL_USER=wordpress \
+            -e MYSQL_PASSWORD=preview-pass \
+            mysql:8.0 >/dev/null
+
+          for i in $(seq 1 90); do
+            if docker exec vf-preview-db mysqladmin ping -uroot -ppreview-root --silent >/dev/null 2>&1; then
+              echo "MYSQL_READY=PASS"
+              break
+            fi
+            sleep 2
+          done
+          docker exec vf-preview-db mysqladmin ping -uroot -ppreview-root --silent >/dev/null
+
+          docker run -d --name vf-preview-wp --network vf-preview-net -p 9400:80 \
+            -e WORDPRESS_DB_HOST=vf-preview-db:3306 \
+            -e WORDPRESS_DB_USER=wordpress \
+            -e WORDPRESS_DB_PASSWORD=preview-pass \
+            -e WORDPRESS_DB_NAME=wordpress \
+            -v vf-preview-wp:/var/www/html \
+            -v "$PWD/ops:/var/www/html/wp-content/plugins/vf-ops:ro" \
+            wordpress:php8.3-apache >/dev/null
+
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:9400/ >/dev/null 2>&1; then
+              echo "WORDPRESS_HTTP_READY=PASS"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9400/ >/dev/null
+
+          docker run -d --name vf-preview-cf --network vf-preview-net \
+            cloudflare/cloudflared:latest tunnel --no-autoupdate --url http://vf-preview-wp:80 >/dev/null
+
+          ORIGIN=""
+          for i in $(seq 1 90); do
+            ORIGIN="$(docker logs vf-preview-cf 2>&1 | grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' | head -n1 || true)"
+            if [ -n "$ORIGIN" ]; then
+              echo "PREVIEW_ORIGIN=$ORIGIN"
+              break
+            fi
+            sleep 1
+          done
+          test -n "$ORIGIN"
+
+          # WordPress must understand TLS is terminated at Cloudflare.
+          docker exec -i vf-preview-wp php <<'PHP'
+          <?php
+          $path='/var/www/html/wp-config.php';
+          for ($i=0; $i<60 && !is_file($path); $i++) { usleep(250000); }
+          $c=file_get_contents($path);
+          if (strpos($c, 'HTTP_X_FORWARDED_PROTO') === false) {
+              $inject = <<<'CFG'
+          if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strpos((string) $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+              $_SERVER['HTTPS'] = 'on';
+              $_SERVER['SERVER_PORT'] = 443;
+          }
+          define('FORCE_SSL_ADMIN', true);
+
+          CFG;
+              $needle="/* That's all, stop editing! Happy publishing. */";
+              if (strpos($c,$needle)!==false) $c=str_replace($needle,$inject.$needle,$c);
+              else $c=str_replace("require_once ABSPATH . 'wp-settings.php';",$inject."require_once ABSPATH . 'wp-settings.php';",$c);
+              file_put_contents($path,$c);
+          }
+          PHP
+
+          CLI_ENV=(
+            -e WORDPRESS_DB_HOST=vf-preview-db:3306
+            -e WORDPRESS_DB_USER=wordpress
+            -e WORDPRESS_DB_PASSWORD=preview-pass
+            -e WORDPRESS_DB_NAME=wordpress
+          )
+
+          docker run --rm --user 33:33 --network vf-preview-net "${CLI_ENV[@]}" \
+            -v vf-preview-wp:/var/www/html \
+            -v "$PWD/ops:/var/www/html/wp-content/plugins/vf-ops:ro" \
+            wordpress:cli wp core install \
+              --path=/var/www/html \
+              --url="$ORIGIN" \
+              --title="VF Tools Ops 1.21.939 Preview" \
+              --admin_user=preview-owner \
+              --admin_password='Preview-Only-121939!' \
+              --admin_email=preview@example.test \
+              --skip-email
+
+          docker run --rm --user 33:33 --network vf-preview-net "${CLI_ENV[@]}" \
+            -v vf-preview-wp:/var/www/html \
+            -v "$PWD/ops:/var/www/html/wp-content/plugins/vf-ops:ro" \
+            wordpress:cli wp plugin activate vf-ops --path=/var/www/html
+
+          TOKEN="$(openssl rand -hex 16)"
+          docker exec vf-preview-wp mkdir -p /var/www/html/wp-content/mu-plugins
+          docker exec -i vf-preview-wp sh -c 'cat > /var/www/html/wp-content/mu-plugins/vf-owner-preview-login.php' <<'PHP'
+          <?php
+          add_action('init', function () {
+              $expected='__TOKEN__';
+              $provided=isset($_GET['vf_owner_preview']) && !is_array($_GET['vf_owner_preview'])
+                  ? (string) $_GET['vf_owner_preview'] : '';
+              if ($provided==='' || !hash_equals($expected,$provided)) return;
+              $user=get_user_by('login','preview-owner');
+              if (!$user) wp_die('Preview owner unavailable.');
+              wp_set_current_user((int)$user->ID);
+              wp_set_auth_cookie((int)$user->ID,false,is_ssl());
+              wp_safe_redirect(admin_url('admin.php?page=vf-toolsite-ops'));
+              exit;
+          },1);
+          PHP
+          docker exec vf-preview-wp sed -i "s/__TOKEN__/$TOKEN/g" /var/www/html/wp-content/mu-plugins/vf-owner-preview-login.php
+          docker exec vf-preview-wp chown -R www-data:www-data /var/www/html/wp-content/mu-plugins
+
+          LOGIN_URL="$ORIGIN/?vf_owner_preview=$TOKEN"
+          rm -f preview.cookies preview.html
+          OK=0
+          for i in $(seq 1 60); do
+            CODE="$(curl -L --max-redirs 8 -sS -c preview.cookies -b preview.cookies -o preview.html -w '%{http_code}' "$LOGIN_URL" || true)"
+            if [ "$CODE" = "200" ] \
+              && grep -Fq "VF 站点运营" preview.html \
+              && grep -Fq "内容与 SEO" preview.html \
+              && grep -Fq "组件与系统" preview.html; then
+              OK=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$OK" != "1" ]; then
+            echo "PUBLIC_OWNER_PREVIEW=FAIL HTTP=${CODE:-}"
+            grep -E "wp-login|VF 站点运营|内容与 SEO|组件与系统|fatal|error" preview.html | head -n 100 || true
+            docker logs vf-preview-wp --tail 120 || true
+            exit 1
+          fi
+
+          HOST="${ORIGIN#https://}"
+          printf '%s\n' "$LOGIN_URL" > owner-preview-url.txt
+          printf '%s\n' "$HOST" > owner-preview-host.txt
+          printf '%s\n' "$TOKEN" > owner-preview-token.txt
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "OWNER_PREVIEW_RUNTIME=PASS"
+          echo "OWNER_PREVIEW_URL=$LOGIN_URL"
+          echo "PRODUCTION_UNTOUCHED=YES"
+
+      - name: Publish preview coordinate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121939-owner-preview__${{ steps.preview.outputs.host }}__${{ steps.preview.outputs.token }}
+          path: owner-preview-url.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Hold preview for OWNER real-use
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "OWNER_PREVIEW_HOLD=START"
+          for i in $(seq 1 84); do
+            sleep 30
+            test "$(docker inspect -f '{{.State.Running}}' vf-preview-wp)" = "true"
+            test "$(docker inspect -f '{{.State.Running}}' vf-preview-db)" = "true"
+            test "$(docker inspect -f '{{.State.Running}}' vf-preview-cf)" = "true"
+          done
+          echo "OWNER_PREVIEW_HOLD=COMPLETE"
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f vf-preview-cf vf-preview-wp vf-preview-db >/dev/null 2>&1 || true
+          docker volume rm vf-preview-wp >/dev/null 2>&1 || true
+          docker network rm vf-preview-net >/dev/null 2>&1 || true
