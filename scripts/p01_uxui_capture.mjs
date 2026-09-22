@@ -195,6 +195,25 @@ try{
   for(const route of ['index.php','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php']){
     await capture(m,'owner-mobile',route,localBase,'owner-mobile');
   }
+
+  // Mobile owner account chrome: one persistent More trigger, low-frequency actions inside the menu.
+  await m.goto(localBase+'software.php',{waitUntil:'networkidle'});
+  const directSettings=m.locator('.vf-global-account-actions > .vf-global-account-settings');
+  const directLogout=m.locator('.vf-global-account-actions > .vf-global-account-logout');
+  const more=m.locator('[data-vf-global-account-more]');
+  assert(await more.isVisible(),'mobile_account_more_visible');
+  assert(!(await directSettings.isVisible()),'mobile_direct_settings_hidden');
+  assert(!(await directLogout.isVisible()),'mobile_direct_logout_hidden');
+  await more.click();
+  const accountMenu=m.locator('[data-vf-global-account-menu]:not([hidden])');
+  await accountMenu.waitFor({state:'visible',timeout:5000});
+  const menuText=(await accountMenu.innerText()).replace(/\s+/g,' ').trim();
+  for(const label of ['设置','资源管理','回收站','退出登录']){
+    assert(menuText.includes(label),'mobile_account_menu_'+label);
+  }
+  await m.screenshot({path:path.join(out,'owner-mobile-account-menu.png'),fullPage:true});
+  record('owner-interaction','mobile-account-menu',{status:200,screenshot:'owner-mobile-account-menu.png',menuText});
+
   const mobileAdminRoutes=[
     'manage.php','surface-manager.php','surface-manager.php?advanced=1','links-admin.php',
     'transfer.php','data-safety.php','system-health.php','plugins.php',
