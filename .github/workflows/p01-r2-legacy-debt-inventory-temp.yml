@@ -1,0 +1,115 @@
+name: p01-r2-legacy-debt-inventory-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-r2-legacy-debt-inventory-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      STABLE_SHA: e860c52a6be09fa2087e93c9d3f88795f0edeb13
+      CURRENT_SHA: 25700757ef1dd633207e45650ff0808e0839e296
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact stable and current
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          for name in stable current; do
+            git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$name"
+          done
+          git -C stable fetch -q --depth 1 origin "$STABLE_SHA"
+          git -C stable checkout -q --detach FETCH_HEAD
+          git -C current fetch -q --depth 1 origin "$CURRENT_SHA"
+          git -C current checkout -q --detach FETCH_HEAD
+          test "$(git -C stable rev-parse HEAD)" = "$STABLE_SHA"
+          test "$(git -C current rev-parse HEAD)" = "$CURRENT_SHA"
+          echo P01_R2_EXACT_SOURCES=PASS
+
+      - name: Build legacy debt inventory with failure signatures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re, subprocess
+
+          roots={"stable":pathlib.Path("stable"),"current":pathlib.Path("current")}
+          results={}
+          for name,root in roots.items():
+              inv={}
+              for f in sorted((root/"tests/unit").glob("*.php")):
+                  rel=str(f.relative_to(root))
+                  p=subprocess.run(["php",str(f)],cwd=str(root),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  out=p.stdout.replace("\r","").strip()
+                  inv[rel]={"rc":p.returncode,"out":out}
+              results[name]=inv
+
+          stable_fail={k for k,v in results["stable"].items() if v["rc"]!=0}
+          current_fail={k for k,v in results["current"].items() if v["rc"]!=0}
+          legacy=sorted(stable_fail & current_fail)
+          new=sorted(current_fail-stable_fail)
+          resolved=sorted(stable_fail-current_fail)
+
+          def compact(s):
+              s=re.sub(r"\s+"," ",s).strip()
+              s=re.sub(r"/home/runner/work/[^ ]+","<PATH>",s)
+              return s[:420]
+
+          rows=[]
+          for rel in legacy:
+              sf=roots["stable"]/rel
+              cf=roots["current"]/rel
+              same=sf.exists() and cf.exists() and sf.read_bytes()==cf.read_bytes()
+              sout=compact(results["stable"][rel]["out"])
+              cout=compact(results["current"][rel]["out"])
+              # Objective first-pass signal only; semantic class is decided after readback.
+              low=(sout+" "+cout).lower()
+              if any(x in low for x in ["could not find driver","no such file or directory","permission denied","connection refused","failed to open stream","class \"","undefined function","curl error","unable to open database"]):
+                  signal="HARNESS_ENV_SIGNAL"
+              elif any(x in low for x in ["changed unexpectedly","must not return","missing:","contract missing","must remain","must use","must include","must expose","must not","expected"]):
+                  signal="CONTRACT_DRIFT_SIGNAL"
+              else:
+                  signal="UNCLASSIFIED_SIGNAL"
+              rows.append({
+                  "test":rel,
+                  "same_test_bytes":same,
+                  "signal":signal,
+                  "stable":sout,
+                  "current":cout,
+              })
+
+          print(f"P01_R2_STABLE_TESTS={len(results['stable'])}")
+          print(f"P01_R2_CURRENT_TESTS={len(results['current'])}")
+          print(f"P01_R2_STABLE_FAILURES={len(stable_fail)}")
+          print(f"P01_R2_CURRENT_FAILURES={len(current_fail)}")
+          print(f"P01_R2_LEGACY_DEBT={len(legacy)}")
+          print(f"P01_R2_NEW_FAILURES={len(new)}")
+          print(f"P01_R2_RESOLVED_FAILURES={len(resolved)}")
+          for r in rows:
+              print("P01_R2_DEBT_ITEM="+json.dumps(r,ensure_ascii=False,separators=(",",":")))
+          for x in new: print("P01_R2_NEW_FAILURE="+x)
+          for x in resolved: print("P01_R2_RESOLVED_FAILURE="+x)
+          print("P01_R2_INVENTORY=PASS")
+          PY
+
+      - name: Source clean
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -z "$(git -C stable status --porcelain)"
+          test -z "$(git -C current status --porcelain)"
+          echo P01_R2_SOURCE_UNCHANGED=PASS
