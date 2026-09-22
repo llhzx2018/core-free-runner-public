@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ART=/tmp/p01-v24741-artifacts
-REL39=/tmp/p01-rel40
+REL40=/tmp/p01-rel40
 TARGET=2.47.41
 SOURCE=2.47.40
 SCHEMA=2026090401
@@ -88,7 +88,7 @@ test "$(tr -d '\r\n ' </tmp/p01-v24741-full-runtime/VERSION.txt)" = "$TARGET"
 echo P01_V24741_CLEAN_FULL_INSTALL=PASS
 
 # Build a real installed V2.47.40 source for Atomic verification.
-install_full "$REL39/VF-Start-V2.47.40-FULL.zip" /tmp/p01-v24740-upgrade 18464 "VF Start V2.47.40 Upgrade Source"
+install_full "$REL40/VF-Start-V2.47.40-FULL.zip" /tmp/p01-v24740-upgrade 18464 "VF Start V2.47.40 Upgrade Source"
 
 cat >/tmp/p01-v24740-upgrade/sentinel.php <<'PHP'
 <?php
@@ -122,7 +122,7 @@ echo P01_V24741_ATOMIC_UPGRADE=PASS
 echo P01_V24741_ATOMIC_IDEMPOTENCY=PASS
 
 # Failure/rollback gate from a separate exact V2.47.40 install.
-install_full "$REL39/VF-Start-V2.47.40-FULL.zip" /tmp/p01-v24740-rollback 18465 "VF Start V2.47.40 Rollback Source"
+install_full "$REL40/VF-Start-V2.47.40-FULL.zip" /tmp/p01-v24740-rollback 18465 "VF Start V2.47.40 Rollback Source"
 cat >/tmp/p01-v24740-rollback/sentinel.php <<'PHP'
 <?php
 declare(strict_types=1);
