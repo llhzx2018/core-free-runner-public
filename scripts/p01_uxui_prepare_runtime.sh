@@ -90,7 +90,7 @@ $save([
   'description'=>'课程资源示例','tags'=>['课程'],'is_private'=>0,'is_pending'=>0
 ]);
 $save([
-  'surface'=>'projects','title'=>'P01 · VF Start','url'=>'https://start.kewaro.com/',
+  'surface'=>'projects','title'=>'P01 · VF Start','url'=>'https://example.com/projects/p01-vf-start',
   'description'=>'项目资源示例','tags'=>['VF','项目'],'is_private'=>0,'is_pending'=>0
 ]);
 
