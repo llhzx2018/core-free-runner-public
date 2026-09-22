@@ -1,0 +1,450 @@
+name: S01-C02 1.21.930 Formal Release + Distribution
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121930-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release-distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      CORE_REPOSITORY: llhzx2018/core-updates
+      TARGET_SHA: 10678e2370df16c5fd08d7749e9916fee0050a59
+      TARGET_VERSION: 1.21.930
+      PREVIOUS_VERSION: 1.21.929
+      TAG: v1.21.930
+      ASSET_NAME: vf-tools-ops_V1.21.930.zip
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Verify release capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo "RELEASE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING"; exit 78; }
+          test -n "$RELEASE_TOKEN" || { echo "RELEASE_BLOCK=VF_RELEASE_WRITE_TOKEN_MISSING"; exit 78; }
+          command -v gh >/dev/null
+          command -v python3 >/dev/null
+          command -v jq >/dev/null
+          echo "RELEASE_CAPABILITIES=PASS"
+
+      - name: Checkout exact product source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify exact release source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ACTUAL_SHA="$(git -C target rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '$TARGET_VERSION'" target/vf-ops.php
+          grep -Fq "S01-RETIRED-COMPAT-SURFACE-CLOSURE-R41" target/vf-ops.php
+          echo "RELEASE_SOURCE_IDENTITY=PASS"
+
+      - name: Build deterministic runtime-only component package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, stat, zipfile
+          from pathlib import Path
+
+          root = Path("target")
+          out = Path(os.environ["ASSET_NAME"])
+          if out.exists():
+              out.unlink()
+
+          forbidden_dir = re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)', re.I)
+          forbidden_ext = re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$', re.I)
+          allowed_root = {"vf-ops.php", "uninstall.php"}
+          allowed_prefix = ("includes/", "assets/", "languages/", "config/")
+
+          def is_runtime(rel: str) -> bool:
+              rel = rel.replace("\\", "/").lstrip("/")
+              if not rel or "../" in rel:
+                  return False
+              if forbidden_dir.search(rel) or forbidden_ext.search(rel):
+                  return False
+              if "/" not in rel:
+                  return rel in allowed_root
+              return rel.startswith(allowed_prefix)
+
+          files = {}
+          for p in root.rglob("*"):
+              if not p.is_file():
+                  continue
+              rel = p.relative_to(root).as_posix()
+              if not is_runtime(rel):
+                  continue
+              if p.is_symlink():
+                  raise SystemExit(f"RUNTIME_SYMLINK_FORBIDDEN:{rel}")
+              data = p.read_bytes()
+              files[rel] = hashlib.sha256(data).hexdigest()
+
+          if "vf-ops.php" not in files:
+              raise SystemExit("PLUGIN_MAIN_MISSING")
+
+          canonical = b"".join(
+              rel.encode("utf-8") + b"\0" + files[rel].encode("ascii") + b"\n"
+              for rel in sorted(files)
+          )
+          runtime_fp = hashlib.sha256(canonical).hexdigest()
+
+          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for rel in sorted(files):
+                  data = (root / rel).read_bytes()
+                  zi = zipfile.ZipInfo(f"vf-ops/{rel}", date_time=(1980,1,1,0,0,0))
+                  zi.compress_type = zipfile.ZIP_DEFLATED
+                  zi.external_attr = (stat.S_IFREG | 0o644) << 16
+                  z.writestr(zi, data)
+
+          asset_bytes = out.stat().st_size
+          asset_sha = hashlib.sha256(out.read_bytes()).hexdigest()
+          meta = {
+              "schema": "vf-wordpress-component-release-meta-v1",
+              "project_id": "S01",
+              "component_id": "S01-C02",
+              "target_repository": os.environ["TARGET_REPOSITORY"],
+              "target_sha": os.environ["TARGET_SHA"],
+              "version": os.environ["TARGET_VERSION"],
+              "tag": os.environ["TAG"],
+              "asset_name": os.environ["ASSET_NAME"],
+              "asset_bytes": asset_bytes,
+              "asset_sha256": asset_sha,
+              "runtime_file_count": len(files),
+              "runtime_fingerprint_sha256": runtime_fp,
+              "schema_from": "6.0.0",
+              "schema_to": "6.0.0",
+              "backup_required": True,
+              "rollback_supported": True,
+          }
+          Path("release-meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+          print("PACKAGE_BUILD=PASS")
+          print(f"RUNTIME_FILE_COUNT={len(files)}")
+          print(f"RUNTIME_FINGERPRINT_SHA256={runtime_fp}")
+          print(f"ASSET_BYTES={asset_bytes}")
+          print(f"ASSET_SHA256={asset_sha}")
+          PY
+
+      - name: Validate component package contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, zipfile
+          from pathlib import Path
+          meta=json.loads(Path("release-meta.json").read_text(encoding="utf-8"))
+          asset=Path(os.environ["ASSET_NAME"])
+          if hashlib.sha256(asset.read_bytes()).hexdigest()!=meta["asset_sha256"]:
+              raise SystemExit("ASSET_SHA_DRIFT")
+          with zipfile.ZipFile(asset) as z:
+              names=[n for n in z.namelist() if not n.endswith("/")]
+              if not names or any(not n.startswith("vf-ops/") for n in names):
+                  raise SystemExit("PACKAGE_TOP_LEVEL_INVALID")
+              if any("/../" in f"/{n}/" or n.startswith("/") for n in names):
+                  raise SystemExit("ZIP_PATH_INVALID")
+              rel=[n[len("vf-ops/"):] for n in names]
+              if len(rel)!=meta["runtime_file_count"]:
+                  raise SystemExit("RUNTIME_COUNT_MISMATCH")
+              forbidden=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)|\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+              bad=[r for r in rel if forbidden.search(r)]
+              if bad:
+                  raise SystemExit("FORBIDDEN_RUNTIME_FILES:"+",".join(bad[:10]))
+              main=z.read("vf-ops/vf-ops.php").decode("utf-8")
+              if not re.search(r'^\s*\*\s*Plugin Name:\s*VF Tools Ops\s*$',main,re.M):
+                  raise SystemExit("PLUGIN_NAME_INVALID")
+              version=os.environ["TARGET_VERSION"]
+              if not re.search(r'^\s*\*\s*Version:\s*'+re.escape(version)+r'\s*$',main,re.M):
+                  raise SystemExit("PLUGIN_VERSION_INVALID")
+          print("PACKAGE_CONTRACT=PASS")
+          PY
+
+      - name: Reconfirm R41 source contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-121930-retired-compat-surface-r41-contract.php
+          echo "R41_RELEASE_RECHECK=PASS"
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path("release-meta.json").read_text(encoding="utf-8"))
+          notes=f"""# S01-C02 · VF Tools Ops {os.environ['TARGET_VERSION']}
+
+          ## 本次变更
+          - R41 退休 13 个无独立运营价值的历史/兼容 OWNER 页面；formal OWNER Route 收敛为 26，加独立 Tools Surface 后当前 OWNER Surface denominator = 27。
+          - 旧 URL / vf_compat_route / SEO 历史 workspace 只作为 fail-safe alias，统一进入 current canonical successor，不再恢复旧页面身份。
+          - 保持 R38 Shared Page Header、R39 Single PHP Shell、R40 Single Global Shell CSS Authority。
+          - 不修改 Schema / Data / Permission / Write Semantics / Updater / Component Ownership。
+
+          ## Release Identity
+          - Exact Source: {os.environ['TARGET_SHA']}
+          - Tag: {os.environ['TAG']}
+          - Asset: {m['asset_name']}
+          - Asset SHA-256: {m['asset_sha256']}
+          - Runtime Files: {m['runtime_file_count']}
+          - Runtime Fingerprint: {m['runtime_fingerprint_sha256']}
+          - Schema: {m['schema_from']} → {m['schema_to']}
+
+          ## 安装 / 更新
+          - WordPress Component 使用同一正式组件 ZIP；包内仅包含 Runtime Authority 文件，不包含 docs/tests/evidence/private/数据库/Secret/Backup。
+          - Existing-install Update 由 VF 在线更新链执行；当前 Distribution 发布后支持从 {os.environ['PREVIOUS_VERSION']} 进入本版本，并继续继承 manifest 中已支持的来源版本。
+          - Production apply 前必须建立 Recovery / Backup，更新后必须通过 Runtime Authority、状态保持与 Smoke 回读。
+
+          ## 验收边界
+          - Exact Machine Evidence: core-free-runner-public Run 35672026382 = PASS（最终 Source SHA、910 PHP syntax、R41 contract）。
+          - OWNER Preview：本轮符合已明确授权的 bounded continuous-delivery class，pre-release = N_A；post-release OWNER Real-use 仍是 Final UX Closure 必需证据。
+          - 发布本身不代表 Production 已升级；Production installed version 以真实 Runtime 回读为准。
+          """
+          Path("release-notes.md").write_text(notes,encoding="utf-8")
+          PY
+
+      - name: Publish or verify immutable Git tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if TAG_SHA="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)"; then
+            test "$TAG_SHA" = "$TARGET_SHA" || { echo "TAG_TARGET_MISMATCH"; exit 1; }
+            echo "TAG_READBACK=PASS_EXISTING"
+          else
+            gh api --method POST "repos/$TARGET_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$TARGET_SHA" >/dev/null
+            TAG_SHA="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
+            test "$TAG_SHA" = "$TARGET_SHA"
+            echo "TAG_PUBLISH=PASS"
+          fi
+
+      - name: Publish or verify Formal Release and exact Asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" --repo "$TARGET_REPOSITORY" >/dev/null 2>&1; then
+            echo "FORMAL_RELEASE=EXISTS"
+          else
+            gh release create "$TAG"               --repo "$TARGET_REPOSITORY"               --verify-tag               --title "VF Tools Ops $TARGET_VERSION"               --notes-file release-notes.md
+            echo "FORMAL_RELEASE=PUBLISHED"
+          fi
+
+          if gh release view "$TAG" --repo "$TARGET_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$ASSET_NAME"; then
+            echo "RELEASE_ASSET=EXISTS"
+          else
+            gh release upload "$TAG" "$ASSET_NAME" --repo "$TARGET_REPOSITORY"
+            echo "RELEASE_ASSET=UPLOADED"
+          fi
+
+          rm -rf readback && mkdir readback
+          gh release download "$TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback
+          LOCAL_SHA="$(jq -r '.asset_sha256' release-meta.json)"
+          LOCAL_BYTES="$(jq -r '.asset_bytes' release-meta.json)"
+          REMOTE_SHA="$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')"
+          REMOTE_BYTES="$(stat -c %s "readback/$ASSET_NAME")"
+          test "$REMOTE_SHA" = "$LOCAL_SHA"
+          test "$REMOTE_BYTES" = "$LOCAL_BYTES"
+
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$TAG" > release-readback.json
+          RELEASE_ID="$(jq -r '.id' release-readback.json)"
+          gh api "repos/$TARGET_REPOSITORY/releases/$RELEASE_ID/assets" > release-assets-readback.json
+          jq -e --arg n "$ASSET_NAME" '.[] | select(.name==$n)' release-assets-readback.json >/dev/null
+          echo "REMOTE_RELEASE_ASSET_READBACK=PASS"
+
+      - name: Checkout current core-updates channel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: main
+          token: ${{ env.RELEASE_TOKEN }}
+          persist-credentials: true
+          path: core
+
+      - name: Publish exact core-updates manifest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          path=Path("core/projects/S01-C02.json")
+          data=json.loads(path.read_text(encoding="utf-8"))
+          meta=json.loads(Path("release-meta.json").read_text(encoding="utf-8"))
+          release=json.loads(Path("release-readback.json").read_text(encoding="utf-8"))
+          assets=json.loads(Path("release-assets-readback.json").read_text(encoding="utf-8"))
+          asset=next((x for x in assets if x.get("name")==os.environ["ASSET_NAME"]),None)
+          if not asset:
+              raise SystemExit("RELEASE_ASSET_READBACK_MISSING")
+
+          current=str(data.get("target_version",""))
+          if current not in {os.environ["PREVIOUS_VERSION"],os.environ["TARGET_VERSION"]}:
+              raise SystemExit(f"CHANNEL_DRIFT:{current}")
+
+          if current == os.environ["TARGET_VERSION"]:
+              checks={
+                "release_tag":os.environ["TAG"],
+                "asset_name":os.environ["ASSET_NAME"],
+                "asset_sha256":meta["asset_sha256"],
+                "runtime_file_count":meta["runtime_file_count"],
+                "runtime_fingerprint_sha256":meta["runtime_fingerprint_sha256"],
+              }
+              for k,v in checks.items():
+                  if data.get(k)!=v:
+                      raise SystemExit(f"CHANNEL_EXISTING_MISMATCH:{k}")
+              print("CORE_UPDATES_ALREADY_CURRENT=PASS")
+          else:
+              from_versions=list(data.get("from_versions") or [])
+              if os.environ["PREVIOUS_VERSION"] not in from_versions:
+                  from_versions.append(os.environ["PREVIOUS_VERSION"])
+              data.update({
+                  "target_version": os.environ["TARGET_VERSION"],
+                  "from_versions": from_versions,
+                  "release_tag": os.environ["TAG"],
+                  "asset_name": os.environ["ASSET_NAME"],
+                  "asset_bytes": meta["asset_bytes"],
+                  "asset_sha256": meta["asset_sha256"],
+                  "schema_from": meta["schema_from"],
+                  "schema_to": meta["schema_to"],
+                  "backup_required": True,
+                  "rollback_supported": True,
+                  "runtime_files": meta["runtime_file_count"],
+                  "runtime_fingerprint": meta["runtime_fingerprint_sha256"],
+                  "runtime_file_count": meta["runtime_file_count"],
+                  "runtime_fingerprint_sha256": meta["runtime_fingerprint_sha256"],
+                  "released_at": release.get("published_at") or release.get("created_at"),
+                  "notes": (
+                      f"S01-C02 {os.environ['TARGET_VERSION']} Retired Compatibility Surface Closure R41. "
+                      f"Exact source {os.environ['TARGET_SHA']}. Formal Release {os.environ['TAG']}; "
+                      f"Release ID {release.get('id')}; asset ID {asset.get('id')}; "
+                      f"asset {meta['asset_bytes']} bytes / SHA256 {meta['asset_sha256']}. "
+                      f"Runtime Authority target: {meta['runtime_file_count']} files / "
+                      f"{meta['runtime_fingerprint_sha256']}. "
+                      "13 obsolete historical OWNER Views are retired; legacy URL identities resolve to canonical successors. "
+                      "R38/R39/R40 shared page-header/single-PHP-shell/single-Global-Shell-CSS authorities remain. "
+                      "Schema/Data/write semantics/updater/component ownership unchanged."
+                  ),
+              })
+              path.write_text(json.dumps(data,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+              print("CORE_UPDATES_MANIFEST_PREPARED=PASS")
+          PY
+
+          cd core
+          if git diff --quiet -- projects/S01-C02.json; then
+            echo "CORE_UPDATES_COMMIT=NOT_NEEDED"
+          else
+            git config user.name "VF Release Runner"
+            git config user.email "release-runner@users.noreply.github.com"
+            git add projects/S01-C02.json
+            git commit -m "publish S01-C02 1.21.930"
+            git push origin HEAD:main
+            echo "CORE_UPDATES_PUSH=PASS"
+          fi
+
+      - name: Remote-readback distribution truth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C core fetch origin main
+          CORE_REMOTE_SHA="$(git -C core rev-parse origin/main)"
+          git -C core show origin/main:projects/S01-C02.json > manifest-readback.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          d=json.loads(Path("manifest-readback.json").read_text(encoding="utf-8"))
+          m=json.loads(Path("release-meta.json").read_text(encoding="utf-8"))
+          expected={
+              "target_version":os.environ["TARGET_VERSION"],
+              "release_tag":os.environ["TAG"],
+              "asset_name":os.environ["ASSET_NAME"],
+              "asset_sha256":m["asset_sha256"],
+              "runtime_file_count":m["runtime_file_count"],
+              "runtime_fingerprint_sha256":m["runtime_fingerprint_sha256"],
+          }
+          for k,v in expected.items():
+              if d.get(k)!=v:
+                  raise SystemExit(f"DISTRIBUTION_READBACK_MISMATCH:{k}")
+          if os.environ["PREVIOUS_VERSION"] not in (d.get("from_versions") or []):
+              raise SystemExit("FROM_VERSION_MISSING")
+          print("CORE_UPDATES_READBACK=PASS")
+          PY
+          echo "CORE_UPDATES_REMOTE_SHA=$CORE_REMOTE_SHA"
+
+      - name: Build release evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          meta=json.loads(Path("release-meta.json").read_text(encoding="utf-8")) if Path("release-meta.json").exists() else {}
+          release=json.loads(Path("release-readback.json").read_text(encoding="utf-8")) if Path("release-readback.json").exists() else {}
+          manifest=json.loads(Path("manifest-readback.json").read_text(encoding="utf-8")) if Path("manifest-readback.json").exists() else {}
+          payload={
+              "schema":"vf-release/s01-c02-121930-v1",
+              "target_repository":os.environ["TARGET_REPOSITORY"],
+              "target_sha":os.environ["TARGET_SHA"],
+              "version":os.environ["TARGET_VERSION"],
+              "tag":os.environ["TAG"],
+              "exact_machine_run":35672026382,
+              "machine_gate":"PASS",
+              "release_id":release.get("id"),
+              "asset":meta,
+              "distribution_target_version":manifest.get("target_version"),
+              "authority_applicability":{
+                  "INSTALL":"N_A:not a deployable FULL app; WordPress Component contract",
+                  "SECURITY":"REQUIRED",
+                  "TESTING":"REQUIRED",
+                  "UPGRADE":"REQUIRED",
+                  "DATA_SCHEMA":"N_A:schema 6.0.0 to 6.0.0; no data/schema change",
+                  "API_PROVIDER":"N_A:no provider/API change",
+                  "SEO":"N_A:no public SEO/indexing change",
+                  "CRON_JOB":"N_A:no scheduler/cron change",
+                  "NOTIFICATION":"N_A:no notification change",
+                  "OBSERVABILITY":"REQUIRED",
+                  "PERFORMANCE":"N_A:no performance-sensitive behavior change",
+                  "GIT":"REQUIRED",
+                  "UA_UI":"REQUIRED"
+              },
+              "owner_preview_runtime_applicability":"N_A_PRE_RELEASE_BOUNDED_CONTINUOUS_DELIVERY",
+              "post_release_owner_real_use_required":True,
+              "pre_release_authority_drift":"PASS_SEMANTIC",
+              "production_claim":"NOT_YET_UPGRADED",
+              "secret_values_persisted":False,
+              "private_source_persisted_in_runner_artifact":False
+          }
+          canonical=json.dumps(payload,ensure_ascii=False,sort_keys=True).encode("utf-8")
+          payload["evidence_sha256"]=hashlib.sha256(canonical).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-121930-release.json").write_text(json.dumps(payload,ensure_ascii=False,indent=2,sort_keys=True),encoding="utf-8")
+          print("RELEASE_EVIDENCE_SHA256="+payload["evidence_sha256"])
+          PY
+
+      - name: Upload minimum release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+        with:
+          name: s01-c02-121930-release-${{ github.run_id }}
+          path: evidence/s01-c02-121930-release.json
+          if-no-files-found: error
+          retention-days: 14
