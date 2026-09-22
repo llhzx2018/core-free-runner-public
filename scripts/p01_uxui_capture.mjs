@@ -229,6 +229,7 @@ try{
       productionPublicMobile:results.filter(x=>x.kind==='prod-mobile').length,
       candidatePublicDesktop:results.filter(x=>x.kind==='candidate-public-desktop').length,
       candidatePublicMobile:results.filter(x=>x.kind==='candidate-public-mobile').length,
+      candidateMobileDomainChecks:results.filter(x=>x.kind==='candidate-mobile-domain').length,
       ownerDesktop:results.filter(x=>x.kind==='owner-desktop').length,
       ownerMobile:results.filter(x=>x.kind==='owner-mobile').length,
       ownerInteractions:results.filter(x=>x.kind==='owner-interaction').length,
