@@ -53,7 +53,7 @@ jobs:
           bash scripts/verify-repository.sh
           echo P02_V2583_NAVIGATION_SAFETY_SOURCE=PASS
 
-      - name: Real runtime and Chromium regression
+      - name: Real runtime and focused Chromium regression
         shell: bash
         working-directory: product
         env:
@@ -63,7 +63,44 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "$EVIDENCE_DIR"
           bash scripts/maintenance-reverify.sh
-          bash scripts/ux-browser-reverify.sh
+
+          RUN_ROOT="${RUNNER_TEMP}/p02-v2583-focused-${GITHUB_RUN_ID}"
+          SITE="$RUN_ROOT/site"
+          COOKIE="$RUN_ROOT/cookies.txt"
+          PORT=18083
+          BASE_URL="http://127.0.0.1:$PORT"
+          mkdir -p "$RUN_ROOT"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          [[ "$(tr -d '\r\n' < "$SITE/VERSION.txt")" == "2.5.83" ]]
+
+          php -d display_errors=0 -S "127.0.0.1:$PORT" -t "$SITE" >"$RUN_ROOT/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          cleanup(){ kill "$SERVER_PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 80); do
+            curl -fsS "$BASE_URL/setup.php" >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          kill -0 "$SERVER_PID"
+
+          curl -fsS -c "$COOKIE" "$BASE_URL/setup.php" > "$RUN_ROOT/setup.html"
+          SETUP_CSRF="$(python3 - "$RUN_ROOT/setup.html" <<'PY'
+import html,re,sys
+text=open(sys.argv[1],encoding='utf-8').read()
+match=re.search(r'name="setup_csrf" value="([^"]+)"',text)
+if not match:
+    raise SystemExit('setup csrf missing')
+print(html.unescape(match.group(1)))
+PY
+)"
+          STATUS="$(curl -sS -o "$RUN_ROOT/setup-post.html" -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE_URL" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE_URL/setup.php")"
+          [[ "$STATUS" == "303" ]]
+
+          export VF_UX_E2E_BASE_URL="$BASE_URL"
+          export VF_UX_E2E_PASSWORD="$TEST_PASSWORD"
+          export VF_UX_E2E_VERSION="2.5.83"
+          node tests/e2e/p02_v2583_navigation_safety.mjs | tee "$EVIDENCE_DIR/browser-v2583-navigation-safety.log"
+          grep -Fx 'P02_V2583_NAVIGATION_SAFETY_BROWSER=PASS' "$EVIDENCE_DIR/browser-v2583-navigation-safety.log"
           echo P02_V2583_NAVIGATION_SAFETY_BROWSER_GATE=PASS
 
       - name: Upload focused evidence
