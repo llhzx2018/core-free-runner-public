@@ -22,6 +22,10 @@ function fail(label,detail=''){
   failures.push({label,detail});
   console.log('UXUI_AUDIT_FAIL',label,detail);
 }
+function assert(ok,label,detail=''){
+  if(ok)console.log('UXUI_AUDIT_PASS',label);
+  else fail(label,detail);
+}
 
 async function activeDomainVisible(page){
   return await page.evaluate(()=>{
