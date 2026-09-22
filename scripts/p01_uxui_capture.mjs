@@ -116,7 +116,15 @@ try{
     const ctx=await browser.newContext(viewport.opts);
     const page=await ctx.newPage();
     const routes=['','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'];
-    for(const route of routes) await capture(page,viewport.name,route,localBase,viewport.name);
+    for(const route of routes){
+      await capture(page,viewport.name,route,localBase,viewport.name);
+      if(viewport.name==='candidate-public-mobile'){
+        const visible=await activeDomainVisible(page);
+        record('candidate-mobile-domain',route,visible);
+        if(!visible.ok)fail('CANDIDATE_MOBILE_ACTIVE_DOMAIN_'+(route||'index'),JSON.stringify(visible));
+        if(route==='software.php'&&visible.marker!=='1')fail('CANDIDATE_SOFTWARE_ACTIVE_DOMAIN_MARKER',JSON.stringify(visible));
+      }
+    }
     await ctx.close();
   }
 
