@@ -65,11 +65,19 @@ PY
   curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"     --data-urlencode "setup_csrf=$csrf"     --data-urlencode "site_title=$title"     --data-urlencode "admin_password=$pass"     --data-urlencode "admin_password_confirm=$pass"     -o "/tmp/setup-post-$port.html"
   (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
   grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
-  test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")" = 302
+  local revisit
+  revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+  echo "FULL_SETUP_REVISIT_STATUS=$revisit PORT=$port"
+  test "$revisit" = 302
   local login
-  login="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}'     -H 'Content-Type: application/json'     --data "{"password":"$pass"}"     "http://127.0.0.1:$port/api.php?action=login")"
+  local login_body
+  login_body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+  login="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$login_body" "http://127.0.0.1:$port/api.php?action=login")"
+  echo "FULL_LOGIN_STATUS=$login PORT=$port"
+  if [ "$login" != 200 ]; then cat "/tmp/login-$port.json" || true; fi
   test "$login" = 200
   grep -Fq '"ok":true' "/tmp/login-$port.json"
+  echo "FULL_INSTALL_RUNTIME_PASS PORT=$port"
   kill "$pid" >/dev/null 2>&1 || true
   trap - RETURN
 }
