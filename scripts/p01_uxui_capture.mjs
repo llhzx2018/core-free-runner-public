@@ -223,7 +223,7 @@ try{
   await compatCtx.close();
 
   writeFileSync(path.join(out,'visual-audit.json'),JSON.stringify({
-    source:{sha:'73bdfa38310aaabcf6df48810fe8479024a1a819',tree:'516a2d9ec341910859e7777195ace6e8900c6f7d',version:'2.47.40'},
+    source:{sha:String(process.env.target_sha||''),tree:String(process.env.target_tree||''),version:String(process.env.target_version||'')},
     counts:{
       productionPublicDesktop:results.filter(x=>x.kind==='prod-desktop').length,
       productionPublicMobile:results.filter(x=>x.kind==='prod-mobile').length,
