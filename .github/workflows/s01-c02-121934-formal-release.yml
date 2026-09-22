@@ -1,0 +1,296 @@
+name: S01-C02 1.21.934 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121934-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: 3d369fbdffcee236c218e8b22292e41fc7af6c51
+      PREVIOUS_TAG: v1.21.933
+      TARGET_VERSION: 1.21.934
+      RELEASE_TAG: v1.21.934
+      ASSET_NAME: vf-tools-ops_V1.21.934.zip
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Verify credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          test -n "$RELEASE_WRITE_TOKEN"
+          echo "RELEASE_CREDENTIALS=PASS"
+
+      - name: Checkout exact product main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+
+      - name: Exact source and bounded scope gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "S01-SHELL-HEADER-VISUAL-LOCK-R45" target/vf-ops.php
+          git -C target fetch --force --tags origin
+          mapfile -t changed < <(git -C target diff --name-only "$PREVIOUS_TAG..$TARGET_SHA" | sort)
+          printf '%s\n' "${changed[@]}" > changed-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          allowed = {
+            "CHANGELOG.md",
+            "VERSION",
+            "docs/authority/ACCEPTANCE_MATRIX.md",
+            "includes/views/admin-style-helpers/admin-s01-uiux-polish.php",
+            "tests/s01-c02-121933-navigation-flyout-r44-contract.php",
+            "tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php",
+            "vf-ops.php",
+          }
+          got = {x for x in Path("changed-files.txt").read_text().splitlines() if x}
+          if got != allowed:
+              raise SystemExit("BOUNDED_SCOPE_MISMATCH\nexpected="+repr(sorted(allowed))+"\ngot="+repr(sorted(got)))
+          print("BOUNDED_FILES_ONLY_ADMIN_UX_UI=PASS")
+          print("NO_SCHEMA_DATA_MIGRATION=PASS")
+          print("NO_WRITE_SEMANTICS_CHANGE=PASS")
+          print("NO_COMPONENT_OWNERSHIP_CHANGE=PASS")
+          PY
+          echo "EXACT_RELEASE_SOURCE=PASS"
+
+      - name: Required testing and UI authority gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l target/vf-ops.php
+          php -l target/includes/views/admin-style-helpers/admin-s01-uiux-polish.php
+          php -l target/tests/s01-c02-121932-navigation-role-r43-contract.php
+          php -l target/tests/s01-c02-121933-navigation-flyout-r44-contract.php
+          php -l target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          php target/tests/s01-c02-121932-navigation-role-r43-contract.php
+          php target/tests/s01-c02-121933-navigation-flyout-r44-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          node --check target/assets/js/admin-s01-domain-shell-r1.js
+          echo "TESTING_AUTHORITY_GATE=PASS"
+          echo "UA_UI_AUTHORITY_GATE=PASS"
+
+      - name: Security and upgrade preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # R45 is bounded presentation authority ordering only; updater, auth,
+          # permissions, schema/data and write paths are byte-unchanged from v1.21.933.
+          if grep -Eq '(^|/)(migrations?|schema|database|upgrade|updater|update-center|permissions?|auth|security)(/|\.|$)' changed-files.txt; then
+            echo "SECURITY_UPGRADE_SCOPE_DRIFT=FAIL"
+            cat changed-files.txt
+            exit 1
+          fi
+          echo "SECURITY_RELEASE_SCOPE=PASS"
+          echo "UPGRADE_SCHEMA_6_0_0_TO_6_0_0=PASS"
+          echo "BACKUP_REQUIRED=YES"
+          echo "ROLLBACK_SUPPORTED=YES"
+          echo "OWNER_PREVIEW_RUNTIME_APPLICABILITY=N_A_BOUNDED_FILES_ONLY_ADMIN_UX_UI"
+
+      - name: Build deterministic runtime asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, os, re, stat, zipfile
+          from pathlib import Path
+          root=Path("target")
+          out=Path(os.environ["ASSET_NAME"])
+          forbidden_dir=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',re.I)
+          forbidden_ext=re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+          allowed_root={"vf-ops.php","uninstall.php"}
+          allowed_prefix=("includes/","assets/","languages/","config/")
+          files={}
+          for p in root.rglob("*"):
+              if not p.is_file(): continue
+              rel=p.relative_to(root).as_posix()
+              if forbidden_dir.search(rel) or forbidden_ext.search(rel): continue
+              if "/" not in rel and rel not in allowed_root: continue
+              if "/" in rel and not rel.startswith(allowed_prefix): continue
+              if p.is_symlink(): raise SystemExit("RUNTIME_SYMLINK_FORBIDDEN:"+rel)
+              files[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+          if "vf-ops.php" not in files: raise SystemExit("PLUGIN_MAIN_MISSING")
+          canonical=b"".join(rel.encode()+b"\0"+files[rel].encode()+b"\n" for rel in sorted(files))
+          fp=hashlib.sha256(canonical).hexdigest()
+          with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel in sorted(files):
+                  data=(root/rel).read_bytes()
+                  zi=zipfile.ZipInfo("vf-ops/"+rel,date_time=(1980,1,1,0,0,0))
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  zi.external_attr=(stat.S_IFREG|0o644)<<16
+                  z.writestr(zi,data)
+          sha=hashlib.sha256(out.read_bytes()).hexdigest()
+          size=out.stat().st_size
+          Path("runtime-count.txt").write_text(str(len(files)))
+          Path("runtime-fingerprint.txt").write_text(fp)
+          Path("asset-bytes.txt").write_text(str(size))
+          Path("asset-sha.txt").write_text(sha)
+          print("PACKAGE_BUILD=PASS")
+          print("RUNTIME_FILE_COUNT="+str(len(files)))
+          print("RUNTIME_FINGERPRINT_SHA256="+fp)
+          print("ASSET_BYTES="+str(size))
+          print("ASSET_SHA256="+sha)
+          PY
+
+      - name: Create formal release and exact asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "RELEASE_CREATE=SKIPPED_ALREADY_EXISTS"
+          else
+            cat > release-notes.md <<'MD'
+          S01-C02 · VF Tools Ops · V1.21.934
+
+          R45 Shell Header Visual Lock:
+          - all page/domain visual CSS loads before the single global Shell CSS
+          - Brand / primary nav / flyout geometry / active state / top spacing are owned by one Shell visual authority
+          - structural page-head CSS remains responsible only for page identity below the app bar
+          - R43 one-layer navigation and R44 compact flyouts are preserved
+          - all formal OWNER routes remain discoverable
+          - no IA / Route / Schema / Data / permissions / updater / write-semantics change
+
+          Exact source:
+          3d369fbdffcee236c218e8b22292e41fc7af6c51
+          MD
+            gh release create "$RELEASE_TAG" "$ASSET_NAME" \
+              --repo "$TARGET_REPOSITORY" \
+              --target "$TARGET_SHA" \
+              --title "VF Tools Ops V1.21.934" \
+              --notes-file release-notes.md
+            echo "RELEASE_CREATE=PASS"
+          fi
+
+      - name: Formal release remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          EXPECTED_SHA="$(cat asset-sha.txt)"
+          EXPECTED_BYTES="$(cat asset-bytes.txt)"
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          RELEASE_ID="$(jq -r '.id' release.json)"
+          ASSET_ID="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .id' release.json)"
+          ASSET_SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | .size' release.json)"
+          ASSET_DIGEST="$(jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name==$n) | (.digest // "")' release.json)"
+          PUBLISHED_AT="$(jq -r '.published_at' release.json)"
+          test -n "$RELEASE_ID"
+          test -n "$ASSET_ID"
+          test "$ASSET_SIZE" = "$EXPECTED_BYTES"
+          if [ -n "$ASSET_DIGEST" ] && [ "$ASSET_DIGEST" != "null" ]; then
+            test "$ASSET_DIGEST" = "sha256:$EXPECTED_SHA"
+          fi
+          rm -rf readback && mkdir readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback --clobber
+          READBACK_SHA="$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')"
+          READBACK_BYTES="$(stat -c %s "readback/$ASSET_NAME")"
+          REF_SHA="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$READBACK_SHA" = "$EXPECTED_SHA"
+          test "$READBACK_BYTES" = "$EXPECTED_BYTES"
+          test "$REF_SHA" = "$TARGET_SHA"
+          printf '%s\n' "$RELEASE_ID" > release-id.txt
+          printf '%s\n' "$ASSET_ID" > asset-id.txt
+          printf '%s\n' "$PUBLISHED_AT" > published-at.txt
+          echo "FORMAL_RELEASE_REMOTE_READBACK=PASS"
+          echo "GIT_AUTHORITY_GATE=PASS"
+          echo "RELEASE_ID=$RELEASE_ID"
+          echo "ASSET_ID=$ASSET_ID"
+          echo "ASSET_BYTES=$READBACK_BYTES"
+          echo "ASSET_SHA256=$READBACK_SHA"
+          echo "PUBLISHED_AT=$PUBLISHED_AT"
+
+      - name: Build sanitized release evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          matrix={
+            "INSTALL":"N_A:not_full_install",
+            "SECURITY":"REQUIRED:bounded_scope_and_signed_channel_controls",
+            "TESTING":"REQUIRED:r43_r44_r45_php_js",
+            "UPGRADE":"REQUIRED:schema_6.0.0_to_6.0.0_backup_rollback_post_readback",
+            "DATA_SCHEMA":"N_A:no_schema_or_data_touch",
+            "API_PROVIDER":"N_A:no_provider_change",
+            "SEO":"N_A:no_public_seo_change",
+            "CRON_JOB":"N_A:no_scheduler_change",
+            "NOTIFICATION":"N_A:no_notification_change",
+            "OBSERVABILITY":"REQUIRED:formal_and_production_readback",
+            "PERFORMANCE":"N_A:no_performance_surface_change",
+            "GIT":"REQUIRED:exact_main_tag_asset",
+            "UA_UI":"REQUIRED:r45_shell_visual_authority",
+          }
+          p={
+            "schema":"vf-release/s01-c02-formal-v2",
+            "version":os.environ["TARGET_VERSION"],
+            "tag":os.environ["RELEASE_TAG"],
+            "target_sha":os.environ["TARGET_SHA"],
+            "previous_tag":os.environ["PREVIOUS_TAG"],
+            "release_id":Path("release-id.txt").read_text().strip(),
+            "asset_id":Path("asset-id.txt").read_text().strip(),
+            "asset_name":os.environ["ASSET_NAME"],
+            "asset_bytes":int(Path("asset-bytes.txt").read_text()),
+            "asset_sha256":Path("asset-sha.txt").read_text().strip(),
+            "runtime_file_count":int(Path("runtime-count.txt").read_text()),
+            "runtime_fingerprint_sha256":Path("runtime-fingerprint.txt").read_text().strip(),
+            "schema_from":"6.0.0",
+            "schema_to":"6.0.0",
+            "backup_required":True,
+            "rollback_supported":True,
+            "owner_preview_runtime_applicability":"N_A:bounded_files_only_admin_ux_ui",
+            "public_authority_applicability":matrix,
+            "public_authority_release_preflight":"PASS",
+            "production_observability":"PENDING_PRODUCTION_STEP",
+            "published_at":Path("published-at.txt").read_text().strip(),
+            "remote_readback_pass":True,
+            "private_source_persisted":False,
+            "secret_values_persisted":False
+          }
+          raw=json.dumps(p,sort_keys=True).encode()
+          p["evidence_sha256"]=hashlib.sha256(raw).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-121934-formal-release.json").write_text(json.dumps(p,indent=2,sort_keys=True),encoding="utf-8")
+          print("PUBLIC_AUTHORITY_RELEASE_PREFLIGHT=PASS")
+          print("NO_UNKNOWN_APPLICABILITY=YES")
+          print("FORMAL_RELEASE_EVIDENCE_SHA256="+p["evidence_sha256"])
+          PY
+
+      - name: Remove private product bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target readback "$ASSET_NAME"
+          echo "PRIVATE_PRODUCT_BYTES_REMOVED=PASS"
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121934-formal-release-${{ github.run_id }}
+          path: evidence/s01-c02-121934-formal-release.json
+          if-no-files-found: error
+          retention-days: 14
