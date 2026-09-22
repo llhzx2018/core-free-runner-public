@@ -130,21 +130,34 @@ jobs:
           docker run --rm --user 0:0 --network vf-preview-net             -v vf-preview-wp-data:/var/www/html             -v "$PWD/target:/var/www/html/wp-content/plugins/vf-ops:ro"             wordpress:cli wp --allow-root plugin activate vf-ops --path=/var/www/html
 
           docker exec vf-preview-wp mkdir -p /var/www/html/wp-content/mu-plugins
+          PREVIEW_TOKEN="$(openssl rand -hex 16)"
           docker exec -i vf-preview-wp sh -c 'cat > /var/www/html/wp-content/mu-plugins/vf-preview-autologin.php' <<'PHP'
           <?php
           /**
-           * Disposable preview only. Any visitor to this throwaway WordPress
-           * instance is treated as the preview administrator. No production
-           * data or credentials exist in this runtime.
+           * Disposable preview only. This runtime contains no production data
+           * or credentials. A run-scoped token performs one-click login.
            */
-          add_action('plugins_loaded', function () {
-              if (is_user_logged_in()) { return; }
+          add_action('init', function () {
+              $expected = '__VF_PREVIEW_TOKEN__';
+              $provided = isset($_GET['vf_preview_login']) && !is_array($_GET['vf_preview_login'])
+                  ? (string) $_GET['vf_preview_login']
+                  : '';
+              if ($provided === '' || !hash_equals($expected, $provided)) {
+                  return;
+              }
+
               $user = get_user_by('login', 'preview-owner');
-              if (!$user) { return; }
-              wp_set_current_user((int)$user->ID);
-              wp_set_auth_cookie((int)$user->ID, false, is_ssl());
+              if (!$user) {
+                  wp_die('Preview owner unavailable.');
+              }
+
+              wp_set_current_user((int) $user->ID);
+              wp_set_auth_cookie((int) $user->ID, false, true);
+              wp_redirect(admin_url('admin.php?page=vf-toolsite-content&tab=workflow'));
+              exit;
           }, 1);
           PHP
+          docker exec vf-preview-wp sed -i "s/__VF_PREVIEW_TOKEN__/$PREVIEW_TOKEN/g" /var/www/html/wp-content/mu-plugins/vf-preview-autologin.php
           docker exec vf-preview-wp chown -R www-data:www-data /var/www/html/wp-content/mu-plugins
 
           PAGE="$ORIGIN/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow"
@@ -155,10 +168,12 @@ jobs:
           # actual public wp-admin runtime directly instead of following that
           # redirect back through localhost as HTTPS.
 
+          LOGIN_URL="$ORIGIN/?vf_preview_login=$PREVIEW_TOKEN"
           CODE=""
           PUBLIC_OK=0
-          for i in $(seq 1 90); do
-            CODE="$(curl -L --max-redirs 8 -sS -o tunnel-check.html -w '%{http_code}' "$PAGE" || true)"
+          rm -f preview-cookies.txt tunnel-check.html
+          for i in $(seq 1 60); do
+            CODE="$(curl -L --max-redirs 8 -sS -c preview-cookies.txt -b preview-cookies.txt -o tunnel-check.html -w '%{http_code}' "$LOGIN_URL" || true)"
             if [ "$CODE" = "200" ] \
               && grep -Fq "VF 站点运营" tunnel-check.html 2>/dev/null \
               && grep -Fq "vf-v6-domain-menu" tunnel-check.html 2>/dev/null; then
@@ -176,12 +191,12 @@ jobs:
           fi
 
           echo "WPADMIN_PREVIEW_RUNTIME=PASS"
-          echo "OWNER_PREVIEW_URL=$PAGE"
+          echo "OWNER_PREVIEW_URL=$LOGIN_URL"
           echo "Exact source: $TARGET_SHA"
           echo "Disposable MySQL WordPress runtime. Production untouched."
 
           test -n "$COMMENT_TOKEN"
-          GH_TOKEN="$COMMENT_TOKEN" gh pr comment 1152 --repo "$GITHUB_REPOSITORY" --body "S01-C02 1.21.932 REAL wp-admin Preview READY — $PAGE — exact source $TARGET_SHA — disposable WordPress + MySQL / PHP 8.3 — Production unchanged."
+          GH_TOKEN="$COMMENT_TOKEN" gh pr comment 1152 --repo "$GITHUB_REPOSITORY" --body "S01-C02 1.21.932 REAL wp-admin Preview READY — $LOGIN_URL — exact source $TARGET_SHA — disposable WordPress + MySQL / PHP 8.3 — Production unchanged."
 
           for i in $(seq 1 60); do
             sleep 30
