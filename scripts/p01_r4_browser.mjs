@@ -27,7 +27,7 @@ try{
   const publicErrors=attachErrors(publicPage);
   const publicRoutes=[
     '', 'start.php', 'channels.php', 'watch.php', 'topics.php', 'courses.php',
-    'projects.php', 'tools.php?q=R4+Browser+SEO+Tool', 'software.php'
+    'projects.php', 'tools.php?q=R4+Browser+SEO+Tool', 'software.php?q=R4+Browser+Search+Software'
   ];
   for(const route of publicRoutes){
     publicErrors.length=0;
@@ -48,7 +48,7 @@ try{
   const mobileErrors=attachErrors(mobilePage);
   const mobileRoutes=[
     'start.php','channels.php','watch.php','topics.php','courses.php','projects.php',
-    'tools.php?q=R4+Browser+SEO+Tool','software.php'
+    'tools.php?q=R4+Browser+SEO+Tool','software.php?q=R4+Browser+Search+Software'
   ];
   for(const route of mobileRoutes){
     mobileErrors.length=0;
@@ -81,7 +81,12 @@ try{
 
   await page.goto(base+'start.php',{waitUntil:'networkidle'});
   const favorite='[data-favorite-id="'+fixture.tool+'"]';
+  const row='[data-asset-row="'+fixture.tool+'"]';
+  const actionTrigger=row+' .vf-action-menu-trigger';
   assert((await page.locator(favorite).count())===1,'favorite_control_present');
+  assert((await page.locator(actionTrigger).count())===1,'secondary_action_menu_present');
+  await page.click(actionTrigger);
+  await page.locator(favorite).waitFor({state:'visible'});
   await page.click(favorite);
   await page.waitForFunction(sel=>document.querySelector(sel)?.dataset.favorite==='1',favorite);
   assert(await page.locator(favorite).getAttribute('data-favorite')==='1','favorite_mutation_updates_ui');
@@ -98,6 +103,8 @@ try{
   });
   assert(logoutResult.status===200&&logoutResult.json.ok===true,'logout_api_success');
 
+  await page.click(actionTrigger);
+  await page.locator(favorite).waitFor({state:'visible'});
   await page.click(favorite);
   await page.waitForSelector('[data-vf-auth-dialog][open]',{state:'visible',timeout:5000});
   assert(await page.locator('[data-vf-auth-dialog][open]').isVisible(),'expired_session_opens_login_dialog');
