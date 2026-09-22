@@ -23,6 +23,24 @@ function fail(label,detail=''){
   console.log('UXUI_AUDIT_FAIL',label,detail);
 }
 
+async function activeDomainVisible(page){
+  return await page.evaluate(()=>{
+    const links=document.querySelector('.vf-global-domain-links');
+    const active=links?.querySelector('a.active');
+    if(!links||!active)return {ok:false,reason:'missing'};
+    const lr=links.getBoundingClientRect();
+    const ar=active.getBoundingClientRect();
+    return {
+      ok:ar.left>=lr.left-1&&ar.right<=lr.right+1,
+      active:String(active.textContent||'').trim(),
+      marker:links.dataset.vfActiveDomainVisible||'',
+      scrollLeft:links.scrollLeft,
+      scrollWidth:links.scrollWidth,
+      clientWidth:links.clientWidth
+    };
+  });
+}
+
 async function metrics(page){
   return await page.evaluate(()=>{
     const q=(s)=>document.querySelector(s);
