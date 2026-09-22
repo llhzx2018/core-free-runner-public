@@ -257,6 +257,32 @@ try{
   ]);
   for(const route of ['index.php','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php']){
     await capture(m,'owner-mobile',route,localBase,'owner-mobile');
+    if(route==='start.php'){
+      const navigationDensity=await m.evaluate(()=>{
+        const filters=document.querySelector('.vf-mobile-functional-filters');
+        const canonical=filters?.querySelector('select[aria-label="导航分类"]');
+        const trigger=filters?.querySelector('.vf-mobile-category-trigger');
+        const first=document.querySelector('.vf-asset-row');
+        const isVisible=el=>!!el&&getComputedStyle(el).display!=='none'&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0;
+        return {
+          canonicalVisible:isVisible(canonical),
+          triggerVisible:isVisible(trigger),
+          visibleFilterChildren:filters?[...filters.children].filter(isVisible).length:0,
+          firstAssetTop:first?Math.round(first.getBoundingClientRect().top):0,
+          viewportHeight:window.innerHeight
+        };
+      });
+      assert(!navigationDensity.canonicalVisible,'r5_mobile_navigation_canonical_select_hidden',JSON.stringify(navigationDensity));
+      assert(navigationDensity.triggerVisible,'r5_mobile_navigation_picker_visible',JSON.stringify(navigationDensity));
+      assert(navigationDensity.visibleFilterChildren===2,'r5_mobile_navigation_filter_row_deduped',JSON.stringify(navigationDensity));
+      assert(navigationDensity.firstAssetTop>0&&navigationDensity.firstAssetTop<=325,'r5_mobile_navigation_first_asset_early',JSON.stringify(navigationDensity));
+      const trigger=m.locator('.vf-mobile-category-trigger');
+      await trigger.click();
+      const overlay=m.locator('.vf-mobile-category-overlay.open');
+      await overlay.waitFor({state:'visible',timeout:5000});
+      assert(await overlay.locator('.vf-mobile-category-search input').isVisible(),'r5_mobile_navigation_picker_search_visible');
+      await m.keyboard.press('Escape');
+    }
   }
 
   // Mobile owner account chrome: one persistent More trigger, low-frequency actions inside the menu.
