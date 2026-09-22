@@ -157,11 +157,22 @@ try{
     if(await close.count())await close.click();
   }
   await admin.goto(localBase+'start.php',{waitUntil:'networkidle'});
-  await admin.keyboard.press('Control+K').catch(()=>{});
-  if(await admin.locator('.vf-quick-open:not([hidden])').count()){
-    await admin.screenshot({path:path.join(out,'owner-desktop-quick-open.png'),fullPage:true});
-    record('owner-interaction','quick-open',{status:200,screenshot:'owner-desktop-quick-open.png'});
-    await admin.keyboard.press('Escape').catch(()=>{});
+  await admin.keyboard.press('Control+K');
+  const quickInput=admin.locator('.vf-global-search input[name="q"]').first();
+  await quickInput.fill('Google');
+  await admin.locator('.vf-quick-open:not([hidden])').waitFor({state:'visible',timeout:5000});
+  await admin.screenshot({path:path.join(out,'owner-desktop-quick-open.png'),fullPage:true});
+  record('owner-interaction','quick-open',{status:200,screenshot:'owner-desktop-quick-open.png'});
+  await admin.keyboard.press('Escape');
+  await admin.goto(localBase+'start.php',{waitUntil:'networkidle'});
+  const rowMore=admin.locator('.vf-action-menu-trigger').first();
+  if(await rowMore.count()){
+    await rowMore.click();
+    const popover=admin.locator('.vf-action-menu-popover:popover-open').first();
+    await popover.waitFor({state:'visible',timeout:5000});
+    await admin.screenshot({path:path.join(out,'owner-desktop-row-more.png'),fullPage:true});
+    record('owner-interaction','row-more',{status:200,screenshot:'owner-desktop-row-more.png'});
+    await admin.keyboard.press('Escape');
   }
 
   const adminRoutes=[
@@ -224,6 +235,11 @@ try{
     'browser-helper.php','update.php','settings.php'
   ];
   for(const route of mobileAdminRoutes) await capture(m,'admin-mobile',route,localBase,'admin-mobile');
+  await m.goto(localBase+'manage.php',{waitUntil:'networkidle'});
+  await m.locator('.vf-admin-menu-button').click();
+  await m.locator('#vfAdminRail').waitFor({state:'visible',timeout:5000});
+  await m.screenshot({path:path.join(out,'admin-mobile-rail-open.png'),fullPage:true});
+  record('owner-interaction','admin-mobile-rail',{status:200,screenshot:'admin-mobile-rail-open.png'});
   await mobileCtx.close();
 
   // Compatibility/orphan audit: these should converge, not own a second visual shell.
