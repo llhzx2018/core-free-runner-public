@@ -89,6 +89,19 @@ try{
     await ctx.close();
   }
 
+  // Exact-source candidate public surfaces: same page denominator as Production,
+  // but rendered from the PR head against synthetic public data.
+  for(const viewport of [
+    {name:'candidate-public-desktop',opts:{viewport:{width:1440,height:960}}},
+    {name:'candidate-public-mobile',opts:{viewport:{width:390,height:844},isMobile:true,hasTouch:true}}
+  ]){
+    const ctx=await browser.newContext(viewport.opts);
+    const page=await ctx.newPage();
+    const routes=['','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'];
+    for(const route of routes) await capture(page,viewport.name,route,localBase,viewport.name);
+    await ctx.close();
+  }
+
   // Exact-source local runtime admin.
   const adminCtx=await browser.newContext({viewport:{width:1440,height:960}});
   const admin=await adminCtx.newPage();
@@ -164,6 +177,8 @@ try{
     counts:{
       productionPublicDesktop:results.filter(x=>x.kind==='prod-desktop').length,
       productionPublicMobile:results.filter(x=>x.kind==='prod-mobile').length,
+      candidatePublicDesktop:results.filter(x=>x.kind==='candidate-public-desktop').length,
+      candidatePublicMobile:results.filter(x=>x.kind==='candidate-public-mobile').length,
       adminDesktop:results.filter(x=>x.kind==='admin-desktop').length,
       adminMobile:results.filter(x=>x.kind==='admin-mobile').length,
       compatibility:results.filter(x=>x.kind==='compat').length
