@@ -132,6 +132,16 @@ try{
     await ctx.close();
   }
 
+  // Anonymous login dialog is a shared public interaction state.
+  const loginCtx=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const loginPage=await loginCtx.newPage();
+  await loginPage.goto(localBase,{waitUntil:'networkidle'});
+  await loginPage.locator('[data-vf-auth-login]').first().click();
+  await loginPage.locator('[data-vf-auth-dialog][open]').waitFor({state:'visible',timeout:5000});
+  await loginPage.screenshot({path:path.join(out,'candidate-mobile-login-dialog.png'),fullPage:true});
+  record('public-interaction','login-dialog',{status:200,screenshot:'candidate-mobile-login-dialog.png'});
+  await loginCtx.close();
+
   // Exact-source local runtime admin.
   const adminCtx=await browser.newContext({viewport:{width:1440,height:960}});
   const admin=await adminCtx.newPage();
