@@ -1,0 +1,183 @@
+name: S01-C02 1.21.932 Package Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121932-package-preflight.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: db44417cd76ec1dd8b9369222209be0148ad550b
+      TARGET_VERSION: 1.21.932
+      ASSET_NAME: vf-tools-ops_V1.21.932.zip
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo "PRIVATE_READ=PASS"
+
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "S01-NAVIGATION-ROLE-REBASELINE-R43" target/vf-ops.php
+          echo "RELEASE_IDENTITY=PASS"
+
+      - name: Build deterministic runtime-only package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, re, stat, zipfile
+          from pathlib import Path
+          root=Path("target")
+          out=Path(os.environ["ASSET_NAME"])
+          forbidden_dir=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',re.I)
+          forbidden_ext=re.compile(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+          allowed_root={"vf-ops.php","uninstall.php"}
+          allowed_prefix=("includes/","assets/","languages/","config/")
+          files={}
+          for p in root.rglob("*"):
+              if not p.is_file(): continue
+              rel=p.relative_to(root).as_posix()
+              if forbidden_dir.search(rel) or forbidden_ext.search(rel): continue
+              if "/" not in rel and rel not in allowed_root: continue
+              if "/" in rel and not rel.startswith(allowed_prefix): continue
+              if p.is_symlink(): raise SystemExit("RUNTIME_SYMLINK_FORBIDDEN:"+rel)
+              files[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+          if "vf-ops.php" not in files: raise SystemExit("PLUGIN_MAIN_MISSING")
+          canonical=b"".join(rel.encode()+b"\0"+files[rel].encode()+b"\n" for rel in sorted(files))
+          runtime_fp=hashlib.sha256(canonical).hexdigest()
+          with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel in sorted(files):
+                  data=(root/rel).read_bytes()
+                  zi=zipfile.ZipInfo("vf-ops/"+rel,date_time=(1980,1,1,0,0,0))
+                  zi.compress_type=zipfile.ZIP_DEFLATED
+                  zi.external_attr=(stat.S_IFREG|0o644)<<16
+                  z.writestr(zi,data)
+          asset_sha=hashlib.sha256(out.read_bytes()).hexdigest()
+          meta={
+              "schema":"vf-release/s01-c02-package-preflight-v1",
+              "target_repository":os.environ["TARGET_REPOSITORY"],
+              "target_sha":os.environ["TARGET_SHA"],
+              "version":os.environ["TARGET_VERSION"],
+              "asset_name":os.environ["ASSET_NAME"],
+              "asset_bytes":out.stat().st_size,
+              "asset_sha256":asset_sha,
+              "runtime_file_count":len(files),
+              "runtime_fingerprint_sha256":runtime_fp,
+              "schema_from":"6.0.0",
+              "schema_to":"6.0.0",
+              "backup_required":True,
+              "rollback_supported":True,
+              "package_persisted_publicly":False
+          }
+          Path("package-meta.json").write_text(json.dumps(meta,indent=2,sort_keys=True),encoding="utf-8")
+          print("PACKAGE_BUILD=PASS")
+          print("RUNTIME_FILE_COUNT="+str(len(files)))
+          print("RUNTIME_FINGERPRINT_SHA256="+runtime_fp)
+          print("ASSET_BYTES="+str(out.stat().st_size))
+          print("ASSET_SHA256="+asset_sha)
+          PY
+
+      - name: Validate runtime package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,re,zipfile
+          from pathlib import Path
+          m=json.loads(Path("package-meta.json").read_text())
+          p=Path(os.environ["ASSET_NAME"])
+          if hashlib.sha256(p.read_bytes()).hexdigest()!=m["asset_sha256"]: raise SystemExit("ASSET_SHA_DRIFT")
+          with zipfile.ZipFile(p) as z:
+              names=[x for x in z.namelist() if not x.endswith("/")]
+              if any(not x.startswith("vf-ops/") for x in names): raise SystemExit("TOP_LEVEL_INVALID")
+              rel=[x[len("vf-ops/"):] for x in names]
+              if len(rel)!=m["runtime_file_count"]: raise SystemExit("COUNT_MISMATCH")
+              bad=re.compile(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)|\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',re.I)
+              offenders=[x for x in rel if bad.search(x)]
+              if offenders: raise SystemExit("FORBIDDEN:"+",".join(offenders[:10]))
+              main=z.read("vf-ops/vf-ops.php").decode("utf-8")
+              if "Version: "+os.environ["TARGET_VERSION"] not in main: raise SystemExit("VERSION_INVALID")
+          print("PACKAGE_CONTRACT=PASS")
+          PY
+
+      - name: R43 release recheck
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-121932-navigation-role-r43-contract.php
+          node --check target/assets/js/admin-s01-domain-shell-r1.js
+          echo "R43_RELEASE_RECHECK=PASS"
+
+      - name: Build metadata-only evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          m=json.loads(Path("package-meta.json").read_text())
+          m["public_authority_applicability"]={
+            "INSTALL":"N_A: WordPress component update, not standalone FULL install",
+            "SECURITY":"REQUIRED",
+            "TESTING":"REQUIRED",
+            "UPGRADE":"REQUIRED",
+            "DATA_SCHEMA":"N_A: schema 6.0.0 -> 6.0.0; no DB/schema change",
+            "API_PROVIDER":"N_A: no provider/API change",
+            "SEO":"N_A: admin-only navigation change",
+            "CRON_JOB":"N_A: no scheduler change",
+            "NOTIFICATION":"N_A: no notification change",
+            "OBSERVABILITY":"CONDITIONAL: becomes REQUIRED at Production upgrade/readback",
+            "PERFORMANCE":"N_A: no performance-sensitive runtime change",
+            "GIT":"REQUIRED",
+            "UA_UI":"REQUIRED"
+          }
+          m["owner_preview_runtime_applicability"]="REQUIRED_PRE_RELEASE"
+          m["formal_release_permitted_without_owner_preview"]=False
+          raw=json.dumps(m,sort_keys=True).encode()
+          m["evidence_sha256"]=hashlib.sha256(raw).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-121932-package-preflight.json").write_text(json.dumps(m,indent=2,sort_keys=True),encoding="utf-8")
+          print("PACKAGE_PREFLIGHT_EVIDENCE_SHA256="+m["evidence_sha256"])
+          PY
+
+      - name: Remove private package before artifact upload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f "$ASSET_NAME"
+          test ! -f "$ASSET_NAME"
+          echo "PRIVATE_PACKAGE_REMOVED=PASS"
+
+      - name: Upload metadata-only evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121932-package-preflight-${{ github.run_id }}
+          path: evidence/s01-c02-121932-package-preflight.json
+          if-no-files-found: error
+          retention-days: 14
