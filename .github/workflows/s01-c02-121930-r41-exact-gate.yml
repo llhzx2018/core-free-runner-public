@@ -1,0 +1,120 @@
+name: S01-C02 1.21.930 R41 Exact Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121930-r41-exact-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: 60538f30ec2fb99c0e988f1f2f4a75df1e1bc8e7
+      EXPECTED_VERSION: 1.21.930
+    steps:
+      - name: Prove runner start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "RUNNER_START=PASS"
+          echo "TARGET_REPOSITORY=$TARGET_REPOSITORY"
+          echo "TARGET_SHA=$TARGET_SHA"
+
+      - name: Checkout exact public product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$EXPECTED_VERSION"
+          grep -Fq "Version: $EXPECTED_VERSION" vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '$EXPECTED_VERSION'" vf-ops.php
+          echo "EXACT_SOURCE_IDENTITY=PASS"
+
+      - name: Install PHP CLI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli >/dev/null
+          php -v | head -n 1
+
+      - name: PHP syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find target -type f -name '*.php' -not -path '*/vendor/*' -print0 \
+            | xargs -0 -n1 php -l > php-lint.log
+          LINTED="$(wc -l < php-lint.log | tr -d ' ')"
+          test "$LINTED" -gt 0
+          echo "PHP_LINT=PASS"
+          echo "PHP_FILES_LINTED=$LINTED"
+
+      - name: R41 exact contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-121930-retired-compat-surface-r41-contract.php | tee r41-contract.log
+          grep -Fq "R41 contract PASS" r41-contract.log
+          echo "R41_CONTRACT=PASS"
+
+      - name: Build minimum public-safe evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          target = Path("target")
+          actual_sha = ""
+          if (target / ".git").exists():
+              actual_sha = subprocess.check_output(["git","-C","target","rev-parse","HEAD"], text=True).strip()
+          version = (target / "VERSION").read_text(encoding="utf-8").strip() if (target / "VERSION").exists() else ""
+          lint_text = Path("php-lint.log").read_text(encoding="utf-8") if Path("php-lint.log").exists() else ""
+          r41_text = Path("r41-contract.log").read_text(encoding="utf-8") if Path("r41-contract.log").exists() else ""
+          payload = {
+              "schema": "vf-runner/s01-c02-r41-exact-gate-v1",
+              "target_repository": os.environ["TARGET_REPOSITORY"],
+              "expected_sha": os.environ["TARGET_SHA"],
+              "actual_sha": actual_sha,
+              "version": version,
+              "exact_source_identity": actual_sha == os.environ["TARGET_SHA"] and version == os.environ["EXPECTED_VERSION"],
+              "php_lint_pass": "No syntax errors detected" in lint_text,
+              "php_files_linted": sum(1 for line in lint_text.splitlines() if line.strip()),
+              "r41_contract_pass": "R41 contract PASS" in r41_text,
+              "private_material_persisted": False,
+              "secret_values_persisted": False
+          }
+          canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+          payload["evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-r41-exact-gate.json").write_text(
+              json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+          )
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+
+      - name: Upload minimum evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 Node24
+        with:
+          name: s01-c02-r41-exact-${{ github.run_id }}
+          path: evidence/s01-c02-r41-exact-gate.json
+          if-no-files-found: error
+          retention-days: 14
