@@ -234,8 +234,22 @@ try{
   if(await admin.locator('[data-open-add]').count()){
     await admin.locator('[data-open-add]').first().click();
     await admin.locator('[data-panel="add"]:not([hidden])').waitFor({state:'visible',timeout:5000});
+    await admin.waitForFunction(()=>{
+      const overlay=document.querySelector('.vf-workspace-overlay.open');
+      if(!overlay)return false;
+      return parseFloat(getComputedStyle(overlay).opacity)>=0.98;
+    },null,{timeout:5000});
+    const addDialogStable=await admin.evaluate(()=>{
+      const overlay=document.querySelector('.vf-workspace-overlay.open');
+      const dialog=document.querySelector('[data-panel="add"]:not([hidden])');
+      return {
+        overlayOpacity:overlay?parseFloat(getComputedStyle(overlay).opacity):0,
+        dialogBackground:dialog?getComputedStyle(dialog).backgroundColor:''
+      };
+    });
+    assert(addDialogStable.overlayOpacity>=0.98,'r8_add_dialog_stable_visual_state',JSON.stringify(addDialogStable));
     await admin.screenshot({path:path.join(out,'owner-desktop-start-add-dialog.png'),fullPage:true});
-    record('owner-interaction','start-add-dialog',{status:200,screenshot:'owner-desktop-start-add-dialog.png'});
+    record('owner-interaction','start-add-dialog',{status:200,screenshot:'owner-desktop-start-add-dialog.png',...addDialogStable});
     const close=admin.locator('[data-panel="add"] [data-close-panel]').first();
     if(await close.count())await close.click();
   }
@@ -253,8 +267,28 @@ try{
     await rowMore.click();
     const popover=admin.locator('.vf-action-menu-popover:popover-open').first();
     await popover.waitFor({state:'visible',timeout:5000});
+    await admin.waitForFunction(()=>{
+      const trigger=document.querySelector('.vf-action-menu-trigger[aria-expanded="true"]');
+      const menu=document.querySelector('.vf-action-menu-popover:popover-open');
+      if(!trigger||!menu)return false;
+      const tr=trigger.getBoundingClientRect(),mr=menu.getBoundingClientRect();
+      return mr.left>=8&&mr.top>=8&&Math.abs(mr.right-tr.right)<=24&&mr.top>=tr.bottom&&mr.top-tr.bottom<=20;
+    },null,{timeout:5000});
+    const rowMenuGeometry=await admin.evaluate(()=>{
+      const trigger=document.querySelector('.vf-action-menu-trigger[aria-expanded="true"]');
+      const menu=document.querySelector('.vf-action-menu-popover:popover-open');
+      if(!trigger||!menu)return {ok:false};
+      const tr=trigger.getBoundingClientRect(),mr=menu.getBoundingClientRect();
+      return {
+        ok:true,
+        trigger:{left:Math.round(tr.left),right:Math.round(tr.right),top:Math.round(tr.top),bottom:Math.round(tr.bottom)},
+        menu:{left:Math.round(mr.left),right:Math.round(mr.right),top:Math.round(mr.top),bottom:Math.round(mr.bottom)}
+      };
+    });
+    assert(rowMenuGeometry.ok&&rowMenuGeometry.menu.left>8,'r8_row_more_not_viewport_origin',JSON.stringify(rowMenuGeometry));
+    assert(Math.abs(rowMenuGeometry.menu.right-rowMenuGeometry.trigger.right)<=24,'r8_row_more_right_aligned_to_trigger',JSON.stringify(rowMenuGeometry));
     await admin.screenshot({path:path.join(out,'owner-desktop-row-more.png'),fullPage:true});
-    record('owner-interaction','row-more',{status:200,screenshot:'owner-desktop-row-more.png'});
+    record('owner-interaction','row-more',{status:200,screenshot:'owner-desktop-row-more.png',...rowMenuGeometry});
     await admin.keyboard.press('Escape');
   }
 
