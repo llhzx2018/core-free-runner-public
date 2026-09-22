@@ -149,6 +149,9 @@ echo P01_V24740_ATOMIC_ROLLBACK=PASS
 # Artifact identity/readback.
 unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$TARGET"
 unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!=="2.47.40"||($m["source_version"]??"")!=="2.47.39"||($m["schema_version"]??"")!=="2026090401")exit(1); echo "FORMAL_MANIFEST_IDENTITY=PASS\n";'
-sha256sum -c "$ART/VF-Start-V2.47.40-FULL.zip.sha256"
-sha256sum -c "$ART/VF_Start_V2.47.40_UPDATE.zip.sha256"
+(
+  cd "$ART"
+  sha256sum -c "VF-Start-V2.47.40-FULL.zip.sha256"
+  sha256sum -c "VF_Start_V2.47.40_UPDATE.zip.sha256"
+)
 echo P01_V24740_FORMAL_ARTIFACT_GATE=PASS
