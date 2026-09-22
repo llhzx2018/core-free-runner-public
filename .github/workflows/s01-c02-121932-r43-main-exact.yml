@@ -1,0 +1,119 @@
+name: S01-C02 1.21.932 R43 Main Exact Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121932-r43-main-exact.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-main-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: db44417cd76ec1dd8b9369222209be0148ad550b
+      EXPECTED_VERSION: 1.21.932
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo "PRIVATE_READ=PASS"
+
+      - name: Checkout exact main source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd target
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$EXPECTED_VERSION"
+          grep -Fq "Version: $EXPECTED_VERSION" vf-ops.php
+          grep -Fq "S01-NAVIGATION-ROLE-REBASELINE-R43" vf-ops.php
+          echo "EXACT_MAIN_IDENTITY=PASS"
+
+      - name: Install PHP CLI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli >/dev/null
+
+      - name: PHP syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find target -type f -name '*.php' -not -path '*/vendor/*' -print0 | xargs -0 -n1 php -l > php-lint.log
+          echo "PHP_FILES_LINTED=$(wc -l < php-lint.log | tr -d ' ')"
+          echo "PHP_LINT=PASS"
+
+      - name: JavaScript syntax gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --check target/assets/js/admin-s01-domain-shell-r1.js
+          echo "JS_SYNTAX=PASS"
+
+      - name: R43 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-121932-navigation-role-r43-contract.php | tee r43.log
+          grep -Fq "R43 contract PASS" r43.log
+          echo "R43_CONTRACT=PASS"
+
+      - name: Build minimum evidence
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          t=Path("target")
+          actual=subprocess.check_output(["git","-C","target","rev-parse","HEAD"],text=True).strip() if (t/".git").exists() else ""
+          version=(t/"VERSION").read_text().strip() if (t/"VERSION").exists() else ""
+          lint=Path("php-lint.log").read_text() if Path("php-lint.log").exists() else ""
+          r43=Path("r43.log").read_text() if Path("r43.log").exists() else ""
+          p={
+            "schema":"vf-runner/s01-c02-r43-main-exact-v1",
+            "target_repository":os.environ["TARGET_REPOSITORY"],
+            "expected_sha":os.environ["TARGET_SHA"],
+            "actual_sha":actual,
+            "version":version,
+            "exact_main_identity":actual==os.environ["TARGET_SHA"] and version==os.environ["EXPECTED_VERSION"],
+            "php_lint_pass":"No syntax errors detected" in lint,
+            "php_files_linted":sum(1 for x in lint.splitlines() if x.strip()),
+            "r43_contract_pass":"R43 contract PASS" in r43,
+            "private_source_persisted":False,
+            "secret_values_persisted":False
+          }
+          raw=json.dumps(p,sort_keys=True).encode()
+          p["evidence_sha256"]=hashlib.sha256(raw).hexdigest()
+          Path("evidence").mkdir(exist_ok=True)
+          Path("evidence/s01-c02-r43-main-exact.json").write_text(json.dumps(p,indent=2,sort_keys=True))
+          print(json.dumps(p))
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-r43-main-exact-${{ github.run_id }}
+          path: evidence/s01-c02-r43-main-exact.json
+          if-no-files-found: error
+          retention-days: 14
