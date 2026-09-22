@@ -113,6 +113,27 @@ try{
     admin.click('[data-vf-auth-submit]')
   ]);
 
+  const ownerRoutes=['index.php','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'];
+  for(const route of ownerRoutes) await capture(admin,'owner-desktop',route,localBase,'owner-desktop');
+
+  // Shared owner interaction states belong to the UX/UI denominator too.
+  await admin.goto(localBase+'start.php',{waitUntil:'networkidle'});
+  if(await admin.locator('[data-open-add]').count()){
+    await admin.locator('[data-open-add]').first().click();
+    await admin.locator('[data-panel="add"]:not([hidden])').waitFor({state:'visible',timeout:5000});
+    await admin.screenshot({path:path.join(out,'owner-desktop-start-add-dialog.png'),fullPage:true});
+    record('owner-interaction','start-add-dialog',{status:200,screenshot:'owner-desktop-start-add-dialog.png'});
+    const close=admin.locator('[data-panel="add"] [data-close-panel]').first();
+    if(await close.count())await close.click();
+  }
+  await admin.goto(localBase+'start.php',{waitUntil:'networkidle'});
+  await admin.keyboard.press('Control+K').catch(()=>{});
+  if(await admin.locator('.vf-quick-open:not([hidden])').count()){
+    await admin.screenshot({path:path.join(out,'owner-desktop-quick-open.png'),fullPage:true});
+    record('owner-interaction','quick-open',{status:200,screenshot:'owner-desktop-quick-open.png'});
+    await admin.keyboard.press('Escape').catch(()=>{});
+  }
+
   const adminRoutes=[
     'manage.php',
     'surface-manager.php',
@@ -145,6 +166,9 @@ try{
     m.waitForNavigation({waitUntil:'networkidle'}),
     m.click('[data-vf-auth-submit]')
   ]);
+  for(const route of ['index.php','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php']){
+    await capture(m,'owner-mobile',route,localBase,'owner-mobile');
+  }
   const mobileAdminRoutes=[
     'manage.php','surface-manager.php','surface-manager.php?advanced=1','links-admin.php',
     'transfer.php','data-safety.php','system-health.php','plugins.php',
@@ -179,6 +203,9 @@ try{
       productionPublicMobile:results.filter(x=>x.kind==='prod-mobile').length,
       candidatePublicDesktop:results.filter(x=>x.kind==='candidate-public-desktop').length,
       candidatePublicMobile:results.filter(x=>x.kind==='candidate-public-mobile').length,
+      ownerDesktop:results.filter(x=>x.kind==='owner-desktop').length,
+      ownerMobile:results.filter(x=>x.kind==='owner-mobile').length,
+      ownerInteractions:results.filter(x=>x.kind==='owner-interaction').length,
       adminDesktop:results.filter(x=>x.kind==='admin-desktop').length,
       adminMobile:results.filter(x=>x.kind==='admin-mobile').length,
       compatibility:results.filter(x=>x.kind==='compat').length
