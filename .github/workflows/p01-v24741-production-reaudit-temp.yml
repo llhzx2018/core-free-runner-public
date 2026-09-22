@@ -1,0 +1,96 @@
+name: p01-v24741-production-reaudit-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v24741-production-reaudit-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  production-reaudit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Read-only Production bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://start.kewaro.com'
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' "$BASE/api.php?action=bootstrap" -o /tmp/p01-prod-bootstrap.json
+          jq -e '.ok==true and .version=="2.47.41"' /tmp/p01-prod-bootstrap.json >/dev/null
+          echo 'P01_PRODUCTION_VERSION=2.47.41'
+          echo 'P01_PRODUCTION_BOOTSTRAP=PASS'
+
+      - name: Public surface HTTP anonymous and content sanity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://start.kewaro.com'
+          routes=('/' '/start.php' '/channels.php' '/watch.php' '/topics.php' '/courses.php' '/projects.php' '/tools.php' '/software.php')
+          for route in "${routes[@]}"; do
+            safe="$(printf '%s' "$route" | tr '/?&=.' '_' | tr -cd 'A-Za-z0-9_-')"
+            headers="/tmp/p01-prod-${safe}.headers"
+            body="/tmp/p01-prod-${safe}.html"
+            status="$(curl -sS -L -D "$headers" -o "$body" -w '%{http_code}' --connect-timeout 10 --max-time 30 "$BASE$route")"
+            test "$status" = 200 || { echo "P01_PRODUCTION_HTTP_FAIL route=$route status=$status"; exit 21; }
+            test -s "$body" || { echo "P01_PRODUCTION_EMPTY_BODY route=$route"; exit 23; }
+            if grep -Eiq '^Set-Cookie:[[:space:]]*vfnav_session=' "$headers"; then
+              echo "P01_PRODUCTION_ANON_SESSION_LEAK route=$route"
+              exit 22
+            fi
+            if grep -Eiq '(Fatal error|Parse error|Uncaught [A-Za-z]+Exception|Warning: .* on line)' "$body"; then
+              echo "P01_PRODUCTION_RUNTIME_ERROR_MARKER route=$route"
+              exit 24
+            fi
+            echo "P01_PRODUCTION_ROUTE_PASS route=$route status=$status bytes=$(wc -c < "$body")"
+          done
+          echo 'P01_PRODUCTION_PUBLIC_SURFACES=PASS'
+          echo 'P01_PRODUCTION_ANON_SESSION_BOUNDARY=PASS'
+          echo 'P01_PRODUCTION_CONTENT_SANITY=PASS'
+
+      - name: Release and stable channel exact alignment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          tag_sha="$(gh api 'repos/llhzx2018/vf-start/git/ref/tags/v2.47.41' --jq '.object.sha')"
+          test "$tag_sha" = 'e860c52a6be09fa2087e93c9d3f88795f0edeb13'
+          gh api 'repos/llhzx2018/vf-start/releases/tags/v2.47.41' > /tmp/release.json
+          jq -e '
+            .id==393665873 and
+            .tag_name=="v2.47.41" and
+            .draft==false and .prerelease==false and
+            ([.assets[]|select(.name=="VF-Start-V2.47.41-FULL.zip" and .size==894237 and .digest=="sha256:c988e932be7744d6ba99a1447b2a69dc1c37d12c321e282341919a46c364d629")]|length)==1 and
+            ([.assets[]|select(.name=="VF_Start_V2.47.41_UPDATE.zip" and .size==1911507 and .digest=="sha256:0cd4085f25631db772d97e661cd4251c1901049837f59cbb086ab5d9f0111c8f")]|length)==1
+          ' /tmp/release.json >/dev/null
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > /tmp/P01.json
+          jq -e '
+            .current_version=="2.47.40" and
+            .target_version=="2.47.41" and
+            .from_versions==["2.47.40"] and
+            .release_tag=="v2.47.41" and
+            .release_id==393665873 and
+            .product_identity=="e860c52a6be09fa2087e93c9d3f88795f0edeb13" and
+            .asset_name=="VF_Start_V2.47.41_UPDATE.zip" and
+            .asset_bytes==1911507 and
+            .asset_sha256=="0cd4085f25631db772d97e661cd4251c1901049837f59cbb086ab5d9f0111c8f"
+          ' /tmp/P01.json >/dev/null
+          echo 'P01_PRODUCTION_RELEASE_DISTRIBUTION_ALIGNMENT=PASS'
+
+      - name: Production re-audit summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_V24741_PRODUCTION_PUBLIC_READBACK=PASS'
+          echo 'OWNER_REPORTED_UPDATE_COMPLETED=YES'
+          echo 'PRIVATE_ADMIN_RUNTIME=NOT_REMOTELY_READ'
+          echo 'PRODUCTION_WRITE=0'
