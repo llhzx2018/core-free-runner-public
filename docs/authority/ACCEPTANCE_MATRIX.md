@@ -20,6 +20,9 @@
 | Temporary branch deletion | SEPARATE DESTRUCTIVE CLEANUP / NOT IMPLIED |
 | Reusable Harness Main Adoption | REQUIRE EXPLICIT REUSE DECISION |
 | Repeated Version Lane Identity | SINGLE-SOURCE SPEC + PRE-TRIGGER `audit-rendered` / NO RAW COPY-REPLACE |
+| Exact Worktree Binding | SHA + Tree + Version + clean checkout / FAIL CLOSED |
+| Mutation-prone Test Isolation | DISPOSABLE DETACHED WORKTREE / ORIGINAL SOURCE UNCHANGED |
+| Nonzero Isolated Test Command | UNRESOLVED_TEST_FAILURE / NOT PRODUCT FAIL UNTIL CLASSIFIED |
 | Gate Ownership Isolation | PASS / NO GLOBAL TEST-DISCOVERY COUPLING |
 | Release-capable Trigger Boundary | PUSH REQUIRES DEDICATED BRANCH / HISTORICAL EXACT RELEASE PREFERS MANUAL |
 | Machine PASS Self-sign by AI | FORBIDDEN |
