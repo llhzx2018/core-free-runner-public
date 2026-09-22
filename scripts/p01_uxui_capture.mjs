@@ -122,6 +122,29 @@ try{
     const routes=['','start.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'];
     for(const route of routes){
       await capture(page,viewport.name,route,localBase,viewport.name);
+      if(viewport.name==='candidate-public-desktop'){
+        if(route===''){
+          const hero=await page.evaluate(()=>{
+            const h1=document.querySelector('.vf-public-home-hero h1');
+            return h1?parseFloat(getComputedStyle(h1).fontSize):0;
+          });
+          assert(hero>0&&hero<=60.5,'r3_public_home_hero_compact',String(hero));
+        }
+        if(route==='projects.php'){
+          const panels=await page.locator('.vf-project-action-panels').count();
+          assert(panels===0,'r3_projects_zero_attention_omits_panel',String(panels));
+        }
+        if(route==='tools.php'){
+          const scene=await page.evaluate(()=>{
+            const cards=[...document.querySelectorAll('.vf-tool-scene-grid>.vf-tool-scene-card')];
+            const widths=cards.map(x=>x.getBoundingClientRect().width);
+            return {count:cards.length,max:widths.length?Math.max(...widths):0};
+          });
+          if(scene.count>0&&scene.count<=3){
+            assert(scene.max<=318,'r3_sparse_tool_scene_width',JSON.stringify(scene));
+          }
+        }
+      }
       if(viewport.name==='candidate-public-mobile'){
         const visible=await activeDomainVisible(page);
         record('candidate-mobile-domain',route,visible);
