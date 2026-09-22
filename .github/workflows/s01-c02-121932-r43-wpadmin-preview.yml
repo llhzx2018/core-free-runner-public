@@ -1,0 +1,168 @@
+name: S01-C02 1.21.932 R43 wp-admin Preview
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121932-r43-wpadmin-preview.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  wpadmin-preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: db44417cd76ec1dd8b9369222209be0148ad550b
+      EXPECTED_VERSION: 1.21.932
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Verify private read
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+          echo "PRIVATE_READ=PASS"
+
+      - name: Checkout exact Ops source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+
+      - name: Verify candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$EXPECTED_VERSION"
+          grep -Fq "Version: $EXPECTED_VERSION" target/vf-ops.php
+          grep -Fq "S01-NAVIGATION-ROLE-REBASELINE-R43" target/vf-ops.php
+          echo "PREVIEW_SOURCE_IDENTITY=PASS"
+
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          ./cloudflared --version
+
+      - name: Start disposable public tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          nohup ./cloudflared tunnel --no-autoupdate --url http://127.0.0.1:9400 > cloudflared.log 2>&1 &
+          echo $! > cloudflared.pid
+          for i in $(seq 1 60); do
+            URL="$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' cloudflared.log | head -n1 || true)"
+            if [ -n "$URL" ]; then
+              echo "$URL" > preview-origin.txt
+              echo "PREVIEW_ORIGIN=$URL"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat cloudflared.log
+          echo "TUNNEL_URL_NOT_FOUND"
+          exit 1
+
+      - name: Prepare WordPress Playground blueprint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > preview-blueprint.json <<'JSON'
+          {
+            "$schema": "https://playground.wordpress.net/blueprint-schema.json",
+            "preferredVersions": {
+              "php": "8.3",
+              "wp": "latest"
+            },
+            "landingPage": "/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow",
+            "login": true,
+            "steps": [
+              {
+                "step": "activatePlugin",
+                "pluginPath": "vf-ops/vf-ops.php"
+              }
+            ]
+          }
+          JSON
+
+      - name: Start exact candidate in WordPress Playground
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          URL="$(cat preview-origin.txt)"
+          nohup npx --yes @wp-playground/cli@latest server             --php=8.3             --wp=latest             --port=9400             --site-url="$URL"             --login             --mount="$PWD/target:/wordpress/wp-content/plugins/vf-ops"             --blueprint="$PWD/preview-blueprint.json"             > playground.log 2>&1 &
+          echo $! > playground.pid
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:9400/ >/dev/null 2>&1; then
+              echo "PLAYGROUND_LOCAL=READY"
+              exit 0
+            fi
+            if ! kill -0 "$(cat playground.pid)" 2>/dev/null; then
+              cat playground.log
+              echo "PLAYGROUND_PROCESS_EXITED"
+              exit 1
+            fi
+            sleep 1
+          done
+          cat playground.log
+          echo "PLAYGROUND_START_TIMEOUT"
+          exit 1
+
+      - name: Verify real wp-admin candidate through tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ORIGIN="$(cat preview-origin.txt)"
+          PAGE="$ORIGIN/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow"
+          for i in $(seq 1 60); do
+            curl -L -fsS "$PAGE" -o admin-preview.html || true
+            if grep -Fq "VF 站点运营" admin-preview.html && grep -Fq "vf-v6-domain-menu" admin-preview.html; then
+              echo "WPADMIN_PREVIEW_RUNTIME=PASS"
+              echo "OWNER_PREVIEW_URL=$PAGE"
+              echo "$PAGE" > owner-preview-url.txt
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "----- playground.log -----"
+          tail -n 120 playground.log || true
+          echo "----- cloudflared.log -----"
+          tail -n 80 cloudflared.log || true
+          echo "----- response markers -----"
+          grep -E "wp-login|VF 站点运营|vf-v6-domain-menu|error|fatal" admin-preview.html | head -n 80 || true
+          echo "WPADMIN_PREVIEW_RUNTIME=FAIL"
+          exit 1
+
+      - name: Publish preview coordinates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PAGE="$(cat owner-preview-url.txt)"
+          echo "=================================================="
+          echo "S01-C02 1.21.932 REAL WP-ADMIN PREVIEW"
+          echo "$PAGE"
+          echo "Exact source: $TARGET_SHA"
+          echo "This is disposable WordPress Playground, not Production."
+          echo "Persistent secondary navigation: NONE"
+          echo "Persistent tertiary navigation: NONE"
+          echo "=================================================="
+
+      - name: Keep preview alive for OWNER real-use
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "Preview runtime will remain available for approximately 40 minutes."
+          for i in $(seq 1 80); do
+            sleep 30
+            kill -0 "$(cat playground.pid)"
+            kill -0 "$(cat cloudflared.pid)"
+          done
