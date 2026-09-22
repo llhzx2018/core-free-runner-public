@@ -1,0 +1,388 @@
+name: p01-r3-70-entry-audit-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-r3-70-entry-audit-temp.yml'
+      - 'requests/p01-r3-70-entry-audit-20260922.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-r3-70-entry-audit-temp
+  cancel-in-progress: false
+
+jobs:
+  r3-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      LANE_SPEC: requests/p01-r3-70-entry-audit-20260922.json
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Validate lane
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$LANE_SPEC" | tee /tmp/lane.json
+          python3 scripts/ephemeral_lane_spec.py github-output --spec "$LANE_SPEC" >> "$GITHUB_ENV"
+          grep -F '"status": "PASS"' /tmp/lane.json >/dev/null
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          php -m | grep -Fx gd
+
+      - name: Checkout exact P01 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 269c07f3f1f2198d08193b2afa6ed7c4328fb57d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Verify exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$target_sha"
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = "$target_tree"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$target_version"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$target_version"
+          test "$(php -r '$p=json_decode(file_get_contents("candidate/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$schema_version"
+          echo 'P01_R3_EXACT_IDENTITY=PASS'
+
+      - name: Build 70-entry source inventory
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          root=Path('candidate/src')
+          entries=sorted(root.glob('*.php'))
+          assert len(entries)==70, f'expected 70 top-level PHP entries, got {len(entries)}'
+          searchable=[]
+          for p in root.rglob('*'):
+              if p.is_file() and p.suffix.lower() in {'.php','.js','.css','.json','.html','.md'}:
+                  try: searchable.append((p,p.read_text(encoding='utf-8',errors='ignore')))
+                  except Exception: pass
+          canonical_roots={
+              'index.php','home.php','start.php','channels.php','watch.php','topics.php',
+              'courses.php','projects.php','tools.php','software.php','setup.php','manage.php'
+          }
+          rows=[]
+          for p in entries:
+              text=p.read_text(encoding='utf-8',errors='ignore')
+              base=p.name
+              refs=sorted(str(q.relative_to(root)) for q,t in searchable if q!=p and base in t)
+              redirect='Location:' in text
+              jsonish='vf_json(' in text or 'application/json' in text
+              resource='readfile(' in text or 'Content-Disposition:' in text
+              rendered=bool(re.search(r'<!doctype html|vf_admin_shell_begin\s*\(|::render\s*\(',text,re.I))
+              if base in {'home.php','start.php','surfaces.php','channels.php','watch.php','topics.php','courses.php','projects.php','tools.php','software.php'}:
+                  rendered=True
+              action=('vf_require_csrf(' in text or 'setup_csrf' in text) and not rendered and not redirect
+              kind='page' if rendered else 'redirect' if redirect else 'resource' if resource else 'api' if jsonish else 'action' if action else 'endpoint'
+              orphan_candidate=kind=='page' and base not in canonical_roots and len(refs)==0
+              rows.append({'entry':base,'kind':kind,'incoming_count':len(refs),'incoming_refs':refs[:20],'orphan_candidate':orphan_candidate})
+          report={'entry_count':len(rows),'orphan_candidates':[r['entry'] for r in rows if r['orphan_candidate']],'entries':rows}
+          Path('/tmp/p01-r3-entry-inventory.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('P01_R3_ENTRY_COUNT='+str(len(rows)))
+          print('P01_R3_ORPHAN_CANDIDATES='+','.join(report['orphan_candidates']))
+          for r in rows:
+              print(f"ENTRY {r['entry']} kind={r['kind']} incoming={r['incoming_count']} orphan_candidate={str(r['orphan_candidate']).lower()}")
+          PY
+          echo 'P01_R3_SOURCE_INVENTORY=PASS'
+
+      - name: Syntax and focused edge contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          cd candidate
+          php tests/integration/p01_six_surface_authority_acceptance.php
+          php tests/integration/resource_asset_disaster_restore_e2e.php
+          php tests/unit/browser_helper_distribution_contract.php
+          php tests/unit/tmdb_watch_metadata_behavior.php
+          php tests/unit/tmdb_watch_match_safety_r15.php
+          php tests/unit/cross_page_mobile_touch_consistency_contract.php
+          php tests/unit/mobile_product_controls_contract.php
+          php tests/unit/duplicates_mobile_readability_contract.php
+          php tests/unit/project_mobile_touch_targets_contract.php
+          php tests/unit/books_mobile_touch_contract.php
+          php tests/unit/legacy_entrypoint_convergence_r6_contract.php
+          echo 'P01_R3_FOCUSED_EDGE_CONTRACTS=PASS'
+
+      - name: Fresh install and deterministic real-data fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-r3-runtime
+          COOKIE=/tmp/p01-r3-admin.cookies
+          TEST_PASS="$(printf '%s%s%s' 'P01R3' 'Audit!' '2026')"
+          rm -rf "$RUNTIME" "$COOKIE"
+          cp -a candidate/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:"$target_port" -t . >/tmp/p01-r3-server.log 2>&1 &
+          SERVER_PID=$!
+          echo "$SERVER_PID" >/tmp/p01-r3-server.pid
+          trap 'code=$?; if [ "$code" -ne 0 ]; then echo "P01_R3_RUNTIME_FAILURE=$code"; tail -n 80 /tmp/p01-r3-server.log || true; fi; exit "$code"' ERR
+
+          for i in $(seq 1 40); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$target_port/setup.php" -o /tmp/p01-r3-setup.html; then break; fi
+            sleep 1
+          done
+          SETUP_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-r3-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$target_port/setup.php" \
+            --data-urlencode "setup_csrf=$SETUP_CSRF" \
+            --data-urlencode 'site_title=VF Start R3 Audit' \
+            --data-urlencode "admin_password=$TEST_PASS" \
+            --data-urlencode "admin_password_confirm=$TEST_PASS" \
+            -o /tmp/p01-r3-setup-post.html
+          php cli/verify.php | tee /tmp/p01-r3-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-r3-verify.txt
+
+          LOGIN_PAYLOAD=$(jq -nc --arg p "$TEST_PASS" '{password:$p}')
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' \
+            --data "$LOGIN_PAYLOAD" "http://127.0.0.1:$target_port/api.php?action=login" >/tmp/p01-r3-login.json
+          grep -Fq '"ok":true' /tmp/p01-r3-login.json
+
+          cat >/tmp/p01-r3-fixture.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__ . '/p01-r3-runtime/app/bootstrap.php';
+          require_once __DIR__ . '/p01-r3-runtime/app/SurfaceRepository.php';
+          require_once __DIR__ . '/p01-r3-runtime/app/ResourceAssetStore.php';
+
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $surface=new VfSurfaceRepository($db);
+
+          $publicCat=$repo->createCategory(['name'=>'R3 Public Root','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          $privateCat=$repo->createCategory(['name'=>'R3 Private Root','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+
+          $makeStart=function(string $title,string $url,int $category,array $extra=[])use($repo):int{
+              $data=array_merge(['surface'=>'start','category_id'=>$category,'title'=>$title,'url'=>$url,'description'=>'R3 deterministic fixture','tags'=>[],'is_private'=>0,'is_pending'=>0],$extra);
+              return (int)$repo->saveLink(null,$data)['id'];
+          };
+          $makePeer=function(string $domain,string $title,string $url,bool $private=false,array $profile=[])use($repo,$surface):int{
+              $id=(int)$repo->saveLink(null,['surface'=>$domain,'title'=>$title,'url'=>$url,'description'=>'R3 deterministic fixture','tags'=>[],'is_private'=>$private?1:0,'is_pending'=>0])['id'];
+              $surface->upsertProfile($id,array_merge(['surface'=>$domain],$profile));
+              return $id;
+          };
+
+          $ids=[];
+          $ids['start_public']=$makeStart('R3 Public Start','https://example.com/r3-public-start',$publicCat);
+          $ids['start_private']=$makeStart('R3 Private Start','https://example.com/r3-private-start',$privateCat);
+          $ids['start_pending']=$makeStart('R3 Pending Start','https://example.com/r3-pending-start',$publicCat,['is_pending'=>1]);
+          $ids['start_sensitive']=$makeStart('R3 Sensitive Start','https://example.com/r3-sensitive?token=fixture',$publicCat);
+          $ids['start_protected']=$makeStart('R3 Protected Start','https://example.com/r3-protected',$publicCat,['url_type'=>'protected']);
+          $ids['tool']=$makeStart('R3 SEO Keyword Tool','https://example.com/r3-seo-tool',$publicCat,['tags'=>['seo','关键词','工具']]);
+          $ids['software']=$makeStart('R3 Windows File Search Software','https://example.com/r3-software',$publicCat,['tags'=>['windows','文件搜索','软件']]);
+
+          $ids['channel_public']=$makePeer('channels','R3 Public Channel','https://example.com/r3-channel',false,['resource_kind'=>'youtube','background_friendly'=>1]);
+          $ids['channel_private']=$makePeer('channels','R3 Private Channel','https://example.com/r3-channel-private',true,['resource_kind'=>'youtube']);
+          $ids['watch_public']=$makePeer('watch','R3 Public Movie','https://example.com/r3-movie',false,['resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want']);
+          $ids['watch_private']=$makePeer('watch','R3 Private Movie','https://example.com/r3-movie-private',true,['resource_kind'=>'movie','media_year'=>2026,'media_status'=>'want']);
+          $ids['topic_public']=$makePeer('topics','R3 Hosted Topic','https://example.com/r3-topic',false,['resource_kind'=>'guide','source_kind'=>'hosted_html','source_ref'=>'r3-topic.html']);
+          $ids['book_public']=$makePeer('books','R3 Public Course','https://example.com/r3-course',false,['resource_kind'=>'course']);
+          $ids['project_admin']=$makePeer('projects','R3 Owner Project','https://example.com/r3-project',false,['resource_kind'=>'project','project_code'=>'R3','project_status'=>'active']);
+
+          $htmlDir=VF_PRIVATE_ROOT.'/resource-assets/html';
+          if(!is_dir($htmlDir))mkdir($htmlDir,0750,true);
+          vf_write_storage_guards($htmlDir);
+          $html='<!doctype html><html><body><h1>R3 Hosted Topic Body</h1></body></html>';
+          $hash=hash('sha256',$html);
+          $file='topic-'.$ids['topic_public'].'-'.substr($hash,0,20).'.html';
+          file_put_contents($htmlDir.'/'.$file,$html,LOCK_EX);
+          chmod($htmlDir.'/'.$file,0640);
+          $now=gmdate('c');
+          $stmt=$db->prepare("INSERT INTO resource_asset_files(link_id,asset_kind,file_name,original_name,mime_type,byte_size,width,height,file_hash,created_at,updated_at) VALUES(?,'html',?,'r3-topic.html','text/html',?,NULL,NULL,?,?,?)");
+          $stmt->execute([$ids['topic_public'],$file,strlen($html),$hash,$now,$now]);
+
+          file_put_contents('/tmp/p01-r3-fixture.json',json_encode($ids,JSON_UNESCAPED_SLASHES));
+          echo "P01_R3_FIXTURE=PASS\n";
+          PHP
+          php /tmp/p01-r3-fixture.php
+          echo 'P01_R3_FRESH_INSTALL_AND_FIXTURE=PASS'
+
+      - name: Sweep all 70 HTTP entries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-r3-runtime
+          COOKIE=/tmp/p01-r3-admin.cookies
+          PORT="$target_port"
+          cd "$RUNTIME"
+          : >/tmp/p01-r3-http.tsv
+          printf 'entry\tanon_status\tanon_location\tanon_cache\tanon_session_cookie\tadmin_status\tadmin_location\tadmin_cache\n' >>/tmp/p01-r3-http.tsv
+          FAIL=0
+          COUNT=0
+          while IFS= read -r entry; do
+            COUNT=$((COUNT+1))
+            ah=$(mktemp); ab=$(mktemp)
+            uh=$(mktemp); ub=$(mktemp)
+            ANON_STATUS=$(curl -sS --max-time 12 -D "$ah" -o "$ab" -w '%{http_code}' "http://127.0.0.1:$PORT/$entry" || echo 000)
+            ADMIN_STATUS=$(curl -sS --max-time 12 -b "$COOKIE" -c "$COOKIE" -D "$uh" -o "$ub" -w '%{http_code}' "http://127.0.0.1:$PORT/$entry" || echo 000)
+            ANON_LOC=$(awk 'BEGIN{IGNORECASE=1}/^Location:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' "$ah")
+            ADMIN_LOC=$(awk 'BEGIN{IGNORECASE=1}/^Location:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' "$uh")
+            ANON_CACHE=$(awk 'BEGIN{IGNORECASE=1}/^Cache-Control:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' "$ah")
+            ADMIN_CACHE=$(awk 'BEGIN{IGNORECASE=1}/^Cache-Control:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' "$uh")
+            ANON_COOKIE=0
+            if grep -Eiq '^Set-Cookie: *vfnav_session=' "$ah"; then ANON_COOKIE=1; fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$entry" "$ANON_STATUS" "$ANON_LOC" "$ANON_CACHE" "$ANON_COOKIE" "$ADMIN_STATUS" "$ADMIN_LOC" "$ADMIN_CACHE" >>/tmp/p01-r3-http.tsv
+            if [[ "$ANON_STATUS" == 000 || "$ANON_STATUS" =~ ^5 ]] || [[ "$ADMIN_STATUS" == 000 || "$ADMIN_STATUS" =~ ^5 ]]; then
+              echo "R3_ENTRY_SERVER_ERROR entry=$entry anon=$ANON_STATUS admin=$ADMIN_STATUS"
+              FAIL=1
+            fi
+            if [ "$ANON_COOKIE" = 1 ]; then
+              echo "R3_ANON_SESSION_COOKIE entry=$entry status=$ANON_STATUS"
+              FAIL=1
+            fi
+            rm -f "$ah" "$ab" "$uh" "$ub"
+          done < <(find . -maxdepth 1 -type f -name '*.php' -printf '%f\n' | sort)
+          test "$COUNT" = 70
+          echo '--- P01 R3 HTTP SWEEP ---'
+          cat /tmp/p01-r3-http.tsv
+          test "$FAIL" = 0
+          echo 'P01_R3_HTTP_70_ENTRY_SWEEP=PASS'
+
+      - name: Canonical pages legacy redirects and real-data projections
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PORT="$target_port"
+          COOKIE=/tmp/p01-r3-admin.cookies
+          IDS=/tmp/p01-r3-fixture.json
+
+          for page in manage.php surface-manager.php links-admin.php health.php duplicates.php recycle-bin.php transfer.php data-safety.php system-health.php system-info.php system-baseline.php plugins.php browser-helper.php update.php update-credential.php settings.php full-governance.php workbench.php quick-save.php; do
+            code=$(curl -sS -b "$COOKIE" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/$page")
+            echo "R3_CANONICAL_PAGE $page $code"
+            test "$code" = 200
+          done
+
+          check_redirect(){
+            local entry="$1" expected="$2"
+            local h code loc
+            h=$(mktemp)
+            code=$(curl -sS -b "$COOKIE" -D "$h" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/$entry")
+            loc=$(awk 'BEGIN{IGNORECASE=1}/^Location:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' "$h")
+            rm -f "$h"
+            echo "R3_LEGACY_REDIRECT $entry status=$code location=$loc"
+            test "$code" = 302
+            [[ "$loc" == "$expected"* ]]
+          }
+          check_redirect affiliate.php 'links-admin.php?notice=affiliate-retired'
+          check_redirect governance.php 'full-governance.php'
+          check_redirect icons.php 'settings.php?section=display'
+          check_redirect jobs.php 'system-health.php'
+          check_redirect security.php 'settings.php?section=account'
+          check_redirect tags.php 'links-admin.php?notice=tags-retired'
+          check_redirect data.php 'transfer.php'
+          check_redirect resources.php 'surface-manager.php'
+          check_redirect system.php 'system-health.php'
+
+          fetch_anon(){
+            curl -fsS "http://127.0.0.1:$PORT/$1"
+          }
+          fetch_admin(){
+            curl -fsS -b "$COOKIE" "http://127.0.0.1:$PORT/$1"
+          }
+
+          fetch_anon start.php >/tmp/r3-start-anon.html
+          grep -Fq 'R3 Public Start' /tmp/r3-start-anon.html
+          ! grep -Fq 'R3 Private Start' /tmp/r3-start-anon.html
+          ! grep -Fq 'R3 Pending Start' /tmp/r3-start-anon.html
+          ! grep -Fq 'R3 Sensitive Start' /tmp/r3-start-anon.html
+          ! grep -Fq 'R3 Protected Start' /tmp/r3-start-anon.html
+
+          fetch_admin start.php >/tmp/r3-start-admin.html
+          grep -Fq 'R3 Public Start' /tmp/r3-start-admin.html
+          grep -Fq 'R3 Private Start' /tmp/r3-start-admin.html
+          ! grep -Fq 'R3 Pending Start' /tmp/r3-start-admin.html
+
+          fetch_anon channels.php >/tmp/r3-channels-anon.html
+          grep -Fq 'R3 Public Channel' /tmp/r3-channels-anon.html
+          ! grep -Fq 'R3 Private Channel' /tmp/r3-channels-anon.html
+
+          fetch_anon watch.php >/tmp/r3-watch-anon.html
+          grep -Fq 'R3 Public Movie' /tmp/r3-watch-anon.html
+          ! grep -Fq 'R3 Private Movie' /tmp/r3-watch-anon.html
+
+          fetch_anon topics.php >/tmp/r3-topics-anon.html
+          grep -Fq 'R3 Hosted Topic' /tmp/r3-topics-anon.html
+          fetch_anon courses.php >/tmp/r3-courses-anon.html
+          grep -Fq 'R3 Public Course' /tmp/r3-courses-anon.html
+          fetch_anon projects.php >/tmp/r3-projects-anon.html
+          ! grep -Fq 'R3 Owner Project' /tmp/r3-projects-anon.html
+
+          fetch_anon tools.php >/tmp/r3-tools-anon.html
+          grep -Fq 'R3 SEO Keyword Tool' /tmp/r3-tools-anon.html
+          fetch_anon software.php >/tmp/r3-software-anon.html
+          grep -Fq 'R3 Windows File Search Software' /tmp/r3-software-anon.html
+
+          TOPIC_ID=$(jq -r '.topic_public' "$IDS")
+          TOPIC_STATUS=$(curl -sS -o /tmp/r3-topic-hosted.html -w '%{http_code}' "http://127.0.0.1:$PORT/resource-html.php?id=$TOPIC_ID")
+          echo "R3_HOSTED_HTML_PUBLIC_STATUS=$TOPIC_STATUS"
+          test "$TOPIC_STATUS" = 200
+          grep -Fq 'R3 Hosted Topic Body' /tmp/r3-topic-hosted.html
+          echo 'P01_R3_CANONICAL_AND_REAL_DATA_PROJECTIONS=PASS'
+
+      - name: Session expiry fail-closed proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-r3-runtime
+          COOKIE=/tmp/p01-r3-admin.cookies
+          PORT="$target_port"
+          SESSION_ID=$(awk '$6=="vfnav_session"{print $7}' "$COOKIE" | tail -n1)
+          test -n "$SESSION_ID"
+          SESSION_HASH=$(printf '%s' "$SESSION_ID" | sha256sum | awk '{print $1}')
+          cd "$RUNTIME"
+          php -r '
+          require "app/bootstrap.php";
+          $db=vf_db();
+          $stmt=$db->prepare("UPDATE admin_sessions SET max_expires_at=?,last_seen_at=? WHERE session_hash=?");
+          $past=gmdate("c",time()-7200);
+          $stmt->execute([$past,$past,$argv[1]]);
+          if($stmt->rowCount()<1){fwrite(STDERR,"session row missing\n");exit(2);}
+          ' "$SESSION_HASH"
+          CODE=$(curl -sS -b "$COOKIE" -D /tmp/r3-expired.headers -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/manage.php")
+          LOC=$(awk 'BEGIN{IGNORECASE=1}/^Location:/{sub(/^[^:]+:[[:space:]]*/,"");gsub("\r","");print;exit}' /tmp/r3-expired.headers)
+          echo "R3_EXPIRED_SESSION_STATUS=$CODE location=$LOC"
+          test "$CODE" = 302
+          test "$LOC" = './'
+          echo 'P01_R3_SESSION_EXPIRY=PASS'
+
+      - name: R3 audit summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_R3_AUDIT_SOURCE_SHA='"$target_sha"
+          echo 'P01_R3_AUDIT_SOURCE_TREE='"$target_tree"
+          echo 'P01_R3_AUDIT_ENTRY_COUNT=70'
+          echo 'P01_R3_AUDIT_SCOPE=70_ENTRY_REAL_DATA_SESSION_LEGACY_HOSTED_HTML_MOBILE_CONTRACTS'
+          echo 'P01_R3_AUDIT=PASS'
