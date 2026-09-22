@@ -150,6 +150,21 @@ try{
         record('candidate-mobile-domain',route,visible);
         if(!visible.ok)fail('CANDIDATE_MOBILE_ACTIVE_DOMAIN_'+(route||'index'),JSON.stringify(visible));
         if(route==='software.php'&&visible.marker!=='1')fail('CANDIDATE_SOFTWARE_ACTIVE_DOMAIN_MARKER',JSON.stringify(visible));
+        if(route==='channels.php'){
+          const density=await page.evaluate(()=>{
+            const stats=document.querySelector('.vf-channel-stats');
+            const card=document.querySelector('.vf-channel-card');
+            const sr=stats?.getBoundingClientRect();
+            const cr=card?.getBoundingClientRect();
+            return {
+              statsHeight:sr?Math.round(sr.height):0,
+              firstCardTop:cr?Math.round(cr.top):0,
+              viewportHeight:window.innerHeight
+            };
+          });
+          assert(density.statsHeight>0&&density.statsHeight<=58,'r4_mobile_channel_stats_compact',JSON.stringify(density));
+          assert(density.firstCardTop>0&&density.firstCardTop<=680,'r4_mobile_channel_first_card_early',JSON.stringify(density));
+        }
       }
     }
     await ctx.close();
