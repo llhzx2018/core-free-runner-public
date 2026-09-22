@@ -167,6 +167,24 @@ try{
           });
           assert(categoryControl.enhanced&&categoryControl.triggerVisible&&!categoryControl.selectVisible,'r5_mobile_navigation_single_category_control',JSON.stringify(categoryControl));
         }
+        if(route==='courses.php'){
+          const fallback=await page.evaluate(()=>{
+            const nodes=[...document.querySelectorAll('.vf-course-cover-art.is-fallback')];
+            return {
+              count:nodes.length,
+              visibleInitial:nodes.some(node=>{
+                const b=node.querySelector('b');
+                if(!b)return false;
+                const r=b.getBoundingClientRect(),s=getComputedStyle(b);
+                return r.width>0&&r.height>0&&s.display!=='none'&&String(b.textContent||'').trim()!=='';
+              }),
+              imageInsideFallback:nodes.some(node=>!!node.querySelector('img'))
+            };
+          });
+          assert(fallback.count>0,'r7_course_missing_cover_has_fallback',JSON.stringify(fallback));
+          assert(fallback.visibleInitial,'r7_course_fallback_initial_visible',JSON.stringify(fallback));
+          assert(!fallback.imageInsideFallback,'r7_course_fallback_not_icon_image',JSON.stringify(fallback));
+        }
         if(route==='channels.php'){
           const density=await page.evaluate(()=>{
             const stats=document.querySelector('.vf-channel-stats');
