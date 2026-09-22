@@ -1,0 +1,97 @@
+name: P02 V2.5.81 System Audit R2 Gate
+
+on:
+  push:
+    branches:
+      - run/p02-v2581-system-audit-r2-20260922
+    paths:
+      - '.github/workflows/p02-v2581-system-audit-r2-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      TARGET_SHA: 940401321c01364b5093fb7002ca8ab2b853067d
+      TARGET_VERSION: 2.5.81
+      TARGET_SCHEMA: "2401"
+    steps:
+      - name: Checkout exact private P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install runtime and browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Exact source, manifest, contracts and syntax
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < VERSION)" = "$TARGET_VERSION"
+          python3 - <<'PY'
+          import json
+          x=json.load(open('SOURCE_MANIFEST.json',encoding='utf-8'))
+          assert x['version']=='2.5.81',x
+          assert int(x['schema'])==2401,x
+          print('SOURCE_MANIFEST_IDENTITY=PASS')
+          PY
+          bash scripts/verify-repository.sh
+          while IFS= read -r cmd; do
+            test -n "$cmd"
+            eval "$cmd"
+          done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          while IFS= read -r -d '' f; do node --check "$f" >/dev/null; done < <(find public tests scripts -type f \( -name '*.js' -o -name '*.mjs' \) -print0)
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find public src tests scripts -type f -name '*.php' -print0)
+          git diff --check
+          echo P02_V2581_SYSTEM_AUDIT_R2_SOURCE_GATE=PASS
+
+      - name: Dark-path maintenance and browser regression
+        shell: bash
+        working-directory: product
+        env:
+          TEST_PASSWORD: VF-P02-AUDIT-R2-${{ github.run_id }}!
+          EVIDENCE_DIR: ${{ runner.temp }}/p02-v2581-system-audit-r2
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          python3 - "$EVIDENCE_DIR/pre-activation-failure-regression.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x.get('ok') is True,x
+          for key in [
+            'restore_preflight_failure_no_block',
+            'atomic_preprotection_failure_no_private_rollback',
+            'attachment_rename_atomicity',
+            'attachment_replace_atomicity',
+          ]:
+            assert x.get('results',{}).get(key)=='PASS',(key,x)
+          print('DARK_PATH_FAILURE_INJECTION=PASS')
+          PY
+          grep -q 'DESTRUCTIVE_RECENT_AUTH_BOUNDARIES=PASS' "$EVIDENCE_DIR/destructive-recent-auth.txt"
+          grep -q 'BACKUP_RESTORE_RECENT_AUTH_BOUNDARY=PASS' "$EVIDENCE_DIR/backup-restore-recent-auth.txt"
+          grep -q 'LEGACY_CATEGORY_DELETE_RECENT_AUTH_BOUNDARY=PASS' "$EVIDENCE_DIR/legacy-category-delete-recent-auth.txt"
+          grep -q 'LEGACY_CATEGORY_DELETE_AFTER_REAUTH=PASS' "$EVIDENCE_DIR/legacy-category-delete-recent-auth.txt"
+          echo P02_V2581_SYSTEM_AUDIT_R2_DARK_PATH_GATE=PASS
+
+      - name: Final bounded result
+        shell: bash
+        run: |
+          echo P02_V2581_SYSTEM_AUDIT_R2_GATE=PASS
