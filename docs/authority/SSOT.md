@@ -104,6 +104,24 @@ rendered one-off workflow = still CLOSE WITHOUT MERGE by default
 
 目标是减少复制版本 Workflow、旧版本残留、Harness 假失败与 Agent token 消耗，同时不建立新的 Runtime / Runner / Release 平台。
 
+
+Current shared worktree helper：`scripts/ephemeral_lane_worktree.py`。
+
+```text
+verify
+  -> lane spec binds target SHA / Tree / Version to the checked-out worktree
+  -> dirty exact-source checkout fails closed by default
+
+run-isolated
+  -> execute mutation-prone regression inside a disposable detached Git worktree
+  -> original exact-source checkout must remain byte/status unchanged
+  -> isolated setup/cleanup failure = HARNESS_ISOLATION_FAILURE
+  -> test command nonzero = UNRESOLVED_TEST_FAILURE
+  -> must classify further as PRODUCT / CONTRACT / HARNESS / ENVIRONMENT before assigning ownership
+```
+
+固定：`UNRESOLVED_TEST_FAILURE != Product FAIL`。Canonical regression、fixture-heavy test、build/test steps that may create runtime files SHOULD use isolated execution before formal artifact construction, so test-generated files cannot leak into release bytes.
+
 ## 5.2 Gate Ownership Isolation
 
 基础设施 Gate 只执行自己拥有的检查域，禁止用全目录 test discovery 把无关模块失败传播成当前 Gate FAIL。
