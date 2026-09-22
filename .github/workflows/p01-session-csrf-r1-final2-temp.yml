@@ -1,0 +1,155 @@
+name: p01-session-csrf-r1-final2-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-session-csrf-r1-final2-temp.yml'
+      - 'requests/p01-session-csrf-r1-final2-20260922.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-session-csrf-r1-final2-temp
+  cancel-in-progress: false
+
+jobs:
+  security-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      LANE_SPEC: requests/p01-session-csrf-r1-final2-20260922.json
+    steps:
+      - name: Checkout public runner control source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Validate ephemeral lane identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$LANE_SPEC" | tee /tmp/lane.json
+          python3 scripts/ephemeral_lane_spec.py github-output --spec "$LANE_SPEC" >> "$GITHUB_ENV"
+          grep -F '"status": "PASS"' /tmp/lane.json >/dev/null
+
+      - name: Prepare PHP runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+
+      - name: Checkout P01 Round 1 branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: fix/p01-csrf-session-contract-r1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$target_sha"
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = "$target_tree"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$target_version"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$target_version"
+          test "$(php -r '$p=json_decode(file_get_contents("candidate/VF_PROJECT.json"),true); echo $p["working_schema_version"];')" = "$schema_version"
+          echo 'P01_SESSION_CSRF_EXACT_SOURCE=PASS'
+
+      - name: Syntax and focused contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          cd candidate
+          php tests/unit/session_csrf_contract.php
+          php tests/unit/update_csrf_recovery_contract.php
+          php tests/unit/workspace_atomic_form_routing_contract.php
+          php tests/unit/admin_backend_coverage_r60_contract.php
+          php tests/unit/full_surface_governance_contract.php
+          php tests/unit/tmdb_watch_metadata_behavior.php
+          echo 'P01_SESSION_CSRF_FOCUSED_CONTRACTS=PASS'
+
+      - name: Fresh runtime HTTP auth and CSRF semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          RUNTIME=/tmp/p01-session-csrf-r1-final2
+          COOKIE=/tmp/p01-session-csrf-r1-final2.cookies
+          rm -rf "$RUNTIME" "$COOKIE"
+          cp -a candidate/src "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:"$target_port" -t . >/tmp/p01-session-csrf-r1-final2.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 40); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:$target_port/setup.php" -o /tmp/p01-setup.html; then break; fi
+            sleep 1
+          done
+          SETUP_CSRF=$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:$target_port/setup.php" \
+            --data-urlencode "setup_csrf=$SETUP_CSRF" \
+            --data-urlencode 'site_title=VF Start Security Contract' \
+            --data-urlencode 'admin_password=SecurityContract!2026' \
+            --data-urlencode 'admin_password_confirm=SecurityContract!2026' \
+            -o /tmp/p01-setup-post.html
+          php cli/verify.php | tee /tmp/p01-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-verify.txt
+
+          expect_status() {
+            expected="$1"; shift
+            actual=$(curl -sS -o /tmp/p01-http-body -w '%{http_code}' "$@")
+            if [ "$actual" != "$expected" ]; then
+              echo "EXPECTED_HTTP=$expected ACTUAL_HTTP=$actual"
+              cat /tmp/p01-http-body
+              exit 90
+            fi
+          }
+
+          rm -f /tmp/p01-anon.cookies
+          expect_status 401 -c /tmp/p01-anon.cookies -b /tmp/p01-anon.cookies \
+            -X POST -F 'csrf=invalid' -F 'action=favorite' -F 'id=1' \
+            "http://127.0.0.1:$target_port/workspace-action.php"
+
+          LOGIN_STATUS=$(curl -sS -c "$COOKIE" -b "$COOKIE" -o /tmp/p01-login.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data '{"password":"SecurityContract!2026"}' \
+            "http://127.0.0.1:$target_port/api.php?action=login")
+          test "$LOGIN_STATUS" = '200'
+
+          expect_status 419 -c "$COOKIE" -b "$COOKIE" \
+            -X POST -F 'csrf=stale-token' -F 'action=favorite' -F 'id=1' \
+            "http://127.0.0.1:$target_port/workspace-action.php"
+          expect_status 419 -c "$COOKIE" -b "$COOKIE" \
+            -X POST -F 'csrf=stale-token' -F 'link_id=1' \
+            "http://127.0.0.1:$target_port/pending-delete.php"
+          expect_status 419 -c "$COOKIE" -b "$COOKIE" \
+            -X POST -F 'csrf=stale-token' \
+            "http://127.0.0.1:$target_port/resource-media.php"
+          expect_status 419 -c "$COOKIE" -b "$COOKIE" \
+            -X POST -H 'Content-Type: application/json' -H 'X-CSRF-Token: stale-token' \
+            --data '{"content":""}' \
+            "http://127.0.0.1:$target_port/full-governance-action.php?action=preview"
+          expect_status 419 -c "$COOKIE" -b "$COOKIE" \
+            -X POST -H 'Content-Type: application/json' -H 'X-CSRF-Token: stale-token' \
+            --data '{}' \
+            "http://127.0.0.1:$target_port/api.php?action=settings_save"
+
+          echo 'P01_SESSION_CSRF_HTTP_SEMANTICS=PASS'
