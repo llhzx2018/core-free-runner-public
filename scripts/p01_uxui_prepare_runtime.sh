@@ -73,26 +73,31 @@ $save([
   'tags'=>['私人'],'is_private'=>1,'is_pending'=>0
 ]);
 
-$save([
-  'surface'=>'channels','title'=>'Fireship','url'=>'https://www.youtube.com/@Fireship',
+$channel=$save([
+  'category_id'=>$publicCat,'title'=>'Fireship','url'=>'https://www.youtube.com/@Fireship',
   'description'=>'开发频道示例','tags'=>['开发','YouTube'],'is_private'=>0,'is_pending'=>0
 ]);
-$save([
-  'surface'=>'watch','title'=>'示例影片','url'=>'https://example.com/watch/movie',
+$surface->upsertProfile($channel,['surface'=>'channels','resource_kind'=>'创作者']);
+$watch=$save([
+  'category_id'=>$publicCat,'title'=>'示例影片','url'=>'https://example.com/watch/movie',
   'description'=>'影视资源示例','tags'=>['电影'],'is_private'=>0,'is_pending'=>0
 ]);
-$save([
-  'surface'=>'topics','title'=>'SEO 实战专题','url'=>'https://example.com/topic/seo',
+$surface->upsertProfile($watch,['surface'=>'watch','resource_kind'=>'电影','media_year'=>2026,'media_status'=>'want']);
+$topic=$save([
+  'category_id'=>$publicCat,'title'=>'SEO 实战专题','url'=>'https://example.com/topic/seo',
   'description'=>'专题资源示例','tags'=>['SEO'],'is_private'=>0,'is_pending'=>0
 ]);
-$save([
-  'surface'=>'books','title'=>'一个人做出海网站','url'=>'https://example.com/course/solo-site',
+$surface->upsertProfile($topic,['surface'=>'topics','resource_kind'=>'指南']);
+$course=$save([
+  'category_id'=>$publicCat,'title'=>'一个人做出海网站','url'=>'https://example.com/course/solo-site',
   'description'=>'课程资源示例','tags'=>['课程'],'is_private'=>0,'is_pending'=>0
 ]);
-$save([
-  'surface'=>'projects','title'=>'P01 · VF Start','url'=>'https://example.com/projects/p01-vf-start',
+$surface->upsertProfile($course,['surface'=>'books','resource_kind'=>'实战']);
+$project=$save([
+  'category_id'=>$publicCat,'title'=>'P01 · VF Start','url'=>'https://example.com/projects/p01-vf-start',
   'description'=>'项目资源示例','tags'=>['VF','项目'],'is_private'=>0,'is_pending'=>0
 ]);
+$surface->upsertProfile($project,['surface'=>'projects','resource_kind'=>'网站','project_code'=>'P01','project_status'=>'active']);
 
 echo "P01_UXUI_FIXTURE=PASS\n";
 PHP
