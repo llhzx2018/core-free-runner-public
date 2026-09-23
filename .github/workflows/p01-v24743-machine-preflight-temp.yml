@@ -1,0 +1,164 @@
+name: p01-v24743-machine-preflight-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v24743-machine-preflight-temp.yml'
+      - 'requests/p01-v24743-machine-preflight-20260923.json'
+
+permissions:
+  contents: read
+
+jobs:
+  machine-preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LANE_SPEC: requests/p01-v24743-machine-preflight-20260923.json
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Validate lane
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$LANE_SPEC" >/tmp/lane.json
+          python3 scripts/ephemeral_lane_spec.py github-output --spec "$LANE_SPEC" >> "$GITHUB_ENV"
+          grep -F '"status": "PASS"' /tmp/lane.json >/dev/null
+
+      - name: Checkout exact V2.47.43 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 221301fba18dd3c73307ecf06b3f9185630ff485
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: candidate
+
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$target_sha"
+          test "$(git -C candidate rev-parse 'HEAD^{tree}')" = "$target_tree"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$target_version"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$target_version"
+          echo P01_V24743_RELEASE_SOURCE=PASS
+
+      - name: Download V2.47.42 formal baseline assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-rel42
+          gh release download v2.47.42 -R llhzx2018/vf-start -D /tmp/p01-rel42             -p 'VF-Start-V2.47.42-FULL.zip'             -p 'VF_Start_V2.47.42_UPDATE.zip'
+          sha256sum /tmp/p01-rel42/*.zip
+          echo "FULL_ENTRIES=$(unzip -Z1 /tmp/p01-rel42/VF-Start-V2.47.42-FULL.zip | wc -l)"
+          echo "UPDATE_ENTRIES=$(unzip -Z1 /tmp/p01-rel42/VF_Start_V2.47.42_UPDATE.zip | wc -l)"
+          unzip -Z1 /tmp/p01-rel42/VF-Start-V2.47.42-FULL.zip | head -n 40
+          echo '---UPDATE---'
+          unzip -Z1 /tmp/p01-rel42/VF_Start_V2.47.42_UPDATE.zip
+          mkdir -p /tmp/p01-rel42/update
+          unzip -q /tmp/p01-rel42/VF_Start_V2.47.42_UPDATE.zip -d /tmp/p01-rel42/update
+          REPAIR=$(find /tmp/p01-rel42/update -maxdepth 2 -type f -name 'repair-v2.47.42.php' -print -quit)
+          test -n "$REPAIR"
+          grep -E "SOURCE_VERSION|TARGET_VERSION|TARGET_SCHEMA" "$REPAIR" | head -n 6
+          echo P01_V24742_FORMAL_BASELINE_READBACK=PASS
+          echo '---FULL METADATA---'
+          mkdir -p /tmp/p01-rel42/full
+          unzip -q /tmp/p01-rel42/VF-Start-V2.47.42-FULL.zip -d /tmp/p01-rel42/full
+          printf 'VERSION='; tr -d '\r\n ' </tmp/p01-rel42/full/VERSION.txt; echo
+          printf 'FULL_NOTES='; head -n 1 /tmp/p01-rel42/full/FULL-PACKAGE-NOTES.txt
+          php -r '$m=json_decode(file_get_contents("/tmp/p01-rel42/full/release-manifest.json"),true); echo json_encode(["version"=>$m["version"]??null,"source_commit"=>$m["source_commit"]??null,"source_tree"=>$m["source_tree"]??null,"source_version"=>$m["source_version"]??null,"schema_version"=>$m["schema_version"]??null,"runtime_hashed_file_count"=>$m["runtime_hashed_file_count"]??null],JSON_UNESCAPED_SLASHES),"\n";'
+          grep -E "private const (SOURCE_MANIFEST|TARGET_MANIFEST|PAYLOAD|REMOVED|SOURCE_ALTERNATES)" "$REPAIR" | sed -E "s/='[^']+';/='<REDACTED_BYTES>';/"
+
+
+      - name: Prepare formal runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          php -m | grep -Fx gd
+
+      - name: Checkout exact V2.47.42 stable source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.42
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: stable
+
+      - name: Canonical release regression in isolated worktree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C stable rev-parse HEAD)" = "63aece29b7562a800d6771a1479bcfc9faa26cab"
+          stable_abs="$(realpath stable)"
+          python3 scripts/ephemeral_lane_worktree.py run-isolated \
+            --spec "$LANE_SPEC" \
+            --repo candidate \
+            --label "p01-v24743-formal-canonical" \
+            -- bash tests/canonical_release_regression.sh . "$stable_abs" \
+            | tee /tmp/p01-v24743-canonical-isolated.txt
+          grep -F '"status": "PASS"' /tmp/p01-v24743-canonical-isolated.txt >/dev/null
+          grep -F '"source_unchanged": true' /tmp/p01-v24743-canonical-isolated.txt >/dev/null
+          echo P01_V24743_CANONICAL_RELEASE_REGRESSION=PASS
+
+      - name: Focused security and data-safety contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_worktree.py run-isolated \
+            --spec "$LANE_SPEC" \
+            --repo candidate \
+            --label "p01-v24743-release-security-data" \
+            -- bash -lc '
+              set -Eeuo pipefail
+              php tests/unit/session_csrf_contract.php
+              php tests/unit/update_csrf_recovery_contract.php
+              php tests/unit/navigation_owner_behavior_privacy_contract.php
+              php tests/unit/privacy_cache_performance_r2_contract.php
+              php tests/unit/backup_policy_desktop_disclosure_contract.php
+              php tests/unit/data_recovery_desktop_disclosure_contract.php
+              php tests/unit/admin_diagnose_entry_closure_r1_contract.php
+              php tests/unit/admin_system_health_r18_contract.php
+              php tests/unit/system_health_runtime_r7_contract.php
+              for t in tests/unit/admin_*page*_polish_contract.php tests/unit/admin_core_pages_1_3_consistency_closure_contract.php; do php "$t"; done
+              php tests/integration/resource_asset_disaster_recovery_contract.php
+            ' | tee /tmp/p01-v24743-security-data.txt
+          grep -F '"status": "PASS"' /tmp/p01-v24743-security-data.txt >/dev/null
+          grep -F '"source_unchanged": true' /tmp/p01-v24743-security-data.txt >/dev/null
+          echo P01_V24743_SECURITY_DATA=PASS
+
+      - name: Build and verify formal FULL and ATOMIC
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/p01_v24743_formal_gate.sh
+
+      - name: Upload V2.47.43 formal candidate artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p01-v24743-machine-preflight
+          path: /tmp/p01-v24743-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Machine preflight artifact receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat /tmp/p01-v24743-artifacts/P01_V24743_ARTIFACT_RECEIPT.json
+          echo P01_V24743_MACHINE_PREFLIGHT_READY=PASS
