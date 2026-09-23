@@ -152,26 +152,181 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk >/dev/null
           fc-cache -f >/dev/null
 
-      - name: Execute exact Theme WordPress and browser regression
+      - name: Execute exact Theme shell browser regression
         shell: bash
         run: |
           set -Eeuo pipefail
           cd theme
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('tests/phase3/run-current.sh')
-          s=p.read_text(encoding='utf-8')
-          s=s.replace('1.35.7','1.35.31').replace('1.35.6','1.35.30').replace('V1357','V13531')
-          p.write_text(s,encoding='utf-8')
+          ROOT="$PWD"
+          RUN_ID="S01-C01-SHELL-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          EVIDENCE_DIR="$ROOT/evidence/shell-browser/$RUN_ID"
+          mkdir -p "$EVIDENCE_DIR/screenshots" "$EVIDENCE_DIR/dom" "$EVIDENCE_DIR/logs"
+
+          NET="vf-theme-shell-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          DB="vf-theme-shell-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          WP="vf-theme-shell-wp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          VOL="vf-theme-shell-vol-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          PORT="18082"
+
+          cleanup() {
+            set +e
+            docker logs "$WP" >"$EVIDENCE_DIR/logs/wordpress-container.log" 2>&1 || true
+            docker logs "$DB" >"$EVIDENCE_DIR/logs/mariadb-container.log" 2>&1 || true
+            docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true
+            docker volume rm "$VOL" >/dev/null 2>&1 || true
+            docker network rm "$NET" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker pull mariadb:11.8.8 >/dev/null
+          docker pull wordpress:7.0.2-php8.4-apache >/dev/null
+          docker pull wordpress:cli-2.12.0-php8.4 >/dev/null
+          docker network create "$NET" >/dev/null
+          docker volume create "$VOL" >/dev/null
+          docker run -d --name "$DB" --network "$NET"             -e MARIADB_ROOT_PASSWORD=rootpass             -e MARIADB_DATABASE=wordpress             -e MARIADB_USER=wordpress             -e MARIADB_PASSWORD=wordpress             mariadb:11.8.8 >/dev/null
+
+          for _ in $(seq 1 120); do
+            if docker exec "$DB" mariadb -h127.0.0.1 -P3306 -N -uwordpress -pwordpress wordpress -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec "$DB" mariadb -h127.0.0.1 -P3306 -N -uwordpress -pwordpress wordpress -e 'SELECT 1' >/dev/null
+
+          docker run -d --name "$WP" --network "$NET" -p "${PORT}:80" -v "$VOL:/var/www/html"             -e WORDPRESS_DB_HOST="$DB:3306"             -e WORDPRESS_DB_USER=wordpress             -e WORDPRESS_DB_PASSWORD=wordpress             -e WORDPRESS_DB_NAME=wordpress             wordpress:7.0.2-php8.4-apache >/dev/null
+
+          for _ in $(seq 1 90); do
+            docker exec "$WP" test -f /var/www/html/wp-config.php >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec "$WP" test -f /var/www/html/wp-config.php
+
+          wpcli() {
+            docker run --rm --network "$NET" --volumes-from "$WP" --user 33:33               -e WORDPRESS_DB_HOST="$DB:3306"               -e WORDPRESS_DB_USER=wordpress               -e WORDPRESS_DB_PASSWORD=wordpress               -e WORDPRESS_DB_NAME=wordpress               wordpress:cli-2.12.0-php8.4 "$@" --path=/var/www/html
+          }
+
+          wpcli core install             --url="http://127.0.0.1:${PORT}"             --title='VF Theme Shell Browser'             --admin_user=admin             --admin_password='vf_theme_shell_admin_pass'             --admin_email='theme-shell@example.invalid'             --skip-email >/dev/null
+
+          docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme
+          docker cp "$ROOT/src/." "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
+          docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
+          wpcli theme activate vf-tools-theme >/dev/null
+          test "$(wpcli theme get vf-tools-theme --field=version | tr -d '\r')" = "1.35.31"
+
+          TOKEN="vf-theme-shell-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          MU="$RUNNER_TEMP/vf-theme-shell-browser.php"
+          cat > "$MU" <<'PHP'
+          <?php
+          add_action('init', function () {
+              if (!isset($_GET['vf_shell_login']) || !hash_equals('__TOKEN__', (string)$_GET['vf_shell_login'])) { return; }
+              wp_set_current_user(1);
+              wp_set_auth_cookie(1, true);
+              wp_safe_redirect(admin_url('themes.php?page=vf-theme-modules&tab=overview'));
+              exit;
+          });
+          add_action('admin_footer', function () {
+              ?>
+              <script>
+              (() => {
+                const root=document.documentElement;
+                const shell=document.querySelector('.vf-admin-one-row-shell');
+                const mark=document.querySelector('.vf-admin-brand-mark');
+                const title=document.querySelector('.vf-admin-page-head-copy h1');
+                const active=document.querySelector('.vf-admin-topbar-pill[aria-current="page"],.vf-admin-topbar-pill.is-active');
+                root.dataset.vfShellOverflow=String(Math.max(0,root.scrollWidth-root.clientWidth));
+                root.dataset.vfShellHeight=shell?String(Math.round(shell.getBoundingClientRect().height)):'0';
+                root.dataset.vfShellBrandWidth=mark?String(Math.round(mark.getBoundingClientRect().width)):'0';
+                root.dataset.vfShellTitleSize=title?getComputedStyle(title).fontSize:'0';
+                root.dataset.vfShellActive=active?'1':'0';
+              })();
+              </script>
+              <?php
+          }, PHP_INT_MAX);
+          PHP
+          sed -i "s/__TOKEN__/$TOKEN/g" "$MU"
+          docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
+          docker cp "$MU" "$WP:/var/www/html/wp-content/mu-plugins/vf-theme-shell-browser.php"
+          docker exec "$WP" chown www-data:www-data /var/www/html/wp-content/mu-plugins/vf-theme-shell-browser.php
+
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          test -n "$CHROME"
+          "$CHROME" --version > "$EVIDENCE_DIR/browser-version.txt"
+          PROFILE="$RUNNER_TEMP/$RUN_ID-profile"
+          mkdir -p "$PROFILE"
+          "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars             --user-data-dir="$PROFILE" --window-size=1440,1000 --virtual-time-budget=1500             --dump-dom "http://127.0.0.1:${PORT}/?vf_shell_login=${TOKEN}" >/dev/null 2>"$EVIDENCE_DIR/logs/login.log"
+
+          TABS=(overview brand layout navigation render seo preview recovery)
+          : > "$EVIDENCE_DIR/checks.tsv"
+          for width in 1440 768 390; do
+            height=1000
+            test "$width" != 390 || height=844
+            for tab in "${TABS[@]}"; do
+              url="http://127.0.0.1:${PORT}/wp-admin/themes.php?page=vf-theme-modules&tab=${tab}"
+              dom="$EVIDENCE_DIR/dom/${tab}-${width}.html"
+              shot="$EVIDENCE_DIR/screenshots/${tab}-${width}.png"
+              "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars                 --user-data-dir="$PROFILE" --window-size="${width},${height}" --virtual-time-budget=1800                 --dump-dom "$url" > "$dom" 2>>"$EVIDENCE_DIR/logs/browser.log"
+              grep -q 'vf-theme-admin' "$dom"
+              grep -q 'vf-admin-one-row-shell' "$dom"
+              grep -q 'VF Tools Theme' "$dom"
+              grep -q 'vf-admin-page-head' "$dom"
+              grep -q 'data-vf-shell-active="1"' "$dom"
+              ! grep -q 'wp-login.php' "$dom"
+
+              overflow="$(python3 - "$dom" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'data-vf-shell-overflow="([0-9]+)"',s)
+          print(m.group(1) if m else '9999')
           PY
-          GITHUB_WORKSPACE="$PWD" GITHUB_SHA="$TARGET_SHA" GITHUB_REF="refs/heads/work/s01-c01-shell-header-alignment-r1-20260923" bash tests/phase3/run-current-v4.sh
+              )"
+              brand="$(python3 - "$dom" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'data-vf-shell-brand-width="([0-9]+)"',s)
+          print(m.group(1) if m else '0')
+          PY
+              )"
+              title_size="$(python3 - "$dom" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'data-vf-shell-title-size="([^"]+)"',s)
+          print(m.group(1) if m else '0')
+          PY
+              )"
+              test "$overflow" -le 2
+              test "$brand" -ge 40
+              test "$brand" -le 44
+              if test "$width" -ge 768; then test "$title_size" = "30px"; fi
+              if test "$width" = 390; then test "$title_size" = "28px"; fi
+
+              printf '%s\t%s\t%s\t%s\t%s\tPASS\n' "$tab" "$width" "$overflow" "$brand" "$title_size" >> "$EVIDENCE_DIR/checks.tsv"
+              "$CHROME" --headless=new --no-sandbox --disable-gpu --hide-scrollbars                 --user-data-dir="$PROFILE" --window-size="${width},${height}" --virtual-time-budget=1800                 --screenshot="$shot" "$url" >/dev/null 2>>"$EVIDENCE_DIR/logs/browser.log"
+              test -s "$shot"
+            done
+          done
+
+          python3 - "$EVIDENCE_DIR/checks.tsv" "$EVIDENCE_DIR/result.json" "$TARGET_SHA" <<'PY'
+          import json,sys
+          src,out,sha=sys.argv[1:]
+          rows=[]
+          for line in open(src,encoding='utf-8'):
+              tab,width,overflow,brand,title,status=line.rstrip('\n').split('\t')
+              rows.append({'tab':tab,'width':int(width),'overflow_px':int(overflow),'brand_width_px':int(brand),'title_size':title,'status':status})
+          result={
+            'status':'PASS' if len(rows)==24 and all(r['status']=='PASS' for r in rows) else 'FAIL',
+            'component_id':'S01-C01','candidate_sha':sha,'candidate_version':'1.35.31',
+            'page_count':8,'viewport_count':3,'checks':rows,
+            'screenshots':24,'production_write':False
+          }
+          json.dump(result,open(out,'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+          if result['status']!='PASS': raise SystemExit(1)
+          PY
+          echo "THEME_SHELL_BROWSER_GATE=PASS"
 
       - name: Upload Theme browser evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: s01-c01-shell-browser-${{ github.run_id }}
-          path: theme/evidence/runtime/
+          path: theme/evidence/shell-browser/
           if-no-files-found: warn
           retention-days: 14
 
