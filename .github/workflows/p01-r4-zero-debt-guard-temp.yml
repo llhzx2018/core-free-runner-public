@@ -1,0 +1,84 @@
+name: p01-r4-zero-debt-guard-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-r4-zero-debt-guard-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      BASE_SHA: 74870893b5e35af3a02562e1bb02e6bec5df18d5
+      TARGET_SHA: 4664981477d852a3d288adf9708815bf307f7911
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact P01 sources
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          for name in baseline current; do
+            git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$name"
+          done
+          git -C baseline fetch -q --depth 1 origin "$BASE_SHA"
+          git -C baseline checkout -q --detach FETCH_HEAD
+          git -C current fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C current checkout -q --detach FETCH_HEAD
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C current rev-parse HEAD)" = "$TARGET_SHA"
+          echo P01_R4_ZERO_DEBT_EXACT_SOURCES=PASS
+
+      - name: Contract and current zero-debt PASS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l current/tests/unit/canonical_zero_debt_mode_contract.php
+          php current/tests/unit/canonical_zero_debt_mode_contract.php
+          bash current/tests/canonical_release_regression.sh current baseline --require-zero-debt | tee /tmp/zero-pass.txt
+          grep -q '^P01_CANONICAL_UNIT_REGRESSION=PASS$' /tmp/zero-pass.txt
+          grep -q '^P01_CANONICAL_CURRENT_FAILURE_COUNT=0$' /tmp/zero-pass.txt
+          grep -q '^P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS$' /tmp/zero-pass.txt
+          echo P01_R4_ZERO_DEBT_POSITIVE=PASS
+
+      - name: Synthetic debt is rejected
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a current /tmp/current-with-debt
+          cat > /tmp/current-with-debt/tests/unit/__p01_zero_debt_probe.php <<'PHP'
+          <?php
+          fwrite(STDERR, "synthetic zero-debt probe failure\n");
+          exit(1);
+          PHP
+          set +e
+          bash /tmp/current-with-debt/tests/canonical_release_regression.sh /tmp/current-with-debt baseline --require-zero-debt > /tmp/zero-fail.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/zero-fail.txt
+          test "$rc" -ne 0
+          grep -q '^P01_CANONICAL_CURRENT_FAILURE_COUNT=1$' /tmp/zero-fail.txt
+          grep -q '^P01_CANONICAL_NEW_REGRESSION_COUNT=1$' /tmp/zero-fail.txt
+          grep -q '^NEW_UNIT_REGRESSION=tests/unit/__p01_zero_debt_probe.php$' /tmp/zero-fail.txt
+          grep -q '^P01_CANONICAL_UNIT_REGRESSION=FAIL$' /tmp/zero-fail.txt
+          echo P01_R4_ZERO_DEBT_NEGATIVE=PASS
+
+      - name: Runtime source unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C current diff --exit-code "$BASE_SHA" "$TARGET_SHA" -- src
+          test "$(cat current/VERSION)" = "2.47.41"
+          test -z "$(git -C current status --porcelain --untracked-files=no)"
+          echo P01_R4_ZERO_DEBT_RUNTIME_UNCHANGED=PASS
