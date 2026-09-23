@@ -297,6 +297,79 @@ jobs:
           echo '--- browser-e2e.json ---'
           cat "$GITHUB_WORKSPACE/evidence/browser-e2e.json"
           echo '--- end browser-e2e.json ---'
+          if [ "$BROWSER_RC" -ne 0 ]; then
+            node - <<'JS'
+          const fs = require('fs');
+          const { chromium } = require('playwright');
+          (async () => {
+            const base = String(process.env.VF_BASE_URL || '').replace(/\/+$/, '');
+            const browser = await chromium.launch({headless:true});
+            const page = await browser.newPage();
+            await page.goto(base + '/wp-login.php', {waitUntil:'domcontentloaded'});
+            await page.fill('#user_login', 'admin');
+            await page.fill('#user_pass', process.env.WP_ADMIN_PASSWORD || '');
+            await Promise.all([
+              page.waitForNavigation({waitUntil:'domcontentloaded'}),
+              page.click('#wp-submit')
+            ]);
+            const routes = [
+              ['content', '/wp-admin/admin.php?page=vf-toolsite-content'],
+              ['seo', '/wp-admin/admin.php?page=vf-toolsite-seo-keywords']
+            ];
+            const result = [];
+            for (const width of [768,390]) {
+              await page.setViewportSize({width,height:900});
+              for (const [name,path] of routes) {
+                await page.goto(base + path, {waitUntil:'networkidle'});
+                const row = await page.evaluate(() => {
+                  const label = (el) => {
+                    if (!el) return '';
+                    let s = el.tagName.toLowerCase();
+                    if (el.id) s += '#' + el.id;
+                    if (el.classList && el.classList.length) s += '.' + Array.from(el.classList).slice(0,5).join('.');
+                    return s;
+                  };
+                  const vw = window.innerWidth;
+                  const offenders = Array.from(document.querySelectorAll('body *')).map(el => {
+                    const r = el.getBoundingClientRect();
+                    const cs = getComputedStyle(el);
+                    return {
+                      el: label(el),
+                      parent: label(el.parentElement),
+                      left: Math.round(r.left),
+                      right: Math.round(r.right),
+                      width: Math.round(r.width),
+                      scrollWidth: el.scrollWidth,
+                      clientWidth: el.clientWidth,
+                      minWidth: cs.minWidth,
+                      cssWidth: cs.width,
+                      maxWidth: cs.maxWidth,
+                      display: cs.display,
+                      position: cs.position,
+                      whiteSpace: cs.whiteSpace,
+                      overflowX: cs.overflowX
+                    };
+                  }).filter(x => x.right > vw + 1 || x.width > vw + 1 || x.scrollWidth > x.clientWidth + 1)
+                    .sort((a,b) => Math.max(b.right-vw,b.width-vw,b.scrollWidth-b.clientWidth) - Math.max(a.right-vw,a.width-vw,a.scrollWidth-a.clientWidth))
+                    .slice(0,20);
+                  return {
+                    viewport: vw,
+                    docScrollWidth: document.documentElement.scrollWidth,
+                    bodyScrollWidth: document.body.scrollWidth,
+                    offenders
+                  };
+                });
+                result.push({name,width,...row});
+              }
+            }
+            fs.writeFileSync(process.env.GITHUB_WORKSPACE + '/evidence/overflow-diagnostic.json', JSON.stringify(result,null,2));
+            await browser.close();
+          })().catch(err => { console.error(err); process.exit(1); });
+          JS
+            echo '--- overflow-diagnostic.json ---'
+            cat "$GITHUB_WORKSPACE/evidence/overflow-diagnostic.json" || true
+            echo '--- end overflow-diagnostic.json ---'
+          fi
           test "$BROWSER_RC" -eq 0
           jq -e '.result=="PASS" and .login=="PASS" and .blocking_errors==0 and .responsive_failures==0' "$GITHUB_WORKSPACE/evidence/browser-e2e.json" >/dev/null
           echo 'AUTHENTICATED_BROWSER_RESPONSIVE=PASS'
