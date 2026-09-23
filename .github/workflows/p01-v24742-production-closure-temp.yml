@@ -1,0 +1,133 @@
+name: p01-v24742-production-closure-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v24742-production-closure-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  production-closure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Read-only Production bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://start.kewaro.com'
+          curl -fsS --connect-timeout 10 --max-time 30 -H 'Accept: application/json' "$BASE/api.php?action=bootstrap" -o /tmp/p01-prod-bootstrap.json
+          jq -e '.ok==true and .version=="2.47.42"' /tmp/p01-prod-bootstrap.json >/dev/null
+          echo 'P01_PRODUCTION_VERSION=2.47.42'
+          echo 'P01_PRODUCTION_BOOTSTRAP=PASS'
+
+      - name: Public surface HTTP anonymous and content sanity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://start.kewaro.com'
+          routes=('/' '/start.php' '/channels.php' '/watch.php' '/topics.php' '/courses.php' '/projects.php' '/tools.php' '/software.php')
+          for route in "${routes[@]}"; do
+            safe="$(printf '%s' "$route" | tr '/?&=.' '_' | tr -cd 'A-Za-z0-9_-')"
+            headers="/tmp/p01-prod-${safe}.headers"
+            body="/tmp/p01-prod-${safe}.html"
+            status="$(curl -sS -L -D "$headers" -o "$body" -w '%{http_code}' --connect-timeout 10 --max-time 30 "$BASE$route")"
+            test "$status" = 200 || { echo "P01_PRODUCTION_HTTP_FAIL route=$route status=$status"; exit 21; }
+            test -s "$body" || { echo "P01_PRODUCTION_EMPTY_BODY route=$route"; exit 23; }
+            if grep -Eiq '^Set-Cookie:[[:space:]]*vfnav_session=' "$headers"; then
+              echo "P01_PRODUCTION_ANON_SESSION_LEAK route=$route"
+              exit 22
+            fi
+            if grep -Eiq '(Fatal error|Parse error|Uncaught [A-Za-z]+Exception|Warning: .* on line)' "$body"; then
+              echo "P01_PRODUCTION_RUNTIME_ERROR_MARKER route=$route"
+              exit 24
+            fi
+            echo "P01_PRODUCTION_ROUTE_PASS route=$route status=$status bytes=$(wc -c < "$body")"
+          done
+          echo 'P01_PRODUCTION_PUBLIC_SURFACES=PASS'
+          echo 'P01_PRODUCTION_ANON_SESSION_BOUNDARY=PASS'
+          echo 'P01_PRODUCTION_CONTENT_SANITY=PASS'
+
+      - name: Anonymous admin setup and diagnostic boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE='https://start.kewaro.com'
+          check_status() {
+            route="$1"; shift
+            body="/tmp/p01-boundary-$(printf '%s' "$route" | tr '/?&=.' '_' | tr -cd 'A-Za-z0-9_-').body"
+            headers="/tmp/p01-boundary-$(printf '%s' "$route" | tr '/?&=.' '_' | tr -cd 'A-Za-z0-9_-').headers"
+            status="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' --connect-timeout 10 --max-time 30 "$BASE$route")"
+            ok=0
+            for expected in "$@"; do [ "$status" = "$expected" ] && ok=1; done
+            [ "$ok" = 1 ] || { echo "P01_ANON_BOUNDARY_FAIL route=$route status=$status"; exit 31; }
+            if grep -Eiq '(/home/|/var/www/|VF_PRIVATE_ROOT|error_log|open_basedir)' "$body"; then
+              echo "P01_ANON_SENSITIVE_RUNTIME_LEAK route=$route"; exit 32
+            fi
+            echo "P01_ANON_BOUNDARY_PASS route=$route status=$status"
+          }
+          check_status '/manage.php' 302
+          check_status '/settings.php' 302
+          check_status '/system-info.php' 302
+          check_status '/system-baseline.php' 302
+          check_status '/system-health.php' 302
+          check_status '/workbench.php' 302
+          check_status '/setup.php' 302
+          check_status '/diagnose.php' 404
+          check_status '/project-signals.php' 403
+          check_status '/tmdb-config.php' 401
+          echo 'P01_PRODUCTION_PRIVATE_BOUNDARY=PASS'
+          echo 'P01_PRODUCTION_SETUP_DIAGNOSTIC_BOUNDARY=PASS'
+
+      - name: Release Stable Production exact alignment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          tag_sha="$(gh api 'repos/llhzx2018/vf-start/git/ref/tags/v2.47.42' --jq '.object.sha')"
+          test "$tag_sha" = '63aece29b7562a800d6771a1479bcfc9faa26cab'
+
+          gh api 'repos/llhzx2018/vf-start/releases/tags/v2.47.42' > /tmp/release.json
+          jq -e '
+            .id==394262173 and
+            .tag_name=="v2.47.42" and
+            .target_commitish=="63aece29b7562a800d6771a1479bcfc9faa26cab" and
+            .draft==false and .prerelease==false and
+            ([.assets[]|select(.name=="VF-Start-V2.47.42-FULL.zip" and .size==894352 and .digest=="sha256:94e7697a4cc26df93eec52755d42a95a952c7edb09ce5590b32a7c5386ae3296")]|length)==1 and
+            ([.assets[]|select(.name=="VF_Start_V2.47.42_UPDATE.zip" and .size==1911997 and .digest=="sha256:b957f3261b568a2b65abc70fcbe336c43a3b681073dd00172cce8ae9724931e9")]|length)==1
+          ' /tmp/release.json >/dev/null
+
+          gh api 'repos/llhzx2018/core-updates/contents/projects/P01.json?ref=main' --jq .content | tr -d '\n' | base64 -d > /tmp/P01.json
+          jq -e '
+            .current_version=="2.47.41" and
+            .target_version=="2.47.42" and
+            .from_versions==["2.47.41"] and
+            .release_tag=="v2.47.42" and
+            .release_id==394262173 and
+            .product_identity=="63aece29b7562a800d6771a1479bcfc9faa26cab" and
+            .asset_name=="VF_Start_V2.47.42_UPDATE.zip" and
+            .asset_bytes==1911997 and
+            .asset_sha256=="b957f3261b568a2b65abc70fcbe336c43a3b681073dd00172cce8ae9724931e9"
+          ' /tmp/P01.json >/dev/null
+
+          jq -e '.ok==true and .version=="2.47.42"' /tmp/p01-prod-bootstrap.json >/dev/null
+          echo 'P01_PRODUCTION_RELEASE_STABLE_ALIGNMENT=PASS'
+
+      - name: Production closure summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo 'P01_V24742_PRODUCTION_PUBLIC_READBACK=PASS'
+          echo 'OWNER_REPORTED_UPDATE_COMPLETED=YES'
+          echo 'OWNER_UPDATE_ACTION_REAL_USE=YES'
+          echo 'PRIVATE_ADMIN_RUNTIME=NOT_REMOTELY_READ'
+          echo 'PRODUCTION_WRITE=0'
