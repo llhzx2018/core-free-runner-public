@@ -1,0 +1,346 @@
+name: S01-C02 V1.21.941 R5 Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-v121941-r5-candidate-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_SHA: ff1c8d620a58a16242bcd3425ccab14bbe8c5eae
+  BASE_SHA: 9e15e5ad0ebb127b146b50731eeeaaf726f895e5
+  TARGET_VERSION: 1.21.941
+  BASE_VERSION: 1.21.939
+  ARTIFACT_NAME: vf-tools-ops_V1.21.941.zip
+
+jobs:
+  candidate:
+    name: Exact Source + Install + Upgrade + Browser Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Public Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+
+      - name: Credential presence gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo 'PRIVATE_READ_CREDENTIAL=PASS'
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact current-main baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source and bounded-diff gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -q "^ \* Version: 1\.21\.941$" target/vf-ops.php
+          grep -q "VF_OPS_VERSION', '1.21.941'" target/vf-ops.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          test -s evidence/changed-files.txt
+          if grep -Eq '^(includes/wp-update/|includes/v6/(schema|migration|upgrade)|uninstall\.php|database/)' evidence/changed-files.txt; then
+            echo 'FORBIDDEN_UPDATE_SCHEMA_DATA_PATH_CHANGED' >&2
+            exit 1
+          fi
+          grep -q '^includes/s01/tool-workbench.php$' evidence/changed-files.txt
+          grep -q '^includes/bootstrap/runtime-loader.php$' evidence/changed-files.txt
+          grep -q '^tests/s01-c02-121941-r5-final-product-gate-contract.php$' evidence/changed-files.txt
+          echo 'EXACT_SOURCE_AND_BOUNDED_DIFF=PASS'
+
+      - name: PHP 8.2 syntax and current contract gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc '
+            set -eu
+            find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+            php tests/s01-c02-121941-r5-final-product-gate-contract.php
+            php tests/s01-c02-121941-r4-survivor-role-closure-r53-contract.php
+            php tests/s01-c02-121938-survivor-audit-truth-r50-contract.php
+            php tests/s01-c02-121937-survivor-product-r49-contract.php
+          '
+          echo 'PHP82_SOURCE_CONTRACT=PASS'
+
+      - name: Security source gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -RIlE --exclude-dir=.git -- '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9._-]{16,}|sk-[A-Za-z0-9]{20,})' target | grep -q .
+          ! find target -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa' -o -name 'id_ed25519' \) -print -quit | grep -q .
+          echo 'SECURITY_SOURCE_SCAN=PASS'
+
+      - name: Build exact runtime packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, re, zipfile
+          from pathlib import Path
+
+          def runtime(rel: Path) -> bool:
+              p=rel.as_posix().lstrip('/')
+              parts=p.split('/')
+              if not p or '..' in parts:
+                  return False
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts):
+                  return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$', p, re.I):
+                  return False
+              if '/' not in p:
+                  return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+
+          def collect(root: Path):
+              out={}
+              for path in root.rglob('*'):
+                  if path.is_file() and not path.is_symlink():
+                      rel=path.relative_to(root)
+                      if runtime(rel):
+                          out[rel.as_posix()]=path.read_bytes()
+              return dict(sorted(out.items()))
+
+          def fingerprint(files):
+              h=hashlib.sha256()
+              for rel,data in sorted(files.items()):
+                  h.update(rel.encode()); h.update(b'\0')
+                  h.update(hashlib.sha256(data).hexdigest().encode()); h.update(b'\n')
+              return h.hexdigest()
+
+          def pack(path: Path, files):
+              with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(files.items()):
+                      info=zipfile.ZipInfo(f'vf-ops/{rel}',(2026,9,23,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=0o100644<<16
+                      z.writestr(info,data)
+
+          evidence=Path('evidence')
+          evidence.mkdir(exist_ok=True)
+          rows={}
+          for label,root,version,outname in [
+              ('baseline',Path('baseline'), '1.21.939', Path('/tmp/vf-tools-ops_V1.21.939.zip')),
+              ('candidate',Path('target'), '1.21.941', Path('/tmp/vf-tools-ops_V1.21.941.zip')),
+          ]:
+              files=collect(root)
+              assert 'vf-ops.php' in files and 'uninstall.php' in files
+              pack(outname,files)
+              with zipfile.ZipFile(outname) as z:
+                  assert all(n.startswith('vf-ops/') for n in z.namelist())
+                  assert z.testzip() is None
+              rows[label]={
+                  'version':version,
+                  'files':len(files),
+                  'bytes':outname.stat().st_size,
+                  'sha256':hashlib.sha256(outname.read_bytes()).hexdigest(),
+                  'runtime_fingerprint':fingerprint(files),
+              }
+          (evidence/'package-evidence.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          cp "/tmp/$ARTIFACT_NAME" "evidence/$ARTIFACT_NAME"
+          unzip -tq "evidence/$ARTIFACT_NAME" >/dev/null
+          echo 'EXACT_RUNTIME_PACKAGE=PASS'
+
+      - name: Clean install and existing-install upgrade gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r5-${GITHUB_RUN_ID}"
+          DB="vf-r5-db-${GITHUB_RUN_ID}"
+          WP="vf-r5-wp-${GITHUB_RUN_ID}"
+          PORT="$((18000 + (GITHUB_RUN_ID % 10000)))"
+          cleanup() {
+            docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true
+            docker network rm "$NET" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cleanup
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" \
+            -e MARIADB_DATABASE=vf_test \
+            -e MARIADB_USER=vf_runner \
+            -e MARIADB_PASSWORD=vf_runner_ephemeral \
+            -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral \
+            mariadb:11.8.8 \
+            --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci >/dev/null
+          for i in $(seq 1 40); do
+            if docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null
+
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" \
+            -e WORDPRESS_DB_HOST="$DB:3306" \
+            -e WORDPRESS_DB_USER=vf_runner \
+            -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral \
+            -e WORDPRESS_DB_NAME=vf_test \
+            -e WORDPRESS_TABLE_PREFIX=wp_ \
+            -e WORDPRESS_DEBUG=1 \
+            wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null
+
+          if ! curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar; then
+            curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/wp-cli.phar
+          fi
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"
+          docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/$ARTIFACT_NAME"
+          docker cp /tmp/vf-tools-ops_V1.21.939.zip "$WP:/tmp/vf-tools-ops_V1.21.939.zip"
+
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html \
+            --url="$BASE_URL" --title='VF Ops R5 Clean' --admin_user=admin \
+            --admin_password='VF-R5-Admin-941!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install "/tmp/$ARTIFACT_NAME" --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            do_action("admin_init");
+            if (!defined("VF_OPS_VERSION") || VF_OPS_VERSION !== "1.21.941") exit(2);
+            if (!function_exists("vf_tools_ops_v6_table_suffixes") || count(vf_tools_ops_v6_table_suffixes()) !== 48) exit(3);
+            if (class_exists("VF_Ops_Runtime_Authority_V1") && is_wp_error(VF_Ops_Runtime_Authority_V1::verify("1.21.941", WP_PLUGIN_DIR . "/vf-ops/"))) exit(4);
+            echo "CLEAN_INSTALL_ACTIVATION=PASS\n";
+          ' | tee evidence/clean-install.txt
+
+          docker exec "$WP" wp db reset --yes --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" rm -rf /var/www/html/wp-content/plugins/vf-ops
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html \
+            --url="$BASE_URL" --title='VF Ops R5 Upgrade' --admin_user=admin \
+            --admin_password='VF-R5-Admin-941!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/vf-tools-ops_V1.21.939.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            if (!defined("VF_OPS_VERSION") || VF_OPS_VERSION !== "1.21.939") exit(2);
+            update_option("vf_ops_r5_fixture_business_state", ["keep"=>"yes","n"=>941], false);
+            $h=vf_tools_ops_v6_secret_put("R5FIX","fixture-secret-value","r5");
+            update_option("vf_ops_r5_fixture_secret_handle", $h, false);
+            if (!wp_next_scheduled("vf_ops_r5_fixture_cron")) wp_schedule_single_event(time()+3600, "vf_ops_r5_fixture_cron");
+            echo "BASELINE_STATE_CREATED=PASS\n";
+          ' | tee evidence/upgrade-before.txt
+
+          docker exec "$WP" wp plugin install "/tmp/$ARTIFACT_NAME" --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            do_action("admin_init");
+            require_once ABSPATH . "wp-admin/includes/plugin.php";
+            $d=get_plugin_data(WP_PLUGIN_DIR . "/vf-ops/vf-ops.php", false, false);
+            if (($d["Version"]??"") !== "1.21.941" || VF_OPS_VERSION !== "1.21.941") exit(2);
+            if (!is_plugin_active("vf-ops/vf-ops.php")) exit(3);
+            $business=get_option("vf_ops_r5_fixture_business_state", []);
+            $h=(string)get_option("vf_ops_r5_fixture_secret_handle", "");
+            if (($business["keep"]??"") !== "yes") exit(4);
+            if (vf_tools_ops_v6_secret_resolve($h, "R5FIX") !== "fixture-secret-value") exit(5);
+            if (!wp_next_scheduled("vf_ops_r5_fixture_cron")) exit(6);
+            if (count(vf_tools_ops_v6_table_suffixes()) !== 48) exit(7);
+            if (class_exists("VF_Ops_Runtime_Authority_V1") && is_wp_error(VF_Ops_Runtime_Authority_V1::verify("1.21.941", WP_PLUGIN_DIR . "/vf-ops/"))) exit(8);
+            echo "EXISTING_INSTALL_UPGRADE_PRESERVATION=PASS\n";
+          ' | tee evidence/upgrade-after.txt
+
+          echo "VF_HTTP_PORT=$PORT" >> "$GITHUB_ENV"
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"
+          echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"
+          echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated browser and responsive gate
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R5-Admin-941!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node browser-e2e.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/browser-e2e.json"
+          jq -e '.result=="PASS" and .login=="PASS" and .blocking_errors==0 and .responsive_failures==0' "$GITHUB_WORKSPACE/evidence/browser-e2e.json" >/dev/null
+          echo 'AUTHENTICATED_BROWSER_RESPONSIVE=PASS'
+
+      - name: Final machine evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n \
+            --arg target "$TARGET_SHA" \
+            --arg base "$BASE_SHA" \
+            --arg version "$TARGET_VERSION" \
+            --argjson browser "$(cat evidence/browser-e2e.json)" \
+            --argjson package "$(cat evidence/package-evidence.json)" \
+            '{
+              status:"PASS",
+              project_id:"S01",
+              component_id:"S01-C02",
+              candidate_version:$version,
+              candidate_sha:$target,
+              baseline_sha:$base,
+              php82_source_contract:"PASS",
+              security_source_scan:"PASS",
+              clean_install_activation:"PASS",
+              existing_install_upgrade_preservation:"PASS",
+              updater_implementation_changed:false,
+              schema_migration:"NONE",
+              internal_table_contract:48,
+              owner_surface_count:14,
+              browser:$browser,
+              package:$package,
+              production:"NOT_EXECUTED"
+            }' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "evidence/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+          echo 'S01-C02 V1.21.941 R5 CANDIDATE MACHINE PASS'
+
+      - name: Upload exact candidate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.941-r5-candidate
+          path: |
+            evidence/FINAL_EVIDENCE.json
+            evidence/package-evidence.json
+            evidence/browser-e2e.json
+            evidence/changed-files.txt
+            evidence/clean-install.txt
+            evidence/upgrade-before.txt
+            evidence/upgrade-after.txt
+            evidence/SHA256SUMS.txt
+            evidence/vf-tools-ops_V1.21.941.zip
+          retention-days: 30
+
+      - name: Cleanup runtime
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
