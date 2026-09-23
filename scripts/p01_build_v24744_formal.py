@@ -94,7 +94,7 @@ alternates={}
 
 repair=old
 for a,b in [
-    ("public const SOURCE_VERSION='2.47.41';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
+    ("public const SOURCE_VERSION='2.47.42';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
     ("public const TARGET_VERSION='2.47.43';",f"public const TARGET_VERSION='{VERSION}';"),
     ("public const TARGET_SCHEMA='2026090401';",f"public const TARGET_SCHEMA='{SCHEMA}';"),
 ]:
