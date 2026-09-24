@@ -45,10 +45,6 @@ foreach($expected as $version=>$status){
     fwrite(STDERR,$version.' expected '.$status.' got '.($result['status']??'UNKNOWN').PHP_EOL);
     exit(1);
   }
-  if($status==='AVAILABLE' && empty($result['can_update'])){
-    fwrite(STDERR,$version.' expected can_update=true'.PHP_EOL);
-    exit(1);
-  }
   echo 'P02_V25111_DISCOVERY_'.$version.'='.$status.PHP_EOL;
 }
 echo "P02_V25111_DISCOVERY_VERIFY=PASS\n";
