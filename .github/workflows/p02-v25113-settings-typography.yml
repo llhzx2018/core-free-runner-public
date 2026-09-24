@@ -1,0 +1,75 @@
+name: P02 V2.5.113 Settings Typography Verify
+
+on:
+  push:
+    branches:
+      - run/p02-v25113-settings-typography-20260924
+    paths:
+      - '.github/workflows/p02-v25113-settings-typography.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact P02 V2.5.113 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: e41c3801085ebd3b85a812c53db66c2b65925164
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - name: Install runtime and Chromium
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Exact-source repository and unit verification
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "e41c3801085ebd3b85a812c53db66c2b65925164"
+          test "$(cat VERSION)" = "2.5.113"
+          python3 scripts/generate-source-manifest.py
+          git diff --exit-code -- SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          while IFS= read -r cmd; do test -n "$cmd"; eval "$cmd"; done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          echo P02_V25113_SOURCE_AND_UNIT=PASS
+
+      - name: Real Chromium Settings typography
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25113-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          SITE="${RUNNER_TEMP}/p02-v25113-site"
+          COOKIE="${RUNNER_TEMP}/p02-v25113-cookie.txt"
+          BASE="http://127.0.0.1:18119"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S 127.0.0.1:18119 -t "$SITE" >"${RUNNER_TEMP}/p02-v25113-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "${RUNNER_TEMP}/p02-v25113-setup.html"
+          SETUP_CSRF="$(python3 -c 'import re,html,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s);assert m;print(html.unescape(m.group(1)))' "${RUNNER_TEMP}/p02-v25113-setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")"
+          test "$STATUS" = "303"
+          VF_UX_E2E_BASE_URL="$BASE" VF_UX_E2E_PASSWORD="$TEST_PASSWORD" node tests/e2e/p02_v25113_settings_typography.mjs
+          echo P02_V25113_SETTINGS_TYPOGRAPHY_BROWSER=PASS
