@@ -148,7 +148,7 @@ echo P01_V24746_ATOMIC_ROLLBACK=PASS
 
 # Artifact identity/readback.
 unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$TARGET"
-unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!=="2.47.45"||($m["source_version"]??"")!=="2.47.44"||($m["schema_version"]??"")!=="2026090401")exit(1); echo "CANDIDATE_MANIFEST_IDENTITY=PASS\n";'
+unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!=="2.47.46"||($m["source_version"]??"")!=="2.47.45"||($m["schema_version"]??"")!=="2026090401")exit(1); echo "CANDIDATE_MANIFEST_IDENTITY=PASS\n";'
 (
   cd "$ART"
   sha256sum -c "VF-Start-V2.47.46-FULL.zip.sha256"
