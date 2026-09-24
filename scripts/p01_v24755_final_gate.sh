@@ -84,7 +84,7 @@ PY
 
 install_full "$FULL" /tmp/p01-v24755-full-runtime 18477 "VF Start V2.47.55 FULL Gate"
 test "$(tr -d '\r\n ' </tmp/p01-v24755-full-runtime/VERSION.txt)" = "$TARGET"
-echo P01_V24754_CLEAN_FULL_INSTALL=PASS
+echo P01_V24755_CLEAN_FULL_INSTALL=PASS
 
 install_full "$REL/VF-Start-V2.47.54-FULL.zip" /tmp/p01-v24754-upgrade 18478 "VF Start V2.47.54 Upgrade Source"
 
@@ -115,8 +115,8 @@ php -r 'require "/tmp/p01-v24754-upgrade/app/bootstrap.php"; $id=(int)trim(file_
 cp "$REPAIR" /tmp/p01-v24754-upgrade/repair-v2.47.55.php
 php /tmp/p01-v24754-upgrade/repair-v2.47.55.php --run=/tmp/p01-v24754-upgrade | tee /tmp/p01-atomic-idempotent.json
 grep -Fq '"already_current":true' /tmp/p01-atomic-idempotent.json
-echo P01_V24754_ATOMIC_UPGRADE=PASS
-echo P01_V24754_ATOMIC_IDEMPOTENCY=PASS
+echo P01_V24755_ATOMIC_UPGRADE=PASS
+echo P01_V24755_ATOMIC_IDEMPOTENCY=PASS
 
 install_full "$REL/VF-Start-V2.47.54-FULL.zip" /tmp/p01-v24754-rollback 18479 "VF Start V2.47.54 Rollback Source"
 cat >/tmp/p01-v24754-rollback/sentinel.php <<'PHP'
@@ -140,7 +140,7 @@ test "$status" -ne 0
 test "$(tr -d '\r\n ' </tmp/p01-v24754-rollback/VERSION.txt)" = "$SOURCE"
 (cd /tmp/p01-v24754-rollback && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
 php -r 'require "/tmp/p01-v24754-rollback/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";'
-echo P01_V24754_ATOMIC_ROLLBACK=PASS
+echo P01_V24755_ATOMIC_ROLLBACK=PASS
 
 unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$TARGET"
 unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!=="2.47.55"||($m["source_version"]??"")!=="2.47.54"||($m["schema_version"]??"")!=="2026090401")exit(1); echo "CANDIDATE_MANIFEST_IDENTITY=PASS\n";'
@@ -149,4 +149,4 @@ unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_conte
   sha256sum -c "VF-Start-V2.47.55-FULL.zip.sha256"
   sha256sum -c "VF_Start_V2.47.55_UPDATE.zip.sha256"
 )
-echo P01_V24754_MACHINE_ARTIFACT_GATE=PASS
+echo P01_V24755_MACHINE_ARTIFACT_GATE=PASS
