@@ -1,0 +1,164 @@
+name: P02 V2.5.104 Formal Release + Publish
+
+on:
+  push:
+    branches:
+      - run/p02-v25104-rail-drag-20260924
+    paths:
+      - '.github/workflows/p02-v25104-release-publish.yml'
+      - 'requests/p02-v25104-release-gate.sh'
+      - 'requests/p02-v25104-formal-release.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  release-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact merged P02 V2.5.104 main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 5cfe1f652cf735a46c29c486929c68ab399bffc9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Checkout V2.5.81 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 9290f8d583312524b728288a39f9c493654ccce6
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: old81-src
+
+      - name: Checkout V2.5.82 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 0411c3fbf36a896f0aaaa693e7f077ac9acfb143
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: old82-src
+
+      - name: Checkout V2.5.102 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 430d0e7d7a1f47e2d444f57ac615e6bdabb53823
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: old102-src
+
+      - name: Checkout V2.5.103 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 2c8a75f4fbe391a3beddafe977ebca33ddfd8e1a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: old103-src
+
+      - name: Install runtime and Chromium
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+          gh --version
+
+      - name: Exact-source repository and unit closure
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "5cfe1f652cf735a46c29c486929c68ab399bffc9"
+          test "$(git show -s --format=%T HEAD)" = "49e7862e1139a4fc64db68ea26d8df164ac5c796"
+          test "$(cat VERSION)" = "2.5.104"
+          python3 scripts/generate-source-manifest.py
+          git diff --exit-code -- SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          python3 scripts/verify-source-manifest.py
+          python3 -m py_compile scripts/build-candidate.py scripts/build-release.py scripts/build-multisource-update.py scripts/build-multisource-repair.py
+          bash -n scripts/verify-release-artifacts.sh
+          while IFS= read -r cmd; do test -n "$cmd"; eval "$cmd"; done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          bash scripts/verify-repository.sh
+          echo P02_V25104_EXACT_SOURCE=PASS
+
+      - name: Maintenance clean FULL browser E2E privacy
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25104-MAINT-${{ github.run_id }}!"
+          EVIDENCE_DIR: "${{ runner.temp }}/p02-v25104-maintenance"
+        run: |
+          set -Eeuo pipefail
+          bash scripts/maintenance-reverify.sh
+          echo P02_V25104_MAINTENANCE_BROWSER=PASS
+
+      - name: Visible rail browser regression
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25104-RAIL-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          SITE="${RUNNER_TEMP}/p02-v25104-rail-site"
+          COOKIE="${RUNNER_TEMP}/p02-v25104-rail-cookie.txt"
+          BASE="http://127.0.0.1:18114"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S 127.0.0.1:18114 -t "$SITE" >"${RUNNER_TEMP}/p02-v25104-rail-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "${RUNNER_TEMP}/p02-v25104-rail-setup.html"
+          SETUP_CSRF="$(python3 -c 'import re,html,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s);assert m;print(html.unescape(m.group(1)))' "${RUNNER_TEMP}/p02-v25104-rail-setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")"
+          test "$STATUS" = "303"
+          VF_UX_E2E_BASE_URL="$BASE" VF_UX_E2E_PASSWORD="$TEST_PASSWORD" VF_UX_E2E_VERSION="2.5.104" node tests/e2e/p02_v25104_rail_drag_bugfix.mjs
+          kill "$PID"
+          wait "$PID" 2>/dev/null || true
+          trap - EXIT
+          echo P02_V25104_VISIBLE_RAIL_BROWSER=PASS
+
+      - name: Deterministic formal release preflight
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25104-RELEASE-${{ github.run_id }}!"
+          VF_RELEASE_SOURCE_SHA: 5cfe1f652cf735a46c29c486929c68ab399bffc9
+          VF_RELEASE_SOURCE_TREE: 49e7862e1139a4fc64db68ea26d8df164ac5c796
+          VF_RELEASE_SOURCE_REF: main
+          VF_RELEASE_FROM_VERSIONS: "2.5.81 2.5.82 2.5.102 2.5.103"
+        run: |
+          set -Eeuo pipefail
+          bash scripts/verify-release-artifacts.sh
+          echo P02_V25104_RELEASE_PREFLIGHT=PASS
+
+      - name: Real-data direct upgrade matrix
+        env:
+          TEST_PASSWORD: "VF-P02-V25104-UPGRADE-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          bash runner/requests/p02-v25104-release-gate.sh
+
+      - name: Publish formal release and remote readback
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          bash runner/requests/p02-v25104-formal-release.sh
+
+      - name: Final release marker
+        run: echo P02_V25104_FORMAL_RELEASE_GATE=PASS
