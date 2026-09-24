@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ART=/tmp/p01-v24748-artifacts
-REL=/tmp/p01-rel46
+REL=/tmp/p01-rel47
 TARGET=2.47.48
 SOURCE=2.47.47
 SCHEMA=2026090401
