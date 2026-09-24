@@ -5,8 +5,8 @@ from pathlib import Path
 
 ROOT=Path.cwd()
 CAND=ROOT/"candidate"/"src"
-BASE=Path("/tmp/p01-rel48/full")
-OLD_REPAIR=Path("/tmp/p01-rel48/update/repair-v2.47.49.php")
+BASE=Path("/tmp/p01-rel49/full")
+OLD_REPAIR=Path("/tmp/p01-rel49/update/repair-v2.47.49.php")
 OUT=Path("/tmp/p01-v24750-artifacts")
 VERSION="2.47.50"
 SOURCE_VERSION="2.47.49"
@@ -86,7 +86,7 @@ alternates={}
 
 repair=old
 for a,b in [
-    ("public const SOURCE_VERSION='2.47.47';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
+    ("public const SOURCE_VERSION='2.47.48';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
     ("public const TARGET_VERSION='2.47.49';",f"public const TARGET_VERSION='{VERSION}';"),
     ("public const TARGET_SCHEMA='2026090401';",f"public const TARGET_SCHEMA='{SCHEMA}';"),
 ]:
