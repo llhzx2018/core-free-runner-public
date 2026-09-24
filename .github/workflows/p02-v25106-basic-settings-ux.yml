@@ -1,0 +1,85 @@
+name: P02 V2.5.106 Basic Settings UX
+
+on:
+  push:
+    branches:
+      - run/p02-v25106-basic-settings-ux-20260924
+    paths:
+      - '.github/workflows/p02-v25106-basic-settings-ux.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact P02 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 50b8b933e6d3d24e68b46c1214a16457d9027fac
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - name: Install runtime and Chromium
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Exact-source contracts
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "50b8b933e6d3d24e68b46c1214a16457d9027fac"
+          test "$(cat VERSION)" = "2.5.106"
+          node tests/unit/p02_v25105_settings_chrome_visual_closure.mjs
+          node tests/unit/p02_v25106_basic_settings_ux.mjs
+          python3 scripts/generate-source-manifest.py
+          git diff --exit-code -- SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          echo P02_V25106_EXACT_SOURCE=PASS
+
+      - name: Launch clean V2.5.106 site
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25106-UX-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          SITE="${RUNNER_TEMP}/p02-v25106-site"
+          COOKIE="${RUNNER_TEMP}/p02-v25106-cookie.txt"
+          BASE="http://127.0.0.1:18116"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          test "$(cat "$SITE/VERSION.txt")" = "2.5.106"
+          php -d display_errors=0 -S 127.0.0.1:18116 -t "$SITE" >"${RUNNER_TEMP}/p02-v25106-server.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/p02-v25106-server.pid"
+          for _ in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "${RUNNER_TEMP}/p02-v25106-setup.html"
+          SETUP_CSRF="$(python3 -c 'import re,html,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s);assert m;print(html.unescape(m.group(1)))' "${RUNNER_TEMP}/p02-v25106-setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")"
+          test "$STATUS" = "303"
+
+      - name: Real Chromium Basic Settings regression
+        working-directory: product
+        env:
+          VF_UX_E2E_BASE_URL: http://127.0.0.1:18116
+          VF_UX_E2E_PASSWORD: "VF-P02-V25106-UX-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          node tests/e2e/p02_v25106_basic_settings_ux.mjs
+          echo P02_V25106_BASIC_SETTINGS_BROWSER=PASS
+
+      - name: Stop clean site
+        if: always()
+        run: |
+          if test -f "${RUNNER_TEMP}/p02-v25106-server.pid"; then
+            kill "$(cat "${RUNNER_TEMP}/p02-v25106-server.pid")" 2>/dev/null || true
+          fi
