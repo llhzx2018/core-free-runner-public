@@ -23,7 +23,8 @@ assert x['asset_sha256']=='af8373147fcae999cc84b91cded6a022e74aa0e367583be325a21
 print('P02_V25103_PUBLIC_MIRROR_IDENTITY=PASS')
 PY
 
-php - "$MANIFEST" <<'PHP'
+PHP_CHECK="${RUNNER_TEMP}/p02-v25103-discovery-check.php"
+cat > "$PHP_CHECK" <<'PHP'
 <?php
 require getcwd().'/product/src/app/CoreUpdates/UpdateCore.php';
 $manifest=json_decode(file_get_contents($argv[1]),true,512,JSON_THROW_ON_ERROR);
@@ -44,3 +45,4 @@ foreach($expected as $version=>$status){
 }
 echo "P02_V25103_DISCOVERY_VERIFY=PASS\n";
 PHP
+php "$PHP_CHECK" "$MANIFEST"
