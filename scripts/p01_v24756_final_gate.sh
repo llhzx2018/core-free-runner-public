@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ART=/tmp/p01-v24756-artifacts
 REL=/tmp/p01-rel55
 TARGET=2.47.56
-SOURCE=2.47.56
+SOURCE=2.47.55
 SCHEMA=2026090401
 
 python3 scripts/p01_build_v24756_final.py | tee /tmp/p01-v24756-build.json
