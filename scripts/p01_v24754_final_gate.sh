@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 ART=/tmp/p01-v24754-artifacts
-REL=/tmp/p01-rel52
+REL=/tmp/p01-rel53
 TARGET=2.47.54
 SOURCE=2.47.53
 SCHEMA=2026090401
 
-python3 scripts/p01_build_v24753_final.py | tee /tmp/p01-v24754-build.json
+python3 scripts/p01_build_v24754_final.py | tee /tmp/p01-v24754-build.json
 
 FULL="$ART/VF-Start-V2.47.54-FULL.zip"
 UPDATE="$ART/VF_Start_V2.47.54_UPDATE.zip"
