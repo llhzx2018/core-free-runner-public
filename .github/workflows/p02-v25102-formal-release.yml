@@ -1,0 +1,152 @@
+name: P02 V2.5.102 Formal Release
+
+on:
+  push:
+    branches:
+      - release/p02-v25102-formal-20260924
+    paths:
+      - '.github/workflows/p02-v25102-formal-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TARGET_REPO: llhzx2018/vf-library
+      TARGET_SHA: 430d0e7d7a1f47e2d444f57ac615e6bdabb53823
+      TARGET_TREE: 2401c0fef338ffb14e7e02524752674361459cdc
+      TARGET_VERSION: 2.5.102
+      TARGET_TAG: v2.5.102
+      VF_RELEASE_FROM_VERSIONS: "2.5.81 2.5.82"
+      VF_RELEASE_SOURCE_SHA: 430d0e7d7a1f47e2d444f57ac615e6bdabb53823
+      VF_RELEASE_SOURCE_TREE: 2401c0fef338ffb14e7e02524752674361459cdc
+      VF_RELEASE_SOURCE_REF: main
+    steps:
+      - name: Checkout exact product main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 430d0e7d7a1f47e2d444f57ac615e6bdabb53823
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Install release dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+
+      - name: Reconfirm exact current main and protected release boundary
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < product/VERSION)" = "$TARGET_VERSION"
+          test "$(gh api "repos/${TARGET_REPO}/branches/main" --jq '.commit.sha')" = "$TARGET_SHA"
+          if gh release view "$TARGET_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            echo "formal release already exists; refusing overwrite" >&2
+            exit 31
+          fi
+          if gh api "repos/${TARGET_REPO}/git/ref/tags/${TARGET_TAG}" >/dev/null 2>&1; then
+            echo "formal tag already exists; refusing overwrite" >&2
+            exit 32
+          fi
+          grep -F 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' product/docs/authority/ACCEPTANCE_MATRIX.md
+          grep -F 'DYNAMIC_TRUTH_NOT_STORED_HERE' product/docs/authority/CURRENT.md
+          echo P02_V25102_RELEASE_WRITE_BOUNDARY=PASS
+
+      - name: Re-run formal artifact preflight on exact source
+        working-directory: product
+        env:
+          TEST_PASSWORD: VF-P02-V25102-FORMAL-${{ github.run_id }}!
+        run: |
+          set -Eeuo pipefail
+          bash scripts/verify-release-artifacts.sh
+          echo P02_V25102_FORMAL_ARTIFACT_GATE=PASS
+
+      - name: Create exact GitHub formal release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          FORMAL_DIR="$GITHUB_WORKSPACE/product/build/release-preflight"
+          test -d "$FORMAL_DIR"
+          test "$(find "$FORMAL_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "8"
+          (cd "$FORMAL_DIR" && sha256sum -c SHA256SUMS.txt)
+          for z in "$FORMAL_DIR"/*.zip; do unzip -t "$z" >/dev/null; done
+          NOTES="$FORMAL_DIR/VF_Library_V${TARGET_VERSION}_RELEASE_NOTES.md"
+          test -f "$NOTES"
+
+          created=0
+          cleanup_release(){
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ "$created" -eq 1 ]; then
+              gh release delete "$TARGET_TAG" --repo "$TARGET_REPO" --cleanup-tag -y >/dev/null 2>&1 || true
+            fi
+            exit "$rc"
+          }
+          trap cleanup_release EXIT
+
+          gh release create "$TARGET_TAG" "$FORMAL_DIR"/*             --repo "$TARGET_REPO"             --target "$TARGET_SHA"             --title "VF Library V$TARGET_VERSION"             --notes-file "$NOTES"
+
+          created=1
+          trap - EXIT
+          echo P02_V25102_GITHUB_RELEASE_CREATED=PASS
+
+      - name: Remote tag release and asset readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          FORMAL_DIR="$GITHUB_WORKSPACE/product/build/release-preflight"
+          REMOTE="${RUNNER_TEMP}/p02-v25102-remote"
+          mkdir -p "$REMOTE"
+
+          JSON="$(gh api "repos/${TARGET_REPO}/releases/tags/${TARGET_TAG}")"
+          RELEASE_ID="$(python3 -c 'import json,sys;x=json.loads(sys.argv[1]);assert x["tag_name"]=="v2.5.102" and x["name"]=="VF Library V2.5.102" and not x["draft"] and not x["prerelease"];print(x["id"])' "$JSON")"
+          ASSET_COUNT="$(python3 -c 'import json,sys;x=json.loads(sys.argv[1]);print(len(x.get("assets",[])))' "$JSON")"
+          test "$ASSET_COUNT" = "8"
+
+          TAG_SHA="$(gh api "repos/${TARGET_REPO}/git/ref/tags/${TARGET_TAG}" --jq '.object.sha')"
+          test "$TAG_SHA" = "$TARGET_SHA"
+
+          gh release download "$TARGET_TAG" --repo "$TARGET_REPO" --dir "$REMOTE"
+          test "$(find "$REMOTE" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "8"
+
+          for p in "$FORMAL_DIR"/*; do
+            name="$(basename "$p")"
+            test -f "$REMOTE/$name"
+            cmp "$p" "$REMOTE/$name"
+          done
+          (cd "$REMOTE" && sha256sum -c SHA256SUMS.txt)
+
+          UPDATE="VF_Library_V${TARGET_VERSION}_UPDATE.zip"
+          UPDATE_BYTES="$(stat -c '%s' "$REMOTE/$UPDATE")"
+          UPDATE_SHA="$(sha256sum "$REMOTE/$UPDATE" | awk '{print $1}')"
+
+          test "$(gh api "repos/${TARGET_REPO}/branches/main" --jq '.commit.sha')" = "$TARGET_SHA"
+
+          echo "P02_V25102_RELEASE_ID=$RELEASE_ID"
+          echo "P02_V25102_TAG_SHA=$TAG_SHA"
+          echo "P02_V25102_UPDATE_BYTES=$UPDATE_BYTES"
+          echo "P02_V25102_UPDATE_SHA256=$UPDATE_SHA"
+          echo P02_V25102_REMOTE_RELEASE_READBACK=PASS
+          echo P02_V25102_POST_RELEASE_AUTHORITY_CLOSURE=PASS
+          echo P02_V25102_FORMAL_RELEASE_GATE=PASS
+
+      - name: Upload formal release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p02-v25102-formal-release-${{ github.run_id }}
+          path: product/build/release-preflight
+          if-no-files-found: ignore
+          retention-days: 30
