@@ -82,7 +82,7 @@ PY
   trap - RETURN
 }
 
-install_full "$FULL" /tmp/p01-v24753-full-runtime 18477 "VF Start V2.47.52 FULL Gate"
+install_full "$FULL" /tmp/p01-v24753-full-runtime 18477 "VF Start V2.47.53 FULL Gate"
 test "$(tr -d '\r\n ' </tmp/p01-v24753-full-runtime/VERSION.txt)" = "$TARGET"
 echo P01_V24753_CLEAN_FULL_INSTALL=PASS
 
