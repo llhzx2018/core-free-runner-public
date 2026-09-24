@@ -1,0 +1,310 @@
+name: p01-v24753-final-release-temp
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v24753-final-release-temp.yml'
+      - 'requests/p01-v24753-final-release-20260924.json'
+      - 'scripts/p01_build_v24753_final.py'
+      - 'scripts/p01_v24753_final_gate.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      UPDATES_REPO: llhzx2018/core-updates
+      TARGET_SHA: 52e4b0ce086935589cfeb7ec2fb26ad3a8049fd6
+      TARGET_TREE: a252ca2799dad6886a24b6a698b917ae65c393f6
+      GOV_SHA: d27f1391a63b4f7cc366894a445f771df14ba4d9
+      VERSION: 2.47.53
+      SOURCE_VERSION: 2.47.53
+      SCHEMA: '2026090401'
+      TAG: v2.47.53
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Exact source and Current Authority readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          remote_main="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')"
+          remote_gov="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-doc.git" refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "$TARGET_SHA"
+          test "$remote_gov" = "$GOV_SHA"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          echo P01_V24753_FINAL_EXACT_SOURCE=PASS
+
+      - name: Download exact V2.47.53 formal baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-rel52/full /tmp/p01-rel52/update
+          gh release download v2.47.53 -R "$PRODUCT_REPO" -D /tmp/p01-rel52             -p 'VF-Start-V2.47.53-FULL.zip'             -p 'VF_Start_V2.47.53_UPDATE.zip'
+          unzip -q /tmp/p01-rel51/VF-Start-V2.47.52-FULL.zip -d /tmp/p01-rel51/full
+          unzip -q /tmp/p01-rel51/VF_Start_V2.47.52_UPDATE.zip -d /tmp/p01-rel51/update
+          test "$(tr -d '\r\n ' </tmp/p01-rel51/full/VERSION.txt)" = "$SOURCE_VERSION"
+          test -f /tmp/p01-rel51/update/repair-v2.47.53.php
+          echo P01_V24753_FORMAL_BASELINE=PASS
+
+      - name: Prepare runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          php -m | grep -Fx gd
+
+      - name: Build and verify final FULL + Atomic UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/p01_v24753_final_gate.sh
+          RECEIPT=/tmp/p01-v24753-artifacts/P01_V24753_ARTIFACT_RECEIPT.json
+          jq -e --arg s "$TARGET_SHA" --arg t "$TARGET_TREE" '.version=="2.47.53" and .source_version=="2.47.52" and .source_sha==$s and .source_tree==$t and .schema=="2026090401"' "$RECEIPT" >/dev/null
+          echo "FULL_SHA=$(jq -r '.full_sha256' "$RECEIPT")" >> "$GITHUB_ENV"
+          echo "FULL_BYTES=$(jq -r '.full_bytes' "$RECEIPT")" >> "$GITHUB_ENV"
+          echo "UPDATE_SHA=$(jq -r '.update_sha256' "$RECEIPT")" >> "$GITHUB_ENV"
+          echo "UPDATE_BYTES=$(jq -r '.update_bytes' "$RECEIPT")" >> "$GITHUB_ENV"
+          echo P01_V24753_FINAL_ARTIFACT_GATE=PASS
+
+      - name: Checkout V2.47.53 stable source
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch v2.47.53 "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(git -C stable rev-parse HEAD)" = "3d1f59364d6c328cc87bb07327ffa0be8d4faa5f"
+
+      - name: Canonical zero-debt regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-v24753-canonical.txt
+          grep -Fx 'P01_CANONICAL_CURRENT_FAILURE_COUNT=0' /tmp/p01-v24753-canonical.txt
+          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=0' /tmp/p01-v24753-canonical.txt
+          grep -Fx 'P01_CANONICAL_LEGACY_TEST_DEBT_COUNT=0' /tmp/p01-v24753-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-v24753-canonical.txt
+          echo P01_V24753_FINAL_CANONICAL=PASS
+
+      - name: Focused UI security and data contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/p01-v24753-focused-source
+          cp -a candidate /tmp/p01-v24753-focused-source
+          focused=/tmp/p01-v24753-focused-source
+          tests=(
+            tests/unit/shared_dialog_foundation_r1_contract.php
+            tests/unit/links_dialog_cancel_save_guard_contract.php
+            tests/unit/navigation_url_table_production_r1_contract.php
+            tests/unit/navigation_page_visual_closure_contract.php
+            tests/unit/navigation_row_action_hierarchy_contract.php
+            tests/unit/links_admin_visible_selection_contract.php
+            tests/unit/admin_all_resources_final_polish_r7_contract.php
+            tests/unit/admin_all_resources_readability_r6_contract.php
+            tests/unit/admin_all_resources_scanability_r5_contract.php
+            tests/unit/admin_all_resources_column_lock_r4_contract.php
+            tests/unit/admin_all_resources_visual_alignment_r3_contract.php
+            tests/unit/admin_all_resources_alignment_r2_contract.php
+            tests/unit/admin_all_resources_page3_polish_contract.php
+            tests/unit/admin_resource_browse_edit_r5_contract.php
+            tests/unit/resource_manager_pagination_context_contract.php
+            tests/unit/engineering_consistency_r80_contract.php
+            tests/unit/session_csrf_contract.php
+            tests/unit/update_csrf_recovery_contract.php
+            tests/unit/navigation_owner_behavior_privacy_contract.php
+            tests/unit/privacy_cache_performance_r2_contract.php
+          )
+          for t in "${tests[@]}"; do php "$focused/$t"; done
+          php "$focused/tests/integration/resource_asset_disaster_recovery_contract.php"
+          test "$(git -C candidate status --porcelain)" = ""
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          echo P01_V24753_FINAL_FOCUSED=PASS
+          echo P01_V24753_CANDIDATE_UNCHANGED=PASS
+
+      - name: Record OWNER-authorized Preview exception
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/P01_V24753_RELEASE_EXCEPTION.txt <<'EOF'
+          exception_id=P01-REL-24753-OWNER-PREVIEW-EX-20260924
+          rule=RP-07 OWNER_PREVIEW_RUNTIME + OWNER_REAL_USE before Formal Release
+          result=EXCEPTION
+          approver=OWNER
+          reason=OWNER explicitly authorized direct publish for manual Production update and asked not to repeat confirmation prompts.
+          scope=V2.47.53 Formal Release + Distribution only
+          residual_risk=Exact V2.47.53 visible UI was not OWNER-previewed before release.
+          compensating_control=Exact-source canonical zero-debt, focused UI/security/data, Clean FULL, Atomic upgrade, idempotency, rollback and data-sentinel gates PASS; Production remains manual.
+          effective_at=2026-09-24
+          expires_at=2026-09-25 or Formal Release + Distribution closure, whichever comes first.
+          exit_plan=OWNER manually updates Production to V2.47.53 and performs real-use visual QA; remaining defects return to L2 repair.
+          evidence_pointer=vf-start PR #946 + active OWNER authorization
+          EOF
+          cat /tmp/P01_V24753_RELEASE_EXCEPTION.txt
+          echo OWNER_PREVIEW_RUNTIME=EXCEPTION
+          echo OWNER_REAL_USE=EXCEPTION
+          echo OWNER_PREVIEW_EXCEPTION_AUTHORIZED=YES
+
+      - name: Publish tag and GitHub Formal Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          remote_tag="$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/tags/${TAG}" | awk '{print $1}')"
+          if [ -z "$remote_tag" ]; then
+            git -C candidate config user.name VictorForge
+            git -C candidate config user.email llhzx2018@gmail.com
+            git -C candidate tag "$TAG" "$TARGET_SHA"
+            git -C candidate push "https://x-access-token:${GH_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/tags/${TAG}"
+          else
+            test "$remote_tag" = "$TARGET_SHA"
+          fi
+          cat >/tmp/p01-v24753-notes.md <<EOF
+          # VF Start V2.47.53
+
+          P01 · VF Start V2.47.53 全站后台弹窗基础层统一收口。
+
+          - Exact Source: $TARGET_SHA
+          - Exact Tree: $TARGET_TREE
+          - Source Version: V2.47.52
+          - Target Version: V2.47.53
+          - Schema: $SCHEMA（不变）
+          - 统一后台弹窗：点击遮罩层、右上角关闭、取消与 Escape 均按弹窗语义关闭；敏感令牌弹窗保留二次确认
+          - 统一遮罩、圆角、阴影、滚动锁定与表单节奏；正常保存与危险操作语义保持不变
+          - Desktop 与 Mobile 保持独立布局
+          - Canonical zero-debt / Focused UI-Security-Data / Clean FULL / Atomic / Idempotency / Rollback / Data Sentinel: PASS
+          - OWNER Preview Gate: EXCEPTION（Owner 明确授权直接发布供后台手动更新；未伪装为 Preview PASS）
+          - Production upgrade: NOT INCLUDED；仍由 OWNER 在 P01 后台手动执行
+          EOF
+          FULL=/tmp/p01-v24753-artifacts/VF-Start-V2.47.53-FULL.zip
+          UPDATE=/tmp/p01-v24753-artifacts/VF_Start_V2.47.53_UPDATE.zip
+          if gh release view "$TAG" --repo "$PRODUCT_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FULL" "$UPDATE" --repo "$PRODUCT_REPO" --clobber
+          else
+            gh release create "$TAG" "$FULL" "$UPDATE" --repo "$PRODUCT_REPO" --title 'VF Start V2.47.53' --notes-file /tmp/p01-v24753-notes.md --verify-tag
+          fi
+          gh api "repos/${PRODUCT_REPO}/releases/tags/${TAG}" >/tmp/p01-v24753-release.json
+          RELEASE_ID="$(jq -r '.id' /tmp/p01-v24753-release.json)"
+          RELEASED_AT="$(jq -r '.published_at' /tmp/p01-v24753-release.json)"
+          test -n "$RELEASE_ID" && test "$RELEASE_ID" != null
+          test "$(jq -r '.assets[]|select(.name=="VF-Start-V2.47.53-FULL.zip")|.size' /tmp/p01-v24753-release.json)" = "$FULL_BYTES"
+          test "$(jq -r '.assets[]|select(.name=="VF_Start_V2.47.53_UPDATE.zip")|.size' /tmp/p01-v24753-release.json)" = "$UPDATE_BYTES"
+          echo "RELEASE_ID=$RELEASE_ID" >> "$GITHUB_ENV"
+          echo "RELEASED_AT=$RELEASED_AT" >> "$GITHUB_ENV"
+          echo P01_V24753_FORMAL_RELEASE=PASS
+
+      - name: Remote Tag and Asset readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          remote_tag="$(git ls-remote "https://x-access-token:${GH_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/tags/${TAG}" | awk '{print $1}')"
+          test "$remote_tag" = "$TARGET_SHA"
+          rm -rf /tmp/p01-v24753-remote && mkdir -p /tmp/p01-v24753-remote
+          gh release download "$TAG" --repo "$PRODUCT_REPO" --dir /tmp/p01-v24753-remote             --pattern 'VF-Start-V2.47.53-FULL.zip'             --pattern 'VF_Start_V2.47.53_UPDATE.zip'
+          test "$(sha256sum /tmp/p01-v24753-remote/VF-Start-V2.47.53-FULL.zip | awk '{print $1}')" = "$FULL_SHA"
+          test "$(sha256sum /tmp/p01-v24753-remote/VF_Start_V2.47.53_UPDATE.zip | awk '{print $1}')" = "$UPDATE_SHA"
+          echo P01_V24753_REMOTE_RELEASE_READBACK=PASS
+
+      - name: Publish Stable core-updates P01
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          git clone -q --depth 1 --branch main "https://x-access-token:${WRITE_TOKEN}@github.com/${UPDATES_REPO}.git" updates
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os
+          p=Path('updates/projects/P01.json')
+          d=json.loads(p.read_text(encoding='utf-8'))
+          if str(d.get('target_version','')) not in {'2.47.52','2.47.53'}:
+              raise SystemExit('unexpected P01 stable target: '+str(d.get('target_version')))
+          d.update({
+            'current_version':'2.47.52',
+            'target_version':'2.47.53',
+            'update_type':'ATOMIC',
+            'from_versions':['2.47.52'],
+            'schema_from':'2026090401',
+            'schema_to':'2026090401',
+            'repository':'llhzx2018/vf-start',
+            'release_tag':'v2.47.53',
+            'release_id':int(os.environ['RELEASE_ID']),
+            'product_identity':os.environ['TARGET_SHA'],
+            'asset_name':'VF_Start_V2.47.53_UPDATE.zip',
+            'asset_bytes':int(os.environ['UPDATE_BYTES']),
+            'asset_sha256':os.environ['UPDATE_SHA'],
+            'backup_required':True,
+            'rollback_supported':True,
+            'released_at':os.environ['RELEASED_AT'],
+            'minimum_php':'8.0.0',
+            'notes':'P01 · VF Start V2.47.53 全站后台弹窗基础层统一收口。Exact Source '+os.environ['TARGET_SHA']+'；Schema 2026090401 不变；Machine/Canonical/Clean FULL/Atomic/Idempotency/Rollback/Data Sentinel 均 PASS。OWNER 明确授权直接 Formal Release + Stable Distribution 供后台手动 Production 更新；Preview Gate 记录为一次性 EXCEPTION，不等于 Preview PASS；Production 仍由 OWNER 手动升级并做真实视觉验收。'
+          })
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          PY
+          git -C updates config user.name VictorForge
+          git -C updates config user.email llhzx2018@gmail.com
+          git -C updates add projects/P01.json
+          if ! git -C updates diff --cached --quiet; then
+            git -C updates commit -m 'release(P01): publish VF Start V2.47.53 stable update'
+          fi
+          for i in 1 2 3; do
+            if git -C updates push origin main; then break; fi
+            git -C updates pull --rebase origin main
+            test "$i" -lt 3
+          done
+          echo P01_V24753_CORE_UPDATES_PUBLISHED=PASS
+
+      - name: Stable channel remote readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/core-updates-readback
+          git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/${UPDATES_REPO}.git" /tmp/core-updates-readback
+          jq -e             --arg sha "$UPDATE_SHA"             --arg product "$TARGET_SHA"             --argjson rid "$RELEASE_ID"             --argjson bytes "$UPDATE_BYTES"             '.current_version=="2.47.52" and .target_version=="2.47.53" and .from_versions==["2.47.52"] and .release_tag=="v2.47.53" and .release_id==$rid and .product_identity==$product and .asset_name=="VF_Start_V2.47.53_UPDATE.zip" and .asset_bytes==$bytes and .asset_sha256==$sha'             /tmp/core-updates-readback/projects/P01.json >/dev/null
+          cat /tmp/core-updates-readback/projects/P01.json
+          echo P01_V24753_STABLE_CHANNEL_READBACK=PASS
+          echo P01_V24753_FORMAL_RELEASE_DISTRIBUTION=PASS
+          echo P01_V24753_PRODUCTION_CHANGED=NO
+
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p01-v24753-final-release
+          path: |
+            /tmp/p01-v24753-artifacts/P01_V24753_ARTIFACT_RECEIPT.json
+            /tmp/p01-v24753-release.json
+            /tmp/P01_V24753_RELEASE_EXCEPTION.txt
+            /tmp/p01-v24753-canonical.txt
+          if-no-files-found: warn
+          retention-days: 14
