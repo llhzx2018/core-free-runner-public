@@ -6,6 +6,7 @@ on:
       - run/p02-v25103-release-gate-20260924
     paths:
       - '.github/workflows/p02-v25103-release-gate.yml'
+      - 'requests/p02-v25103-release-gate.sh'
 
 permissions:
   contents: read
@@ -15,6 +16,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
       - name: Checkout exact P02 V2.5.103 candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -80,11 +87,11 @@ jobs:
           bash scripts/verify-repository.sh
           echo P02_V25103_EXACT_SOURCE=PASS
 
-      - name: Maintenance / clean FULL / browser E2E / privacy
+      - name: Maintenance clean FULL browser E2E privacy
         working-directory: product
         env:
-          TEST_PASSWORD: VF-P02-V25103-MAINT-${{ github.run_id }}!
-          EVIDENCE_DIR: ${{ runner.temp }}/p02-v25103-maintenance
+          TEST_PASSWORD: "VF-P02-V25103-MAINT-${{ github.run_id }}!"
+          EVIDENCE_DIR: "${{ runner.temp }}/p02-v25103-maintenance"
         run: |
           set -Eeuo pipefail
           bash scripts/maintenance-reverify.sh
@@ -93,152 +100,22 @@ jobs:
       - name: Deterministic formal release preflight
         working-directory: product
         env:
-          TEST_PASSWORD: VF-P02-V25103-RELEASE-${{ github.run_id }}!
+          TEST_PASSWORD: "VF-P02-V25103-RELEASE-${{ github.run_id }}!"
           VF_RELEASE_SOURCE_SHA: b1c704900f15776a96d3e8930ec61c2ff64ae02f
           VF_RELEASE_SOURCE_TREE: 8d9c432a9e8bbcac2da2359cbf1a1cb05d79a61b
           VF_RELEASE_SOURCE_REF: work/p02-v25103-inkstone-final-ux-convergence-20260924
-          VF_RELEASE_FROM_VERSIONS: 2.5.81 2.5.82 2.5.102
+          VF_RELEASE_FROM_VERSIONS: "2.5.81 2.5.82 2.5.102"
         run: |
           set -Eeuo pipefail
           bash scripts/verify-release-artifacts.sh
           echo P02_V25103_RELEASE_PREFLIGHT=PASS
 
-      - name: Real-data direct upgrade matrix to V2.5.103
+      - name: Real-data direct upgrade matrix
         env:
-          TEST_PASSWORD: VF-P02-V25103-UPGRADE-${{ github.run_id }}!
+          TEST_PASSWORD: "VF-P02-V25103-UPGRADE-${{ github.run_id }}!"
         run: |
           set -Eeuo pipefail
-          ROOT="$PWD"
-          PRODUCT="$ROOT/product"
-
-          run_upgrade(){
-            local SRC="$1"
-            local FROM="$2"
-            local PORT="$3"
-            local SITE="${RUNNER_TEMP}/p02-v25103-from-${FROM}"
-            local COOKIE="${RUNNER_TEMP}/p02-v25103-${FROM}-cookie.txt"
-            local BASE="http://127.0.0.1:${PORT}"
-            local LOG="${RUNNER_TEMP}/p02-v25103-${FROM}-server.log"
-            rm -rf "$SITE" "$COOKIE"
-            bash "$SRC/scripts/build-deploy-tree.sh" "$SITE"
-            test "$(cat "$SITE/VERSION.txt")" = "$FROM"
-
-            php -d display_errors=0 -S "127.0.0.1:${PORT}" -t "$SITE" >"$LOG" 2>&1 &
-            local PID=$!
-            for _ in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
-            kill -0 "$PID"
-
-            curl -fsS -c "$COOKIE" "$BASE/setup.php" > "${RUNNER_TEMP}/setup-${FROM}.html"
-            SETUP_CSRF="$(python3 - "${RUNNER_TEMP}/setup-${FROM}.html" <<'PY'
-          import html,re,sys
-          s=open(sys.argv[1],encoding='utf-8').read()
-          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
-          assert m
-          print(html.unescape(m.group(1)))
-          PY
-)"
-            STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE"               --data-urlencode "setup_csrf=$SETUP_CSRF"               --data-urlencode "password=$TEST_PASSWORD"               --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")"
-            test "$STATUS" = "303"
-
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" "$BASE/api.php?action=session" > "${RUNNER_TEMP}/session-${FROM}.json"
-            CSRF="$(python3 - "${RUNNER_TEMP}/session-${FROM}.json" "$FROM" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok'] and x['site']['auth'] and x['version']==sys.argv[2]
-          print(x['csrf'])
-          PY
-)"
-
-            cat > "${RUNNER_TEMP}/cat-${FROM}.json" <<JSON
-          {"name":"V25103 Upgrade ${FROM}","description":"real-data direct upgrade fixture","icon":"folder"}
-          JSON
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json'               --data-binary @"${RUNNER_TEMP}/cat-${FROM}.json" "$BASE/api.php?action=category_save" > "${RUNNER_TEMP}/cat-${FROM}-response.json"
-            CATEGORY_ID="$(python3 - "${RUNNER_TEMP}/cat-${FROM}-response.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok']; print(x['id'])
-          PY
-)"
-
-            python3 - "${RUNNER_TEMP}/article-${FROM}.json" "$CATEGORY_ID" "$FROM" <<'PY'
-          import json,sys
-          marker='P02_V25103_UPGRADE_MARKER_'+sys.argv[3].replace('.','_')
-          json.dump({
-            'category_id':int(sys.argv[2]),
-            'title':'V2.5.103 Upgrade Fixture '+sys.argv[3],
-            'description':'must survive direct upgrade',
-            'content':marker+'\n中文资料完整性\n'+('DATA-LINE\n'*120),
-            'content_mode':'article',
-            'content_format':'markdown',
-            'primary_action':'read',
-            'status':'active'
-          },open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False)
-          PY
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json'               --data-binary @"${RUNNER_TEMP}/article-${FROM}.json" "$BASE/api.php?action=content_save" > "${RUNNER_TEMP}/article-${FROM}-response.json"
-            ARTICLE_ID="$(python3 - "${RUNNER_TEMP}/article-${FROM}-response.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok']; print(x['id'])
-          PY
-)"
-
-            python3 - "${RUNNER_TEMP}/fixture-${FROM}.png" <<'PY'
-          import base64,sys
-          open(sys.argv[1],'wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZfGQAAAAASUVORK5CYII='))
-          PY
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" -H "X-CSRF-Token: $CSRF"               -F "item_id=$ARTICLE_ID" -F "attachment=@${RUNNER_TEMP}/fixture-${FROM}.png;type=image/png"               "$BASE/api.php?action=attachment_upload" > "${RUNNER_TEMP}/attachment-${FROM}.json"
-            python3 - "${RUNNER_TEMP}/attachment-${FROM}.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok'] and x['attachments']
-          PY
-
-            cp "$PRODUCT/build/release-preflight/repair-v2.5.103.php" "$SITE/repair-v2.5.103.php"
-            curl -fsS -b "$COOKIE" -c "$COOKIE" "$BASE/repair-v2.5.103.php" > "${RUNNER_TEMP}/repair-${FROM}-form.html"
-            REPAIR_CSRF="$(python3 - "${RUNNER_TEMP}/repair-${FROM}-form.html" <<'PY'
-          import html,re,sys
-          s=open(sys.argv[1],encoding='utf-8').read()
-          m=re.search(r'name="csrf" value="([^"]+)"',s)
-          assert m,s[:500]
-          print(html.unescape(m.group(1)))
-          PY
-)"
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE"               --data-urlencode "action=upgrade" --data-urlencode "csrf=$REPAIR_CSRF"               "$BASE/repair-v2.5.103.php" > "${RUNNER_TEMP}/repair-${FROM}-result.html"
-            grep -q "升级完成" "${RUNNER_TEMP}/repair-${FROM}-result.html"
-            test ! -e "$SITE/repair-v2.5.103.php"
-            test "$(cat "$SITE/VERSION.txt")" = "2.5.103"
-
-            curl -fsS -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" "$BASE/api.php?action=session" > "${RUNNER_TEMP}/session-${FROM}-103.json"
-            python3 - "${RUNNER_TEMP}/session-${FROM}-103.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok'] and x['site']['auth'] and x['version']=='2.5.103'
-          PY
-            curl -fsS -b "$COOKIE" -H "Origin: $BASE" "$BASE/api.php?action=content_get&id=$ARTICLE_ID" > "${RUNNER_TEMP}/article-${FROM}-103.json"
-            python3 - "${RUNNER_TEMP}/article-${FROM}-103.json" "$FROM" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1],encoding='utf-8'))
-          marker='P02_V25103_UPGRADE_MARKER_'+sys.argv[2].replace('.','_')
-          assert x['ok'] and marker in x['item']['content']
-          PY
-            curl -fsS -b "$COOKIE" -H "Origin: $BASE" "$BASE/api.php?action=attachment_list&item_id=$ARTICLE_ID" > "${RUNNER_TEMP}/attachments-${FROM}-103.json"
-            python3 - "${RUNNER_TEMP}/attachments-${FROM}-103.json" <<'PY'
-          import json,sys
-          x=json.load(open(sys.argv[1])); assert x['ok'] and len((x.get('data') or {}).get('items',[]))>=1
-          PY
-            ( cd "$SITE" && php cli/verify.php ) > "${RUNNER_TEMP}/verify-${FROM}-103.json"
-            python3 - "${RUNNER_TEMP}/verify-${FROM}-103.json" <<'PY'
-          import json,sys
-          assert json.load(open(sys.argv[1]))['ok'] is True
-          PY
-            DB_FILE="$(cd "$SITE" && php -r '$r=include "app/.runtime.php"; echo $r["db_file"];')"
-            test "$(sqlite3 "$DB_FILE" 'PRAGMA integrity_check;')" = "ok"
-            test -z "$(sqlite3 "$DB_FILE" 'PRAGMA foreign_key_check;')"
-            kill "$PID"
-            wait "$PID" 2>/dev/null || true
-            echo "P02_V25103_DIRECT_UPGRADE_${FROM}=PASS"
-          }
-
-          run_upgrade "$ROOT/old81-src" "2.5.81" "18101"
-          run_upgrade "$ROOT/old82-src" "2.5.82" "18102"
-          run_upgrade "$ROOT/old102-src" "2.5.102" "18103"
-          echo P02_V25103_SOURCE_SET_MATRIX=PASS
+          bash runner/requests/p02-v25103-release-gate.sh
 
       - name: Final release gate marker
-        run: |
-          echo P02_V25103_FORMAL_RELEASE_GATE=PASS
+        run: echo P02_V25103_FORMAL_RELEASE_GATE=PASS
