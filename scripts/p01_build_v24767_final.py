@@ -5,8 +5,8 @@ from pathlib import Path
 
 ROOT=Path.cwd()
 CAND=ROOT/"candidate"/"src"
-BASE=Path("/tmp/p01-rel65/full")
-OLD_REPAIR=Path("/tmp/p01-rel65/update/repair-v2.47.65.php")
+BASE=Path("/tmp/p01-rel66/full")
+OLD_REPAIR=Path("/tmp/p01-rel66/update/repair-v2.47.66.php")
 OUT=Path("/tmp/p01-v24767-artifacts")
 VERSION="2.47.67"
 SOURCE_VERSION="2.47.66"
