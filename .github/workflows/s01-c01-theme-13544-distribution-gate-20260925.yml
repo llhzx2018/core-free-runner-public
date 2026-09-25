@@ -1,0 +1,127 @@
+name: S01 C01 Theme 1.35.44 Distribution Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/s01-c01-theme-13544-distribution-gate-20260925.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: github.head_ref == 'task/s01-c01-theme-13544-distribution-gate-20260925'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      CORE_MAIN_SHA: b578184ff981ccb4d8b367a94659837ab4776e1b
+      CORE_CANDIDATE_SHA: ff4c4362b13158dec1e1f512d8d8df8ba31d903a
+      CORE_CANDIDATE_BRANCH: release/s01-c01-theme-13544-20260925
+      THEME_SHA: c1bb2dddb27cb0df02fb5eeec4cda6af0afb503a
+      VERSION: 1.35.44
+      TAG: v1.35.44
+      ASSET: vf-tools-theme_V1.35.44.zip
+      ASSET_BYTES: '1742684'
+      ASSET_SHA256: 9ede045bfedab2221d7c63daf6fadabc4574dbe22da8219599d287761f0da09e
+      RUNTIME_FILES: '460'
+      RUNTIME_FP: 4d5bb887e3065458f196d3aa553116ff3d725f1585173ab346093ee51c258127
+      RELEASED_AT: '2026-09-25T15:06:00Z'
+    steps:
+      - name: Credential presence
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+
+      - name: Resolve governed core-updates read credential
+        id: auth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          choose=''
+          for candidate_name in VF_PRIVATE_READ_TOKEN VF_RELEASE_WRITE_TOKEN; do
+            candidate="${!candidate_name:-}"
+            [ -n "$candidate" ] || continue
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $candidate" https://api.github.com/repos/llhzx2018/core-updates || true)"
+            if [ "$code" = '200' ]; then choose="$candidate_name"; break; fi
+          done
+          [ -n "$choose" ] || exit 1
+          echo "token_name=$choose" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact core-updates candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ steps.auth.outputs.token_name }}" = 'VF_PRIVATE_READ_TOKEN' ]; then TOKEN="$VF_PRIVATE_READ_TOKEN"; else TOKEN="$VF_RELEASE_WRITE_TOKEN"; fi
+          rm -rf core-updates && mkdir core-updates && cd core-updates
+          git init -q
+          git remote add origin https://github.com/llhzx2018/core-updates.git
+          AUTH="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --no-tags origin             refs/heads/main:refs/remotes/origin/main             refs/heads/$CORE_CANDIDATE_BRANCH:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CORE_MAIN_SHA"
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "$CORE_CANDIDATE_SHA"
+          git checkout --detach refs/remotes/origin/candidate
+
+      - name: Exact one-file scope
+        working-directory: core-updates
+        run: test "$(git diff --name-only refs/remotes/origin/main...HEAD)" = 'projects/S01-C01.json'
+
+      - name: Exact manifest identity
+        working-directory: core-updates
+        run: |
+          python3 - <<'PY'
+          import json,os
+          p=json.load(open('projects/S01-C01.json',encoding='utf-8'))
+          assert p['schema_version']=='wp-component-1.0'
+          assert p['project_id']=='S01' and p['component_id']=='S01-C01'
+          assert p['component_type']=='THEME'
+          assert p['package_slug']=='vf-tools-theme'
+          assert p['target_version']==os.environ['VERSION']
+          assert p['from_versions']==[f'1.35.{n}' for n in range(8,44)]
+          assert p['release_tag']==os.environ['TAG']
+          assert p['asset_name']==os.environ['ASSET']
+          assert p['asset_bytes']==int(os.environ['ASSET_BYTES'])
+          assert p['asset_sha256']==os.environ['ASSET_SHA256']
+          assert p['runtime_files']==int(os.environ['RUNTIME_FILES'])
+          assert p['runtime_fingerprint']==os.environ['RUNTIME_FP']
+          assert p['released_at']==os.environ['RELEASED_AT']
+          assert p['schema_from']=='N/A' and p['schema_to']=='N/A'
+          assert p['backup_required'] is True and p['rollback_supported'] is True
+          print('PASS exact Theme 1.35.44 manifest')
+          PY
+
+      - name: Manifest Contract Audit
+        working-directory: core-updates
+        run: python3 scripts/check_manifest_contract.py
+
+      - name: Update Core regression
+        working-directory: core-updates
+        run: |
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+
+      - name: Release metadata readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          JSON="$(gh api "repos/llhzx2018/vf-tools-theme/releases/tags/$TAG")"
+          python3 - "$JSON" core-updates/projects/S01-C01.json <<'PY'
+          import json,sys,os
+          r=json.loads(sys.argv[1]); m=json.load(open(sys.argv[2],encoding='utf-8'))
+          assert r['target_commitish']==os.environ['THEME_SHA']
+          assert r['tag_name']==m['release_tag']
+          a=[x for x in r.get('assets',[]) if x.get('name')==m['asset_name']]
+          assert len(a)==1
+          assert int(a[0]['size'])==m['asset_bytes']
+          assert str(a[0].get('digest') or '')=='sha256:'+m['asset_sha256']
+          assert r['published_at']==m['released_at']
+          print('PASS release metadata')
+          PY
+
+      - name: Public manifest secret fence
+        working-directory: core-updates
+        run: |
+          ! grep -RInE '(ghp_|github_pat_|Authorization:[[:space:]]*Bearer|VF_PRIVATE_READ_TOKEN[[:space:]]*=|VF_RELEASE_WRITE_TOKEN[[:space:]]*=)' projects/S01-C01.json
