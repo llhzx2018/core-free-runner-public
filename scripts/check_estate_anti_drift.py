@@ -329,10 +329,27 @@ openssl pkeyutl -encrypt -pubin -inkey "$TMP/public.pem" \
 CIPHER="$(base64 -w0 "$TMP/access.enc")"
 rm -f "$TMP/access.txt" "$TMP/public.pem"
 unset PASS BODY CSRF
+
+curl -fsSL 'https://codeload.github.com/actions/upload-artifact/tar.gz/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' -o "$TMP/upload-artifact.tgz"
+mkdir -p "$TMP/upload-action"
+tar -xzf "$TMP/upload-artifact.tgz" -C "$TMP/upload-action"
+UPLOAD_DIR="$(find "$TMP/upload-action" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+test -f "$UPLOAD_DIR/dist/upload/index.js"
+env \
+  'INPUT_NAME=p01-v24773-preview-access-encrypted' \
+  "INPUT_PATH=$TMP/access.enc" \
+  'INPUT_IF-NO-FILES-FOUND=error' \
+  'INPUT_RETENTION-DAYS=1' \
+  'INPUT_COMPRESSION-LEVEL=6' \
+  'INPUT_OVERWRITE=true' \
+  'INPUT_INCLUDE-HIDDEN-FILES=false' \
+  node "$UPLOAD_DIR/dist/upload/index.js"
+echo 'P01_V24773_PREVIEW_ACCESS_ARTIFACT=PASS'
+
 printf '::notice title=P01_V24773_PREVIEW_ACCESS_RSA_OAEP_SHA256_B64::%s\n' "$CIPHER"
 echo 'P01_V24773_OWNER_PREVIEW_RUNTIME=READY'
-echo 'P01_V24773_PREVIEW_WINDOW_SECONDS=220'
-sleep 220
+echo 'P01_V24773_PREVIEW_WINDOW_SECONDS=240'
+sleep 240
 echo 'P01_V24773_PREVIEW_WINDOW_COMPLETE=YES'
 '''
     try:
