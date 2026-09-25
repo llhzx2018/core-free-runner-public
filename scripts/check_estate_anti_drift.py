@@ -343,6 +343,7 @@ env \
   'INPUT_COMPRESSION-LEVEL=6' \
   'INPUT_OVERWRITE=true' \
   'INPUT_INCLUDE-HIDDEN-FILES=false' \
+  'INPUT_ARCHIVE=true' \
   node "$UPLOAD_DIR/dist/upload/index.js"
 echo 'P01_V24773_PREVIEW_ACCESS_ARTIFACT=PASS'
 
