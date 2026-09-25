@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
 import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-MODULE = ROOT / "packages" / "p07-system-care" / "0.1.0-rc13" / "lib" / "resource_profile.py"
+VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc14")
+MODULE = ROOT / "packages" / "p07-system-care" / VERSION / "lib" / "resource_profile.py"
 spec = importlib.util.spec_from_file_location("p07_resource_profile", MODULE)
 rp = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
