@@ -130,7 +130,7 @@ menu() {
       7) run_action intrusion-evidence-entry.sh menu ;;
       8) run_action resource-profile.sh menu; pause_menu ;;
       0) return 0 ;;
-      *) warn '无效选择，请输入 0-7。'; sleep 1 ;;
+      *) warn '无效选择，请输入 0-8。'; sleep 1 ;;
     esac
   done
 }

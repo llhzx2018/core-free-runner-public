@@ -4,7 +4,7 @@ set -Eeuo pipefail
 VERSION='0.1.0-rc13'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='912f86b4d38496e4e6975be4418bdd6ce7f2689c'
+MANIFEST_BLOB='0fb4fbfecdf264e8569d47ab9d852b004c1802d1'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
