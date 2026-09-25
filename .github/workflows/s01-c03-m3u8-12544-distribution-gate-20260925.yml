@@ -1,0 +1,139 @@
+name: S01 C03 M3U8 1.25.44 Distribution Gate
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/s01-c03-m3u8-12544-distribution-gate-20260925.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: github.head_ref == 'task/s01-c03-m3u8-12544-distribution-gate-20260925'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      CORE_MAIN_SHA: c40e96376c157cccd6f0efafb7f361adb40bbceb
+      CORE_CANDIDATE_SHA: 89b8a6d1dafa262b66be20a63b2f07bcb5a47979
+      CORE_CANDIDATE_BRANCH: release/s01-c03-m3u8-12544-20260925
+      M3U8_SHA: 7e9eafeb3087b19de7d24ecc3906d37affd2ed66
+      VERSION: 1.25.44
+      TAG: v1.25.44
+      ASSET: vf-tools-m3u8_V1.25.44.zip
+      ASSET_BYTES: '3566136'
+      ASSET_SHA256: 403ce59cb948b508af0a168da1a1da8b1d790dd5dcdefc9b054e6eaa284ca303
+      RUNTIME_FILES: '564'
+      RUNTIME_FP: eede134d3d78bb775aec4fbb03319a6d773ea75e35540e2d7e4573b484cf407d
+      RELEASED_AT: '2026-09-25T10:22:23Z'
+    steps:
+      - name: Credential presence
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+
+      - name: Resolve governed core-updates read credential
+        id: auth
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          choose=''
+          for candidate_name in VF_PRIVATE_READ_TOKEN VF_RELEASE_WRITE_TOKEN; do
+            candidate="${!candidate_name:-}"
+            [ -n "$candidate" ] || continue
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $candidate" https://api.github.com/repos/llhzx2018/core-updates || true)"
+            if [ "$code" = '200' ]; then choose="$candidate_name"; break; fi
+          done
+          [ -n "$choose" ] || exit 1
+          echo "token_name=$choose" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact core-updates candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ steps.auth.outputs.token_name }}" = 'VF_PRIVATE_READ_TOKEN' ]; then TOKEN="$VF_PRIVATE_READ_TOKEN"; else TOKEN="$VF_RELEASE_WRITE_TOKEN"; fi
+          rm -rf core-updates && mkdir core-updates && cd core-updates
+          git init -q
+          git remote add origin https://github.com/llhzx2018/core-updates.git
+          AUTH="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --no-tags origin             refs/heads/main:refs/remotes/origin/main             refs/heads/$CORE_CANDIDATE_BRANCH:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/main)" = "$CORE_MAIN_SHA"
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "$CORE_CANDIDATE_SHA"
+          git checkout --detach refs/remotes/origin/candidate
+
+      - name: Exact one-file scope fence
+        working-directory: core-updates
+        run: |
+          set -Eeuo pipefail
+          test "$(git diff --name-only refs/remotes/origin/main...HEAD)" = 'projects/S01-C03.json'
+
+      - name: Exact manifest identity
+        working-directory: core-updates
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os
+          p=json.load(open('projects/S01-C03.json',encoding='utf-8'))
+          assert p['schema_version']=='wp-component-1.0'
+          assert p['project_id']=='S01' and p['component_id']=='S01-C03'
+          assert p['component_type']=='PLUGIN'
+          assert p['package_slug']=='vf-tool-m3u8'
+          assert p['plugin_file']=='vf-tool-m3u8/vf-tool-m3u8.php'
+          assert p['locator_cutover'] is False
+          assert p['target_version']==os.environ['VERSION']
+          assert p['from_versions']==[f'1.25.{n}' for n in range(20,44)]
+          assert p['release_tag']==os.environ['TAG']
+          assert p['asset_name']==os.environ['ASSET']
+          assert p['asset_bytes']==int(os.environ['ASSET_BYTES'])
+          assert p['asset_sha256']==os.environ['ASSET_SHA256']
+          assert p['schema_from']=='1.3.0' and p['schema_to']=='1.3.0'
+          assert p['runtime_files']==int(os.environ['RUNTIME_FILES'])
+          assert p['runtime_file_count']==int(os.environ['RUNTIME_FILES'])
+          assert p['runtime_fingerprint']==os.environ['RUNTIME_FP']
+          assert p['runtime_fingerprint_sha256']==os.environ['RUNTIME_FP']
+          assert p['released_at']==os.environ['RELEASED_AT']
+          assert p['backup_required'] is True and p['rollback_supported'] is True
+          print('PASS exact S01-C03 manifest')
+          PY
+
+      - name: Manifest Contract Audit
+        working-directory: core-updates
+        run: python3 scripts/check_manifest_contract.py
+
+      - name: Update Core regression
+        working-directory: core-updates
+        run: |
+          set -Eeuo pipefail
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+
+      - name: Release metadata readback matches manifest
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/llhzx2018/vf-tools-m3u8/releases/tags/$TAG")"
+          python3 - "$JSON" core-updates/projects/S01-C03.json <<'PY'
+          import json,sys,os
+          r=json.loads(sys.argv[1]); m=json.load(open(sys.argv[2],encoding='utf-8'))
+          assert r['tag_name']==m['release_tag']
+          assert r['target_commitish']==os.environ['M3U8_SHA']
+          assert r['draft'] is False and r['prerelease'] is False
+          assets=[a for a in r.get('assets',[]) if a.get('name')==m['asset_name']]
+          assert len(assets)==1
+          a=assets[0]
+          assert int(a['size'])==m['asset_bytes']
+          assert str(a.get('digest') or '')=='sha256:'+m['asset_sha256']
+          assert r['published_at']==m['released_at']
+          print('PASS exact Release metadata')
+          PY
+
+      - name: Public manifest secret fence
+        working-directory: core-updates
+        run: |
+          set -Eeuo pipefail
+          ! grep -RInE '(ghp_|github_pat_|Authorization:[[:space:]]*Bearer|VF_PRIVATE_READ_TOKEN[[:space:]]*=|VF_RELEASE_WRITE_TOKEN[[:space:]]*=)' projects/S01-C03.json
