@@ -1,0 +1,443 @@
+name: P07 Real Cloud Full-server E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-real-cloud-e2e.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  real-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact private P07 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: e41873437bbe23f4d5b0cad45af8b72aabf777e3
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Verify exact source
+        working-directory: source
+        shell: bash
+        env:
+          SOURCE_SHA: e41873437bbe23f4d5b0cad45af8b72aabf777e3
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          echo "P07_REAL_E2E_EXACT_SOURCE=$SOURCE_SHA"
+
+      - name: Generate ephemeral TARGET SSH key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p /tmp/p07-real-e2e
+          ssh-keygen -q -t ed25519 -N '' \
+            -C 'p07-real-e2e-20260925' \
+            -f /tmp/p07-real-e2e/id_ed25519
+          printf '%s\n' 'VFOPS_MANAGED_MIGRATION_KEY_V1' \
+            > /tmp/p07-real-e2e/id_ed25519.vfops-managed
+          chmod 600 /tmp/p07-real-e2e/id_ed25519.vfops-managed
+          printf 'P07_E2E_PUBLIC_KEY=%s\n' \
+            "$(cat /tmp/p07-real-e2e/id_ed25519.pub)"
+
+      - name: Wait for DigitalOcean TARGET rendezvous
+        id: rendezvous
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          url='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/p07-real-e2e-20260925/.tmp/p07-e2e-target.json'
+          for attempt in $(seq 1 120); do
+            if curl -fsSL -H 'Cache-Control: no-cache' \
+              "$url?ts=$(date +%s)-$attempt" -o /tmp/p07-target.json 2>/dev/null; then
+              target_ip="$(python3 - <<'PY'
+import json
+from pathlib import Path
+obj=json.loads(Path('/tmp/p07-target.json').read_text())
+value=str(obj.get('target_ip','')).strip()
+parts=value.split('.')
+if len(parts)!=4 or any(not p.isdigit() or not 0<=int(p)<=255 for p in parts):
+    raise SystemExit(2)
+print(value)
+PY
+)"
+              echo "target_ip=$target_ip" >> "$GITHUB_OUTPUT"
+              echo "P07_E2E_TARGET_READY=$target_ip"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'P07_E2E_BLOCK=TARGET_RENDEZVOUS_TIMEOUT'
+          exit 1
+
+      - name: Verify TARGET SSH
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+        run: |
+          set -Eeuo pipefail
+          for attempt in $(seq 1 60); do
+            if ssh -i /tmp/p07-real-e2e/id_ed25519 \
+              -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              -o ConnectTimeout=5 root@"$TARGET_IP" 'printf P07_TARGET_SSH_READY' \
+              >/tmp/p07-target-ssh.out 2>/dev/null; then
+              grep -q 'P07_TARGET_SSH_READY' /tmp/p07-target-ssh.out
+              echo 'P07_E2E_TARGET_SSH=PASS'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'P07_E2E_TARGET_SSH=FAIL'
+          exit 1
+
+      - name: Install SOURCE CloudPanel MariaDB 10.11
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log=/tmp/p07-source-cloudpanel-install.log
+          (
+            sudo apt-get update -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              curl wget sudo cron rsync sqlite3 jq
+            curl -fsSL https://installer.cloudpanel.io/ce/v2/install.sh \
+              -o /tmp/cloudpanel-install.sh
+            echo '8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  /tmp/cloudpanel-install.sh' \
+              | sha256sum -c -
+            sudo DB_ENGINE=MARIADB_10.11 bash /tmp/cloudpanel-install.sh
+            sudo clpctl --version
+          ) >"$log" 2>&1
+          echo "P07_E2E_SOURCE_CLOUDPANEL=PASS"
+          echo "P07_E2E_SOURCE_CLOUDPANEL_LOG_SHA256=$(sha256sum "$log" | awk '{print $1}')"
+
+      - name: Seed SOURCE sites and runtime
+        id: seed
+        working-directory: source
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          suffix="${TARGET_IP//./-}"
+          php_domain="php.${suffix}.sslip.io"
+          node_domain="node.${suffix}.sslip.io"
+          static_domain="static.${suffix}.sslip.io"
+          for d in "$php_domain" "$node_domain" "$static_domain"; do
+            resolved="$(getent ahostsv4 "$d" | awk 'NR==1{print $1}')"
+            test "$resolved" = "$TARGET_IP"
+          done
+
+          site_pw="$(openssl rand -hex 18)"
+          db_pw="$(openssl rand -hex 18)"
+          node_pw="$(openssl rand -hex 18)"
+          static_pw="$(openssl rand -hex 18)"
+
+          sudo clpctl site:add:php \
+            --domainName="$php_domain" --phpVersion=8.4 \
+            --vhostTemplate=Generic --siteUser=p07php \
+            --siteUserPassword="$site_pw" >/tmp/p07-site-php.log 2>&1
+          sudo clpctl db:add \
+            --domainName="$php_domain" --databaseName=p07e2edb \
+            --databaseUserName=p07e2edbuser \
+            --databaseUserPassword="$db_pw" >/tmp/p07-db-add.log 2>&1
+
+          php_root="/home/p07php/htdocs/$php_domain"
+          sudo tee "$php_root/index.php" >/dev/null <<'PHP'
+          <?php echo "P07_PHP_E2E_OK"; ?>
+          PHP
+          sudo tee "$php_root/wp-config.php" >/dev/null <<PHP
+          <?php
+          define('DB_NAME', 'p07e2edb');
+          define('DB_USER', 'p07e2edbuser');
+          define('DB_PASSWORD', '$db_pw');
+          define('DB_HOST', '127.0.0.1');
+          PHP
+          sudo chown -R p07php:p07php "$php_root"
+
+          cat >/tmp/p07-e2e.sql <<'SQL'
+          CREATE TABLE p07_e2e_marker (
+            id INT PRIMARY KEY,
+            marker VARCHAR(64) NOT NULL
+          );
+          INSERT INTO p07_e2e_marker VALUES (1,'P07_DB_ROW_OK');
+          SQL
+          gzip -c /tmp/p07-e2e.sql >/tmp/p07-e2e.sql.gz
+          sudo clpctl db:import --databaseName=p07e2edb \
+            --file=/tmp/p07-e2e.sql.gz >/tmp/p07-db-import.log 2>&1
+
+          sudo install -d -o p07php -g p07php -m 750 \
+            /home/p07php/.vf-e2e /home/p07php/.press-e2e
+          sudo -u p07php python3 - <<'PY'
+          import sqlite3
+          p='/home/p07php/.vf-e2e/state.sqlite'
+          db=sqlite3.connect(p)
+          db.execute('create table marker(id integer primary key, value text not null)')
+          db.execute('insert into marker(value) values (?)', ('P07_SQLITE_OK',))
+          db.commit(); db.close()
+          PY
+          printf '%s\n' 'P07_HIDDEN_VF_OK' | \
+            sudo tee /home/p07php/.vf-e2e/hidden.txt >/dev/null
+          printf '%s\n' 'P07_HIDDEN_PRESS_OK' | \
+            sudo tee /home/p07php/.press-e2e/hidden.txt >/dev/null
+          sudo chown -R p07php:p07php /home/p07php/.vf-e2e /home/p07php/.press-e2e
+
+          sudo tee /etc/cron.d/p07-e2e >/dev/null <<EOF
+          MAILTO=""
+          */5 * * * * p07php /usr/bin/printf 'system-cron\n' >> /home/p07php/.vf-e2e/system-cron.log
+          EOF
+          sudo chmod 644 /etc/cron.d/p07-e2e
+          printf '%s\n' \
+            "*/7 * * * * /usr/bin/printf 'user-cron\\n' >> /home/p07php/.vf-e2e/user-cron.log" \
+            | sudo crontab -u p07php -
+
+          sudo clpctl site:add:nodejs \
+            --domainName="$node_domain" --nodejsVersion=22 --appPort=3101 \
+            --siteUser=p07node --siteUserPassword="$node_pw" \
+            >/tmp/p07-site-node.log 2>&1
+          node_root="/home/p07node/htdocs/$node_domain"
+          sudo tee "$node_root/app.js" >/dev/null <<'JS'
+          const http = require('http');
+          http.createServer((req,res)=>{
+            res.writeHead(200, {'Content-Type':'text/plain'});
+            res.end('P07_NODE_E2E_OK');
+          }).listen(3101, '127.0.0.1');
+          JS
+          sudo chown -R p07node:p07node "$node_root"
+          sudo -u p07node -H bash -lc "
+            set -e
+            . /home/p07node/.nvm/nvm.sh
+            nvm use 22 >/dev/null
+            npm install -g pm2 >/dev/null 2>&1
+            cd '$node_root'
+            pm2 start app.js --name p07-e2e-node >/dev/null
+            pm2 save >/dev/null
+          "
+
+          sudo clpctl site:add:static \
+            --domainName="$static_domain" --siteUser=p07static \
+            --siteUserPassword="$static_pw" >/tmp/p07-site-static.log 2>&1
+          static_root="/home/p07static/htdocs/$static_domain"
+          printf '%s\n' 'P07_STATIC_E2E_OK' | \
+            sudo tee "$static_root/index.html" >/dev/null
+          sudo chown -R p07static:p07static "$static_root"
+
+          sudo nohup python3 -m http.server 31535 --bind 0.0.0.0 \
+            >/tmp/p07-extra-listener.log 2>&1 &
+          echo $! >/tmp/p07-extra-listener.pid
+          sleep 2
+          sudo ss -ltnH | grep -q ':31535'
+
+          echo "php_domain=$php_domain" >> "$GITHUB_OUTPUT"
+          echo "node_domain=$node_domain" >> "$GITHUB_OUTPUT"
+          echo "static_domain=$static_domain" >> "$GITHUB_OUTPUT"
+          echo 'P07_E2E_SOURCE_SEED=PASS'
+
+      - name: P07 bootstrap clean TARGET
+        working-directory: source
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate bootstrap-target \
+            --target-ip "$TARGET_IP" \
+            --identity-file /tmp/p07-real-e2e/id_ed25519 \
+            --managed-identity-file \
+            --confirm "BOOTSTRAP_CLOUDPANEL:$TARGET_IP" \
+            >/tmp/p07-bootstrap.json 2>/tmp/p07-bootstrap.err
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-bootstrap.json'))
+          assert d['status']=='READY'
+          assert d['db_engine']=='MYSQL_8.4'
+          PY
+          echo 'P07_E2E_TARGET_BOOTSTRAP=PASS'
+
+      - name: P07 plan full server
+        working-directory: source
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate plan \
+            --target-ip "$TARGET_IP" \
+            --identity-file /tmp/p07-real-e2e/id_ed25519 \
+            --managed-identity-file \
+            >/tmp/p07-plan.json 2>/tmp/p07-plan.err
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-plan.json'))
+          assert d['site_count'] >= 3
+          listeners=d.get('source_external_listeners',[])
+          assert any(int(x.get('port',0))==31535 for x in listeners), listeners
+          assert d['site_set_preflight']['status']=='READY'
+          PY
+          echo 'P07_E2E_PLAN=PASS'
+
+      - name: P07 prepare full server
+        id: prepare
+        working-directory: source
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate prepare \
+            --target-ip "$TARGET_IP" \
+            --identity-file /tmp/p07-real-e2e/id_ed25519 \
+            --managed-identity-file \
+            --confirm PREPARE_SERVER_MIGRATION \
+            >/tmp/p07-prepare.json 2>/tmp/p07-prepare.err
+          mid="$(python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-prepare.json'))
+          assert d['status']=='PREPARED', d
+          print(d['migration_id'])
+          PY
+          )"
+          echo "migration_id=$mid" >> "$GITHUB_OUTPUT"
+          echo "P07_E2E_PREPARE=PASS"
+
+      - name: P07 cutover
+        working-directory: source
+        shell: bash
+        env:
+          MID: ${{ steps.prepare.outputs.migration_id }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate cutover \
+            --migration-id "$MID" \
+            --confirm "CUTOVER_SERVER:$MID" \
+            >/tmp/p07-cutover.json 2>/tmp/p07-cutover.err
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-cutover.json'))
+          assert d['status']=='CUTOVER_PREP_READY', d
+          PY
+          echo 'P07_E2E_CUTOVER=PASS'
+
+      - name: P07 finalize public route TLS and Production proof
+        working-directory: source
+        shell: bash
+        env:
+          MID: ${{ steps.prepare.outputs.migration_id }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate finalize \
+            --migration-id "$MID" \
+            --confirm "DNS_UPDATED:$MID" \
+            --attempts 18 --delay 5 \
+            >/tmp/p07-finalize.json 2>/tmp/p07-finalize.err
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-finalize.json'))
+          assert d['status']=='PRODUCTION_PASS', d
+          assert d['public_route_proof']['status']=='PASS'
+          assert d['production_verification']['status']=='PASS'
+          assert d['source_decommission_safe'] is False
+          PY
+          echo 'P07_E2E_PRODUCTION=PASS'
+
+      - name: Independent target data and runtime proof
+        working-directory: source
+        shell: bash
+        env:
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+          PHP_DOMAIN: ${{ steps.seed.outputs.php_domain }}
+          NODE_DOMAIN: ${{ steps.seed.outputs.node_domain }}
+          STATIC_DOMAIN: ${{ steps.seed.outputs.static_domain }}
+        run: |
+          set -Eeuo pipefail
+          key=/tmp/p07-real-e2e/id_ed25519
+          ssh_base=(ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=yes root@"$TARGET_IP")
+
+          curl -fsS "https://$PHP_DOMAIN/" | grep -q 'P07_PHP_E2E_OK'
+          curl -fsS "https://$NODE_DOMAIN/" | grep -q 'P07_NODE_E2E_OK'
+          curl -fsS "https://$STATIC_DOMAIN/" | grep -q 'P07_STATIC_E2E_OK'
+
+          "${ssh_base[@]}" "test \"$(cat /home/p07php/.vf-e2e/hidden.txt)\" = P07_HIDDEN_VF_OK"
+          "${ssh_base[@]}" "test \"$(cat /home/p07php/.press-e2e/hidden.txt)\" = P07_HIDDEN_PRESS_OK"
+          "${ssh_base[@]}" "sqlite3 /home/p07php/.vf-e2e/state.sqlite 'pragma quick_check;' | grep -qx ok"
+          "${ssh_base[@]}" "sqlite3 /home/p07php/.vf-e2e/state.sqlite 'select value from marker;' | grep -qx P07_SQLITE_OK"
+          "${ssh_base[@]}" "test -f /etc/cron.d/p07-e2e"
+          "${ssh_base[@]}" "pm2=\$(find /home/p07node/.nvm/versions/node -path '*/bin/pm2' -type f | head -1); test -n \"\$pm2\"; runuser -u p07node -- env HOME=/home/p07node PM2_HOME=/home/p07node/.pm2 \"\$pm2\" jlist | grep -q p07-e2e-node"
+
+          "${ssh_base[@]}" "clpctl db:export --databaseName=p07e2edb --file=/tmp/p07-e2e-verify.sql.gz >/dev/null 2>&1; zgrep -q P07_DB_ROW_OK /tmp/p07-e2e-verify.sql.gz; rm -f /tmp/p07-e2e-verify.sql.gz"
+
+          ! systemctl is-active --quiet nginx
+          test ! -e /etc/cron.d/p07-e2e
+          if sudo crontab -u p07php -l >/tmp/p07-source-cron 2>/dev/null; then
+            ! grep -q '[^[:space:]#]' /tmp/p07-source-cron
+          fi
+          sudo ss -ltnH | grep -q ':31535'
+          echo 'P07_E2E_INDEPENDENT_PROOF=PASS'
+
+      - name: Close P07 recovery SSH channel
+        working-directory: source
+        shell: bash
+        env:
+          MID: ${{ steps.prepare.outputs.migration_id }}
+        run: |
+          set -Eeuo pipefail
+          sudo bash bin/vfops server-migrate cleanup-managed-key \
+            --migration-id "$MID" \
+            --confirm "CLEANUP_MANAGED_SSH_KEY:$MID" \
+            >/tmp/p07-key-cleanup.json 2>/tmp/p07-key-cleanup.err
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/p07-key-cleanup.json'))
+          assert d['managed_ssh_key_cleanup']=='PASS', d
+          assert d['recovery_protection_key_active'] is False
+          assert d['target_staging_cleanup']=='PASS'
+          PY
+          test ! -e /tmp/p07-real-e2e/id_ed25519
+          echo 'P07_E2E_MANAGED_KEY_CLEANUP=PASS'
+
+      - name: Build public-safe real E2E receipt
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: e41873437bbe23f4d5b0cad45af8b72aabf777e3
+          TARGET_IP: ${{ steps.rendezvous.outputs.target_ip }}
+          MID: ${{ steps.prepare.outputs.migration_id }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          payload={
+            "schema":"p07-real-cloud-e2e/v1",
+            "source_repository":"llhzx2018/vf-server-ops",
+            "source_sha":os.environ.get("SOURCE_SHA",""),
+            "source_runtime":"github-hosted-ubuntu-24.04-cloudpanel-mariadb-10.11",
+            "target_provider":"digitalocean",
+            "target_ip":os.environ.get("TARGET_IP",""),
+            "target_runtime":"cloudpanel-mysql-8.4",
+            "migration_id":os.environ.get("MID",""),
+            "existing_user_droplets_touched":False,
+            "user_computer_touched":False,
+          }
+          raw=json.dumps(payload,sort_keys=True).encode()
+          payload["receipt_sha256"]=hashlib.sha256(raw).hexdigest()
+          with open('/tmp/P07_REAL_CLOUD_E2E_PUBLIC_RECEIPT.json','w',encoding='utf-8') as f:
+            json.dump(payload,f,ensure_ascii=False,indent=2,sort_keys=True)
+            f.write('\n')
+          print("P07_REAL_E2E_RECEIPT_SHA256="+payload["receipt_sha256"])
+          PY
+
+      - name: Upload public-safe receipt only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p07-real-cloud-e2e-public-receipt-${{ github.run_id }}
+          path: /tmp/P07_REAL_CLOUD_E2E_PUBLIC_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 14
