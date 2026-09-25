@@ -3,9 +3,9 @@ set -Eeuo pipefail
 
 ROOT="$PWD"
 PRODUCT="$ROOT/product"
-TARGET="2.5.121"
+TARGET="2.5.122"
 SCHEMA="2401"
-SOURCES=(2.5.81 2.5.82 2.5.102 2.5.103 2.5.104 2.5.105 2.5.111 2.5.112 2.5.113 2.5.114 2.5.115 2.5.116 2.5.117 2.5.118 2.5.119 2.5.120)
+SOURCES=(2.5.81 2.5.82 2.5.102 2.5.103 2.5.104 2.5.105 2.5.111 2.5.112 2.5.113 2.5.114 2.5.115 2.5.116 2.5.117 2.5.118 2.5.119 2.5.120 2.5.121)
 PKG="$PRODUCT/build/release-preflight/VF_Library_V${TARGET}_UPDATE.zip"
 
 test -f "$PKG"
@@ -22,13 +22,13 @@ trap cleanup EXIT
 run_one(){
   local FROM="$1"
   local INDEX="$2"
-  local SRC="$RUNNER_TEMP/p02-v25121-src-${FROM}"
-  local SITE="$RUNNER_TEMP/p02-v25121-site-${FROM}"
-  local COOKIE="$RUNNER_TEMP/p02-v25121-cookie-${FROM}.txt"
+  local SRC="$RUNNER_TEMP/p02-v25122-src-${FROM}"
+  local SITE="$RUNNER_TEMP/p02-v25122-site-${FROM}"
+  local COOKIE="$RUNNER_TEMP/p02-v25122-cookie-${FROM}.txt"
   local PORT="$((18400 + INDEX))"
   local BASE="http://127.0.0.1:${PORT}"
-  local PASS="P02-V25121-UP-${FROM}-${GITHUB_RUN_ID}!"
-  local LOG="$RUNNER_TEMP/p02-v25121-${FROM}.log"
+  local PASS="P02-V25122-UP-${FROM}-${GITHUB_RUN_ID}!"
+  local LOG="$RUNNER_TEMP/p02-v25122-${FROM}.log"
 
   echo "=== DIRECT UPGRADE ${FROM} -> ${TARGET} ==="
   rm -rf "$SRC" "$SITE" "$COOKIE"
@@ -66,12 +66,12 @@ PY
   jq -e --arg v "$FROM" '.ok==true and .site.auth==true and .version==$v' <<<"$SESSION" >/dev/null
 
   local CAT CID
-  CAT="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF"     -d '{"name":"V25121 Direct Upgrade","description":"release matrix fixture","icon":"folder"}'     "$BASE/api.php?action=category_save")"
+  CAT="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF"     -d '{"name":"V25122 Direct Upgrade","description":"release matrix fixture","icon":"folder"}'     "$BASE/api.php?action=category_save")"
   CID="$(jq -r .id <<<"$CAT")"
   test "$CID" -gt 0
 
   local ITEM SAVED IID
-  ITEM="$(jq -nc --argjson cid "$CID" --arg f "$FROM" '{category_id:$cid,title:("V25121 Upgrade "+$f),description:"preserve",content:("P02_V25121_MARKER_"+($f|gsub("\\.";"_"))+"\n中文资料\n"+("DATA\n"*80)),content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')"
+  ITEM="$(jq -nc --argjson cid "$CID" --arg f "$FROM" '{category_id:$cid,title:("V25122 Upgrade "+$f),description:"preserve",content:("P02_V25122_MARKER_"+($f|gsub("\\.";"_"))+"\n中文资料\n"+("DATA\n"*80)),content_mode:"article",content_format:"markdown",primary_action:"read",status:"active"}')"
   SAVED="$(curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF"     -d "$ITEM" "$BASE/api.php?action=content_save")"
   IID="$(jq -r .id <<<"$SAVED")"
   test "$IID" -gt 0
@@ -84,13 +84,13 @@ PY
   test "$SID" -gt 0
   curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF"     -d "$(jq -nc --argjson id "$SID" --arg c "升级前临时页签 ${FROM}" '{id:$id,content:$c,cursor_pos:10,scroll_top:7}')"     "$BASE/scratch-action.php?action=save" | jq -e '.tab.content|contains("升级前临时页签")' >/dev/null
 
-  python3 - "$RUNNER_TEMP/p02-v25121-${FROM}.png" <<'PY'
+  python3 - "$RUNNER_TEMP/p02-v25122-${FROM}.png" <<'PY'
 import base64,sys
 open(sys.argv[1],'wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZfGQAAAAASUVORK5CYII='))
 PY
-  curl -fsS -b "$COOKIE" -H "X-CSRF-Token: $CSRF"     -F "item_id=$IID" -F "attachment=@$RUNNER_TEMP/p02-v25121-${FROM}.png;type=image/png"     "$BASE/api.php?action=attachment_upload" | jq -e '.ok==true and (.attachments|length)>=1' >/dev/null
+  curl -fsS -b "$COOKIE" -H "X-CSRF-Token: $CSRF"     -F "item_id=$IID" -F "attachment=@$RUNNER_TEMP/p02-v25122-${FROM}.png;type=image/png"     "$BASE/api.php?action=attachment_upload" | jq -e '.ok==true and (.attachments|length)>=1' >/dev/null
 
-  cat > "$RUNNER_TEMP/p02-v25121-up-${FROM}.php" <<'PHP'
+  cat > "$RUNNER_TEMP/p02-v25122-up-${FROM}.php" <<'PHP'
 <?php
 $site=$argv[1];
 $pkg=$argv[2];
@@ -122,7 +122,7 @@ $m=[
  'asset_sha256'=>$sha,
  'backup_required'=>true,
  'rollback_supported'=>true,
- 'released_at'=>'2026-09-25T00:00:00Z'
+ 'released_at'=>'2026-09-26T00:00:00Z'
 ];
 $c=new CoreUpdates\UpdateCore('P02','APP');
 $check=$c->check($from,'2401',$m);
@@ -134,16 +134,16 @@ file_put_contents($out,json_encode($r));
 if(!in_array($r['status']??'',['COMMITTED','COMMITTED_WITH_CLEANUP_WARNING'],true)||empty($r['backup_locator']))exit(4);
 PHP
 
-  php "$RUNNER_TEMP/p02-v25121-up-${FROM}.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$FROM" "$TARGET" "$SOURCE_JSON" "$RUNNER_TEMP/p02-v25121-result-${FROM}.json"
+  php "$RUNNER_TEMP/p02-v25122-up-${FROM}.php" "$SITE" "$PKG" "$BYTES" "$SHA" "$FROM" "$TARGET" "$SOURCE_JSON" "$RUNNER_TEMP/p02-v25122-result-${FROM}.json"
   test "$(cat "$SITE/VERSION.txt")" = "$TARGET"
-  jq -e '.backup_locator|length>0' "$RUNNER_TEMP/p02-v25121-result-${FROM}.json" >/dev/null
+  jq -e '.backup_locator|length>0' "$RUNNER_TEMP/p02-v25122-result-${FROM}.json" >/dev/null
 
   local AFTER CSRF2
   AFTER="$(curl -fsS -b "$COOKIE" "$BASE/api.php?action=session")"
   CSRF2="$(jq -r .csrf <<<"$AFTER")"
   jq -e --arg v "$TARGET" '.ok==true and .site.auth==true and .version==$v' <<<"$AFTER" >/dev/null
 
-  curl -fsS -b "$COOKIE" "$BASE/api.php?action=content_get&id=$IID" |     jq -e --arg f "$FROM" '(.item.is_favorite|tonumber)==1 and (.item.content|contains("P02_V25121_MARKER_"+($f|gsub("\\.";"_"))))' >/dev/null
+  curl -fsS -b "$COOKIE" "$BASE/api.php?action=content_get&id=$IID" |     jq -e --arg f "$FROM" '(.item.is_favorite|tonumber)==1 and (.item.content|contains("P02_V25122_MARKER_"+($f|gsub("\\.";"_"))))' >/dev/null
 
   curl -fsS -b "$COOKIE" "$BASE/scratch-action.php?action=list" |     jq -e --argjson id "$SID" '.data.open[]|select(.id==$id)|.content|contains("升级前临时页签")' >/dev/null
 
@@ -155,7 +155,7 @@ PHP
   test "$POSTID" -gt 0
   curl -fsS -b "$COOKIE" -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF2"     -d "$(jq -nc --argjson id "$POSTID" --arg c "升级后临时页签 ${FROM}" '{id:$id,content:$c,cursor_pos:10,scroll_top:0}')"     "$BASE/scratch-action.php?action=save" | jq -e '.tab.content|contains("升级后临时页签")' >/dev/null
 
-  (cd "$SITE" && php cli/verify.php) | jq -e '.ok==true and .version=="2.5.121" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
+  (cd "$SITE" && php cli/verify.php) | jq -e '.ok==true and .version=="2.5.122" and .schema_version==2401 and .integrity=="ok" and .foreign_key_errors==0' >/dev/null
   local DB_FILE
   DB_FILE="$(cd "$SITE" && php -r '$r=include "app/.runtime.php"; echo $r["db_file"];')"
   test "$(sqlite3 "$DB_FILE" 'PRAGMA integrity_check;')" = "ok"
@@ -167,7 +167,7 @@ PHP
   git -C "$PRODUCT" worktree remove --force "$SRC" >/dev/null
   rm -rf "$SITE"
 
-  echo "P02_V25121_DIRECT_UPGRADE_${FROM}=PASS"
+  echo "P02_V25122_DIRECT_UPGRADE_${FROM}=PASS"
 }
 
 index=1
@@ -176,4 +176,4 @@ for from in "${SOURCES[@]}"; do
   index=$((index+1))
 done
 
-echo P02_V25121_SOURCE_SET_MATRIX=PASS
+echo P02_V25122_SOURCE_SET_MATRIX=PASS
