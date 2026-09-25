@@ -1,0 +1,291 @@
+name: S01 Header IA Browser Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-header-ia-browser-gate-20260925.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      THEME_SHA: f8b0cbc60570f01839aba238dedc0a02a3355402
+      M3U8_SHA: 4b2f306fcc987e8ba133859bfc4b0a1448243167
+      HTTP_PORT: "8099"
+    steps:
+      - name: Credential presence
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+
+      - name: Checkout exact Theme
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+
+      - name: Checkout exact M3U8
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+
+      - name: Verify exact sources
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(tr -d '\r\n' < theme/VERSION)" = "1.35.40"
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = "1.25.43"
+          php theme/tests/s01-c01-admin-shell-alignment-r1-contract.php
+          php m3u8/tests/s01-c03-admin-shell-alignment-r1-contract.php
+
+      - name: Boot isolated WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker network create vf-s01 >/dev/null
+          docker volume create vf-s01-wp >/dev/null
+          docker run -d --name vf-db --network vf-s01 \
+            -e MARIADB_DATABASE=wordpress \
+            -e MARIADB_USER=wordpress \
+            -e MARIADB_PASSWORD=wordpress \
+            -e MARIADB_ROOT_PASSWORD=root \
+            mariadb:11.4 >/dev/null
+          for i in $(seq 1 60); do
+            if docker exec vf-db mariadb-admin ping -uroot -proot --silent >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker run -d --name vf-wp --network vf-s01 -p "${HTTP_PORT}:80" \
+            -e WORDPRESS_DB_HOST=vf-db:3306 \
+            -e WORDPRESS_DB_USER=wordpress \
+            -e WORDPRESS_DB_PASSWORD=wordpress \
+            -e WORDPRESS_DB_NAME=wordpress \
+            -v vf-s01-wp:/var/www/html \
+            wordpress:6.9.1-php8.3-apache >/dev/null
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:${HTTP_PORT}/" >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+      - name: Install exact component sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker exec vf-wp mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/plugins/vf-tool-m3u8
+          docker cp theme/src/. vf-wp:/var/www/html/wp-content/themes/vf-tools-theme/
+          docker cp m3u8/src/. vf-wp:/var/www/html/wp-content/plugins/vf-tool-m3u8/
+          docker exec vf-wp chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/plugins/vf-tool-m3u8
+
+          docker run --rm --network vf-s01 -v vf-s01-wp:/var/www/html -u 33:33 wordpress:cli-php8.3 \
+            core install --path=/var/www/html --url="http://127.0.0.1:${HTTP_PORT}" --title="VF S01 Gate" --admin_user=admin --admin_password=runner-pass --admin_email=runner@example.invalid --skip-email
+          docker run --rm --network vf-s01 -v vf-s01-wp:/var/www/html -u 33:33 wordpress:cli-php8.3 \
+            theme activate vf-tools-theme --path=/var/www/html
+          docker run --rm --network vf-s01 -v vf-s01-wp:/var/www/html -u 33:33 wordpress:cli-php8.3 \
+            plugin activate vf-tool-m3u8 --path=/var/www/html
+
+      - name: Install ephemeral browser probe
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/vf-s01-browser-probe.php <<'PHP'
+          <?php
+          add_action('init', function(){
+              if (!isset($_GET['vf_s01_gate_login']) || $_GET['vf_s01_gate_login'] !== 'header-ia') { return; }
+              wp_set_current_user(1);
+              wp_set_auth_cookie(1, true);
+              wp_safe_redirect(admin_url());
+              exit;
+          });
+          add_action('admin_footer', function(){
+              ?>
+              <script>
+              (() => {
+                const h=document.documentElement;
+                const shell=document.querySelector('.vf-v6-shell-header');
+                const mark=document.querySelector('.vf-v6-brand-mark');
+                const nav=document.querySelector('.vf-v6-domain-nav');
+                const mobile=document.querySelector('.vf-v6-domain-mobile');
+                const active=document.querySelector('.vf-v6-domain-nav>a[aria-current="page"],.vf-v6-domain-menu>summary[aria-current="page"],.vf-v6-domain-menu.is-current>summary');
+                const after=active?getComputedStyle(active,'::after'):null;
+                const labels=[...document.querySelectorAll('.vf-v6-domain-nav>:scope > a, .vf-v6-domain-nav>:scope > details > summary')].map(x=>(x.textContent||'').replace(/\s+/g,' ').trim());
+                h.dataset.vfGateShellHeight=shell?String(Math.round(shell.getBoundingClientRect().height)):'0';
+                h.dataset.vfGateShellRadius=shell?getComputedStyle(shell).borderRadius:'';
+                h.dataset.vfGateMarkWidth=mark?String(Math.round(mark.getBoundingClientRect().width)):'0';
+                h.dataset.vfGateMarkHeight=mark?String(Math.round(mark.getBoundingClientRect().height)):'0';
+                h.dataset.vfGateNavDisplay=nav?getComputedStyle(nav).display:'';
+                h.dataset.vfGateMobileDisplay=mobile?getComputedStyle(mobile).display:'';
+                h.dataset.vfGateMobileSummaryHeight=mobile?String(Math.round((mobile.querySelector(':scope>summary')||mobile).getBoundingClientRect().height)):'0';
+                h.dataset.vfGateLabels=labels.join('|');
+                h.dataset.vfGateOverflow=String(Math.max(0,document.documentElement.scrollWidth-document.documentElement.clientWidth));
+                h.dataset.vfGateActiveAfterHeight=after?after.height:'';
+                h.dataset.vfGateActiveAfterBg=after?after.backgroundColor:'';
+                h.dataset.vfGateThemeMaintenance=String(document.querySelectorAll('.vf-theme-maintenance-menu').length);
+                h.dataset.vfGateM3Chevron=String(document.querySelectorAll('.vf-v6-domain-menu-chevron').length);
+                h.dataset.vfGateRuntimeMerged=String(document.querySelectorAll('[data-vf-m3u8-merged-surface="runtime-environment"]').length);
+                h.dataset.vfGateDiagMerged=String(document.querySelectorAll('[data-vf-m3u8-merged-surface="diagnostics-performance"]').length);
+              })();
+              </script>
+              <?php
+          }, 9999);
+          PHP
+          docker exec vf-wp mkdir -p /var/www/html/wp-content/mu-plugins
+          docker cp /tmp/vf-s01-browser-probe.php vf-wp:/var/www/html/wp-content/mu-plugins/vf-s01-browser-probe.php
+          docker exec vf-wp chown www-data:www-data /var/www/html/wp-content/mu-plugins/vf-s01-browser-probe.php
+
+      - name: Authenticated Chrome shell and IA matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          test -n "$CHROME"
+          mkdir -p evidence/dom evidence/screenshots
+          PROFILE="$RUNNER_TEMP/vf-s01-profile"
+          mkdir -p "$PROFILE"
+
+          "$CHROME" --headless=new --no-sandbox --disable-gpu --user-data-dir="$PROFILE" --virtual-time-budget=2500 --dump-dom \
+            "http://127.0.0.1:${HTTP_PORT}/?vf_s01_gate_login=header-ia" > evidence/dom/login.html 2>evidence/chrome.log
+
+          cat > /tmp/check_dom.py <<'PY'
+          import html,re,sys,json
+          p=sys.argv[1]; kind=sys.argv[2]; width=int(sys.argv[3]); route=sys.argv[4]
+          s=open(p,encoding='utf-8').read()
+          def d(name,default=''):
+              m=re.search(r'data-'+re.escape(name)+r'="([^"]*)"',s)
+              return html.unescape(m.group(1)) if m else default
+          rec={
+            'kind':kind,'width':width,'route':route,
+            'shell_height':int(d('vf-gate-shell-height','0') or 0),
+            'radius':d('vf-gate-shell-radius'),
+            'mark_w':int(d('vf-gate-mark-width','0') or 0),
+            'mark_h':int(d('vf-gate-mark-height','0') or 0),
+            'nav_display':d('vf-gate-nav-display'),
+            'mobile_display':d('vf-gate-mobile-display'),
+            'mobile_h':int(d('vf-gate-mobile-summary-height','0') or 0),
+            'labels':d('vf-gate-labels').split('|') if d('vf-gate-labels') else [],
+            'overflow':int(d('vf-gate-overflow','999') or 999),
+            'active_h':d('vf-gate-active-after-height'),
+            'active_bg':d('vf-gate-active-after-bg'),
+            'theme_maintenance':int(d('vf-gate-theme-maintenance','0') or 0),
+            'm3_chevron':int(d('vf-gate-m3-chevron','0') or 0),
+            'runtime_merged':int(d('vf-gate-runtime-merged','0') or 0),
+            'diag_merged':int(d('vf-gate-diag-merged','0') or 0),
+          }
+          ok=rec['overflow']<=2
+          if width==1440:
+              ok=ok and rec['shell_height']==66 and rec['radius']=='12px' and rec['mark_w']==36 and rec['mark_h']==36 and rec['nav_display']!='none'
+              ok=ok and rec['active_h']=='2px' and rec['active_bg']=='rgb(11, 129, 153)'
+          if width<=960:
+              ok=ok and rec['nav_display']=='none' and rec['mobile_display']!='none' and rec['mobile_h']==44
+          if width<=782:
+              ok=ok and rec['shell_height']==60 and rec['mark_w']==34 and rec['mark_h']==34
+          if kind=='theme' and width==1440:
+              ok=ok and rec['labels']==['概览','品牌与样式','页面布局','导航与页脚','工具页渲染','技术 SEO','验证与维护 ⌄']
+              ok=ok and rec['theme_maintenance']==1
+          if kind=='m3u8' and width==1440:
+              ok=ok and rec['labels']==['概览','兼容与健康','专业模式 ⌄']
+              ok=ok and rec['m3_chevron']==1
+          if route=='runtime':
+              ok=ok and rec['runtime_merged']==1
+          if route=='diagnostics':
+              ok=ok and rec['diag_merged']==1
+          rec['status']='PASS' if ok else 'FAIL'
+          print(json.dumps(rec,ensure_ascii=False))
+          raise SystemExit(0 if ok else 1)
+          PY
+
+          theme_routes=(
+            "overview|/wp-admin/themes.php?page=vf-theme-modules&tab=overview"
+            "brand|/wp-admin/themes.php?page=vf-theme-modules&tab=brand"
+            "layout|/wp-admin/themes.php?page=vf-theme-modules&tab=layout"
+            "navigation|/wp-admin/themes.php?page=vf-theme-modules&tab=navigation"
+            "render|/wp-admin/themes.php?page=vf-theme-modules&tab=render"
+            "seo|/wp-admin/themes.php?page=vf-theme-modules&tab=seo"
+            "preview|/wp-admin/themes.php?page=vf-theme-modules&tab=preview"
+            "recovery|/wp-admin/themes.php?page=vf-theme-modules&tab=recovery"
+          )
+          m3_routes=(
+            "overview|/wp-admin/admin.php?page=vf-tool-m3u8"
+            "compatibility|/wp-admin/admin.php?page=vf-tool-m3u8-compatibility"
+            "capabilities|/wp-admin/admin.php?page=vf-tool-m3u8-capabilities"
+            "pipelines|/wp-admin/admin.php?page=vf-tool-m3u8-pipelines"
+            "runtime|/wp-admin/admin.php?page=vf-tool-m3u8-runtime-v6"
+            "playground|/wp-admin/admin.php?page=vf-tool-m3u8-playground"
+            "fixtures|/wp-admin/admin.php?page=vf-tool-m3u8-fixtures"
+            "diagnostics|/wp-admin/admin.php?page=vf-tool-m3u8-diagnostics-v6"
+            "backup|/wp-admin/admin.php?page=vf-tool-m3u8-provider-backup"
+          )
+
+          : > evidence/matrix.jsonl
+          for width in 390 768 1440; do
+            for spec in "${theme_routes[@]}"; do
+              name="${spec%%|*}"; path="${spec#*|}"
+              dom="evidence/dom/theme-${name}-${width}.html"
+              "$CHROME" --headless=new --no-sandbox --disable-gpu --user-data-dir="$PROFILE" --window-size="${width},900" --virtual-time-budget=3000 --dump-dom "http://127.0.0.1:${HTTP_PORT}${path}" >"$dom" 2>>evidence/chrome.log
+              python3 /tmp/check_dom.py "$dom" theme "$width" "$name" | tee -a evidence/matrix.jsonl
+              if [[ "$name" == overview ]]; then
+                "$CHROME" --headless=new --no-sandbox --disable-gpu --user-data-dir="$PROFILE" --window-size="${width},900" --virtual-time-budget=3000 --screenshot="evidence/screenshots/theme-${width}.png" "http://127.0.0.1:${HTTP_PORT}${path}" >/dev/null 2>>evidence/chrome.log
+              fi
+            done
+            for spec in "${m3_routes[@]}"; do
+              name="${spec%%|*}"; path="${spec#*|}"
+              dom="evidence/dom/m3u8-${name}-${width}.html"
+              "$CHROME" --headless=new --no-sandbox --disable-gpu --user-data-dir="$PROFILE" --window-size="${width},900" --virtual-time-budget=3000 --dump-dom "http://127.0.0.1:${HTTP_PORT}${path}" >"$dom" 2>>evidence/chrome.log
+              python3 /tmp/check_dom.py "$dom" m3u8 "$width" "$name" | tee -a evidence/matrix.jsonl
+              if [[ "$name" == overview ]]; then
+                "$CHROME" --headless=new --no-sandbox --disable-gpu --user-data-dir="$PROFILE" --window-size="${width},900" --virtual-time-budget=3000 --screenshot="evidence/screenshots/m3u8-${width}.png" "http://127.0.0.1:${HTTP_PORT}${path}" >/dev/null 2>>evidence/chrome.log
+              fi
+            done
+          done
+          test "$(grep -c '"status": "PASS"' evidence/matrix.jsonl)" = "51"
+          ! grep -q '"status": "FAIL"' evidence/matrix.jsonl
+
+      - name: Security and update preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -RInE '(runner-pass|VF_PRIVATE_READ_TOKEN|VF_RELEASE_WRITE_TOKEN)' evidence theme/src m3u8/src >/dev/null 2>&1
+          test "$(docker run --rm --network vf-s01 -v vf-s01-wp:/var/www/html -u 33:33 wordpress:cli-php8.3 theme status vf-tools-theme --path=/var/www/html --field=status)" = "active"
+          test "$(docker run --rm --network vf-s01 -v vf-s01-wp:/var/www/html -u 33:33 wordpress:cli-php8.3 plugin status vf-tool-m3u8 --path=/var/www/html --field=status)" = "active"
+
+      - name: Evidence summary
+        run: |
+          python3 - <<'PY'
+          import json
+          rows=[json.loads(x) for x in open('evidence/matrix.jsonl',encoding='utf-8') if x.strip()]
+          out={
+            'status':'PASS' if len(rows)==51 and all(x['status']=='PASS' for x in rows) else 'FAIL',
+            'theme_source':'f8b0cbc60570f01839aba238dedc0a02a3355402',
+            'm3u8_source':'4b2f306fcc987e8ba133859bfc4b0a1448243167',
+            'checks':len(rows),
+            'viewports':[390,768,1440],
+            'theme_pages':8,
+            'm3u8_pages':9,
+            'page_content_visual_refinement':'OUT_OF_SCOPE',
+            'owner_product_acceptance':'PENDING_PRODUCTION_REAL_USE'
+          }
+          json.dump(out,open('evidence/result.json','w'),ensure_ascii=False,indent=2)
+          print(json.dumps(out,ensure_ascii=False))
+          raise SystemExit(0 if out['status']=='PASS' else 1)
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-header-ia-browser-evidence
+          path: evidence
+          retention-days: 14
