@@ -1,11 +1,136 @@
-name: S01 R15 Public Fallback Probe
+name: S01 R15 Public Runner Exact Release Gate
 on:
   push:
     branches: [task/s01-r15-safe-carrier-20260925]
 permissions:
   contents: read
+
 jobs:
-  probe:
+  exact-gate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - run: echo PUBLIC_FALLBACK_PROBE=PASS
+      - name: Checkout Theme exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: f8b0cbc60570f01839aba238dedc0a02a3355402
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+
+      - name: Checkout M3U8 exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: d505c19ad21c35f94b138f88fdab9f2fa0c3f9e1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+
+      - name: Verify exact sources and contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = "f8b0cbc60570f01839aba238dedc0a02a3355402"
+          test "$(git -C m3u8 rev-parse HEAD)" = "d505c19ad21c35f94b138f88fdab9f2fa0c3f9e1"
+          test "$(tr -d '\r\n' < theme/VERSION)" = "1.35.40"
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = "1.25.43"
+          grep -Fq 'Version: 1.35.40' theme/src/style.css
+          grep -Fq 'V1.35.40_S01_THEME_HEADER_IA_R13' theme/src/style.css
+          grep -Fq 'Version: 1.25.43' m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.43'" m3u8/src/vf-tool-m3u8.php
+          php theme/tests/s01-c01-admin-shell-alignment-r1-contract.php
+          php theme/tests/final-admin-human-closure-contract.php
+          php theme/tests/recovery-workflow-v4-contract.php
+          php m3u8/tests/s01-c03-admin-shell-alignment-r1-contract.php
+          php m3u8/tests/unit/admin-human-language-contract.php
+          php m3u8/tests/unit/update-schema-authority-contract.php
+          php m3u8/tests/unit/package-physical-locator-contract.php
+          echo EXACT_SOURCE_CONTRACTS=PASS
+
+      - name: Build deterministic exact assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          python3 - <<'PY'
+          import hashlib, pathlib, re, zipfile, json
+
+          def build(kind, src_path, out_path, root_name):
+              src=pathlib.Path(src_path); out=pathlib.Path(out_path)
+              files=sorted((p for p in src.rglob('*') if p.is_file()), key=lambda p:p.relative_to(src).as_posix())
+              def make(path):
+                  with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                      if kind=='m3u8':
+                          d=zipfile.ZipInfo(root_name+'/',date_time=(1980,1,1,0,0,0))
+                          d.external_attr=(0o40755<<16)|0x10
+                          z.writestr(d,b'')
+                      for p in files:
+                          rel=p.relative_to(src).as_posix()
+                          zi=zipfile.ZipInfo(root_name+'/'+rel,date_time=(1980,1,1,0,0,0))
+                          zi.compress_type=zipfile.ZIP_DEFLATED
+                          zi.create_system=3
+                          zi.external_attr=0o100644<<16
+                          z.writestr(zi,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+              a=out.with_suffix('.a.zip'); b=out.with_suffix('.b.zip')
+              make(a); make(b)
+              sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+              assert sha(a)==sha(b)
+              out.write_bytes(a.read_bytes())
+
+              def runtime(rel):
+                  if re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I): return False
+                  base=pathlib.PurePosixPath(rel).name.lower()
+                  excluded={'readme.md','changelog.md','license','license.txt'}
+                  if kind=='m3u8': excluded.add('package_profile.json')
+                  if base in excluded: return False
+                  if re.search(r'\.(?:sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',rel,re.I): return False
+                  if '/' not in rel:
+                      if kind=='theme': return rel=='style.css' or rel.lower().endswith('.php')
+                      return rel in {'vf-tool-m3u8.php','uninstall.php','plugin-manifest.json','tool-settings.schema.json'}
+                  prefixes={'inc','assets','config','languages','template-parts','templates'} if kind=='theme' else {'admin','config','includes','public','templates','tools'}
+                  return rel.split('/',1)[0] in prefixes
+
+              rows=[]
+              for p in files:
+                  rel=p.relative_to(src).as_posix()
+                  if runtime(rel): rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+              canon=''.join(rel+'\0'+h+'\n' for rel,h in rows).encode()
+              return {
+                  'asset_bytes':out.stat().st_size,
+                  'asset_sha256':sha(out),
+                  'runtime_files':len(rows),
+                  'runtime_fingerprint':hashlib.sha256(canon).hexdigest()
+              }
+
+          theme=build('theme','theme/src','dist/vf-tools-theme_V1.35.40.zip','vf-tools-theme')
+          m3=build('m3u8','m3u8/src','dist/vf-tools-m3u8_V1.25.43.zip','vf-tool-m3u8')
+          assert theme=={
+              'asset_bytes':1836082,
+              'asset_sha256':'08b5d774b4bb5061a0ab41c75e3bfd924a981189a92fae402cac550709f755d8',
+              'runtime_files':460,
+              'runtime_fingerprint':'54880780466db81af526146e93d9f6a45750594840341cc2809bd4059a4b35cd'
+          }, theme
+          assert m3=={
+              'asset_bytes':3564691,
+              'asset_sha256':'157f604d558c87c8b90477c4474ace652d1dfa4eaf65c40ce7e9d636ae90cd54',
+              'runtime_files':564,
+              'runtime_fingerprint':'7a627841259e61d308df46921596395d6ca314b614e81b9da6c24901e98f5300'
+          }, m3
+          pathlib.Path('dist/release-identities.json').write_text(json.dumps({'theme':theme,'m3u8':m3},indent=2))
+          print(json.dumps({'theme':theme,'m3u8':m3}))
+          PY
+          unzip -tq dist/vf-tools-theme_V1.35.40.zip
+          unzip -tq dist/vf-tools-m3u8_V1.25.43.zip
+          echo DETERMINISTIC_EXACT_ASSETS=PASS
+
+      - name: Upload exact release gate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-r15-exact-release-gate-${{ github.run_id }}
+          path: |
+            dist/release-identities.json
+            dist/vf-tools-theme_V1.35.40.zip
+            dist/vf-tools-m3u8_V1.25.43.zip
+          retention-days: 14
