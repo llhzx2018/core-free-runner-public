@@ -1,0 +1,70 @@
+name: P02 V2.5.117 Settings Final Verify R2
+
+on:
+  push:
+    branches:
+      - run/p02-v25117-settings-final-20260925
+    paths:
+      - '.github/workflows/p02-v25117-settings-final-r2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact P02 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: 93bf45d3de91e21d76f53b381d0b2e93a70917d2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+
+      - name: Install runtime and Chromium
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip curl
+          cd product
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Exact-source repository and unit verification
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "93bf45d3de91e21d76f53b381d0b2e93a70917d2"
+          test "$(cat VERSION)" = "2.5.117"
+          python3 scripts/generate-source-manifest.py
+          git diff --exit-code -- SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          python3 scripts/verify-source-manifest.py
+          bash scripts/verify-repository.sh
+          while IFS= read -r cmd; do test -n "$cmd"; eval "$cmd"; done < <(awk '/run: node tests\/unit\//{sub(/^.*run: /,""); print}' .github/workflows/repository-health.yml)
+          echo P02_V25117_SOURCE_AND_UNIT=PASS
+
+      - name: Real Chromium Settings final closure
+        working-directory: product
+        env:
+          TEST_PASSWORD: "VF-P02-V25117-R2-${{ github.run_id }}!"
+        run: |
+          set -Eeuo pipefail
+          SITE="${RUNNER_TEMP}/p02-v25117-site"
+          COOKIE="${RUNNER_TEMP}/p02-v25117-cookie.txt"
+          BASE="http://127.0.0.1:18141"
+          bash scripts/build-deploy-tree.sh "$SITE"
+          php -d display_errors=0 -S 127.0.0.1:18141 -t "$SITE" >"${RUNNER_TEMP}/p02-v25117-server.log" 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 80); do curl -fsS "$BASE/setup.php" >/dev/null 2>&1 && break; sleep .25; done
+          curl -fsS -c "$COOKIE" "$BASE/setup.php" > "${RUNNER_TEMP}/p02-v25117-setup.html"
+          SETUP_CSRF="$(python3 -c 'import re,html,sys;s=open(sys.argv[1],encoding="utf-8").read();m=re.search(r"name=\"setup_csrf\" value=\"([^\"]+)\"",s);assert m;print(html.unescape(m.group(1)))' "${RUNNER_TEMP}/p02-v25117-setup.html")"
+          STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$SETUP_CSRF" --data-urlencode "password=$TEST_PASSWORD" --data-urlencode "password_confirm=$TEST_PASSWORD" "$BASE/setup.php")"
+          test "$STATUS" = "303"
+          VF_UX_E2E_BASE_URL="$BASE" VF_UX_E2E_PASSWORD="$TEST_PASSWORD" node tests/e2e/p02_v25116_inkstone_settings_surface.mjs
+          VF_UX_E2E_BASE_URL="$BASE" VF_UX_E2E_PASSWORD="$TEST_PASSWORD" node tests/e2e/p02_v25117_settings_final_closure.mjs
+          echo P02_V25117_SETTINGS_FINAL_BROWSER=PASS
