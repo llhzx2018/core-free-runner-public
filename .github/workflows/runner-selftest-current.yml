@@ -19,11 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: public-runner-current-selftest
+  group: public-runner-current-selftest-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   selftest:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'p01-v24773-owner-preview-public-20260925'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -89,3 +90,143 @@ jobs:
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
+
+
+  p01-v24773-owner-preview:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'p01-v24773-owner-preview-public-20260925'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      TARGET_SHA: 5a90fa61b0e446444b49f8de58438d2de5e9acda
+      TARGET_TREE: 9e6fe0e775e95dfb237471a569f604062f267218
+      TARGET_VERSION: 2.47.73
+      PREVIEW_PORT: '18490'
+    steps:
+      - name: Checkout preview carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 5a90fa61b0e446444b49f8de58438d2de5e9acda
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify candidate and install runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < product/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = "$TARGET_VERSION"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd curl openssl >/dev/null
+          rm -rf /tmp/p01-v24773-owner-preview
+          cp -a product/src /tmp/p01-v24773-owner-preview
+          echo P01_V24773_PREVIEW_EXACT_SOURCE=PASS
+
+      - name: Clean install isolated preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          root=/tmp/p01-v24773-owner-preview
+          cookie=/tmp/p01-v24773-preview-cookie.txt
+          pass="$(openssl rand -hex 18)"
+          printf '%s' "$pass" >/tmp/p01-v24773-preview-password
+          (
+            cd "$root"
+            php -S 127.0.0.1:"$PREVIEW_PORT" -t . >/tmp/p01-v24773-preview-php.log 2>&1 &
+            echo $! >/tmp/p01-v24773-preview-php.pid
+          )
+          for i in $(seq 1 40); do
+            curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$PREVIEW_PORT/setup.php" -o /tmp/p01-v24773-setup.html && break
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+import re
+t=open('/tmp/p01-v24773-setup.html',encoding='utf-8').read()
+m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',t)
+assert m
+print(m.group(1))
+PY
+)"
+          curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$PREVIEW_PORT/setup.php"             --data-urlencode "setup_csrf=$csrf"             --data-urlencode "site_title=VF Start V2.47.73 Owner Preview"             --data-urlencode "admin_password=$pass"             --data-urlencode "admin_password_confirm=$pass"             -o /tmp/p01-v24773-setup-post.html
+          (cd "$root" && php cli/verify.php) | tee /tmp/p01-v24773-preview-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v24773-preview-verify.txt
+          body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+          curl -fsS -c "$cookie" -b "$cookie" -H 'Content-Type: application/json' --data "$body"             "http://127.0.0.1:$PREVIEW_PORT/api.php?action=login" >/tmp/p01-v24773-preview-login.json
+          grep -Fq '"ok":true' /tmp/p01-v24773-preview-login.json
+          curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$PREVIEW_PORT/jobs.php" -o /tmp/p01-v24773-preview-jobs.html
+          grep -Fq '计划任务' /tmp/p01-v24773-preview-jobs.html
+          unset pass body
+          echo P01_V24773_PREVIEW_RUNTIME_LOCAL=PASS
+
+      - name: Start authorized temporary Quick Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod 700 /tmp/cloudflared
+          /tmp/cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PREVIEW_PORT" --logfile /tmp/p01-v24773-cloudflared.log --loglevel info >/tmp/p01-v24773-cloudflared.stdout 2>&1 &
+          echo $! >/tmp/p01-v24773-cloudflared.pid
+          url=""
+          for i in $(seq 1 60); do
+            url="$(grep -hEo 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/p01-v24773-cloudflared.log /tmp/p01-v24773-cloudflared.stdout 2>/dev/null | tail -1 || true)"
+            [[ -n "$url" ]] && break
+            sleep 1
+          done
+          test -n "$url"
+          curl -fsS --retry 5 --retry-delay 2 "$url/" -o /tmp/p01-v24773-preview-external.html
+          printf '%s' "$url" >/tmp/p01-v24773-preview-url
+          echo P01_V24773_OWNER_PREVIEW_RUNTIME=READY
+
+      - name: Encrypt preview access capsule
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          url="$(cat /tmp/p01-v24773-preview-url)"
+          pass="$(cat /tmp/p01-v24773-preview-password)"
+          printf 'PREVIEW_URL=%s/jobs.php\nLOGIN_PASSWORD=%s\nVERSION=%s\nEXACT_SOURCE=%s\nPRODUCTION_WRITE=NO\nTAG_RELEASE_CHANNEL_WRITE=NO\n'             "$url" "$pass" "$TARGET_VERSION" "$TARGET_SHA" >/tmp/P01_V24773_PREVIEW_ACCESS.txt
+          printf '%s' 'LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQ0lqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FnOEFNSUlDQ2dLQ0FnRUF2YmdtUklNWHJwL2E4Rm1OYTE0bApoTFVXVTgrYURZcjU1SE8zeG5RZkM0aElDS09Tem5xNEM3TjNSWVZrYkd6UVhORUJva1phc0JQWVhVZG9vQkh5ClZZVFpNalpMVEYvQnlsUmxrazhPK0hvdzJpYk54OUFKRXBZU2IrT1JNcGs5bVNCTDErTE1FdHQ5ak5zNlQwQ0IKNi8vM3A1c2JwZEZBTmZZbEJ5MG0wZThVSmMrTmJlSmNLMVVqMHV4d0NWZmpKdXNjWFR0Z1BHVjdndnNYU0xHUgpUY0VxOHViQWpONXd2c25KK29BL0NwL1ZyODI0SVcwVmw5aU1WbDV1WFpIN3IxUXpPYU5yOWJCUnJpYU1LTWFYCi9Sd1NHNit2dXdsRmRndUdSVW5Mcm5xbjI3cERFU0lTeHprcEhVRHNhWjlkNkRiSTlwOVcycUpxUmtBOGJQV1EKWW5oZmJSOGkrM2hGa01nSnNxTW9DeGN4R2JPOEtmUm1QRnpqK3pQOVVhTnVvaGp1clVjQnNiNmZzUzBLSVJvbQp0dFFYRlRNWFhJQ1F4QzE2bm9ZQTRML1d1azB4cG9ZMXY0NWp4MTR2ZnNMRFZmcU5UVDVxb2xRbnE3SnR1TVVuCm1vQU5RcDd1MTY3bW9GWkxWZTlQa1ZzemNoYWFuQllDNnNWVnM2aWpNajU4c0FNVzk2TjEwTVl4dEJzb205VkgKL1QrWHRvRXU1aW0wb01KZFN5bm9KSTFMWDl3SG93OFdZZ3NicXlOcXFPR1Rrdk54MzRNWG43ZEJieldCN0o5YgpRNXY3cUhiUnEvR1M3STV6K0JYRDFVL3dKckVPSnZIaEEyUGxKT0puSGlkcEh5eXB0OGVWVHNpT1J4N1JtbitMCit4NzgrNzVWMTZ1VWFuK01DcnJKM2wwQ0F3RUFBUT09Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=' | base64 -d >/tmp/p01-preview-public.pem
+          openssl pkeyutl -encrypt -pubin -inkey /tmp/p01-preview-public.pem             -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256             -in /tmp/P01_V24773_PREVIEW_ACCESS.txt             -out /tmp/P01_V24773_PREVIEW_ACCESS.enc
+          rm -f /tmp/P01_V24773_PREVIEW_ACCESS.txt /tmp/p01-v24773-preview-password /tmp/p01-preview-public.pem
+          unset url pass
+          test -s /tmp/P01_V24773_PREVIEW_ACCESS.enc
+          echo P01_V24773_PREVIEW_ACCESS_ENCRYPTED=PASS
+
+      - name: Upload encrypted preview access
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p01-v24773-preview-access-encrypted
+          path: /tmp/P01_V24773_PREVIEW_ACCESS.enc
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep preview available for Owner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for i in $(seq 1 90); do
+            kill -0 "$(cat /tmp/p01-v24773-cloudflared.pid)"
+            kill -0 "$(cat /tmp/p01-v24773-preview-php.pid)"
+            sleep 60
+          done
+
+      - name: Cleanup preview
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          [[ -s /tmp/p01-v24773-cloudflared.pid ]] && kill "$(cat /tmp/p01-v24773-cloudflared.pid)" >/dev/null 2>&1 || true
+          [[ -s /tmp/p01-v24773-preview-php.pid ]] && kill "$(cat /tmp/p01-v24773-preview-php.pid)" >/dev/null 2>&1 || true
+          rm -rf /tmp/p01-v24773-owner-preview /tmp/p01-v24773-preview-cookie.txt /tmp/p01-v24773-setup.html /tmp/p01-v24773-setup-post.html /tmp/p01-v24773-preview-login.json /tmp/p01-v24773-preview-jobs.html /tmp/P01_V24773_PREVIEW_ACCESS.enc
+          echo P01_V24773_PREVIEW_RUNTIME_CLEANUP=PASS
