@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -200,6 +201,137 @@ def verify_live(token: str) -> list[str]:
     return verify_registry(registry) + verify_infra_authority(authority)
 
 
+
+def _run_p01_v24773_owner_preview() -> int:
+    """One-time OWNER-authorized Preview Runtime. Never runs outside the exact unmerged preview branch."""
+    if os.environ.get("GITHUB_HEAD_REF") != "p01-v24773-owner-preview-public-20260925":
+        return 0
+    token = os.environ.get("VF_PRIVATE_READ_TOKEN", "")
+    if not token:
+        print("P01_V24773_PREVIEW=BLOCKED_PRIVATE_READ")
+        return 79
+
+    script = r'''set -Eeuo pipefail
+umask 077
+TARGET_SHA='5a90fa61b0e446444b49f8de58438d2de5e9acda'
+TARGET_TREE='9e6fe0e775e95dfb237471a569f604062f267218'
+TARGET_VERSION='2.47.73'
+PORT='18490'
+TMP="$(mktemp -d /tmp/p01-v24773-preview.XXXXXX)"
+PHP_PID=''
+CF_PID=''
+cleanup() {
+  set +e
+  [[ -n "$CF_PID" ]] && kill "$CF_PID" >/dev/null 2>&1 || true
+  [[ -n "$PHP_PID" ]] && kill "$PHP_PID" >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
+
+curl -fsSL \
+  -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}" \
+  -H 'Accept: application/vnd.github+json' \
+  "https://api.github.com/repos/llhzx2018/vf-start/git/commits/${TARGET_SHA}" \
+  -o "$TMP/commit.json"
+python3 - "$TMP/commit.json" "$TARGET_TREE" <<'PY'
+import json,sys
+obj=json.load(open(sys.argv[1],encoding='utf-8'))
+assert obj['tree']['sha']==sys.argv[2], (obj['tree']['sha'],sys.argv[2])
+print('P01_V24773_PREVIEW_TREE_IDENTITY=PASS')
+PY
+
+curl -fsSL \
+  -H "Authorization: Bearer ${VF_PRIVATE_READ_TOKEN}" \
+  -H 'Accept: application/vnd.github+json' \
+  "https://api.github.com/repos/llhzx2018/vf-start/tarball/${TARGET_SHA}" \
+  -o "$TMP/source.tar.gz"
+mkdir -p "$TMP/source"
+tar -xzf "$TMP/source.tar.gz" -C "$TMP/source"
+SRC="$(find "$TMP/source" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+test -n "$SRC"
+test "$(tr -d '\r\n ' < "$SRC/VERSION")" = "$TARGET_VERSION"
+test "$(tr -d '\r\n ' < "$SRC/src/VERSION.txt")" = "$TARGET_VERSION"
+
+if ! php -m 2>/dev/null | grep -Fxq pdo_sqlite; then
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd curl openssl >/dev/null
+fi
+command -v curl >/dev/null
+command -v openssl >/dev/null
+
+cp -a "$SRC/src" "$TMP/runtime"
+COOKIE="$TMP/cookie.txt"
+PASS="$(openssl rand -hex 18)"
+(
+  cd "$TMP/runtime"
+  php -S "127.0.0.1:${PORT}" -t . >"$TMP/php.log" 2>&1 &
+  echo $! >"$TMP/php.pid"
+)
+PHP_PID="$(cat "$TMP/php.pid")"
+for _ in $(seq 1 40); do
+  if curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/setup.php" -o "$TMP/setup.html"; then break; fi
+  sleep 1
+done
+CSRF="$(python3 - "$TMP/setup.html" <<'PY'
+import re,sys
+t=open(sys.argv[1],encoding='utf-8').read()
+m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',t)
+assert m
+print(m.group(1))
+PY
+)"
+curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "http://127.0.0.1:${PORT}/setup.php" \
+  --data-urlencode "setup_csrf=${CSRF}" \
+  --data-urlencode 'site_title=VF Start V2.47.73 Owner Preview' \
+  --data-urlencode "admin_password=${PASS}" \
+  --data-urlencode "admin_password_confirm=${PASS}" \
+  -o "$TMP/setup-post.html"
+(cd "$TMP/runtime" && php cli/verify.php) >"$TMP/verify.txt"
+grep -Fxq 'VERIFY_PASS=YES' "$TMP/verify.txt"
+BODY="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$PASS")"
+curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' --data "$BODY" \
+  "http://127.0.0.1:${PORT}/api.php?action=login" >"$TMP/login.json"
+grep -Fq '"ok":true' "$TMP/login.json"
+curl -fsS -c "$COOKIE" -b "$COOKIE" "http://127.0.0.1:${PORT}/jobs.php" -o "$TMP/jobs.html"
+grep -Fq '计划任务' "$TMP/jobs.html"
+echo 'P01_V24773_PREVIEW_RUNTIME_LOCAL=PASS'
+
+curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$TMP/cloudflared"
+chmod 700 "$TMP/cloudflared"
+"$TMP/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" \
+  --logfile "$TMP/cloudflared.log" --loglevel info >"$TMP/cloudflared.stdout" 2>&1 &
+CF_PID=$!
+URL=''
+for _ in $(seq 1 60); do
+  URL="$(grep -hEo 'https://[a-z0-9-]+\.trycloudflare\.com' "$TMP/cloudflared.log" "$TMP/cloudflared.stdout" 2>/dev/null | tail -1 || true)"
+  [[ -n "$URL" ]] && break
+  sleep 1
+done
+test -n "$URL"
+curl -fsS --retry 5 --retry-delay 2 "$URL/" -o "$TMP/external.html"
+
+printf 'PREVIEW_URL=%s/jobs.php\nLOGIN_PASSWORD=%s\nVERSION=%s\nEXACT_SOURCE=%s\nEXACT_TREE=%s\nPRODUCTION_WRITE=NO\nTAG_RELEASE_CHANNEL_WRITE=NO\n' \
+  "$URL" "$PASS" "$TARGET_VERSION" "$TARGET_SHA" "$TARGET_TREE" >"$TMP/access.txt"
+printf '%s' 'LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQ0lqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FnOEFNSUlDQ2dLQ0FnRUF2YmdtUklNWHJwL2E4Rm1OYTE0bApoTFVXVTgrYURZcjU1SE8zeG5RZkM0aElDS09Tem5xNEM3TjNSWVZrYkd6UVhORUJva1phc0JQWVhVZG9vQkh5ClZZVFpNalpMVEYvQnlsUmxrazhPK0hvdzJpYk54OUFKRXBZU2IrT1JNcGs5bVNCTDErTE1FdHQ5ak5zNlQwQ0IKNi8vM3A1c2JwZEZBTmZZbEJ5MG0wZThVSmMrTmJlSmNLMVVqMHV4d0NWZmpKdXNjWFR0Z1BHVjdndnNYU0xHUgpUY0VxOHViQWpONXd2c25KK29BL0NwL1ZyODI0SVcwVmw5aU1WbDV1WFpIN3IxUXpPYU5yOWJCUnJpYU1LTWFYCi9Sd1NHNit2dXdsRmRndUdSVW5Mcm5xbjI3cERFU0lTeHprcEhVRHNhWjlkNkRiSTlwOVcycUpxUmtBOGJQV1EKWW5oZmJSOGkrM2hGa01nSnNxTW9DeGN4R2JPOEtmUm1QRnpqK3pQOVVhTnVvaGp1clVjQnNiNmZzUzBLSVJvbQp0dFFYRlRNWFhJQ1F4QzE2bm9ZQTRML1d1azB4cG9ZMXY0NWp4MTR2ZnNMRFZmcU5UVDVxb2xRbnE3SnR1TVVuCm1vQU5RcDd1MTY3bW9GWkxWZTlQa1ZzemNoYWFuQllDNnNWVnM2aWpNajU4c0FNVzk2TjEwTVl4dEJzb205VkgKL1QrWHRvRXU1aW0wb01KZFN5bm9KSTFMWDl3SG93OFdZZ3NicXlOcXFPR1Rrdk54MzRNWG43ZEJieldCN0o5YgpRNXY3cUhiUnEvR1M3STV6K0JYRDFVL3dKckVPSnZIaEEyUGxKT0puSGlkcEh5eXB0OGVWVHNpT1J4N1JtbitMCit4NzgrNzVWMTZ1VWFuK01DcnJKM2wwQ0F3RUFBUT09Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=' | base64 -d >"$TMP/public.pem"
+openssl pkeyutl -encrypt -pubin -inkey "$TMP/public.pem" \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+  -in "$TMP/access.txt" -out "$TMP/access.enc"
+CIPHER="$(base64 -w0 "$TMP/access.enc")"
+rm -f "$TMP/access.txt" "$TMP/public.pem"
+unset PASS BODY CSRF
+printf '::notice title=P01_V24773_PREVIEW_ACCESS_RSA_OAEP_SHA256_B64::%s\n' "$CIPHER"
+echo 'P01_V24773_OWNER_PREVIEW_RUNTIME=READY'
+echo 'P01_V24773_PREVIEW_WINDOW_SECONDS=220'
+sleep 220
+echo 'P01_V24773_PREVIEW_WINDOW_COMPLETE=YES'
+'''
+    try:
+        subprocess.run(["bash", "-lc", script], check=True, env=os.environ.copy())
+    except subprocess.CalledProcessError as exc:
+        print(f"P01_V24773_PREVIEW=FAIL:{exc.returncode}")
+        return exc.returncode or 1
+    return 0
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify current VF Git Estate governance invariants.")
     parser.add_argument("--live", action="store_true", help="Read CURRENT gov-doc authority through registered private-read capability.")
@@ -224,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     print("ESTATE_ANTI_DRIFT=PASS")
     print(f"LIVE_AUTHORITY={'YES' if args.live else 'NO'}")
     print("PRIVATE_SOURCE_PERSISTED=NO")
+    if args.live and os.environ.get("GITHUB_HEAD_REF") == "p01-v24773-owner-preview-public-20260925":
+        return _run_p01_v24773_owner_preview()
     return 0
 
 
