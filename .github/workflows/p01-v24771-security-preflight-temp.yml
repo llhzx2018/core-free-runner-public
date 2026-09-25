@@ -1,0 +1,108 @@
+name: p01-v24771-security-preflight-temp
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p01-v24771-security-preflight-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      TARGET_SHA: 9ea4e49ac596fb088d71eb8d8eae0f00fe084290
+      TARGET_TREE: 9142eeabcbeba2ac5a374e3a824997b8679a2db3
+      STABLE_SHA: 120741a2fcf40f6d854e0b7201e54b396d4b2ec5
+      VERSION: 2.47.71
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Exact candidate checkout
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          remote_main="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "$TARGET_SHA"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          git clone -q --depth 1 --branch v2.47.70 "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(git -C stable rev-parse HEAD)" = "$STABLE_SHA"
+
+      - name: Prepare runtime dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+
+      - name: Exact diff boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C candidate diff --name-only "$STABLE_SHA" "$TARGET_SHA" | sort >/tmp/diff.txt
+          cat >/tmp/allowed.txt <<'EOF'
+          VERSION
+          src/VERSION.txt
+          src/app/SystemHealth.php
+          src/app/bootstrap.php
+          tests/unit/system_health_seo_root_privacy_false_positive_contract.php
+          EOF
+          sort -o /tmp/allowed.txt /tmp/allowed.txt
+          diff -u /tmp/allowed.txt /tmp/diff.txt
+          test -z "$(git -C candidate diff "$STABLE_SHA" "$TARGET_SHA" -- src/api.php src/app/Auth.php src/app/Repository.php src/app/Seo.php src/migrations)"
+          echo P01_V24771_DIFF_BOUNDARY=PASS
+
+      - name: Focused security diagnostics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l candidate/src/app/SystemHealth.php >/dev/null
+          tests=(
+            tests/unit/system_health_seo_root_privacy_false_positive_contract.php
+            tests/unit/system_health_runtime_r7_contract.php
+            tests/unit/navigation_owner_behavior_privacy_contract.php
+            tests/unit/privacy_cache_performance_r2_contract.php
+            tests/unit/full_surface_governance_privacy_monotonic_runtime.php
+            tests/unit/admin_system_health_page9_polish_contract.php
+            tests/unit/admin_system_health_r18_contract.php
+            tests/unit/session_csrf_contract.php
+          )
+          for t in "${tests[@]}"; do php "candidate/$t"; done
+          echo P01_V24771_FOCUSED_SECURITY_DIAGNOSTICS=PASS
+
+      - name: Canonical zero-debt regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-v24771-canonical.txt
+          grep -Fx 'P01_CANONICAL_CURRENT_FAILURE_COUNT=0' /tmp/p01-v24771-canonical.txt
+          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=0' /tmp/p01-v24771-canonical.txt
+          grep -Fx 'P01_CANONICAL_LEGACY_TEST_DEBT_COUNT=0' /tmp/p01-v24771-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-v24771-canonical.txt
+          echo P01_V24771_CANONICAL=PASS
+
+      - name: Candidate readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate status --porcelain)" = ""
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          echo P01_V24771_SECURITY_PREFLIGHT=PASS
