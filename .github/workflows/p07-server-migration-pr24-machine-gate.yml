@@ -1,0 +1,175 @@
+name: P07 Full-server Migration PR24 Machine Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-server-migration-pr24-machine-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  machine-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Initialize public-safe receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p07-machine-receipt.env <<'EOF'
+          RUNNER_ALLOCATION=PASS
+          PRIVATE_READ=NOT_RUN
+          EXACT_SOURCE=NOT_RUN
+          BASH_SYNTAX=NOT_RUN
+          PYTHON_COMPILE=NOT_RUN
+          IDENTITY=NOT_RUN
+          SMOKE=NOT_RUN
+          UNIT_TESTS=NOT_RUN
+          SECRET_SCAN=NOT_RUN
+          EOF
+
+      - name: Verify registered private read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            sed -i 's/^PRIVATE_READ=.*/PRIVATE_READ=BLOCKED/' /tmp/p07-machine-receipt.env
+            echo "P07_MACHINE_GATE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING"
+            exit 78
+          fi
+          sed -i 's/^PRIVATE_READ=.*/PRIVATE_READ=PASS/' /tmp/p07-machine-receipt.env
+
+      - name: Checkout exact vf-server-ops PR24 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: f5c6e37eca0df17cb801b67f5fba538e4b9fc02e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Verify exact source identity
+        working-directory: source
+        shell: bash
+        env:
+          SOURCE_SHA: f5c6e37eca0df17cb801b67f5fba538e4b9fc02e
+        run: |
+          set -Eeuo pipefail
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]; then
+            sed -i 's/^EXACT_SOURCE=.*/EXACT_SOURCE=FAIL/' /tmp/p07-machine-receipt.env
+            echo "P07_EXACT_SOURCE=FAIL"
+            exit 1
+          fi
+          sed -i 's/^EXACT_SOURCE=.*/EXACT_SOURCE=PASS/' /tmp/p07-machine-receipt.env
+          echo "P07_EXACT_SOURCE_SHA=$SOURCE_SHA"
+
+      - name: Run secret-safe exact-source machine gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          stage() {
+            local key="$1"
+            shift
+            local log="/tmp/p07-${key}.log"
+            set +e
+            "$@" >"$log" 2>&1
+            local rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              sed -i "s/^${key}=.*/${key}=PASS/" /tmp/p07-machine-receipt.env
+              echo "P07_${key}=PASS"
+              return 0
+            fi
+            sed -i "s/^${key}=.*/${key}=FAIL/" /tmp/p07-machine-receipt.env
+            echo "P07_${key}=FAIL"
+            if [ "$key" = "UNIT_TESTS" ]; then
+              grep -E '^(FAIL|ERROR): ' "$log" | head -20 || true
+            fi
+            echo "P07_${key}_LOG_SHA256=$(sha256sum "$log" | awk '{print $1}')"
+            return "$rc"
+          }
+
+          stage BASH_SYNTAX bash -lc '
+            bash -n bin/vfops &&
+            bash -n bin/vfops-user &&
+            bash -n bin/vfops-site-ui &&
+            bash -n bin/vfops-migrate-ui &&
+            bash -n bin/vfops-cloudpanel-ui &&
+            bash -n lib/cloudpanel_ui_common.sh &&
+            bash -n lib/cloudpanel_ui_sites.sh &&
+            bash -n lib/cloudpanel_ui_ops.sh &&
+            bash -n lib/cloudpanel_ui_admin.sh &&
+            bash -n bin/vfops-auto-backup &&
+            bash -n tests/smoke.sh
+          '
+
+          stage PYTHON_COMPILE python3 -m compileall -q lib tests scripts
+
+          stage IDENTITY bash -lc '
+            test "$(NO_COLOR=1 bash bin/vfops-user --version)" = "VF Server Ops 0.1.0 RC3" &&
+            test "$(NO_COLOR=1 bash bin/vfops-user --build-id)" = "0.1.0-rc3-guided-init16" &&
+            python3 -m json.tool VF_PROJECT.json >/dev/null &&
+            python3 -m json.tool config/storage.example.json >/dev/null &&
+            python3 -m json.tool config/policy.example.json >/dev/null
+          '
+
+          stage SMOKE bash tests/smoke.sh
+
+          stage UNIT_TESTS python3 -m unittest discover -s tests -p 'test_*.py' -q
+
+          stage SECRET_SCAN python3 scripts/secret_scan.py --root .
+
+      - name: Build public-safe receipt
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: f5c6e37eca0df17cb801b67f5fba538e4b9fc02e
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          env_path = Path('/tmp/p07-machine-receipt.env')
+          values = {}
+          if env_path.is_file():
+              for raw in env_path.read_text(encoding='utf-8').splitlines():
+                  if '=' in raw:
+                      key, value = raw.split('=', 1)
+                      values[key] = value
+
+          payload = {
+              'schema': 'p07-full-server-migration-machine-gate/v1',
+              'source_repository': 'llhzx2018/vf-server-ops',
+              'source_sha': os.environ['SOURCE_SHA'],
+              'runner_repository': 'llhzx2018/core-free-runner-public',
+              'private_source_persisted': False,
+              'private_artifact_uploaded': False,
+              'checks': values,
+          }
+          ordered = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['receipt_sha256'] = hashlib.sha256(ordered).hexdigest()
+          out = Path('/tmp/P07_PR24_MACHINE_GATE_PUBLIC_RECEIPT.json')
+          out.write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(f"P07_MACHINE_GATE_SOURCE_SHA={payload['source_sha']}")
+          print(f"P07_MACHINE_GATE_RECEIPT_SHA256={payload['receipt_sha256']}")
+          PY
+
+      - name: Upload public-safe receipt only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0
+        with:
+          name: p07-pr24-machine-gate-public-receipt-${{ github.run_id }}
+          path: /tmp/P07_PR24_MACHINE_GATE_PUBLIC_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 14
