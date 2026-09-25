@@ -11,8 +11,8 @@ OUT=Path("/tmp/p01-v24766-artifacts")
 VERSION="2.47.66"
 SOURCE_VERSION="2.47.65"
 SCHEMA="2026090401"
-SOURCE_SHA="fb1b78c52bac84e14975b2d41a82bc7e32858f10"
-SOURCE_TREE="cf650374208db0efd6e4a490c5f3c0f86fad424e"
+SOURCE_SHA="50553f3b070a26e500b36ed8d0a1873683dd2366"
+SOURCE_TREE="d2a4f5bddc70a63296c823c5bb56cae8a2ad5ace"
 
 def sha(b:bytes)->str:
     return hashlib.sha256(b).hexdigest()
