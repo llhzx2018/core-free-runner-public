@@ -86,8 +86,8 @@ alternates={}
 
 repair=old
 for a,b in [
-    ("public const SOURCE_VERSION='2.47.64';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
-    ("public const TARGET_VERSION='2.47.65';",f"public const TARGET_VERSION='{VERSION}';"),
+    ("public const SOURCE_VERSION='2.47.65';",f"public const SOURCE_VERSION='{SOURCE_VERSION}';"),
+    ("public const TARGET_VERSION='2.47.66';",f"public const TARGET_VERSION='{VERSION}';"),
     ("public const TARGET_SCHEMA='2026090401';",f"public const TARGET_SCHEMA='{SCHEMA}';"),
 ]:
     if repair.count(a)!=1:
