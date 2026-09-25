@@ -298,7 +298,7 @@ echo 'P01_V24773_PREVIEW_RUNTIME_LOCAL=PASS'
 
 curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$TMP/cloudflared"
 chmod 700 "$TMP/cloudflared"
-"$TMP/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" \
+"$TMP/cloudflared" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" \
   --logfile "$TMP/cloudflared.log" --loglevel info >"$TMP/cloudflared.stdout" 2>&1 &
 CF_PID=$!
 URL=''
@@ -308,7 +308,17 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 test -n "$URL"
-curl -fsS --retry 5 --retry-delay 2 "$URL/" -o "$TMP/external.html"
+READY=0
+for _ in $(seq 1 30); do
+  CODE="$(curl -sS --connect-timeout 5 --max-time 10 -o "$TMP/external.html" -w '%{http_code}' "$URL/" || true)"
+  if [[ "$CODE" = '200' || "$CODE" = '302' || "$CODE" = '303' ]]; then
+    READY=1
+    break
+  fi
+  sleep 2
+done
+test "$READY" = '1'
+echo 'P01_V24773_PREVIEW_EXTERNAL_ROUTE=PASS'
 
 printf 'PREVIEW_URL=%s/jobs.php\nLOGIN_PASSWORD=%s\nVERSION=%s\nEXACT_SOURCE=%s\nEXACT_TREE=%s\nPRODUCTION_WRITE=NO\nTAG_RELEASE_CHANNEL_WRITE=NO\n' \
   "$URL" "$PASS" "$TARGET_VERSION" "$TARGET_SHA" "$TARGET_TREE" >"$TMP/access.txt"
