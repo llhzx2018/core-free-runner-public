@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc12'
+VERSION='0.1.0-rc13'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_BLOB='3c120333051561d7aa21c3a569d8a4d295593375'
+MANIFEST_BLOB='912f86b4d38496e4e6975be4418bdd6ce7f2689c'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -47,7 +47,7 @@ installed_version() {
 }
 
 manager_ready() {
-  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -x "$TARGET/intrusion-evidence-entry.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_discovery.py" ]] || return 1
+  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -x "$TARGET/intrusion-evidence-entry.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_discovery.py" && -x "$TARGET/resource-profile.sh" && -f "$TARGET/lib/resource_profile.py" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
   NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
 }
@@ -94,8 +94,8 @@ install_runtime() {
   done < "$manifest"
 
   cp -a "$tmp/pkg/." "$stage/"
-  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh" "$stage/intrusion-evidence-entry.sh"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py" "$stage/lib/intrusion_discovery.py"
+  chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh" "$stage/intrusion-evidence-entry.sh" "$stage/resource-profile.sh"
+  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py" "$stage/lib/intrusion_discovery.py" "$stage/lib/resource_profile.py"
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
@@ -147,10 +147,14 @@ Commands:
   memory
   services
   security
+  resources [menu|preview|matrix|json] [--mode conservative|balanced|performance]
 HELP
     ;;
   status|check|audit|memory|services|security)
     cmd="$1"; ensure_manager; exec "$ENTRY" "$cmd"
+    ;;
+  resources|resource|optimize)
+    shift; ensure_manager; exec "$ENTRY" resources "${@:-menu}"
     ;;
   updates|cleanup)
     cmd="$1"; shift; ensure_manager; exec "$ENTRY" "$cmd" "$@"
