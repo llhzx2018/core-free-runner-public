@@ -7,7 +7,7 @@ TARGET=2.47.73
 SOURCE=2.47.72
 SCHEMA=2026090401
 
-python3 scripts/p01_build_v24772_final.py | tee /tmp/p01-v24773-build.json
+python3 scripts/p01_build_v24773_preflight.py | tee /tmp/p01-v24773-build.json
 
 FULL="$ART/VF-Start-V2.47.73-FULL.zip"
 UPDATE="$ART/VF_Start_V2.47.73_UPDATE.zip"
