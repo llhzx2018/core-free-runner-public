@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # Public versions stay short and semantic. Internal build identities remain hidden
 # and are used only for exact validation / engineering traceability.
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-preview17"
+BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
