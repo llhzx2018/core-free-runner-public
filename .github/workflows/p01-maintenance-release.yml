@@ -1,0 +1,366 @@
+name: p01-maintenance-release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'release-requests/P01.json'
+      - '.github/workflows/p01-maintenance-release.yml'
+      - 'scripts/p01-maintenance-release.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-maintenance-release
+  cancel-in-progress: false
+
+jobs:
+  validate-control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Validate reusable control
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile scripts/p01-maintenance-release.py
+          python3 scripts/p01-maintenance-release.py --help >/dev/null
+          if [ -f release-requests/P01.json ]; then
+            jq -e '
+              .project_id == "P01" and
+              .mode == "maintenance" and
+              (.version | type == "string") and
+              (.source_version | type == "string") and
+              (.target_sha | type == "string") and
+              (.summary | type == "string" and length > 0)
+            ' release-requests/P01.json >/dev/null
+          fi
+          echo P01_REUSABLE_RELEASE_CONTROL=PASS
+
+  release:
+    needs: validate-control
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'release(P01):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      REQUEST: release-requests/P01.json
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      REQUEST_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout trusted runner control plus request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind one-file release request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA" "$REQUEST_SHA")
+          test "${#changed[@]}" -eq 1
+          test "${changed[0]}" = "$REQUEST"
+          jq -e '.project_id=="P01" and .mode=="maintenance"' "$REQUEST" >/dev/null
+
+          VERSION="$(jq -r '.version' "$REQUEST")"
+          SOURCE="$(jq -r '.source_version' "$REQUEST")"
+          TARGET_SHA="$(jq -r '.target_sha' "$REQUEST")"
+
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$VERSION" != "$SOURCE"
+
+          {
+            echo "VERSION=$VERSION"
+            echo "SOURCE=$SOURCE"
+            echo "TARGET_SHA=$TARGET_SHA"
+            echo "TAG=v$VERSION"
+            echo "BASE_TAG=v$SOURCE"
+            echo "ART=/tmp/p01-maintenance-artifacts"
+            echo "REL=/tmp/p01-maintenance-source"
+          } >> "$GITHUB_ENV"
+          echo P01_RELEASE_REQUEST_BOUND=PASS
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          echo P01_RELEASE_RUNTIME=PASS
+
+      - name: Resolve exact product source and prior formal release
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$GH_TOKEN"
+
+          remote_main="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" refs/heads/main | awk '{print $1}')"
+          test "$remote_main" = "$TARGET_SHA"
+
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+
+          TARGET_TREE="$(git -C candidate rev-parse HEAD^{tree})"
+          echo "TARGET_TREE=$TARGET_TREE" >> "$GITHUB_ENV"
+
+          git clone -q --depth 1 --branch "$BASE_TAG" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
+          BASE_COMMIT="$(git -C stable rev-parse HEAD)"
+          echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
+
+          rm -rf "$REL"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "$BASE_TAG" -R "$PRODUCT_REPO" -D "$REL"             -p "VF-Start-V${SOURCE}-FULL.zip"             -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V${SOURCE}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
+          test -f "$REL/update/repair-v${SOURCE}.php"
+          echo P01_EXACT_SOURCE_AND_BASELINE=PASS
+
+      - name: Canonical regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical.txt
+          echo P01_CANONICAL_RELEASE_PROOF=PASS
+
+      - name: Build exact maintenance artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ART"
+          python3 scripts/p01-maintenance-release.py             --candidate candidate/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" | tee /tmp/p01-maintenance-build.json
+
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
+          echo P01_MAINTENANCE_BUILD=PASS
+
+      - name: Verify clean FULL and Atomic UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          WORK="/tmp/p01-maintenance-gate"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$UPDATE" -d "$WORK/update"
+          REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+          test -f "$REPAIR"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+
+          assert_no_private_payload() {
+            local zip="$1"
+            if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-hits.txt; then
+              cat /tmp/p01-private-hits.txt
+              echo PRIVATE_PAYLOAD_LEAK
+              exit 90
+            fi
+          }
+          assert_no_private_payload "$FULL"
+          assert_no_private_payload "$UPDATE"
+
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+              echo $! >"/tmp/server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/server-$port.pid")"
+            trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+import re,sys
+text=open(sys.argv[1],encoding="utf-8").read()
+m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+assert m
+print(m.group(1))
+PY
+)"
+            local pass="ReleaseGate!${port}"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            local body status
+            body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+            status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$status" = 200
+            grep -Fq '"ok":true' "/tmp/login-$port.json"
+            kill "$pid" >/dev/null 2>&1 || true
+            trap - RETURN
+          }
+
+          install_full "$FULL" "$WORK/target-full" 18511 "VF Start V$VERSION FULL Gate"
+          test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+          echo P01_CLEAN_FULL_INSTALL=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/upgrade" 18512 "VF Start V$SOURCE Upgrade Source"
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+<?php
+declare(strict_types=1);
+require __DIR__.'/app/bootstrap.php';
+$repo=new VfRepository(vf_db());
+$cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+$link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Release Sentinel Link','url'=>'https://example.com/release-sentinel','description'=>'must survive atomic','tags'=>['release-sentinel'],'is_private'=>1,'is_pending'=>0]);
+file_put_contents('/tmp/p01-sentinel-id.txt',(string)$link['id']);
+PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-source-verify.json
+          grep -Fq '"ok":true' /tmp/p01-source-verify.json
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-success.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-success.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-atomic-repeat.json
+          echo P01_ATOMIC_UPGRADE_AND_IDEMPOTENCY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/rollback" 18513 "VF Start V$SOURCE Rollback Source"
+          cat >"$WORK/rollback/sentinel.php" <<'PHP'
+<?php
+declare(strict_types=1);
+require __DIR__.'/app/bootstrap.php';
+$repo=new VfRepository(vf_db());
+$cat=$repo->createCategory(['name'=>'Rollback Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+$link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Rollback Sentinel Link','url'=>'https://example.com/rollback-sentinel','description'=>'must survive rollback','tags'=>['rollback-sentinel'],'is_private'=>1,'is_pending'=>0]);
+file_put_contents('/tmp/p01-rollback-id.txt',(string)$link['id']);
+PHP
+          php "$WORK/rollback/sentinel.php"
+          rm "$WORK/rollback/sentinel.php"
+          cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+          rollback_rc=$?
+          set -e
+          test "$rollback_rc" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";' "$WORK/rollback"
+          echo P01_ATOMIC_ROLLBACK=PASS
+
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
+          echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+
+      - name: Publish exact Tag and GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          FULL_SHA="$(sha256sum "$FULL" | awk '{print $1}')"
+          UPDATE_SHA="$(sha256sum "$UPDATE" | awk '{print $1}')"
+          FULL_BYTES="$(stat -c %s "$FULL")"
+          UPDATE_BYTES="$(stat -c %s "$UPDATE")"
+          SUMMARY="$(jq -r '.summary' "$REQUEST")"
+
+          if gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" >/tmp/p01-tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/p01-tag.json)" = "$TARGET_SHA"
+          else
+            gh api --method POST "repos/$PRODUCT_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$TARGET_SHA" >/tmp/p01-tag.json
+            test "$(jq -r '.object.sha' /tmp/p01-tag.json)" = "$TARGET_SHA"
+          fi
+
+          cat >/tmp/p01-release-notes.md <<EOF
+          # VF Start V$VERSION
+
+          $SUMMARY
+
+          - Source Version: V$SOURCE
+          - Target Version: V$VERSION
+          - Exact Source: $TARGET_SHA
+          - Exact Tree: $TARGET_TREE
+          - Release Mode: reusable maintenance path
+          - Schema / migrations / updater mechanism: unchanged
+          - Canonical regression / Clean FULL / Atomic UPDATE / rollback / data preservation / idempotency: PASS
+          - Production: not changed; OWNER upgrades manually from the backend
+          EOF
+
+          if gh release view "$TAG" -R "$PRODUCT_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FULL" "$UPDATE" -R "$PRODUCT_REPO" --clobber
+          else
+            gh release create "$TAG" "$FULL" "$UPDATE" -R "$PRODUCT_REPO"               --title "VF Start V$VERSION"               --notes-file /tmp/p01-release-notes.md               --verify-tag
+          fi
+
+          gh api "repos/$PRODUCT_REPO/releases/tags/$TAG" >/tmp/p01-release.json
+          RELEASE_ID="$(jq -r '.id' /tmp/p01-release.json)"
+          RELEASED_AT="$(jq -r '.published_at' /tmp/p01-release.json)"
+          test "$(jq -r '.target_commitish' /tmp/p01-release.json)" = "$TARGET_SHA"
+          test "$(jq -r '.draft' /tmp/p01-release.json)" = false
+          test "$(jq -r '.prerelease' /tmp/p01-release.json)" = false
+          test "$(jq -r --arg n "VF-Start-V${VERSION}-FULL.zip" '.assets[]|select(.name==$n)|.size' /tmp/p01-release.json)" = "$FULL_BYTES"
+          test "$(jq -r --arg n "VF_Start_V${VERSION}_UPDATE.zip" '.assets[]|select(.name==$n)|.size' /tmp/p01-release.json)" = "$UPDATE_BYTES"
+
+          rm -rf /tmp/p01-remote-readback
+          mkdir -p /tmp/p01-remote-readback
+          gh release download "$TAG" -R "$PRODUCT_REPO" -D /tmp/p01-remote-readback             -p "VF-Start-V${VERSION}-FULL.zip"             -p "VF_Start_V${VERSION}_UPDATE.zip"
+          test "$(sha256sum "/tmp/p01-remote-readback/VF-Start-V${VERSION}-FULL.zip" | awk '{print $1}')" = "$FULL_SHA"
+          test "$(sha256sum "/tmp/p01-remote-readback/VF_Start_V${VERSION}_UPDATE.zip" | awk '{print $1}')" = "$UPDATE_SHA"
+
+          jq -n             --argjson release_id "$RELEASE_ID"             --arg released_at "$RELEASED_AT"             --arg version "$VERSION"             --arg source_version "$SOURCE"             --arg target_sha "$TARGET_SHA"             --arg target_tree "$TARGET_TREE"             --arg full_name "VF-Start-V${VERSION}-FULL.zip"             --arg full_sha "$FULL_SHA"             --argjson full_bytes "$FULL_BYTES"             --arg update_name "VF_Start_V${VERSION}_UPDATE.zip"             --arg update_sha "$UPDATE_SHA"             --argjson update_bytes "$UPDATE_BYTES"             '{
+              release_id:$release_id,
+              released_at:$released_at,
+              version:$version,
+              source_version:$source_version,
+              product_identity:$target_sha,
+              tree:$target_tree,
+              full:{name:$full_name,bytes:$full_bytes,sha256:$full_sha},
+              update:{name:$update_name,bytes:$update_bytes,sha256:$update_sha},
+              production_changed:false
+            }' >/tmp/P01_MAINTENANCE_PUBLICATION_RECEIPT.json
+
+          cat /tmp/P01_MAINTENANCE_PUBLICATION_RECEIPT.json
+          echo P01_MAINTENANCE_GITHUB_RELEASE=PASS
