@@ -1,0 +1,366 @@
+name: P07 V0.1.0 Final Integration Machine Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-v010-final-integration-machine-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  secret-diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact vf-server-ops Final Integration source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 8e694ef64ae8f298c13072cb9d5e4f3f38ac0bad
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Print secret scanner path/rule findings only
+        working-directory: source
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/secret_scan.py --root .
+          rc=$?
+          set -e
+          echo "P07_SECRET_DIAG_EXIT=$rc"
+          exit 0
+
+      - name: Run synthetic secret fixture regressions
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m unittest -q \
+            tests.test_auto_backup.AutoBackupTests.test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo \
+            tests.test_google_device_oauth.GoogleDeviceOAuthTests.test_network_error_does_not_echo_request_payload
+          echo "P07_SECRET_FIXTURE_REGRESSIONS=PASS"
+
+  machine-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Initialize public-safe receipt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p07-machine-receipt.env <<'EOF'
+          RUNNER_ALLOCATION=PASS
+          PRIVATE_READ=NOT_RUN
+          EXACT_SOURCE=NOT_RUN
+          BASH_SYNTAX=NOT_RUN
+          PYTHON_COMPILE=NOT_RUN
+          IDENTITY=NOT_RUN
+          SMOKE=NOT_RUN
+          UNIT_TESTS=NOT_RUN
+          SECRET_SCAN=NOT_RUN
+          EOF
+
+      - name: Verify registered private read capability
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [ -z "$PRIVATE_READ_TOKEN" ]; then
+            sed -i 's/^PRIVATE_READ=.*/PRIVATE_READ=BLOCKED/' /tmp/p07-machine-receipt.env
+            echo "P07_MACHINE_GATE_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING"
+            exit 78
+          fi
+          sed -i 's/^PRIVATE_READ=.*/PRIVATE_READ=PASS/' /tmp/p07-machine-receipt.env
+
+      - name: Checkout exact vf-server-ops Final Integration source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 8e694ef64ae8f298c13072cb9d5e4f3f38ac0bad
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Verify exact source identity
+        working-directory: source
+        shell: bash
+        env:
+          SOURCE_SHA: 8e694ef64ae8f298c13072cb9d5e4f3f38ac0bad
+        run: |
+          set -Eeuo pipefail
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]; then
+            sed -i 's/^EXACT_SOURCE=.*/EXACT_SOURCE=FAIL/' /tmp/p07-machine-receipt.env
+            echo "P07_EXACT_SOURCE=FAIL"
+            exit 1
+          fi
+          sed -i 's/^EXACT_SOURCE=.*/EXACT_SOURCE=PASS/' /tmp/p07-machine-receipt.env
+          echo "P07_EXACT_SOURCE_SHA=$SOURCE_SHA"
+
+      - name: Run secret-safe exact-source machine gate
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          stage() {
+            local key="$1"
+            shift
+            local log="/tmp/p07-${key}.log"
+            set +e
+            "$@" >"$log" 2>&1
+            local rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              sed -i "s/^${key}=.*/${key}=PASS/" /tmp/p07-machine-receipt.env
+              echo "P07_${key}=PASS"
+              return 0
+            fi
+            sed -i "s/^${key}=.*/${key}=FAIL/" /tmp/p07-machine-receipt.env
+            echo "P07_${key}=FAIL"
+            if [ "$key" = "UNIT_TESTS" ]; then
+              grep -E '^(FAIL|ERROR): ' "$log" | head -20 || true
+            fi
+            echo "P07_${key}_LOG_SHA256=$(sha256sum "$log" | awk '{print $1}')"
+            return "$rc"
+          }
+
+          stage BASH_SYNTAX bash -lc '
+            bash -n bin/vfops &&
+            bash -n bin/vfops-user &&
+            bash -n bin/vfops-site-ui &&
+            bash -n bin/vfops-migrate-ui &&
+            bash -n bin/vfops-cloudpanel-ui &&
+            bash -n lib/cloudpanel_ui_common.sh &&
+            bash -n lib/cloudpanel_ui_sites.sh &&
+            bash -n lib/cloudpanel_ui_ops.sh &&
+            bash -n lib/cloudpanel_ui_admin.sh &&
+            bash -n bin/vfops-auto-backup &&
+            bash -n tests/smoke.sh
+          '
+
+          set +e
+          python3 - <<'PY' >/tmp/p07-PYTHON_COMPILE.log 2>&1
+          from pathlib import Path
+          import py_compile
+
+          roots = [Path("lib"), Path("tests"), Path("scripts")]
+          failed = []
+          for root in roots:
+              if not root.exists():
+                  continue
+              for path in sorted(root.rglob("*.py")):
+                  try:
+                      py_compile.compile(str(path), doraise=True)
+                  except py_compile.PyCompileError as exc:
+                      value = exc.exc_value
+                      failed.append((
+                          path.as_posix(),
+                          getattr(value, "lineno", None),
+                          getattr(value, "offset", None),
+                          getattr(value, "msg", value.__class__.__name__),
+                      ))
+
+          if failed:
+              for path, lineno, offset, message in failed:
+                  safe_message = str(message).replace("\n", " ")[:160]
+                  print(f"P07_PY_COMPILE_FAIL_FILE={path}")
+                  print(f"P07_PY_COMPILE_FAIL_LINE={lineno}")
+                  print(f"P07_PY_COMPILE_FAIL_OFFSET={offset}")
+                  print(f"P07_PY_COMPILE_FAIL_MESSAGE={safe_message}")
+              raise SystemExit(1)
+          raise SystemExit(0)
+          PY
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            sed -i 's/^PYTHON_COMPILE=.*/PYTHON_COMPILE=PASS/' /tmp/p07-machine-receipt.env
+            echo "P07_PYTHON_COMPILE=PASS"
+          else
+            sed -i 's/^PYTHON_COMPILE=.*/PYTHON_COMPILE=FAIL/' /tmp/p07-machine-receipt.env
+            echo "P07_PYTHON_COMPILE=FAIL"
+            grep '^P07_PY_COMPILE_FAIL_' /tmp/p07-PYTHON_COMPILE.log || true
+            echo "P07_PYTHON_COMPILE_LOG_SHA256=$(sha256sum /tmp/p07-PYTHON_COMPILE.log | awk '{print $1}')"
+            exit "$rc"
+          fi
+
+          stage IDENTITY bash -lc '
+            test "$(NO_COLOR=1 bash bin/vfops-user --version)" = "VF Server Ops 0.1.0 RC3" &&
+            test "$(NO_COLOR=1 bash bin/vfops-user --build-id)" = "0.1.0-rc3-guided-init16" &&
+            python3 -m json.tool VF_PROJECT.json >/dev/null &&
+            python3 -m json.tool docs/authority/P07_INTEGRATION_MANIFEST.json >/dev/null &&
+            python3 -m unittest -q tests.test_p07_integration_manifest &&
+            python3 -m json.tool config/storage.example.json >/dev/null &&
+            python3 -m json.tool config/policy.example.json >/dev/null
+          '
+
+          stage SMOKE bash tests/smoke.sh
+
+          set +e
+          unit_fail=0
+          unit_log=/tmp/p07-UNIT_TESTS.log
+          : >"$unit_log"
+          for module in \
+            tests.test_p07_integration_manifest \
+            tests.test_cli_menu \
+            tests.test_menu3_modular \
+            tests.test_ux \
+            tests.test_diagnostics \
+            tests.test_cli_diagnostics \
+            tests.test_secret_scan \
+            tests.test_cloudpanel \
+            tests.test_cloudpanel_site \
+            tests.test_cloudpanel_integration \
+            tests.test_cloudpanel_ui_complete \
+            tests.test_site_lifecycle \
+            tests.test_restore_as \
+            tests.test_restore_as_verified \
+            tests.test_restore_as_real_db_compat \
+            tests.test_restore_as_machine_e2e \
+            tests.test_inventory \
+            tests.test_backup \
+            tests.test_storage \
+            tests.test_restore \
+            tests.test_restore_apply \
+            tests.test_restore_new \
+            tests.test_runtime \
+            tests.test_verify \
+            tests.test_migrate \
+            tests.test_migrate_new \
+            tests.test_transport \
+            tests.test_cli_transport \
+            tests.test_server_migration \
+            tests.test_app_config \
+            tests.test_cutover \
+            tests.test_policy
+          do
+            module_log="/tmp/p07-unit-${module//./_}.log"
+            timeout 240 python3 -m unittest -q "$module" >"$module_log" 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              unit_fail=1
+              echo "P07_UNIT_FAIL_MODULE=$module"
+              grep -E '^(FAIL|ERROR): ' "$module_log" | head -30 || true
+              echo "P07_UNIT_FAIL_LOG_SHA256=$(sha256sum "$module_log" | awk '{print $1}')"
+            fi
+            cat "$module_log" >>"$unit_log"
+          done
+          set -e
+          if [ "$unit_fail" -eq 0 ]; then
+            sed -i 's/^UNIT_TESTS=.*/UNIT_TESTS=PASS/' /tmp/p07-machine-receipt.env
+            echo "P07_UNIT_TESTS=PASS"
+          else
+            sed -i 's/^UNIT_TESTS=.*/UNIT_TESTS=FAIL/' /tmp/p07-machine-receipt.env
+            echo "P07_UNIT_TESTS=FAIL"
+            echo "P07_UNIT_TESTS_LOG_SHA256=$(sha256sum "$unit_log" | awk '{print $1}')"
+            exit 1
+          fi
+
+          stage SECRET_SCAN python3 scripts/secret_scan.py --root .
+
+      - name: Diagnose bounded native-CI failures
+        if: failure()
+        working-directory: source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re
+          import subprocess
+
+          tests = [
+              "tests.test_backup.BackupTest.test_real_cloudpanel_schema_requires_private_recovery_input_and_merges_it_safely",
+              "tests.test_restore_apply.RestoreApplyTest.test_existing_target_is_refused_without_overwrite",
+              "tests.test_migrate.MigrationTest.test_existing_target_blocks_migration_and_preserves_existing_data",
+              "tests.test_server_migration.ServerMigrationAutomationTests.test_target_database_transaction_marker_is_private_and_resumable",
+          ]
+          secret_patterns = [
+              r"PRIVATE-[A-Z0-9_-]+",
+              r"old-pass",
+              r"old_user",
+          ]
+          for test in tests:
+              proc = subprocess.run(
+                  ["python3", "-m", "unittest", "-v", test],
+                  text=True,
+                  capture_output=True,
+                  check=False,
+                  timeout=120,
+              )
+              combined = proc.stdout + "\n" + proc.stderr
+              print(f"P07_DIAG_TEST={test}")
+              print(f"P07_DIAG_EXIT={proc.returncode}")
+
+              line_numbers = re.findall(r'File "[^"]+", line (\d+),', combined)
+              if line_numbers:
+                  print(f"P07_DIAG_LAST_LINE={line_numbers[-1]}")
+
+              candidates = []
+              for line in combined.splitlines():
+                  stripped = line.strip()
+                  if re.match(
+                      r"^(?:AssertionError|[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception))(?::|$)",
+                      stripped,
+                  ):
+                      candidates.append(stripped)
+              if candidates:
+                  message = candidates[-1]
+                  for pattern in secret_patterns:
+                      message = re.sub(pattern, "<REDACTED>", message)
+                  message = message[:240]
+                  print(f"P07_DIAG_EXCEPTION={message}")
+          PY
+
+      - name: Build public-safe receipt
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: 8e694ef64ae8f298c13072cb9d5e4f3f38ac0bad
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          env_path = Path('/tmp/p07-machine-receipt.env')
+          values = {}
+          if env_path.is_file():
+              for raw in env_path.read_text(encoding='utf-8').splitlines():
+                  if '=' in raw:
+                      key, value = raw.split('=', 1)
+                      values[key] = value
+
+          payload = {
+              'schema': 'p07-final-integration-machine-gate/v1',
+              'source_repository': 'llhzx2018/vf-server-ops',
+              'source_sha': os.environ['SOURCE_SHA'],
+              'runner_repository': 'llhzx2018/core-free-runner-public',
+              'private_source_persisted': False,
+              'private_artifact_uploaded': False,
+              'checks': values,
+          }
+          ordered = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode('utf-8')
+          payload['receipt_sha256'] = hashlib.sha256(ordered).hexdigest()
+          out = Path('/tmp/P07_Final Integration_MACHINE_GATE_PUBLIC_RECEIPT.json')
+          out.write_text(
+              json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + '\n',
+              encoding='utf-8',
+          )
+          print(f"P07_MACHINE_GATE_SOURCE_SHA={payload['source_sha']}")
+          print(f"P07_MACHINE_GATE_RECEIPT_SHA256={payload['receipt_sha256']}")
+          PY
+
+      - name: Upload public-safe receipt only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: p07-final-integration-machine-gate-public-receipt-${{ github.run_id }}
+          path: /tmp/P07_Final Integration_MACHINE_GATE_PUBLIC_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 14
