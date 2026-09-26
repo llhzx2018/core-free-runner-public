@@ -16,5 +16,6 @@ PY
 test "$(curl -sS -o /dev/null -w '%{http_code}' -b "$COOKIE" -c "$COOKIE" -H "Origin: $BASE" --data-urlencode "setup_csrf=$TOKEN" --data-urlencode "password=$PASSWORD" --data-urlencode "password_confirm=$PASSWORD" "$BASE/setup.php")" = "303"
 export VF_UX_E2E_BASE_URL="$BASE" VF_UX_E2E_PASSWORD="$PASSWORD" VF_UX_E2E_VERSION="2.5.124"
 cd "$PRODUCT"
+node tests/e2e/p02_ux_task_flow.mjs
 node tests/e2e/p02_v2537_inkstone_shell.mjs
 echo P02_V25124_NOTEBOOK_TARGETED_BROWSER=PASS
