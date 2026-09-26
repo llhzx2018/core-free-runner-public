@@ -120,6 +120,38 @@ max_connections = 40
             self.assertFalse(plan["eligible"])
             self.assertIn("MYSQL_FLAVOR_NOT_SUPPORTED",plan["block_reasons"])
 
+    def test_runtime_cap_only_never_raises_lower_live_mysql_values(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=pathlib.Path(td); snap,rec,_,_=fixture(root)
+            plan=ra.build_plan(snap,rec,root=root)
+            runtime_before={
+                "innodb_buffer_pool_size":128*1024*1024,
+                "max_connections":40,
+                "tmp_table_size":16*1024*1024,
+                "max_heap_table_size":16*1024*1024,
+                "table_open_cache":500,
+            }
+            ra._cap_plan_to_runtime(plan,runtime_before)
+            effective={x["key"]:x["effective_numeric"] for x in plan["mysql_changes"]}
+            self.assertEqual(effective,{
+                "innodb_buffer_pool_size":128,
+                "max_connections":40,
+                "tmp_table_size":16,
+                "max_heap_table_size":16,
+                "table_open_cache":500,
+            })
+
+    def test_state_write_failure_path_can_restore_modified_files(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as bd:
+            root=pathlib.Path(td); snap,rec,mysql,pool=fixture(root)
+            before_mysql=mysql.read_bytes(); before_pool=pool.read_bytes()
+            plan=ra.build_plan(snap,rec,root=root)
+            state=ra.synthetic_apply(plan,root,pathlib.Path(bd)/"backup")
+            self.assertNotEqual(mysql.read_bytes(),before_mysql)
+            ra._restore_files(state)
+            self.assertEqual(mysql.read_bytes(),before_mysql)
+            self.assertEqual(pool.read_bytes(),before_pool)
+
     def test_unused_php_is_suggestion_not_automatic_disable(self):
         with tempfile.TemporaryDirectory() as td:
             root=pathlib.Path(td); snap,rec,_,_=fixture(root)
