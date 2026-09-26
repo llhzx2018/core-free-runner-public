@@ -18,6 +18,29 @@ show_plan() {
   python3 "$ENGINE" plan --mode "$mode"
 }
 
+calibrate_readonly() {
+  require_engine
+  local profile_engine="$SCRIPT_DIR/lib/resource_profile.py"
+  [[ -f "$profile_engine" ]] || { fail 'Resource Profile 引擎不存在。'; return 3; }
+
+  say "${C_BOLD}P07 · Production Read-only Calibration${C_RESET}"
+  say
+  say '本动作只读取当前 CPU / RAM / Swap / Load / PHP / MySQL 与配置。'
+  say '不会 Apply，不会 reload/restart，不会写 PHP/MySQL/Swap/systemd。'
+  say
+  say '===== PROFILE PREVIEW ====='
+  python3 "$profile_engine" preview --mode balanced
+  say
+  say '===== SAFE PLAN ====='
+  python3 "$ENGINE" plan --mode balanced
+  say
+  say '===== CALIBRATION DECISION HINT ====='
+  say '若当前 Production 已按推荐值调优，Safe Plan 应主要显示 KEEP / NO CHANGE。'
+  say '若出现大量 CHANGE、BLOCKED 或识别错误，不应执行 Apply，应先修算法。'
+  say
+  say 'P07_PRODUCTION_CALIBRATION=READ_ONLY_COMPLETE'
+}
+
 apply_balanced() {
   require_root
   require_engine
@@ -74,27 +97,30 @@ menu() {
     screen_clear
     say "${C_BOLD}P07 · Resource Safe Apply${C_RESET}"
     say
-    say '1. 查看 Safe Plan'
-    say '2. 执行 Balanced Safe Apply（仅已校准规格）'
-    say '3. 查看最近 Backup / Receipt'
-    say '4. 回滚指定 Backup'
+    say '1. Production 只读校准（Preview + Safe Plan）'
+    say '2. 查看 Safe Plan'
+    say '3. 执行 Balanced Safe Apply（仅已校准规格）'
+    say '4. 查看最近 Backup / Receipt'
+    say '5. 回滚指定 Backup'
     say '0. 返回'
     say
-    printf '请选择 [0-4]：'
+    printf '请选择 [0-5]：'
     read -r choice || return 0
     case "$choice" in
-      1) show_plan balanced; pause_menu ;;
-      2) apply_balanced; pause_menu ;;
-      3) list_backups; pause_menu ;;
-      4) rollback_state; pause_menu ;;
+      1) calibrate_readonly; pause_menu ;;
+      2) show_plan balanced; pause_menu ;;
+      3) apply_balanced; pause_menu ;;
+      4) list_backups; pause_menu ;;
+      5) rollback_state; pause_menu ;;
       0) return 0 ;;
-      *) warn '无效选择，请输入 0-4。'; sleep 1 ;;
+      *) warn '无效选择，请输入 0-5。'; sleep 1 ;;
     esac
   done
 }
 
 case "${1:-menu}" in
   menu|"") menu ;;
+  calibrate|calibration) calibrate_readonly ;;
   plan) shift; mode="balanced"; [[ "${1:-}" == "--mode" ]] && mode="${2:-balanced}"; show_plan "$mode" ;;
   apply) apply_balanced ;;
   backups|receipts) list_backups ;;
@@ -105,6 +131,7 @@ P07 · Resource Safe Apply
 
 Commands:
   resource-apply.sh menu
+  resource-apply.sh calibrate
   resource-apply.sh plan [--mode conservative|balanced|performance]
   resource-apply.sh apply
   resource-apply.sh backups
