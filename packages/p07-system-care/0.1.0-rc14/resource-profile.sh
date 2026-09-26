@@ -24,14 +24,15 @@ menu() {
     say "${C_BOLD}P07 · 资源优化 / 配置推荐${C_RESET}"
     say
     say '自动识别 CPU / RAM / Swap / Load / PHP Pool / Worker RSS / MySQL。'
-    say '这里只生成建议，不会修改配置或重启服务。'
+    say '1-5 仅生成建议，不修改配置或重启服务。'
+    say '第 6 项包含高风险 Safe Apply / Rollback；仅已校准 Profile 可执行，并要求显式确认。'
     say
     say '1. 平衡方案（默认）'
     say '2. 保守方案（稳定优先）'
     say '3. 性能方案（并发优先）'
     say '4. 查看不同规格 Profile 矩阵'
     say '5. 输出机器 JSON'
-    say '6. Safe Plan / Apply / Rollback'
+    say '6. Safe Plan / Apply / Rollback（会写配置，需确认）'
     say '0. 返回'
     say
     printf '请选择 [0-6]：'
@@ -102,9 +103,10 @@ Commands:
   resource-profile.sh rollback [backup_dir]
 
 Boundary:
-  READ_ONLY_RECOMMENDATION
-  No PHP/MySQL/Swap/systemd writes.
-  No service restart.
+  preview / matrix / json / plan = READ_ONLY
+  apply / rollback = PRODUCTION_HIGH_RISK_EXPLICIT_CONFIRMATION
+  Safe Apply only supports production-calibrated profiles and is CAP-ONLY.
+  No automatic MySQL restart, Swap mutation, or unused-PHP disable.
 HELP
     ;;
   *) fail "未知命令: $1"; exit 2 ;;
