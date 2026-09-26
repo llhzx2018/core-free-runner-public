@@ -85,7 +85,7 @@ case "${1:-menu}" in
     run_profile json "$mode"
     ;;
   safe) shift; exec bash "$SCRIPT_DIR/resource-apply.sh" menu "$@" ;;
-  plan|apply|backups|receipts|rollback)
+  calibrate|calibration|plan|apply|backups|receipts|rollback)
     cmd="$1"; shift; exec bash "$SCRIPT_DIR/resource-apply.sh" "$cmd" "$@"
     ;;
   -h|--help)
@@ -97,6 +97,7 @@ Commands:
   resource-profile.sh preview [--mode conservative|balanced|performance]
   resource-profile.sh matrix  [--mode conservative|balanced|performance]
   resource-profile.sh json    [--mode conservative|balanced|performance]
+  resource-profile.sh calibrate
   resource-profile.sh plan
   resource-profile.sh apply
   resource-profile.sh backups
