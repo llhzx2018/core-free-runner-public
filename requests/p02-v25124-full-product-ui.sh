@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# V2.5.124 full-product gate exact-source trigger
 set -Eeuo pipefail
 
 ROOT="$PWD"
