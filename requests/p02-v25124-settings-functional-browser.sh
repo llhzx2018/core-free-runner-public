@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# V2.5.124 browser gate trigger
 set -Eeuo pipefail
 
 ROOT="$PWD"
