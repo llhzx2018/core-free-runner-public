@@ -36,11 +36,19 @@ def safe_rel(rel: str) -> str:
 
 def collect(root: Path) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
+    forbidden_parts = {"private", "private_data", "PRIVATE_DATA", "backups", "backup", "sessions", "tokens", "staging"}
+    forbidden_suffixes = (".sqlite", ".sqlite3", ".db", ".log", ".env")
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.is_symlink():
             continue
         rel = p.relative_to(root).as_posix()
         safe_rel(rel)
+        parts = PurePosixPath(rel).parts
+        low = rel.lower()
+        if any(part in forbidden_parts or part.startswith(".vfnav-data-") for part in parts):
+            continue
+        if low.endswith(forbidden_suffixes):
+            continue
         out[rel] = p.read_bytes()
     return out
 
