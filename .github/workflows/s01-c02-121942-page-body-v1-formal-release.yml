@@ -1,0 +1,163 @@
+name: S01 OPS 1.21.942 Page Body V1 Phase4 Formal Release
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/s01-c02-121942-page-body-v1-formal-release.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release:
+    if: github.head_ref == 'task/s01-page-body-v1-phase4-formal-release-20260926'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      REPO: llhzx2018/vf-tools-ops
+      SHA: f5844e3fddca106071c00f55b0517e22835a9565
+      VERSION: 1.21.942
+      TAG: v1.21.942
+      ASSET: vf-tools-ops_V1.21.942.zip
+      PREVIOUS_TAG: v1.21.941
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.941.zip
+    steps:
+      - name: Credential presence
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+
+      - name: Checkout exact OPS main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: f5844e3fddca106071c00f55b0517e22835a9565
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          path: ops
+          persist-credentials: false
+
+      - name: Exact source and Page Body contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$SHA"
+          test "$(tr -d '\r\n' < ops/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.21.942' ops/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '1.21.942'" ops/vf-ops.php
+          grep -Fq "VF_OPS_ROUND', 'S01-PAGE-BODY-V1-PHASE4-R54'" ops/vf-ops.php
+          for t in ops/tests/s01-c02-page-body-system-v1-*.php; do php -l "$t" >/dev/null; php "$t"; done
+
+      - name: PHP syntax and security fence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find ops -type f -name '*.php' -not -path 'ops/.git/*' -print0 | sort -z)
+          test "$(find ops -type l -not -path 'ops/.git/*' | wc -l)" = "0"
+          ! find ops -type f -not -path 'ops/.git/*' | grep -E '/(?:\.env|wp-config\.php)$'
+          ! find ops -type f -not -path 'ops/.git/*' | grep -Ei '\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$'
+
+      - name: Build deterministic OPS package and Runtime Authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage1 stage2 dist previous
+          mkdir -p stage1/vf-tools-ops stage2/vf-tools-ops dist previous
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, shutil
+          src=Path('ops')
+          excluded_dirs={'.git','.github','tests','docs','evidence','private','tmp','temp','cache','logs'}
+          excluded_files={'AGENTS.md','README.md','CHANGELOG.md','.gitignore','.gitattributes','.editorconfig'}
+          for root_name in ('stage1/vf-tools-ops','stage2/vf-tools-ops'):
+              root=Path(root_name)
+              for p in src.rglob('*'):
+                  rel=p.relative_to(src)
+                  if any(part in excluded_dirs for part in rel.parts): continue
+                  if p.is_dir(): continue
+                  if rel.as_posix() in excluded_files: continue
+                  dst=root/rel
+                  dst.parent.mkdir(parents=True,exist_ok=True)
+                  shutil.copy2(p,dst)
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('stage1/vf-tools-ops')
+          rows=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canonical=b''.join(rel.encode()+b'\0'+sha.encode()+b'\n' for rel,sha in rows)
+          Path('/tmp/count').write_text(str(len(rows)))
+          Path('/tmp/fp').write_text(hashlib.sha256(canonical).hexdigest())
+          PY
+          test -f stage1/vf-tools-ops/vf-ops.php
+          test -f stage1/vf-tools-ops/VERSION
+          (cd stage1 && zip -X -q -r "../dist/$ASSET" vf-tools-ops)
+          (cd stage2 && zip -X -q -r "../dist/rebuild-$ASSET" vf-tools-ops)
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-tools-ops"
+          unzip -p "dist/$ASSET" vf-tools-ops/vf-ops.php | grep -Fq 'Version: 1.21.942'
+          ! unzip -Z1 "dist/$ASSET" | grep -E '(^|/)(\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)'
+          sha256sum "dist/$ASSET" | awk '{print $1}' > /tmp/sha
+          stat -c '%s' "dist/$ASSET" > /tmp/bytes
+
+      - name: Previous release rollback source
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download "$PREVIOUS_TAG" --repo "$REPO" --pattern "$PREVIOUS_ASSET" --dir previous
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          unzip -p "previous/$PREVIOUS_ASSET" vf-tools-ops/vf-ops.php | grep -Fq 'Version: 1.21.941'
+
+      - name: Publish and remote-readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            j="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          else
+            cat > /tmp/notes.md <<EOF
+          # VF Tools Ops V1.21.942
+          S01 Page Body System V1 · Phase 4 macro visual candidate.
+          - Shared A1-A7 page-body macro system across all 14 canonical OPS OWNER surfaces.
+          - Phase 3 responsive/accessibility/legacy-residue closure included.
+          - Frozen Shell / Header / Header Menu IA unchanged.
+          - Routes, state, schema, permissions and updater semantics unchanged.
+          - OWNER Production macro visual acceptance remains required before page-by-page fine polish.
+          EOF
+            gh release create "$TAG" "dist/$ASSET#VF Tools Ops $VERSION" --repo "$REPO" --target "$SHA" --title "VF Tools Ops V$VERSION" --notes-file /tmp/notes.md
+            j="$(gh api "repos/$REPO/releases/tags/$TAG")"
+          fi
+          aid="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.id' <<<"$j")"
+          rbytes="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.size' <<<"$j")"
+          rdigest="$(jq -r --arg n "$ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$j")"
+          lbytes="$(cat /tmp/bytes)"; lsha="$(cat /tmp/sha)"
+          test "$rbytes" = "$lbytes"
+          test "$rdigest" = "sha256:$lsha"
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SHA"
+          mkdir -p /tmp/readback
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir /tmp/readback --clobber
+          test "$(sha256sum "/tmp/readback/$ASSET" | awk '{print $1}')" = "$lsha"
+          cmp "dist/$ASSET" "/tmp/readback/$ASSET"
+          cat > /tmp/receipt.json <<EOF
+          {"component_id":"S01-C02","version":"$VERSION","source_sha":"$SHA","tag":"$TAG","asset":"$ASSET","asset_id":$aid,"asset_bytes":$lbytes,"asset_sha256":"$lsha","runtime_files":$(cat /tmp/count),"runtime_fingerprint":"$(cat /tmp/fp)","schema_from":"6.0.0","schema_to":"6.0.0","remote_readback":"PASS"}
+          EOF
+
+      - name: Upload receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-121942-formal-release-${{ github.run_id }}
+          path: /tmp/receipt.json
+          if-no-files-found: error
+          retention-days: 30
