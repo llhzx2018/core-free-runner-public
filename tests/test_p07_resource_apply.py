@@ -141,6 +141,35 @@ max_connections = 40
                 "table_open_cache":500,
             })
 
+    def test_initial_state_write_failure_restores_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as bd:
+            root=pathlib.Path(td); snap,rec,mysql,pool=fixture(root)
+            before_mysql=mysql.read_bytes(); before_pool=pool.read_bytes()
+            plan=ra.build_plan(snap,rec,root=root)
+            file_state=ra.synthetic_apply(plan,root,pathlib.Path(bd)/"backup")
+            original=ra._write_state
+            try:
+                def fail_write(_path,_state):
+                    raise OSError("synthetic state write failure")
+                ra._write_state=fail_write
+                with self.assertRaises(OSError):
+                    ra._write_initial_state_or_restore(pathlib.Path(bd)/"backup"/"state.json",{"status":"BACKED_UP"},file_state)
+            finally:
+                ra._write_state=original
+            self.assertEqual(mysql.read_bytes(),before_mysql)
+            self.assertEqual(pool.read_bytes(),before_pool)
+
+    def test_synthetic_rollback_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as bd:
+            root=pathlib.Path(td); snap,rec,mysql,pool=fixture(root)
+            before_mysql=mysql.read_bytes(); before_pool=pool.read_bytes()
+            plan=ra.build_plan(snap,rec,root=root)
+            state=ra.synthetic_apply(plan,root,pathlib.Path(bd)/"backup")
+            ra.synthetic_rollback(state)
+            ra.synthetic_rollback(state)
+            self.assertEqual(mysql.read_bytes(),before_mysql)
+            self.assertEqual(pool.read_bytes(),before_pool)
+
     def test_state_write_failure_path_can_restore_modified_files(self):
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as bd:
             root=pathlib.Path(td); snap,rec,mysql,pool=fixture(root)
