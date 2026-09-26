@@ -278,7 +278,7 @@ def recommend(snapshot: Mapping[str, Any], mode: str = "balanced") -> Dict[str, 
         notes.append("MYSQL_RSS_HIGH")
     if int(snapshot.get("swap_mib") or 0) < recommended_swap // 2 and memory_mib <= 2048:
         notes.append("SWAP_BELOW_RECOMMENDED")
-    if bool(snapshot.get("cloudpanel_present")) and memory_mib < CLOUDPANEL_MIN_RAM_MIB:
+    if bool(snapshot.get("cloudpanel_present")) and band == "1G":
         notes.append("BELOW_CLOUDPANEL_MINIMUM_RAM")
     if cpu_count == 1:
         notes.append("SINGLE_CORE_CPU_CONTENTION_GUARD")
