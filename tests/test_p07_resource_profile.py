@@ -5,8 +5,12 @@ import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc14")
-MODULE = ROOT / "packages" / "p07-system-care" / VERSION / "lib" / "resource_profile.py"
+VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc15")
+LIB = ROOT / "packages" / "p07-system-care" / VERSION / "lib"
+import sys
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
+MODULE = LIB / "resource_profile.py"
 spec = importlib.util.spec_from_file_location("p07_resource_profile", MODULE)
 rp = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -37,6 +41,8 @@ class ResourceProfileTests(unittest.TestCase):
         self.assertEqual(r["php"]["hot_pool_max_children"], 2)
         self.assertEqual(r["php"]["unused_active_versions"], ["8.4"])
         self.assertEqual(r["evidence"]["production_calibration"], "1C_2G_BALANCED_REFERENCE")
+        self.assertEqual(r["calibration"]["state"], "PRODUCTION_VERIFIED")
+        self.assertTrue(r["calibration"]["auto_apply"])
 
     def test_1g_cloudpanel_is_explicitly_below_vendor_minimum(self):
         r = rp.recommend(snap(1, 1024, cloudpanel=True), "balanced")
@@ -53,11 +59,19 @@ class ResourceProfileTests(unittest.TestCase):
         r4 = rp.recommend(snap(2, 4096, swap=2048, rss=100), "balanced")
         self.assertEqual(r4["mysql"]["innodb_buffer_pool_size_mib"], 512)
         self.assertEqual(r4["mysql"]["max_connections"], 120)
+        self.assertEqual(r4["mysql"]["tmp_table_size_mib"], 48)
+        self.assertEqual(r4["mysql"]["max_heap_table_size_mib"], 48)
+        self.assertEqual(r4["mysql"]["table_open_cache"], 2000)
         self.assertEqual(r4["php"]["hot_pool_max_children"], 4)
+        self.assertEqual(r4["php"]["low_traffic_pool_max_children"], 2)
+        self.assertEqual(r4["swap"]["recommended_mib"], 2048)
+        self.assertEqual(r4["calibration"]["state"], "CANDIDATE")
+        self.assertFalse(r4["calibration"]["auto_apply"])
         r8 = rp.recommend(snap(4, 8192, swap=1024, rss=100), "balanced")
         self.assertEqual(r8["mysql"]["innodb_buffer_pool_size_mib"], 1024)
         self.assertEqual(r8["mysql"]["max_connections"], 200)
         self.assertEqual(r8["php"]["hot_pool_max_children"], 8)
+        self.assertEqual(r8["calibration"]["state"], "PREVIEW_ONLY")
 
     def test_modes_are_ordered(self):
         s = snap(2, 4096, rss=110)
@@ -88,6 +102,21 @@ class ResourceProfileTests(unittest.TestCase):
         self.assertEqual(len(rows), 12)
         cells = {(r["hardware"]["memory_mib"], r["hardware"]["cpu_count"]) for r in rows}
         self.assertEqual(cells, {(m, c) for m in (1024, 2048, 4096, 8192) for c in (1, 2, 4)})
+
+
+    def test_2c4g_candidate_worker_rss_stress_keeps_cpu_ceiling_and_reduces_aggregate(self):
+        rows = [rp.recommend(snap(2, 4096, swap=2048, rss=rss, cloudpanel=True), "balanced") for rss in (80, 132, 200, 256)]
+        self.assertTrue(all(r["calibration"]["state"] == "CANDIDATE" for r in rows))
+        self.assertTrue(all(r["php"]["hot_pool_max_children"] == 4 for r in rows))
+        budgets = [r["php"]["aggregate_children_budget"] for r in rows]
+        self.assertEqual(budgets, sorted(budgets, reverse=True))
+        self.assertGreater(budgets[0], budgets[-1])
+
+    def test_matrix_surfaces_registered_calibration_states(self):
+        text = rp.render_matrix("balanced")
+        self.assertIn("PRODUCTION_VERIFIED", text)
+        self.assertIn("CANDIDATE", text)
+        self.assertIn("PREVIEW_ONLY", text)
 
     def test_engine_is_read_only_contract(self):
         r = rp.recommend(snap(1, 2048), "balanced")
