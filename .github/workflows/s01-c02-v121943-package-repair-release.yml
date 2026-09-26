@@ -1,0 +1,289 @@
+name: S01-C02 V1.21.943 Package Repair Release
+
+on:
+  push:
+    branches:
+      - task/s01-c02-v121943-release-runner
+    paths:
+      - .github/workflows/s01-c02-v121943-package-repair-release.yml
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_COMMIT: 7c90688c5fe02d60c3d1b271d112442343533c8d
+  TARGET_TREE: c3024e7365364928d965d3a3b047794d0ae3cb89
+  VERSION: 1.21.943
+  TAG: v1.21.943
+  RELEASE_NAME: VF Tools Ops V1.21.943
+  ASSET_NAME: vf-tools-ops_V1.21.943.zip
+  CORE_REPOSITORY: llhzx2018/core-updates
+  CORE_MANIFEST_PATH: projects/S01-C02.json
+
+jobs:
+  release:
+    name: Exact source package repair + release + distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Credential presence gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo "CREDENTIAL_PRESENCE=PASS"
+
+      - name: Fetch exact private source and verify identity
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$TARGET_REPOSITORY/commits/$TARGET_COMMIT"             -o /tmp/commit.json
+          test "$(jq -r '.sha' /tmp/commit.json)" = "$TARGET_COMMIT"
+          test "$(jq -r '.commit.tree.sha' /tmp/commit.json)" = "$TARGET_TREE"
+
+          curl -fsSL -L             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$TARGET_REPOSITORY/tarball/$TARGET_COMMIT"             -o /tmp/source.tar.gz
+          mkdir -p /tmp/source
+          tar -xzf /tmp/source.tar.gz -C /tmp/source
+          SOURCE_DIR="$(find /tmp/source -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$SOURCE_DIR"
+          test "$(tr -d '\r\n' < "$SOURCE_DIR/VERSION")" = "$VERSION"
+          grep -Eq "^\\s*\\*\\s*Version:\\s*$VERSION\\s*$" "$SOURCE_DIR/vf-ops.php"
+          test -f "$SOURCE_DIR/.github/release/build-ops-package.py"
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          echo "EXACT_SOURCE=PASS"
+
+      - name: Build deterministic runtime-only package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 "$SOURCE_DIR/.github/release/build-ops-package.py"             --source "$SOURCE_DIR"             --output "/tmp/$ASSET_NAME" > /tmp/package-meta.json
+          jq -e '.version=="1.21.943"' /tmp/package-meta.json >/dev/null
+          jq -e '.package_slug=="vf-ops"' /tmp/package-meta.json >/dev/null
+          jq -e '.plugin_file=="vf-ops/vf-ops.php"' /tmp/package-meta.json >/dev/null
+          jq -e '.root_contract=="PASS_SINGLE_VF_OPS_ROOT"' /tmp/package-meta.json >/dev/null
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          python3 - <<'PY'
+          import zipfile, os
+          p='/tmp/'+os.environ['ASSET_NAME']
+          with zipfile.ZipFile(p) as z:
+              names=[n for n in z.namelist() if not n.endswith('/')]
+          if not names:
+              raise SystemExit('empty package')
+          bad=[n for n in names if not n.startswith('vf-ops/')]
+          if bad:
+              raise SystemExit('unexpected root: '+bad[0])
+          if any(n.startswith('vf-ops/vf-ops/') for n in names):
+              raise SystemExit('double nested root')
+          if 'vf-ops/vf-ops.php' not in names:
+              raise SystemExit('plugin main missing')
+          print('ZIP_ROOT_CONTRACT=PASS')
+          PY
+          cat /tmp/package-meta.json
+
+      - name: Formal release absence gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG_CODE="$(curl -sS -o /tmp/tag-check.json -w '%{http_code}'             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$TARGET_REPOSITORY/git/ref/tags/$TAG")"
+          RELEASE_CODE="$(curl -sS -o /tmp/release-check.json -w '%{http_code}'             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$TARGET_REPOSITORY/releases/tags/$TAG")"
+          test "$TAG_CODE" = "404"
+          test "$RELEASE_CODE" = "404"
+          echo "RELEASE_ABSENCE=PASS"
+
+      - name: Create exact tag and formal release
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg ref "refs/tags/$TAG" --arg sha "$TARGET_COMMIT"             '{ref:$ref,sha:$sha}' > /tmp/tag-create.json
+          curl -fsSL -X POST             -H "Authorization: Bearer $WRITE_TOKEN"             -H "Accept: application/vnd.github+json"             -H "Content-Type: application/json"             "https://api.github.com/repos/$TARGET_REPOSITORY/git/refs"             --data-binary @/tmp/tag-create.json > /tmp/tag-created.json
+          test "$(jq -r '.object.sha' /tmp/tag-created.json)" = "$TARGET_COMMIT"
+
+          cat > /tmp/release-body.md <<'EOF'
+          S01-C02 · VF Tools Ops · V1.21.943
+
+          Package repair release after Production correctly blocked V1.21.942 with vf_update_zip_slug.
+
+          - Exact source: 7c90688c5fe02d60c3d1b271d112442343533c8d
+          - Package root: vf-ops/
+          - Physical locator: vf-ops/vf-ops.php
+          - Page Body System V1 unchanged
+          - Shell / Header / Header Menu IA unchanged and frozen
+          - Schema / routes / permissions / business state unchanged
+          - Production upgrade is OWNER manual and is not executed by this release
+          EOF
+          jq -n             --arg tag "$TAG"             --arg name "$RELEASE_NAME"             --arg target "$TARGET_COMMIT"             --rawfile body /tmp/release-body.md             '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:false,prerelease:false}'             > /tmp/release-create.json
+          curl -fsSL -X POST             -H "Authorization: Bearer $WRITE_TOKEN"             -H "Accept: application/vnd.github+json"             -H "Content-Type: application/json"             "https://api.github.com/repos/$TARGET_REPOSITORY/releases"             --data-binary @/tmp/release-create.json > /tmp/release-created.json
+          RID="$(jq -r '.id' /tmp/release-created.json)"
+          test -n "$RID"
+          test "$RID" != "null"
+          echo "RELEASE_ID=$RID" >> "$GITHUB_ENV"
+          echo "FORMAL_RELEASE_CREATED=PASS"
+
+      - name: Upload exact package asset
+        shell: bash
+        env:
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL -X POST             -H "Authorization: Bearer $WRITE_TOKEN"             -H "Content-Type: application/zip"             "https://uploads.github.com/repos/$TARGET_REPOSITORY/releases/$RELEASE_ID/assets?name=$ASSET_NAME"             --data-binary "@/tmp/$ASSET_NAME" > /tmp/asset-created.json
+          AID="$(jq -r '.id' /tmp/asset-created.json)"
+          test -n "$AID"
+          test "$AID" != "null"
+          test "$(jq -r '.name' /tmp/asset-created.json)" = "$ASSET_NAME"
+          EXPECTED_BYTES="$(jq -r '.asset_bytes' /tmp/package-meta.json)"
+          test "$(jq -r '.size' /tmp/asset-created.json)" = "$EXPECTED_BYTES"
+          echo "ASSET_ID=$AID" >> "$GITHUB_ENV"
+          echo "ASSET_UPLOAD=PASS"
+
+      - name: Remote release and package readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$TARGET_REPOSITORY/releases/tags/$TAG"             -o /tmp/release-readback.json
+          test "$(jq -r '.id' /tmp/release-readback.json)" = "$RELEASE_ID"
+          test "$(jq -r '.tag_name' /tmp/release-readback.json)" = "$TAG"
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' /tmp/release-readback.json)"
+          test "$AID" = "$ASSET_ID"
+
+          curl -fsSL -L             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/octet-stream"             "https://api.github.com/repos/$TARGET_REPOSITORY/releases/assets/$ASSET_ID"             -o "/tmp/remote-$ASSET_NAME"
+
+          LOCAL_SHA="$(jq -r '.asset_sha256' /tmp/package-meta.json)"
+          LOCAL_BYTES="$(jq -r '.asset_bytes' /tmp/package-meta.json)"
+          test "$(stat -c %s "/tmp/remote-$ASSET_NAME")" = "$LOCAL_BYTES"
+          test "$(sha256sum "/tmp/remote-$ASSET_NAME" | awk '{print $1}')" = "$LOCAL_SHA"
+
+          python3 - <<'PY'
+          import hashlib, json, os, zipfile
+          meta=json.load(open('/tmp/package-meta.json'))
+          p='/tmp/remote-'+os.environ['ASSET_NAME']
+          files={}
+          with zipfile.ZipFile(p) as z:
+              for n in z.namelist():
+                  if n.endswith('/'):
+                      continue
+                  if not n.startswith('vf-ops/'):
+                      raise SystemExit('bad remote root: '+n)
+                  rel=n[len('vf-ops/'):]
+                  if rel:
+                      files[rel]=z.read(n)
+          if len(files)!=int(meta['runtime_files']):
+              raise SystemExit('remote runtime file count mismatch')
+          h=hashlib.sha256()
+          for rel,data in sorted(files.items()):
+              h.update(rel.encode())
+              h.update(b'\0')
+              h.update(hashlib.sha256(data).hexdigest().encode())
+              h.update(b'\n')
+          if h.hexdigest()!=meta['runtime_fingerprint']:
+              raise SystemExit('remote runtime fingerprint mismatch')
+          print('REMOTE_PACKAGE_READBACK=PASS')
+          PY
+
+      - name: Publish core-updates S01-C02 distribution
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/$CORE_REPOSITORY/contents/$CORE_MANIFEST_PATH?ref=main"             -o /tmp/core-current.json
+          MANIFEST_SHA="$(jq -r '.sha' /tmp/core-current.json)"
+          jq -r '.content' /tmp/core-current.json | tr -d '\n' | base64 -d > /tmp/manifest-old.json
+          test "$(jq -r '.target_version' /tmp/manifest-old.json)" = "1.21.942"
+          test "$(jq -r '.component_id' /tmp/manifest-old.json)" = "S01-C02"
+          test "$(jq -r '.package_slug' /tmp/manifest-old.json)" = "vf-ops"
+
+          ASSET_BYTES="$(jq -r '.asset_bytes' /tmp/package-meta.json)"
+          ASSET_SHA="$(jq -r '.asset_sha256' /tmp/package-meta.json)"
+          RUNTIME_FILES="$(jq -r '.runtime_files' /tmp/package-meta.json)"
+          RUNTIME_FP="$(jq -r '.runtime_fingerprint' /tmp/package-meta.json)"
+          RELEASED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          NOTES="S01-C02 1.21.943 PACKAGE ROOT REPAIR. Exact source $TARGET_COMMIT. Formal Release repairs the invalid 1.21.942 asset root and enforces a single vf-ops/ top-level directory. Page Body System V1 and frozen Shell/Header/Header Menu IA unchanged. Runtime Authority: $RUNTIME_FILES files / $RUNTIME_FP. Production remains OWNER manual."
+
+          jq             --arg version "$VERSION"             --arg tag "$TAG"             --arg asset "$ASSET_NAME"             --argjson bytes "$ASSET_BYTES"             --arg sha "$ASSET_SHA"             --argjson files "$RUNTIME_FILES"             --arg fp "$RUNTIME_FP"             --arg released "$RELEASED_AT"             --arg notes "$NOTES"             '
+            .target_version=$version
+            | .from_versions=(if (.from_versions|index("1.21.942")) then .from_versions else (.from_versions+["1.21.942"]) end)
+            | .release_tag=$tag
+            | .asset_name=$asset
+            | .asset_bytes=$bytes
+            | .asset_sha256=$sha
+            | .runtime_files=$files
+            | .runtime_fingerprint=$fp
+            | .runtime_file_count=$files
+            | .runtime_fingerprint_sha256=$fp
+            | .released_at=$released
+            | .notes=$notes
+            ' /tmp/manifest-old.json > /tmp/manifest-new.json
+
+          CONTENT="$(base64 -w0 /tmp/manifest-new.json)"
+          jq -n             --arg message "release(S01-C02): distribute VF Tools Ops 1.21.943 package repair"             --arg content "$CONTENT"             --arg sha "$MANIFEST_SHA"             '{message:$message,content:$content,sha:$sha,branch:"main"}'             > /tmp/core-update-request.json
+
+          curl -fsSL -X PUT             -H "Authorization: Bearer $WRITE_TOKEN"             -H "Accept: application/vnd.github+json"             -H "Content-Type: application/json"             "https://api.github.com/repos/$CORE_REPOSITORY/contents/$CORE_MANIFEST_PATH"             --data-binary @/tmp/core-update-request.json > /tmp/core-updated.json
+          CORE_COMMIT="$(jq -r '.commit.sha' /tmp/core-updated.json)"
+          test -n "$CORE_COMMIT"
+          test "$CORE_COMMIT" != "null"
+          echo "CORE_COMMIT=$CORE_COMMIT" >> "$GITHUB_ENV"
+          echo "DISTRIBUTION_PUBLISH=PASS"
+
+      - name: Distribution remote readback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL             -H "Authorization: Bearer $READ_TOKEN"             -H "Accept: application/vnd.github.raw+json"             "https://api.github.com/repos/$CORE_REPOSITORY/contents/$CORE_MANIFEST_PATH?ref=main"             -o /tmp/manifest-readback.json
+          test "$(jq -r '.target_version' /tmp/manifest-readback.json)" = "$VERSION"
+          test "$(jq -r '.release_tag' /tmp/manifest-readback.json)" = "$TAG"
+          test "$(jq -r '.asset_name' /tmp/manifest-readback.json)" = "$ASSET_NAME"
+          test "$(jq -r '.package_slug' /tmp/manifest-readback.json)" = "vf-ops"
+          test "$(jq -r '.asset_sha256' /tmp/manifest-readback.json)" = "$(jq -r '.asset_sha256' /tmp/package-meta.json)"
+          test "$(jq -r '.runtime_fingerprint' /tmp/manifest-readback.json)" = "$(jq -r '.runtime_fingerprint' /tmp/package-meta.json)"
+          jq -e '.from_versions|index("1.21.941")' /tmp/manifest-readback.json >/dev/null
+          echo "DISTRIBUTION_READBACK=PASS"
+
+      - name: Write public-safe release evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n             --arg component "S01-C02"             --arg version "$VERSION"             --arg source "$TARGET_COMMIT"             --arg tree "$TARGET_TREE"             --arg tag "$TAG"             --argjson release_id "$RELEASE_ID"             --argjson asset_id "$ASSET_ID"             --arg asset "$ASSET_NAME"             --argjson bytes "$(jq -r '.asset_bytes' /tmp/package-meta.json)"             --arg sha "$(jq -r '.asset_sha256' /tmp/package-meta.json)"             --argjson files "$(jq -r '.runtime_files' /tmp/package-meta.json)"             --arg fp "$(jq -r '.runtime_fingerprint' /tmp/package-meta.json)"             --arg core_commit "$CORE_COMMIT"             '{
+              component:$component,
+              version:$version,
+              exact_source:$source,
+              exact_tree:$tree,
+              tag:$tag,
+              release_id:$release_id,
+              asset_id:$asset_id,
+              asset_name:$asset,
+              asset_bytes:$bytes,
+              asset_sha256:$sha,
+              runtime_files:$files,
+              runtime_fingerprint:$fp,
+              zip_root:"vf-ops/",
+              package_root_gate:"PASS",
+              remote_release_readback:"PASS",
+              distribution_readback:"PASS",
+              production:"NOT_EXECUTED_OWNER_MANUAL",
+              core_updates_commit:$core_commit
+            }' > /tmp/s01-c02-v121943-release-evidence.json
+          cat /tmp/s01-c02-v121943-release-evidence.json
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.943-package-repair-release-evidence
+          path: /tmp/s01-c02-v121943-release-evidence.json
+          retention-days: 30
