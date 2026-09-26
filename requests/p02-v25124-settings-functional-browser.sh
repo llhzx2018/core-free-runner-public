@@ -42,10 +42,13 @@ test "$STATUS" = "303"
 
 export VF_UX_E2E_BASE_URL="$BASE"
 export VF_UX_E2E_PASSWORD="$PASSWORD"
+export VF_DEBUG_SITE="$SITE"
 
 cd "$PRODUCT"
 node tests/e2e/p02_v25121_settings_ia_functional_closure.mjs
+php -r 'require getenv("VF_DEBUG_SITE")."/app/bootstrap.php"; $r=VfLibraryCommonBaseline::report(vftb_db()); echo "AFTER_25121_BASELINE=".$r["overall"]." ".json_encode(array_values(array_filter($r["rows"],fn($x)=>$x["result"]!=="PASS"))).PHP_EOL;'
 node tests/e2e/p02_v25122_settings_production_closure.mjs
+php -r 'require getenv("VF_DEBUG_SITE")."/app/bootstrap.php"; $r=VfLibraryCommonBaseline::report(vftb_db()); echo "AFTER_25122_BASELINE=".$r["overall"]." ".json_encode(array_values(array_filter($r["rows"],fn($x)=>$x["result"]!=="PASS"))).PHP_EOL;'
 node tests/e2e/p02_v25123_runtime_health_worker_closure.mjs
 node tests/e2e/p02_v25124_settings_functional_content_closure.mjs
 
