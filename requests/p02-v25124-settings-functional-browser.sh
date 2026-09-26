@@ -45,6 +45,26 @@ export VF_UX_E2E_PASSWORD="$PASSWORD"
 cd "$PRODUCT"
 node tests/e2e/p02_v25121_settings_ia_functional_closure.mjs
 node tests/e2e/p02_v25122_settings_production_closure.mjs
+cat > .p02-v25124-baseline-diag.mjs <<'JS'
+import { chromium } from 'playwright';
+const base=process.env.VF_UX_E2E_BASE_URL,password=process.env.VF_UX_E2E_PASSWORD;
+const browser=await chromium.launch({headless:true});const context=await browser.newContext({viewport:{width:1365,height:700}});const page=await context.newPage();
+await page.goto(base+'/',{waitUntil:'networkidle'});
+if(await page.locator('[data-open-login]').count())await page.locator('[data-open-login]').first().click();else await page.evaluate(()=>openLogin());
+await page.waitForSelector('#loginForm input[name="password"]');await page.locator('#loginForm input[name="password"]').fill(password);await page.locator('#loginSubmit').click();
+await page.waitForFunction(async()=>{const j=await (await fetch('/api.php?action=session',{cache:'no-store'})).json();return Boolean(j?.ok&&j?.site?.auth);});
+const apiBefore=await page.evaluate(async()=>await (await fetch('/api.php?action=system_overview',{cache:'no-store'})).json());
+console.log('BROWSER_API_BASELINE_BEFORE_OPEN='+JSON.stringify({overall:apiBefore?.system?.baseline?.overall,counts:apiBefore?.system?.baseline?.counts,issues:(apiBefore?.system?.baseline?.rows||[]).filter(x=>x.result!=='PASS')}));
+await page.evaluate(()=>openSettings('system'));
+await page.waitForSelector('#systemOverviewInline');
+await page.waitForFunction(()=>Array.from(document.querySelectorAll('[data-system-summary]')).every(node=>!['读取中','读取失败'].includes(node.textContent.trim())));
+console.log('BROWSER_UI_BASELINE='+JSON.stringify({baseline:document.querySelector('[data-system-summary="baseline"]')?.textContent,health:document.querySelector('[data-system-summary="health"]')?.textContent}));
+const apiAfter=await page.evaluate(async()=>await (await fetch('/api.php?action=system_overview',{cache:'no-store'})).json());
+console.log('BROWSER_API_BASELINE_AFTER_OPEN='+JSON.stringify({overall:apiAfter?.system?.baseline?.overall,counts:apiAfter?.system?.baseline?.counts,issues:(apiAfter?.system?.baseline?.rows||[]).filter(x=>x.result!=='PASS')}));
+await browser.close();
+JS
+node .p02-v25124-baseline-diag.mjs
+rm -f .p02-v25124-baseline-diag.mjs
 node tests/e2e/p02_v25123_runtime_health_worker_closure.mjs
 node tests/e2e/p02_v25124_settings_functional_content_closure.mjs
 
