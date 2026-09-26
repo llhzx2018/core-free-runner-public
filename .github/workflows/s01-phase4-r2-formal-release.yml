@@ -1,0 +1,257 @@
+name: S01 Phase 4 R2 Formal Release
+
+on:
+  push:
+    branches:
+      - task/s01-phase4-r2-cognitive-load-gate
+    paths:
+      - .github/workflows/s01-phase4-r2-formal-release.yml
+
+permissions:
+  contents: read
+
+env:
+  OPS_REPO: llhzx2018/vf-tools-ops
+  OPS_SHA: c0159b3cb58cfa6cc0d1bfc36e29ab8271d5e29b
+  OPS_VERSION: 1.21.945
+  OPS_ASSET: vf-tools-ops_V1.21.945.zip
+  THEME_REPO: llhzx2018/vf-tools-theme
+  THEME_SHA: d80e1681d0b69bfd3a9da915befb161273bce747
+  THEME_VERSION: 1.35.47
+  THEME_ASSET: vf-tools-theme_V1.35.47.zip
+  M3U8_REPO: llhzx2018/vf-tools-m3u8
+  M3U8_SHA: 1a86645b2677c75f196843eb82fdfb8b1f54990e
+  M3U8_VERSION: 1.25.50
+  M3U8_ASSET: vf-tools-m3u8_V1.25.50.zip
+
+jobs:
+  release:
+    name: Exact main release + distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Credential gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$WRITE_TOKEN"
+          echo "CREDENTIAL_GATE=PASS"
+
+      - name: Fetch exact merged main sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/s01r2
+          mkdir -p /tmp/s01r2/src /tmp/s01r2/out /tmp/s01r2/meta
+          fetch_source() {
+            key="$1"; repo="$2"; sha="$3"; version="$4"
+            main_sha="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/$repo/branches/main" | jq -r '.commit.sha')"
+            test "$main_sha" = "$sha"
+            mkdir -p "/tmp/s01r2/src/$key"
+            curl -fsSL -L -H "Authorization: Bearer $READ_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/$repo/tarball/$sha" -o "/tmp/s01r2/$key.tar.gz"
+            tar -xzf "/tmp/s01r2/$key.tar.gz" -C "/tmp/s01r2/src/$key"
+            root="$(find "/tmp/s01r2/src/$key" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            test -n "$root"
+            test "$(tr -d '\r\n' < "$root/VERSION")" = "$version"
+            printf '%s' "$root" > "/tmp/s01r2/meta/$key-root"
+          }
+          fetch_source ops "$OPS_REPO" "$OPS_SHA" "$OPS_VERSION"
+          fetch_source theme "$THEME_REPO" "$THEME_SHA" "$THEME_VERSION"
+          fetch_source m3u8 "$M3U8_REPO" "$M3U8_SHA" "$M3U8_VERSION"
+          echo "EXACT_MERGED_MAIN=PASS"
+
+      - name: Final exact-source contract gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ops="$(cat /tmp/s01r2/meta/ops-root)"
+          theme="$(cat /tmp/s01r2/meta/theme-root)"
+          m3u8="$(cat /tmp/s01r2/meta/m3u8-root)"
+          php "$ops/tests/s01-c02-page-body-system-v1-phase4-r2-cognitive-load-contract.php"
+          php "$ops/tests/s01-c02-page-body-system-v1-phase3-contract.php"
+          php "$theme/tests/s01-c01-page-body-system-v1-phase4-r2-cognitive-load-contract.php"
+          php "$theme/tests/s01-c01-page-body-system-v1-phase3-contract.php"
+          php "$m3u8/tests/s01-c03-page-body-system-v1-phase4-r2-cognitive-load-contract.php"
+          php "$m3u8/tests/s01-c03-page-body-system-v1-phase3-contract.php"
+          php "$m3u8/tests/unit/package-physical-locator-contract.php"
+          php "$m3u8/tests/unit/update-schema-authority-contract.php"
+          echo "FINAL_EXACT_SOURCE_CONTRACTS=PASS"
+
+      - name: Build exact release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ops="$(cat /tmp/s01r2/meta/ops-root)"
+          theme="$(cat /tmp/s01r2/meta/theme-root)"
+          m3u8="$(cat /tmp/s01r2/meta/m3u8-root)"
+
+          python3 "$ops/.github/release/build-ops-package.py"             --source "$ops" --output "/tmp/s01r2/out/$OPS_ASSET" > /tmp/s01r2/meta/ops.json
+
+          python3 - "$theme" "$m3u8" <<'PY'
+          import hashlib,json,re,sys,zipfile
+          from pathlib import Path
+          theme_repo=Path(sys.argv[1]); m3u8_repo=Path(sys.argv[2]); out=Path("/tmp/s01r2/out"); meta=Path("/tmp/s01r2/meta"); epoch=(1980,1,1,0,0,0)
+
+          def safe_files(src):
+              files=[]
+              for p in sorted(src.rglob("*")):
+                  if not p.is_file(): continue
+                  rel=p.relative_to(src).as_posix()
+                  if p.is_symlink(): raise SystemExit("symlink:"+rel)
+                  if re.search(r"(^|/)(\.git|\.github|tests?|docs?|evidence|private)(/|$)",rel,re.I): raise SystemExit("dev:"+rel)
+                  if re.search(r"\.(sql|sqlite|sqlite3|db|log|tar|gz)$",rel,re.I): raise SystemExit("forbidden:"+rel)
+                  files.append((rel,p.read_bytes()))
+              return files
+
+          def write_zip(files,top,path):
+              with zipfile.ZipFile(path,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in files:
+                      zi=zipfile.ZipInfo(f"{top}/{rel}",epoch); zi.compress_type=zipfile.ZIP_DEFLATED; zi.external_attr=0o100644<<16
+                      z.writestr(zi,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+
+          def fp(files,runtime):
+              rows=[(rel,hashlib.sha256(data).hexdigest()) for rel,data in files if runtime(rel)]
+              canonical="".join(f"{p}\0{h}\n" for p,h in sorted(rows)).encode()
+              return len(rows),hashlib.sha256(canonical).hexdigest()
+
+          def theme_runtime(rel):
+              p=rel.split("/")
+              return (len(p)==1 and (rel=="style.css" or rel.lower().endswith(".php"))) or (len(p)>1 and p[0] in {"inc","assets","config","languages","template-parts","templates"})
+
+          def m3u8_runtime(rel):
+              base=rel.split("/")[-1].lower(); p=rel.split("/")
+              if base in {"readme.md","changelog.md","license","license.txt","package_profile.json"}: return False
+              if re.search(r"\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$",rel,re.I): return False
+              return (len(p)==1 and rel in {"vf-tool-m3u8.php","uninstall.php","plugin-manifest.json","tool-settings.schema.json"}) or (len(p)>1 and p[0] in {"admin","config","includes","public","templates","tools"})
+
+          specs=[
+              ("theme",theme_repo/"src","vf-tools-theme","1.35.47","style.css",theme_runtime,"vf-tools-theme_V1.35.47.zip"),
+              ("m3u8",m3u8_repo/"src","vf-tool-m3u8","1.25.50","vf-tool-m3u8.php",m3u8_runtime,"vf-tools-m3u8_V1.25.50.zip")
+          ]
+          for key,src,top,ver,main,runtime,asset_name in specs:
+              files=safe_files(src); asset=out/asset_name; write_zip(files,top,asset)
+              with zipfile.ZipFile(asset) as z:
+                  names=[n for n in z.namelist() if not n.endswith("/")]
+                  if any(not n.startswith(top+"/") for n in names): raise SystemExit(key+" root")
+                  if f"{top}/{main}" not in names: raise SystemExit(key+" main")
+                  if any(n.startswith(top+"/"+top+"/") for n in names): raise SystemExit(key+" double")
+              count,fingerprint=fp(files,runtime)
+              d={"version":ver,"asset_name":asset_name,"asset_bytes":asset.stat().st_size,"asset_sha256":hashlib.sha256(asset.read_bytes()).hexdigest(),"runtime_files":count,"runtime_fingerprint":fingerprint,"package_slug":top}
+              (meta/f"{key}.json").write_text(json.dumps(d,sort_keys=True)+"\n")
+              print(key,json.dumps(d,sort_keys=True))
+          PY
+
+          for key in ops theme m3u8; do
+            jq -e '.asset_bytes>0 and (.asset_sha256|length)==64 and .runtime_files>0 and (.runtime_fingerprint|length)==64' "/tmp/s01r2/meta/$key.json"
+            cat "/tmp/s01r2/meta/$key.json"
+          done
+          echo "EXACT_RELEASE_ASSETS=PASS"
+
+      - name: Create tags releases and upload assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_one() {
+            key="$1"; repo="$2"; sha="$3"; version="$4"; display="$5"; asset="$6"; body="$7"
+            tag="v$version"; m="/tmp/s01r2/meta/$key.json"
+
+            code="$(curl -sS -o "/tmp/s01r2/meta/$key-ref.json" -w '%{http_code}' -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/$repo/git/ref/tags/$tag")"
+            if [ "$code" = "404" ]; then
+              jq -n --arg ref "refs/tags/$tag" --arg sha "$sha" '{ref:$ref,sha:$sha}' > "/tmp/s01r2/meta/$key-ref-create.json"
+              curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json"                 "https://api.github.com/repos/$repo/git/refs" --data-binary @"/tmp/s01r2/meta/$key-ref-create.json" > "/tmp/s01r2/meta/$key-ref.json"
+            fi
+            test "$(jq -r '.object.sha' "/tmp/s01r2/meta/$key-ref.json")" = "$sha"
+
+            rcode="$(curl -sS -o "/tmp/s01r2/meta/$key-release.json" -w '%{http_code}' -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/$repo/releases/tags/$tag")"
+            if [ "$rcode" = "404" ]; then
+              jq -n --arg tag "$tag" --arg target "$sha" --arg name "$display V$version" --arg body "$body"                 '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:false,prerelease:false}' > "/tmp/s01r2/meta/$key-release-create.json"
+              curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json"                 "https://api.github.com/repos/$repo/releases" --data-binary @"/tmp/s01r2/meta/$key-release-create.json" > "/tmp/s01r2/meta/$key-release.json"
+            fi
+            rid="$(jq -r '.id' "/tmp/s01r2/meta/$key-release.json")"; test -n "$rid"
+            upload="$(jq -r '.upload_url' "/tmp/s01r2/meta/$key-release.json" | sed 's/{?name,label}//')"
+            curl -fsSL -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/$repo/releases/$rid/assets" > "/tmp/s01r2/meta/$key-assets.json"
+            aid="$(jq -r --arg n "$asset" '.[]|select(.name==$n)|.id' "/tmp/s01r2/meta/$key-assets.json" | head -n1)"
+            if [ -z "$aid" ]; then
+              curl -fsSL -X POST -H "Authorization: Bearer $WRITE_TOKEN" -H "Content-Type: application/zip"                 "$upload?name=$asset" --data-binary @"/tmp/s01r2/out/$asset" > "/tmp/s01r2/meta/$key-upload.json"
+              aid="$(jq -r '.id' "/tmp/s01r2/meta/$key-upload.json")"
+            fi
+            test -n "$aid"
+            curl -fsSL -L -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/octet-stream"               "https://api.github.com/repos/$repo/releases/assets/$aid" -o "/tmp/s01r2/$key-remote.zip"
+            test "$(stat -c%s "/tmp/s01r2/$key-remote.zip")" = "$(jq -r '.asset_bytes' "$m")"
+            test "$(sha256sum "/tmp/s01r2/$key-remote.zip" | awk '{print $1}')" = "$(jq -r '.asset_sha256' "$m")"
+            jq --argjson release_id "$rid" --argjson asset_id "$aid" --arg released_at "$(jq -r '.published_at // .created_at' "/tmp/s01r2/meta/$key-release.json")"               '.+{release_id:$release_id,asset_id:$asset_id,released_at:$released_at,remote_readback:"PASS"}' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
+            echo "$key FORMAL_RELEASE=PASS"
+          }
+
+          release_one ops "$OPS_REPO" "$OPS_SHA" "$OPS_VERSION" "VF Tools Ops" "$OPS_ASSET"             "S01 Phase 4 Macro R2. Compare: OPS 工作台. Removes redundant body Page Head and compacts status/priority/business-domain rhythm. Frozen Shell/Header/Menu unchanged. OWNER Production real-use still required."
+          release_one theme "$THEME_REPO" "$THEME_SHA" "$THEME_VERSION" "VF Tools Theme" "$THEME_ASSET"             "S01 Phase 4 Macro R2. Compare: 品牌与样式、页面布局、导航与页脚、技术 SEO. Removes SEO left rail, card-wall density and brand-preview dominance. Frozen Shell/Header/Menu unchanged. OWNER Production real-use still required."
+          release_one m3u8 "$M3U8_REPO" "$M3U8_SHA" "$M3U8_VERSION" "VF Tools M3U8" "$M3U8_ASSET"             "S01 Phase 4 Macro R2. Compare: 运行实验室 / Runtime Playground. Converts raw console into compact runtime workbench. Frozen Shell/Header/Menu unchanged. OWNER Production real-use still required."
+
+      - name: Publish core-updates manifests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          update_manifest() {
+            key="$1"; component="$2"; repo="$3"; sha="$4"; pages="$5"; schema_from="$6"; schema_to="$7"
+            m="/tmp/s01r2/meta/$key.json"
+            curl -fsSL -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/$component.json?ref=main" > "/tmp/s01r2/meta/$key-manifest-source.json"
+            blob="$(jq -r '.sha' "/tmp/s01r2/meta/$key-manifest-source.json")"
+            jq -r '.content' "/tmp/s01r2/meta/$key-manifest-source.json" | tr -d '\n' | base64 -d > "/tmp/s01r2/meta/$key-manifest.json"
+
+            python3 - "/tmp/s01r2/meta/$key-manifest.json" "$m" "$repo" "$sha" "$pages" "$schema_from" "$schema_to" <<'PY'
+          import json,sys
+          from pathlib import Path
+          p=Path(sys.argv[1]); mp=Path(sys.argv[2]); repo=sys.argv[3]; sha=sys.argv[4]; pages=sys.argv[5]; sf=sys.argv[6]; st=sys.argv[7]
+          d=json.loads(p.read_text()); m=json.loads(mp.read_text()); old=str(d.get("target_version",""))
+          fv=[str(x) for x in d.get("from_versions",[])]
+          if old and old!=m["version"] and old not in fv: fv.append(old)
+          d.update({
+            "target_version":m["version"],"from_versions":fv,"repository":repo,"release_tag":"v"+m["version"],
+            "asset_name":m["asset_name"],"asset_bytes":m["asset_bytes"],"asset_sha256":m["asset_sha256"],
+            "schema_from":sf,"schema_to":st,"backup_required":True,"rollback_supported":True,
+            "runtime_contract":"VF_WP_COMPONENT_RUNTIME_AUTHORITY_V1","runtime_files":m["runtime_files"],
+            "runtime_fingerprint":m["runtime_fingerprint"],"released_at":m["released_at"]
+          })
+          if "runtime_file_count" in d: d["runtime_file_count"]=m["runtime_files"]
+          if "runtime_fingerprint_sha256" in d: d["runtime_fingerprint_sha256"]=m["runtime_fingerprint"]
+          d["notes"]=f"Phase 4 Macro R2 UI-only release. Exact source {sha}. OWNER comparison surfaces: {pages}. Formal Release ID {m['release_id']}; asset ID {m['asset_id']}; {m['asset_bytes']} bytes / SHA256 {m['asset_sha256']}. Runtime Authority: {m['runtime_files']} files / {m['runtime_fingerprint']}. Frozen Shell / Header / Header Menu IA unchanged. Production remains OWNER manual; post-Production real-use is required before Macro Freeze."
+          p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+"\n")
+          PY
+
+            content="$(base64 -w0 "/tmp/s01r2/meta/$key-manifest.json")"
+            jq -n --arg message "release($component): distribute Phase 4 Macro R2" --arg content "$content" --arg sha "$blob"               '{message:$message,content:$content,sha:$sha,branch:"main"}' > "/tmp/s01r2/meta/$key-put.json"
+            curl -fsSL -X PUT -H "Authorization: Bearer $WRITE_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json"               "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/$component.json" --data-binary @"/tmp/s01r2/meta/$key-put.json"               > "/tmp/s01r2/meta/$key-put-result.json"
+            test "$(jq -r '.content.path' "/tmp/s01r2/meta/$key-put-result.json")" = "projects/$component.json"
+          }
+          update_manifest ops S01-C02 "$OPS_REPO" "$OPS_SHA" "OPS → 工作台" "6.0.0" "6.0.0"
+          update_manifest theme S01-C01 "$THEME_REPO" "$THEME_SHA" "Theme → 品牌与样式、页面布局、导航与页脚、技术 SEO" "N/A" "N/A"
+          update_manifest m3u8 S01-C03 "$M3U8_REPO" "$M3U8_SHA" "M3U8 → 运行实验室 / Runtime Playground" "1.3.0" "1.3.0"
+          echo "DISTRIBUTION_WRITE=PASS"
+
+      - name: Remote readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          verify() {
+            key="$1"; component="$2"; repo="$3"; sha="$4"; version="$5"; asset="$6"
+            m="/tmp/s01r2/meta/$key.json"
+            test "$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$repo/branches/main" | jq -r '.commit.sha')" = "$sha"
+            rel="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$repo/releases/tags/v$version")"
+            test "$(printf '%s' "$rel" | jq -r '.tag_name')" = "v$version"
+            test "$(printf '%s' "$rel" | jq -r --arg n "$asset" '.assets[]|select(.name==$n)|.id' | head -n1)" = "$(jq -r '.asset_id' "$m")"
+            man="$(curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H "Accept: application/vnd.github.raw+json" "https://api.github.com/repos/llhzx2018/core-updates/contents/projects/$component.json?ref=main")"
+            test "$(printf '%s' "$man"|jq -r '.target_version')" = "$version"
+            test "$(printf '%s' "$man"|jq -r '.asset_sha256')" = "$(jq -r '.asset_sha256' "$m")"
+            test "$(printf '%s' "$man"|jq -r '.runtime_fingerprint')" = "$(jq -r '.runtime_fingerprint' "$m")"
+            echo "$key REMOTE_READBACK=PASS"
+          }
+          verify ops S01-C02 "$OPS_REPO" "$OPS_SHA" "$OPS_VERSION" "$OPS_ASSET"
+          verify theme S01-C01 "$THEME_REPO" "$THEME_SHA" "$THEME_VERSION" "$THEME_ASSET"
+          verify m3u8 S01-C03 "$M3U8_REPO" "$M3U8_SHA" "$M3U8_VERSION" "$M3U8_ASSET"
+          echo "FORMAL_RELEASE_DISTRIBUTION_CLOSURE=PASS"
+          echo "PRODUCTION=NOT_EXECUTED_OWNER_MANUAL"
+          echo "PHASE4_MACRO_FREEZE=PENDING_OWNER_REAL_USE"
