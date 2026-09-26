@@ -44,6 +44,11 @@ class ResourceProfileTests(unittest.TestCase):
         self.assertEqual(r["mysql"]["innodb_buffer_pool_size_mib"], 128)
         self.assertEqual(r["mysql"]["max_connections"], 40)
 
+    def test_cloudpanel_2g_band_does_not_false_warn_for_reserved_memory(self):
+        r = rp.recommend(snap(1, 1950, cloudpanel=True), "balanced")
+        self.assertEqual(r["hardware"]["band"], "2G")
+        self.assertNotIn("BELOW_CLOUDPANEL_MINIMUM_RAM", r["notes"])
+
     def test_2c4g_and_4c8g_balanced_baselines(self):
         r4 = rp.recommend(snap(2, 4096, swap=2048, rss=100), "balanced")
         self.assertEqual(r4["mysql"]["innodb_buffer_pool_size_mib"], 512)
