@@ -7,8 +7,10 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc14")
+VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc15")
 LIB = ROOT / "packages" / "p07-system-care" / VERSION / "lib"
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
 
 spec_rp = importlib.util.spec_from_file_location("resource_profile", LIB / "resource_profile.py")
 rp = importlib.util.module_from_spec(spec_rp)
@@ -65,6 +67,7 @@ class ResourceApplyTests(unittest.TestCase):
             root=pathlib.Path(td); snap,rec,_,_=fixture(root)
             plan=ra.build_plan(snap,rec,root=root)
             self.assertTrue(plan["eligible"]); self.assertTrue(plan["cap_only"])
+            self.assertEqual(plan["calibration_state"], "PRODUCTION_VERIFIED")
             self.assertEqual({x["key"]:x["new_raw"] for x in plan["mysql_changes"]},{
                 "innodb_buffer_pool_size":"256M","max_connections":"80",
                 "tmp_table_size":"32M","max_heap_table_size":"32M","table_open_cache":"1000"})
@@ -75,7 +78,17 @@ class ResourceApplyTests(unittest.TestCase):
             root=pathlib.Path(td); snap,_,_,_=fixture(root,cpu=2,mem=4096)
             plan=ra.build_plan(snap,rp.recommend(snap,"balanced"),root=root)
             self.assertFalse(plan["eligible"])
-            self.assertIn("PROFILE_NOT_PRODUCTION_CALIBRATED",plan["block_reasons"])
+            self.assertEqual(plan["calibration_state"], "CANDIDATE")
+            self.assertIn("PROFILE_CALIBRATION_STATE:CANDIDATE",plan["block_reasons"])
+
+
+    def test_preview_only_profile_is_blocked_by_registry(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=pathlib.Path(td); snap,_,_,_=fixture(root,cpu=4,mem=8192)
+            plan=ra.build_plan(snap,rp.recommend(snap,"balanced"),root=root)
+            self.assertFalse(plan["eligible"])
+            self.assertEqual(plan["calibration_state"], "PREVIEW_ONLY")
+            self.assertIn("PROFILE_CALIBRATION_STATE:PREVIEW_ONLY",plan["block_reasons"])
 
     def test_cap_only_never_increases_lower_existing_values(self):
         with tempfile.TemporaryDirectory() as td:
