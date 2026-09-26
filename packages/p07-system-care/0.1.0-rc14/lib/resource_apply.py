@@ -551,6 +551,19 @@ def _write_state(path: Path, state: Mapping[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
+def _write_initial_state_or_restore(
+    state_path: Path,
+    state: Mapping[str, Any],
+    file_state: Mapping[str, Any],
+) -> None:
+    """Close the crash window between config mutation and durable rollback state."""
+    try:
+        _write_state(state_path, state)
+    except Exception:
+        _restore_files(file_state)
+        raise
+
+
 def production_apply(mode: str, confirm: str) -> Dict[str, Any]:
     if os.geteuid() != 0:
         raise ApplyBlocked("ROOT_REQUIRED")
@@ -595,11 +608,7 @@ def production_apply(mode: str, confirm: str) -> Dict[str, Any]:
         "origin_smoke": [],
     }
     state_path = backup_dir / "state.json"
-    try:
-        _write_state(state_path, state)
-    except Exception:
-        _restore_files(file_state)
-        raise
+    _write_initial_state_or_restore(state_path, state, file_state)
 
     try:
         _validate_mysql()
