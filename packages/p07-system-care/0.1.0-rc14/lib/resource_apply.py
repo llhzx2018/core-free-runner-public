@@ -457,6 +457,28 @@ WHERE VARIABLE_NAME='Max_used_connections';
     }
 
 
+def _runtime_numeric_for_plan(key: str, value: int) -> int:
+    if key in ("innodb_buffer_pool_size", "tmp_table_size", "max_heap_table_size"):
+        return max(1, int(value) // (1024 * 1024))
+    return int(value)
+
+
+def _cap_plan_to_runtime(plan: Dict[str, Any], runtime_before: Mapping[str, Any]) -> None:
+    """Make CAP-ONLY apply to live MySQL values as well as persistent config."""
+    for item in plan.get("mysql_changes") or []:
+        key = str(item["key"])
+        runtime_numeric = _runtime_numeric_for_plan(key, int(runtime_before[key]))
+        effective = min(int(item["effective_numeric"]), runtime_numeric)
+        item["runtime_current_numeric"] = runtime_numeric
+        item["effective_numeric"] = effective
+        item["new_raw"] = (
+            f"{effective}M"
+            if key in ("innodb_buffer_pool_size", "tmp_table_size", "max_heap_table_size")
+            else str(effective)
+        )
+        item["change"] = effective < int(item["current_numeric"])
+
+
 def _runtime_targets(plan: Mapping[str, Any]) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for item in plan.get("mysql_changes") or []:
@@ -545,6 +567,7 @@ def production_apply(mode: str, confirm: str) -> Dict[str, Any]:
 
     cmd, env = _mysql_client()
     runtime_before = _mysql_runtime_state(cmd, env)
+    _cap_plan_to_runtime(plan, runtime_before)
     version_comment = (runtime_before["version"] + " " + runtime_before["version_comment"]).lower()
     major_match = re.match(r"(\d+)", runtime_before["version"])
     major = int(major_match.group(1)) if major_match else 0
@@ -572,7 +595,11 @@ def production_apply(mode: str, confirm: str) -> Dict[str, Any]:
         "origin_smoke": [],
     }
     state_path = backup_dir / "state.json"
-    _write_state(state_path, state)
+    try:
+        _write_state(state_path, state)
+    except Exception:
+        _restore_files(file_state)
+        raise
 
     try:
         _validate_mysql()
