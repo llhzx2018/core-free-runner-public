@@ -11,11 +11,11 @@ VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc9"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.2.1"
-VPS_AUDIT_EXPECTED="V2.2.1"
-VPS_AUDIT_BUILD_EXPECTED="2.2.1-rc1-reference-lines"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/f5ccca1cc6ed41701219fa150d4089cfd41f0d96/experiments/p07-vps-audit-v22.sh"
-VPS_AUDIT_SHA256="c0538f24d4f6d4f54cab81f6d98bfe09ffcbdc563099021da405d58a3a3af4ae"
+VPS_AUDIT_PUBLIC="V2.2.2"
+VPS_AUDIT_EXPECTED="V2.2.2"
+VPS_AUDIT_BUILD_EXPECTED="2.2.2-rc1-semantic-color"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/30c0f9d332b410ebf14f7e6a80056cebace1905b/experiments/p07-vps-audit-v22.sh"
+VPS_AUDIT_SHA256="376f3cf791dcac00ba870697db9233a5ad4f765400a4dbe4418c20aafbc3b401"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -95,7 +95,8 @@ render_vps_audit_output() {
     -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.1\.0-rc7-field/${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.2\.0-rc1-value-verdict/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.1-rc1-reference-lines/${VPS_AUDIT_PUBLIC}/g"
+    -e "s/2\.2\.1-rc1-reference-lines/${VPS_AUDIT_PUBLIC}/g" \
+    -e "s/2\.2\.2-rc1-semantic-color/${VPS_AUDIT_PUBLIC}/g"
 }
 
 run_vps_audit() {
