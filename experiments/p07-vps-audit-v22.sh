@@ -217,7 +217,7 @@ self_test(){
   case "$r" in 偏弱\|偏弱\|良好\|能用，但后台和动态页面响应会偏慢*) ;; *) printf 'DO-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 1479 1363 0.59 0 961 1 NORMAL)"
-  case "$r" in 良好\|强\|强\|CPU/I/O可以，但内存不足*) ;; *) printf 'Linode-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
+  case "$r" in 良好\|强\|强\|CPU/I/O\ 可以，但内存不足*) ;; *) printf 'Linode-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 700 850 3 1 4096 2 NORMAL)"
   case "$r" in 良好\|良好\|良好\|适合*) ;; *) printf 'balanced fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
