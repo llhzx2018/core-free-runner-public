@@ -36,7 +36,7 @@ MODE_FACTORS: Dict[str, Dict[str, float]] = {
 }
 CLOUDPANEL_MIN_RAM_MIB = 2048
 
-_COLOR_ENABLED = bool(sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
+_COLOR_ENABLED = bool((sys.stdout.isatty() or os.environ.get("P07_FORCE_COLOR") == "1") and not os.environ.get("NO_COLOR"))
 _ANSI = {
     "reset": "\033[0m",
     "bold": "\033[1m",
