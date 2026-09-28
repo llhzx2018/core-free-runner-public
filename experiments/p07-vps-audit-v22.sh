@@ -2,8 +2,8 @@
 set -uo pipefail
 
 APP="P07 VPS 一键验机"
-VERSION="V2.2.1"
-BUILD_ID="2.2.1-rc1-reference-lines"
+VERSION="V2.2.2"
+BUILD_ID="2.2.2-rc1-semantic-color"
 
 BASE_VERSION="V2.1.0"
 BASE_BUILD="2.1.0-rc7-field"
@@ -15,7 +15,7 @@ case "${1:-}" in
   --build-id) printf '%s\n' "$BUILD_ID"; exit 0 ;;
   --help|-h)
     cat <<'EOF'
-P07 VPS 一键验机 V2.2.1
+P07 VPS 一键验机 V2.2.2
 
 在 V2.1.0 完整验机基础上增加“使用价值判断”：
 - 不需要另一台 VPS 做对比
@@ -25,6 +25,7 @@ P07 VPS 一键验机 V2.2.1
 - 输出主要短板和保留建议
 - 直接显示 CPU / I/O / CPU Steal / CloudPanel 内存判定参考线
 - 支持 --reference 单独查看当前 P07 判定基线
+- 恢复终端彩色分区，并用绿色 / 黄色 / 红色表达正常、注意和风险
 
 判断是 P07 的工作负载阈值，不是全网 VPS 排名，也不是商家宣传评分。
 EOF
@@ -32,7 +33,7 @@ EOF
     ;;
   --reference)
     cat <<'EOF'
-P07 VPS 一键验机 V2.2.1 · 判定参考线
+P07 VPS 一键验机 V2.2.2 · 判定参考线
 
 单核 CPU（SHA256）
   强      >= 900 MB/s
@@ -67,6 +68,7 @@ CPU 核数
 EOF
     exit 0
     ;;
+  --color-demo) ;;
   --self-test) ;;
   "") ;;
   *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
@@ -106,6 +108,31 @@ first_number(){
 num_ge(){ awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>=b)}'; }
 num_le(){ awk -v a="$1" -v b="$2" 'BEGIN{exit !(a<=b)}'; }
 num_gt(){ awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>b)}'; }
+
+semantic_color(){
+  local value="${1:-}"
+  case "$value" in
+    强|良好|正常|适合|建议保留) printf '%s' "$GREEN" ;;
+    可用|可接受|需观察|有条件保留|可以保留*|能用*|CPU/I\ O\ 可以*) printf '%s' "$YELLOW" ;;
+    偏弱|很弱|异常偏高|不建议|不建议*|建议更换*) printf '%s' "$RED" ;;
+    *) printf '%s' "$CYAN" ;;
+  esac
+}
+paint_semantic(){
+  local value="${1:-}" color
+  color="$(semantic_color "$value")"
+  printf '%s%s%s' "$color" "$value" "$RESET"
+}
+paint_bottleneck(){
+  local value="${1:-}"
+  if [[ "$value" == "未发现明显硬伤" ]]; then
+    printf '%s%s%s' "$GREEN" "$value" "$RESET"
+  elif [[ "$value" == *"隐藏资源限制"* ]]; then
+    printf '%s%s%s' "$RED" "$value" "$RESET"
+  else
+    printf '%s%s%s' "$YELLOW" "$value" "$RESET"
+  fi
+}
 
 cpu_class(){
   local x="$1"
@@ -237,26 +264,45 @@ print_value_verdict(){
 
   rule
   printf '%s%s P07 使用价值判断%s\n' "$BOLD" "$CYAN" "$RESET"
-  printf ' 机器性能           : %s%s%s\n' "$GREEN" "$machine" "$RESET"
-  printf ' 单核 CPU           : %s  （%s MB/s）\n' "$cc" "${cpu:-未知}"
-  printf ' 数据库型 I/O       : %s  （4K %s IOPS / fsync P95 %s ms）\n' "$dc" "${iops:-未知}" "${fsync:-未知}"
-  printf ' CPU 争抢           : %s  （%s%%）\n' "$(steal_class "${steal:-UNKNOWN}")" "${steal:-未知}"
-  printf ' CloudPanel/WordPress: %s\n' "$cloud"
-  printf ' 主要短板           : %s%s%s\n' "$YELLOW" "$bottlenecks" "$RESET"
-  printf ' 适合               : %s\n' "$suitable"
-  printf ' 不适合             : %s\n' "$avoid"
-  printf ' 保留建议           : %s%s%s\n' "$YELLOW" "$keep" "$RESET"
-  printf ' 性价比             : 月费未知，不做假判断\n'
-  printf ' 判断边界           : 这是 P07 工作负载阈值，不是全网 VPS 排名；建议晚高峰复测一次确认稳定性。\n'
+  printf ' 机器性能           : '; paint_semantic "$machine"; printf '\n'
+  printf ' 单核 CPU           : '; paint_semantic "$cc"; printf '  （%s MB/s）\n' "${cpu:-未知}"
+  printf ' 数据库型 I/O       : '; paint_semantic "$dc"; printf '  （4K %s IOPS / fsync P95 %s ms）\n' "${iops:-未知}" "${fsync:-未知}"
+  printf ' CPU 争抢           : '; paint_semantic "$(steal_class "${steal:-UNKNOWN}")"; printf '  （%s%%）\n' "${steal:-未知}"
+  printf ' CloudPanel/WordPress: '; paint_semantic "$cloud"; printf '\n'
+  printf ' 主要短板           : '; paint_bottleneck "$bottlenecks"; printf '\n'
+  printf ' 适合               : %s%s%s\n' "$GREEN" "$suitable" "$RESET"
+  printf ' 不适合             : %s%s%s\n' "$RED" "$avoid" "$RESET"
+  printf ' 保留建议           : '; paint_semantic "$keep"; printf '\n'
+  printf ' 性价比             : %s月费未知，不做假判断%s\n' "$GRAY" "$RESET"
+  printf ' 判断边界           : %s这是 P07 工作负载阈值，不是全网 VPS 排名；建议晚高峰复测一次确认稳定性。%s\n' "$GRAY" "$RESET"
   printf '\n'
-  printf '%s判定参考线%s\n' "$CYAN" "$RESET"
-  printf ' 单核 CPU（SHA256） : 强 >=900 ｜ 良好 >=500 ｜ 可用 >=250 ｜ 偏弱 >=150 ｜ 很弱 <150 MB/s\n'
-  printf ' 数据库型 I/O       : 强 >=1000 IOPS + <=2.5ms ｜ 良好 >=500 + <=5ms ｜ 可用 >=300 + <=10ms ｜ 其它偏弱\n'
-  printf ' CPU Steal          : 正常 <=2%% ｜ 可接受 <=5%% ｜ 需观察 <=10%% ｜ 异常 >10%%\n'
-  printf ' CloudPanel 内存    : >=1800 MiB 视为 2GB 级；低于此值标记内存短板\n'
-  printf ' CPU 核数           : 1 vCPU 标记并发上限；>=2 vCPU 不触发该短板\n'
-  printf ' 参考线用途         : CloudPanel / WordPress / PHP / MySQL / 小工具站，不代表行业统一排名\n'
+  printf '%s%s判定参考线%s\n' "$BOLD" "$CYAN" "$RESET"
+  printf ' 单核 CPU（SHA256） : %s强 >=900%s ｜ %s良好 >=500%s ｜ %s可用 >=250%s ｜ %s偏弱 >=150%s ｜ %s很弱 <150%s MB/s\n' "$GREEN" "$RESET" "$GREEN" "$RESET" "$YELLOW" "$RESET" "$RED" "$RESET" "$RED" "$RESET"
+  printf ' 数据库型 I/O       : %s强 >=1000 IOPS + <=2.5ms%s ｜ %s良好 >=500 + <=5ms%s ｜ %s可用 >=300 + <=10ms%s ｜ %s其它偏弱%s\n' "$GREEN" "$RESET" "$GREEN" "$RESET" "$YELLOW" "$RESET" "$RED" "$RESET"
+  printf ' CPU Steal          : %s正常 <=2%%%s ｜ %s可接受 <=5%%%s ｜ %s需观察 <=10%%%s ｜ %s异常 >10%%%s\n' "$GREEN" "$RESET" "$YELLOW" "$RESET" "$YELLOW" "$RESET" "$RED" "$RESET"
+  printf ' CloudPanel 内存    : %s>=1800 MiB%s 视为 2GB 级；%s低于此值%s标记内存短板\n' "$GREEN" "$RESET" "$YELLOW" "$RESET"
+  printf ' CPU 核数           : %s1 vCPU%s 标记并发上限；%s>=2 vCPU%s 不触发该短板\n' "$YELLOW" "$RESET" "$GREEN" "$RESET"
+  printf ' 参考线用途         : %sCloudPanel / WordPress / PHP / MySQL / 小工具站，不代表行业统一排名%s\n' "$GRAY" "$RESET"
 }
+
+color_demo(){
+  local demo
+  demo="$(mktemp -t p07-color-demo.XXXXXX 2>/dev/null || printf '/tmp/p07-color-demo.%s' "$")"
+  cat >"$demo" <<'EOF'
+SHA256 单核           : 236.0 MB/s
+4K 同步写 IOPS       : 512
+fsync P95 延迟       : 1.86 ms
+CPU Steal（负载）    : 0.50%
+资源限制信号         : NORMAL
+EOF
+  print_value_verdict "$demo"
+  rm -f "$demo"
+}
+
+if [[ "${1:-}" == "--color-demo" ]]; then
+  color_demo
+  exit $?
+fi
 
 self_test(){
   local r
@@ -310,11 +356,22 @@ if [[ "$base_version" != "$BASE_VERSION" || "$base_build" != "$BASE_BUILD" ]]; t
 fi
 
 printf '%s%s P07 VPS 一键验机 %s%s\n' "$BOLD" "$CYAN" "$VERSION" "$RESET"
-printf ' %sV2.2.1：测完直接给用途结论，并显示每项强/弱判定参考线。%s\n' "$GRAY" "$RESET"
+printf ' %sV2.2.2：恢复彩色分区；强/弱/风险按统一语义色显示，并保留可见参考线。%s\n' "$GRAY" "$RESET"
 
 set +e
-NO_COLOR="${NO_COLOR:-}" bash "$BASE" 2>&1 | sed -u 's/V2\.1\.0/V2.2.0/g' | tee "$OUT"
-rc=${PIPESTATUS[0]}
+if [[ -t 1 && -z "${NO_COLOR:-}" ]] && command -v script >/dev/null 2>&1; then
+  # The wrapper captures output for the verdict; a normal pipe disables the base ANSI colors.
+  # Use a PTY so the original colored section hierarchy remains visible in a real terminal.
+  script -qefc "bash '$BASE'" /dev/null 2>&1 |
+    sed -u 's/V2\.1\.0/V2.2.2/g' |
+    tee "$OUT"
+  rc=${PIPESTATUS[0]}
+else
+  NO_COLOR="${NO_COLOR:-}" bash "$BASE" 2>&1 |
+    sed -u 's/V2\.1\.0/V2.2.2/g' |
+    tee "$OUT"
+  rc=${PIPESTATUS[0]}
+fi
 set -e 2>/dev/null || true
 (( rc == 0 )) || exit "$rc"
 
