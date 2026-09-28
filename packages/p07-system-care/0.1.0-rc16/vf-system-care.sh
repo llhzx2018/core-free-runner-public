@@ -154,7 +154,7 @@ case "${1:-menu}" in
   resources|resource|optimize) shift; exec bash "$SCRIPT_DIR/resource-profile.sh" "${@:-menu}" ;;
   evidence) shift; exec bash "$SCRIPT_DIR/intrusion-evidence-entry.sh" "${@:-menu}" ;;
   menu|"")
-    if [[ ( -t 0 && -t 1 ) || "${P07_FORCE_INTERACTIVE:-0}" == "1" ]]; then menu; else show_help; fi
+    if [[ -t 0 && -t 1 ]]; then menu; else show_help; fi
     ;;
   *) fail "未知命令: $1"; exit 2 ;;
 esac
