@@ -108,7 +108,7 @@ classify_values(){
     machine="不建议"
     keep="建议更换或先排查隐藏资源限制"
     bottlenecks="存在隐藏资源限制"
-  elif [[ "$cc" == 很弱 || "$dc" == 偏弱 || "$sc" == 异常偏高 ]]; then
+  elif [[ "$cc" == 很弱 || "$cc" == 偏弱 || "$dc" == 偏弱 || "$sc" == 异常偏高 ]]; then
     machine="偏弱"
     keep="有条件保留"
   elif [[ "$cc" == 强 || "$cc" == 良好 ]] && [[ "$dc" == 强 || "$dc" == 良好 ]] && [[ "$sc" == 正常 || "$sc" == 可接受 ]]; then
