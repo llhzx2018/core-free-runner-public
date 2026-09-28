@@ -68,6 +68,7 @@ CPU 核数
 EOF
     exit 0
     ;;
+  --color-demo) ;;
   --self-test) ;;
   "") ;;
   *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
@@ -281,6 +282,25 @@ print_value_verdict(){
   printf ' CPU 核数           : %s1 vCPU%s 标记并发上限；%s>=2 vCPU%s 不触发该短板\n' "$YELLOW" "$RESET" "$GREEN" "$RESET"
   printf ' 参考线用途         : %sCloudPanel / WordPress / PHP / MySQL / 小工具站，不代表行业统一排名%s\n' "$GRAY" "$RESET"
 }
+
+color_demo(){
+  local demo
+  demo="$(mktemp -t p07-color-demo.XXXXXX 2>/dev/null || printf '/tmp/p07-color-demo.%s' "$")"
+  cat >"$demo" <<'EOF'
+SHA256 单核           : 236.0 MB/s
+4K 同步写 IOPS       : 512
+fsync P95 延迟       : 1.86 ms
+CPU Steal（负载）    : 0.50%
+资源限制信号         : NORMAL
+EOF
+  print_value_verdict "$demo"
+  rm -f "$demo"
+}
+
+if [[ "${1:-}" == "--color-demo" ]]; then
+  color_demo
+  exit $?
+fi
 
 self_test(){
   local r
