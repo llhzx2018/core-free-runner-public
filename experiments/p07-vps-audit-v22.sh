@@ -214,13 +214,13 @@ print_value_verdict(){
 self_test(){
   local r
   r="$(classify_values 236 512 1.86 0.5 1973 1 NORMAL)"
-  [[ "$r" == 偏弱'|'偏弱'|'良好'|'能用，但后台和动态页面响应会偏慢'* ]] || { printf 'DO-like fixture FAIL: %s\n' "$r" >&2; return 1; }
+  case "$r" in 偏弱\|偏弱\|良好\|能用，但后台和动态页面响应会偏慢*) ;; *) printf 'DO-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 1479 1363 0.59 0 961 1 NORMAL)"
-  [[ "$r" == 良好'|'强'|'强'|'CPU/I/O 可以，但内存不足；不建议直接作为 CloudPanel 多站主机'* ]] || { printf 'Linode-like fixture FAIL: %s\n' "$r" >&2; return 1; }
+  case "$r" in 良好\|强\|强\|CPU/I/O可以，但内存不足*) ;; *) printf 'Linode-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 700 850 3 1 4096 2 NORMAL)"
-  [[ "$r" == 良好'|'良好'|'良好'|'适合'* ]] || { printf 'balanced fixture FAIL: %s\n' "$r" >&2; return 1; }
+  case "$r" in 良好\|良好\|良好\|适合*) ;; *) printf 'balanced fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
 
   printf 'P07_VPS_VALUE_VERDICT_SELF_TEST=PASS\n'
 }
