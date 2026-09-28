@@ -2,8 +2,8 @@
 set -uo pipefail
 
 APP="P07 VPS 一键验机"
-VERSION="V2.2.0"
-BUILD_ID="2.2.0-rc1-value-verdict"
+VERSION="V2.2.1"
+BUILD_ID="2.2.1-rc1-reference-lines"
 
 BASE_VERSION="V2.1.0"
 BASE_BUILD="2.1.0-rc7-field"
@@ -15,7 +15,7 @@ case "${1:-}" in
   --build-id) printf '%s\n' "$BUILD_ID"; exit 0 ;;
   --help|-h)
     cat <<'EOF'
-P07 VPS 一键验机 V2.2.0
+P07 VPS 一键验机 V2.2.1
 
 在 V2.1.0 完整验机基础上增加“使用价值判断”：
 - 不需要另一台 VPS 做对比
@@ -23,8 +23,47 @@ P07 VPS 一键验机 V2.2.0
 - 给出 CloudPanel / WordPress / 轻量工具站 / 数据库型负载的用途结论
 - 明确区分“机器性能”与“性价比”；没有月费证据时不伪造性价比结论
 - 输出主要短板和保留建议
+- 直接显示 CPU / I/O / CPU Steal / CloudPanel 内存判定参考线
+- 支持 --reference 单独查看当前 P07 判定基线
 
 判断是 P07 的工作负载阈值，不是全网 VPS 排名，也不是商家宣传评分。
+EOF
+    exit 0
+    ;;
+  --reference)
+    cat <<'EOF'
+P07 VPS 一键验机 V2.2.1 · 判定参考线
+
+单核 CPU（SHA256）
+  强      >= 900 MB/s
+  良好    >= 500 MB/s
+  可用    >= 250 MB/s
+  偏弱    >= 150 MB/s
+  很弱    <  150 MB/s
+
+数据库型 I/O（4K 同步写 + fsync P95）
+  强      >= 1000 IOPS 且 fsync P95 <= 2.5 ms
+  良好    >=  500 IOPS 且 fsync P95 <= 5 ms
+  可用    >=  300 IOPS 且 fsync P95 <= 10 ms
+  偏弱    其它
+
+CPU Steal
+  正常    <= 2%
+  可接受  <= 5%
+  需观察  <= 10%
+  异常    > 10%
+
+CloudPanel / 多站内存基线
+  >= 1800 MiB   视为 2GB 级别
+  <  1800 MiB   标记为内存短板
+
+CPU 核数
+  1 vCPU        标记并发上限
+  >= 2 vCPU     不触发“1 vCPU 并发上限”短板
+
+边界：
+  这些是 P07 针对 CloudPanel / WordPress / PHP / MySQL / 小工具站的工作负载参考线，
+  不是行业统一 VPS 排名，也不是商家宣传评分。
 EOF
     exit 0
     ;;
@@ -209,6 +248,14 @@ print_value_verdict(){
   printf ' 保留建议           : %s%s%s\n' "$YELLOW" "$keep" "$RESET"
   printf ' 性价比             : 月费未知，不做假判断\n'
   printf ' 判断边界           : 这是 P07 工作负载阈值，不是全网 VPS 排名；建议晚高峰复测一次确认稳定性。\n'
+  printf '\n'
+  printf '%s判定参考线%s\n' "$CYAN" "$RESET"
+  printf ' 单核 CPU（SHA256） : 强 >=900 ｜ 良好 >=500 ｜ 可用 >=250 ｜ 偏弱 >=150 ｜ 很弱 <150 MB/s\n'
+  printf ' 数据库型 I/O       : 强 >=1000 IOPS + <=2.5ms ｜ 良好 >=500 + <=5ms ｜ 可用 >=300 + <=10ms ｜ 其它偏弱\n'
+  printf ' CPU Steal          : 正常 <=2%% ｜ 可接受 <=5%% ｜ 需观察 <=10%% ｜ 异常 >10%%\n'
+  printf ' CloudPanel 内存    : >=1800 MiB 视为 2GB 级；低于此值标记内存短板\n'
+  printf ' CPU 核数           : 1 vCPU 标记并发上限；>=2 vCPU 不触发该短板\n'
+  printf ' 参考线用途         : CloudPanel / WordPress / PHP / MySQL / 小工具站，不代表行业统一排名\n'
 }
 
 self_test(){
@@ -221,6 +268,13 @@ self_test(){
 
   r="$(classify_values 700 850 3 1 4096 2 NORMAL)"
   case "$r" in 良好\|良好\|良好\|适合*) ;; *) printf 'balanced fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
+
+  local ref
+  ref="$(NO_COLOR=1 bash "$0" --reference 2>/dev/null || true)"
+  grep -Fq '强      >= 900 MB/s' <<<"$ref" || { printf 'reference CPU threshold FAIL\n' >&2; return 1; }
+  grep -Fq '>= 1000 IOPS' <<<"$ref" || { printf 'reference I/O threshold FAIL\n' >&2; return 1; }
+  grep -Fq '正常    <= 2%' <<<"$ref" || { printf 'reference Steal threshold FAIL\n' >&2; return 1; }
+  grep -Fq '>= 1800 MiB' <<<"$ref" || { printf 'reference RAM threshold FAIL\n' >&2; return 1; }
 
   printf 'P07_VPS_VALUE_VERDICT_SELF_TEST=PASS\n'
 }
@@ -256,7 +310,7 @@ if [[ "$base_version" != "$BASE_VERSION" || "$base_build" != "$BASE_BUILD" ]]; t
 fi
 
 printf '%s%s P07 VPS 一键验机 %s%s\n' "$BOLD" "$CYAN" "$VERSION" "$RESET"
-printf ' %sV2.2 新增：测完直接告诉你这台 VPS 值不值得用于建站，以及主要短板是什么。%s\n' "$GRAY" "$RESET"
+printf ' %sV2.2.1：测完直接给用途结论，并显示每项强/弱判定参考线。%s\n' "$GRAY" "$RESET"
 
 set +e
 NO_COLOR="${NO_COLOR:-}" bash "$BASE" 2>&1 | sed -u 's/V2\.1\.0/V2.2.0/g' | tee "$OUT"
