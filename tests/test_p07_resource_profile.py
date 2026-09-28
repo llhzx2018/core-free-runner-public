@@ -5,7 +5,7 @@ import pathlib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc15")
+VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc16")
 LIB = ROOT / "packages" / "p07-system-care" / VERSION / "lib"
 import sys
 if str(LIB) not in sys.path:
