@@ -33,11 +33,11 @@ install_custom_certificate() {
   local rc fields domain key cert chain confirm
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"
-  printf 'Private Key 文件：'; read -r key || return 0
-  printf 'Certificate 文件：'; read -r cert || return 0
-  printf 'Certificate Chain 文件（可留空）：'; read -r chain || true
-  [[ -f "$key" && -f "$cert" ]] || { printf 'Key/Certificate 文件不存在。\n'; pause; return 0; }
-  [[ -z "$chain" || -f "$chain" ]] || { printf 'Chain 文件不存在。\n'; pause; return 0; }
+  printf '私钥文件：'; read -r key || return 0
+  printf '证书文件：'; read -r cert || return 0
+  printf '证书链文件（可留空）：'; read -r chain || true
+  [[ -f "$key" && -f "$cert" ]] || { printf '私钥/证书文件不存在。\n'; pause; return 0; }
+  [[ -z "$chain" || -f "$chain" ]] || { printf '证书链文件不存在。\n'; pause; return 0; }
   ui_attention "将为 $domain 安装自定义证书，不修改 DNS。"; ui_prompt '继续？[y/N]：'; read -r confirm || true
   [[ "$confirm" =~ ^[Yy]$ ]] || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$domain" "$key" "$cert" "$chain" <<'PY'
@@ -73,7 +73,7 @@ repair_permissions() {
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"; root="${fields[2]}"
   if [[ "$user" == UNKNOWN || "$root" == UNKNOWN ]]; then ui_bad '网站用户/目录无法安全识别，已停止。'; pause; return 0; fi
-  say; ui_attention "将使用 CloudPanel Site User 权限修复：$domain"
+  say; ui_attention "将使用 CloudPanel 网站用户权限修复：$domain"
   say "路径：${C_GRAY}$root${C_RESET}"
   ui_note '目录权限 770，文件权限 660；不会删除文件。'
   ui_prompt '继续？[y/N]：'; read -r confirm || return 0
@@ -91,8 +91,8 @@ purge_varnish() {
   local rc fields domain user target confirm
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"
-  [[ "$user" != UNKNOWN ]] || { printf 'Site User 无法识别，已停止。\n'; pause; return 0; }
-  printf '清理目标 [all]（也可输入 URL 或 tag1,tag2）：'; read -r target || true; target="${target:-all}"
+  [[ "$user" != UNKNOWN ]] || { printf '网站用户无法识别，已停止。\n'; pause; return 0; }
+  printf '清理目标 [all=全部]（也可输入 URL 或 tag1,tag2）：'; read -r target || true; target="${target:-all}"
   say; ui_attention "将清理 $domain 的 Varnish 缓存：$target"; ui_note '不会删除网站文件。'; ui_prompt '继续？[Y/n]：'; read -r confirm || true
   [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]] || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$target" <<'PY'
