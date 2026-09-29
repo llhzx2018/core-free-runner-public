@@ -292,9 +292,9 @@ class AutoBackupTests(unittest.TestCase):
             }
             output = self._run_status_menu(root, failed, live)
             self.assertIn("上次各网站", output)
-            self.assertIn("Google：PASS", output)
-            self.assertIn("B2：FAIL", output)
-            self.assertIn("双副本：FAIL", output)
+            self.assertIn("Google：通过", output)
+            self.assertIn("B2：失败", output)
+            self.assertIn("双副本：失败", output)
             self.assertIn("立即完整备份一次", output)
 
             busy = dict(failed)
