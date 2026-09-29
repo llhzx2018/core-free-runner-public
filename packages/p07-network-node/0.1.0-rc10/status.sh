@@ -39,6 +39,13 @@ case "$install_label" in
   LEGACY_STATE|UNKNOWN|'') install_label='旧版状态' ;;
 esac
 
+display_value() {
+  case "${1:-UNKNOWN}" in
+    UNKNOWN|'') printf '未知' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 if ((managed)); then
   if ((healthy)); then
     printf '%-18s %b\n' "管理状态" "${C_GREEN}● P07 已接管 · 健康${C_RESET}"
@@ -46,12 +53,12 @@ if ((managed)); then
     printf '%-18s %b\n' "管理状态" "${C_RED}● P07 已接管 · 安装异常${C_RESET}"
   fi
   printf '%-18s %b\n' "安装标记" "${C_GRAY}${install_label}${C_RESET}"
-  printf '%-18s %b\n' "方案" "${C_GREEN}${PROFILE:-UNKNOWN}${C_RESET}"
-  printf '%-18s %b\n' "V2Ray 核心" "${C_CYAN}${CORE_VERSION:-UNKNOWN}${C_RESET}"
-  printf '%-18s %b\n' "核心组件" "${C_GRAY}${CORE_ASSET:-UNKNOWN}${C_RESET}"
-  printf '%-18s %b\n' "UDP 端口" "${C_YELLOW}${PORT:-UNKNOWN}${C_RESET}"
-  printf '%-18s %b\n' "上游提交" "${C_GRAY}${SOURCE_COMMIT:-UNKNOWN}${C_RESET}"
-  printf '%-18s %b\n' "安装时间" "${C_GRAY}${INSTALLED_AT:-UNKNOWN}${C_RESET}"
+  printf '%-18s %b\n' "方案" "${C_GREEN}$(display_value "${PROFILE:-UNKNOWN}")${C_RESET}"
+  printf '%-18s %b\n' "V2Ray 核心" "${C_CYAN}$(display_value "${CORE_VERSION:-UNKNOWN}")${C_RESET}"
+  printf '%-18s %b\n' "核心组件" "${C_GRAY}$(display_value "${CORE_ASSET:-UNKNOWN}")${C_RESET}"
+  printf '%-18s %b\n' "UDP 端口" "${C_YELLOW}$(display_value "${PORT:-UNKNOWN}")${C_RESET}"
+  printf '%-18s %b\n' "上游提交" "${C_GRAY}$(display_value "${SOURCE_COMMIT:-UNKNOWN}")${C_RESET}"
+  printf '%-18s %b\n' "安装时间" "${C_GRAY}$(display_value "${INSTALLED_AT:-UNKNOWN}")${C_RESET}"
 else
   if [[ -n "$cli" ]]; then
     printf '%-18s %b\n' "管理状态" "${C_YELLOW}● 外部 V2Ray · P07 不接管${C_RESET}"
