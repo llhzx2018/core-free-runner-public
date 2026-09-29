@@ -139,4 +139,4 @@ if [[ "$security_advisories" -gt 0 ]]; then
   say '下一步     返回后选 6. SSH / 安全检查 查看详情；当前不会自动改 SSH。'
 fi
 say
-say "${C_GRAY}说明：体检只读取服务器状态；CloudPanel 管理的网站、PHP、Vhost、SSL、数据库与面板规则不会被修改。${C_RESET}"
+say "${C_GRAY}说明：体检只读取服务器状态；CloudPanel 管理的网站、PHP、虚拟主机（Vhost）、SSL、数据库与面板规则不会被修改。${C_RESET}"
