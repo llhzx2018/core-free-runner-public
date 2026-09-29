@@ -12,23 +12,23 @@ BASE_INSTALLER_URL="${BASE_PUBLIC_ROOT}/installers/p07-rc3-r2-oauth-contract.sh"
 BASE_INSTALLER_BLOB="4a7889ea606fa2353f194abbb2c6b27345f35050"
 
 EXPECTED_VERSION="VF Server Ops 0.1.0"
-EXPECTED_BUILD_ID="0.1.0-release2"
-BUILD_BLOB="956d07ee93ae1a3e617448cfac7a89b3eb1c3c0d"
-STORAGE_SETUP_BLOB="455cd024840cadfb670e7820014aa98e3b01d39e"
+EXPECTED_BUILD_ID="0.1.0-release3"
+BUILD_BLOB="dde14d6cdd536d1c3daf7121e86df2e82ee44aea"
+STORAGE_SETUP_BLOB="9bc702f8abc0aa5c32e9adb840bbb03834ca0e18"
 GOOGLE_OAUTH_BLOB="3b023f307bf744650a351e19bde01b3597469992"
 SERVER_MIGRATION_BLOB="4b06d04c93227d55286c6629eb031d262b21f3aa"
-INTEGRATION_MANIFEST_BLOB="ce7ba2ff154eff39757a0a5047941914a47797a7"
-MANIFEST_BLOB="bf6d14d55546013801b275d4a1740fced1df2661"
-USER_ENTRY_BLOB="9f3a0ce78864bdc3bbca6924c22253347013a090"
-SITE_UI_BLOB="4f76ad436a755e04539b6cd5016007f6836a502a"
-MIGRATE_UI_BLOB="497e3eee599c5bb7f3742a4fce134149687847c7"
-AUTO_BACKUP_UI_BLOB="27915058caf8f034e3ddebc88e1c0729c7a1862b"
-CLOUDPANEL_UI_BLOB="c49a19319dab957688f284b41b2cd7a2f82b479d"
+INTEGRATION_MANIFEST_BLOB="adf70328573cfe6cc6c942456ecd4898663029bc"
+MANIFEST_BLOB="f8b5c7e9031c2b8adc40ffd24cf30e2c817189b6"
+USER_ENTRY_BLOB="5a2eda82289305cdc277f20afd4e86e65191f83a"
+SITE_UI_BLOB="586c3c3f79da3d43d0da2ede4bbb3832128a36a6"
+MIGRATE_UI_BLOB="b733c433d84c3c1b895ebdde69c052b06eb3a2de"
+AUTO_BACKUP_UI_BLOB="2cd3fcaee7b88e3bc6f793ef531f7b4d0c656bdd"
+CLOUDPANEL_UI_BLOB="3766314484bad6e438cae5ca0dbeceea1fe8c02d"
 TERMINAL_UI_BLOB="6c03ee20375b7c320071cf0619078ebe533c4ecc"
-CLOUDPANEL_COMMON_BLOB="c6f66f011339f3239be50c8c5c490fc2a96d48d6"
-CLOUDPANEL_SITES_BLOB="9167816cc4ff652d20baf0671a80bfa8f0ec031f"
-CLOUDPANEL_OPS_BLOB="c4e56f50883c2cef711a648df4426c79f78fd604"
-CLOUDPANEL_ADMIN_BLOB="8fb2587c9a1d08942e52490e107a63d68eafd2ef"
+CLOUDPANEL_COMMON_BLOB="8c1b33aea5bd288a41677160a3d18531a340ce4f"
+CLOUDPANEL_SITES_BLOB="5b37d47187a45a7035e0ab6c022675494ea65281"
+CLOUDPANEL_OPS_BLOB="bda0b72840e6beda32b53728683f55363022824b"
+CLOUDPANEL_ADMIN_BLOB="1d5e983a696d6dfb99779891d1567d8f2d16a231"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -197,7 +197,7 @@ verify_git_blob "$INSTALL_DIR/bin/vfops-storage-setup" "$STORAGE_SETUP_BLOB" || 
 verify_git_blob "$INSTALL_DIR/lib/google_device_oauth.py" "$GOOGLE_OAUTH_BLOB" || fail "R2 Google OAuth 基线发生漂移。"
 grep -Fq 'server-migrate' "$INSTALL_DIR/bin/vfops" || fail "整机迁移 CLI 未进入 Final Runtime。"
 grep -Fq '服务器迁移（整机 / 单站）' "$INSTALL_DIR/bin/vfops-user" || fail "整机迁移入口未进入 Final Runtime。"
-grep -Fq 'Google：OAuth Client ID + Client Secret' "$INSTALL_DIR/bin/vfops-storage-setup" || fail "Google+B2 初始化入口发生回归。"
+grep -Fq 'Google：OAuth 客户端 ID + 客户端密钥' "$INSTALL_DIR/bin/vfops-storage-setup" || fail "Google+B2 初始化入口发生回归。"
 
 COMMITTED=1
 rm -rf "$PREVIOUS_DIR" 2>/dev/null || true
@@ -206,7 +206,7 @@ say "P07 V0.1.0 Final Release 安装完成 ✓"
 printf '版本：%s\n' "$EXPECTED_VERSION"
 printf 'Build：%s\n' "$EXPECTED_BUILD_ID"
 printf '已集成：网络节点 / VPS 验机 / CloudPanel 备份恢复整机迁移 / 系统维护安全（由 Toolbox 统一入口提供）。\n'
-printf '安全边界：不自动改 DNS、不自动删除 SOURCE、不自动覆盖已有 TARGET。\n'
+printf '安全边界：不自动改 DNS、不自动删除源服务器、不自动覆盖已有目标服务器。\n'
 if [[ "${P07_TOOLBOX_PARENT:-0}" == "1" ]]; then
   printf '退出模块后返回 P07 Toolbox。\n'
 else
