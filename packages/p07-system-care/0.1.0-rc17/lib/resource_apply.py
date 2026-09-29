@@ -48,7 +48,7 @@ class ApplyFailed(RuntimeError):
     pass
 
 
-def _sha256(path: Path) → str:
+def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -56,7 +56,7 @@ def _sha256(path: Path) → str:
     return h.hexdigest()
 
 
-def _read(path: Path) → str:
+def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
@@ -66,7 +66,7 @@ def _run(
     env: Optional[Mapping[str, str]] = None,
     timeout: float = 15.0,
     check: bool = True,
-) → subprocess.CompletedProcess[str]:
+) -> subprocess.CompletedProcess[str]:
     p = subprocess.run(
         list(cmd),
         stdout=subprocess.PIPE,
@@ -81,7 +81,7 @@ def _run(
     return p
 
 
-def _parse_size_mib(value: str) → int:
+def _parse_size_mib(value: str) -> int:
     value = value.strip()
     m = re.fullmatch(r"(\d+)([KkMmGg]?)", value)
     if not m:
@@ -97,7 +97,7 @@ def _parse_size_mib(value: str) → int:
     raise ValueError(value)
 
 
-def _mysql_config_values(path: Path) → Dict[str, Tuple[str, int]]:
+def _mysql_config_values(path: Path) -> Dict[str, Tuple[str, int]]:
     text = _read(path)
     out: Dict[str, Tuple[str, int]] = {}
     for key in MYSQL_KEYS:
@@ -120,7 +120,7 @@ def _mysql_config_values(path: Path) → Dict[str, Tuple[str, int]]:
     return out
 
 
-def _replace_single(text: str, key: str, value: str) → str:
+def _replace_single(text: str, key: str, value: str) -> str:
     pattern = re.compile(
         rf"(?m)^([ \t]*{re.escape(key)}[ \t]*=[ \t]*)([^#;\r\n]+)([ \t]*(?:[#;].*)?)$"
     )
@@ -130,7 +130,7 @@ def _replace_single(text: str, key: str, value: str) → str:
     return pattern.sub(rf"\g<1>{value}\g<3>", text, count=1)
 
 
-def _php_current_max_children(path: Path) → int:
+def _php_current_max_children(path: Path) -> int:
     text = _read(path)
     matches = re.findall(r"(?m)^[ \t]*pm\.max_children[ \t]*=[ \t]*(\d+)[ \t]*$", text)
     if len(matches) != 1:
@@ -138,7 +138,7 @@ def _php_current_max_children(path: Path) → int:
     return int(matches[0])
 
 
-def _rooted(path: Path, root: Path) → Path:
+def _rooted(path: Path, root: Path) -> Path:
     if root == Path("/"):
         return path
     return root / path.relative_to("/")
@@ -149,7 +149,7 @@ def build_plan(
     recommendation: Mapping[str, Any],
     *,
     root: Path = Path("/"),
-) → Dict[str, Any]:
+) -> Dict[str, Any]:
     reasons: List[str] = []
     profile_id = str(recommendation.get("profile_id") or "")
     calibration = calibrations.get_calibration(profile_id)
@@ -255,7 +255,20 @@ def build_plan(
     }
 
 
-def render_plan(plan: Mapping[str, Any]) → str:
+def block_reason_text(reason: str) -> str:
+    mapping = {
+        "MODE_NOT_BALANCED": "自动应用只允许平衡模式",
+        "CLOUDPANEL_NOT_DETECTED": "未检测到 CloudPanel",
+        "MYSQL_NOT_DETECTED": "未检测到 MySQL / Percona",
+        "MYSQL_CONFIG_NOT_FOUND": "未找到 MySQL 配置文件",
+        "MYSQL_FLAVOR_NOT_SUPPORTED": "当前数据库类型不在自动应用支持范围",
+    }
+    if reason.startswith("PROFILE_CALIBRATION_STATE:"):
+        return "当前规格尚未完成生产环境校准"
+    return mapping.get(reason, f"内部原因代码：{reason}")
+
+
+def render_plan(plan: Mapping[str, Any]) -> str:
     lines = [
         rp.color("P07 · 资源安全应用计划", "magenta"),
         "",
@@ -266,7 +279,7 @@ def render_plan(plan: Mapping[str, Any]) → str:
     ]
     if plan.get("block_reasons"):
         lines += ["", rp.color("阻断原因", "red")]
-        lines += [rp.color(f"  - {x}", "red") for x in plan["block_reasons"]]
+        lines += [rp.color(f"  - {block_reason_text(str(x))}", "red") for x in plan["block_reasons"]]
     lines += ["", rp.color("MySQL", "yellow")]
     for item in plan.get("mysql_changes") or []:
         marker = rp.color("调整", "yellow") if item["change"] else rp.color("保持", "green")
@@ -292,7 +305,7 @@ def render_plan(plan: Mapping[str, Any]) → str:
     return "\n".join(lines)
 
 
-def _atomic_write(path: Path, text: str) → None:
+def _atomic_write(path: Path, text: str) -> None:
     st = path.stat()
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.vf-", dir=str(path.parent))
     tmp = Path(tmp_name)
@@ -312,7 +325,7 @@ def _atomic_write(path: Path, text: str) → None:
             tmp.unlink(missing_ok=True)
 
 
-def _apply_plan_files(plan: Mapping[str, Any], *, root: Path, backup_dir: Path) → Dict[str, Any]:
+def _apply_plan_files(plan: Mapping[str, Any], *, root: Path, backup_dir: Path) -> Dict[str, Any]:
     backup_dir.mkdir(parents=True, exist_ok=False)
     os.chmod(backup_dir, 0o700)
     records: List[Dict[str, Any]] = []
@@ -374,7 +387,7 @@ def _apply_plan_files(plan: Mapping[str, Any], *, root: Path, backup_dir: Path) 
         raise
 
 
-def _restore_files(state: Mapping[str, Any]) → None:
+def _restore_files(state: Mapping[str, Any]) -> None:
     for item in state.get("files") or []:
         live = Path(item["live"])
         backup = Path(item["backup"])
@@ -384,7 +397,7 @@ def _restore_files(state: Mapping[str, Any]) → None:
         shutil.copy2(backup, live)
 
 
-def _parse_clp_credentials(text: str) → Tuple[str, str, str, int]:
+def _parse_clp_credentials(text: str) -> Tuple[str, str, str, int]:
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
     wanted = {
         "host": "host",
@@ -410,7 +423,7 @@ def _parse_clp_credentials(text: str) → Tuple[str, str, str, int]:
     return out.get("user", "root"), password, out.get("host", "127.0.0.1"), int(out.get("port", "3306"))
 
 
-def _mysql_client() → Tuple[List[str], Dict[str, str]]:
+def _mysql_client() -> Tuple[List[str], Dict[str, str]]:
     if not shutil.which("clpctl") or not shutil.which("mysql"):
         raise ApplyBlocked("MYSQL_LOCAL_ADMIN_TOOLING_MISSING")
     creds = _run(["clpctl", "db:show:master-credentials"], timeout=8.0)
@@ -425,7 +438,7 @@ def _mysql_client() → Tuple[List[str], Dict[str, str]]:
     return cmd, env
 
 
-def _mysql_runtime_state(cmd: Sequence[str], env: Mapping[str, str]) → Dict[str, Any]:
+def _mysql_runtime_state(cmd: Sequence[str], env: Mapping[str, str]) -> Dict[str, Any]:
     sql = """
 SELECT CONCAT_WS('|',
 @@GLOBAL.innodb_buffer_pool_size,
@@ -459,13 +472,13 @@ WHERE VARIABLE_NAME='Max_used_connections';
     }
 
 
-def _runtime_numeric_for_plan(key: str, value: int) → int:
+def _runtime_numeric_for_plan(key: str, value: int) -> int:
     if key in ("innodb_buffer_pool_size", "tmp_table_size", "max_heap_table_size"):
         return max(1, int(value) // (1024 * 1024))
     return int(value)
 
 
-def _cap_plan_to_runtime(plan: Dict[str, Any], runtime_before: Mapping[str, Any]) → None:
+def _cap_plan_to_runtime(plan: Dict[str, Any], runtime_before: Mapping[str, Any]) -> None:
     """Make CAP-ONLY apply to live MySQL values as well as persistent config."""
     for item in plan.get("mysql_changes") or []:
         key = str(item["key"])
@@ -481,7 +494,7 @@ def _cap_plan_to_runtime(plan: Dict[str, Any], runtime_before: Mapping[str, Any]
         item["change"] = effective < int(item["current_numeric"])
 
 
-def _runtime_targets(plan: Mapping[str, Any]) → Dict[str, int]:
+def _runtime_targets(plan: Mapping[str, Any]) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for item in plan.get("mysql_changes") or []:
         n = int(item["effective_numeric"])
@@ -491,18 +504,18 @@ def _runtime_targets(plan: Mapping[str, Any]) → Dict[str, int]:
     return out
 
 
-def _set_mysql_globals(cmd: Sequence[str], env: Mapping[str, str], values: Mapping[str, int]) → None:
+def _set_mysql_globals(cmd: Sequence[str], env: Mapping[str, str], values: Mapping[str, int]) -> None:
     sql = "\n".join(f"SET GLOBAL {key}={int(values[key])};" for key in MYSQL_KEYS if key in values)
     _run(list(cmd) + ["-e", sql], env=env, timeout=15.0)
 
 
-def _validate_mysql() → None:
+def _validate_mysql() -> None:
     if not shutil.which("mysqld"):
         raise ApplyBlocked("MYSQLD_BINARY_MISSING")
     _run(["mysqld", "--validate-config"], timeout=15.0)
 
 
-def _validate_php(versions: Iterable[str]) → None:
+def _validate_php(versions: Iterable[str]) -> None:
     for version in sorted(set(v for v in versions if v)):
         binary = shutil.which(f"php-fpm{version}")
         if not binary:
@@ -510,12 +523,12 @@ def _validate_php(versions: Iterable[str]) → None:
         _run([binary, "-t"], timeout=10.0)
 
 
-def _reload_php(versions: Iterable[str]) → None:
+def _reload_php(versions: Iterable[str]) -> None:
     for version in sorted(set(v for v in versions if v)):
         _run(["systemctl", "reload", f"php{version}-fpm"], timeout=15.0)
 
 
-def _verify_services(versions: Iterable[str]) → None:
+def _verify_services(versions: Iterable[str]) -> None:
     for unit in ["mysql", "nginx"] + [f"php{v}-fpm" for v in sorted(set(versions))]:
         p = _run(["systemctl", "is-active", unit], timeout=5.0, check=False)
         if p.stdout.strip() != "active":
@@ -523,7 +536,7 @@ def _verify_services(versions: Iterable[str]) → None:
     _run(["nginx", "-t"], timeout=10.0)
 
 
-def _origin_smoke(pools: Iterable[Mapping[str, Any]]) → List[Dict[str, Any]]:
+def _origin_smoke(pools: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     results = []
     if not shutil.which("curl"):
         return results
@@ -548,7 +561,7 @@ def _origin_smoke(pools: Iterable[Mapping[str, Any]]) → List[Dict[str, Any]]:
     return results
 
 
-def _write_state(path: Path, state: Mapping[str, Any]) → None:
+def _write_state(path: Path, state: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
 
@@ -557,7 +570,7 @@ def _write_initial_state_or_restore(
     state_path: Path,
     state: Mapping[str, Any],
     file_state: Mapping[str, Any],
-) → None:
+) -> None:
     """Close the crash window between config mutation and durable rollback state."""
     try:
         _write_state(state_path, state)
@@ -566,7 +579,7 @@ def _write_initial_state_or_restore(
         raise
 
 
-def production_apply(mode: str, confirm: str) → Dict[str, Any]:
+def production_apply(mode: str, confirm: str) -> Dict[str, Any]:
     if os.geteuid() != 0:
         raise ApplyBlocked("ROOT_REQUIRED")
     if not sys.stdin.isatty():
@@ -651,7 +664,7 @@ def production_apply(mode: str, confirm: str) → Dict[str, Any]:
         env.pop("MYSQL_PWD", None)
 
 
-def rollback(state_dir: Path, confirm: str, *, require_tty: bool = True) → Dict[str, Any]:
+def rollback(state_dir: Path, confirm: str, *, require_tty: bool = True) -> Dict[str, Any]:
     if os.geteuid() != 0:
         raise ApplyBlocked("ROOT_REQUIRED")
     if require_tty and not sys.stdin.isatty():
@@ -686,17 +699,17 @@ def rollback(state_dir: Path, confirm: str, *, require_tty: bool = True) → Dic
         env.pop("MYSQL_PWD", None)
 
 
-def synthetic_apply(plan: Mapping[str, Any], root: Path, backup_dir: Path) → Dict[str, Any]:
+def synthetic_apply(plan: Mapping[str, Any], root: Path, backup_dir: Path) -> Dict[str, Any]:
     if not plan.get("eligible"):
         raise ApplyBlocked("PLAN_NOT_ELIGIBLE")
     return _apply_plan_files(plan, root=root, backup_dir=backup_dir)
 
 
-def synthetic_rollback(state: Mapping[str, Any]) → None:
+def synthetic_rollback(state: Mapping[str, Any]) -> None:
     _restore_files(state)
 
 
-def main(argv: Optional[Sequence[str]] = None) → int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="P07 Resource Safe Apply RC14")
     sub = parser.add_subparsers(dest="action", required=True)
 
@@ -729,10 +742,10 @@ def main(argv: Optional[Sequence[str]] = None) → int:
             print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
     except ApplyBlocked as e:
-        print(f"BLOCKED: {e}", file=sys.stderr)
+        print(f"已阻止：{e}", file=sys.stderr)
         return 77
     except ApplyFailed as e:
-        print(f"FAILED: {e}", file=sys.stderr)
+        print(f"失败：{e}", file=sys.stderr)
         return 78
     return 2
 
