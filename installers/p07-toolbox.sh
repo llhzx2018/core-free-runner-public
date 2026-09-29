@@ -279,7 +279,7 @@ main_menu() {
 }
 
 case "${1:-}" in
-  --version|-V) printf 'P07 工具箱 %s\n' "$VERSION" ;;
+  --version|-V) printf 'P07 Toolbox %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
 P07 · VF 服务器运维 ${VERSION}
