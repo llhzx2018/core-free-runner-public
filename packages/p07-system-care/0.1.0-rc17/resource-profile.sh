@@ -23,7 +23,7 @@ menu() {
     screen_clear
     ui_title "P07 · 资源优化 / 配置推荐"
     say
-    ui_note '自动识别 CPU / RAM / Swap / Load / PHP Pool / Worker RSS / MySQL。'
+    ui_note '自动识别 CPU / 内存 / Swap / 负载 / PHP 进程池 / 进程内存 / MySQL。'
     ui_note '1-5 仅生成建议，不修改配置或重启服务。'
     ui_attention '第 6 项包含 安全应用 / 回滚；仅已校准 配置方案 可执行，并要求显式确认。'
     say
