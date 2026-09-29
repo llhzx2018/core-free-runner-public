@@ -52,6 +52,14 @@ elif command -v nft >/dev/null 2>&1; then
   if nft list ruleset >/dev/null 2>&1; then firewall='nftables 已有规则'; else firewall='nftables 状态未知'; fi
 fi
 
+case "$firewall" in
+  "UFW active") firewall='UFW 已启用' ;;
+  "UFW inactive") firewall='UFW 未启用' ;;
+  "firewalld running") firewall='firewalld 运行中' ;;
+  "firewalld not running") firewall='firewalld 未运行' ;;
+  *UNKNOWN*) firewall="${firewall/UNKNOWN/未知}" ;;
+esac
+
 fail2ban='未安装/未运行'
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fail2ban 2>/dev/null; then fail2ban='运行中'
 elif command -v fail2ban-client >/dev/null 2>&1; then fail2ban='已安装但未运行'; fi
@@ -92,20 +100,20 @@ write_summary_cache "$health" "$disk" "$inode" "$failed" "$reboot_cache" "$cp" "
 
 say "${C_BOLD}P07 · 一键系统体检${C_RESET}"
 say
-printf '系统       %s\n' "$os"
-printf '内核       %s\n' "$kernel"
-printf '负载       %s\n' "$load"
-printf '内存       %s\n' "$mem"
-printf '交换分区   %s\n' "$swap"
+printf '系统       %s\n' "${os/UNKNOWN/未知}"
+printf '内核       %s\n' "${kernel/UNKNOWN/未知}"
+printf '负载       %s\n' "${load/UNKNOWN/未知}"
+printf '内存       %s\n' "${mem/UNKNOWN/未知}"
+printf '交换分区   %s\n' "${swap/UNKNOWN/未知}"
 printf '根分区     %s%% · inode %s%%\n' "$disk" "$inode"
-printf '系统日志   %s\n' "$journal"
+printf '系统日志   %s\n' "${journal/UNKNOWN/未知}"
 printf '系统更新   %s · 安全更新 %s\n' "$updates" "$security"
 printf '需要重启   %s\n' "$reboot"
 printf '异常服务   %s\n' "$failed"
 printf '内存不足   %s\n' "$oom"
 printf '时间同步   %s\n' "$ntp_text"
 printf 'SSH        端口=%s · Root 登录=%s · 密码认证=%s\n' "$ssh_port" "$root_login_text" "$password_auth_text"
-printf '监听端口   %s\n' "$ports"
+printf '监听端口   %s\n' "${ports/UNKNOWN/未知}"
 printf '防火墙     %s\n' "$firewall"
 printf 'Fail2ban   %s\n' "$fail2ban"
 printf 'CloudPanel %s\n' "$cp"
