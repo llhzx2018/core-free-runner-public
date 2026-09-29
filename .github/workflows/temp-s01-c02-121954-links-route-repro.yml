@@ -1,0 +1,136 @@
+name: TEMP S01-C02 1.21.954 Links Route Repro
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-s01-c02-121954-links-route-repro.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: c16fc1cfe9a3e903bb499c0a6038216da3e736aa
+      TARGET_VERSION: 1.21.954
+
+    steps:
+      - name: Checkout exact product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Build runtime zip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import re, zipfile
+          from pathlib import Path
+          root=Path('target')
+          out=Path('/tmp/vf-tools-ops_V1.21.954.zip')
+          def keep(rel):
+              p=rel.as_posix()
+              parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for path in root.rglob('*'):
+                  if path.is_file() and not path.is_symlink():
+                      rel=path.relative_to(root)
+                      if keep(rel): z.write(path,'vf-ops/'+rel.as_posix())
+          PY
+          unzip -tq /tmp/vf-tools-ops_V1.21.954.zip
+
+      - name: Boot WordPress and reproduce exact route
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-links-${GITHUB_RUN_ID}"
+          DB="vf-links-db-${GITHUB_RUN_ID}"
+          WP="vf-links-wp-${GITHUB_RUN_ID}"
+          PORT="$((20000 + (GITHUB_RUN_ID % 10000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          cleanup
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test -e WORDPRESS_TABLE_PREFIX=wp_ -e WORDPRESS_DEBUG=1 wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V1.21.954.zip "$WP:/tmp/vf-tools-ops_V1.21.954.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF Links Repro' --admin_user=admin --admin_password='VF-Links-Repro-954!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/vf-tools-ops_V1.21.954.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          echo "define('WP_DEBUG_LOG', true);" >> /tmp/extra.php
+          docker exec "$WP" sh -lc "printf '\ndefine(\"WP_DEBUG_LOG\", true);\ndefine(\"WP_DEBUG_DISPLAY\", false);\n' >> /var/www/html/wp-config.php"
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"
+          echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"
+          echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"
+          echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Direct authenticated route probe
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-Links-Repro-954!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > /tmp/probe.js <<'JS'
+          const { chromium } = require(process.cwd() + '/node_modules/playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1000}});
+            const out={console:[],pageErrors:[],requests:[]};
+            page.on('console',m=>{if(m.type()==='error') out.console.push(m.text())});
+            page.on('pageerror',e=>out.pageErrors.push(String(e)));
+            page.on('response',r=>{if(r.status()>=400) out.requests.push({status:r.status(),url:r.url()})});
+            const base=process.argv[2];
+            await page.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#user_login','admin');
+            await page.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.click('#wp-submit')]);
+            const url=base+'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=links';
+            const res=await page.goto(url,{waitUntil:'domcontentloaded',timeout:30000});
+            out.status=res?res.status():0;
+            out.finalUrl=page.url();
+            out.title=await page.title();
+            out.body=(await page.locator('body').innerText()).slice(0,8000);
+            out.hasLinksPage=await page.locator('[data-vf-links-page]').count();
+            out.hasCritical=/There has been a critical error|Fatal error|Parse error|Uncaught Error/i.test(out.body);
+            console.log(JSON.stringify(out,null,2));
+            await browser.close();
+            if(out.status>=500||out.hasCritical||out.hasLinksPage!==1) process.exit(2);
+          })().catch(e=>{console.error(e);process.exit(3)});
+          JS
+          set +e
+          node /tmp/probe.js "$VF_BASE_URL" | tee /tmp/route-probe.json
+          PROBE_RC=${PIPESTATUS[0]}
+          set -e
+          echo "PROBE_RC=$PROBE_RC"
+          docker exec "$VF_WP_CONTAINER" sh -lc 'test -f /var/www/html/wp-content/debug.log && tail -n 200 /var/www/html/wp-content/debug.log || true' | tee /tmp/wp-debug.log
+          docker logs "$VF_WP_CONTAINER" 2>&1 | tail -n 200 | tee /tmp/container.log
+          exit "$PROBE_RC"
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
