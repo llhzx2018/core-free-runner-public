@@ -12,13 +12,23 @@ BASE_INSTALLER_URL="${BASE_PUBLIC_ROOT}/installers/p07-rc3-r2-oauth-contract.sh"
 BASE_INSTALLER_BLOB="4a7889ea606fa2353f194abbb2c6b27345f35050"
 
 EXPECTED_VERSION="VF Server Ops 0.1.0"
-EXPECTED_BUILD_ID="0.1.0-release1"
-BUILD_BLOB="ba9759efbe649502f8908787c3d1a8c867635d0e"
-STORAGE_SETUP_BLOB="b279677ae561f9feb689964bd8f09be98c9211c9"
+EXPECTED_BUILD_ID="0.1.0-release2"
+BUILD_BLOB="956d07ee93ae1a3e617448cfac7a89b3eb1c3c0d"
+STORAGE_SETUP_BLOB="455cd024840cadfb670e7820014aa98e3b01d39e"
+USER_ENTRY_BLOB="9f3a0ce78864bdc3bbca6924c22253347013a090"
+SITE_UI_BLOB="4f76ad436a755e04539b6cd5016007f6836a502a"
+MIGRATE_UI_BLOB="497e3eee599c5bb7f3742a4fce134149687847c7"
+AUTO_BACKUP_UI_BLOB="27915058caf8f034e3ddebc88e1c0729c7a1862b"
+CLOUDPANEL_UI_BLOB="c49a19319dab957688f284b41b2cd7a2f82b479d"
+TERMINAL_UI_BLOB="6c03ee20375b7c320071cf0619078ebe533c4ecc"
+CLOUDPANEL_COMMON_BLOB="c6f66f011339f3239be50c8c5c490fc2a96d48d6"
+CLOUDPANEL_SITES_BLOB="9167816cc4ff652d20baf0671a80bfa8f0ec031f"
+CLOUDPANEL_OPS_BLOB="c4e56f50883c2cef711a648df4426c79f78fd604"
+CLOUDPANEL_ADMIN_BLOB="8fb2587c9a1d08942e52490e107a63d68eafd2ef"
 GOOGLE_OAUTH_BLOB="3b023f307bf744650a351e19bde01b3597469992"
 SERVER_MIGRATION_BLOB="4b06d04c93227d55286c6629eb031d262b21f3aa"
 INTEGRATION_MANIFEST_BLOB="9b9bd90a6ff6de339923b7b853c12f579e5a0667"
-MANIFEST_BLOB="f646160afc202118c6df18f8e23fe35d688e8bde"
+MANIFEST_BLOB="c66ede085cdc2a025ec788536786ffa1e07db071"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -46,7 +56,17 @@ verify_installed_final() {
   [[ "$("$BIN_LINK" --version 2>/dev/null || true)" == "$EXPECTED_VERSION" ]] || return 1
   [[ "$("$BIN_LINK" --build-id 2>/dev/null || true)" == "$EXPECTED_BUILD_ID" ]] || return 1
   verify_git_blob "$INSTALL_DIR/BUILD_ID" "$BUILD_BLOB" >/dev/null 2>&1 || return 1
-  verify_git_blob "$INSTALL_DIR/bin/vfops-user" "e7183974dce0a8e6ba4ba3bd26a7561e2377e563" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-user" "$USER_ENTRY_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-site-ui" "$SITE_UI_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-migrate-ui" "$MIGRATE_UI_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-auto-backup" "$AUTO_BACKUP_UI_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-cloudpanel-ui" "$CLOUDPANEL_UI_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/bin/vfops-storage-setup" "$STORAGE_SETUP_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/lib/terminal_ui.sh" "$TERMINAL_UI_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_common.sh" "$CLOUDPANEL_COMMON_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_sites.sh" "$CLOUDPANEL_SITES_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_ops.sh" "$CLOUDPANEL_OPS_BLOB" >/dev/null 2>&1 || return 1
+  verify_git_blob "$INSTALL_DIR/lib/cloudpanel_ui_admin.sh" "$CLOUDPANEL_ADMIN_BLOB" >/dev/null 2>&1 || return 1
   verify_git_blob "$INSTALL_DIR/lib/server_migration.py" "$SERVER_MIGRATION_BLOB" >/dev/null 2>&1 || return 1
   verify_git_blob "$INSTALL_DIR/docs/authority/P07_INTEGRATION_MANIFEST.json" "$INTEGRATION_MANIFEST_BLOB" >/dev/null 2>&1 || return 1
 }
@@ -136,7 +156,16 @@ done < "$TMP_DIR/MANIFEST.gitblob"
 say "执行 Final Release 自检..."
 bash -n "$INSTALL_DIR/bin/vfops"
 bash -n "$INSTALL_DIR/bin/vfops-user"
+bash -n "$INSTALL_DIR/bin/vfops-site-ui"
 bash -n "$INSTALL_DIR/bin/vfops-migrate-ui"
+bash -n "$INSTALL_DIR/bin/vfops-auto-backup"
+bash -n "$INSTALL_DIR/bin/vfops-cloudpanel-ui"
+bash -n "$INSTALL_DIR/bin/vfops-storage-setup"
+bash -n "$INSTALL_DIR/lib/terminal_ui.sh"
+bash -n "$INSTALL_DIR/lib/cloudpanel_ui_common.sh"
+bash -n "$INSTALL_DIR/lib/cloudpanel_ui_sites.sh"
+bash -n "$INSTALL_DIR/lib/cloudpanel_ui_ops.sh"
+bash -n "$INSTALL_DIR/lib/cloudpanel_ui_admin.sh"
 python3 -m py_compile   "$INSTALL_DIR/lib/app_config.py"   "$INSTALL_DIR/lib/backup_frontend.py"   "$INSTALL_DIR/lib/migrate.py"   "$INSTALL_DIR/lib/restore.py"   "$INSTALL_DIR/lib/restore_apply_core.py"   "$INSTALL_DIR/lib/restore_new.py"   "$INSTALL_DIR/lib/runtime.py"   "$INSTALL_DIR/lib/server_migration.py"   "$INSTALL_DIR/lib/transport.py"   "$INSTALL_DIR/lib/verify.py"
 
 (
@@ -144,6 +173,9 @@ python3 -m py_compile   "$INSTALL_DIR/lib/app_config.py"   "$INSTALL_DIR/lib/bac
   python3 -m unittest -q tests.test_p07_integration_manifest
   python3 -m unittest -q tests.test_app_config
   python3 -m unittest -q tests.test_server_migration
+  python3 -m unittest -q tests.test_terminal_ui_color_contract
+  python3 -m unittest -q tests.test_menu3_modular
+  python3 -m unittest -q tests.test_user_entry
 ) || fail "Final Release 安装后回归测试失败。"
 
 [[ "$("$BIN_LINK" --version 2>/dev/null || true)" == "$EXPECTED_VERSION" ]] || fail "Final Version 自检失败。"
