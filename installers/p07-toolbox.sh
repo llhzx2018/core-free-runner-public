@@ -2,8 +2,7 @@
 set -Eeuo pipefail
 
 # P07 V0.1.0 final public distribution readback marker.
-# Public versions stay short and semantic. Internal build identities remain hidden
-# and are used only for exact validation / engineering traceability.
+# 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
@@ -38,7 +37,7 @@ screen_clear() { if [[ -t 1 ]]; then printf '\033[H\033[2J'; fi; }
 show_header() {
   screen_clear
   say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF Server Ops${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
+  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF 服务器运维${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
   say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
   say
 }
@@ -280,7 +279,7 @@ main_menu() {
 }
 
 case "${1:-}" in
-  --version|-V) printf 'P07 Toolbox %s\n' "$VERSION" ;;
+  --version|-V) printf 'P07 工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
 P07 · VF Server Ops ${VERSION}
