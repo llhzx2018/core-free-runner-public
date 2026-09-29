@@ -132,7 +132,7 @@ menu() {
 }
 
 case "${1:-menu}" in
-  --version|-V) printf 'P07 系统维护 / 安全 %s\n' "$VERSION" ;;
+  --version|-V) printf 'P07 System Care %s\n' "$VERSION" ;;
   --help|-h) show_help ;;
   status|check) exec bash "$SCRIPT_DIR/status.sh" ;;
   audit) exec bash "$SCRIPT_DIR/audit.sh" ;;
