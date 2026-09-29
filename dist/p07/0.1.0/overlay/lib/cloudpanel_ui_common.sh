@@ -125,7 +125,7 @@ dbs=s.get('mysql_databases')
 print(len(dbs) if isinstance(dbs,list) else -1)
 PY
 )"
-  if [[ "$count" == -1 ]]; then printf '数据库清单为 UNKNOWN，已停止。\n'; return 1; fi
+  if [[ "$count" == -1 ]]; then printf '数据库清单状态未知，已停止。\n'; return 1; fi
   if [[ "$count" == 0 ]]; then printf '该网站没有发现 MySQL 数据库。\n'; return 2; fi
   say; ui_title '请选择数据库'; ui_rule
   python3 - "$INV_FILE" "$SELECTED_INDEX" <<'PY'
@@ -164,15 +164,15 @@ show_site_details() {
   runtime="${fields[4]}"; version="${fields[5]}"; mysql="${fields[6]}"; sqlite="${fields[7]}"; ssl="${fields[8]}"; days="${fields[9]}"
   say; ui_title '网站详情'; ui_rule
   say "域名：${C_CYAN}$domain${C_RESET}"
-  say "Site User：$user"
-  say "Site Root：${C_GRAY}$root${C_RESET}"
-  say "Document Root：${C_GRAY}$docroot${C_RESET}"
-  say "Runtime：$runtime $version"
+  say "网站用户：$user"
+  say "网站根目录：${C_GRAY}$root${C_RESET}"
+  say "Web 根目录：${C_GRAY}$docroot${C_RESET}"
+  say "运行环境：$runtime $version"
   say "MySQL：$mysql · SQLite：$sqlite"
   case "$ssl" in
-    YES) say "SSL：${C_GREEN}$ssl${C_RESET} · 剩余天数：$days" ;;
-    NO) say "SSL：${C_YELLOW}$ssl${C_RESET} · 剩余天数：$days" ;;
-    *) say "SSL：${C_YELLOW}$ssl${C_RESET} · 剩余天数：$days" ;;
+    YES) say "SSL：${C_GREEN}已配置${C_RESET} · 剩余天数：$days" ;;
+    NO) say "SSL：${C_YELLOW}未配置${C_RESET} · 剩余天数：$days" ;;
+    *) say "SSL：${C_YELLOW}未知${C_RESET} · 剩余天数：$days" ;;
   esac
   ui_note '读取方式：只读，不修改网站。'
   pause
@@ -183,9 +183,9 @@ site_health() {
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"; docroot="${fields[3]}"
   say; ui_title '网站健康检查（只读）'; ui_rule
-  [[ "$user" != UNKNOWN ]] && id "$user" >/dev/null 2>&1 && ui_good 'Site User：PASS' || ui_bad 'Site User：UNKNOWN/FAIL'
-  [[ "$docroot" != UNKNOWN && -d "$docroot" ]] && ui_good 'Document Root：PASS' || ui_bad 'Document Root：UNKNOWN/FAIL'
-  if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX 配置：PASS'; else ui_bad 'NGINX 配置：UNKNOWN/FAIL'; fi
+  [[ "$user" != UNKNOWN ]] && id "$user" >/dev/null 2>&1 && ui_good '网站用户：通过' || ui_bad '网站用户：未知/失败'
+  [[ "$docroot" != UNKNOWN && -d "$docroot" ]] && ui_good 'Web 根目录：通过' || ui_bad 'Web 根目录：未知/失败'
+  if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX 配置：通过'; else ui_bad 'NGINX 配置：未知/失败'; fi
   http_code="$(curl -sS --max-time 8 --resolve "$domain:80:127.0.0.1" -o /dev/null -w '%{http_code}' "http://$domain/" 2>/dev/null || true)"
   https_code="$(curl -ksS --max-time 8 --resolve "$domain:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$domain/" 2>/dev/null || true)"
   [[ "$http_code" =~ ^[1-5][0-9][0-9]$ ]] || http_code="NO_RESPONSE"
