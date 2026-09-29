@@ -307,20 +307,20 @@ fi
 self_test(){
   local r
   r="$(classify_values 236 512 1.86 0.5 1973 1 NORMAL)"
-  case "$r" in 偏弱\|偏弱\|良好\|能用，但后台和动态页面响应会偏慢*) ;; *) printf 'DO-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
+  case "$r" in 偏弱\|偏弱\|良好\|能用，但后台和动态页面响应会偏慢*) ;; *) printf 'DO 类测试样例失败：%s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 1479 1363 0.59 0 961 1 NORMAL)"
-  case "$r" in 良好\|强\|强\|CPU/I/O\ 可以，但内存不足*) ;; *) printf 'Linode-like fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
+  case "$r" in 良好\|强\|强\|CPU/I/O\ 可以，但内存不足*) ;; *) printf 'Linode 类测试样例失败：%s\n' "$r" >&2; return 1 ;; esac
 
   r="$(classify_values 700 850 3 1 4096 2 NORMAL)"
-  case "$r" in 良好\|良好\|良好\|适合*) ;; *) printf 'balanced fixture FAIL: %s\n' "$r" >&2; return 1 ;; esac
+  case "$r" in 良好\|良好\|良好\|适合*) ;; *) printf '平衡型测试样例失败：%s\n' "$r" >&2; return 1 ;; esac
 
   local ref
   ref="$(NO_COLOR=1 bash "$0" --reference 2>/dev/null || true)"
-  grep -Fq '强      >= 900 MB/s' <<<"$ref" || { printf 'reference CPU threshold FAIL\n' >&2; return 1; }
-  grep -Fq '>= 1000 IOPS' <<<"$ref" || { printf 'reference I/O threshold FAIL\n' >&2; return 1; }
-  grep -Fq '正常    <= 2%' <<<"$ref" || { printf 'reference Steal threshold FAIL\n' >&2; return 1; }
-  grep -Fq '>= 1800 MiB' <<<"$ref" || { printf 'reference RAM threshold FAIL\n' >&2; return 1; }
+  grep -Fq '强      >= 900 MB/s' <<<"$ref" || { printf 'CPU 参考线自检失败\n' >&2; return 1; }
+  grep -Fq '>= 1000 IOPS' <<<"$ref" || { printf 'I/O 参考线自检失败\n' >&2; return 1; }
+  grep -Fq '正常    <= 2%' <<<"$ref" || { printf 'CPU 争抢参考线自检失败\n' >&2; return 1; }
+  grep -Fq '>= 1800 MiB' <<<"$ref" || { printf '内存参考线自检失败\n' >&2; return 1; }
 
   printf 'P07_VPS_VALUE_VERDICT_SELF_TEST=PASS\n'
 }
