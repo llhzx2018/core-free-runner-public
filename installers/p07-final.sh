@@ -10,10 +10,10 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/0.1.0-rc2"
 BASE_PACKAGE="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 BASE_SHA256="de28a5e9dada500357be725e78e9e5cbacd51d26f1ec9bbb55ff92d21d49ada5"
 RUNTIME_URL="${PUBLIC_ROOT}/dist/p07/0.1.0/overlay"
-RUNTIME_MANIFEST_BLOB="320c0c9030c1185bf6bc0a3de9bfee8475791da9"
+RUNTIME_MANIFEST_BLOB="e5e1932718cafaf84616b4418481b77d8d91fcbf"
 
 EXPECTED_VERSION="VF Server Ops 0.1.0"
-EXPECTED_BUILD_ID="0.1.0-release5"
+EXPECTED_BUILD_ID="0.1.0-release6"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] 错误：%s\n' "$*" >&2; exit 1; }
@@ -152,7 +152,7 @@ say "CloudPanel 运维模块安装 / 升级完成 ✓"
 printf '版本：%s\n' "$EXPECTED_VERSION"
 printf '构建：%s\n' "$EXPECTED_BUILD_ID"
 printf '加载方式：只安装第 3 模块当前运行时，不回放历史候选版 / 初始化升级链。\n'
-printf '按需依赖：进入远程备份时才安装 rclone；进入服务器迁移时才安装 OpenSSH 客户端。\n'
+printf '按需依赖：进入远程备份时才安装 rclone；进入服务器迁移时才安装 OpenSSH 客户端 + rsync。\n'
 printf '安全边界：不自动改 DNS、不自动删除源服务器、不自动覆盖已有目标服务器。\n'
 
 if [[ -t 0 && -t 1 && "${P07_NO_EXEC:-0}" != "1" ]]; then
