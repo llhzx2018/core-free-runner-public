@@ -38,11 +38,11 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertIn("semantic_terminal_colors", s["capabilities"])
         self.assertIn("pty_color_preservation", s["capabilities"])
 
-    def test_slot3_release2_is_public_distribution(self):
+    def test_slot3_release3_is_public_distribution_candidate(self):
         s = self.data["slots"][2]
-        self.assertEqual(s["internal_version"], "0.1.0-release2")
-        self.assertEqual(s["integration_state"], "RELEASED_TO_PUBLIC_MAIN")
-        self.assertEqual(s["source_main_commit"], "b52c710519430122ac443b7f7ebc54a84a9a2be4")
+        self.assertEqual(s["internal_version"], "0.1.0-release3")
+        self.assertEqual(s["integration_state"], "RELEASE_CANDIDATE_FOR_PUBLIC_MAIN")
+        self.assertEqual(s["source_main_commit"], "424b539b331236d85a35b310943b810046be0927")
         self.assertEqual(s["terminal_ui_color_system"], "CANONICAL_V1")
         self.assertEqual(s["full_server_migration_integration_commit"], "5c447fc99030f75c098934ddb9aa300b934564bb")
 
@@ -55,12 +55,12 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual(self.data["release_blockers"], [])
         self.assertEqual(self.data["release"]["tag"], "p07-v0.1.0")
         self.assertEqual(self.data["release"]["status"], "PUBLISHED")
-        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release2")
+        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release3")
 
     def test_production_is_not_claimed_upgraded_before_owner_verification(self):
         p = self.data["production"]
         self.assertEqual(p["slot3_build"], "0.1.0-release1")
-        self.assertEqual(p["release2_install_status"], "NOT_YET_OWNER_VERIFIED")
+        self.assertEqual(p["release3_install_status"], "NOT_YET_OWNER_VERIFIED")
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]
