@@ -45,6 +45,10 @@ class AutoBackupTests(unittest.TestCase):
         menu = runtime / "bin" / "vfops-auto-backup"
         menu.write_text((ROOT / "bin" / "vfops-auto-backup").read_text(encoding="utf-8"), encoding="utf-8")
         menu.chmod(0o755)
+        (runtime / "lib" / "terminal_ui.sh").write_text(
+            (ROOT / "lib" / "terminal_ui.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
         engine = runtime / "lib" / "auto_backup.py"
         status_json = json.dumps(status_payload, ensure_ascii=False)
@@ -242,7 +246,7 @@ class AutoBackupTests(unittest.TestCase):
                 {"provider": "b2", "enabled": True, "health": "OK"},
             ]}
             output = self._run_status_menu(root, status, live, status_rc=12)
-            self.assertIn("状态：需关注", output)
+            self.assertIn("状态：远程已就绪 · 待首次验证", output)
             self.assertIn("Google 实时：正常 ✓", output)
             self.assertIn("B2 实时：正常 ✓", output)
             self.assertIn("启用 / 更新自动备份", output)

@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/lib/terminal_ui.sh"
+CORE="$ROOT_DIR/bin/vfops"
+BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
+EVIDENCE_DIR="${VFOPS_EVIDENCE_DIR:-/var/lib/vf-server-ops/evidence/restore-as}"
+INV_FILE=""
+SELECTED_BACKUP=""
+SELECTED_DOMAIN=""
+
+cleanup() { [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true; }
+trap cleanup EXIT
+pause() { printf '\n按 Enter 返回...'; read -r _ || true; }
+
+load_inventory() {
+  cleanup
+  INV_FILE="$(mktemp -t p07-inventory.XXXXXX)"
+  if ! "$CORE" inventory --compact >"$INV_FILE" 2>/tmp/p07-inventory.err; then
+    printf '\n无法读取 CloudPanel 网站。服务器没有被修改。\n' >&2
+    rm -f /tmp/p07-inventory.err
+    return 1
+  fi
+  rm -f /tmp/p07-inventory.err
+}
+
+show_overview() {
+  say "\n${C_CYAN}[P07] 正在读取这台服务器...${C_RESET}"
+  load_inventory || { pause; return 0; }
+  C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$INV_FILE" <<'PY'
+import json,os,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+cyan=os.environ.get("C_CYAN",""); green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def paint(text,color): return f"{color}{text}{reset}" if color else text
+system=p.get('system',{}) if isinstance(p.get('system'),dict) else {}
+osinfo=system.get('os',{}) if isinstance(system.get('os'),dict) else {}
+sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
+summary=p.get('summary',{}) if isinstance(p.get('summary'),dict) else {}
+print('\n'+paint('服务器 / 网站概览',cyan))
+print(paint('----------------------------------------',gray))
+print(f"系统：{osinfo.get('pretty_name','UNKNOWN')}")
+print(f"CloudPanel：{system.get('cloudpanel_version','UNKNOWN')}")
+print(f"网站：{len(sites)}  MySQL：{summary.get('mysql_database_count_known','?')}  SQLite：{summary.get('sqlite_file_count_known','?')}")
+print('\n'+paint('网站',cyan))
+print(paint('----------------------------------------',gray))
+for i,s in enumerate(sites,1):
+    r=s.get('runtime',{}) if isinstance(s.get('runtime'),dict) else {}
+    mysql=s.get('mysql_databases')
+    sqlite=s.get('sqlite_paths')
+    ssl=s.get('ssl',{}) if isinstance(s.get('ssl'),dict) else {}
+    print(f"{i}. "+paint(str(s.get('domain','UNKNOWN')),cyan))
+    ssl_text='是' if ssl.get('configured') is True else '否/未知'
+    ssl_text=paint(ssl_text,green if ssl.get('configured') is True else yellow)
+    print(f"   {r.get('type','UNKNOWN')} {r.get('version','')} · MySQL {len(mysql) if isinstance(mysql,list) else '?'} · SQLite {len(sqlite) if isinstance(sqlite,list) else '?'} · SSL {ssl_text}")
+PY
+  pause
+}
+
+select_site() {
+  SELECTED_DOMAIN=""
+  load_inventory || return 1
+  local count choice
+  count="$(python3 - "$INV_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+print(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else []))
+PY
+)"
+  [[ "$count" -gt 0 ]] || { printf '\n没有发现 CloudPanel 网站。\n'; return 2; }
+  ui_title '请选择网站'; ui_rule
+  python3 - "$INV_FILE" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+for i,s in enumerate(p.get('sites',[]),1): print(f"  {i}. {s.get('domain','UNKNOWN')}")
+print('  0. 返回')
+PY
+  ui_prompt "\n请选择 [0-${count}]："
+  read -r choice || return 2
+  [[ "$choice" =~ ^[0-9]+$ ]] || { printf '请输入上面的数字。\n'; return 1; }
+  [[ "$choice" == 0 ]] && return 2
+  (( choice >= 1 && choice <= count )) || { printf '选择超出范围。\n'; return 1; }
+  SELECTED_DOMAIN="$(python3 - "$INV_FILE" "$choice" <<'PY'
+import json,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+print(p['sites'][int(sys.argv[2])-1]['domain'])
+PY
+)"
+}
+
+backup_site() {
+  say "\n${C_CYAN}[P07] 正在读取 CloudPanel 网站...${C_RESET}"
+  local rc output path size
+  if select_site; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
+  printf '\n将备份：%s\n保存：%s\n开始备份？[Y/n]：' "$SELECTED_DOMAIN" "$BACKUP_DIR"
+  local yn; read -r yn || return 0
+  [[ -z "$yn" || "$yn" =~ ^[Yy]$ ]] || return 0
+  say "\n${C_CYAN}[P07] 正在创建并校验备份...${C_RESET}"
+  if ! output="$("$CORE" backup --site "$SELECTED_DOMAIN" --output-dir "$BACKUP_DIR" 2>&1)"; then
+    ui_bad '备份完整性检查没有通过。原网站未修改。'
+    ui_safe_diagnostic "$output" || ui_note '原因代码：BACKUP_FAILED'
+    pause; return 0
+  fi
+  path="$(printf '%s\n' "$output" | tail -n1)"
+  size="$(du -sh "$path" 2>/dev/null | awk '{print $1}' || printf '?')"
+  ui_good '备份完成 ✓'
+  say "网站：${C_GREEN}${SELECTED_DOMAIN}${C_RESET}"
+  say "大小：${size}"
+  say "状态：${C_GREEN}已验证，可恢复${C_RESET}"
+  say "位置：${C_GRAY}${path}${C_RESET}"
+  ui_note 'DNS：未修改 · SOURCE：保留'
+  pause
+}
+
+list_backups() {
+  python3 - "$BACKUP_DIR" <<'PY'
+import json,sys
+from pathlib import Path
+base=Path(sys.argv[1]); rows=[]
+if base.is_dir():
+    for m in base.glob('*/manifest.json'):
+        try:
+            d=json.loads(m.read_text(encoding='utf-8'))
+            v=m.parent/'verification.json'
+            if not v.is_file() or json.loads(v.read_text(encoding='utf-8')).get('status')!='PASS': continue
+            rows.append((m.parent,d.get('site',{}).get('domain','UNKNOWN'),d.get('backup_id','UNKNOWN'),d.get('created_at','UNKNOWN')))
+        except Exception: pass
+rows.sort(key=lambda x:x[3],reverse=True)
+for i,(path,domain,bid,created) in enumerate(rows,1): print(f"{i}\t{path}\t{domain}\t{bid}\t{created}")
+PY
+}
+
+select_backup() {
+  SELECTED_BACKUP=""
+  local raw count choice
+  raw="$(list_backups)"
+  [[ -n "$raw" ]] || { ui_attention '没有发现已验证、可恢复的 P07 本地备份。'; return 2; }
+  count="$(printf '%s\n' "$raw" | wc -l | tr -d ' ')"
+  ui_title '可恢复备份'; ui_rule
+  printf '%s\n' "$raw" | awk -F '\t' '{printf "  %s. %s  (%s)\n",$1,$3,$5}'
+  ui_menu_back 0 '返回'
+  ui_prompt "\n请选择 [0-${count}]："
+  read -r choice || return 2
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  [[ "$choice" == 0 ]] && return 2
+  (( choice>=1 && choice<=count )) || return 1
+  SELECTED_BACKUP="$(printf '%s\n' "$raw" | awk -F '\t' -v n="$choice" '$1==n{print $2}')"
+}
+
+backup_identity() {
+  python3 - "$1" <<'PY'
+import json,sys
+from pathlib import Path
+d=json.loads((Path(sys.argv[1])/'manifest.json').read_text(encoding='utf-8'))
+print(f"{d['site']['domain']}\t{d['backup_id']}")
+PY
+}
+
+validate_new_domain() {
+  PYTHONPATH="$ROOT_DIR/lib" python3 - "$1" <<'PY' >/dev/null 2>&1
+import sys,cloudpanel
+cloudpanel.validate_domain(sys.argv[1])
+PY
+}
+
+preflight_new_domain() {
+  PYTHONPATH="$ROOT_DIR/lib" python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+import site_lifecycle
+try:
+    site_lifecycle.ensure_domain_available(Path('/'),sys.argv[1])
+except Exception:
+    print('BLOCKED')
+    raise SystemExit(1)
+print('READY')
+PY
+}
+
+persist_restore_as_evidence() {
+  local result_file="$1" target_domain="$2" timestamp safe_target evidence_file
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  safe_target="$(printf '%s' "$target_domain" | tr -c 'A-Za-z0-9._-' '_')"
+  install -d -m 700 "$EVIDENCE_DIR" || return 1
+  evidence_file="$EVIDENCE_DIR/${timestamp}_${safe_target}.json"
+  install -m 600 "$result_file" "$evidence_file" || return 1
+  printf '%s\n' "$evidence_file"
+}
+
+render_restore_as_result() {
+  C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$1" "${2:-NOT_SAVED}" <<'PY'
+import json,os,sys
+p=json.load(open(sys.argv[1],encoding='utf-8'))
+green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def paint(text,color): return f"{color}{text}{reset}" if color else text
+evidence=sys.argv[2]
+v=p.get('local_verification',{}) if isinstance(p.get('local_verification'),dict) else {}
+sni=v.get('sni',{}) if isinstance(v.get('sni'),dict) else {}
+tls_mode=sni.get('mode','UNKNOWN')
+print('\n'+paint('恢复为新网站完成 ✓',green))
+print(paint(f"原网站：{p.get('source_domain','UNKNOWN')} · 保留",gray))
+print(f"新网站：{paint(str(p.get('target_domain','UNKNOWN')),green)} · CloudPanel 已自动创建")
+print(f"新 Site User：{p.get('target_site_user','UNKNOWN')}")
+print(f"数据库：{'已创建并验证' if p.get('target_database') else '无 MySQL'}")
+print(f"应用配置：{p.get('application_config_mode','UNKNOWN')}")
+verify='PASS' if v.get('status') == 'PASS' else 'UNKNOWN'
+print(f"本机验证：{paint(verify,green if verify == 'PASS' else yellow)} · 文件 / DB / Host / SNI")
+tls_text='本机 SNI 已验证' if tls_mode == 'LOCAL_HTTPS_SNI' else '目标 vhost 已验证，证书待 DNS 就绪后申请'
+print(f"TLS：{paint(tls_text,green if tls_mode == 'LOCAL_HTTPS_SNI' else yellow)}")
+print(f"SSL：{p.get('ssl_status','UNKNOWN')}")
+print(f"Runtime：{p.get('runtime_metadata_status','UNKNOWN')}")
+print(paint('DNS：未修改',gray))
+print(paint('原网站：未删除、未覆盖',gray))
+print('无需先在 CloudPanel 手工创建空网站。')
+print('\nP07 Restore-As 结果摘要')
+print('----------------------------------------')
+print(f"P07_RESTORE_AS_VERIFIED={'PASS' if p.get('status') == 'RESTORE_AS_VERIFIED' else 'UNKNOWN'}")
+print(f"P07_RESTORE_SOURCE_DOMAIN={p.get('source_domain','UNKNOWN')}")
+print(f"P07_RESTORE_TARGET_DOMAIN={p.get('target_domain','UNKNOWN')}")
+print(f"P07_RESTORE_LOCAL_VERIFY={'PASS' if v.get('status') == 'PASS' else 'UNKNOWN'}")
+print(f"P07_RESTORE_TLS_MODE={tls_mode}")
+print('P07_RESTORE_DNS_CHANGED=0')
+print('P07_RESTORE_SOURCE_DELETED=0')
+print('P07_RESTORE_EXISTING_TARGET_OVERWRITE=0')
+print(f"P07_RESTORE_EVIDENCE={evidence}")
+PY
+}
+
+restore_as_new_site() {
+  local source_domain="$1" backup_id="$2" target_domain confirm tmp rc evidence
+  while true; do
+    say; ui_attention '恢复为新网站（推荐，可在本机测试）'
+    say "原网站：${C_GRAY}$source_domain${C_RESET}"
+    printf '请输入新的域名（输入 0 返回）：'
+    read -r target_domain || return 0
+    [[ "$target_domain" == 0 ]] && return 0
+    if [[ -z "$target_domain" ]] || ! validate_new_domain "$target_domain"; then
+      ui_attention '域名格式无效，请输入类似 restore.example.com。'
+      continue
+    fi
+    if [[ "$target_domain" == "$source_domain" ]]; then
+      ui_attention '这是原域名。要在本机测试恢复，请输入一个新的域名。'
+      continue
+    fi
+    if ! preflight_new_domain "$target_domain" >/dev/null; then
+      ui_bad '这个域名已经在当前 CloudPanel 或网站目录中存在，P07 不会覆盖。'
+      continue
+    fi
+    break
+  done
+  ui_attention 'P07 将创建 CloudPanel 新站、独立 Site User/数据库身份并恢复文件与数据库。'
+  ui_note '恢复后会做文件、数据库、Host 与 SNI/vhost 验证；失败会回滚本次新建目标。'
+  ui_note '成功结果以 0600 权限保存在本机 evidence 目录；旧证书不复制，DNS 不修改，原网站不删除。'
+  printf '开始恢复为 %s？[y/N]：' "$target_domain"
+  read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return 0; }
+  tmp="$(mktemp -t p07-restore-as.XXXXXX)"; chmod 600 "$tmp"
+  say; ui_attention '[P07] 正在创建、恢复并自动验证新网站...'
+  set +e
+  PYTHONPATH="$ROOT_DIR/lib" python3 "$ROOT_DIR/lib/restore_as_verified.py" \
+    --package "$SELECTED_BACKUP" \
+    --target-domain "$target_domain" \
+    --confirm "RESTORE_AS:${source_domain}:${target_domain}:${backup_id}" >"$tmp" 2>"${tmp}.err"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    printf '%b\n' "${C_RED}恢复为新网站没有完成。P07 已尝试清理本次新建目标；原网站未修改。${C_RESET}" >&2
+    sed -n '1,8p' "${tmp}.err" >&2 || true
+    printf '%b\n' "${C_GRAY}DNS：未修改 · SOURCE：保留${C_RESET}" >&2
+    rm -f "$tmp" "${tmp}.err"
+    pause; return 0
+  fi
+  evidence="NOT_SAVED"
+  if evidence="$(persist_restore_as_evidence "$tmp" "$target_domain")"; then
+    :
+  else
+    evidence="NOT_SAVED"
+    printf '%b\n' "${C_YELLOW}警告：恢复已验证成功，但本机 evidence 文件保存失败。${C_RESET}" >&2
+  fi
+  render_restore_as_result "$tmp" "$evidence"
+  rm -f "$tmp" "${tmp}.err"
+  pause
+}
+
+restore_original_domain() {
+  local source_domain="$1" backup_id="$2" plan confirm output
+  say; ui_attention '按原域名恢复到这台服务器'
+  ui_note "仅适用于当前 CloudPanel 不存在 $source_domain 的情况。"
+  ui_note '不会覆盖已有同名站点，也不会修改 DNS。'
+  if ! plan="$("$CORE" restore plan --package "$SELECTED_BACKUP" 2>&1)"; then
+    printf '%b\n' "${C_RED}当前服务器不能按原域名接收这个备份。${C_RESET}" >&2
+    printf '%s\n' "$plan" >&2
+    pause; return 0
+  fi
+  ui_good '恢复前检查：PASS ✓'
+  ui_prompt "开始恢复 $source_domain？[y/N]："
+  read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || return 0
+  if ! output="$("$CORE" restore apply-new-site --package "$SELECTED_BACKUP" --confirm "RESTORE_NEW_SITE:${source_domain}:${backup_id}" 2>&1)"; then
+    printf '%b\n' "${C_RED}网站数据恢复没有完成。${C_RESET}" >&2
+    printf '%s\n' "$output" >&2
+    pause; return 0
+  fi
+  ui_good '网站数据恢复完成 ✓'
+  ui_note 'DNS：未修改 · SOURCE：不适用/未删除'
+  ui_attention 'Cron / PM2 等 Runtime 仍需沿原恢复 Runtime Gate 继续核验。'
+  pause
+}
+
+restore_menu() {
+  local rc identity source_domain backup_id choice
+  if select_backup; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 2 ]] && return 0
+    pause
+    return 0
+  fi
+  identity="$(backup_identity "$SELECTED_BACKUP")"; IFS=$'\t' read -r source_domain backup_id <<<"$identity"
+  while true; do
+    say
+    ui_title '恢复网站'
+    ui_rule
+    say "备份：${C_GREEN}${source_domain}${C_RESET}"
+    say
+    ui_menu_warn 1 '恢复为新网站        推荐 · 可在本机测试'
+    ui_menu_warn 2 '按原域名恢复        仅限当前服务器没有同名站点'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '恢复写入只允许受控目标；DNS 不自动修改；原网站不自动删除。'
+    ui_prompt '请选择 [0-2]：'; read -r choice || return 0
+    case "$choice" in
+      1) restore_as_new_site "$source_domain" "$backup_id"; return 0 ;;
+      2) restore_original_domain "$source_domain" "$backup_id"; return 0 ;;
+      0) return 0 ;;
+      *) printf '请输入 0-2。\n' ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  overview) show_overview ;;
+  backup) backup_site ;;
+  restore) restore_menu ;;
+  *) printf 'Usage: vfops-site-ui overview|backup|restore\n' >&2; exit 2 ;;
+esac

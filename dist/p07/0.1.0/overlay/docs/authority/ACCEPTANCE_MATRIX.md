@@ -144,3 +144,16 @@ Current progression remains `R1 retry → R2 → R3 → R4`; until those require
 - GitHub Actions classification: **BLOCKED_ENV_ACTIONS_START** — job objects are created but return `steps=null` / `logs_url=null`, so no Bash/Python/unit-test step executes.
 - This condition predates PR #24: develop had successful bootstrap-ci through 2026-09-06; develop Runs #497/#498 on 2026-09-10 already exhibit the same pre-step failure.
 - Therefore the blocker is not promoted to Machine FAIL and must not be promoted to Machine PASS. Merge/Release/Production remain gated.
+
+
+## Terminal UI Color Contract
+
+| Gate | Requirement | PASS condition |
+|---|---|---|
+| Terminal UI hierarchy | Interactive P07 pages must not degrade into full-screen plain white text | Titles, sections, actions and statuses follow the RPD canonical semantic color map |
+| Semantic status color | PASS/READY/KEEP/normal vs attention/review vs fail/block/risk must be visually distinct | Green / Yellow / Red semantics match RPD |
+| High-risk action color | Apply/Rollback/Uninstall/destructive actions must not look like ordinary safe actions | High-risk entry/action uses Red semantics plus existing explicit confirmation gate |
+| NO_COLOR compatibility | Color must remain optional | `NO_COLOR` output is plain text and semantically complete |
+| Non-TTY compatibility | Machine workflows must not depend on ANSI | Non-TTY output remains parseable/plain unless a documented PTY wrapper is intentionally used |
+| Machine-output integrity | JSON / machine-readable formats must never receive ANSI escapes | Parser/regression Gate PASS |
+| Shared implementation | New pages must reuse the P07 color helpers / canonical map | No ad-hoc conflicting color vocabulary |

@@ -1,0 +1,610 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+source "$ROOT_DIR/lib/terminal_ui.sh"
+CORE="$ROOT_DIR/bin/vfops"
+ENGINE="$ROOT_DIR/lib/auto_backup.py"
+SETUP_MENU="$ROOT_DIR/bin/vfops-storage-setup"
+CONFIG="${VFOPS_AUTO_BACKUP_CONFIG:-/etc/vf-server-ops/auto-backup.json}"
+STORAGE_CONFIG="${VFOPS_STORAGE_CONFIG:-/etc/vf-server-ops/storage.json}"
+BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
+CRON_FILE="${VFOPS_AUTO_BACKUP_CRON:-/etc/cron.d/vf-server-ops-auto-backup}"
+STATE_FILE="${VFOPS_AUTO_BACKUP_STATE:-/var/lib/vf-server-ops/auto-backup-state.json}"
+CRON_MARKER="# P07 VF Server Ops automatic dual-remote backup"
+
+screen_clear() { [[ -t 1 ]] && printf '\033[H\033[2J' || true; }
+pause_menu() { printf '\n按 Enter 返回...'; read -r _ || true; }
+
+header() {
+  screen_clear
+  ui_title 'P07 · 自动备份 / 远程灾备'
+  ui_rule
+  say '每天自动执行：'
+  say "  ${C_GREEN}本地 Fresh Verify${C_RESET}"
+  say "  ${C_GRAY}→${C_RESET} ${C_CYAN}Google Drive 加密副本${C_RESET}"
+  say "  ${C_GRAY}→${C_RESET} ${C_MAGENTA}Backblaze B2 加密灾备副本${C_RESET}"
+  say
+}
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    printf '自动备份设置需要 root。\n' >&2
+    return 1
+  fi
+}
+
+p07_cron_owned() {
+  [[ -f "$CRON_FILE" ]] || return 1
+  [[ "$(head -n1 "$CRON_FILE" 2>/dev/null || true)" == "$CRON_MARKER" ]]
+}
+
+config_enabled_for_verification() {
+  [[ -f "$CONFIG" ]] || return 1
+  python3 - "$CONFIG" <<'PY' >/dev/null 2>&1
+import json,sys
+try:
+    p=json.load(open(sys.argv[1],encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(p,dict) and p.get('enabled') is True else 1)
+PY
+}
+
+storage_preflight() {
+  if [[ ! -f "$STORAGE_CONFIG" ]]; then
+    printf '%b\n' "${C_YELLOW}Google + B2 远程存储尚未设置。${C_RESET}" >&2
+    printf '%b\n' "${C_GRAY}请先选择“1. 设置 / 检查 Google + B2”。${C_RESET}" >&2
+    return 1
+  fi
+  command -v rclone >/dev/null 2>&1 || {
+    printf '%b\n' "${C_RED}缺少 rclone，无法验证 Google / B2 加密远程。${C_RESET}" >&2
+    return 1
+  }
+  say; ui_title '[P07] 正在验证 Google + B2 加密远程，请稍候...'
+  local output
+  if ! output="$("$CORE" storage --config "$STORAGE_CONFIG" status 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    printf '%b\n' "${C_RED}远程存储检查没有通过，自动备份未启用。${C_RESET}" >&2
+    return 1
+  fi
+  if ! python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+accounts=p.get('accounts',[]) if isinstance(p.get('accounts'),list) else []
+google=any(a.get('provider')=='google' and a.get('enabled') is True and a.get('health')=='OK' for a in accounts if isinstance(a,dict))
+b2=any(a.get('provider')=='b2' and a.get('enabled') is True and a.get('health')=='OK' for a in accounts if isinstance(a,dict))
+raise SystemExit(0 if google and b2 else 1)
+PY
+  then
+    printf '%b\n' "${C_RED}需要至少一个健康的 Google crypt 远程和一个健康的 B2 crypt 远程。${C_RESET}" >&2
+    printf '%b\n' "${C_GRAY}请先重新运行“设置 / 检查 Google + B2”。${C_RESET}" >&2
+    return 1
+  fi
+  ui_good 'Google Drive：READY ✓'
+  ui_good 'Backblaze B2：READY ✓'
+}
+
+inventory_sites() {
+  local payload
+  if ! payload="$("$CORE" inventory --compact 2>&1)"; then
+    printf '%s\n' "$payload" >&2
+    return 1
+  fi
+  python3 - "$payload" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+for site in p.get('sites',[]):
+    if isinstance(site,dict) and isinstance(site.get('domain'),str) and site.get('domain'):
+        print(site['domain'])
+PY
+}
+
+schedule_guard() {
+  local requested="$1" output
+  if ! output="$(python3 "$ENGINE" schedule-check --daily-at "$requested" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  python3 - "$output" <<'PY'
+import json,sys
+p=json.loads(sys.argv[1])
+print(p.get('status','UNKNOWN'))
+print(p.get('recommended_at',p.get('requested_at','')))
+print(p.get('collision_count',0))
+for item in p.get('collisions',[]):
+    print(f"{item.get('scheduled_at','?')}\t{item.get('path','?')}")
+PY
+}
+
+first_verification_passed() {
+  local expected_sites="$1"
+  [[ -f "$CONFIG" ]] || return 1
+  local output rc
+  set +e
+  output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+  [[ $rc -eq 0 || $rc -eq 12 ]] || return 1
+  python3 - "$output" "$expected_sites" <<'PY' >/dev/null 2>&1
+import json,sys
+try:
+    p=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+expected={x.strip() for x in sys.argv[2].splitlines() if x.strip()}
+if not expected or not isinstance(p,dict) or p.get('schema')!='vf-server-ops.auto-backup-status.v1':
+    raise SystemExit(1)
+configured={x for x in p.get('sites',[]) if isinstance(x,str) and x}
+if configured != expected:
+    raise SystemExit(1)
+last=p.get('last_run') if isinstance(p.get('last_run'),dict) else None
+if not last or last.get('status')!='PASS':
+    raise SystemExit(1)
+rows=last.get('sites',[]) if isinstance(last.get('sites'),list) else []
+if not rows:
+    raise SystemExit(1)
+verified=set()
+for row in rows:
+    if not isinstance(row,dict) or not isinstance(row.get('domain'),str) or not row.get('domain'):
+        raise SystemExit(1)
+    if any(row.get(k)!='PASS' for k in ('local_backup','google','b2','dual_remote')):
+        raise SystemExit(1)
+    verified.add(row['domain'])
+raise SystemExit(0 if verified == expected else 1)
+PY
+}
+
+prepare_first_run_config() {
+  storage_preflight || return 1
+  local sites_raw
+  if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
+    printf '没有发现可备份的 CloudPanel 网站；没有创建首次验证配置。\n' >&2
+    return 1
+  fi
+  local args=()
+  while IFS= read -r site; do [[ -n "$site" ]] && args+=(--site "$site"); done <<<"$sites_raw"
+  if ! python3 "$ENGINE" configure --config "$CONFIG" "${args[@]}" --daily-at '03:30' --storage-config "$STORAGE_CONFIG" --backup-dir "$BACKUP_DIR" --keep-last 7 >/dev/null; then
+    printf '%b\n' "${C_RED}首次验证配置创建失败；没有安装定时任务。${C_RESET}" >&2
+    return 1
+  fi
+  ui_good '首次验证配置：READY ✓'
+  printf '当前网站：已重新读取 CloudPanel 全部站点\n'
+  printf '定时任务：尚未安装\n'
+  ui_note '说明：只有当前全部网站的双远程备份验证 PASS 后，才建议选择“2. 启用 / 更新自动备份”。'
+}
+
+setup_storage() {
+  if [[ ! -x "$SETUP_MENU" ]]; then
+    printf '远程存储设置组件缺失，请重新运行 P07 主入口更新。\n' >&2
+    pause_menu
+    return 0
+  fi
+  bash "$SETUP_MENU"
+}
+
+show_status() {
+  say; ui_title '[P07] 正在检查自动备份设置与 Google + B2 实时状态，请稍候...'
+  local output rc remote_output remote_rc
+  set +e
+  output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 && $rc -ne 12 ]]; then
+    printf '%b\n' "${C_RED}自动备份状态读取失败；没有修改任何配置。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+  if ! python3 - "$output" <<'PY' >/dev/null 2>&1
+import json,sys
+p=json.loads(sys.argv[1])
+raise SystemExit(0 if isinstance(p,dict) and p.get('schema')=='vf-server-ops.auto-backup-status.v1' else 1)
+PY
+  then
+    printf '%b\n' "${C_RED}自动备份状态返回格式异常；没有修改任何配置。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+
+  remote_output='{}'
+  remote_rc=125
+  if [[ -f "$STORAGE_CONFIG" ]] && command -v rclone >/dev/null 2>&1 && [[ -x "$CORE" ]]; then
+    set +e
+    remote_output="$("$CORE" storage --config "$STORAGE_CONFIG" status 2>/dev/null)"
+    remote_rc=$?
+    set -e
+  fi
+
+  C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_RED="$C_RED" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$output" "$remote_output" "$remote_rc" <<'PY'
+import json,os,sys
+cyan=os.environ.get("C_CYAN",""); green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); red=os.environ.get("C_RED",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def paint(text,color): return f"{color}{text}{reset}" if color else text
+def token_color(token):
+    t=str(token)
+    if t in {'PASS','OK','ENABLED','VERIFIED_NO_SCHEDULE'} or '正常' in t or '已启用' in t or '已通过' in t:
+        return green
+    if t in {'FAIL','UNAVAILABLE','CHECK_FAILED','LIVE_ATTENTION'} or '失败' in t or '不可用' in t or '异常' in t:
+        return red
+    return yellow
+
+base=json.loads(sys.argv[1])
+try:
+    live=json.loads(sys.argv[2]) if sys.argv[2] else {}
+except json.JSONDecodeError:
+    live={}
+try:
+    remote_rc=int(sys.argv[3])
+except ValueError:
+    remote_rc=125
+
+status=base.get('status','UNKNOWN')
+last=base.get('last_run') if isinstance(base.get('last_run'),dict) else None
+
+def provider_health(provider):
+    if status == 'NOT_CONFIGURED':
+        return 'NOT_CONFIGURED'
+    if remote_rc != 0 or not isinstance(live,dict):
+        return 'CHECK_FAILED'
+    accounts=live.get('accounts',[]) if isinstance(live.get('accounts'),list) else []
+    provider_accounts=[a for a in accounts if isinstance(a,dict) and a.get('provider')==provider and a.get('enabled') is True]
+    if not provider_accounts:
+        return 'MISSING'
+    return 'OK' if any(a.get('health')=='OK' for a in provider_accounts) else 'UNAVAILABLE'
+
+google=provider_health('google')
+b2=provider_health('b2')
+live_ok=(google=='OK' and b2=='OK')
+effective=status
+if status=='ENABLED' and not live_ok:
+    effective='LIVE_ATTENTION'
+elif status=='ATTENTION' and base.get('enabled',False) and not base.get('cron_installed',False) and base.get('storage_state')=='CONFIGURED' and live_ok:
+    effective='VERIFIED_NO_SCHEDULE' if last and last.get('status')=='PASS' else 'READY_NO_SCHEDULE'
+
+cn={
+    'ENABLED':'已启用',
+    'DISABLED':'已关闭',
+    'NOT_CONFIGURED':'未配置',
+    'ATTENTION':'需关注',
+    'LIVE_ATTENTION':'需关注（实时远程异常）',
+    'READY_NO_SCHEDULE':'远程已就绪 · 待首次验证',
+    'VERIFIED_NO_SCHEDULE':'首次验证已通过 · 定时未开启',
+}.get(effective,effective)
+health_cn={
+    'OK':'正常 ✓',
+    'UNAVAILABLE':'不可用',
+    'MISSING':'未配置',
+    'CHECK_FAILED':'检查失败',
+    'NOT_CONFIGURED':'未配置',
+}
+
+print()
+print(paint('自动备份状态',cyan))
+print(paint('----------------------------------------',gray))
+print(f"状态：{paint(cn,token_color(effective))}")
+if status != 'NOT_CONFIGURED':
+    if base.get('cron_installed'):
+        print(f"时间：每天 {base.get('daily_at','UNKNOWN')}")
+    else:
+        print('定时：未开启')
+    sites=base.get('sites',[]) if isinstance(base.get('sites'),list) else []
+    print(f"网站：{len(sites)} 个")
+    for site in sites:
+        print(f"  - {site}")
+    print('远程：Google + Backblaze B2')
+    print(f"Google 实时：{paint(health_cn.get(google,google),token_color(google))}")
+    print(f"B2 实时：{paint(health_cn.get(b2,b2),token_color(b2))}")
+    print(f"本地自动备份保留：最近 {base.get('local_keep_last','?')} 份 / 网站")
+    print(f"Cron：{'已安装（P07 owned）' if base.get('cron_installed') else '未安装'}")
+    print(f"配置结构：{base.get('storage_state','UNKNOWN')}")
+
+if last:
+    result=last.get('status','UNKNOWN')
+    cn_result={'PASS':'PASS','FAIL':'FAIL','RUNNING':'执行中','SKIPPED_BUSY':'服务器忙，已让路','DISABLED':'已关闭'}.get(result,result)
+    print(f"上次执行：{paint(cn_result,token_color(result))}")
+    print(f"更新时间：{last.get('updated_at','UNKNOWN')}")
+    rows=last.get('sites',[]) if isinstance(last.get('sites'),list) else []
+    detail_rows=[row for row in rows if isinstance(row,dict)]
+    if detail_rows:
+        print('上次各网站：')
+        for row in detail_rows:
+            print(f"  {row.get('domain','UNKNOWN')}")
+            local=row.get('local_backup','UNKNOWN'); g=row.get('google','UNKNOWN'); b=row.get('b2','UNKNOWN'); dual=row.get('dual_remote','UNKNOWN')
+            print(f"    本地：{paint(local,token_color(local))}")
+            print(f"    Google：{paint(g,token_color(g))}")
+            print(f"    B2：{paint(b,token_color(b))}")
+            print(f"    双副本：{paint(dual,token_color(dual))}")
+    if result=='SKIPPED_BUSY':
+        print('说明：上次检测到服务器正在执行备份 / 恢复 / 迁移 / 远程存储任务，P07 已安全让路。')
+
+if status=='NOT_CONFIGURED':
+    action='先选择“1. 设置 / 检查 Google + B2”，然后选择“3. 立即完整备份一次”完成首次验证；PASS 后再选择“2. 启用 / 更新自动备份”。'
+elif not base.get('enabled',False):
+    if not live_ok:
+        action='自动备份已关闭；如要重新启用，先选择“1. 设置 / 检查 Google + B2”确认远程，再选择“2. 启用 / 更新自动备份”。'
+    else:
+        action='如需恢复定时保护，选择“2. 启用 / 更新自动备份”。'
+elif not base.get('cron_installed',False):
+    if not live_ok:
+        action='定时尚未开启；先选择“1. 设置 / 检查 Google + B2”修复远程，再选择“3. 立即完整备份一次”验证。'
+    elif last and last.get('status')=='PASS':
+        action='首次真实备份已 PASS；定时仍未开启。选择“2. 启用 / 更新自动备份”时 P07 会再次核对当前 CloudPanel 网站集合。'
+    elif last and last.get('status')=='FAIL':
+        action='首次验证没有通过，定时仍未开启；按失败项修复后再次选择“3. 立即完整备份一次”。'
+    elif last and last.get('status')=='SKIPPED_BUSY':
+        action='首次验证遇到服务器忙，定时仍未开启；稍后再次选择“3. 立即完整备份一次”。'
+    else:
+        action='远程已就绪，定时尚未开启；先选择“3. 立即完整备份一次”，PASS 后再选择“2. 启用 / 更新自动备份”。'
+elif not live_ok:
+    action='选择“1. 设置 / 检查 Google + B2”修复实时远程状态；修复后可选择“3. 立即完整备份一次”验证。'
+elif last and last.get('status')=='FAIL':
+    action='远程当前正常，但上次备份失败；选择“3. 立即完整备份一次”重新验证。'
+elif last and last.get('status')=='SKIPPED_BUSY':
+    action='无需修复；稍后选择“3. 立即完整备份一次”，或等待下一次计划任务自动重试。'
+elif last and last.get('status')=='RUNNING':
+    action='当前可能仍在执行备份；稍后再查看状态，不要重复启动。'
+elif last is None:
+    action='当前定时已启用但还没有执行记录；可选择“3. 立即完整备份一次”完成首次验证。'
+else:
+    action='当前无需操作；继续保留定时备份即可。'
+
+print(paint(f"下一步：{action}", yellow if effective not in {'ENABLED','VERIFIED_NO_SCHEDULE'} else green))
+print(paint('安全边界：DNS 未修改；状态检查不会删除 SOURCE、备份，也不会修改 CloudPanel Cron。',gray))
+PY
+  pause_menu
+}
+
+enable_or_update() {
+  require_root || { pause_menu; return 0; }
+  storage_preflight || { pause_menu; return 0; }
+
+  local sites_raw daily_at choice schedule_raw schedule_state recommended collision_count
+  if ! sites_raw="$(inventory_sites)" || [[ -z "$sites_raw" ]]; then
+    printf '没有发现可自动备份的 CloudPanel 网站。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  if ! p07_cron_owned && ! first_verification_passed "$sites_raw"; then
+    printf '%b\n' "${C_YELLOW}首次启用定时备份前，当前全部 CloudPanel 网站必须先完成一次真实双远程备份验证。${C_RESET}" >&2
+    printf '%b\n' "${C_YELLOW}如果网站列表刚发生变化，也必须重新验证；旧 PASS 不会覆盖新站点。${C_RESET}" >&2
+    printf '%b\n' "${C_YELLOW}下一步：返回后选择“3. 立即完整备份一次”；当前全部网站本地 + Google + B2 PASS 后再回来启用。${C_RESET}" >&2
+    printf '定时任务：未安装\n' >&2
+    printf '安全边界：没有修改 Cron；DNS 未修改；SOURCE 保留。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  printf '\n将保护当前 CloudPanel 全部网站：\n'
+  while IFS= read -r site; do [[ -n "$site" ]] && printf '  - %s\n' "$site"; done <<<"$sites_raw"
+
+  printf '\n每天备份时间 [03:30]：'
+  read -r daily_at || return 0
+  [[ -n "$daily_at" ]] || daily_at='03:30'
+  if [[ ! "$daily_at" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    printf '时间格式应为 HH:MM，例如 03:30。\n' >&2
+    pause_menu
+    return 0
+  fi
+
+  if ! schedule_raw="$(schedule_guard "$daily_at")"; then
+    printf '%b\n' "${C_RED}无法完成定时冲突检查，P07 暂不写入 Cron。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+  schedule_state="$(printf '%s\n' "$schedule_raw" | sed -n '1p')"
+  recommended="$(printf '%s\n' "$schedule_raw" | sed -n '2p')"
+  collision_count="$(printf '%s\n' "$schedule_raw" | sed -n '3p')"
+  if [[ "$schedule_state" == 'COLLISION' ]]; then
+    ui_attention "检测到 $collision_count 个相邻的备份类定时任务。"
+    printf '%s\n' "$schedule_raw" | tail -n +4 | while IFS=$'\t' read -r at path; do
+      [[ -n "$at" ]] && printf '  %s  %s\n' "$at" "$path"
+    done
+    ui_attention "P07 已建议错峰：$daily_at → $recommended"
+    daily_at="$recommended"
+  else
+    ui_good '定时冲突检查：CLEAR ✓'
+  fi
+
+  printf '\n将启用：本地 + Google + B2，每个网站本地保留最近 7 份自动备份。\n'
+  printf '执行时间：每天 %s\n' "$daily_at"
+  printf '运行时若发现备份/恢复/迁移/远程上传正忙，会自动让路，不抢资源。\n'
+  ui_note '不会修改 DNS，不会删除网站，不会删除手工/迁移备份。'; say
+  printf '1. 确认启用 / 更新\n0. 取消\n\n请选择 [0-1]：'
+  read -r choice || return 0
+  [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
+
+  local args=()
+  while IFS= read -r site; do [[ -n "$site" ]] && args+=(--site "$site"); done <<<"$sites_raw"
+
+  printf '\n[P07] 正在写入 P07 自动备份配置...\n'
+  if ! python3 "$ENGINE" configure --config "$CONFIG" "${args[@]}" --daily-at "$daily_at" --storage-config "$STORAGE_CONFIG" --backup-dir "$BACKUP_DIR" --keep-last 7 >/dev/null; then
+    printf '%b\n' "${C_RED}自动备份配置写入失败。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+  if ! python3 "$ENGINE" install-cron --config "$CONFIG" --cron-file "$CRON_FILE" --script "$ENGINE" --python /usr/bin/python3 --confirm ENABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+    printf '%b\n' "${C_RED}定时任务安装失败；不会假装已启用。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+
+  ui_good '自动备份已启用 ✓'
+  say "时间：每天 $daily_at"
+  say '目标：本地 + Google Drive + Backblaze B2'
+  ui_good '当前全部网站首次真实验证：PASS ✓'
+  ui_note '并发保护：已启用 · DNS：不会修改 · SOURCE：保留'
+  pause_menu
+}
+
+run_now() {
+  require_root || { pause_menu; return 0; }
+
+  local schedule_active=0
+  if p07_cron_owned; then schedule_active=1; fi
+
+  if [[ $schedule_active -eq 0 ]]; then
+    if [[ ! -f "$CONFIG" ]]; then
+      printf '\n尚未启用定时备份。P07 会先建立“首次验证配置”，不会安装 Cron。\n'
+      if ! prepare_first_run_config; then
+        pause_menu
+        return 0
+      fi
+    elif config_enabled_for_verification; then
+      printf '\n定时尚未开启。P07 会重新读取当前 CloudPanel 网站并刷新首次验证配置，不会安装 Cron。\n'
+      if ! prepare_first_run_config; then
+        pause_menu
+        return 0
+      fi
+    fi
+  fi
+
+  printf '\n[P07] 正在执行一次完整双远程自动备份。\n'
+  printf '若检测到备份/恢复/迁移/远程上传正忙，本次会自动让路。\n'
+  [[ $schedule_active -eq 0 ]] && printf '定时任务：当前未开启；本次仅做真实验证。\n'
+  local output rc
+  set +e
+  output="$(python3 "$ENGINE" run --config "$CONFIG" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 && $rc -ne 12 ]]; then
+    printf '%b\n' "${C_RED}自动备份执行失败，未取得可读结果；P07 不会把这次执行标记为成功。${C_RESET}" >&2
+    printf '下一步：选择“4. 查看自动备份状态”；如远程异常，先选择“1. 设置 / 检查 Google + B2”。\n' >&2
+    printf '定时任务：%s\n' "$([[ $schedule_active -eq 1 ]] && printf '保持原状态' || printf '未开启')" >&2
+    printf '%b\n' "${C_GRAY}安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+
+  if ! python3 - "$output" <<'PY' >/dev/null 2>&1
+import json,sys
+p=json.loads(sys.argv[1])
+raise SystemExit(0 if isinstance(p,dict) and p.get('schema')=='vf-server-ops.auto-backup-run.v1' else 1)
+PY
+  then
+    printf '%b\n' "${C_RED}自动备份返回格式异常；P07 不会把这次执行标记为成功。${C_RESET}" >&2
+    printf '下一步：选择“4. 查看自动备份状态”，确认最近执行状态后再重试。\n' >&2
+    printf '定时任务：%s\n' "$([[ $schedule_active -eq 1 ]] && printf '保持原状态' || printf '未开启')" >&2
+    printf '%b\n' "${C_GRAY}安全边界：DNS 未修改；SOURCE 保留；已有备份不会因此被删除。${C_RESET}" >&2
+    pause_menu
+    return 0
+  fi
+
+  C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_RED="$C_RED" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$output" "$schedule_active" <<'PY'
+import json,os,sys
+cyan=os.environ.get("C_CYAN",""); green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); red=os.environ.get("C_RED",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def paint(text,color): return f"{color}{text}{reset}" if color else text
+def token_color(token):
+    t=str(token)
+    if t=='PASS': return green
+    if t=='FAIL': return red
+    return yellow
+p=json.loads(sys.argv[1])
+schedule_active=sys.argv[2]=='1'
+status=p.get('status','UNKNOWN')
+rows=[row for row in p.get('sites',[]) if isinstance(row,dict)] if isinstance(p.get('sites'),list) else []
+
+print()
+if status=='SKIPPED_BUSY':
+    print('服务器当前有备份 / 恢复 / 迁移 / 远程上传任务，P07 本次已自动让路。')
+    print('状态：'+paint('服务器忙，已安全让路',yellow))
+    if schedule_active:
+        print('下一步：无需修复；稍后再选择“3. 立即完整备份一次”，或等待下一次计划任务。')
+    else:
+        print('下一步：定时仍未开启；稍后再次选择“3. 立即完整备份一次”完成首次验证。')
+    print(paint('安全边界：DNS 未修改；SOURCE 保留；没有删除任何备份。',gray))
+    raise SystemExit
+
+print(paint('自动备份结果',cyan))
+print(paint('----------------------------------------',gray))
+for row in rows:
+    print(row.get('domain','UNKNOWN'))
+    local=row.get('local_backup','UNKNOWN'); g=row.get('google','UNKNOWN'); b=row.get('b2','UNKNOWN'); dual=row.get('dual_remote','UNKNOWN')
+    print(f"  本地：{paint(local,token_color(local))}")
+    print(f"  Google：{paint(g,token_color(g))}")
+    print(f"  B2：{paint(b,token_color(b))}")
+    print(f"  双副本：{paint(dual,token_color(dual))}")
+print(f"最终：{paint(status,token_color(status))}")
+
+if status=='PASS':
+    if schedule_active:
+        action='本次本地 + Google + B2 已完成；定时保护保持启用，无需操作。'
+    else:
+        action='当前全部网站本地 + Google + B2 真实验证已 PASS；定时备份仍未开启。下一步：选择“2. 启用 / 更新自动备份”。'
+elif status=='DISABLED':
+    action='自动备份当前已关闭；如需恢复保护，选择“2. 启用 / 更新自动备份”。'
+elif status=='FAIL':
+    local_fail=any(row.get('local_backup')!='PASS' for row in rows) if rows else False
+    google_fail=any(row.get('google')!='PASS' for row in rows) if rows else False
+    b2_fail=any(row.get('b2')!='PASS' for row in rows) if rows else False
+    if google_fail or b2_fail:
+        failed=[]
+        if google_fail: failed.append('Google')
+        if b2_fail: failed.append('B2')
+        action=f"本次 {' + '.join(failed)} 未完成；先选择“1. 设置 / 检查 Google + B2”，修复后再选择“3. 立即完整备份一次”。"
+    elif local_fail:
+        action='本地 Fresh Verify 未完成；选择“4. 查看自动备份状态”确认最近结果，再检查网站 / 磁盘状态后重试。'
+    else:
+        action='本次没有达到双副本 PASS；选择“4. 查看自动备份状态”，再按提示重试。'
+    if not schedule_active:
+        action += ' 定时备份仍未开启。'
+else:
+    action='结果需要关注；选择“4. 查看自动备份状态”获取下一步。'
+
+print(paint(f"下一步：{action}",green if status=='PASS' else yellow))
+if status=='FAIL':
+    print(paint('保留策略：已成功的本地备份 / 远程副本会保留；失败运行不会执行本地自动清理。',gray))
+if not schedule_active:
+    print(paint('定时任务：未开启；本次验证不会创建或修改 P07 Cron。',yellow))
+print(paint('安全边界：DNS 未修改；SOURCE 保留；不会因本次结果删除已有手工 / 迁移备份。',gray))
+PY
+  pause_menu
+}
+
+disable_auto() {
+  require_root || { pause_menu; return 0; }
+  if [[ ! -f "$CONFIG" && ! -f "$CRON_FILE" ]]; then
+    printf '自动备份当前没有启用。\n'
+    pause_menu
+    return 0
+  fi
+  say; ui_bad '关闭后只停止以后自动执行；不会删除现有本地、Google 或 B2 备份。'
+  ui_menu_danger 1 '确认关闭'
+  ui_menu_back 0 '取消'
+  say
+  ui_prompt '请选择 [0-1]：'
+  local choice
+  read -r choice || return 0
+  [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
+  if python3 "$ENGINE" disable --config "$CONFIG" --cron-file "$CRON_FILE" --confirm DISABLE_DUAL_REMOTE_AUTOBACKUP >/dev/null; then
+    ui_bad '自动备份已关闭。现有备份均保留。'
+  else
+    printf '%b\n' "${C_RED}关闭没有完成；P07 没有删除任何备份。${C_RESET}" >&2
+  fi
+  pause_menu
+}
+
+while true; do
+  header
+  ui_menu_warn 1 '设置 / 检查 Google + B2'
+  ui_menu_warn 2 '启用 / 更新自动备份'
+  ui_menu_good 3 '立即完整备份一次'
+  ui_menu_info 4 '查看自动备份状态'
+  ui_menu_danger 5 '关闭自动备份'
+  ui_menu_back 0 '返回'
+  say
+  ui_note '绿色=执行/验证 · 黄色=配置 · 红色=关闭写操作'
+  say
+  ui_prompt '请选择 [0-5]：'
+  read -r choice || exit 0
+  case "$choice" in
+    1) setup_storage ;;
+    2) enable_or_update ;;
+    3) run_now ;;
+    4) show_status ;;
+    5) disable_auto ;;
+    0) exit 0 ;;
+    *) ui_warn '请输入 0-5。'; pause_menu ;;
+  esac
+done
