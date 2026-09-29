@@ -4,52 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/lib/terminal_ui.sh"
 CORE="$ROOT_DIR/bin/vfops"
-BACKUP_DIR="${VFOPS_BACKUP_DIR:-/var/backups/vf-server-ops}"
-INV_FILE=""
-SELECTED_DOMAIN=""
+
+SOURCE_IDENTITY_FILE=""
+SOURCE_IDENTITY_MANAGED=0
 SSH_PREFLIGHT_STATE="UNKNOWN"
-WHOLE_SERVER_IDENTITY_FILE=""
-WHOLE_SERVER_IDENTITY_MANAGED=0
 
-cleanup() { [[ -n "$INV_FILE" ]] && rm -f "$INV_FILE" 2>/dev/null || true; }
-trap cleanup EXIT
 pause() { printf '\n按 Enter 返回...'; read -r _ || true; }
-
-load_inventory() {
-  cleanup
-  INV_FILE="$(mktemp -t p07-migrate-inventory.XXXXXX)"
-  "$CORE" inventory --compact >"$INV_FILE" 2>/dev/null
-}
-
-select_site() {
-  SELECTED_DOMAIN=""
-  load_inventory || { printf '\n无法读取 CloudPanel 网站。\n'; return 1; }
-  local count choice
-  count="$(python3 - "$INV_FILE" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8'))
-print(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else []))
-PY
-)"
-  [[ "$count" -gt 0 ]] || { printf '\n没有发现可迁移的网站。\n'; return 2; }
-  ui_title '请选择要迁移的网站'; ui_rule
-  python3 - "$INV_FILE" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8'))
-for i,s in enumerate(p.get('sites',[]),1): print(f"  {i}. {s.get('domain','UNKNOWN')}")
-print('  0. 返回')
-PY
-  ui_prompt "\n请选择 [0-${count}]："; read -r choice || return 2
-  [[ "$choice" =~ ^[0-9]+$ ]] || { printf '请输入上面的数字。\n'; return 1; }
-  [[ "$choice" == 0 ]] && return 2
-  (( choice>=1 && choice<=count )) || { printf '选择超出范围。\n'; return 1; }
-  SELECTED_DOMAIN="$(python3 - "$INV_FILE" "$choice" <<'PY'
-import json,sys
-p=json.load(open(sys.argv[1],encoding='utf-8'))
-print(p['sites'][int(sys.argv[2])-1]['domain'])
-PY
-)"
-}
 
 validate_ip() {
   python3 - "$1" <<'PY' >/dev/null 2>&1
@@ -58,290 +18,15 @@ ipaddress.ip_address(sys.argv[1])
 PY
 }
 
-ensure_migration_dependencies() {
-  local cmd
-  for cmd in ssh scp ssh-copy-id ssh-keygen; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      ui_attention '首次使用服务器迁移，需要 OpenSSH 客户端；现在才按需安装，不影响其它 P07 功能。'
-      if command -v apt-get >/dev/null 2>&1; then
-        ui_note '只安装迁移所需依赖：openssh-client'
-        apt-get update -y >/dev/null || { ui_bad '软件源更新失败，未安装迁移依赖。'; return 1; }
-        DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client >/dev/null || { ui_bad '迁移依赖安装失败。'; return 1; }
-      else
-        ui_bad '当前系统缺少 OpenSSH 客户端，也没有可用的 apt-get。'
-        return 1
-      fi
-      break
-    fi
-  done
-  for cmd in ssh scp ssh-copy-id ssh-keygen; do
-    command -v "$cmd" >/dev/null 2>&1 || { ui_bad "迁移依赖仍不可用：$cmd"; return 1; }
-  done
-  ui_good '服务器迁移依赖已就绪 ✓'
-}
-
-ssh_state_label() {
-  case "$1" in
-    READY) printf '已就绪' ;;
-    NEEDS_KEY_SETUP) printf '需要配置 SSH 密钥' ;;
-    TARGET_NOT_CLOUDPANEL) printf '目标服务器未安装 CloudPanel' ;;
-    TARGET_SITE_CONFLICT) printf '目标服务器存在同名网站' ;;
-    UNREACHABLE) printf '无法连接' ;;
-    *) printf '未知状态' ;;
-  esac
-}
-
-ssh_state_line() {
-  local label
-  label="$(ssh_state_label "$1")"
-  case "$1" in
-    READY) say "连接状态：${C_GREEN}$label${C_RESET}" ;;
-    NEEDS_KEY_SETUP|TARGET_NOT_CLOUDPANEL) say "连接状态：${C_YELLOW}$label${C_RESET}" ;;
-    *) say "连接状态：${C_RED}$label${C_RESET}" ;;
-  esac
-}
-
-migration_status_label() {
-  case "$1" in
-    PRODUCTION_PASS) printf '正式环境验证通过' ;;
-    PREPARED) printf '预迁移已完成' ;;
-    CUTOVER_PREP_READY) printf '最终切换准备就绪' ;;
-    WAITING_DNS) printf '等待 DNS 切换' ;;
-    PREPARING) printf '正在预迁移' ;;
-    CUTOVER_RUNNING) printf '正在最终切换' ;;
-    PREPARE_FAILED) printf '预迁移失败' ;;
-    PRODUCTION_VERIFY_FAILED) printf '正式环境验证未通过' ;;
-    CUTOVER_FAILED_ROLLED_BACK) printf '最终切换失败并已回滚' ;;
-    ROLLED_BACK) printf '已回滚' ;;
-    *) printf '未知状态' ;;
-  esac
-}
-
-migration_status_color() {
-  local label
-  label="$(migration_status_label "$1")"
-  case "$1" in
-    PRODUCTION_PASS) printf '%b' "${C_GREEN}$label${C_RESET}" ;;
-    PREPARED|CUTOVER_PREP_READY|WAITING_DNS) printf '%b' "${C_YELLOW}$label${C_RESET}" ;;
-    PREPARING|CUTOVER_RUNNING) printf '%b' "${C_MAGENTA}$label${C_RESET}" ;;
-    PREPARE_FAILED|PRODUCTION_VERIFY_FAILED|CUTOVER_FAILED_ROLLED_BACK|ROLLED_BACK) printf '%b' "${C_RED}$label${C_RESET}" ;;
-    *) printf '%b' "${C_YELLOW}$label${C_RESET}" ;;
-  esac
-}
-
-migration_status_line() {
-  printf '状态：'
-  migration_status_color "$1"
-  printf '\n'
-}
-
-target_ssh_preflight() {
-  local target_ip="$1" domain="$2" identity_file="${3:-}" output rc remote_cmd
-  local -a identity_args=()
-  [[ -n "$identity_file" ]] && identity_args=(-i "$identity_file")
-  SSH_PREFLIGHT_STATE="UNKNOWN"
-  command -v ssh >/dev/null 2>&1 || {
-    SSH_PREFLIGHT_STATE="UNREACHABLE"; ssh_state_line "$SSH_PREFLIGHT_STATE"
-    printf '原因：源服务器缺少 SSH 客户端。迁移尚未开始。\n'; return 13;
-  }
-  printf '\n[P07] 正在检查 SSH、CloudPanel 与同名网站冲突...\n'
-  if output="$(ssh -p 22 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
-    -o ServerAliveInterval=10 -o ServerAliveCountMax=1 "${identity_args[@]}" "root@${target_ip}" "printf P07_SSH_READY" 2>&1)"; then
-    rc=0
-  else
-    rc=$?
-  fi
-  if [[ $rc -ne 0 ]]; then
-    if printf '%s\n' "$output" | grep -Eqi 'permission denied|publickey|no supported authentication methods'; then
-      SSH_PREFLIGHT_STATE="NEEDS_KEY_SETUP"
-      printf '\n源服务器还没有目标服务器的 SSH 密钥登录权限。\n'; ssh_state_line "$SSH_PREFLIGHT_STATE"
-      printf '迁移尚未开始，也没有创建迁移备份。\n'; return 10
-    fi
-    SSH_PREFLIGHT_STATE="UNREACHABLE"
-    printf '\n无法连接新服务器：%s\n' "$target_ip"; ssh_state_line "$SSH_PREFLIGHT_STATE"
-    ui_attention '请检查 IP、22 端口、防火墙或服务器是否在线。'
-    ui_note '迁移尚未开始，也没有创建迁移备份。'
-    return 13
-  fi
-
-  remote_cmd="set -eu; command -v clpctl >/dev/null 2>&1 || exit 43; test -f /home/clp/htdocs/app/data/db.sq3 || exit 43; for p in /home/*/htdocs/${domain}; do [ ! -e \"\$p\" ] || exit 42; done"
-  if output="$(ssh -p 22 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
-    -o ServerAliveInterval=10 -o ServerAliveCountMax=1 "${identity_args[@]}" "root@${target_ip}" "$remote_cmd" 2>&1)"; then
-    rc=0
-  else
-    rc=$?
-  fi
-  if [[ $rc -eq 42 ]]; then
-    SSH_PREFLIGHT_STATE="TARGET_SITE_CONFLICT"
-    printf '\n目标服务器已存在同名网站：%s\n' "$domain"; ssh_state_line "$SSH_PREFLIGHT_STATE"
-    printf 'P07 不会覆盖。迁移尚未开始。\n'; return 12
-  fi
-  if [[ $rc -eq 43 ]]; then
-    SSH_PREFLIGHT_STATE="TARGET_NOT_CLOUDPANEL"
-    printf '\n目标服务器可以 SSH 登录，但没有检测到可用的 CloudPanel。\n'; ssh_state_line "$SSH_PREFLIGHT_STATE"
-    ui_attention '如果这是全新空服务器，整机迁移可以由 P07 自动安装 CloudPanel。'
-    ui_note '迁移尚未开始，也没有创建迁移备份。'
-    return 11
-  fi
-  if [[ $rc -ne 0 ]]; then
-    SSH_PREFLIGHT_STATE="UNREACHABLE"; ssh_state_line "$SSH_PREFLIGHT_STATE"
-    printf '目标服务器检查中断。迁移尚未开始。\n'; return 13
-  fi
-  SSH_PREFLIGHT_STATE="READY"; ssh_state_line "$SSH_PREFLIGHT_STATE"
-  ui_good 'SSH 密钥：已就绪 ✓'
-  ui_good 'CloudPanel：已就绪 ✓'
-  ui_good '同名网站冲突：未发现 ✓'
-}
-
-prepare_target_ssh_key() {
-  local target_ip="$1" ssh_dir="${HOME:-/root}/.ssh"
-  command -v ssh-copy-id >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 || {
-    printf '\n缺少 openssh-client，无法自动准备连接。\n'; return 1;
-  }
-  mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"
-  if ! compgen -G "$ssh_dir/id_*.pub" >/dev/null; then
-    printf '\n[P07] 正在为源服务器生成 SSH 密钥...\n'
-    ssh-keygen -q -t ed25519 -f "$ssh_dir/id_ed25519" -N '' -C 'p07-vf-server-ops' || return 1
-    chmod 600 "$ssh_dir/id_ed25519"; chmod 644 "$ssh_dir/id_ed25519.pub"
-  fi
-  printf '\n如果系统询问 root 密码，请输入目标服务器的 root 密码。\n'
-  printf '密码只交给系统 ssh-copy-id；P07 不读取、不保存。\n'
-  ssh-copy-id -o StrictHostKeyChecking=accept-new "root@${target_ip}" || return 1
-  printf '\nSSH 密钥已发送到目标服务器 ✓\n'
-}
-
-prepare_managed_whole_server_key() {
-  local target_ip="$1" ssh_dir="${HOME:-/root}/.ssh" token key marker_file rc
-  command -v ssh-copy-id >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 || {
-    printf '\n缺少 openssh-client，无法自动准备迁移密钥。\n'; return 1;
-  }
-  token="$(python3 - "$target_ip" <<'PY'
-import hashlib,sys
-print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])
-PY
-)"
-  key="$ssh_dir/vfops-migration-$token"
-  marker_file="$key.vfops-managed"
-  mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"
-
-  if [[ -e "$key" || -e "$key.pub" || -e "$marker_file" ]]; then
-    if [[ ! -f "$key" || ! -f "$key.pub" || ! -f "$marker_file" ]] || \
-       [[ "$(cat "$marker_file" 2>/dev/null || true)" != "VFOPS_MANAGED_MIGRATION_KEY_V1" ]]; then
-      printf '\n发现同名但无法证明由 P07 管理的 SSH 密钥；为避免误删，自动迁移停止。\n'
-      return 1
-    fi
-    if ssh -p 22 -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-      -o ConnectTimeout=10 "root@${target_ip}" "printf P07_SSH_READY" >/dev/null 2>&1; then
-      rc=0
-    else
-      rc=$?
-    fi
-    if [[ $rc -eq 0 ]]; then
-      WHOLE_SERVER_IDENTITY_FILE="$key"
-      WHOLE_SERVER_IDENTITY_MANAGED=1
-      printf '\n已复用 P07 之前创建的专用迁移密钥 ✓\n'
-      return 0
-    fi
-  else
-    printf '\n[P07] 正在生成只用于本次目标服务器的临时迁移密钥...\n'
-    ssh-keygen -q -t ed25519 -f "$key" -N '' -C "p07-vf-server-ops-migration-$token" || return 1
-    chmod 600 "$key"; chmod 644 "$key.pub"
-    printf '%s\n' 'VFOPS_MANAGED_MIGRATION_KEY_V1' >"$marker_file"
-    chmod 600 "$marker_file"
-  fi
-
-  printf '\n如果系统询问 root 密码，请输入目标服务器的 root 密码。\n'
-  printf '密码只交给系统 ssh-copy-id；P07 不读取、不保存。\n'
-  if ! ssh-copy-id -i "$key.pub" -o StrictHostKeyChecking=accept-new "root@${target_ip}"; then
-    rm -f -- "$key" "$key.pub" "$marker_file"
-    return 1
-  fi
-  WHOLE_SERVER_IDENTITY_FILE="$key"
-  WHOLE_SERVER_IDENTITY_MANAGED=1
-  printf '\nP07 临时迁移密钥已发送到目标服务器 ✓\n'
-}
-
-backup_identity() {
-  python3 - "$1" <<'PY'
-import json,sys
-from pathlib import Path
-d=json.loads((Path(sys.argv[1])/'manifest.json').read_text(encoding='utf-8'))
-print(f"{d['site']['domain']}\t{d['backup_id']}")
-PY
-}
-
-migrate_site() {
-  ui_flow '[P07] 正在读取源服务器网站...'
-  local rc target_ip preflight_rc setup_choice confirm output package identity domain backup_id migration_output
-  if ! select_site; then rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
-
-  say; ui_flow "迁移网站：$SELECTED_DOMAIN"
-  while true; do
-    printf '目标服务器 IP（输入 0 返回）：'; read -r target_ip || return 0
-    [[ "$target_ip" == 0 ]] && return 0
-    if [[ -z "$target_ip" ]]; then printf '没有输入 IP；输入 0 可返回。\n'; continue; fi
-    validate_ip "$target_ip" && break
-    printf 'IP 格式无效，请重新输入。\n'
-  done
-
-  say; ui_flow '[1/3] 检查目标服务器...'
-  if target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN"; then
-    preflight_rc=0
-  else
-    preflight_rc=$?
-  fi
-  if [[ $preflight_rc -ne 0 ]]; then
-    if [[ $preflight_rc -eq 10 ]]; then
-      say; ui_menu_warn 1 '现在准备源服务器 → 目标服务器 SSH 密钥'; ui_menu_back 0 '返回'; ui_prompt '请选择 [0-1]：'
-      read -r setup_choice || return 0
-      [[ "$setup_choice" == 1 ]] || return 0
-      prepare_target_ssh_key "$target_ip" || { pause; return 0; }
-      ui_flow '[P07] 重新检查目标服务器...'
-      target_ssh_preflight "$target_ip" "$SELECTED_DOMAIN" || { pause; return 0; }
-    else
-      pause; return 0
-    fi
-  fi
-
-  printf '\nP07 将：创建迁移备份 → SSH 传输 → 目标服务器自动建站 → 恢复 → 运行环境 → 技术验证。\n'
-  ui_note 'DNS 不会修改，源服务器不会删除。'
-  ui_prompt '开始迁移？[y/N]：'
-  read -r confirm || return 0
-  [[ "$confirm" =~ ^[Yy]$ ]] || { printf '已取消。\n'; return 0; }
-
-  say; ui_flow '[2/3] 创建并验证迁移备份...'
-  if ! output="$("$CORE" backup --site "$SELECTED_DOMAIN" --kind pre_migration --output-dir "$BACKUP_DIR" 2>&1)"; then
-    printf '\n迁移备份没有完成。源服务器未修改。\n%s\n' "$output" >&2; pause; return 0
-  fi
-  package="$(printf '%s\n' "$output" | tail -n1)"
-  identity="$(backup_identity "$package")"; IFS=$'\t' read -r domain backup_id <<<"$identity"
-
-  say; ui_flow '[3/3] 正在传输、恢复运行环境并做技术验证...'
-  if migration_output="$("$CORE" migrate transfer-new-site --package "$package" --target-host "$target_ip" \
-    --target-ip "$target_ip" --ssh-user root --ssh-port 22 --confirm "MIGRATE_NEW_SITE:${domain}:${backup_id}" 2>&1)"; then
-    ui_good '迁移技术验证完成 ✓'
-    say "网站：${C_GREEN}$domain${C_RESET}"
-    say "目标服务器：$target_ip · ${C_GREEN}已就绪${C_RESET}"
-    ui_note '当前流量：仍在源服务器 · DNS：未修改 · 源服务器：保留'
-    ui_attention '下一步：确认目标服务器网站后，再单独决定 DNS 切换。'
-  else
-    printf '%b\n' "${C_RED}迁移没有完成。源服务器与迁移备份仍保留；DNS 未修改。${C_RESET}" >&2
-    printf '%s\n' "$migration_output" >&2
-  fi
-  pause
-}
-
-
 json_field() {
   local payload="$1" field="$2"
   PAYLOAD_JSON="$payload" python3 - "$field" <<'PY'
 import json,os,sys
 field=sys.argv[1]
 try:
-    data=json.loads(os.environ["PAYLOAD_JSON"])
+    value=json.loads(os.environ["PAYLOAD_JSON"])
 except Exception:
     raise SystemExit(2)
-value=data
 for part in field.split("."):
     if not isinstance(value,dict) or part not in value:
         raise SystemExit(2)
@@ -355,236 +40,385 @@ else:
 PY
 }
 
-whole_server_ssh_ready() {
-  local target_ip="$1" rc choice output
-  local -a bootstrap_args=()
+migration_status_label() {
+  case "$1" in
+    PRODUCTION_PASS) printf '正式环境验证通过' ;;
+    PREPARED) printf '首轮迁入已完成' ;;
+    CUTOVER_PREP_READY) printf '最终同步完成，等待 DNS 人工切换' ;;
+    WAITING_DNS) printf '等待 DNS 生效' ;;
+    PREPARING) printf '正在首轮迁入' ;;
+    CUTOVER_RUNNING) printf '正在最终增量同步' ;;
+    PREPARE_FAILED) printf '首轮迁入未完成，可继续' ;;
+    PRODUCTION_VERIFY_FAILED) printf '公网验证未通过，可重试' ;;
+    CUTOVER_FAILED_ROLLED_BACK) printf '最终同步失败，旧服务器已恢复' ;;
+    CUTOVER_FAILED_ROLLBACK_PARTIAL) printf '最终同步失败，恢复不完整' ;;
+    ROLLED_BACK) printf '已回退到旧服务器运行' ;;
+    ROLLBACK_PARTIAL) printf '回退不完整，需要检查' ;;
+    *) printf '未知状态' ;;
+  esac
+}
 
-  WHOLE_SERVER_IDENTITY_FILE=""
-  WHOLE_SERVER_IDENTITY_MANAGED=0
+migration_status_color() {
+  local label
+  label="$(migration_status_label "$1")"
+  case "$1" in
+    PRODUCTION_PASS) printf '%b' "${C_GREEN}$label${C_RESET}" ;;
+    PREPARED|CUTOVER_PREP_READY|WAITING_DNS) printf '%b' "${C_YELLOW}$label${C_RESET}" ;;
+    PREPARING|CUTOVER_RUNNING) printf '%b' "${C_MAGENTA}$label${C_RESET}" ;;
+    *) printf '%b' "${C_RED}$label${C_RESET}" ;;
+  esac
+}
 
-  if target_ssh_preflight "$target_ip" "p07-migration-probe.invalid"; then
-    rc=0
+ensure_migration_dependencies() {
+  local -a missing=()
+  local cmd
+  for cmd in ssh ssh-copy-id ssh-keygen rsync; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if (("${#missing[@]}")); then
+    ui_attention '首次使用服务器迁移，需要 SSH 客户端和 rsync；现在才按需安装，不影响其它 P07 功能。'
+    command -v apt-get >/dev/null 2>&1 || {
+      ui_bad "当前系统缺少迁移依赖：${missing[*]}，且没有 apt-get。"
+      return 1
+    }
+    ui_note '只安装服务器迁移当前需要的依赖：openssh-client + rsync'
+    apt-get update -y >/dev/null || { ui_bad '软件源更新失败。'; return 1; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client rsync >/dev/null || {
+      ui_bad '服务器迁移依赖安装失败。'
+      return 1
+    }
+  fi
+  for cmd in ssh ssh-copy-id ssh-keygen rsync; do
+    command -v "$cmd" >/dev/null 2>&1 || { ui_bad "迁移依赖仍不可用：$cmd"; return 1; }
+  done
+}
+
+ensure_current_server_ready() {
+  local payload status answer
+  if ! payload="$("$CORE" server-migrate target-status 2>/dev/null)"; then
+    ui_bad '无法检查当前服务器。'
+    return 1
+  fi
+  status="$(json_field "$payload" status 2>/dev/null || printf UNKNOWN)"
+  if [[ "$status" == "CLOUDPANEL_READY" ]]; then
+    ui_good '当前服务器：新服务器 / 接收端 · CloudPanel 已就绪 ✓'
+    return 0
+  fi
+
+  ui_attention '当前服务器还没有可用的 CloudPanel。'
+  ui_note '只有通过“空服务器 + 支持的系统/资源”安全检查，P07 才允许自动安装。'
+  printf '\n检查当前服务器是否满足自动安装条件？[Y/n]：'
+  read -r answer || return 1
+  [[ ! "$answer" =~ ^[Nn]$ ]] || return 1
+
+  if ! payload="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
+    ui_bad '当前服务器不满足 CloudPanel 自动安装条件。'
+    printf '%s\n' "$payload" >&2
+    return 1
+  fi
+  ui_good '当前服务器满足 CloudPanel 自动安装条件 ✓'
+  ui_note '将使用发布时固定的 CloudPanel 官方安装器与 SHA256 校验；不会覆盖已有网站或数据库。'
+  printf '\n现在安装 CloudPanel？[y/N]：'
+  read -r answer || return 1
+  [[ "$answer" =~ ^[Yy]$ ]] || return 1
+  if ! payload="$("$CORE" server-migrate bootstrap-local --confirm BOOTSTRAP_LOCAL_CLOUDPANEL 2>&1)"; then
+    ui_bad 'CloudPanel 安装未完成。'
+    printf '%s\n' "$payload" >&2
+    return 1
+  fi
+  ui_good 'CloudPanel 已安装并验证 ✓'
+}
+
+source_ssh_preflight() {
+  local old_ip="$1" identity_file="${2:-}" output rc
+  local -a id_args=()
+  [[ -n "$identity_file" ]] && id_args=(-i "$identity_file")
+  SSH_PREFLIGHT_STATE="UNKNOWN"
+  if output="$(ssh -p 22 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=1 "${id_args[@]}" "root@${old_ip}" \
+    "set -eu; printf P07_SSH_READY; command -v clpctl >/dev/null 2>&1; test -f /home/clp/htdocs/app/data/db.sq3" 2>&1)"; then
+    SSH_PREFLIGHT_STATE="READY"
+    ui_good '旧服务器 SSH：已就绪 ✓'
+    ui_good '旧服务器 CloudPanel：已识别 ✓'
+    return 0
   else
     rc=$?
   fi
-
-  if [[ $rc -eq 10 ]]; then
-    printf '\n新服务器还没有源服务器的 SSH 密钥权限。\n'
-    printf '整机迁移会使用 P07 专用临时密钥，不会复用/删除你原来的 SSH 密钥。\n'
-    printf '  1. P07 现在准备专用迁移密钥\n  0. 返回\n请选择 [0-1]：'
-    read -r choice || return 1
-    [[ "$choice" == 1 ]] || return 1
-    prepare_managed_whole_server_key "$target_ip" || return 1
-    if target_ssh_preflight "$target_ip" "p07-migration-probe.invalid" "$WHOLE_SERVER_IDENTITY_FILE"; then
-      rc=0
-    else
-      rc=$?
-    fi
+  if printf '%s\n' "$output" | grep -Eqi 'permission denied|publickey|no supported authentication methods'; then
+    SSH_PREFLIGHT_STATE="NEEDS_KEY_SETUP"
+    ui_attention '当前新服务器还没有登录旧服务器的 SSH 密钥权限。'
+    return 10
   fi
-
-  if [[ $rc -eq 11 ]]; then
-    printf '\nP07 可以在“全新空服务器”上自动安装 CloudPanel。\n'
-    printf '安装内容：CloudPanel 官方安装脚本 + SHA256 校验 + MySQL 8.4 + rsync/cron。\n'
-    printf '已有网站 / MySQL / Web 服务的目标服务器会拒绝自动安装。\n'
-    printf '\n  1. 自动安装 CloudPanel\n  0. 返回\n请选择 [0-1]：'
-    read -r choice || return 1
-    [[ "$choice" == 1 ]] || return 1
-
-    bootstrap_args=(--target-ip "$target_ip")
-    if [[ -n "$WHOLE_SERVER_IDENTITY_FILE" ]]; then
-      bootstrap_args+=(--identity-file "$WHOLE_SERVER_IDENTITY_FILE")
-      [[ "$WHOLE_SERVER_IDENTITY_MANAGED" -eq 1 ]] && bootstrap_args+=(--managed-identity-file)
-    fi
-
-    printf '\n[P07] 正在验证空服务器并安装 CloudPanel，可能需要几分钟...\n'
-    if ! output="$("$CORE" server-migrate bootstrap-target "${bootstrap_args[@]}" \
-      --confirm "BOOTSTRAP_CLOUDPANEL:${target_ip}" 2>&1)"; then
-      printf '%b\n' "${C_RED}CloudPanel 自动安装未完成；迁移尚未开始。${C_RESET}" >&2
-      printf '%s\n' "$output" >&2
-      return 1
-    fi
-    ui_good 'CloudPanel：已就绪 ✓'
-    if target_ssh_preflight "$target_ip" "p07-migration-probe.invalid" "$WHOLE_SERVER_IDENTITY_FILE"; then
-      rc=0
-    else
-      rc=$?
-    fi
+  if printf '%s\n' "$output" | grep -Fq 'P07_SSH_READY'; then
+    SSH_PREFLIGHT_STATE="OLD_NOT_CLOUDPANEL"
+    ui_bad 'SSH 可以连接，但旧服务器未检测到可用的 CloudPanel。'
+    ui_note '请确认旧服务器确实是要迁出的 CloudPanel 服务器。'
+    return 11
   fi
-
-  [[ $rc -eq 0 ]]
+  SSH_PREFLIGHT_STATE="UNREACHABLE"
+  ui_bad "无法连接旧服务器：$old_ip"
+  ui_note '请检查旧服务器 IP、22 端口、防火墙和 SSH 服务。'
+  return "$rc"
 }
 
-continue_server_migration() {
-  local mid="$1" payload status target_ip answer output rc listeners key_state cleanup_answer
+prepare_source_key() {
+  local old_ip="$1" ssh_dir="${HOME:-/root}/.ssh" token key marker
+  token="$(python3 - "$old_ip" <<'PY'
+import hashlib,sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])
+PY
+)"
+  key="$ssh_dir/vfops-old-server-$token"
+  marker="$key.vfops-managed"
+  mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"
+
+  if [[ -e "$key" || -e "$key.pub" || -e "$marker" ]]; then
+    if [[ ! -f "$key" || ! -f "$key.pub" || ! -f "$marker" ]] || \
+       [[ "$(cat "$marker" 2>/dev/null || true)" != "VFOPS_MANAGED_OLD_SERVER_KEY_V1" ]]; then
+      ui_bad '发现同名 SSH 文件，但无法证明由 P07 管理；为避免误用，迁移停止。'
+      return 1
+    fi
+    if source_ssh_preflight "$old_ip" "$key"; then
+      SOURCE_IDENTITY_FILE="$key"
+      SOURCE_IDENTITY_MANAGED=1
+      ui_good '已复用 P07 之前创建的旧服务器迁移密钥 ✓'
+      return 0
+    fi
+  else
+    ssh-keygen -q -t ed25519 -f "$key" -N '' -C "p07-old-server-$token" || return 1
+    chmod 600 "$key"; chmod 644 "$key.pub"
+    printf '%s\n' 'VFOPS_MANAGED_OLD_SERVER_KEY_V1' >"$marker"
+    chmod 600 "$marker"
+  fi
+
+  printf '\n如果系统询问 root 密码，请输入“旧服务器”的 root 密码。\n'
+  printf '密码只交给系统 ssh-copy-id；P07 不读取、不保存。\n'
+  if ! ssh-copy-id -i "$key.pub" -o StrictHostKeyChecking=accept-new "root@${old_ip}"; then
+    ui_bad 'SSH 密钥授权失败；迁移尚未开始。'
+    return 1
+  fi
+  SOURCE_IDENTITY_FILE="$key"
+  SOURCE_IDENTITY_MANAGED=1
+  source_ssh_preflight "$old_ip" "$key"
+}
+
+ensure_source_access() {
+  local old_ip="$1" rc answer
+  SOURCE_IDENTITY_FILE=""
+  SOURCE_IDENTITY_MANAGED=0
+  if source_ssh_preflight "$old_ip"; then
+    return 0
+  else
+    rc=$?
+  fi
+  [[ "$rc" -eq 10 ]] || return 1
+  printf '\n  1. 现在为新服务器准备专用迁移密钥\n'
+  printf '  0. 返回\n'
+  ui_prompt '请选择 [0-1]：'
+  read -r answer || return 1
+  [[ "$answer" == 1 ]] || return 1
+  prepare_source_key "$old_ip"
+}
+
+OLD_SERVER_IP=""
+read_old_ip() {
+  local value
+  OLD_SERVER_IP=""
+  while true; do
+    printf '旧服务器 IP（输入 0 返回）：'
+    read -r value || return 1
+    [[ "$value" == 0 ]] && return 2
+    if [[ -n "$value" ]] && validate_ip "$value"; then
+      OLD_SERVER_IP="$value"
+      return 0
+    fi
+    printf 'IP 格式无效，请重新输入。\n'
+  done
+}
+
+source_args() {
+  local old_ip="$1"
+  SOURCE_ARGS=(--source-ip "$old_ip")
+  if [[ -n "$SOURCE_IDENTITY_FILE" ]]; then
+    SOURCE_ARGS+=(--identity-file "$SOURCE_IDENTITY_FILE")
+    [[ "$SOURCE_IDENTITY_MANAGED" -eq 1 ]] && SOURCE_ARGS+=(--managed-identity-file)
+  fi
+}
+
+show_plan() {
+  local payload="$1"
+  PLAN_JSON="$payload" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - <<'PY'
+import json,os
+p=json.loads(os.environ["PLAN_JSON"])
+green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def paint(t,c): return f"{c}{t}{reset}" if c else t
+print("当前服务器："+paint("新服务器 / 接收端",green))
+print(f"旧服务器：{p.get('old_server_ip','')}")
+print(f"将迁入网站：{p.get('site_count',0)} 个")
+for i,s in enumerate(p.get("sites",[]),1):
+    runtime=s.get("runtime") or {}
+    rtype=runtime.get("type","")
+    version=runtime.get("version","")
+    dbs=s.get("mysql_databases") or []
+    print(f"  {i}. {s.get('domain')} · {rtype} {version} · MySQL {len(dbs)}")
+cap=p.get("capacity_estimate") or {}
+required=int(cap.get("target_required_bytes") or 0)
+if required:
+    print(f"预计新服务器所需空间：约 {required/1024/1024/1024:.2f} GiB")
+listeners=p.get("old_server_external_listeners") or []
+if listeners:
+    ports=", ".join(f"{x.get('protocol','?').upper()}/{x.get('port','?')}" for x in listeners)
+    print("旧服务器额外公网服务："+paint(ports,yellow))
+    print(paint("这些服务不属于 CloudPanel 网站迁入范围；旧服务器必须继续保留。",gray))
+print(paint("安全边界：DNS 不自动修改 · 旧服务器不删除 · 新服务器已有资源不覆盖",gray))
+PY
+}
+
+prepare_and_continue() {
+  local old_ip="$1" domain="${2:-}" payload mid answer
+  local -a args
+  source_args "$old_ip"; args=("${SOURCE_ARGS[@]}")
+  [[ -n "$domain" ]] && args+=(--site "$domain")
+
+  say; ui_flow '[P07] 正在从旧服务器读取迁移清单...'
+  if ! payload="$("$CORE" server-migrate plan "${args[@]}" 2>&1)"; then
+    ui_bad '迁移预检未通过；没有迁移业务数据，也没有改 DNS。'
+    printf '%s\n' "$payload" >&2
+    pause
+    return 0
+  fi
+  show_plan "$payload"
+
+  printf '\n开始首轮迁入？[y/N]：'
+  read -r answer || return 0
+  [[ "$answer" =~ ^[Yy]$ ]] || return 0
+
+  ui_flow '[P07] 新服务器开始主动拉取旧服务器数据...'
+  if ! payload="$("$CORE" server-migrate prepare "${args[@]}" --confirm PREPARE_PULL_MIGRATION 2>&1)"; then
+    ui_bad '首轮迁入未完整结束；目标端状态已保留，可从“继续未完成迁移”续跑。'
+    printf '%s\n' "$payload" >&2
+    pause
+    return 0
+  fi
+  mid="$(json_field "$payload" migration_id 2>/dev/null || true)"
+  [[ -n "$mid" ]] || {
+    ui_bad '迁移已执行，但没有读到迁移任务编号。请从“继续未完成迁移”进入。'
+    pause
+    return 0
+  }
+  ui_good '首轮迁入完成 ✓'
+  say "迁移任务编号：${C_MAGENTA}$mid${C_RESET}"
+  continue_migration "$mid"
+}
+
+continue_migration() {
+  local mid="$1" payload status answer output
   while true; do
     if ! payload="$("$CORE" server-migrate status --migration-id "$mid" 2>/dev/null)"; then
-      ui_bad "无法读取整机迁移状态：$mid"
+      ui_bad "无法读取迁移状态：$mid"
       pause
       return 0
     fi
     status="$(json_field "$payload" status 2>/dev/null || printf UNKNOWN)"
-    target_ip="$(json_field "$payload" target_ip 2>/dev/null || true)"
-
-    say; ui_flow "整机迁移：$mid"; migration_status_line "$status"
+    say
+    ui_flow "迁移任务：$mid"
+    printf '状态：'; migration_status_color "$status"; printf '\n'
 
     case "$status" in
-      PREPARE_FAILED|PREPARING)
-        printf '\n上次预迁移未完整结束。P07 可以从已完成站点继续，不重做成功步骤。\n'
-        printf '继续预迁移？[Y/n]：'
+      PREPARING|PREPARE_FAILED)
+        ui_note '上次首轮迁入未完整结束，可从已完成位置继续。'
+        printf '继续首轮迁入？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
         if ! output="$("$CORE" server-migrate resume --migration-id "$mid" 2>&1)"; then
-          printf '%b\n' "${C_RED}预迁移仍未完成，状态已保留，可稍后继续。${C_RESET}" >&2
+          ui_bad '继续迁入仍未完成；状态已保留。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
-        ui_good '预迁移完成 ✓'
-        ui_note '源服务器仍在线，DNS 未修改。'
+        ui_good '首轮迁入完成 ✓'
         ;;
       PREPARED)
-        ui_attention '预迁移已完成。下一步会进入短维护窗口：'
-        ui_flow '停止源服务器 Web/Cron/PM2 → 最终文件/DB/SQLite 增量 → 目标服务器运行环境 → 本机验证。'
-        ui_note '任何关键步骤失败会尝试自动恢复源服务器；DNS 仍不会自动修改。'
-        printf '\n现在进入最终切换准备？[y/N]：'
+        ui_attention '下一步进入短维护窗口：旧服务器会暂时停止 Nginx / Cron / PM2，然后新服务器做最终增量拉取。'
+        ui_note '此阶段仍不会修改 DNS；失败会尝试恢复旧服务器运行。'
+        printf '\n进入最终同步？[y/N]：'
         read -r answer || return 0
         [[ "$answer" =~ ^[Yy]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_SERVER:${mid}" 2>&1)"; then
-          printf '%b\n' "${C_RED}最终切换准备失败。P07 已执行回滚流程，请以上方状态为准。${C_RESET}" >&2
+        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid" 2>&1)"; then
+          ui_bad '最终同步未完成；P07 已执行安全恢复流程，请以上方状态为准。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
-        ui_good '最终数据同步与目标服务器运行环境验证完成 ✓'
+        ui_good '最终增量同步与新服务器本地验证完成 ✓'
         ;;
       CUTOVER_RUNNING)
-        ui_attention '上次最终切换在执行中断开。P07 已保存源服务器/目标服务器事务状态。'
-        ui_flow '继续会跳过已完成的冻结/运行环境步骤，并重新执行可安全重复的数据校验。'
-        printf '继续恢复最终切换？[Y/n]：'
+        ui_attention '上次最终同步被中断。再次执行会从安全状态继续。'
+        printf '继续最终同步？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_SERVER:${mid}" 2>&1)"; then
-          printf '%b\n' "${C_RED}最终切换恢复未完成。P07 已执行/保留回滚状态，请以上方结果为准。${C_RESET}" >&2
+        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid" 2>&1)"; then
+          ui_bad '最终同步仍未完成。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
-        ui_good '最终切换已从断点继续完成 ✓'
         ;;
-      CUTOVER_PREP_READY|WAITING_DNS|PRODUCTION_VERIFY_FAILED)
-        say
-        say "${C_YELLOW}============================================================${C_RESET}"
-        say "${C_BOLD}${C_YELLOW} 唯一人工确认：现在修改 DNS${C_RESET}"
-        say "${C_YELLOW}============================================================${C_RESET}"
-        printf '把本次迁移的网站 DNS 指向目标服务器：%s\n' "$target_ip"
-        ui_note '源服务器已保留且 Web/运行环境已冻结；P07 不会自动删除旧服务器。'
-        if [[ "$status" == "PRODUCTION_VERIFY_FAILED" ]]; then
-          ui_bad '上次公网路由已进入最终验收，但 HTTPS/正式环境验证未完全通过。'
-          printf 'P07 会重新验证路由，并在安全条件满足时重试目标服务器证书签发。\n'
-        else
-          printf '修改完成后，P07 会用目标服务器独有随机文件证明公网已经真正到新服务器。\n'
-        fi
-        printf '\nDNS 已修改完成 / 继续最终验收？[y/N]：'
+      CUTOVER_PREP_READY)
+        ui_good '新服务器本地验证通过 ✓'
+        ui_attention '唯一剩余人工步骤：把网站 DNS 切换到当前这台新服务器。'
+        ui_note 'P07 不会自动修改 DNS，也不会删除旧服务器。'
+        printf '\n完成 DNS 切换后，输入 y 开始公网验证；暂未切换可直接返回。[y/N]：'
         read -r answer || return 0
         [[ "$answer" =~ ^[Yy]$ ]] || return 0
-        if output="$("$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:${mid}" 2>&1)"; then
-          rc=0
-        else
-          rc=$?
-        fi
-        if [[ $rc -eq 18 ]]; then
-          ui_attention 'DNS 还没有全部指向目标服务器。状态已保留；稍后再次选择“继续已有整机迁移”即可。'
-          printf '%s\n' "$output"
-          pause
-          return 0
-        fi
-        if [[ $rc -ne 0 ]]; then
-          printf '%b\n' "${C_RED}公网/正式环境验收未通过。源服务器仍保留，不会自动删除。${C_RESET}" >&2
+        if ! output="$("$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid" 2>&1)"; then
+          ui_bad '公网验证暂未通过。请检查 DNS / HTTPS，之后可从“继续未完成迁移”重试。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
-        ui_good '迁移完成 ✓'
-        ui_good '公网路由、HTTPS、网站、数据库与运行环境已通过最终验证。'
-        ui_note '源服务器继续保留作为恢复副本，不会自动删除。'
-        payload="$("$CORE" server-migrate status --migration-id "$mid" 2>/dev/null || true)"
-        key_state="$(json_field "$payload" managed_ssh_key_cleanup 2>/dev/null || printf NOT_RUN)"
-        if [[ "$key_state" == "RETAINED_FOR_RECOVERY" ]]; then
-          printf 'P07 专用迁移密钥：继续保留，用于恢复/清理保护；不会碰你的其它 SSH 密钥。\n'
+        ;;
+      WAITING_DNS|PRODUCTION_VERIFY_FAILED)
+        ui_attention '已进入 DNS / 公网验证阶段；不要执行运行环境回退。'
+        ui_note '确认 DNS 已指向当前新服务器后，可以安全重试公网验证。'
+        printf '\n重试公网验证？[Y/n]：'
+        read -r answer || return 0
+        [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
+        if ! output="$("$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid" 2>&1)"; then
+          ui_bad '公网验证仍未通过。'
+          printf '%s\n' "$output" >&2
+          pause
+          return 0
         fi
-        listeners="$(json_field "$payload" source_external_listeners 2>/dev/null || printf '[]')"
-        if [[ "$listeners" != "[]" && -n "$listeners" ]]; then
-          LISTENERS_JSON="$listeners" python3 - <<'PY'
-import json,os
-try: rows=json.loads(os.environ["LISTENERS_JSON"])
-except Exception: rows=[]
-if rows:
-    ports=", ".join(f"{x.get('protocol','?').upper()}/{x.get('port','?')}" for x in rows)
-    print(f"注意：源服务器仍有非 CloudPanel 公网服务：{ports}")
-    print("旧服务器必须继续保留，直到这些服务单独迁移或确认不再需要。")
-PY
-        fi
-        pause
-        return 0
         ;;
       PRODUCTION_PASS)
-        ui_good '该整机迁移已经通过正式环境验证 ✓'
-        ui_note '旧服务器仍按安全策略保留，P07 不会自动删除。'
-        ui_bad '注意：正式环境已可能产生新数据，禁止直接“只开旧机”回滚。'
-        ui_bad '如需回退，必须先完成目标服务器 → 源服务器数据对账/反向同步。'
-
-        key_state="$(json_field "$payload" managed_ssh_key_cleanup 2>/dev/null || printf NOT_RUN)"
-        if [[ "$key_state" == "RETAINED_FOR_RECOVERY" ]]; then
-          say
-          ui_attention 'P07 专用迁移密钥：正在保留，作为恢复 / 清理通道。'
-          ui_note '建议确认新服务器稳定、无需迁移恢复后再清理。'
-          ui_menu_good 1 '继续保留恢复保护'
-          ui_menu_danger 2 '结束恢复保护并清理 P07 专用迁移密钥'
-          ui_menu_back 0 '返回'
-          ui_prompt '请选择 [0-2]：'
-          read -r cleanup_answer || return 0
-          case "$cleanup_answer" in
-            2)
-              printf '\n清理后旧源服务器仍会保留，但 P07 不再保留这条目标服务器专用 SSH 通道。\n'
-              ui_bad '高风险：只清理 P07 自己创建的迁移密钥，不删除源服务器/目标服务器。'
-              ui_prompt '确认只删除 P07 自己创建的迁移密钥？[y/N]：'
-              read -r answer || return 0
-              if [[ "$answer" =~ ^[Yy]$ ]]; then
-                if output="$("$CORE" server-migrate cleanup-managed-key \
-                  --migration-id "$mid" \
-                  --confirm "CLEANUP_MANAGED_SSH_KEY:${mid}" 2>&1)"; then
-                  ui_good 'P07 专用迁移密钥已清理 ✓'
-                  ui_note '你的其它 SSH 密钥、目标服务器网站与源服务器均未删除。'
-                else
-                  printf '%b\n' "${C_RED}专用迁移密钥清理未完成；状态已保留，不会误删其它密钥。${C_RESET}" >&2
-                  printf '%s\n' "$output" >&2
-                fi
-              fi
-              ;;
-            1|0|"") ;;
-            *) printf '无效选择，继续保留恢复保护。\n' ;;
-          esac
-        elif [[ "$key_state" == "PASS" || "$key_state" == "LOCAL_REMOVE_PARTIAL" ]]; then
-          printf 'P07 专用迁移密钥：恢复通道已结束。\n'
-        fi
-
-        listeners="$(json_field "$payload" source_external_listeners 2>/dev/null || printf '[]')"
-        if [[ "$listeners" != "[]" && -n "$listeners" ]]; then
+        ui_good '服务器迁入正式验证通过 ✓'
+        ui_note '当前服务器：正式接收端'
+        ui_note '旧服务器：继续保留为恢复副本，不自动删除'
+        ui_note 'P07：未自动修改 DNS；未执行旧服务器删除'
+        local listeners
+        listeners="$(json_field "$payload" old_server_external_listeners 2>/dev/null || printf '[]')"
+        if [[ "$listeners" != "[]" ]]; then
           LISTENERS_JSON="$listeners" python3 - <<'PY'
 import json,os
 try: rows=json.loads(os.environ["LISTENERS_JSON"])
 except Exception: rows=[]
 if rows:
     ports=", ".join(f"{x.get('protocol','?').upper()}/{x.get('port','?')}" for x in rows)
-    print(f"注意：源服务器还有非 CloudPanel 公网服务：{ports}")
-    print("这些服务没有被网站迁移链自动删除/假装完成，旧服务器必须继续保留直到另行处理。")
+    print(f"注意：旧服务器还有非 CloudPanel 公网服务：{ports}")
+    print("这些服务未被网站迁入链自动处理，因此旧服务器更不能删除。")
 PY
         fi
         pause
         return 0
         ;;
       CUTOVER_FAILED_ROLLED_BACK|ROLLED_BACK)
-        ui_bad '该迁移已回滚到源服务器。目标服务器不会被自动删除，DNS 如已修改需人工改回。'
+        ui_attention '迁移已回到旧服务器运行；新服务器资源不会自动删除。'
+        pause
+        return 0
+        ;;
+      CUTOVER_FAILED_ROLLBACK_PARTIAL|ROLLBACK_PARTIAL)
+        ui_bad '恢复只完成了一部分，需要工程检查；请勿修改 DNS 或删除旧服务器。'
         pause
         return 0
         ;;
@@ -597,91 +431,43 @@ PY
   done
 }
 
-new_server_migration() {
-  local target_ip plan answer output mid
-  local -a target_args=()
-  say; ui_flow '整机迁移 · 推荐'
-  ui_note 'P07 会自动发现当前 CloudPanel 全部网站并执行两阶段迁移。'
-  printf '自动范围：建站 / 文件 / MySQL / 全 Home SQLite / VF 隐藏数据 / Cron / PM2 / 验证 / 回滚保护。\n'
-  printf '人工只保留：目标服务器 root SSH 首次授权（如需要）+ 最后一次 DNS 人工确认。\n'
-  printf '目标服务器若是全新空服务器且未装 CloudPanel，P07 可自动完成安装。\n\n'
+whole_server_in() {
+  local old_ip rc
+  say; ui_flow '整机迁入'
+  ui_note '你现在应登录“新服务器”。P07 会从这里主动读取旧服务器。'
+  printf '流程：检查旧服务器 → 盘点网站/数据库/运行环境 → 首轮拉取 → 最终增量 → 新机验证 → DNS 人工确认。\n\n'
 
-  while true; do
-    printf '目标服务器 IP（输入 0 返回）：'
-    read -r target_ip || return 0
-    [[ "$target_ip" == 0 ]] && return 0
-    validate_ip "$target_ip" && break
-    printf 'IP 格式无效，请重新输入。\n'
-  done
-
-  if ! whole_server_ssh_ready "$target_ip"; then
-    ui_attention '目标服务器 SSH / CloudPanel 尚未就绪。迁移未开始。'
-    pause
+  if ! read_old_ip; then
+    rc=$?
+    [[ "$rc" -eq 2 ]] && return 0
     return 0
   fi
-
-  target_args=(--target-ip "$target_ip")
-  if [[ -n "$WHOLE_SERVER_IDENTITY_FILE" ]]; then
-    target_args+=(--identity-file "$WHOLE_SERVER_IDENTITY_FILE")
-    [[ "$WHOLE_SERVER_IDENTITY_MANAGED" -eq 1 ]] && target_args+=(--managed-identity-file)
-  fi
-
-  say; ui_flow '[P07] 正在做整机只读预检...'
-  if ! plan="$("$CORE" server-migrate plan "${target_args[@]}" 2>&1)"; then
-    printf '%b\n' "${C_RED}整机预检未通过，未写入源服务器/目标服务器。${C_RESET}" >&2
-    printf '%s\n' "$plan" >&2
-    pause
-    return 0
-  fi
-
-  PLAN_JSON="$plan" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - <<'PY'
-import json,os
-p=json.loads(os.environ["PLAN_JSON"])
-green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
-def paint(text,color): return f"{color}{text}{reset}" if color else text
-print(f"发现网站：{p.get('site_count',0)}")
-for i,s in enumerate(p.get("sites",[]),1):
-    runtime=(s.get("runtime") or {}).get("version","UNKNOWN")
-    print(f"  {i}. {s.get('domain')} · 运行环境 {runtime}")
-print("目标服务器："+paint("已就绪",green))
-listeners=p.get("source_external_listeners") or []
-if listeners:
-    ports=", ".join(f"{x.get('protocol','?').upper()}/{x.get('port','?')}" for x in listeners)
-    print("源服务器额外公网服务："+paint(ports,yellow))
-    print(paint("说明：这些不是 CloudPanel 网站迁移资产；P07 会强制保留旧服务器，避免漏掉代理/VPN/其它服务。",gray))
-else:
-    print("源服务器额外公网服务：未发现")
-print(paint("DNS：不会自动修改",gray))
-print(paint("源服务器：不会删除",gray))
-PY
-
-  printf '\n开始预迁移？[y/N]：'
-  read -r answer || return 0
-  [[ "$answer" =~ ^[Yy]$ ]] || return 0
-
-  say; ui_flow '[P07] 开始自动预迁移。源服务器保持在线...'
-  if ! output="$("$CORE" server-migrate prepare "${target_args[@]}" --confirm PREPARE_SERVER_MIGRATION 2>&1)"; then
-    printf '%b\n' "${C_RED}预迁移未完整结束。P07 已保存可恢复状态。${C_RESET}" >&2
-    printf '%s\n' "$output" >&2
-    printf '稍后选择“继续已有整机迁移”即可从断点继续。\n'
-    pause
-    return 0
-  fi
-
-  mid="$(json_field "$output" migration_id 2>/dev/null || true)"
-  if [[ -z "$mid" ]]; then
-    printf '\n迁移已执行但无法读取迁移任务编号，请从“继续已有整机迁移”恢复。\n'
-    pause
-    return 0
-  fi
-  ui_good '预迁移完成 ✓'; say "迁移任务编号：${C_MAGENTA}$mid${C_RESET}"
-  continue_server_migration "$mid"
+  old_ip="$OLD_SERVER_IP"
+  ensure_source_access "$old_ip" || { pause; return 0; }
+  prepare_and_continue "$old_ip"
 }
 
-select_existing_server_migration() {
-  local root="/var/lib/vf-server-ops/server-migrations" choice count mid status ip row i
+single_site_in() {
+  local old_ip domain rc
+  say; ui_flow '单站迁入'
+  ui_note '当前服务器固定为新服务器 / 接收端。'
+  if ! read_old_ip; then
+    rc=$?
+    [[ "$rc" -eq 2 ]] && return 0
+    return 0
+  fi
+  old_ip="$OLD_SERVER_IP"
+  printf '要迁入的网站域名（输入 0 返回）：'
+  read -r domain || return 0
+  [[ "$domain" == 0 || -z "$domain" ]] && return 0
+  ensure_source_access "$old_ip" || { pause; return 0; }
+  prepare_and_continue "$old_ip" "$domain"
+}
+
+select_existing_migration() {
+  local root="/var/lib/vf-server-ops/server-migrations" choice count row i mid status ip
   local -a rows
-  [[ -d "$root" ]] || { printf '\n没有发现整机迁移记录。\n'; pause; return 0; }
+  [[ -d "$root" ]] || { printf '\n没有发现未完成的迁移任务。\n'; pause; return 0; }
   mapfile -t rows < <(python3 - "$root" <<'PY'
 import json,sys
 from pathlib import Path
@@ -689,18 +475,20 @@ rows=[]
 for p in Path(sys.argv[1]).glob("*/state.json"):
     try: d=json.loads(p.read_text(encoding="utf-8"))
     except Exception: continue
-    rows.append((d.get("updated_at",""),d.get("migration_id",p.parent.name),d.get("status","UNKNOWN"),(d.get("target") or {}).get("ip","")))
+    if d.get("schema")!="vf-server-ops.server-migration.target-pull.v1":
+        continue
+    rows.append((d.get("updated_at",""),d.get("migration_id",p.parent.name),d.get("status","UNKNOWN"),(d.get("source") or {}).get("ip","")))
 for _,mid,status,ip in sorted(rows,reverse=True):
     print(f"{mid}\t{status}\t{ip}")
 PY
 )
   count="${#rows[@]}"
-  [[ "$count" -gt 0 ]] || { printf '\n没有发现可继续的整机迁移。\n'; pause; return 0; }
-  ui_title '已有整机迁移'; ui_rule
+  [[ "$count" -gt 0 ]] || { printf '\n没有发现未完成的迁移任务。\n'; pause; return 0; }
+  ui_title '迁移任务'; ui_rule
   i=1
   for row in "${rows[@]}"; do
     IFS=$'\t' read -r mid status ip <<<"$row"
-    printf '  %s. %s · ' "$i" "$mid"; migration_status_color "$status"; printf ' · 目标服务器 %s\n' "$ip"
+    printf '  %s. %s · ' "$i" "$mid"; migration_status_color "$status"; printf ' · 旧服务器 %s\n' "$ip"
     i=$((i+1))
   done
   ui_menu_back 0 '返回'
@@ -710,34 +498,38 @@ PY
   [[ "$choice" == 0 ]] && return 0
   (( choice>=1 && choice<=count )) || return 0
   IFS=$'\t' read -r mid _ _ <<<"${rows[$((choice-1))]}"
-  continue_server_migration "$mid"
+  continue_migration "$mid"
 }
 
 migration_menu() {
   local choice
   ensure_migration_dependencies || { pause; return 0; }
+  ensure_current_server_ready || { pause; return 0; }
   while true; do
     say
-    say "${C_BOLD}${C_MAGENTA}服务器迁移${C_RESET}"
+    say "${C_BOLD}${C_MAGENTA}P07 · 服务器迁移${C_RESET}"
     ui_rule
-    ui_menu_flow 1 '整机迁移（推荐）'
-    ui_note '     自动发现全部 CloudPanel 网站，两阶段同步，最后只保留一次 DNS 人工确认'
+    say "当前服务器：${C_GREEN}新服务器 / 接收端${C_RESET}"
+    ui_note '迁移由当前新服务器发起；不再要求回旧服务器运行 P07。'
     say
-    ui_menu_flow 2 '继续已有整机迁移'
-    ui_note '     断点续跑 / 等待 DNS / 查看最终状态'
+    ui_menu_flow 1 '整机迁入'
+    ui_note '     自动盘点旧服务器全部 CloudPanel 网站并迁入'
     say
-    ui_menu_flow 3 '单站迁移'
-    ui_note '     只迁一个网站，保持原有安全流程'
+    ui_menu_flow 2 '单站迁入'
+    ui_note '     只迁入指定网站'
+    say
+    ui_menu_flow 3 '继续未完成迁移'
+    ui_note '     断点续跑 / DNS 生效验证 / 查看最终状态'
     say
     ui_menu_back 0 '返回'
     say
-    ui_note '安全边界：DNS 只人工切换 · 源服务器不自动删除 · 已有目标服务器不覆盖'
+    ui_note '安全边界：DNS 只人工切换 · 旧服务器永不自动删除 · 新服务器已有资源不覆盖'
     ui_prompt '请选择 [0-3]：'
     read -r choice || return 0
     case "$choice" in
-      1) new_server_migration ;;
-      2) select_existing_server_migration ;;
-      3) migrate_site ;;
+      1) whole_server_in ;;
+      2) single_site_in ;;
+      3) select_existing_migration ;;
       0) return 0 ;;
       *) ui_warn '无效选择。请输入 0-3。' ;;
     esac

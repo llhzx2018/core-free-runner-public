@@ -34,69 +34,76 @@ V1 用户主入口为纯终端 5 项菜单；Advanced CLI 只作为高级/自动
 
 ### 3.4 服务器迁移
 
-CloudPanel → CloudPanel，必须是完整 Source → Target 流程，而不是“用户手工把 ZIP 搬过去以后才开始”。
+CloudPanel → CloudPanel 的普通正式流程采用 **新服务器主动迁入（Target-owned Pull Model）**。Owner 登录新服务器运行 P07；当前机器固定是“新服务器 / 接收端”，只需要提供旧服务器 IP。不得再把“去旧服务器运行 P07、再输入目标服务器 IP”作为普通用户正式路径。
 
-普通用户迁移入口分为：
+普通用户迁移入口固定为：
 
 ```text
-整机迁移（推荐）
-单站迁移
+P07 · 服务器迁移
+当前服务器：新服务器 / 接收端
+
+1. 整机迁入
+2. 单站迁入
+3. 继续未完成迁移
+0. 返回
 ```
 
-整机迁移是服务器级编排层，不复制单站迁移实现：
+正式编排方向：
 
 ```text
-SOURCE→TARGET SSH Key 预检
-→ TARGET 若为受支持的全新空服务器且未装 CloudPanel：可自动校验官方 installer 并安装 CloudPanel + MySQL 8.4
-→ 只读 SOURCE/TARGET Preflight
-→ 自动发现所选/全部 CloudPanel 网站
-→ TARGET 自动建同运行时站点
-→ SOURCE→TARGET 首轮 Direct Rsync（低磁盘）
-→ MySQL 逐库 transient logical dump/import（传完即清）
-→ TARGET 自动改写兼容 DB 配置
-→ Runtime 暂缓，SOURCE 保持在线
-→ Site User Home 外部 VF/Press 数据补充同步
-→ 全 Site User Home SQLite Online Backup + quick_check
-→ PREPARED
-→ 独立 CUTOVER Gate
-→ 冻结 SOURCE Nginx / Cron / PM2
-→ 最终文件 Delta
-→ fresh logical MySQL export/import + semantic verify
-→ 最终全 Home SQLite snapshot
-→ TARGET Cron / PM2 / system Cron 激活
-→ TARGET local Host/SNI/asset verification
+NEW SERVER（当前机器 / 接收端）
+→ 按需检查 OpenSSH client + rsync
+→ 输入旧服务器 IP
+→ NEW → OLD 建立 SSH
+→ NEW 读取 OLD CloudPanel / 网站 / 数据库 / Runtime 清单
+→ NEW 本地检查目标冲突与容量
+→ NEW 创建本地主 Migration ID / 私有状态
+→ NEW 在 OLD 仅暂存受控 helper / transient dump / Recovery Point
+→ NEW 主动 rsync PULL 网站文件与 Site User Home 业务数据
+→ OLD transient logical MySQL export
+→ NEW 主动 PULL dump → 本地 CloudPanel import → 应用配置 remap → semantic verify
+→ OLD SQLite Online Backup
+→ NEW 主动 PULL authoritative snapshot → quick_check
+→ Cron / PM2 / NVM 精确运行环境先暂存、不启用
+→ PREPARED；OLD 继续在线
+→ 独立最终同步 Gate
+→ NEW 请求 OLD 保存 Recovery Point 并冻结 Nginx / Cron / PM2
+→ NEW 再次主动 PULL 最终文件 Delta / MySQL / SQLite
+→ NEW 激活本地 Cron / PM2 / system Cron
+→ NEW 本地 Host / SNI / asset 验证
 → CUTOVER_PREP_READY
-→ OWNER 唯一人工 DNS Gate
-→ TARGET-only random public-route proof
-→ public HTTPS/TLS Production verify
+→ OWNER 唯一人工 DNS 切换
+→ NEW 创建仅新机存在的随机公网 proof
+→ public HTTPS / TLS / route verify
 → PRODUCTION_PASS
-→ SOURCE retained for rollback
+→ OLD 永久保留为 Recovery Copy，除非 Owner 未来另行处置
 ```
+
+整机迁入与单站迁入使用同一 Pull Orchestrator；单站仅收窄 site set，不允许回退到旧 Push UX。旧 `server_migration.py` 的 Push 实现可以继续作为内部兼容/安全原语来源，但普通 `vfops server-migrate` 与交互菜单必须路由到 Target-owned Pull Engine。
 
 硬规则：
 
-- TARGET 已有 CloudPanel 时绝不重装；仅对通过“受支持 OS/架构 + ≥1 Core + 2 GB 级内存 + ≥10 GB 磁盘 + 无 CloudPanel/MySQL/MariaDB/Nginx/Apache + 无 80/443 Web 服务 + 无现有 htdocs”空机 Gate 的 TARGET 提供自动安装；
-- 自动安装使用 P07 发布时固定的官方 CloudPanel installer URL + SHA256，校验失败禁止执行；默认 MySQL 8.4；
-- SOURCE 如仅缺少 rsync，进入已确认的 prepare 后可用 apt 自动补齐；其它关键运行命令缺失仍 fail closed；
-- `prepare` 阶段不得提前启用 TARGET Cron / PM2，避免 SOURCE/TARGET 双跑；`/etc/cron.d/*` 只有在文件内全部实际任务用户都属于本次迁移 Site User 集合时才允许自动冻结/迁移，共享或解析不明确的 system Cron fail closed；
-- 整机模式不得在 SOURCE 同时保留全部站点的大型迁移包；默认 `LOW_DISK_DIRECT_RSYNC`，SOURCE 额外磁盘占用只允许私有状态、单个 transient DB dump、单个 transient SQLite snapshot；
-- MySQL/MariaDB 跨版本迁移使用逐库 transient logical dump/import，不复制 raw database directory；
-- 单站 Portable Backup 迁移优先保留 SOURCE DB identity；仅在真实 CloudPanel 拒绝 legacy database user 时，允许本次 transaction-owned TARGET fallback 到兼容账号并改写 WordPress `wp-config.php` / 支持的 `.env`。整机低磁盘模式不持久化 SOURCE CloudPanel 私有 DB 凭据，直接保留数据库名并生成 TARGET-compatible DB user，再做同样的原子应用配置 remap；
-- Site-root Inventory 的 SQLite 不是整机迁移完整分母；整机迁移必须补充扫描选中 Site User Home，并对真实 SQLite 使用 online backup；TARGET 对应 `-wal/-shm/-journal` sidecar 必须在 authoritative snapshot 写入前后清理，避免旧 WAL 污染；
-- `.vf*`、`.press*`、`.local/share/vf-*` 等站点 Web Root 外业务数据属于整机迁移资产；
-- PM2 站点必须从 SOURCE 精确解析 dump 对应的 Site User NVM Node 版本，并只迁移该版本运行时；不要求用户在干净 TARGET 手工安装 NVM/PM2；
-- plan 必须给出 SOURCE 临时空间与 TARGET 容量预检；容量不足时在写入前阻断；同时提前拒绝 TARGET 同域名、同 Site User、同数据库名冲突；
-- TARGET `site:add` 后必须立即重新 Inventory，证明 Site User / Site Root / Document Root / Runtime / SOURCE 域名集合可在 TARGET 重建；不等价则在大文件同步前清理本次 transaction-owned site 并停止；
-- final MySQL 验证先使用 canonical SQL exact fingerprint；MariaDB→MySQL 只允许在 exact 不同但 logical object + DML content fingerprint 完全一致时继续；
-- DNS 仍不由 P07 自动修改；Provider/Cloudflare 管理不是 P07 V1 职责；
-- plan 必须识别 SOURCE 对公网监听的非标准端口；它们不被网站迁移链假装“已经迁走”，并使 `source_decommission_safe=false`，旧服务器继续保留直到这些代理/VPN/其它服务单独处理；
-- DNS 修改后必须用仅 TARGET 存在的随机 proof file 证明公网已经到 TARGET，不能只看 DNS lookup；
-- Production PASS 前旧服务器不得删除；Rollback 只恢复 SOURCE Runtime，不自动删除 TARGET；
-- 自动 Runtime 回滚只允许发生在 DNS 交接前的 `CUTOVER_PREP_READY`；DNS 已交接或 Production PASS 后，普通菜单不得提供“只恢复旧机”的回滚，因为 TARGET 可能已经产生更新的文件/MySQL/SQLite 写入。此时 SOURCE 仅作为 Recovery Copy；若未来需要回退，必须先完成 TARGET→SOURCE 数据对账/反向同步事务，再决定 DNS 回切；
-- 整机首次 SSH 授权若需要新 Key，必须使用 P07 专用迁移 SSH Key；用户已有 Key 永不标记为 managed、永不自动删除；Production PASS 后专用 Key 默认只作为 Recovery / 清理 SSH 通道保留，不代表允许 Runtime-only 数据回滚；Recovery 保护期结束后由普通菜单的一键 Gate 精确清理；
-- 中断的 `prepare` 必须保存私有状态并支持断点续跑。
+- **Migration State Ownership**：主迁移状态、Migration ID、断点续传状态与目标事务标记全部由 NEW SERVER 持有；OLD SERVER 只能保留 Recovery Point、受控 helper 与 transient staging，不得成为主 Authority；
+- **Business Data Direction**：网站文件、VF/Press 隐藏业务数据、MySQL dump、SQLite snapshot、Cron/PM2 metadata 与所需 NVM Runtime 的业务传输必须由 NEW SERVER 发起并从 OLD SERVER 拉取；控制面为执行 helper 而上传的无业务 Secret 运行时代码不改变 Pull Model 语义；
+- **Target Bootstrap**：当前新服务器已有 CloudPanel 时绝不重装；仅当当前机通过“受支持 OS/架构 + ≥1 Core + 2 GB 级内存 + ≥10 GB 磁盘 + 无 CloudPanel/MySQL/MariaDB/Nginx/Apache + 无 80/443 Web 服务 + 无现有 htdocs”空机 Gate 时，才允许使用发布时固定的 CloudPanel 官方 installer URL + SHA256 安装，默认 MySQL 8.4；
+- **Lazy Dependency**：进入服务器迁移时才检查 OpenSSH client 与 rsync；OLD SERVER 如仅缺 rsync，只有用户确认开始迁移后才允许通过 apt 按需补齐；不得在 Toolbox 启动或其它 Slot 入口预装；
+- **No Overwrite**：NEW SERVER 上同域名、同 Site User、同数据库名或已存在 `/home/<site_user>` 任一冲突都必须在业务写入前阻断；只允许本次 transaction-owned 资源做清理/重试；
+- **Prepare No Double-run**：首轮迁入期间 OLD 保持在线，NEW 的 Cron / PM2 / system Cron 只暂存不得启动；
+- **Low-disk Pull**：整机迁入不得在 OLD 同时制造 N 份整站大包；网站文件使用 Direct Rsync Pull；MySQL 与 SQLite 仅允许单项 transient staging，用完即清；
+- **MySQL**：MariaDB/MySQL 跨版本只走 logical dump/import；NEW 可为本次 transaction-owned DB 生成兼容账号并原子改写 WordPress `wp-config.php` / 支持的 `.env`；final 验证先用 canonical SQL exact fingerprint，exact 不同只允许在 logical object + DML content 完全一致时通过；
+- **SQLite**：必须扫描所选 Site User Home，不以 Site Root Inventory 作为完整分母；OLD 使用 SQLite online backup，NEW 写入 authoritative snapshot 前后清理 `-wal/-shm/-journal` 并执行 `quick_check`；
+- **External Data**：`.vf*`、`.press*`、`.local/share/vf-*` 等 Web Root 外业务数据属于整机迁入资产；
+- **Runtime**：PM2 必须从 OLD 精确解析 Site User dump 对应的 NVM Node 版本并只拉取该版本；`/etc/cron.d/*` 只有全部真实任务用户均属于本次迁入 Site User 集合时才允许自动迁入，否则 fail closed；
+- **Recovery Point Before Mutation**：最终同步在冻结 OLD Runtime 前必须先把可恢复状态写到 OLD 独立 Recovery Root；失败时先停止 NEW 已启用 Runtime，再恢复 OLD Nginx/Cron/PM2；
+- **DNS**：P07 绝不自动修改 DNS；Provider/Cloudflare 管理不是 P07 V1 迁移职责；只有 Owner 明确完成 DNS 切换后才进入公网验证；
+- **Post-DNS Boundary**：Owner 已声明 DNS 切换、进入 `WAITING_DNS` / `PRODUCTION_VERIFY_FAILED`，或已经 `PRODUCTION_PASS` 后，禁止 Runtime-only 回退到 OLD，因为 NEW 可能已经产生新写入；未来若需回退必须先做 NEW→OLD 数据对账/反向同步事务；
+- **Public Route Proof**：DNS 后必须用仅 NEW SERVER 本地生成的随机 proof file 证明公网真正到达 NEW，不能只看 DNS lookup；
+- **Old Server Retention**：OLD SERVER 永不由 P07 自动删除、关机或格式化；Production PASS 后继续作为 Recovery Copy；
+- **External Listener Disclosure**：必须识别 OLD 对公网监听的非 CloudPanel 端口，并明确提示这些代理/VPN/其它服务未被网站迁入链自动处理；
+- **Secret Boundary**：root 密码只允许交给系统 `ssh-copy-id`；P07 不读取、不保存、不回显；SSH 私钥内容、DB 密码、OAuth/Token 等不得进入普通输出、日志、Machine Result；
+- **Resume**：`PREPARING` / `PREPARE_FAILED` / `CUTOVER_RUNNING` 必须可从目标端私有状态继续；不得要求 Owner 回旧服务器找 Migration ID。
 
-单站迁移复用 Backup Package；整机迁移复用同一 Platform / DB / SQLite / Runtime / Verify 原语，并以私有 Migration State 编排，不把整机临时传输物伪装成新的 Backup Package。
+单站迁入与整机迁入共享 CloudPanel / DB / SQLite / Runtime / Verify 安全原语。Portable Backup 仍是“备份/恢复”产品合同；服务器迁入不应为了复用旧 Push 逻辑强迫用户先制作并手工搬运 ZIP。
 
 ### 3.5 验证与恢复演练
 
@@ -165,7 +172,7 @@ V1 pre-production 产品闭环必须达到：
 1. 一台现有 CloudPanel VPS 可以被准确盘点；
 2. 生成的备份包可以通过验证与恢复演练；
 3. 同一恢复引擎能够在全新 CloudPanel VPS 上重建业务；
-4. 用户从源服务器发起迁移时，VF Server Ops 自己完成安全 Source → Target 传输，不要求人工搬备份包；
+4. 用户在新服务器运行 P07 并输入旧服务器 IP 后，VF Server Ops 由新服务器主动完成旧机 → 新机 Pull 迁入，不要求回旧服务器运行迁移，也不要求人工搬备份包；
 5. 迁移完成后能够给出可审计的 `TECHNICAL_CUTOVER_READY`；
 6. DNS 与旧服务器处置仍保留给 OWNER 明确决定；
 7. runtime/secret/log/DR 等 required Real Gates 必须独立闭环。
@@ -435,7 +442,7 @@ Slot 4  System Care / Security
 
 ### 11.10 中文优先文案规范
 
-P07 面向普通用户的终端界面采用 **中文优先**。能够直接用中文准确表达的状态、角色和动作，不得要求用户先理解内部英文术语。
+P07 **整个产品**面向普通用户的终端界面采用 **中文优先**，范围包括 Toolbox、网络节点 / V2Ray、VPS 一键验机、CloudPanel 备份 / 恢复 / 迁移、系统维护 / 安全及其所有普通子页面。能够直接用中文准确表达的状态、角色和动作，不得要求用户先理解内部英文术语。
 
 普通用户界面应优先使用：
 
@@ -494,8 +501,10 @@ Slot 需要首次安装或升级
 
 ```text
 远程备份 / Google + B2    rclone
-服务器迁移                openssh-client（ssh / scp / ssh-copy-id / ssh-keygen）
+服务器迁移                openssh-client（ssh / ssh-copy-id / ssh-keygen）+ rsync
 ```
+
+服务器迁移依赖只允许在用户真正进入“服务器迁移”后检查 / 安装；进入 Toolbox 或其它 Slot 不得提前安装。
 
 不得为了“以后可能会用”而在 Slot 3 初次打开时预装上述依赖。安装动作必须发生在用户明确进入对应功能之后，并用中文说明正在安装什么、为什么需要。
 
