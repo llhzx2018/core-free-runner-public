@@ -1,0 +1,179 @@
+name: TEMP S01-C02 R7 Composition Proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-s01-c02-r7-composition-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      PRODUCT_SHA: 458c42cde3269e0a17f1177b958f8deb67d66aa8
+
+    steps:
+      - name: Checkout exact R7 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Source contract and runtime package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$PRODUCT_SHA"
+          php target/tests/s01-c02-prod-realuse-r7-content-seo-composition-contract.php
+          python3 - <<'PY'
+          import re,zipfile
+          from pathlib import Path
+          root=Path('target'); out=Path('/tmp/vf-tools-ops-r7.zip')
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for path in root.rglob('*'):
+                  if path.is_file() and not path.is_symlink():
+                      rel=path.relative_to(root)
+                      if keep(rel): z.write(path,'vf-ops/'+rel.as_posix())
+          PY
+          unzip -tq /tmp/vf-tools-ops-r7.zip
+
+      - name: Boot disposable WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r7-${GITHUB_RUN_ID}"; DB="vf-r7-db-${GITHUB_RUN_ID}"; WP="vf-r7-wp-${GITHUB_RUN_ID}"
+          PORT="$((22000 + (GITHUB_RUN_ID % 7000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops-r7.zip "$WP:/tmp/vf-tools-ops-r7.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R7' --admin_user=admin --admin_password='VF-R7-Proof!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/vf-tools-ops-r7.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          for i in $(seq 1 14); do
+            docker exec "$WP" wp post create --allow-root --path=/var/www/html --post_type=post --post_status=publish --post_title="R7 Sample $i" --post_content="Sample content for R7 visual proof $i" >/dev/null
+          done
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated composition measurements
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R7-Proof!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > /tmp/r7.js <<'JS'
+          const {chromium}=require(process.cwd()+'/node_modules/playwright');
+          const fs=require('fs');
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const p=await b.newPage({viewport:{width:1440,height:1000}});
+            const base=process.argv[2], out={routes:[],errors:[]};
+            p.on('pageerror',e=>out.errors.push(String(e)));
+            p.on('console',m=>{if(m.type()==='error')out.errors.push(m.text())});
+            await p.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await p.fill('#user_login','admin'); await p.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([p.waitForNavigation({waitUntil:'domcontentloaded'}),p.click('#wp-submit')]);
+
+            const routes=[
+              {
+                name:'content',
+                url:'/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow&workspace=articles',
+                title:'内容库',
+                hero:'.vf-content-manager-head',
+                work:'.vf-content-manager-list',
+                heroMax:120,
+                workTopMax:560
+              },
+              {
+                name:'keywords',
+                url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=keywords',
+                title:'页面与关键词地图',
+                hero:'.vf-keyword-hero',
+                work:'.vf-keyword-map-console, .vf-keyword-workspace',
+                heroMax:170,
+                workTopMax:600
+              },
+              {
+                name:'refine',
+                url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=refine',
+                title:'单页精修',
+                hero:'.vf-o7-selector-hero',
+                work:'.vf-o7-queue',
+                heroMax:180,
+                workTopMax:590
+              },
+              {
+                name:'links',
+                url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=links',
+                title:'内容集群与链接',
+                hero:'.vf-links-head',
+                work:'.vf-links-panel',
+                heroMax:180,
+                workTopMax:520
+              }
+            ];
+
+            for(const r of routes){
+              const res=await p.goto(base+r.url,{waitUntil:'domcontentloaded'});
+              const title=(await p.locator('.vf-v6-unified-pagehead h1').first().innerText()).trim();
+              const hero=p.locator(r.hero).first(), work=p.locator(r.work).first();
+              const hb=await hero.boundingBox(), wb=await work.boundingBox();
+              const overflow=await p.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth+1);
+              const dupVisible=await p.locator(r.hero+' h1:visible').count();
+              const row={name:r.name,status:res.status(),title,heroHeight:hb?Math.round(hb.height):null,workTop:wb?Math.round(wb.y):null,overflow,duplicateInnerH1:dupVisible};
+              if(r.name==='links'){
+                row.flowDisplay=await p.locator('.vf-links-flow').evaluate(el=>getComputedStyle(el).display);
+              }
+              out.routes.push(row);
+              if(res.status()>=400||title!==r.title||!hb||!wb||hb.height>r.heroMax||wb.y>r.workTopMax||overflow||dupVisible>0) throw new Error(JSON.stringify(out));
+              if(r.name==='links'&&row.flowDisplay!=='none') throw new Error(JSON.stringify(out));
+            }
+
+            if(out.errors.length) throw new Error('browser errors: '+JSON.stringify(out.errors));
+            fs.writeFileSync(process.argv[3],JSON.stringify(out,null,2));
+            console.log(JSON.stringify(out,null,2));
+            await b.close();
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          node /tmp/r7.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/r7-composition.json"
+          echo 'R7_CONTENT_SEO_COMPOSITION_BROWSER=PASS'
+
+      - name: Upload proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-r7-composition-proof
+          path: evidence/r7-composition.json
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
