@@ -17,37 +17,38 @@ class StorageOnboardingUXTests(unittest.TestCase):
 
     def test_first_screen_is_preparation_first(self) -> None:
         self.assertIn("首次使用前请先准备", self.setup)
-        self.assertIn("Google：OAuth Client ID + Client Secret", self.setup)
-        self.assertIn("B2：Bucket + Application Key ID + Application Key", self.setup)
-        self.assertIn("Recovery Key：", self.setup)
+        self.assertIn("Google：OAuth 客户端 ID + 客户端密钥", self.setup)
+        self.assertIn("B2：存储桶 + 应用密钥 ID + 应用密钥", self.setup)
+        self.assertIn("恢复密钥：", self.setup)
         self.assertIn("P07 自动生成，无需提前准备", self.setup)
         self.assertIn("已准备好，一键初始化 Google + B2", self.setup)
         self.assertIn("查看完整准备教程", self.setup)
 
     def test_google_tutorial_is_embedded_before_secret_prompts(self) -> None:
         tutorial = self.setup.find("https://console.cloud.google.com/")
-        secret_prompt = self.setup.find("OAuth Client Secret（输入不回显）")
+        secret_prompt = self.setup.find("OAuth 客户端密钥（输入不回显）")
         self.assertGreaterEqual(tutorial, 0)
         self.assertGreater(secret_prompt, tutorial)
         self.assertIn("Google Drive API", self.setup)
         self.assertIn("TVs and Limited Input devices", self.setup)
-        self.assertIn("Client ID + Client Secret", self.setup)
+        self.assertIn("客户端 ID（Client ID）", self.setup)
+        self.assertIn("客户端密钥（Client Secret）", self.setup)
         self.assertIn("不回显、不写日志、不放命令行参数", self.setup)
 
     def test_b2_tutorial_is_embedded_and_specific(self) -> None:
         self.assertIn("https://secure.backblaze.com/", self.setup)
         self.assertIn("Application Keys", self.setup)
         self.assertIn("Read and Write", self.setup)
-        self.assertIn("List All Bucket Names", self.setup)
-        self.assertIn("Application Key 明文通常只显示一次", self.setup)
+        self.assertIn("List All Bucket Names（列出全部存储桶名称）", self.setup)
+        self.assertIn("应用密钥明文通常只显示一次", self.setup)
 
     def test_recovery_key_is_generated_not_requested(self) -> None:
         self.assertIn("generate_recovery_key", self.setup)
         self.assertIn("secrets.token_urlsafe(48)", self.setup)
-        self.assertNotIn("Recovery Key（输入不回显）", self.setup)
+        self.assertNotIn("恢复密钥（输入不回显）", self.setup)
         self.assertNotIn("请再输入一次确认", self.setup)
         self.assertIn("只显示这一次", self.setup)
-        self.assertIn("P07 不会把这个明文 Key 写入服务器配置", self.setup)
+        self.assertIn("P07 不会把这个明文密钥写入服务器配置", self.setup)
 
     def test_recovery_key_is_revealed_only_after_health_pass(self) -> None:
         health = self.setup.find('if ! storage_health_pass "$CONFIG" "$rclone_config"; then')
@@ -74,10 +75,10 @@ class StorageOnboardingUXTests(unittest.TestCase):
         self.assertIn("从已有 P07 服务器导入", self.setup)
         self.assertIn("import_from_source", self.setup)
         self.assertIn("DNS：未修改", self.setup)
-        self.assertIn("SOURCE：保留", self.setup)
+        self.assertIn("源服务器：保留", self.setup)
         self.assertIn("rollback_fresh", self.setup)
         self.assertIn("rollback_target", self.setup)
-        self.assertIn("TARGET 安装后复核失败，正在恢复安装前配置", self.setup)
+        self.assertIn("目标服务器安装后复核失败，正在恢复安装前配置", self.setup)
 
 
 if __name__ == "__main__":

@@ -129,8 +129,8 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
 
     def test_dns_source_and_target_boundaries_are_explicit(self) -> None:
         self.assertIn("不自动修改 DNS", self.parent)
-        self.assertIn("不删除 SOURCE", self.parent)
-        self.assertIn("不覆盖已有 TARGET", self.parent)
+        self.assertIn("不删除源服务器", self.parent)
+        self.assertIn("不覆盖已有目标服务器", self.parent)
         for forbidden in ("update_dns", "write_dns", "set_dns", "delete_dns"):
             self.assertNotIn(forbidden, self.all_text)
 
@@ -142,7 +142,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
 
     def test_site_collision_is_checked_before_creation(self) -> None:
         self.assertIn('site_domain_exists "$domain"', self.helpers)
-        self.assertIn("TARGET 已存在，P07 不会覆盖", self.helpers)
+        self.assertIn("目标服务器已存在同名目标，P07 不会覆盖", self.helpers)
 
     def test_health_check_is_local_without_hosts_or_dns_mutation(self) -> None:
         self.assertIn('--resolve "$domain:80:127.0.0.1"', self.helpers)

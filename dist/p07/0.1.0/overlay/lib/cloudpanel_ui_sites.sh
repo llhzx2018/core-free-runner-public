@@ -2,31 +2,31 @@ create_site() {
   local type domain user version port template proxy confirm rc
   say; ui_title '创建 CloudPanel 网站'; ui_rule
   ui_menu_warn 1 'PHP'
-  ui_menu_warn 2 'Static HTML'
+  ui_menu_warn 2 '静态 HTML'
   ui_menu_warn 3 'Node.js'
   ui_menu_warn 4 'Python'
-  ui_menu_warn 5 'Reverse Proxy'
+  ui_menu_warn 5 '反向代理'
   ui_menu_back 0 '返回'
   ui_prompt '请选择 [0-5]：'; read -r type || return 0
   [[ "$type" == 0 ]] && return 0
   [[ "$type" =~ ^[1-5]$ ]] || { printf '无效类型。\n'; pause; return 0; }
   printf '域名：'; read -r domain || return 0
-  printf 'Site User：'; read -r user || return 0
+  printf '网站用户：'; read -r user || return 0
   if site_domain_exists "$domain"; then
-    ui_bad 'TARGET 已存在，P07 不会覆盖。'; pause; return 0
+    ui_bad '目标服务器已存在同名目标，P07 不会覆盖。'; pause; return 0
   else
     rc=$?
-    [[ $rc -eq 1 ]] || { ui_bad '无法安全确认 TARGET 是否存在，已停止。'; pause; return 0; }
+    [[ $rc -eq 1 ]] || { ui_bad '无法安全确认目标是否已存在，已停止。'; pause; return 0; }
   fi
-  prompt_secret_twice 'Site User 密码' || { pause; return 0; }
+  prompt_secret_twice '网站用户密码' || { pause; return 0; }
   version=""; port=""; template=""; proxy=""
   case "$type" in
-    1) printf 'PHP 版本 [8.4]：'; read -r version || true; version="${version:-8.4}"; printf 'Vhost Template [Generic]：'; read -r template || true; template="${template:-Generic}" ;;
-    3) printf 'Node.js 版本 [22]：'; read -r version || true; version="${version:-22}"; printf 'App Port [3000]：'; read -r port || true; port="${port:-3000}" ;;
-    4) printf 'Python 版本 [3.13]：'; read -r version || true; version="${version:-3.13}"; printf 'App Port [8000]：'; read -r port || true; port="${port:-8000}" ;;
-    5) printf 'Reverse Proxy URL（例如 http://127.0.0.1:8000）：'; read -r proxy || true ;;
+    1) printf 'PHP 版本 [8.4]：'; read -r version || true; version="${version:-8.4}"; printf 'Vhost 模板 [Generic]：'; read -r template || true; template="${template:-Generic}" ;;
+    3) printf 'Node.js 版本 [22]：'; read -r version || true; version="${version:-22}"; printf '应用端口 [3000]：'; read -r port || true; port="${port:-3000}" ;;
+    4) printf 'Python 版本 [3.13]：'; read -r version || true; version="${version:-3.13}"; printf '应用端口 [8000]：'; read -r port || true; port="${port:-8000}" ;;
+    5) printf '反向代理 URL（例如 http://127.0.0.1:8000）：'; read -r proxy || true ;;
   esac
-  say; ui_attention "将创建新 TARGET：$domain"; ui_note '不会修改 DNS，不会删除任何 SOURCE。'; ui_prompt '继续？[y/N]：'; read -r confirm || true
+  say; ui_attention "将创建新网站：$domain"; ui_note '不会修改 DNS，不会删除任何源网站。'; ui_prompt '继续？[y/N]：'; read -r confirm || true
   [[ "$confirm" =~ ^[Yy]$ ]] || { SECRET_VALUE=""; return 0; }
   if P07_SECRET="$SECRET_VALUE" PYTHONPATH="$ROOT_DIR/lib" python3 - "$type" "$domain" "$user" "$version" "$port" "$template" "$proxy" <<'PY'
 import os,sys
@@ -44,12 +44,12 @@ PY
     if site_domain_exists "$domain"; then
       ui_good '网站已创建并读回确认 ✓'
     else
-      ui_attention 'CloudPanel 已返回成功，但 P07 暂未在 inventory 中读回该网站；未执行删除或覆盖，请稍后查看。'
+      ui_attention 'CloudPanel 已返回成功，但 P07 暂未在资源清单中读回该网站；未执行删除或覆盖，请稍后查看。'
     fi
-    ui_note 'DNS：未修改 · SOURCE：未删除'
+    ui_note 'DNS：未修改 · 源网站：未删除'
   else
     SECRET_VALUE=""
-    printf '%b\n' "${C_RED}网站创建未完成；P07 未修改 DNS，也未删除 SOURCE。${C_RESET}" >&2
+    printf '%b\n' "${C_RED}网站创建未完成；P07 未修改 DNS，也未删除源网站。${C_RESET}" >&2
   fi
   pause
 }
@@ -62,7 +62,7 @@ list_site_databases() {
 import json,sys
 p=json.load(open(sys.argv[1],encoding='utf-8')); s=p['sites'][int(sys.argv[2])-1]
 dbs=s.get('mysql_databases')
-if dbs == 'UNKNOWN' or not isinstance(dbs,list): print('UNKNOWN')
+if dbs == 'UNKNOWN' or not isinstance(dbs,list): print('（状态未知）')
 elif not dbs: print('（无）')
 else:
     for name in dbs: print(name)
@@ -94,10 +94,10 @@ export_site_database() {
   local rc fields user db out
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); user="${fields[1]}"
-  [[ "$user" != UNKNOWN ]] || { printf 'Site User UNKNOWN，已停止。\n'; pause; return 0; }
+  [[ "$user" != UNKNOWN ]] || { printf '网站用户未知，已停止。\n'; pause; return 0; }
   if select_database; then db="$SELECTED_DATABASE"; else pause; return 0; fi
   out="/home/$user/tmp/p07-${db}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
-  runuser -u "$user" -- mkdir -p "/home/$user/tmp" 2>/dev/null || { printf '无法准备 Site User tmp 目录。\n'; pause; return 0; }
+  runuser -u "$user" -- mkdir -p "/home/$user/tmp" 2>/dev/null || { printf '无法准备网站用户临时目录。\n'; pause; return 0; }
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$db" "$out" <<'PY'
 import sys
 import cloudpanel_site
@@ -111,7 +111,7 @@ import_site_database() {
   local rc fields user db src confirm
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); user="${fields[1]}"
-  [[ "$user" != UNKNOWN ]] || { printf 'Site User UNKNOWN，已停止。\n'; pause; return 0; }
+  [[ "$user" != UNKNOWN ]] || { printf '网站用户未知，已停止。\n'; pause; return 0; }
   if select_database; then db="$SELECTED_DATABASE"; else pause; return 0; fi
   printf 'SQL 文件绝对路径：'; read -r src || return 0
   [[ -f "$src" ]] || { printf '文件不存在。\n'; pause; return 0; }

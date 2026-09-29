@@ -28,7 +28,7 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
         self.assertIn("inventory_sites", self.prepare)
         self.assertIn('configure --config "$CONFIG"', self.prepare)
         self.assertIn("--daily-at '03:30'", self.prepare)
-        self.assertIn("首次验证配置：READY", self.prepare)
+        self.assertIn("首次验证配置：已就绪", self.prepare)
         self.assertIn("定时任务：尚未安装", self.prepare)
         self.assertNotIn("install-cron", self.prepare)
         self.assertNotIn("ENABLE_DUAL_REMOTE_AUTOBACKUP", self.prepare)
@@ -48,7 +48,7 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
         self.assertIn("install-cron", self.enable)
 
     def test_pass_without_scheduler_gives_correct_next_action(self):
-        self.assertIn("当前全部网站本地 + Google + B2 真实验证已 PASS", self.run_now)
+        self.assertIn("当前全部网站本地 + Google + B2 真实验证已通过", self.run_now)
         self.assertIn("定时备份仍未开启", self.run_now)
         self.assertIn("选择“2. 启用 / 更新自动备份”", self.run_now)
         self.assertIn("本次验证不会创建或修改 P07 Cron", self.run_now)
@@ -58,15 +58,15 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
         self.assertIn("VERIFIED_NO_SCHEDULE", self.status)
         self.assertIn("远程已就绪 · 待首次验证", self.status)
         self.assertIn("首次验证已通过 · 定时未开启", self.status)
-        self.assertIn("PASS 后再选择“2. 启用 / 更新自动备份”", self.status)
+        self.assertIn("通过后再选择“2. 启用 / 更新自动备份”", self.status)
 
     def test_safety_boundaries_remain_explicit(self):
         self.assertIn("没有修改 Cron", self.enable)
         self.assertIn("DNS 未修改", self.enable)
-        self.assertIn("SOURCE 保留", self.enable)
+        self.assertIn("源服务器保留", self.enable)
         self.assertIn("本次验证不会创建或修改 P07 Cron", self.run_now)
         self.assertIn("DNS 未修改", self.run_now)
-        self.assertIn("SOURCE 保留", self.run_now)
+        self.assertIn("源服务器保留", self.run_now)
 
 
 if __name__ == "__main__":

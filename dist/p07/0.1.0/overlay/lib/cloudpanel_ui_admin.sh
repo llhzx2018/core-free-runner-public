@@ -1,14 +1,14 @@
 panel_security() {
   while true; do
     say; ui_title 'CloudPanel 安全'; ui_rule
-    ui_menu_good 1 '启用 Panel Basic Auth'
-    ui_menu_danger 2 '关闭 Panel Basic Auth'
-    ui_menu_warn 3 '更新 Cloudflare Trusted IP 清单'
+    ui_menu_good 1 '启用面板基础认证（Basic Auth）'
+    ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'
+    ui_menu_warn 3 '更新 Cloudflare 可信 IP 清单'
     ui_menu_back 0 '返回'
     ui_prompt '请选择 [0-3]：'; read -r choice || return 0
     case "$choice" in
       1)
-        printf 'Basic Auth 用户名：'; read -r username || continue
+        printf '基础认证用户名：'; read -r username || continue
         prompt_secret_twice 'Basic Auth 密码' || { pause; continue; }
         ui_attention '启用后访问 CloudPanel 需要额外认证。'; ui_prompt '继续？[y/N]：'; read -r confirm || true
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -18,7 +18,7 @@ import cloudpanel
 pw=os.environ.pop('P07_SECRET')
 cloudpanel.enable_panel_basic_auth(sys.argv[1],pw)
 PY
-          then ui_good 'Basic Auth 已启用 ✓'; else printf '%b\n' "${C_RED}Basic Auth 启用未完成。${C_RESET}" >&2; fi
+          then ui_good '基础认证已启用 ✓'; else printf '%b\n' "${C_RED}基础认证启用未完成。${C_RESET}" >&2; fi
         fi
         SECRET_VALUE=""; pause ;;
       2)
@@ -28,7 +28,7 @@ PY
 import cloudpanel
 cloudpanel.disable_panel_basic_auth()
 PY
-          then ui_bad 'Basic Auth 已关闭。'; else printf '%b\n' "${C_RED}Basic Auth 关闭未完成。${C_RESET}" >&2; fi
+          then ui_bad '基础认证已关闭。'; else printf '%b\n' "${C_RED}基础认证关闭未完成。${C_RESET}" >&2; fi
         fi
         pause ;;
       3)
@@ -38,7 +38,7 @@ PY
 import cloudpanel
 cloudpanel.update_cloudflare_ips()
 PY
-          then ui_good 'Cloudflare Trusted IP 已更新 ✓'; ui_note 'DNS：未修改'; else printf '%b\n' "${C_RED}Trusted IP 更新未完成。${C_RESET}" >&2; fi
+          then ui_good 'Cloudflare 可信 IP 已更新 ✓'; ui_note 'DNS：未修改'; else printf '%b\n' "${C_RED}可信 IP 更新未完成。${C_RESET}" >&2; fi
         fi
         pause ;;
       0) return 0 ;;
@@ -71,7 +71,7 @@ PY
         printf 'Last Name：'; read -r last || continue
         printf '角色 [user/site-manager/admin]（默认 user）：'; read -r role || true; role="${role:-user}"
         sites=""; if [[ "$role" == user ]]; then printf '限制站点（可留空；多个逗号分隔）：'; read -r sites || true; fi
-        printf 'Timezone [UTC]：'; read -r timezone || true; timezone="${timezone:-UTC}"
+        printf '时区 [UTC]：'; read -r timezone || true; timezone="${timezone:-UTC}"
         prompt_secret_twice '用户密码' || { pause; continue; }
         if P07_SECRET="$SECRET_VALUE" PYTHONPATH="$ROOT_DIR/lib" python3 - "$username" "$email" "$first" "$last" "$role" "$sites" "$timezone" <<'PY'
 import os,sys
@@ -191,18 +191,18 @@ platform_status() {
 import os,cloudpanel
 green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); reset=os.environ.get("C_RESET","")
 def paint(text,color): return f"{color}{text}{reset}" if color else text
-print('CLI：'+paint('READY',green))
+print('命令行工具：'+paint('已就绪',green))
 print('版本：'+cloudpanel.version())
 templates=cloudpanel.list_vhost_templates().strip().splitlines()
-print('Vhost 配置模板：'+(paint('READY',green)+'（建站自动使用）' if templates else paint('EMPTY/UNKNOWN',yellow)))
-print('站点类型：PHP / Static / Node.js / Python / Reverse Proxy')
-print('数据库：ADD / EXPORT / IMPORT')
-print('SSL：STATUS / LETS_ENCRYPT / CUSTOM_CERT')
-print('Panel 安全：BASIC_AUTH / CLOUDFLARE_TRUSTED_IPS')
-print('用户：LIST / ADD / RESET_PASSWORD / DISABLE_MFA')
+print('Vhost 配置模板：'+(paint('已就绪',green)+'（建站自动使用）' if templates else paint('为空/未知',yellow)))
+print('站点类型：PHP / 静态 HTML / Node.js / Python / 反向代理')
+print('数据库：新增 / 导出 / 导入')
+print('SSL：状态 / Let’s Encrypt / 自定义证书')
+print('面板安全：基础认证 / Cloudflare 可信 IP')
+print('用户：列表 / 新增 / 重置密码 / 关闭 2FA')
 PY
   then
-    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX：READY'; else ui_bad 'NGINX：UNKNOWN/NOT_READY'; fi
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX：已就绪'; else ui_bad 'NGINX：未知/未就绪'; fi
     if load_inventory; then
       C_GREEN="$C_GREEN" C_RESET="$C_RESET" python3 - "$INV_FILE" <<'PY'
 import json,os,sys
@@ -212,10 +212,10 @@ ready=f"{green}READY{reset}" if green else "READY"
 print('Inventory：'+ready)
 print('Sites：'+str(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else [])))
 PY
-    else ui_bad 'Inventory：NOT_READY'; fi
+    else ui_bad '资源清单：未就绪'; fi
   else
     printf '%b\n' "${C_RED}CloudPanel 基础能力检查没有完成。${C_RESET}" >&2
   fi
-  ui_note '安全边界：不改 DNS / 不删除 SOURCE / 不覆盖 existing TARGET。'
+  ui_note '安全边界：不改 DNS / 不删除源服务器 / 不覆盖已有目标。'
   pause
 }
