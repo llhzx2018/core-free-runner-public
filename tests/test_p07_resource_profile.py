@@ -112,11 +112,19 @@ class ResourceProfileTests(unittest.TestCase):
         self.assertEqual(budgets, sorted(budgets, reverse=True))
         self.assertGreater(budgets[0], budgets[-1])
 
-    def test_matrix_surfaces_registered_calibration_states(self):
+    def test_matrix_surfaces_registered_calibration_states_in_chinese(self):
         text = rp.render_matrix("balanced")
-        self.assertIn("PRODUCTION_VERIFIED", text)
-        self.assertIn("CANDIDATE", text)
-        self.assertIn("PREVIEW_ONLY", text)
+        self.assertIn("P07 · 资源配置参考矩阵 · 平衡", text)
+        self.assertIn("生产环境已验证", text)
+        self.assertIn("候选验证", text)
+        self.assertIn("仅预览", text)
+
+    def test_machine_calibration_states_remain_stable(self):
+        rows = rp.matrix("balanced")
+        states = {r["calibration"]["state"] for r in rows}
+        self.assertIn("PRODUCTION_VERIFIED", states)
+        self.assertIn("CANDIDATE", states)
+        self.assertIn("PREVIEW_ONLY", states)
 
     def test_engine_is_read_only_contract(self):
         r = rp.recommend(snap(1, 2048), "balanced")
