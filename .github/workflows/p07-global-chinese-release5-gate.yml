@@ -1,0 +1,163 @@
+name: P07 Global Chinese Release5 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-global-chinese-release5-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Verify private read capability
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 518a654dfb763f8ee8232f4d60e8cdd736b0b3d9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "518a654dfb763f8ee8232f4d60e8cdd736b0b3d9"
+          test "$(cat VERSION)" = "0.1.0"
+          test "$(cat BUILD_ID)" = "0.1.0-release5"
+
+      - name: Bash syntax
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          for file in bin/vfops bin/vfops-user bin/vfops-site-ui bin/vfops-migrate-ui bin/vfops-auto-backup bin/vfops-cloudpanel-ui bin/vfops-storage-setup lib/terminal_ui.sh lib/cloudpanel_ui_common.sh lib/cloudpanel_ui_sites.sh lib/cloudpanel_ui_ops.sh lib/cloudpanel_ui_admin.sh tests/smoke.sh; do
+            bash -n "$file"
+          done
+
+      - name: Python compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import py_compile
+          for root in (Path("lib"), Path("tests"), Path("scripts")):
+              for p in sorted(root.rglob("*.py")):
+                  py_compile.compile(str(p), doraise=True)
+          PY
+
+      - name: Chinese-first global Slot3 gate
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          grep -Fq 'P07 · VF 服务器运维' bin/vfops-user
+          grep -Fq '用法：' bin/vfops
+          grep -Fq '错误：未知命令' bin/vfops
+          grep -Fq '目标服务器 IP（输入 0 返回）' bin/vfops-migrate-ui
+          grep -Fq '源服务器' bin/vfops-migrate-ui
+          grep -Fq '中文优先' docs/authority/RPD.md
+          grep -Fq '整个当前 P07 产品' docs/authority/RPD.md
+          grep -Fq 'Toolbox + Slot 1/2/3/4' docs/authority/ACCEPTANCE_MATRIX.md
+          ! grep -Fq 'TARGET 服务器 IP（输入 0 返回）' bin/vfops-migrate-ui
+          ! grep -Fq 'Usage: vfops-site-ui' bin/vfops-site-ui
+
+      - name: Terminal UI contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 -m unittest -v tests.test_terminal_ui_color_contract
+
+      - name: Slot3 regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          bash tests/smoke.sh >/tmp/p07-smoke.log 2>&1
+          modules="
+          tests.test_app_config
+          tests.test_auto_backup
+          tests.test_backup
+          tests.test_backup_frontend
+          tests.test_cli_diagnostics
+          tests.test_cli_menu
+          tests.test_cli_transport
+          tests.test_cloudpanel
+          tests.test_cloudpanel_integration
+          tests.test_cloudpanel_site
+          tests.test_cloudpanel_ui_complete
+          tests.test_cutover
+          tests.test_diagnostics
+          tests.test_first_verify_before_scheduler
+          tests.test_google_device_oauth
+          tests.test_inventory
+          tests.test_menu3_modular
+          tests.test_migrate
+          tests.test_migrate_new
+          tests.test_p07_integration_manifest
+          tests.test_policy
+          tests.test_restore
+          tests.test_restore_apply
+          tests.test_restore_as
+          tests.test_restore_as_machine_e2e
+          tests.test_restore_as_real_db_compat
+          tests.test_restore_as_verified
+          tests.test_restore_new
+          tests.test_runtime
+          tests.test_runtime_real_regressions
+          tests.test_secret_scan
+          tests.test_server_migration
+          tests.test_site_lifecycle
+          tests.test_storage
+          tests.test_storage_onboarding_ux
+          tests.test_storage_setup
+          tests.test_terminal_ui_color_contract
+          tests.test_transport
+          tests.test_user_entry
+          tests.test_user_remote_backup
+          tests.test_ux
+          tests.test_verify
+          "
+          fail=0
+          for module in $modules; do
+            log="/tmp/p07-$(printf '%s' "$module" | tr '.' '_').log"
+            set +e
+            timeout 240 python3 -m unittest -q "$module" >"$log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              fail=1
+              echo "P07_UNIT_FAIL_MODULE=$module"
+              grep -E '^(FAIL|ERROR): ' "$log" | head -20 || true
+            fi
+          done
+          test "$fail" -eq 0
+          sudo -E env PYTHONPATH="$PWD/lib" python3 -m unittest -q tests.test_auto_backup_run_now_ux
+
+      - name: Machine and secret boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          NO_COLOR=1 bash bin/vfops-user --version | grep -Fx 'VF Server Ops 0.1.0'
+          NO_COLOR=1 bash bin/vfops-user --build-id | grep -Fx '0.1.0-release5'
+          ! NO_COLOR=1 bash bin/vfops-user --version | grep -q $'\033'
+          python3 scripts/secret_scan.py --root . >/tmp/p07-secret-scan.log 2>&1
+
+      - name: Result
+        if: always()
+        run: |
+          echo "P07_RELEASE5_SOURCE=518a654dfb763f8ee8232f4d60e8cdd736b0b3d9"
+          echo "P07_PRIVATE_SOURCE_PERSISTED=NO"
+          echo "P07_PRODUCTION_DESTRUCTIVE_ACTION=NOT_RUN"
