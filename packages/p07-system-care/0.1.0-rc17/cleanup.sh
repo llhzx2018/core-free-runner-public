@@ -11,7 +11,7 @@ apt_cache_kb() {
 
 journal_usage() {
   command -v journalctl >/dev/null 2>&1 || { printf '未知'; return; }
-  journalctl --disk-usage 2>/dev/null | sed -E 's/^Archived and active journals take up //; s/\.$//' || printf 'UNKNOWN'
+  journalctl --disk-usage 2>/dev/null | sed -E 's/^Archived and active journals take up //; s/\.$//' || printf '未知'
 }
 
 scan() {
