@@ -46,15 +46,15 @@ EOF
 write_health_failure_log() {
   local fail_log="/root/vf-node-health-failed-$(date -u +%Y%m%dT%H%M%SZ).log"
   {
-    printf 'VF Network Node health failure\n'
+    printf 'P07 网络节点健康检查失败\n'
     printf 'version=%s\n' "$VF_NODE_VERSION"
-    printf 'profile=%s\n' "$PROFILE_ID"
+    printf '方案=%s\n' "$PROFILE_ID"
     printf 'port=%s\n' "$port"
-    printf '\n== systemctl status ==\n'
+    printf '\n== systemd 服务状态 ==\n'
     systemctl status v2ray.service --no-pager 2>&1 || true
     printf '\n== journal ==\n'
     journalctl -u v2ray.service -n 80 --no-pager 2>&1 || true
-    printf '\n== udp listeners ==\n'
+    printf '\n== UDP 监听状态 ==\n'
     ss -H -lunp 2>&1 || true
   } > "$fail_log"
   chmod 0600 "$fail_log"
