@@ -13,8 +13,8 @@ VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-
 VPS_AUDIT_PUBLIC="V2.2.2"
 VPS_AUDIT_EXPECTED="V2.2.2"
 VPS_AUDIT_BUILD_EXPECTED="2.2.2-rc2-chinese-first"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0f7368874dc4a5e7d1d2805d65e7c2da06369224/experiments/p07-vps-audit-v22-r2.sh"
-VPS_AUDIT_SHA256="070b86b0a2dbf71987546d406d62dc75dc6a0c20d59ca1b66ff5ffafb3866a38"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/29f737e68d1464fb209565acd9b77e297c1bb81b/experiments/p07-vps-audit-v22-r2.sh"
+VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f36"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -282,7 +282,7 @@ case "${1:-}" in
   --version|-V) printf 'P07 工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
-P07 · VF Server Ops ${VERSION}
+P07 · VF 服务器运维 ${VERSION}
 
 用法：
   p07-toolbox
