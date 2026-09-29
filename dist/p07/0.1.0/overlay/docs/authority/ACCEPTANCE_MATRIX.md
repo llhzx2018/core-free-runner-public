@@ -157,3 +157,4 @@ Current progression remains `R1 retry → R2 → R3 → R4`; until those require
 | Non-TTY compatibility | Machine workflows must not depend on ANSI | Non-TTY output remains parseable/plain unless a documented PTY wrapper is intentionally used |
 | Machine-output integrity | JSON / machine-readable formats must never receive ANSI escapes | Parser/regression Gate PASS |
 | Shared implementation | New pages must reuse the P07 color helpers / canonical map | No ad-hoc conflicting color vocabulary |
+| Chinese-first terminal copy | User-facing roles, states and actions should not require understanding internal English tokens | 普通界面使用“源服务器 / 目标服务器 / 已就绪 / 通过 / 运行环境 / 人工确认”等中文；内部状态码仅保留在机器接口与工程层 |
