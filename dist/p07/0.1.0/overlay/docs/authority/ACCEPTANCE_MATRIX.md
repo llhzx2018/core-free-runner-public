@@ -158,3 +158,4 @@ Current progression remains `R1 retry → R2 → R3 → R4`; until those require
 | Machine-output integrity | JSON / machine-readable formats must never receive ANSI escapes | Parser/regression Gate PASS |
 | Shared implementation | New pages must reuse the P07 color helpers / canonical map | No ad-hoc conflicting color vocabulary |
 | Chinese-first terminal copy | User-facing roles, states and actions should not require understanding internal English tokens | 普通界面使用“源服务器 / 目标服务器 / 已就绪 / 通过 / 运行环境 / 人工确认”等中文；内部状态码仅保留在机器接口与工程层 |
+| Lazy loading / current-runtime install | Toolbox and Slot entry must not replay historical installer chains or preinstall unrelated feature dependencies | Toolbox only loads selected Slot; current Slot runs locally; upgrade installs current runtime directly; rclone/OpenSSH are installed only when their feature is entered; Production install does not rerun full unit suite |

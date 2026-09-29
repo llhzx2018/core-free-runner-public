@@ -124,7 +124,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release3\n")
+        self.assertEqual(build, "0.1.0-release4\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -147,6 +147,18 @@ class TerminalUiColorContractTests(unittest.TestCase):
         self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
         self.assertIn("ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'", admin)
         self.assertIn("ui_menu_danger 4 '关闭用户 2FA'", admin)
+
+    def test_chinese_first_and_lazy_dependency_contract(self) -> None:
+        core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
+        migrate = (ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        storage = (ROOT / "bin" / "vfops-storage-setup").read_text(encoding="utf-8")
+        self.assertIn("高级命令说明", core)
+        self.assertIn("安全边界", core)
+        self.assertNotIn("V1 commands:", core)
+        self.assertIn("ensure_migration_dependencies", migrate)
+        self.assertIn("现在才按需安装", migrate)
+        self.assertIn("ensure_rclone", storage)
+        self.assertIn("现在才按需安装", storage)
 
     def test_color_contract_is_in_owning_authority(self) -> None:
         rpd = (ROOT / "docs" / "authority" / "RPD.md").read_text(encoding="utf-8")
