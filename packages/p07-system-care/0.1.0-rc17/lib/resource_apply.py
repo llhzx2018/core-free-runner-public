@@ -299,7 +299,7 @@ def render_plan(plan: Mapping[str, Any]) -> str:
         lines += ["", rp.color("未引用 PHP 服务（仅建议，不自动停）", "yellow"), rp.color("  " + ", ".join(unused), "yellow")]
     lines += [
         "",
-        rp.color("Swap：仅建议，不自动创建 / 清理 / swapoff。", "gray"),
+        rp.color("交换分区（Swap）：仅建议，不自动创建、清理或关闭。", "gray"),
         rp.color("MySQL：不会自动重启。", "gray"),
     ]
     return "\n".join(lines)
@@ -710,7 +710,7 @@ def synthetic_rollback(state: Mapping[str, Any]) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="P07 Resource Safe Apply RC14")
+    parser = argparse.ArgumentParser(description="P07 资源安全应用引擎")
     sub = parser.add_subparsers(dest="action", required=True)
 
     p_plan = sub.add_parser("plan")
@@ -720,10 +720,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p_apply = sub.add_parser("apply")
     p_apply.add_argument("--mode", choices=rp.MODES, default="balanced")
     p_apply.add_argument("--confirm", default="")
+    p_apply.add_argument("--json", action="store_true")
 
     p_rb = sub.add_parser("rollback")
     p_rb.add_argument("--state-dir", required=True)
     p_rb.add_argument("--confirm", default="")
+    p_rb.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -735,11 +737,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         if args.action == "apply":
             result = production_apply(args.mode, args.confirm)
-            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            if getattr(args, "json", False):
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print("P07 · 资源安全应用")
+                print("结果         已应用并验证")
+                print(f"配置方案编号 {result.get('profile_id') or '-'}")
+                print(f"回滚备份     {result.get('backup_dir') or '-'}")
             return 0
         if args.action == "rollback":
             result = rollback(Path(args.state_dir), args.confirm)
-            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            if getattr(args, "json", False):
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print("P07 · 资源回滚")
+                print("结果         已回滚")
+                print(f"备份目录     {result.get('backup_dir') or '-'}")
             return 0
     except ApplyBlocked as e:
         print(f"已阻止：{e}", file=sys.stderr)
