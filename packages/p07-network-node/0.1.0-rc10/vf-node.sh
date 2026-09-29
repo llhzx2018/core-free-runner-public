@@ -132,7 +132,7 @@ EOF
 
 case "${1:-}" in
   --version|version)
-    printf 'P07 网络节点 %s\n' "$VF_NODE_VERSION"
+    printf 'VF Network Node %s\n' "$VF_NODE_VERSION"
     ;;
   install)
     shift
