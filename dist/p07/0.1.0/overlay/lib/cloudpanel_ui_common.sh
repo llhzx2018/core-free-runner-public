@@ -58,7 +58,7 @@ sites=p.get('sites',[]) if isinstance(p.get('sites'),list) else []
 print(len(sites))
 PY
 )"
-  [[ "$count" -gt 0 ]] || { printf '\n没有发现 CloudPanel 网站。\n'; return 2; }
+  [[ "$count" -gt 0 ]] || { printf '\n没有发现 CloudPanel 网站。\n'; pause; return 2; }
   say; ui_title '请选择网站'; ui_rule
   python3 - "$INV_FILE" <<'PY'
 import json,sys
