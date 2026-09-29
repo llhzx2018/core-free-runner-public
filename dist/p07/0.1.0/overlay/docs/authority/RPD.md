@@ -193,3 +193,242 @@ PRODUCTION                    = NOT_PRODUCTION
 - existing Production overwrite。
 
 下一工程主线返回 L2 Product Optimization；任何 Release / Production 动作仍需单独 OWNER Gate。
+
+
+## 11. Terminal UI / Color System Contract
+
+P07 的普通用户入口是终端产品，不允许把终端 UI 当作“纯日志输出”。所有新增菜单、详情页、状态页、诊断页、资源页、迁移页与高风险操作页必须遵守本节。
+
+### 11.1 目标
+
+终端颜色只用于建立信息层级和表达语义，不用于装饰。
+
+用户应在不逐行阅读全部文本的情况下，能够快速识别：
+
+```text
+当前页面 / 区块
+正常 / 推荐
+注意 / 受限
+风险 / 阻断
+只读 / 写入
+返回 / 说明
+```
+
+禁止出现：
+
+- 整页正文全部白色、只能靠逐行阅读理解层级；
+- 不同页面对同一语义使用不同颜色；
+- 红色用于普通标题或装饰，导致风险语义失真；
+- 绿色显示失败、受限、阻断或 destructive action；
+- 仅菜单标题有颜色，关键状态 / PASS / FAIL / KEEP / CHANGE 仍无语义区分；
+- 为了彩色输出而污染 JSON、机器可读输出、Pipe 或非交互执行。
+
+### 11.2 固定颜色语义
+
+P07 Terminal UI 的 Canonical Color Map：
+
+```text
+Cyan / Bright Cyan
+  页面标题
+  区块标题
+  中性信息入口
+  当前结构 / 当前对象
+
+Green
+  PASS
+  READY
+  HEALTHY
+  KEEP
+  正常
+  强 / 良好
+  推荐
+  只读检查
+  安全执行结果
+
+Yellow
+  注意
+  可用但有限制
+  REVIEW
+  Candidate
+  未开启
+  配置类动作
+  恢复类动作
+  需要人工确认但非 destructive 的动作
+
+Red
+  FAIL
+  BLOCKED
+  ERROR
+  异常
+  偏弱 / 很弱
+  不建议
+  destructive / rollback / uninstall
+  真实写入或高风险动作
+
+Magenta
+  迁移 / Cutover / 编排类主区块
+  复杂事务型流程
+  不代表 PASS 或 FAIL
+
+Gray
+  版本
+  边界
+  注释
+  帮助说明
+  不可变安全规则
+  返回项
+  次要元数据
+```
+
+颜色只是语义增强，文字本身仍必须完整表达状态。不得使用“只有颜色、没有文字”的设计。
+
+### 11.3 菜单规范
+
+普通菜单必须满足：
+
+```text
+页面标题      Cyan + Bold
+安全/查看项   Green / Cyan
+配置项        Yellow
+迁移项        Magenta
+高风险项      Red
+返回项        Gray
+输入提示      Bold
+说明/边界     Gray
+```
+
+示例：
+
+```text
+P07 · 资源优化 / 配置推荐
+
+  1. 平衡方案（默认）                 Green
+  2. 保守方案                         Cyan
+  3. 性能方案                         Cyan
+  4. 查看 Profile 矩阵                Cyan
+  5. 输出机器 JSON                    Cyan
+  6. Safe Plan / Apply / Rollback      Red
+  0. 返回                              Gray
+```
+
+不得为了“好看”给每个菜单项随机分配不同颜色。
+
+### 11.4 状态页 / 详情页规范
+
+状态值必须使用语义色，标签保持稳定。
+
+示例：
+
+```text
+服务器        正常                 Green
+网站安全      需查看               Yellow
+Apply State   ELIGIBLE             Green
+Apply State   BLOCKED              Red
+MySQL         KEEP                 Green
+MySQL         CHANGE               Yellow / Red by risk
+CPU           偏弱                 Red
+CPU           良好                 Green
+```
+
+“注意”“主要短板”“边界”“建议”等信息必须有可扫描层级，避免整屏白字。
+
+### 11.5 高风险操作规范
+
+以下类型必须使用 Red 语义，不得伪装成普通绿色操作：
+
+```text
+Rollback
+Uninstall
+Delete
+Apply Production Write
+Destructive Cleanup
+Cutover irreversible step
+```
+
+同时必须继续遵守原有高风险 Gate：
+
+- 明确目标；
+- 显式确认；
+- Preflight；
+- Rollback / Recovery evidence；
+- 不因颜色变化削弱任何安全合同。
+
+### 11.6 TTY / NO_COLOR / Machine Output
+
+颜色只属于交互式终端表现层。
+
+必须满足：
+
+```text
+interactive TTY + NO_COLOR unset
+    → ANSI semantic colors enabled
+
+NO_COLOR set
+    → plain text
+
+non-TTY / pipe / machine execution
+    → plain text unless exact PTY preservation is intentionally required
+
+JSON / machine-readable output
+    → never contain ANSI escape sequences
+```
+
+如果 Wrapper 需要捕获下游输出，又必须保留交互终端颜色，可以使用受控 PTY；但必须有 Machine Gate 证明：
+
+```text
+plain-output compatibility PASS
+ANSI interactive output PASS
+no JSON contamination
+no parser regression
+```
+
+### 11.7 Shared Implementation Rule
+
+同一模块必须优先使用共享颜色 helper，而不是每个页面自行定义一套颜色。
+
+Bash 建议统一使用：
+
+```text
+ui_title
+ui_rule
+ui_menu_good
+ui_menu_info
+ui_menu_warn
+ui_menu_danger
+ui_menu_back
+ui_note
+ui_good
+ui_attention
+ui_bad
+```
+
+Python TTY 输出必须使用同一 Canonical Color Map，并在 `NO_COLOR` / non-TTY 下返回纯文本。
+
+### 11.8 UI Gate
+
+任何 P07 新功能或菜单在晋级前至少验证：
+
+```text
+Terminal syntax / render             PASS
+Interactive ANSI hierarchy          PASS
+Semantic status colors              PASS
+NO_COLOR plain text                 PASS
+Non-TTY plain text                  PASS
+Existing parser / machine output    PASS
+Safety wording / destructive color  PASS
+```
+
+“功能正确但整屏白字”不再视为完成。
+
+### 11.9 Scope
+
+本合同适用于 P07 四个 Slot 的所有普通用户终端表面：
+
+```text
+Slot 1  Network Node
+Slot 2  VPS Audit
+Slot 3  CloudPanel Backup / Restore / Migration
+Slot 4  System Care / Security
+```
+
+已成熟页面可以冻结；后续新增功能必须直接按本合同实现，不允许先做白字版再补色。
