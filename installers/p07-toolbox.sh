@@ -285,7 +285,7 @@ case "${1:-}" in
     cat <<EOF
 P07 · VF Server Ops ${VERSION}
 
-Usage:
+用法：
   p07-toolbox
 
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
@@ -293,11 +293,11 @@ Usage:
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（可用）
 4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（可用）
 
-说明：用户界面仅显示 Vx.x.x 公共版本；RC / preview / zh 等构建标识只用于内部工程追溯。
+说明：普通界面只显示 Vx.x.x 公共版本；内部构建标识只用于工程校验，不要求用户理解。
 EOF
     ;;
   "")
-    if [[ -t 0 && -t 1 ]]; then main_menu; else printf 'ERROR: P07 Toolbox menu requires an interactive terminal.\n' >&2; exit 2; fi
+    if [[ -t 0 && -t 1 ]]; then main_menu; else printf '错误：P07 主菜单需要交互式终端。\n' >&2; exit 2; fi
     ;;
-  *) printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  *) printf '错误：未知参数：%s\n' "$1" >&2; exit 2 ;;
 esac
