@@ -1,0 +1,195 @@
+name: S01-C02 V1.21.957 R8 Candidate Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-v121957-r8-candidate-gate.yml'
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_SHA: e9b5b9a2bb7a4529841a74e070de78bc2761c533
+  BASE_SHA: 1da10c44b5f202a82a092acb430d0064b03c3d84
+  TARGET_VERSION: 1.21.957
+  BASE_VERSION: 1.21.956
+  ARTIFACT_NAME: vf-tools-ops_V1.21.957.zip
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact source bounded diff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          cat > /tmp/allowed <<'EOF'
+          CHANGELOG.md
+          VERSION
+          assets/css/current/admin-s01-page-body-fine-polish-r1.css
+          tests/s01-c02-prod-realuse-r8-readability-denoise-contract.php
+          vf-ops.php
+          EOF
+          sort -u evidence/changed-files.txt >/tmp/actual
+          sort -u /tmp/allowed >/tmp/expected
+          diff -u /tmp/expected /tmp/actual
+          echo 'EXACT_BOUNDED_DIFF=PASS'
+
+      - name: PHP and R8 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc '
+            set -eu
+            find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+            php tests/s01-c02-prod-realuse-r7-content-seo-composition-contract.php
+            php tests/s01-c02-prod-realuse-r8-readability-denoise-contract.php
+          '
+          echo 'PHP_R8_CONTRACT=PASS'
+
+      - name: Security source scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -RIlE --exclude-dir=.git -- '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,})' target | grep -q .
+          ! find target -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' \) -print -quit | grep -q .
+          echo 'SECURITY_SOURCE_SCAN=PASS'
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): out[rel.as_posix()]=p.read_bytes()
+              return dict(sorted(out.items()))
+          def fp(fs):
+              h=hashlib.sha256()
+              for rel,data in sorted(fs.items()):
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return h.hexdigest()
+          def pack(root,out):
+              fs=files(root)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(fs.items()):
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,29,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+              return fs
+          rows={}
+          for label,root,ver,out in [('baseline',Path('baseline'),'1.21.956',Path('/tmp/vf-tools-ops_V1.21.956.zip')),('candidate',Path('target'),'1.21.957',Path('/tmp/vf-tools-ops_V1.21.957.zip'))]:
+              fs=pack(root,out)
+              rows[label]={'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':fp(fs)}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          cp "/tmp/$ARTIFACT_NAME" "evidence/$ARTIFACT_NAME"
+          unzip -tq "evidence/$ARTIFACT_NAME"
+
+      - name: Upgrade and browser regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r8g-${GITHUB_RUN_ID}"; DB="vf-r8g-db-${GITHUB_RUN_ID}"; WP="vf-r8g-wp-${GITHUB_RUN_ID}"
+          PORT="$((19000 + (GITHUB_RUN_ID % 9000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V1.21.956.zip "$WP:/tmp/base.zip"
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/candidate.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R8 Gate' --admin_user=admin --admin_password='VF-R8-Gate!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/base.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html 'update_option("vf_ops_r8_fixture",["keep"=>"yes"],false);'
+          docker exec "$WP" wp plugin install /tmp/candidate.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            do_action("admin_init");
+            if (VF_OPS_VERSION!=="1.21.957") exit(2);
+            $x=get_option("vf_ops_r8_fixture",[]);
+            if (($x["keep"]??"")!=="yes") exit(3);
+            if (count(vf_tools_ops_v6_table_suffixes())!==48) exit(4);
+            echo "UPGRADE_PRESERVATION=PASS\n";
+          '
+          for i in $(seq 1 14); do docker exec "$WP" wp post create --allow-root --path=/var/www/html --post_type=post --post_status=publish --post_title="R8 Gate $i" --post_content="Sample $i" >/dev/null; done
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated browser regression
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R8-Gate!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node browser-e2e.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/browser.json"
+          jq -e '.result=="PASS" and .login=="PASS" and .blocking_errors==0 and .responsive_failures==0' "$GITHUB_WORKSPACE/evidence/browser.json" >/dev/null
+          echo 'BROWSER_REGRESSION=PASS'
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$TARGET_SHA" --arg version "$TARGET_VERSION" --argjson package "$(cat evidence/package.json)" --argjson browser "$(cat evidence/browser.json)" '{status:"PASS",candidate_sha:$sha,candidate_version:$version,package:$package,browser:$browser,upgrade:"PASS",security:"PASS",r8_contract:"PASS",production:"NOT_EXECUTED"}' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "evidence/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+          echo 'S01-C02 V1.21.957 R8 CANDIDATE MACHINE PASS'
+
+      - name: Upload exact candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.957-r8-candidate
+          path: evidence/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
