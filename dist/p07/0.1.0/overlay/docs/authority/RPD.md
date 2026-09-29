@@ -463,3 +463,40 @@ P07_SSH_READY
 ```
 
 这些内部标识不得直接作为普通用户必须理解的界面文案。CloudPanel、DNS、SSH、IP、MySQL、SQLite、Cron、PM2、HTTPS 等通用产品名 / 协议名 / 技术缩写可以保留，但周围说明必须使用中文。
+
+### 11.11 按需加载 / 安装规范
+
+P07 普通入口采用 **按需加载**，不得因为进入 Toolbox 就安装全部模块，也不得在当前版本安装时回放历史 guided-init 安装链。
+
+固定规则：
+
+```text
+进入 P07 Toolbox
+    → 只加载 Toolbox
+
+选择 Slot 1 / 2 / 3 / 4
+    → 只检查并加载被选择的 Slot
+
+Slot 已是当前版本
+    → 直接运行，不重复下载 / 安装
+
+Slot 需要首次安装或升级
+    → 直接安装“当前正式运行时”
+    → 不逐级执行 RC / guided-init 历史安装器
+    → Production 安装阶段只做轻量身份 / 语法 / 运行入口自检
+    → 完整单元 / 回归测试必须在发布 Gate 预先完成，不在 Owner Production 安装时重复执行
+
+功能专用外部依赖
+    → 进入对应功能时才检查 / 安装
+```
+
+首批明确按需依赖：
+
+```text
+远程备份 / Google + B2    rclone
+服务器迁移                openssh-client（ssh / scp / ssh-copy-id / ssh-keygen）
+```
+
+不得为了“以后可能会用”而在 Slot 3 初次打开时预装上述依赖。安装动作必须发生在用户明确进入对应功能之后，并用中文说明正在安装什么、为什么需要。
+
+历史 installer / candidate / guided-init 文件可以作为工程证据保留，但不得继续出现在普通用户当前安装链。
