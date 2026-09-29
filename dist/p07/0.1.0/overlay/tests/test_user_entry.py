@@ -33,7 +33,7 @@ class UserEntryTests(unittest.TestCase):
             os.chmod(dst, 0o755)
         shutil.copy2(REPO_ROOT / "lib" / "terminal_ui.sh", self.root / "lib" / "terminal_ui.sh")
         (self.root / "VERSION").write_text("0.1.0\n", encoding="utf-8")
-        (self.root / "BUILD_ID").write_text("0.1.0-release4\n", encoding="utf-8")
+        (self.root / "BUILD_ID").write_text("0.1.0-release6\n", encoding="utf-8")
         self.log = self.tmp / "core.log"
         self.backups = self.tmp / "backups"
         self.backups.mkdir()
@@ -102,6 +102,29 @@ JSON
     ;;
   migrate)
     printf '{"status":"TECHNICAL_CUTOVER_READY"}\n'
+    ;;
+  server-migrate)
+    case "${2:-}" in
+      target-status)
+        printf '{"status":"CLOUDPANEL_READY","current_server_role":"RECEIVER","writes_performed":false}\n'
+        ;;
+      plan)
+        if [[ "${VFOPS_TEST_MIGRATION_PLAN:-ready}" == "conflict" ]]; then
+          printf '新服务器已存在同名网站：one.example；P07 不会覆盖。\n' >&2
+          exit 13
+        fi
+        printf '{"status":"READY","migration_direction":"CURRENT_SERVER_PULLS_OLD_SERVER","current_server_role":"RECEIVER","old_server_ip":"203.0.113.10","site_count":1,"sites":[{"domain":"one.example","runtime":{"type":"php","version":"8.3"},"mysql_databases":[]}],"capacity_estimate":{"target_required_bytes":1048576},"old_server_external_listeners":[],"automatic_dns_change":false,"old_server_delete_allowed":false,"existing_target_overwrite_allowed":false}\n'
+        ;;
+      prepare)
+        printf '{"status":"PREPARED","migration_id":"pull-test-001","direction":"TARGET_PULL","current_server_role":"RECEIVER","old_server_ip":"203.0.113.10","site_count":1,"dns_manual_gate_required":true,"source_delete_allowed":false,"dns_changed_by_p07":false,"existing_target_overwrite_allowed":false}\n'
+        ;;
+      status)
+        printf '{"status":"PREPARED","migration_id":"pull-test-001","direction":"TARGET_PULL","current_server_role":"RECEIVER","old_server_ip":"203.0.113.10","site_count":1,"dns_manual_gate_required":true,"source_delete_allowed":false,"dns_changed_by_p07":false,"existing_target_overwrite_allowed":false}\n'
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
     ;;
   *)
     exit 2
@@ -192,27 +215,26 @@ esac
         self.assertIn("位置：", proc.stdout)
         self.assertIn("one.example_backup", proc.stdout)
 
-    def test_migration_unreachable_fails_before_backup(self) -> None:
+    def test_migration_unreachable_old_server_fails_before_pull(self) -> None:
         self._write_executable("ssh", "#!/usr/bin/env bash\necho 'Connection timed out' >&2\nexit 255\n")
-        proc = self._run("4\n3\n1\n203.0.113.10\n\n0\n0\n")
+        proc = self._run("4\n1\n203.0.113.10\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("[1/3] 检查目标服务器", proc.stdout)
-        self.assertIn("连接状态：无法连接", proc.stdout)
-        self.assertIn("迁移尚未开始，也没有创建迁移备份", proc.stdout)
+        self.assertIn("当前服务器：新服务器 / 接收端", proc.stdout)
+        self.assertIn("无法连接旧服务器：203.0.113.10", proc.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertNotIn("backup --site", log)
-        self.assertNotIn("migrate transfer-new-site", log)
+        self.assertIn("server-migrate target-status", log)
+        self.assertNotIn("server-migrate prepare", log)
 
-    def test_migration_needs_key_setup_is_distinct_and_can_return(self) -> None:
+    def test_migration_needs_new_to_old_key_and_can_return(self) -> None:
         self._write_executable("ssh", "#!/usr/bin/env bash\necho 'Permission denied (publickey).' >&2\nexit 255\n")
-        proc = self._run("4\n3\n1\n203.0.113.10\n0\n0\n0\n")
+        proc = self._run("4\n1\n203.0.113.10\n0\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("连接状态：需要配置 SSH 密钥", proc.stdout)
-        self.assertIn("现在准备源服务器 → 目标服务器 SSH 密钥", proc.stdout)
+        self.assertIn("当前新服务器还没有登录旧服务器的 SSH 密钥权限", proc.stdout)
+        self.assertIn("现在为新服务器准备专用迁移密钥", proc.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertNotIn("backup --site", log)
+        self.assertNotIn("server-migrate prepare", log)
 
-    def test_migration_key_setup_rechecks_and_reaches_ready(self) -> None:
+    def test_migration_key_setup_rechecks_old_server_and_reaches_ready(self) -> None:
         marker = self.tmp / "key-installed"
         ssh = textwrap.dedent(
             f'''#!/usr/bin/env bash
@@ -220,68 +242,63 @@ if [[ ! -f "{marker}" ]]; then
   echo 'Permission denied (publickey).' >&2
   exit 255
 fi
-if printf '%s ' "$@" | grep -q P07_SSH_READY; then
-  printf P07_SSH_READY
-  exit 0
-fi
+printf P07_SSH_READY
 exit 0
 '''
         )
         self._write_executable("ssh", ssh)
         self._write_executable("ssh-copy-id", f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 0\n")
-        ssh_dir = self.home / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_ed25519").write_text("private-placeholder", encoding="utf-8")
-        (ssh_dir / "id_ed25519.pub").write_text("public-placeholder", encoding="utf-8")
-        proc = self._run("4\n3\n1\n203.0.113.10\n1\nn\n0\n0\n")
+        proc = self._run("4\n1\n203.0.113.10\n1\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("连接状态：需要配置 SSH 密钥", proc.stdout)
-        self.assertIn("SSH 密钥已发送到目标服务器", proc.stdout)
-        self.assertIn("连接状态：已就绪", proc.stdout)
-        self.assertIn("CloudPanel：已就绪", proc.stdout)
+        self.assertIn("当前新服务器还没有登录旧服务器的 SSH 密钥权限", proc.stdout)
+        self.assertIn("如果系统询问 root 密码，请输入“旧服务器”的 root 密码", proc.stdout)
+        self.assertIn("旧服务器 SSH：已就绪", proc.stdout)
+        self.assertIn("旧服务器 CloudPanel：已识别", proc.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertNotIn("backup --site", log)
+        self.assertIn("server-migrate plan --source-ip 203.0.113.10", log)
+        self.assertNotIn("server-migrate prepare", log)
 
-    def test_migration_target_not_cloudpanel_fails_before_backup(self) -> None:
+    def test_migration_old_server_not_cloudpanel_is_distinct(self) -> None:
         self._write_executable(
             "ssh",
-            "#!/usr/bin/env bash\ncase \"$*\" in *P07_SSH_READY*) printf P07_SSH_READY; exit 0;; *) exit 43;; esac\n",
+            "#!/usr/bin/env bash\nprintf P07_SSH_READY\nexit 43\n",
         )
-        proc = self._run("4\n3\n1\n203.0.113.10\n\n0\n0\n")
+        proc = self._run("4\n1\n203.0.113.10\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("连接状态：目标服务器未安装 CloudPanel", proc.stdout)
-        self.assertIn("没有检测到可用的 CloudPanel", proc.stdout)
+        self.assertIn("SSH 可以连接，但旧服务器未检测到可用的 CloudPanel", proc.stdout)
+        self.assertIn("请确认旧服务器确实是要迁出的 CloudPanel 服务器", proc.stdout)
         log = self.log.read_text(encoding="utf-8")
-        self.assertNotIn("backup --site", log)
+        self.assertNotIn("server-migrate prepare", log)
 
-    def test_migration_target_domain_conflict_fails_before_backup(self) -> None:
-        self._write_executable(
-            "ssh",
-            "#!/usr/bin/env bash\ncase \"$*\" in *P07_SSH_READY*) printf P07_SSH_READY; exit 0;; *) exit 42;; esac\n",
-        )
-        proc = self._run("4\n3\n1\n203.0.113.10\n\n0\n0\n")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("目标服务器已存在同名网站：one.example", proc.stdout)
-        self.assertIn("连接状态：目标服务器存在同名网站", proc.stdout)
-        self.assertIn("P07 不会覆盖", proc.stdout)
-        log = self.log.read_text(encoding="utf-8")
-        self.assertNotIn("backup --site", log)
-        self.assertNotIn("migrate transfer-new-site", log)
-
-    def test_migration_ready_shows_progress_and_dns_boundary(self) -> None:
+    def test_migration_target_collision_fails_during_new_server_plan(self) -> None:
         self._ready_ssh()
-        proc = self._run("4\n3\n1\n203.0.113.10\ny\n\n0\n0\n")
+        proc = self._run(
+            "4\n1\n203.0.113.10\n\n0\n0\n",
+            {"VFOPS_TEST_MIGRATION_PLAN": "conflict"},
+        )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("[1/3] 检查目标服务器", proc.stdout)
-        self.assertIn("[2/3] 创建并验证迁移备份", proc.stdout)
-        self.assertIn("[3/3] 正在传输、恢复运行环境并做技术验证", proc.stdout)
-        self.assertIn("迁移技术验证完成 ✓", proc.stdout)
-        self.assertIn("当前流量：仍在源服务器", proc.stdout)
-        self.assertIn("DNS：未修改", proc.stdout)
-        self.assertIn("源服务器：保留", proc.stdout)
+        self.assertIn("迁移预检未通过", proc.stdout)
+        self.assertIn("新服务器已存在同名网站：one.example", proc.stderr)
+        self.assertIn("P07 不会覆盖", proc.stderr)
         log = self.log.read_text(encoding="utf-8")
-        self.assertIn("backup --site one.example --kind pre_migration", log)
-        self.assertIn("migrate transfer-new-site", log)
+        self.assertIn("server-migrate plan --source-ip 203.0.113.10", log)
+        self.assertNotIn("server-migrate prepare", log)
+
+    def test_migration_ready_shows_pull_plan_and_dns_boundary(self) -> None:
+        self._ready_ssh()
+        proc = self._run("4\n1\n203.0.113.10\ny\nn\n0\n0\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("P07 · 服务器迁移", proc.stdout)
+        self.assertIn("当前服务器：新服务器 / 接收端", proc.stdout)
+        self.assertIn("旧服务器：203.0.113.10", proc.stdout)
+        self.assertIn("新服务器开始主动拉取旧服务器数据", proc.stdout)
+        self.assertIn("首轮迁入完成", proc.stdout)
+        self.assertIn("DNS", proc.stdout)
+        self.assertIn("旧服务器永不自动删除", proc.stdout)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertIn("server-migrate plan --source-ip 203.0.113.10", log)
+        self.assertIn("server-migrate prepare --source-ip 203.0.113.10", log)
+        self.assertNotIn("migrate transfer-new-site", log)
 
     def test_unverified_backup_is_hidden_from_beginner_restore(self) -> None:
         self._make_backup("unverified_backup", verified=False)
