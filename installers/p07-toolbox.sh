@@ -7,7 +7,7 @@ VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc9"
+VF_NODE_EXPECTED="0.1.0-rc10"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 VPS_AUDIT_PUBLIC="V2.2.2"
