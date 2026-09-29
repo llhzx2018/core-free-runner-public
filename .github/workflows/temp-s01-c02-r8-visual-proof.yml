@@ -1,0 +1,143 @@
+name: TEMP S01-C02 R8 Visual Proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-s01-c02-r8-visual-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      PRODUCT_SHA: 82157db3228937e91a9bd4a995865caed5e8a9c6
+
+    steps:
+      - name: Checkout exact R8 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Contract and package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$PRODUCT_SHA"
+          php target/tests/s01-c02-prod-realuse-r8-readability-denoise-contract.php
+          python3 - <<'PY'
+          import re,zipfile
+          from pathlib import Path
+          root=Path('target'); out=Path('/tmp/vf-tools-ops-r8.zip')
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for path in root.rglob('*'):
+                  if path.is_file() and not path.is_symlink():
+                      rel=path.relative_to(root)
+                      if keep(rel): z.write(path,'vf-ops/'+rel.as_posix())
+          PY
+          unzip -tq /tmp/vf-tools-ops-r8.zip
+
+      - name: Boot disposable WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r8-${GITHUB_RUN_ID}"; DB="vf-r8-db-${GITHUB_RUN_ID}"; WP="vf-r8-wp-${GITHUB_RUN_ID}"
+          PORT="$((23000 + (GITHUB_RUN_ID % 6000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops-r8.zip "$WP:/tmp/vf-tools-ops-r8.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R8' --admin_user=admin --admin_password='VF-R8-Proof!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/vf-tools-ops-r8.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          for i in $(seq 1 14); do docker exec "$WP" wp post create --allow-root --path=/var/www/html --post_type=post --post_status=publish --post_title="R8 Sample $i" --post_content="R8 sample $i" >/dev/null; done
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated R8 visual measurements
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R8-Proof!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > /tmp/r8.js <<'JS'
+          const {chromium}=require(process.cwd()+'/node_modules/playwright');
+          const fs=require('fs');
+          (async()=>{
+            const b=await chromium.launch({headless:true});
+            const p=await b.newPage({viewport:{width:1440,height:1000}});
+            const base=process.argv[2], out={routes:[],errors:[]};
+            p.on('pageerror',e=>out.errors.push(String(e)));
+            await p.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await p.fill('#user_login','admin'); await p.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([p.waitForNavigation({waitUntil:'domcontentloaded'}),p.click('#wp-submit')]);
+            const routes=[
+              {name:'content',url:'/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow&workspace=articles',title:'内容库',work:'.vf-content-manager-list',maxTop:570},
+              {name:'keywords',url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=keywords',title:'页面与关键词地图',work:'.vf-keyword-map-console, .vf-keyword-workspace',maxTop:610},
+              {name:'refine',url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=refine',title:'单页精修',work:'.vf-o7-queue',maxTop:590},
+              {name:'links',url:'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=links',title:'内容集群与链接',work:'.vf-links-panel',maxTop:530}
+            ];
+            for(const r of routes){
+              const res=await p.goto(base+r.url,{waitUntil:'domcontentloaded'});
+              const title=(await p.locator('.vf-v6-unified-pagehead h1').first().innerText()).trim();
+              const work=p.locator(r.work).first(), wb=await work.boundingBox();
+              const overflow=await p.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth+1);
+              const row={name:r.name,status:res.status(),title,workTop:wb?Math.round(wb.y):null,overflow};
+              if(r.name==='content'){
+                const first=p.locator('.vf-content-manager-title-copy h3').first();
+                if(await first.count()) row.titleFont=parseFloat(await first.evaluate(el=>getComputedStyle(el).fontSize));
+              }
+              if(r.name==='links'){
+                const empty=p.locator('.vf-links-empty').first();
+                if(await empty.count()) row.emptyDisplay=await empty.evaluate(el=>getComputedStyle(el).display);
+              }
+              row.pass=res.status()<400&&title===r.title&&wb&&wb.y<=r.maxTop&&!overflow&&(r.name!=='content'||!row.titleFont||row.titleFont>=15);
+              out.routes.push(row);
+            }
+            fs.writeFileSync(process.argv[3],JSON.stringify(out,null,2));
+            console.log(JSON.stringify(out,null,2));
+            if(out.errors.length||out.routes.some(r=>!r.pass)) throw new Error(JSON.stringify(out));
+            await b.close();
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          node /tmp/r8.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/r8-visual.json"
+          echo 'R8_VISUAL_PROOF=PASS'
+
+      - name: Upload proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-r8-visual-proof
+          path: evidence/r8-visual.json
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
