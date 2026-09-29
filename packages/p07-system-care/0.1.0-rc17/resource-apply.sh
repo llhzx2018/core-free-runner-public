@@ -38,7 +38,8 @@ calibrate_readonly() {
   ui_good '若当前 生产环境已按推荐值调优，安全计划应主要显示“保持 / 无变化”。'
   ui_bad '若出现大量“调整 / 已阻止” 或识别错误，不应执行应用，应先修算法。'
   say
-  say 'P07_PRODUCTION_CALIBRATION=READ_ONLY_COMPLETE'
+  ui_good '只读校准完成 ✓'
+  [[ "${P07_MACHINE_OUTPUT:-0}" == "1" ]] && say 'P07_PRODUCTION_CALIBRATION=READ_ONLY_COMPLETE'
 }
 
 apply_balanced() {
