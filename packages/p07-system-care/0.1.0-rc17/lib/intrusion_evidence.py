@@ -566,6 +566,30 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def report_status_text(value: str) -> str:
+    return {
+        "FAILED": "检查失败",
+        "NOT_ENABLED": "未开启",
+        "BASELINE_READY": "参考状态已建立",
+        "CLEAN": "正常",
+        "ANOMALY": "发现异常",
+        "ANOMALY_HISTORY": "有历史异常",
+        "NORMAL": "正常",
+        "ATTENTION": "需查看",
+    }.get(str(value or ""), str(value or "未知"))
+
+
+def event_type_text(value: str) -> str:
+    return {
+        "UNBASELINED_WORDPRESS_SITE": "新 WordPress 站点尚未纳入参考状态",
+        "UPLOADS_PHP": "上传目录出现 PHP 文件",
+        "NEW_PHP": "新增 PHP 文件",
+        "DELETED_TRACKED_FILE": "受监控文件被删除",
+        "KEY_FILE_CHANGED": "关键文件发生变化",
+        "MODIFIED_PHP": "PHP 文件发生变化",
+    }.get(str(value or ""), str(value or "未知异常"))
+
+
 def command_report(args: argparse.Namespace) -> int:
     state = Path(args.state_dir)
     status = status_doc(state)
@@ -574,7 +598,7 @@ def command_report(args: argparse.Namespace) -> int:
             print(json.dumps({"status": status, "events": []}, ensure_ascii=False, sort_keys=True, indent=2))
         else:
             print("P07 · 网站入侵留证")
-            print("状态       FAILED")
+            print("状态       检查失败")
             print(f"失败类型   {status.get('error_class') or '-'}")
             print("说明       留证状态不完整，已停止读取事件明细。")
         return 20
@@ -584,7 +608,7 @@ def command_report(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"scan": scan, "events": events[:args.limit]}, ensure_ascii=False, sort_keys=True, indent=2)); return 0
     print("P07 · 网站入侵留证")
-    print(f"状态       {scan.get('result', 'NOT_ENABLED')}")
+    print(f"状态       {report_status_text(scan.get('result', 'NOT_ENABLED'))}")
     print(f"最近扫描   {scan.get('scan_finished_at') or '-'}")
     print(f"可信基线   {scan.get('last_known_clean_at') or '-'}")
     print(f"首次异常   {scan.get('first_detected_at') or '-'}")
@@ -593,7 +617,7 @@ def command_report(args: argparse.Namespace) -> int:
     if not events: print("\n未记录异常。"); return 0
     print("\n最近异常：")
     for event in events[:args.limit]:
-        print(f"- {event.get('first_detected_at')}  {event.get('type')}  {event.get('site')}:{event.get('relative_path')}")
+        print(f"- {event.get('first_detected_at')}  {event_type_text(event.get('type'))}  {event.get('site')}:{event.get('relative_path')}")
         for req in (event.get("correlated_requests") or [])[:3]:
             print(f"  关联请求  {req.get('timestamp')} {req.get('source_ip')} {req.get('method')} {req.get('path_without_query')} {req.get('status')}  [仅线索]")
         meta = event.get("correlation_meta") or {}
