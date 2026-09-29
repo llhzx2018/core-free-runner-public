@@ -1,0 +1,119 @@
+name: S01-C02 1.21.955 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-121955-formal-release.yml'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  formal-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: b08ad8aa9b5650d544daff647bd2cfa5b56cde3b
+      TARGET_VERSION: 1.21.955
+      RELEASE_TAG: v1.21.955
+      ASSET_NAME: vf-tools-ops_V1.21.955.zip
+      TESTED_RUN_ID: '36533130502'
+      TESTED_ARTIFACT_NAME: s01-c02-v1.21.955-r6-candidate
+      EXPECTED_BYTES: '3406465'
+      EXPECTED_SHA256: ceadf9e5c1ec2f7f4a51d6e4f1a9b619028cd97921e7ee1f10ad17eca910f668
+      EXPECTED_FILES: '961'
+      EXPECTED_FP: 5f7867ec4ed083e3ab34263ed5dfc347c142abaef056891c48f125dd6fd4bc90
+      PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Verify credentials
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ_TOKEN"; test -n "$RELEASE_WRITE_TOKEN"
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Fetch and verify exact tested artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          mkdir tested
+          gh run download "$TESTED_RUN_ID" --repo llhzx2018/core-free-runner-public --name "$TESTED_ARTIFACT_NAME" --dir tested
+          jq -e --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION" '
+            .status=="PASS" and .candidate_sha==$sha and .candidate_version==$ver and
+            .soft_navigation_page_identity=="PASS" and .clean_install=="PASS" and
+            .existing_install_upgrade_preservation=="PASS" and
+            .browser.result=="PASS" and .browser.blocking_errors==0 and .browser.responsive_failures==0
+          ' tested/FINAL_EVIDENCE.json >/dev/null
+          jq -e --arg sha "$EXPECTED_SHA256" --arg fp "$EXPECTED_FP" --argjson bytes "$EXPECTED_BYTES" --argjson files "$EXPECTED_FILES" '
+            .candidate.version=="1.21.955" and .candidate.bytes==$bytes and .candidate.sha256==$sha and
+            .candidate.files==$files and .candidate.runtime_fingerprint==$fp
+          ' tested/package-evidence.json >/dev/null
+          test "$(stat -c %s "tested/$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "tested/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "tested/$ASSET_NAME" >/dev/null
+          echo TESTED_ARTIFACT_EXACT=PASS
+
+      - name: Create formal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if ! gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            cat >notes.md <<'MD'
+          S01-C02 · VF Tools Ops · V1.21.955
+
+          Production Real-use R6:
+          - Fine Polish: 内容库 / 页面与关键词 / 单页精修
+          - fixes 内容集群与链接 appearing not to open by synchronizing unified Page Identity during same-page soft navigation
+          - exact 14-surface browser regression + original top-flyout click proof PASS
+          - Shell / Header / Header Menu IA styling and V2 Macro remain frozen
+          - no canonical data, schema, permission, business logic or updater semantic change
+          - Exact Candidate Gate Run: 36533130502
+          - exact source: b08ad8aa9b5650d544daff647bd2cfa5b56cde3b
+
+          OWNER Production visual acceptance remains pending after installation.
+          MD
+            gh release create "$RELEASE_TAG" "tested/$ASSET_NAME" --repo "$TARGET_REPOSITORY" --target "$TARGET_SHA" --title "VF Tools Ops V1.21.955" --notes-file notes.md
+          fi
+          echo FORMAL_RELEASE_CREATE=PASS
+
+      - name: Remote release readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          RID="$(jq -r '.id' release.json)"
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' release.json)"
+          SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' release.json)"
+          DIGEST="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|(.digest//"")' release.json)"
+          TAG_SHA="$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$TAG_SHA" = "$TARGET_SHA"; test "$SIZE" = "$EXPECTED_BYTES"
+          if [ -n "$DIGEST" ] && [ "$DIGEST" != null ]; then test "$DIGEST" = "sha256:$EXPECTED_SHA256"; fi
+          mkdir readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback
+          test "$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
+          echo RELEASE_ID="$RID"; echo ASSET_ID="$AID"; echo ASSET_BYTES="$SIZE"; echo ASSET_SHA256="$EXPECTED_SHA256"; echo RUNTIME_FILES="$EXPECTED_FILES"; echo RUNTIME_FINGERPRINT="$EXPECTED_FP"
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf target tested readback
