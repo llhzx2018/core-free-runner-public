@@ -23,9 +23,9 @@ menu() {
     screen_clear
     ui_title "P07 · 资源优化 / 配置推荐"
     say
-    ui_note '自动识别 CPU / 内存 / Swap / 负载 / PHP 进程池 / 进程内存 / MySQL。'
+    ui_note '自动识别 CPU / 内存 / 交换分区（Swap）/ 负载 / PHP 进程池 / 进程内存 / MySQL。'
     ui_note '1-5 仅生成建议，不修改配置或重启服务。'
-    ui_attention '第 6 项包含 安全应用 / 回滚；仅已校准 配置方案 可执行，并要求显式确认。'
+    ui_attention '第 6 项包含安全应用 / 回滚；仅已校准的配置方案可执行，并要求明确确认。'
     say
     ui_menu_good 1 '平衡方案（默认）'
     ui_menu_info 2 '保守方案（稳定优先）'
@@ -107,7 +107,7 @@ P07 · 资源优化 / 配置推荐
   preview / matrix / json / plan 只读。
   apply / rollback 会写配置，属于高风险操作，必须明确确认。
   安全应用只允许已完成真实生产校准的配置方案，并且只降低超额上限。
-  不自动重启 MySQL，不自动修改 Swap，不自动停用未引用 PHP。
+  不自动重启 MySQL，不自动修改交换分区（Swap），不自动停用未引用 PHP。
 HELP    ;;
   *) fail "未知命令：$1"; exit 2 ;;
 esac
