@@ -39,12 +39,38 @@ else
   write_summary_cache "$health" "$disk" "$inode" "$failed" "$reboot" "$cp" "$advisories"
 fi
 
-printf 'P07_SYSTEM_CARE_STATUS=%s\n' "$health"
-printf 'P07_SYSTEM_CARE_UPDATES=%s\n' "$updates"
-printf 'P07_SYSTEM_CARE_SECURITY_UPDATES=%s\n' "$security"
-printf 'P07_SYSTEM_CARE_ROOT_DISK_PCT=%s\n' "$disk"
-printf 'P07_SYSTEM_CARE_ROOT_INODE_PCT=%s\n' "$inode"
-printf 'P07_SYSTEM_CARE_FAILED_UNITS=%s\n' "$failed"
-printf 'P07_SYSTEM_CARE_REBOOT_REQUIRED=%s\n' "$reboot"
-printf 'P07_SYSTEM_CARE_CLOUDPANEL=%s\n' "$cp"
-printf 'P07_SYSTEM_CARE_SECURITY_ADVISORIES=%s\n' "$advisories"
+if [[ "$mode" == quick || "$mode" == machine ]]; then
+  printf 'P07_SYSTEM_CARE_STATUS=%s\n' "$health"
+  printf 'P07_SYSTEM_CARE_UPDATES=%s\n' "$updates"
+  printf 'P07_SYSTEM_CARE_SECURITY_UPDATES=%s\n' "$security"
+  printf 'P07_SYSTEM_CARE_ROOT_DISK_PCT=%s\n' "$disk"
+  printf 'P07_SYSTEM_CARE_ROOT_INODE_PCT=%s\n' "$inode"
+  printf 'P07_SYSTEM_CARE_FAILED_UNITS=%s\n' "$failed"
+  printf 'P07_SYSTEM_CARE_REBOOT_REQUIRED=%s\n' "$reboot"
+  printf 'P07_SYSTEM_CARE_CLOUDPANEL=%s\n' "$cp"
+  printf 'P07_SYSTEM_CARE_SECURITY_ADVISORIES=%s\n' "$advisories"
+  exit 0
+fi
+
+case "$health" in
+  HEALTHY) health_text='正常' ;;
+  ATTENTION) health_text='需检查' ;;
+  *) health_text='未检查' ;;
+esac
+case "$reboot" in
+  YES) reboot_text='是' ;;
+  NO) reboot_text='否' ;;
+  *) reboot_text='未知' ;;
+esac
+say "${C_BOLD}${C_CYAN}P07 · 系统维护 / 安全 · 快速状态${C_RESET}"
+say
+printf '服务器状态   %s\n' "$health_text"
+printf '可更新       %s\n' "$updates"
+printf '安全更新     %s\n' "$security"
+printf '根分区       %s%% · inode %s%%\n' "$disk" "$inode"
+printf '异常服务     %s\n' "$failed"
+printf '需要重启     %s\n' "$reboot_text"
+printf 'CloudPanel   %s\n' "$cp"
+printf '安全建议     %s 项\n' "$advisories"
+say
+ui_note '说明：普通状态页使用中文；P07 内部自检使用 machine / quick 模式的稳定机器字段。'
