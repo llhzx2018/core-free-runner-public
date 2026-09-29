@@ -44,7 +44,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("恢复为新网站（推荐，可在本机测试）", text)
         self.assertIn("RESTORE_AS:", text)
         self.assertIn("restore_as_verified.py", text)
-        self.assertIn("自动完成本机文件、数据库、Host 与 SNI/vhost 验证", text)
+        self.assertIn("恢复后会做文件、数据库、Host 与 SNI/vhost 验证", text)
         self.assertIn("失败会回滚本次新建目标", text)
         self.assertIn("无需先在 CloudPanel 手工创建空网站", text)
         self.assertIn("按原域名恢复", text)
@@ -119,8 +119,8 @@ class Menu3ModularTests(unittest.TestCase):
         parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
         common = (ROOT / "lib/cloudpanel_ui_common.sh").read_text(encoding="utf-8")
         self.assertIn("网站只选择一次", parent)
-        self.assertIn("98. 更换网站", parent)
-        self.assertIn("0. 返回 P07 主菜单", parent)
+        self.assertIn("ui_menu_flow 98 '更换网站'", parent)
+        self.assertIn("ui_menu_back 0 '返回 P07 主菜单'", parent)
         self.assertIn('SELECTED_DOMAIN=""', common)
         self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', common)
 
@@ -143,7 +143,7 @@ class Menu3ModularTests(unittest.TestCase):
             "只删除 P07 自己创建的迁移 Key",
             "Recovery / 清理通道",
             "TARGET → SOURCE 数据对账/反向同步",
-            "不提供“只开旧机”的一键回滚",
+            "禁止直接“只开旧机”回滚",
             "CUTOVER_RUNNING",
             "最终切换已从断点继续完成",
             "自动安装 CloudPanel",
