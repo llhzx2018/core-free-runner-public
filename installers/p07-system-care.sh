@@ -17,7 +17,7 @@ fi
 say() { printf '%b\n' "$*"; }
 ok() { say "${GREEN}完成${R}  $*"; }
 info() { say "${CYAN}$*${R}"; }
-fail() { say "${RED}FAIL${R}  $*" >&2; }
+fail() { say "${RED}失败${R}  $*" >&2; }
 
 require_root() {
   if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -106,7 +106,7 @@ install_runtime() {
   write_entry
 
   if ! manager_ready; then
-    fail 'System Care 管理器自检失败，正在回滚。'
+    fail '系统维护管理器自检失败，正在回滚。'
     rm -rf "$TARGET"
     if [[ -d "${TARGET}.previous" ]]; then
       mv "${TARGET}.previous" "$TARGET"
@@ -118,14 +118,14 @@ install_runtime() {
 
   NO_COLOR=1 "$ENTRY" evidence refresh-cache >/dev/null 2>&1 || true
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
-  ok "System Care ${VERSION} 已就绪"
+  ok "系统维护 / 安全 ${VERSION} 已就绪"
 }
 
 ensure_manager() {
   manager_ready && return 0
   local current
   current="$(installed_version)"
-  [[ -n "$current" ]] && info "更新 System Care：${current} → ${VERSION}"
+  [[ -n "$current" ]] && info "更新系统维护 / 安全：${current} → ${VERSION}"
   install_runtime
 }
 
@@ -139,7 +139,7 @@ P07 · 系统维护 / 安全
 此脚本仅供 P07 Toolbox 内部安装/更新模块使用。
 普通用户继续使用唯一 P07 Toolbox 主入口。
 
-Commands:
+命令：
   menu
   status|check
   audit
