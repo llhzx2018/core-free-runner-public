@@ -124,7 +124,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release4\n")
+        self.assertEqual(build, "0.1.0-release6\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -137,11 +137,13 @@ class TerminalUiColorContractTests(unittest.TestCase):
         storage = (ROOT / "bin" / "vfops-storage-setup").read_text(encoding="utf-8")
         admin = (ROOT / "lib" / "cloudpanel_ui_admin.sh").read_text(encoding="utf-8")
 
-        self.assertIn("ui_menu_flow 1 '整机迁移（推荐）'", migrate)
-        self.assertIn("ui_menu_flow 3 '单站迁移'", migrate)
-        self.assertIn("目标服务器 IP（输入 0 返回）", migrate)
-        self.assertIn("唯一人工确认：现在修改 DNS", migrate)
-        self.assertNotIn("TARGET 服务器 IP（输入 0 返回）", migrate)
+        self.assertIn("ui_menu_flow 1 '整机迁入'", migrate)
+        self.assertIn("ui_menu_flow 2 '单站迁入'", migrate)
+        self.assertIn("ui_menu_flow 3 '继续未完成迁移'", migrate)
+        self.assertIn("旧服务器 IP（输入 0 返回）", migrate)
+        self.assertIn("新服务器 / 接收端", migrate)
+        self.assertIn("唯一剩余人工步骤", migrate)
+        self.assertNotIn("目标服务器 IP（输入 0 返回）", migrate)
         self.assertIn("ui_menu_warn 1 '恢复为新网站", site)
         self.assertIn("ui_menu_danger 1 '确认关闭'", auto)
         self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
