@@ -55,7 +55,7 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info "下载并校验 VF Network Node ${VERSION}..."
+  info "下载并校验 P07 网络节点 ${VERSION}..."
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
     fail '安装包清单下载失败。'
@@ -99,7 +99,7 @@ install_runtime_files() {
   write_entry
 
   if ! manager_ready; then
-    fail 'VF Network Node 管理器自检失败。'
+    fail 'P07 网络节点管理器自检失败。'
     if [[ -d "${TARGET}.previous" ]]; then
       rm -rf "$TARGET"
       mv "${TARGET}.previous" "$TARGET"
@@ -110,7 +110,7 @@ install_runtime_files() {
   fi
 
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
-  ok "VF Network Node ${VERSION} 已就绪"
+  ok "P07 网络节点 ${VERSION} 已就绪"
 }
 
 ensure_manager() {
@@ -130,7 +130,7 @@ require_root
 case "${1:-}" in
   -h|--help)
     cat <<'EOF'
-P07 · VF Network Node
+P07 · 网络节点
 
 交互运行：安装/更新管理器后进入唯一主菜单。
 非交互运行：安装/更新管理器后执行稳定节点安装。
