@@ -1,0 +1,226 @@
+name: TEMP S01-C02 R10 Mature Admin Proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-s01-c02-r10-mature-admin-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      PRODUCT_SHA: bc2be03e8724462c5647217cc1a1b0f8340302b2
+
+    steps:
+      - name: Checkout exact R10 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.PRODUCT_REPO }}
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - name: Source contract and package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$PRODUCT_SHA"
+          php target/tests/s01-c02-prod-realuse-r10-mature-admin-product-system-contract.php
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          python3 - <<'PY'
+          import re,zipfile
+          from pathlib import Path
+          root=Path('target'); out=Path('/tmp/vf-tools-ops-r10.zip')
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for path in root.rglob('*'):
+                  if path.is_file() and not path.is_symlink():
+                      rel=path.relative_to(root)
+                      if keep(rel): z.write(path,'vf-ops/'+rel.as_posix())
+          PY
+          unzip -tq /tmp/vf-tools-ops-r10.zip
+
+      - name: Boot disposable WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r10-${GITHUB_RUN_ID}"; DB="vf-r10-db-${GITHUB_RUN_ID}"; WP="vf-r10-wp-${GITHUB_RUN_ID}"
+          PORT="$((22000 + (GITHUB_RUN_ID % 6000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.0.2-php8.4-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops-r10.zip "$WP:/tmp/vf-tools-ops-r10.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R10' --admin_user=admin --admin_password='VF-R10-Proof!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/vf-tools-ops-r10.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          for i in $(seq 1 24); do docker exec "$WP" wp post create --allow-root --path=/var/www/html --post_type=post --post_status=publish --post_title="R10 Sample $i" --post_content="R10 sample content $i" >/dev/null; done
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: 14-surface browser maturity proof
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R10-Proof!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cat > /tmp/r10.js <<'JS'
+          const {chromium}=require(process.cwd()+'/node_modules/playwright');
+          const fs=require('fs');
+
+          const routes=[
+            ['O01','工作台','/wp-admin/admin.php?page=vf-toolsite-ops'],
+            ['O02','工具','/wp-admin/admin.php?page=vf-toolsite-tools'],
+            ['O03','内容与 SEO 概览','/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow'],
+            ['O04','内容库','/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow&workspace=articles'],
+            ['O05','页面与关键词','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=keywords'],
+            ['O06','单页精修','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=refine'],
+            ['O07','内容集群与链接','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=links'],
+            ['O08','技术与索引','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=technical'],
+            ['O09','效果复盘','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=reviews'],
+            ['O10','质量中心','/wp-admin/admin.php?page=vf-toolsite-online-acceptance&tab=acceptance'],
+            ['O11','发布中心','/wp-admin/admin.php?page=vf-toolsite-publish&tab=release'],
+            ['O12','组件与系统','/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=plugins'],
+            ['O13','搜索与分析集成','/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=integrations'],
+            ['O14','备份与恢复','/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=recovery']
+          ];
+          const widths=[1440,1024,390];
+
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1000}});
+            const base=process.argv[2], out={source:process.argv[3],results:[],specific:{},errors:[]};
+            page.on('pageerror',e=>out.errors.push(String(e)));
+
+            await page.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#user_login','admin');
+            await page.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.click('#wp-submit')]);
+
+            for(const width of widths){
+              await page.setViewportSize({width,height:1000});
+              for(const [id,label,url] of routes){
+                const res=await page.goto(base+url,{waitUntil:'domcontentloaded'});
+                await page.waitForTimeout(120);
+                const metrics=await page.evaluate(()=>{
+                  const canvas=document.querySelector('.vf-page-canvas') || document.querySelector('#wpbody-content');
+                  const overflow=document.documentElement.scrollWidth>document.documentElement.clientWidth+1;
+                  const h1=[...(canvas?.querySelectorAll('h1')||[])].filter(el=>{
+                    const s=getComputedStyle(el),r=el.getBoundingClientRect();
+                    return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;
+                  });
+                  let minFont=Infinity, tiny=[];
+                  for(const el of [...(canvas?.querySelectorAll('*')||[])]){
+                    if(!el.textContent || !el.textContent.trim()) continue;
+                    if(el.children.length && ![...el.childNodes].some(n=>n.nodeType===3&&n.textContent.trim())) continue;
+                    const s=getComputedStyle(el), r=el.getBoundingClientRect();
+                    if(s.display==='none'||s.visibility==='hidden'||r.width<1||r.height<1) continue;
+                    const size=parseFloat(s.fontSize||'0');
+                    if(size>0){minFont=Math.min(minFont,size); if(size<11) tiny.push({tag:el.tagName,cls:el.className||'',text:el.textContent.trim().slice(0,80),size});}
+                  }
+                  return {
+                    overflow,h1:h1.length,h1Texts:h1.map(x=>x.textContent.trim()),
+                    r10:getComputedStyle(document.body).getPropertyValue('--vf-r10-control').trim(),
+                    minFont:Number.isFinite(minFont)?minFont:null,tiny:tiny.slice(0,12),
+                    scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth
+                  };
+                });
+                const pass=res.status()<400 && !metrics.overflow && metrics.h1<=1 && metrics.r10 && (!metrics.minFont || metrics.minFont>=9);
+                out.results.push({id,label,width,status:res.status(),...metrics,pass});
+              }
+            }
+
+            await page.setViewportSize({width:1440,height:1000});
+            await page.goto(base+routes.find(x=>x[0]==='O04')[2],{waitUntil:'domcontentloaded'});
+            out.specific.O04=await page.evaluate(()=>{
+              const row=document.querySelector('.vf-content-manager-row');
+              const check=document.querySelector('.vf-content-manager-row-check');
+              const b=check?.getBoundingClientRect();
+              const text=row?.innerText||'';
+              return {
+                hasRow:!!row,checkbox:b?{w:b.width,h:b.height}:null,
+                noInternalId:!(/\bID\s+\d+/i.test(text)),
+                noRepeatedColumnLabels:!text.includes('内容质量')&&!text.includes('发布与更新'),
+                noGenericWorkflow:!text.includes('受控工作流')
+              };
+            });
+
+            await page.goto(base+routes.find(x=>x[0]==='O05')[2],{waitUntil:'domcontentloaded'});
+            out.specific.O05=await page.evaluate(()=>({
+              rawFamilyIdsVisible:[...document.querySelectorAll('.vf-keyword-map-table tbody tr')].some(r=>/家族\s*#\d+|成员\s*#\d+/.test(r.innerText)),
+              repeatedRankTargetVisible:[...document.querySelectorAll('.vf-keyword-map-table tbody tr')].some(r=>r.innerText.includes('当前排名目标：')),
+              evidenceDisclosure:!!document.querySelector('.vf-keyword-evidence-summary details')
+            }));
+
+            await page.goto(base+routes.find(x=>x[0]==='O07')[2],{waitUntil:'domcontentloaded'});
+            out.specific.O07=await page.evaluate(()=>{
+              const panel=document.querySelector('.vf-links-panel'), list=document.querySelector('.vf-links-list');
+              const ps=panel?getComputedStyle(panel):null, ls=list?getComputedStyle(list):null;
+              return {
+                panel:ps?{left:ps.borderLeftWidth,right:ps.borderRightWidth,radius:ps.borderRadius,background:ps.backgroundColor}:null,
+                list:ls?{border:ls.borderTopWidth,radius:ls.borderRadius}:null
+              };
+            });
+
+            await page.goto(base+routes.find(x=>x[0]==='O09')[2],{waitUntil:'domcontentloaded'});
+            out.specific.O09=await page.evaluate(()=>{
+              const el=document.querySelector('.vf-review-steps');
+              return {exists:!!el,display:el?getComputedStyle(el).display:null};
+            });
+
+            const required=out.results.every(r=>r.pass)
+              && out.specific.O04.noInternalId
+              && out.specific.O04.noRepeatedColumnLabels
+              && out.specific.O04.noGenericWorkflow
+              && (!out.specific.O04.checkbox || Math.abs(out.specific.O04.checkbox.w-out.specific.O04.checkbox.h)<=1)
+              && !out.specific.O05.rawFamilyIdsVisible
+              && !out.specific.O05.repeatedRankTargetVisible
+              && (!out.specific.O07.panel || (parseFloat(out.specific.O07.panel.left)===0 && parseFloat(out.specific.O07.panel.right)===0))
+              && (!out.specific.O09.exists || out.specific.O09.display==='none')
+              && out.errors.length===0;
+            out.result=required?'PASS':'FAIL';
+            fs.mkdirSync(process.argv[4],{recursive:true});
+            fs.writeFileSync(process.argv[4]+'/r10-mature-admin.json',JSON.stringify(out,null,2));
+            console.log(JSON.stringify({result:out.result,specific:out.specific,failures:out.results.filter(r=>!r.pass),tiny:out.results.filter(r=>r.tiny.length).slice(0,12),errors:out.errors},null,2));
+            await browser.close();
+            if(!required) process.exit(2);
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          node /tmp/r10.js "$VF_BASE_URL" "$PRODUCT_SHA" "$GITHUB_WORKSPACE/evidence"
+          echo 'R10_14_SURFACE_BROWSER=PASS'
+
+      - name: Upload proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-r10-mature-admin
+          path: evidence/r10-mature-admin.json
+          retention-days: 14
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
