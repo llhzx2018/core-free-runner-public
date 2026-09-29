@@ -394,7 +394,7 @@ def render_preview(snapshot: Mapping[str, Any], rec: Mapping[str, Any]) -> str:
         color("P07 · 资源优化 / 配置推荐", "cyan"),
         "",
         f"{color('识别配置', 'cyan')}    {hw['cpu_count']} vCPU / {_fmt_mib(hw['memory_mib'])} RAM / {_fmt_mib(int(snapshot.get('swap_mib') or 0))} Swap",
-        f"{color('配置方案', 'cyan')}    {rec['profile_id']}",
+        f"{color('配置方案编号', 'cyan')} {rec['profile_id']}",
         f"{color('校准状态', 'cyan')}    {calibration_color(rec['calibration']['state'])}",
         f"{color('模式', 'cyan')}        {mode_text(rec['mode'])}",
         f"{color('当前负载', 'cyan')}    {snapshot.get('load1', 0)} / {snapshot.get('load5', 0)} / {snapshot.get('load15', 0)}",
@@ -421,7 +421,7 @@ def render_preview(snapshot: Mapping[str, Any], rec: Mapping[str, Any]) -> str:
         for note in rec["notes"]:
             tone = "red" if note == "BELOW_CLOUDPANEL_MINIMUM_RAM" else "yellow"
             lines.append(color(f"  - {NOTE_TEXT.get(note, note)}", tone))
-    lines += ["", color("边界：本页只生成建议，不修改 PHP / MySQL / Swap / systemd，不重启服务。", "gray")]
+    lines += ["", color("边界：本页只生成建议，不修改 PHP / MySQL / 交换分区（Swap）/ systemd，不重启服务。", "gray")]
     return "\n".join(lines)
 
 
@@ -469,7 +469,7 @@ def render_matrix(mode: str = "balanced") -> str:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="P07 只读资源配置建议引擎")
+    parser = argparse.ArgumentParser(description="P07 只读资源配置建议引擎（普通界面中文，机器参数保持稳定）")
     parser.add_argument("action", nargs="?", choices=("preview", "json", "matrix"), default="preview")
     parser.add_argument("--mode", choices=MODES, default="balanced")
     args = parser.parse_args(argv)
