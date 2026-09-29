@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc9'
+VERSION='0.1.0-rc10'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='0f2db8e08ac610f870cbe0e979fc90e904f36b07e561d8f657d77cc1f073f3c3'
+MANIFEST_SHA256='06e6a344da755cada5312b1df9882564ca997e69af21abc581605883f3223bd5'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 
@@ -55,7 +55,7 @@ install_runtime_files() {
   stage="${TARGET}.new.$$"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info "下载并校验 VF Network Node ${VERSION}..."
+  info "下载并校验 P07 网络节点 ${VERSION}..."
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.sha256" -o "$tmp/pkg/MANIFEST.sha256"; then
     rm -rf "$tmp" "$stage"
     fail '安装包清单下载失败。'
@@ -68,7 +68,7 @@ install_runtime_files() {
   fi
 
   local files=(
-    VERSION vf-node.sh install.sh status.sh share.sh backup.sh uninstall.sh
+    VERSION SOURCE_IDENTITY vf-node.sh install.sh status.sh share.sh backup.sh uninstall.sh
     lib/common.sh lib/core-pin.env lib/patch_upstream_core.py
   )
   for f in "${files[@]}"; do
@@ -86,10 +86,10 @@ install_runtime_files() {
     return 12
   fi
 
-  cp -a "$tmp/pkg/VERSION" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
+  cp -a "$tmp/pkg/VERSION" "$tmp/pkg/SOURCE_IDENTITY" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
   cp -a "$tmp/pkg/lib/common.sh" "$tmp/pkg/lib/core-pin.env" "$tmp/pkg/lib/patch_upstream_core.py" "$stage/lib/"
   chmod 0755 "$stage/vf-node.sh" "$stage/install.sh" "$stage/status.sh" "$stage/share.sh" "$stage/backup.sh" "$stage/uninstall.sh" "$stage/lib/patch_upstream_core.py"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/core-pin.env"
+  chmod 0644 "$stage/VERSION" "$stage/SOURCE_IDENTITY" "$stage/lib/common.sh" "$stage/lib/core-pin.env"
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
@@ -99,7 +99,7 @@ install_runtime_files() {
   write_entry
 
   if ! manager_ready; then
-    fail 'VF Network Node 管理器自检失败。'
+    fail 'P07 网络节点管理器自检失败。'
     if [[ -d "${TARGET}.previous" ]]; then
       rm -rf "$TARGET"
       mv "${TARGET}.previous" "$TARGET"
@@ -110,7 +110,7 @@ install_runtime_files() {
   fi
 
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
-  ok "VF Network Node ${VERSION} 已就绪"
+  ok "P07 网络节点 ${VERSION} 已就绪"
 }
 
 ensure_manager() {
@@ -130,7 +130,7 @@ require_root
 case "${1:-}" in
   -h|--help)
     cat <<'EOF'
-P07 · VF Network Node
+P07 · 网络节点
 
 交互运行：安装/更新管理器后进入唯一主菜单。
 非交互运行：安装/更新管理器后执行稳定节点安装。

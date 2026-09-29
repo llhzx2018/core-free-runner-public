@@ -2,20 +2,19 @@
 set -Eeuo pipefail
 
 # P07 V0.1.0 final public distribution readback marker.
-# Public versions stay short and semantic. Internal build identities remain hidden
-# and are used only for exact validation / engineering traceability.
+# 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc9"
+VF_NODE_EXPECTED="0.1.0-rc10"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 VPS_AUDIT_PUBLIC="V2.2.2"
 VPS_AUDIT_EXPECTED="V2.2.2"
-VPS_AUDIT_BUILD_EXPECTED="2.2.2-rc1-semantic-color"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/30c0f9d332b410ebf14f7e6a80056cebace1905b/experiments/p07-vps-audit-v22.sh"
-VPS_AUDIT_SHA256="376f3cf791dcac00ba870697db9233a5ad4f765400a4dbe4418c20aafbc3b401"
+VPS_AUDIT_BUILD_EXPECTED="2.2.2-rc2-chinese-first"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/29f737e68d1464fb209565acd9b77e297c1bb81b/experiments/p07-vps-audit-v22-r2.sh"
+VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f36"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -23,7 +22,7 @@ VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release4"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc16"
+SYSTEM_CARE_EXPECTED="0.1.0-rc17"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -38,7 +37,7 @@ screen_clear() { if [[ -t 1 ]]; then printf '\033[H\033[2J'; fi; }
 show_header() {
   screen_clear
   say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF Server Ops${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
+  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF 服务器运维${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
   say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
   say
 }
@@ -283,9 +282,9 @@ case "${1:-}" in
   --version|-V) printf 'P07 Toolbox %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
-P07 · VF Server Ops ${VERSION}
+P07 · VF 服务器运维 ${VERSION}
 
-Usage:
+用法：
   p07-toolbox
 
 1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
@@ -293,11 +292,11 @@ Usage:
 3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（可用）
 4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（可用）
 
-说明：用户界面仅显示 Vx.x.x 公共版本；RC / preview / zh 等构建标识只用于内部工程追溯。
+说明：普通界面只显示 Vx.x.x 公共版本；内部构建标识只用于工程校验，不要求用户理解。
 EOF
     ;;
   "")
-    if [[ -t 0 && -t 1 ]]; then main_menu; else printf 'ERROR: P07 Toolbox menu requires an interactive terminal.\n' >&2; exit 2; fi
+    if [[ -t 0 && -t 1 ]]; then main_menu; else printf '错误：P07 主菜单需要交互式终端。\n' >&2; exit 2; fi
     ;;
-  *) printf 'ERROR: unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  *) printf '错误：未知参数：%s\n' "$1" >&2; exit 2 ;;
 esac
