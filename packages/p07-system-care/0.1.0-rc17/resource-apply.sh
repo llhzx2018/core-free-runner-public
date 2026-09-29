@@ -25,8 +25,8 @@ calibrate_readonly() {
 
   ui_title "P07 · 生产环境只读校准"
   say
-  ui_note '本动作只读取当前 CPU / RAM / Swap / Load / PHP / MySQL 与配置。'
-  ui_good '不会 Apply，不会 reload/restart，不会写 PHP/MySQL/Swap/systemd。'
+  ui_note '本动作只读取当前 CPU / 内存 / 交换分区（Swap）/ 负载 / PHP / MySQL 与配置。'
+  ui_good '不会应用配置，不会重新加载或重启服务，不会写入 PHP / MySQL / Swap / systemd 配置。'
   say
   say "${C_BOLD}${C_CYAN}===== 配置方案预览 =====${C_RESET}"
   python3 "$profile_engine" preview --mode balanced
@@ -48,10 +48,10 @@ apply_balanced() {
   say
   say "${C_YELLOW}只有已 完成生产校准 的 1C/2GB 平衡方案 会放行。${C_RESET}"
   say '仅降低上限：只降低超额上限，不自动提高资源。'
-  say '不会自动 重启 MySQL，不会自动改 Swap，不会自动停未引用 PHP。'
+  say '不会自动重启 MySQL，不会自动修改 Swap，不会自动停用未引用 PHP。'
   say
   [[ -t 0 ]] || { fail '生产环境应用需要交互式终端。'; return 78; }
-  printf '请输入 APPLY_RESOURCE_PROFILE 确认执行，其他输入取消：'
+  printf '请输入确认码 APPLY_RESOURCE_PROFILE 执行，其他输入取消：'
   local token
   read -r token || return 78
   [[ "$token" == "APPLY_RESOURCE_PROFILE" ]] || { warn '已取消。'; return 0; }
@@ -84,7 +84,7 @@ rollback_state() {
   fi
   [[ -f "$state_dir/state.json" ]] || { fail '找不到 state.json。'; return 2; }
   say
-  printf '请输入 ROLLBACK_RESOURCE_PROFILE 确认回滚：'
+  printf '请输入确认码 ROLLBACK_RESOURCE_PROFILE 执行回滚：'
   local token
   read -r token || return 78
   [[ "$token" == "ROLLBACK_RESOURCE_PROFILE" ]] || { warn '已取消。'; return 0; }
