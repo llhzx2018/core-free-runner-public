@@ -130,26 +130,26 @@ class Menu3ModularTests(unittest.TestCase):
             "整机迁移（推荐）",
             "继续已有整机迁移",
             "全 Home SQLite",
-            "唯一人工 Gate：现在修改 DNS",
+            "唯一人工确认：现在修改 DNS",
             "server-migrate prepare",
             "server-migrate resume",
             "server-migrate cutover",
             "server-migrate finalize",
-            "SOURCE 继续保留作为 Recovery Copy（恢复副本）",
-            "P07 专用临时 Key",
+            "源服务器继续保留作为恢复副本",
+            "P07 专用临时密钥",
             "RETAINED_FOR_RECOVERY",
-            "结束 Recovery 保护并清理 P07 专用迁移 Key",
+            "结束恢复保护并清理 P07 专用迁移密钥",
             "CLEANUP_MANAGED_SSH_KEY:",
-            "只删除 P07 自己创建的迁移 Key",
-            "Recovery / 清理通道",
-            "TARGET → SOURCE 数据对账/反向同步",
+            "只删除 P07 自己创建的迁移密钥",
+            "恢复 / 清理通道",
+            "目标服务器 → 源服务器数据对账/反向同步",
             "禁止直接“只开旧机”回滚",
             "CUTOVER_RUNNING",
             "最终切换已从断点继续完成",
             "自动安装 CloudPanel",
             "BOOTSTRAP_CLOUDPANEL:",
             "MySQL 8.4",
-            "SOURCE 额外公网服务",
+            "源服务器额外公网服务",
             "非 CloudPanel 公网服务",
         ):
             self.assertIn(marker, text)
@@ -163,7 +163,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("TARGET_SITE_CONFLICT", text)
         self.assertIn("P07 不会覆盖", text)
         self.assertIn("DNS：未修改", text)
-        self.assertIn("SOURCE：保留", text)
+        self.assertIn("源服务器：保留", text)
         self.assertIn("ssh-copy-id", text)
 
 
