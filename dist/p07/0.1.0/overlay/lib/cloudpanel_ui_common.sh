@@ -166,7 +166,7 @@ show_site_details() {
   say "域名：${C_CYAN}$domain${C_RESET}"
   say "网站用户：$user"
   say "网站根目录：${C_GRAY}$root${C_RESET}"
-  say "Web 根目录：${C_GRAY}$docroot${C_RESET}"
+  say "网站公开目录：${C_GRAY}$docroot${C_RESET}"
   say "运行环境：$runtime $version"
   say "MySQL：$mysql · SQLite：$sqlite"
   case "$ssl" in
@@ -184,7 +184,7 @@ site_health() {
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"; docroot="${fields[3]}"
   say; ui_title '网站健康检查（只读）'; ui_rule
   [[ "$user" != UNKNOWN ]] && id "$user" >/dev/null 2>&1 && ui_good '网站用户：通过' || ui_bad '网站用户：未知/失败'
-  [[ "$docroot" != UNKNOWN && -d "$docroot" ]] && ui_good 'Web 根目录：通过' || ui_bad 'Web 根目录：未知/失败'
+  [[ "$docroot" != UNKNOWN && -d "$docroot" ]] && ui_good '网站公开目录：通过' || ui_bad '网站公开目录：未知/失败'
   if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX 配置：通过'; else ui_bad 'NGINX 配置：未知/失败'; fi
   http_code="$(curl -sS --max-time 8 --resolve "$domain:80:127.0.0.1" -o /dev/null -w '%{http_code}' "http://$domain/" 2>/dev/null || true)"
   https_code="$(curl -ksS --max-time 8 --resolve "$domain:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$domain/" 2>/dev/null || true)"

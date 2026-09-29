@@ -208,9 +208,9 @@ PY
 import json,os,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
 green=os.environ.get("C_GREEN",""); reset=os.environ.get("C_RESET","")
-ready=f"{green}READY{reset}" if green else "READY"
-print('Inventory：'+ready)
-print('Sites：'+str(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else [])))
+ready=f"{green}已就绪{reset}" if green else "已就绪"
+print('资源清单：'+ready)
+print('网站数量：'+str(len(p.get('sites',[]) if isinstance(p.get('sites'),list) else [])))
 PY
     else ui_bad '资源清单：未就绪'; fi
   else

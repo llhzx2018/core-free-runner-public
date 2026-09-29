@@ -3,9 +3,9 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-final.sh"
-EXPECTED_BLOB="cf140e00dfb507a698c925a59a9b6e0d157117e0"
+EXPECTED_BLOB="288cc1f9f4dbb4a027e6242b44bf2a8662f0b859"
 
-fail() { printf '\n[P07] ERROR: %s\n' "$*" >&2; exit 1; }
+fail() { printf '\n[P07] 错误：%s\n' "$*" >&2; exit 1; }
 
 if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
   if [[ ${EUID:-$(id -u)} -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
@@ -29,7 +29,7 @@ path,expected=sys.argv[1],sys.argv[2]
 data=open(path,'rb').read()
 actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
 if actual != expected:
-    print(f'installer blob mismatch: {actual} != {expected}', file=sys.stderr)
+    print(f'安装器文件身份不匹配：{actual} != {expected}', file=sys.stderr)
     raise SystemExit(1)
 PY
 
