@@ -15,6 +15,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 from typing import Any
 
 import inventory
@@ -537,6 +538,59 @@ def verify_package(package_dir: Path) -> dict[str, Any]:
     }
 
 
+def verification_failure_code(failures: list[str]) -> str:
+    ordered = [str(item) for item in failures]
+    prefixes = (
+        ("checksum:mysql/", "MYSQL_SNAPSHOT_CHANGED"),
+        ("checksum:sqlite/", "SQLITE_SNAPSHOT_CHANGED"),
+        ("checksum:files/", "SITE_SNAPSHOT_CHANGED"),
+        ("checksum:metadata/", "METADATA_SNAPSHOT_CHANGED"),
+        ("checksum:manifest.json", "MANIFEST_CHANGED"),
+        ("checksum:", "PACKAGE_FILE_CHANGED"),
+        ("mysql:", "MYSQL_SNAPSHOT_INVALID"),
+        ("sqlite:", "SQLITE_SNAPSHOT_INVALID"),
+        ("archive:empty", "SITE_ARCHIVE_EMPTY"),
+        ("archive:invalid", "SITE_ARCHIVE_INVALID"),
+        ("checksums:missing", "CHECKSUM_INDEX_MISSING"),
+        ("checksums:invalid-line", "CHECKSUM_INDEX_INVALID"),
+        ("symlink:", "EXTERNAL_LINK_FOUND"),
+    )
+    for prefix, code in prefixes:
+        if any(item.startswith(prefix) for item in ordered):
+            return code
+    return "FRESH_VERIFY_NOT_PASS"
+
+
+def verify_package_stable(
+    package_dir: Path,
+    *,
+    attempts: int = 4,
+    delay_seconds: float = 0.35,
+    consecutive_passes: int = 2,
+) -> dict[str, Any]:
+    if attempts < consecutive_passes or consecutive_passes < 1:
+        raise ValueError("invalid stable verification policy")
+    pass_count = 0
+    last: dict[str, Any] | None = None
+    for index in range(attempts):
+        current = verify_package(package_dir)
+        last = current
+        if current.get("status") == "PASS":
+            pass_count += 1
+            if pass_count >= consecutive_passes:
+                return current
+        else:
+            pass_count = 0
+        if index + 1 < attempts:
+            time.sleep(delay_seconds)
+    return last or {
+        "schema": VERIFY_SCHEMA,
+        "status": "FAIL",
+        "checksum_files_checked": 0,
+        "failures": ["verification:no-result"],
+    }
+
+
 def build_backup(
     root: Path,
     domain: str,
@@ -627,11 +681,16 @@ def build_backup(
         os.replace(staging, final_dir)
         committed = True
         chmod_private(final_dir, directory=True)
-        final_verification = verify_package(final_dir)
+        final_verification = verify_package_stable(final_dir)
         if final_verification["status"] != "PASS":
             failures = final_verification.get("failures", [])
-            reason = ",".join(str(item) for item in failures[:4]) if isinstance(failures, list) else "UNKNOWN"
-            raise RuntimeError(f"backup failed post-commit fresh verification: {reason or 'UNKNOWN'}")
+            safe_failures = [str(item) for item in failures] if isinstance(failures, list) else []
+            failure_code = verification_failure_code(safe_failures)
+            reason = ",".join(safe_failures[:4])
+            raise RuntimeError(
+                f"backup failed post-commit fresh verification [{failure_code}]: "
+                f"{reason or 'UNKNOWN'}"
+            )
         return final_dir
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
