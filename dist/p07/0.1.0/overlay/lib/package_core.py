@@ -570,6 +570,7 @@ def build_backup(
 
     staging = Path(tempfile.mkdtemp(prefix=f".{backup_id}.tmp-", dir=output_dir))
     chmod_private(staging, directory=True)
+    committed = False
     try:
         files_archive = staging / "files" / "site.tar.gz"
         add_site_archive(root, site_root, files_archive)
@@ -624,10 +625,18 @@ def build_backup(
         if verification["status"] != "PASS":
             raise RuntimeError("backup verification failed")
         os.replace(staging, final_dir)
+        committed = True
         chmod_private(final_dir, directory=True)
+        final_verification = verify_package(final_dir)
+        if final_verification["status"] != "PASS":
+            failures = final_verification.get("failures", [])
+            reason = ",".join(str(item) for item in failures[:4]) if isinstance(failures, list) else "UNKNOWN"
+            raise RuntimeError(f"backup failed post-commit fresh verification: {reason or 'UNKNOWN'}")
         return final_dir
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
+        if committed:
+            shutil.rmtree(final_dir, ignore_errors=True)
         raise
 
 
