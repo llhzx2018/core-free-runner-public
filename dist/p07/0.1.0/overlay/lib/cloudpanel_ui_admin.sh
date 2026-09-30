@@ -22,8 +22,8 @@ PY
         fi
         SECRET_VALUE=""; pause ;;
       2)
-        ui_bad '关闭后 CloudPanel 将失去这一层额外认证。'; ui_prompt '输入 DISABLE 继续：'; read -r confirm || true
-        if [[ "$confirm" == DISABLE ]]; then
+        ui_bad '关闭后 CloudPanel 将失去这一层额外认证。'; ui_safety_tier danger '会降低 CloudPanel 登录保护。'
+        if ui_confirm_exact DISABLE '输入 DISABLE 继续：'; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
 import cloudpanel
 cloudpanel.disable_panel_basic_auth()
@@ -95,8 +95,8 @@ PY
         SECRET_VALUE=""; pause ;;
       4)
         printf '用户名：'; read -r username || continue
-        ui_bad '关闭 2FA 会降低该用户登录保护。'; ui_prompt '输入 DISABLE-MFA 继续：'; read -r confirm || true
-        if [[ "$confirm" == DISABLE-MFA ]]; then
+        ui_bad '关闭 2FA 会降低该用户登录保护。'; ui_safety_tier danger '会降低该用户登录保护。'
+        if ui_confirm_exact DISABLE-MFA '输入 DISABLE-MFA 继续：'; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - "$username" <<'PY'
 import sys
 import cloudpanel
