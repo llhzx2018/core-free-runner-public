@@ -115,8 +115,9 @@ import_site_database() {
   if select_database; then db="$SELECTED_DATABASE"; else pause; return 0; fi
   printf 'SQL 文件绝对路径：'; read -r src || return 0
   [[ -f "$src" ]] || { printf '文件不存在。\n'; pause; return 0; }
-  say; ui_attention "注意：导入会修改数据库 $db 的数据，但不会删除数据库或网站。"; ui_prompt '输入 IMPORT 继续：'; read -r confirm || true
-  [[ "$confirm" == IMPORT ]] || return 0
+  say; ui_attention "注意：导入会修改数据库 $db 的数据，但不会删除数据库或网站。"
+  ui_safety_tier danger "将写入数据库 $db。"
+  ui_confirm_exact IMPORT '输入 IMPORT 继续：' || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$db" "$src" <<'PY'
 import sys
 import cloudpanel_site
