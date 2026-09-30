@@ -222,6 +222,7 @@ menu() {
 
 case "${1:-menu}" in
   --version|-V) printf 'P07 System Care %s\n' "$VERSION" ;;
+  --ui-contract) printf 'P07_BEGINNER_ZH_V1\n' ;;
   --help|-h) show_help ;;
   status|check) exec bash "$SCRIPT_DIR/status.sh" ;;
   audit) exec bash "$SCRIPT_DIR/audit.sh" ;;
