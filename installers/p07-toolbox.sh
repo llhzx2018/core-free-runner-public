@@ -44,9 +44,9 @@ show_header() {
 
 show_menu() {
   show_header
-  say "  ${C_GREEN}1.${C_RESET} 网络节点 / V2Ray              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} VPS 一键验机                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}3.${C_RESET} CloudPanel 备份 / 恢复 / 迁移  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "  ${C_GREEN}3.${C_RESET} 网站备份 / 恢复 / 迁移（CloudPanel）  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
@@ -207,7 +207,11 @@ run_server_ops() {
 
 local_system_care_version() {
   command -v vf-system-care >/dev/null 2>&1 || return 1
-  NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true
+  local version contract
+  version="$(NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true)"
+  contract="$(NO_COLOR=1 vf-system-care --ui-contract 2>/dev/null || true)"
+  [[ "$contract" == 'P07_BEGINNER_ZH_V1' ]] || return 1
+  printf '%s' "$version"
 }
 
 run_system_care() {

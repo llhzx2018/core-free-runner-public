@@ -96,6 +96,95 @@ run_action() {
   return 0
 }
 
+run_action_friendly() {
+  local script="$1"; shift || true
+  set +e
+  bash "$SCRIPT_DIR/$script" "$@" 2>&1 | sed -u     -e 's/APT 缓存/软件安装缓存/g'     -e 's/APT 更新列表/系统更新列表/g'     -e 's/systemd 日志/系统运行日志/g'     -e 's/systemd 服务/系统服务/g'     -e 's/Swap/虚拟内存（Swap）/g'     -e 's/OOM/内存不足保护（OOM）/g'     -e 's/SSH \/ 安全检查/登录与安全检查/g'     -e 's/SSH/远程登录（SSH）/g'     -e 's/Fail2ban/登录防护（Fail2ban）/g'     -e 's/Vhost/网站运行配置（Vhost）/g'     -e 's/JSON/工程数据（JSON）/g'     -e 's/Cron/定时任务（Cron）/g'     -e 's/PM2/Node.js 进程管理（PM2）/g'     -e 's/inode/文件索引（inode）/g'     -e 's/Root 登录/管理员（root）登录/g'
+  local rc=${PIPESTATUS[0]}
+  set -e
+  [[ $rc -eq 0 ]] || warn "操作返回退出码 ${rc}。"
+  return 0
+}
+
+updates_menu_beginner() {
+  local choice
+  while true; do
+    screen_clear
+    ui_title 'P07 · 系统更新'
+    say
+    ui_menu_good 1 '检查是否需要更新'
+    ui_menu_warn 2 '安装安全更新（推荐）'
+    ui_menu_warn 3 '安装全部可用更新（谨慎）'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '安全更新：主要修复系统漏洞。'
+    ui_note '全部更新：还会升级普通系统软件；P07 会先做安全检查，不会自动重启。'
+    say
+    printf '%b' "${C_BOLD}请选择 [0-3]：${C_RESET}"
+    read -r choice || return 0
+    case "$choice" in
+      1) run_action_friendly updates.sh status; pause_menu ;;
+      2) run_action_friendly updates.sh security; pause_menu ;;
+      3) run_action_friendly updates.sh all; pause_menu ;;
+      0) return 0 ;;
+      *) warn '无效选择，请输入 0-3。'; sleep 1 ;;
+    esac
+  done
+}
+
+cleanup_menu_beginner() {
+  local choice
+  while true; do
+    screen_clear
+    ui_title 'P07 · 磁盘空间清理'
+    say
+    ui_menu_good 1 '查看可以安全清理多少空间'
+    ui_menu_warn 2 '清理软件安装缓存'
+    ui_menu_warn 3 '清理旧系统运行日志（保留 14 天）'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '软件安装缓存：系统下载过的安装包，不是网站文件。'
+    ui_note '系统运行日志：Linux 自己的运行记录，不是网站访问日志。'
+    say
+    printf '%b' "${C_BOLD}请选择 [0-3]：${C_RESET}"
+    read -r choice || return 0
+    case "$choice" in
+      1) run_action_friendly cleanup.sh scan; pause_menu ;;
+      2) run_action_friendly cleanup.sh apt; pause_menu ;;
+      3) run_action_friendly cleanup.sh journal; pause_menu ;;
+      0) return 0 ;;
+      *) warn '无效选择，请输入 0-3。'; sleep 1 ;;
+    esac
+  done
+}
+
+resource_menu_beginner() {
+  local choice
+  while true; do
+    screen_clear
+    ui_title 'P07 · 资源配置建议'
+    say
+    ui_menu_good 1 '查看推荐配置（默认）'
+    ui_menu_info 2 '查看保守配置（稳定优先）'
+    ui_menu_info 3 '查看性能配置（并发优先）'
+    ui_menu_warn 9 '高级配置管理（懂技术再用）'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '前 3 项只给建议，不会修改服务器。高级配置管理才可能写配置。'
+    say
+    printf '%b' "${C_BOLD}请选择 [0-3,9]：${C_RESET}"
+    read -r choice || return 0
+    case "$choice" in
+      1) run_action_friendly resource-profile.sh preview --mode balanced; pause_menu ;;
+      2) run_action_friendly resource-profile.sh preview --mode conservative; pause_menu ;;
+      3) run_action_friendly resource-profile.sh preview --mode performance; pause_menu ;;
+      9) run_action_friendly resource-apply.sh menu; pause_menu ;;
+      0) return 0 ;;
+      *) warn '无效选择，请输入 0、1、2、3 或 9。'; sleep 1 ;;
+    esac
+  done
+}
+
 menu() {
   local choice
   while true; do
@@ -104,12 +193,12 @@ menu() {
     say
     ui_menu_good 1 '一键系统体检'
     ui_menu_warn 2 '系统更新'
-    ui_menu_warn 3 '磁盘 / 日志清理'
-    ui_menu_info 4 '内存 / Swap / OOM'
-    ui_menu_info 5 '服务异常诊断'
-    ui_menu_warn 6 'SSH / 安全检查'
-    ui_menu_info 7 '网站入侵留证'
-    ui_menu_good 8 '资源优化 / 配置推荐'
+    ui_menu_warn 3 '磁盘空间清理'
+    ui_menu_info 4 '内存检查'
+    ui_menu_info 5 '异常服务检查'
+    ui_menu_warn 6 '登录与安全检查'
+    ui_menu_info 7 '网站安全检查'
+    ui_menu_good 8 '资源配置建议'
     ui_menu_back 0 '返回'
     say
     ui_note '绿色=检查/推荐 · 黄色=会修改配置或需要关注 · 红色=高风险/回滚'
@@ -118,13 +207,13 @@ menu() {
     read -r choice || return 0
     case "$choice" in
       1) run_action audit.sh; pause_menu ;;
-      2) run_action updates.sh menu ;;
-      3) run_action cleanup.sh menu ;;
-      4) run_action memory.sh; pause_menu ;;
-      5) run_action services.sh; pause_menu ;;
-      6) run_action security-audit.sh; pause_menu ;;
+      2) updates_menu_beginner ;;
+      3) cleanup_menu_beginner ;;
+      4) run_action_friendly memory.sh; pause_menu ;;
+      5) run_action_friendly services.sh; pause_menu ;;
+      6) run_action_friendly security-audit.sh; pause_menu ;;
       7) run_action intrusion-evidence-entry.sh menu ;;
-      8) run_action resource-profile.sh menu; pause_menu ;;
+      8) resource_menu_beginner ;;
       0) return 0 ;;
       *) warn '无效选择，请输入 0-8。'; sleep 1 ;;
     esac
@@ -133,6 +222,7 @@ menu() {
 
 case "${1:-menu}" in
   --version|-V) printf 'P07 System Care %s\n' "$VERSION" ;;
+  --ui-contract) printf 'P07_BEGINNER_ZH_V1\n' ;;
   --help|-h) show_help ;;
   status|check) exec bash "$SCRIPT_DIR/status.sh" ;;
   audit) exec bash "$SCRIPT_DIR/audit.sh" ;;

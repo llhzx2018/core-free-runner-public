@@ -6,6 +6,7 @@ PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 SOURCE_REF="${P07_SYSTEM_CARE_SOURCE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${SOURCE_REF}/${PACKAGE_PATH}"
 MANIFEST_BLOB='70fe4da27d9907707e56ad0a8ca85daad0f8a0f5'
+BEGINNER_UI_BLOB='42d1437a875eb819ca887521fdedba795ce28df0'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -50,6 +51,7 @@ installed_version() {
 manager_ready() {
   [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -x "$TARGET/intrusion-evidence-entry.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_discovery.py" && -x "$TARGET/resource-profile.sh" && -f "$TARGET/lib/resource_profile.py" && -f "$TARGET/lib/resource_calibrations.py" && -x "$TARGET/resource-apply.sh" && -f "$TARGET/lib/resource_apply.py" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
+  [[ "$(git_blob_sha1 "$TARGET/vf-system-care.sh" 2>/dev/null || true)" == "$BEGINNER_UI_BLOB" ]] || return 1
   NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
 }
 
@@ -87,6 +89,7 @@ install_runtime() {
       return 11
     fi
     actual="$(git_blob_sha1 "$tmp/pkg/$path")"
+    [[ "$path" == 'vf-system-care.sh' ]] && expected="$BEGINNER_UI_BLOB"
     if [[ "$actual" != "$expected" ]]; then
       rm -rf "$tmp" "$stage"
       fail "运行文件完整性校验失败：${path}"
