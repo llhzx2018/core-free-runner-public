@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import textwrap
 import unittest
 
@@ -164,6 +167,19 @@ esac
             encoding="utf-8",
         )
         if verified:
+            files_dir = package / "files"
+            files_dir.mkdir(exist_ok=True)
+            archive = files_dir / "site.tar.gz"
+            payload = b"ok\n"
+            with tarfile.open(archive, "w:gz") as tf:
+                info = tarfile.TarInfo("site/index.txt")
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+            rows = []
+            for item in (package / "manifest.json", archive):
+                digest = hashlib.sha256(item.read_bytes()).hexdigest()
+                rows.append(f"{digest}  {item.relative_to(package).as_posix()}")
+            (package / "checksums.sha256").write_text("\n".join(rows) + "\n", encoding="utf-8")
             (package / "verification.json").write_text(
                 json.dumps({"status": "PASS"}), encoding="utf-8"
             )
@@ -199,7 +215,7 @@ esac
         self.assertNotIn("UNKNOWN", proc.stdout)
 
     def test_site_selection_has_zero_back_and_does_not_backup(self) -> None:
-        proc = self._run("2\n0\n0\n")
+        proc = self._run("2\n1\n0\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("0. 返回", proc.stdout)
         log = self.log.read_text(encoding="utf-8")
@@ -207,7 +223,7 @@ esac
         self.assertNotIn("backup --site", log)
 
     def test_backup_success_shows_beginner_result_card(self) -> None:
-        proc = self._run("2\n1\ny\n\n0\n")
+        proc = self._run("2\n1\n1\ny\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("备份完成 ✓", proc.stdout)
         self.assertIn("网站：one.example", proc.stdout)
@@ -217,7 +233,7 @@ esac
 
     def test_migration_unreachable_old_server_fails_before_pull(self) -> None:
         self._write_executable("ssh", "#!/usr/bin/env bash\necho 'Connection timed out' >&2\nexit 255\n")
-        proc = self._run("4\n1\n203.0.113.10\n\n0\n0\n")
+        proc = self._run("3\n1\n203.0.113.10\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("当前：这台新服务器（接收数据）", proc.stdout)
         self.assertIn("无法连接旧服务器：203.0.113.10", proc.stdout)
@@ -227,7 +243,7 @@ esac
 
     def test_migration_needs_new_to_old_key_and_can_return(self) -> None:
         self._write_executable("ssh", "#!/usr/bin/env bash\necho 'Permission denied (publickey).' >&2\nexit 255\n")
-        proc = self._run("4\n1\n203.0.113.10\n0\n\n0\n0\n")
+        proc = self._run("3\n1\n203.0.113.10\n0\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("这台新服务器还没有旧服务器的远程登录权限（SSH 密钥）", proc.stdout)
         self.assertIn("现在为新服务器准备专用迁移密钥", proc.stdout)
@@ -248,7 +264,7 @@ exit 0
         )
         self._write_executable("ssh", ssh)
         self._write_executable("ssh-copy-id", f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 0\n")
-        proc = self._run("4\n1\n203.0.113.10\n1\nn\n0\n0\n")
+        proc = self._run("3\n1\n203.0.113.10\n1\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("这台新服务器还没有旧服务器的远程登录权限（SSH 密钥）", proc.stdout)
         self.assertIn("如果系统询问 root 密码，请输入“旧服务器”的 root 密码", proc.stdout)
@@ -263,7 +279,7 @@ exit 0
             "ssh",
             "#!/usr/bin/env bash\nprintf P07_SSH_READY\nexit 43\n",
         )
-        proc = self._run("4\n1\n203.0.113.10\n\n0\n0\n")
+        proc = self._run("3\n1\n203.0.113.10\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("远程登录（SSH）可以连接，但旧服务器未检测到可用的网站面板（CloudPanel）", proc.stdout)
         self.assertIn("请确认旧服务器确实是要迁出的 CloudPanel 网站服务器", proc.stdout)
@@ -273,7 +289,7 @@ exit 0
     def test_migration_target_collision_fails_during_new_server_plan(self) -> None:
         self._ready_ssh()
         proc = self._run(
-            "4\n1\n203.0.113.10\n\n0\n0\n",
+            "3\n1\n203.0.113.10\n\n0\n0\n",
             {"VFOPS_TEST_MIGRATION_PLAN": "conflict"},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -286,7 +302,7 @@ exit 0
 
     def test_migration_ready_shows_pull_plan_and_dns_boundary(self) -> None:
         self._ready_ssh()
-        proc = self._run("4\n1\n203.0.113.10\ny\nn\n0\n0\n")
+        proc = self._run("3\n1\n203.0.113.10\ny\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("P07 · 服务器迁移", proc.stdout)
         self.assertIn("当前：这台新服务器（接收数据）", proc.stdout)
@@ -302,7 +318,7 @@ exit 0
 
     def test_unverified_backup_is_hidden_from_beginner_restore(self) -> None:
         self._make_backup("unverified_backup", verified=False)
-        proc = self._run("3\n\n0\n")
+        proc = self._run("2\n2\n\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         terminal = proc.stdout + proc.stderr
         self.assertIn("没有发现已验证、可恢复的 P07 本地备份", terminal)
@@ -311,7 +327,7 @@ exit 0
 
     def test_restore_manual_runtime_gate_is_not_reported_complete(self) -> None:
         self._make_backup()
-        proc = self._run("3\n1\n2\ny\n\n0\n", {"VFOPS_TEST_RUNTIME_PLAN": "manual"})
+        proc = self._run("2\n2\n1\n2\ny\n\n0\n", {"VFOPS_TEST_RUNTIME_PLAN": "manual"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("网站数据恢复完成 ✓", proc.stdout)
         self.assertIn("运行环境仍需按原恢复确认流程继续核验", proc.stdout)
@@ -322,7 +338,7 @@ exit 0
 
     def test_restore_ready_runtime_continues_to_complete(self) -> None:
         self._make_backup()
-        proc = self._run("3\n1\n2\ny\n\n0\n")
+        proc = self._run("2\n2\n1\n2\ny\n\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("网站数据恢复完成 ✓", proc.stdout)
         self.assertIn("DNS：未修改", proc.stdout)
@@ -342,7 +358,7 @@ exit 0
             encoding="utf-8",
         )
         os.chmod(core, 0o755)
-        proc = self._run("2\n1\ny\n\n0\n")
+        proc = self._run("2\n1\n1\ny\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("备份完整性检查没有通过", proc.stdout)
         self.assertIn("阶段：BACKUP", proc.stdout)
