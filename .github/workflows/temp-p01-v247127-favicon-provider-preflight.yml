@@ -1,0 +1,361 @@
+name: P01 V2.47.127 Favicon Provider Preflight
+
+on:
+  push:
+    branches:
+      - test-p01-v247127-favicon-provider-preflight-20260930
+    paths:
+      - '.github/workflows/temp-p01-v247127-favicon-provider-preflight.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      TARGET_SHA: d7671173e9b51d763dcd74667b94814db6874143
+      TARGET_TREE: 95bb22dd57049333287de1e661c546202e343d7c
+      VERSION: 2.47.127
+      SOURCE_VERSION: 2.47.126
+      ART: /tmp/p01-v247127-artifacts
+      REL: /tmp/p01-v247127-baseline
+      WORK: /tmp/p01-v247127-gate
+
+    steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: d7671173e9b51d763dcd74667b94814db6874143
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Checkout stable P01 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.126
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: stable
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq sqlite3 >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          echo P01_V247127_PREFLIGHT_RUNTIME=PASS
+
+      - name: Bind exact source and authority
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < product/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = "$VERSION"
+          grep -Fq "define('VF_VERSION', '$VERSION')" product/src/app/bootstrap.php
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE_VERSION"
+          test -z "$(git -C product status --porcelain)"
+          echo P01_V247127_EXACT_SOURCE=PASS
+
+      - name: Focused favicon provider security contracts
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/navigation_v247126_rail_icon_fix_contract.php
+          php tests/unit/navigation_v247127_favicon_provider_privacy_contract.php
+          php tests/unit/navigation_v247127_favicon_reliability_contract.php
+          php tests/unit/navigation_v247127_favicon_hotpath_contract.php
+          echo P01_V247127_FAVICON_FOCUSED_CONTRACTS=PASS
+
+      - name: Canonical regression against stable V2.47.126
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash tests/canonical_release_regression.sh . ../stable --require-zero-debt | tee /tmp/p01-v247127-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-v247127-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-v247127-canonical.txt
+          test -z "$(git status --porcelain)"
+          echo P01_V247127_CANONICAL_RELEASE_PROOF=PASS
+
+      - name: Resolve stable formal release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$REL"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "v$SOURCE_VERSION" -R "$PRODUCT_REPO" -D "$REL"             -p "VF-Start-V${SOURCE_VERSION}-FULL.zip"             -p "VF_Start_V${SOURCE_VERSION}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V${SOURCE_VERSION}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE_VERSION}_UPDATE.zip" -d "$REL/update"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE_VERSION"
+          test -f "$REL/update/repair-v${SOURCE_VERSION}.php"
+          echo P01_V247127_BASELINE_RELEASE=PASS
+
+      - name: Build exact maintenance artifacts without publishing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ART"
+          python3 runner/scripts/p01-maintenance-release.py             --candidate product/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE_VERSION}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE_VERSION"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" | tee /tmp/p01-v247127-build.json
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
+          jq -e --arg v "$VERSION" --arg s "$SOURCE_VERSION" --arg sha "$TARGET_SHA"             '.version==$v and .source_version==$s and .target_sha==$sha'             "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json" >/dev/null
+          echo P01_V247127_ARTIFACT_BUILD=PASS
+
+      - name: Clean FULL install, provider runtime, Atomic UPDATE and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$UPDATE" -d "$WORK/update"
+          REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+          test -f "$REPAIR"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-v247127-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-v247127-atomic-selftest.json
+
+          assert_no_private_payload() {
+            local zip="$1"
+            if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-v247127-private-hits.txt; then
+              cat /tmp/p01-v247127-private-hits.txt
+              echo PRIVATE_PAYLOAD_LEAK
+              exit 90
+            fi
+          }
+          assert_no_private_payload "$FULL"
+          assert_no_private_payload "$UPDATE"
+
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/p01-v247127-cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/p01-v247127-server-$port.log" 2>&1 &
+              echo $! >"/tmp/p01-v247127-server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/p01-v247127-server-$port.pid")"
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/p01-v247127-setup-$port.html"; then break; fi
+              sleep 1
+            done
+            kill -0 "$pid"
+            local csrf
+            csrf="$(python3 - "/tmp/p01-v247127-setup-$port.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+            )"
+            local pass="P01-V247127-Gate-$port!"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/p01-v247127-setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/p01-v247127-verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/p01-v247127-verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            kill "$pid" >/dev/null 2>&1 || true
+          }
+
+          install_full "$FULL" "$WORK/target-full" 18621 "VF Start V$VERSION FULL Gate"
+          test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+          echo P01_V247127_CLEAN_FULL_INSTALL=PASS
+
+          cat >"$WORK/target-full/provider-gate.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $cat=$repo->createCategory([
+              'name'=>'Provider Gate',
+              'description'=>'synthetic release fixture',
+              'icon'=>'',
+              'is_private'=>1,
+              'sort_order'=>0,
+          ]);
+
+          $private=$repo->saveLink(null,[
+              'surface'=>'start',
+              'category_id'=>$cat,
+              'title'=>'Provider Private Sensitive',
+              'url'=>'https://github.com/settings/tokens?token=SYNTHETIC_PROVIDER_GATE_ONLY',
+              'description'=>'synthetic provider contract',
+              'tags'=>['provider-gate'],
+              'is_private'=>1,
+              'is_pending'=>0,
+          ]);
+          $privateId=(int)$private['id'];
+          $icons=new VfIconCache($db);
+          $result=$icons->refreshOne($privateId,true,true,true);
+          if(empty($result['success'])||($result['provider']??'')!=='favicon.im'){
+              fwrite(STDERR,'provider fetch failed: '.json_encode(['success'=>$result['success']??false,'provider'=>$result['provider']??'','error'=>$result['error']??''],JSON_UNESCAPED_UNICODE)."\n");
+              exit(21);
+          }
+
+          $s=$db->prepare('SELECT source_url,file_name,mime_type,attempted_urls FROM icon_cache WHERE link_id=?');
+          $s->execute([$privateId]);
+          $row=$s->fetch(PDO::FETCH_ASSOC);
+          if(!$row) exit(22);
+          $source=(string)$row['source_url'];
+          if(!str_contains($source,'https://a.favicon.im/github.com')) exit(23);
+          foreach(['settings','token=','SYNTHETIC_PROVIDER_GATE_ONLY','github.com%2F'] as $forbidden){
+              if(str_contains($source,$forbidden)) exit(24);
+          }
+          $file=basename((string)$row['file_name']);
+          if($file===''||!is_file(VF_ICON_CACHE_DIR.'/'.$file)) exit(25);
+
+          $decorated=[[
+              'id'=>$privateId,
+              'url'=>'https://github.com/settings/tokens?token=SYNTHETIC_PROVIDER_GATE_ONLY',
+              'icon'=>'',
+          ]];
+          $icons->decorateLinks($decorated);
+          $local=(string)($decorated[0]['icon_cache_url']??'');
+          if(!str_starts_with($local,'/api.php?action=icon_asset&id='.$privateId.'&v=')) exit(26);
+          if(str_contains($local,'favicon.im')||str_contains($local,'github.com')) exit(27);
+
+          $localLink=$repo->saveLink(null,[
+              'surface'=>'start',
+              'category_id'=>$cat,
+              'title'=>'Provider Local Block',
+              'url'=>'https://127.0.0.1/admin?token=SYNTHETIC_LOCAL_ONLY',
+              'description'=>'synthetic local block',
+              'tags'=>['provider-gate'],
+              'is_private'=>1,
+              'is_pending'=>0,
+          ]);
+          $localId=(int)$localLink['id'];
+          $blocked=$icons->refreshOne($localId,true,true,true);
+          if(!empty($blocked['success'])) exit(28);
+          $s=$db->prepare('SELECT attempted_urls,last_error FROM icon_cache WHERE link_id=?');
+          $s->execute([$localId]);
+          $localRow=$s->fetch(PDO::FETCH_ASSOC);
+          if(!$localRow) exit(29);
+          $attempted=(string)($localRow['attempted_urls']??'');
+          if(str_contains($attempted,'favicon.im')||str_contains($attempted,'127.0.0.1')||str_contains($attempted,'SYNTHETIC_LOCAL_ONLY')) exit(30);
+
+          echo json_encode([
+              'provider'=>'favicon.im',
+              'private_sensitive_hostname_only'=>true,
+              'local_asset_only'=>true,
+              'local_private_host_blocked'=>true,
+              'mime'=>(string)$row['mime_type'],
+          ],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          PHP
+          php "$WORK/target-full/provider-gate.php" | tee /tmp/p01-v247127-provider-runtime.json
+          jq -e '.provider=="favicon.im" and .private_sensitive_hostname_only==true and .local_asset_only==true and .local_private_host_blocked==true' /tmp/p01-v247127-provider-runtime.json >/dev/null
+          rm "$WORK/target-full/provider-gate.php"
+          echo P01_V247127_PROVIDER_RUNTIME_SECURITY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE_VERSION}-FULL.zip" "$WORK/upgrade" 18622 "VF Start V$SOURCE_VERSION Upgrade Source"
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,[
+              'surface'=>'start',
+              'category_id'=>$cat,
+              'title'=>'Release Sentinel Link',
+              'url'=>'https://example.com/release-sentinel',
+              'description'=>'must survive atomic',
+              'tags'=>['release-sentinel'],
+              'is_private'=>1,
+              'is_pending'=>0
+          ]);
+          file_put_contents('/tmp/p01-v247127-sentinel-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-v247127-source-verify.json
+          grep -Fq '"ok":true' /tmp/p01-v247127-source-verify.json
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-v247127-atomic-success.json
+          grep -Fq '"ok":true' /tmp/p01-v247127-atomic-success.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-v247127-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-v247127-atomic-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-v247127-atomic-repeat.json
+          echo P01_V247127_ATOMIC_UPGRADE_IDEMPOTENCY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE_VERSION}-FULL.zip" "$WORK/rollback" 18623 "VF Start V$SOURCE_VERSION Rollback Source"
+          cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-v247127-rollback.out 2>/tmp/p01-v247127-rollback.err
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE_VERSION"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_V247127_ATOMIC_ROLLBACK=PASS
+
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_V247127_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE_VERSION"
+          echo P01_V247127_ARTIFACT_UPGRADE_SECURITY_GATE=PASS
+
+      - name: Public authority preflight coverage
+        shell: bash
+        run: |
+          cat <<'EOF'
+          PUBLIC_AUTHORITY_APPLICABILITY
+          INSTALL=REQUIRED/PASS
+          SECURITY=REQUIRED/PASS
+          TESTING=REQUIRED/PASS
+          UPGRADE=REQUIRED/PASS
+          DATA_SCHEMA=REQUIRED/PASS_SCHEMA_UNCHANGED_DATA_PRESERVED
+          API_PROVIDER=REQUIRED/PASS_HOSTNAME_ONLY_LIVE_PROVIDER
+          SEO=N_A_NO_SEO_CHANGE
+          CRON_JOB=N_A_NO_SCHEDULER_CHANGE
+          NOTIFICATION=N_A_NO_NOTIFICATION_CHANGE
+          OBSERVABILITY=N_A_NO_PRODUCTION_WRITE
+          PERFORMANCE=REQUIRED/PASS_PROVIDER_ONLY_3S_HOT_PATH_LOCAL_CACHE
+          GIT=REQUIRED/PASS_EXACT_SHA_TREE
+          UA_UI=REQUIRED/PASS_MACHINE_LOCAL_ICON_PATH_OWNER_PREVIEW_STILL_REQUIRED
+          OWNER_PREVIEW_RUNTIME_APPLICABILITY=REQUIRED
+          OWNER_PREVIEW_RUNTIME=BLOCKED_OWNER_PREVIEW
+          OWNER_REAL_USE=BLOCKED_OWNER_PREVIEW
+          FORMAL_RELEASE=NOT_AUTHORIZED_IN_THIS_WORKFLOW
+          DISTRIBUTION=NOT_AUTHORIZED_IN_THIS_WORKFLOW
+          PRODUCTION=UNCHANGED
+          P01_V247127_FAVICON_PROVIDER_PREFLIGHT=PASS
+          EOF
