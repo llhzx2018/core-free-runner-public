@@ -1,0 +1,141 @@
+name: P01 V2.47.130 Production Favicon Audit
+
+on:
+  push:
+    branches:
+      - test-p01-v247130-production-favicon-audit-20260930
+    paths:
+      - '.github/workflows/temp-p01-v247130-production-favicon-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact P01 V2.47.130 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: af00cd21a437edee027d41979f9749ce34ac06f5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Audit screenshot domains through exact provider and direct resolver
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v247130-favicon-prod-audit.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+
+          require getcwd().'/product/src/app/bootstrap.php';
+
+          $samples = [
+              ['title'=>'Incogniton','url'=>'https://incogniton.com/','direct'=>true],
+              ['title'=>'cocodot','url'=>'https://cocodot.co/','direct'=>true],
+              ['title'=>'FullStory','url'=>'https://www.fullstory.com/','direct'=>true],
+              ['title'=>'Nimi Places','url'=>'https://mynimi.net/','direct'=>false],
+              ['title'=>'Motrix','url'=>'https://motrix.app/','direct'=>false],
+              ['title'=>'冰凌五笔','url'=>'https://icesofts.com/','direct'=>false],
+              ['title'=>'7-Zip','url'=>'https://7-zip.org/','direct'=>false],
+              ['title'=>'ShareX','url'=>'https://getsharex.com/','direct'=>false],
+              ['title'=>'4K YouTube Downloader','url'=>'https://youtube4kdownloader.com/','direct'=>false],
+          ];
+
+          $ref = new ReflectionClass(VfIconCache::class);
+          $cache = $ref->newInstanceWithoutConstructor();
+          $providerUrl = $ref->getMethod('faviconProviderUrl');
+          $providerUrl->setAccessible(true);
+          $fetchProvider = $ref->getMethod('fetchProviderIcon');
+          $fetchProvider->setAccessible(true);
+          $validate = $ref->getMethod('validateImage');
+          $validate->setAccessible(true);
+          $iconCandidates = $ref->getMethod('iconCandidates');
+          $iconCandidates->setAccessible(true);
+          $fetchFollowing = $ref->getMethod('fetchFollowing');
+          $fetchFollowing->setAccessible(true);
+          $originUrl = $ref->getMethod('originUrl');
+          $originUrl->setAccessible(true);
+
+          foreach ($samples as $sample) {
+              $row = [
+                  'title'=>$sample['title'],
+                  'url'=>$sample['url'],
+                  'host'=>(string)parse_url($sample['url'], PHP_URL_HOST),
+                  'provider_ok'=>false,
+                  'provider_url'=>'',
+                  'provider_error'=>'',
+              ];
+
+              try {
+                  $purl = (string)$providerUrl->invoke($cache, $sample['url']);
+                  $row['provider_url'] = $purl;
+                  if ($purl === '') {
+                      $row['provider_error'] = 'provider_url_empty';
+                  } else {
+                      $response = $fetchProvider->invoke($cache, $purl, 1024 * 1024);
+                      $image = $validate->invoke($cache, (string)$response['body'], (string)$response['contentType']);
+                      $row['provider_ok'] = true;
+                      $row['provider_status'] = (int)($response['status'] ?? 0);
+                      $row['provider_content_type'] = (string)($response['contentType'] ?? '');
+                      $row['provider_mime'] = (string)($image['mime'] ?? '');
+                      $row['provider_width'] = (int)($image['width'] ?? 0);
+                      $row['provider_height'] = (int)($image['height'] ?? 0);
+                      $row['provider_bytes'] = strlen((string)$response['body']);
+                  }
+              } catch (Throwable $e) {
+                  $row['provider_error'] = $e->getMessage();
+              }
+
+              if (!empty($sample['direct'])) {
+                  $row['direct_ok'] = false;
+                  $row['direct_error'] = '';
+                  $row['direct_candidates'] = [];
+                  try {
+                      $candidates = $iconCandidates->invoke($cache, ['url'=>$sample['url'],'icon'=>''], false);
+                      $row['direct_candidates'] = array_values(array_slice($candidates, 0, 8));
+                      $origin = (string)$originUrl->invoke($cache, $sample['url']);
+                      $referer = $origin !== '' ? $origin.'/' : '';
+                      $errors = [];
+                      foreach ($candidates as $candidate) {
+                          try {
+                              $response = $fetchFollowing->invoke(
+                                  $cache,
+                                  (string)$candidate,
+                                  1024 * 1024,
+                                  'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                                  false,
+                                  $referer
+                              );
+                              $image = $validate->invoke($cache, (string)$response['body'], (string)$response['contentType']);
+                              $row['direct_ok'] = true;
+                              $row['direct_source'] = (string)($response['url'] ?? $candidate);
+                              $row['direct_content_type'] = (string)($response['contentType'] ?? '');
+                              $row['direct_mime'] = (string)($image['mime'] ?? '');
+                              $row['direct_width'] = (int)($image['width'] ?? 0);
+                              $row['direct_height'] = (int)($image['height'] ?? 0);
+                              $row['direct_bytes'] = strlen((string)$response['body']);
+                              break;
+                          } catch (Throwable $e) {
+                              $errors[] = $e->getMessage();
+                          }
+                      }
+                      if (!$row['direct_ok']) {
+                          $row['direct_error'] = implode(' | ', array_slice(array_values(array_unique($errors)), 0, 4));
+                      }
+                  } catch (Throwable $e) {
+                      $row['direct_error'] = $e->getMessage();
+                  }
+              }
+
+              echo json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)."\n";
+          }
+
+          echo "P01_V247130_FAVICON_PRODUCTION_AUDIT=PASS\n";
+          PHP
+
+          php /tmp/p01-v247130-favicon-prod-audit.php
