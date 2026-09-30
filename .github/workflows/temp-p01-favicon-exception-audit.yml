@@ -15,6 +15,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Checkout exact P01 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: fac9aab3b82d4b08e72d6cfe42773330d7abe96c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
       - name: Audit provider and source favicon behavior
         shell: bash
         run: |
@@ -61,3 +70,37 @@ jobs:
           print(json.dumps(out,indent=2,ensure_ascii=False))
           PY
           echo P01_FAVICON_EXCEPTION_AUDIT=PASS
+
+      - name: Feed real provider SVGs through P01 validator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for domain in voluum.com webcare360.com; do
+            curl -fsS --max-time 12 "https://a.favicon.im/${domain}?throw-error-on-404=true" -o "/tmp/${domain}.svg"
+          done
+          cat >/tmp/favicon-validator-gate.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/product/src/app/bootstrap.php';
+          $ref=new ReflectionClass(VfIconCache::class);
+          $cache=$ref->newInstanceWithoutConstructor();
+          $m=$ref->getMethod('validateImage');
+          $m->setAccessible(true);
+          foreach(['voluum.com','webcare360.com'] as $domain){
+              $bytes=(string)file_get_contents('/tmp/'.$domain.'.svg');
+              try{
+                  $r=$m->invoke($cache,$bytes,'image/svg+xml');
+                  echo json_encode(['domain'=>$domain,'accepted'=>true,'mime'=>$r['mime']??'','width'=>$r['width']??0,'height'=>$r['height']??0],JSON_UNESCAPED_SLASHES)."\n";
+              }catch(Throwable $e){
+                  $tags=[];
+                  if(preg_match_all('/<\/?([A-Za-z][A-Za-z0-9:_-]*)\b/', $bytes, $mm)) $tags=array_values(array_unique(array_map('strtolower',$mm[1])));
+                  $attrs=[];
+                  foreach(['style=','href=','xlink:href=','url(','<style','<use','<image','<filter','<fe','<animate',' on'] as $needle){
+                      if(stripos($bytes,$needle)!==false)$attrs[]=$needle;
+                  }
+                  echo json_encode(['domain'=>$domain,'accepted'=>false,'error'=>$e->getMessage(),'tags'=>$tags,'active_markers'=>$attrs],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+              }
+          }
+          PHP
+          php /tmp/favicon-validator-gate.php
+          echo P01_FAVICON_REAL_SVG_VALIDATOR_AUDIT=PASS
