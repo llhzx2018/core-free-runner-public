@@ -1,0 +1,157 @@
+name: P01 V2.47.133 Temporary Preview Runtime
+
+on:
+  push:
+    branches:
+      - sandbox-p01-v247133-preview-runtime-20260930
+    paths:
+      - '.github/workflows/temp-p01-v247133-preview-runtime.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout public runner coordination branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: sandbox-p01-v247133-preview-runtime-20260930
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Checkout exact private P01 candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: fa2741d17bb54ce2e204a944a2f710d8436473ca
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Generate ephemeral SSH key and publish public half
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preview-coordination
+          rm -f /tmp/p01-preview-key /tmp/p01-preview-key.pub
+          ssh-keygen -q -t ed25519 -N '' -C 'p01-v247133-preview-runtime' -f /tmp/p01-preview-key
+          cp /tmp/p01-preview-key.pub preview-coordination/P01_V247133.pub
+          git config user.name 'vf-preview-runner'
+          git config user.email 'actions@users.noreply.github.com'
+          git add preview-coordination/P01_V247133.pub
+          if ! git diff --cached --quiet; then
+            git commit -m 'sandbox(P01): publish preview SSH public key'
+            git push origin HEAD:sandbox-p01-v247133-preview-runtime-20260930
+          fi
+          echo P01_PREVIEW_PUBLIC_KEY_READY=YES
+
+      - name: Wait for preview target
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='preview-coordination/P01_V247133.target'
+          for i in $(seq 1 120); do
+            git pull --ff-only origin sandbox-p01-v247133-preview-runtime-20260930 >/dev/null 2>&1 || true
+            if [ -s "$target" ]; then
+              cp "$target" /tmp/p01-preview-target
+              echo P01_PREVIEW_TARGET_READY=YES
+              exit 0
+            fi
+            sleep 5
+          done
+          echo P01_PREVIEW_TARGET_READY=NO
+          exit 1
+
+      - name: Deploy exact candidate to temporary runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          IP="$(tr -d '[:space:]' </tmp/p01-preview-target)"
+          test -n "$IP"
+          chmod 600 /tmp/p01-preview-key
+
+          for i in $(seq 1 60); do
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -o ConnectTimeout=5 -i /tmp/p01-preview-key root@"$IP" 'echo ready' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 5
+          done
+
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'echo preview-ssh-ready'
+
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          if [ ! -f /swapfile ]; then
+            fallocate -l 1G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null
+            swapon /swapfile
+          fi
+          apt-get update -y
+          apt-get install -y nginx php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-curl php8.3-zip php8.3-mbstring php8.3-xml curl ca-certificates
+          mkdir -p /var/www/p01-preview
+          rm -rf /var/www/p01-preview/*
+          REMOTE
+
+          tar -C product/src -czf - . | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'tar -xzf - -C /var/www/p01-preview'
+
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          chown -R www-data:www-data /var/www/p01-preview
+          find /var/www/p01-preview -type d -exec chmod 0755 {} +
+          find /var/www/p01-preview -type f -exec chmod 0644 {} +
+          cat >/etc/nginx/sites-available/p01-preview <<'NGINX'
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+              root /var/www/p01-preview;
+              index index.php index.html;
+              client_max_body_size 32m;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$query_string;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+              }
+
+              location ~ /\. {
+                  deny all;
+              }
+          }
+          NGINX
+          rm -f /etc/nginx/sites-enabled/default
+          ln -sfn /etc/nginx/sites-available/p01-preview /etc/nginx/sites-enabled/p01-preview
+          nginx -t
+          systemctl enable --now php8.3-fpm nginx
+          systemctl restart php8.3-fpm nginx
+          REMOTE
+
+          for i in $(seq 1 30); do
+            code="$(curl -sS -o /tmp/setup.html -w '%{http_code}' "http://$IP/setup.php" || true)"
+            if [ "$code" = "200" ]; then
+              break
+            fi
+            sleep 2
+          done
+          grep -q 'VF Start' /tmp/setup.html
+          printf '%s\n' "$IP" > preview-coordination/P01_V247133.ready
+          git add preview-coordination/P01_V247133.ready
+          git commit -m 'sandbox(P01): record preview runtime ready'
+          git push origin HEAD:sandbox-p01-v247133-preview-runtime-20260930
+          echo "P01_PREVIEW_RUNTIME_READY=YES"
+          echo "P01_PREVIEW_URL=http://$IP/"
+          echo "P01_PREVIEW_EXACT_SOURCE=fa2741d17bb54ce2e204a944a2f710d8436473ca"
+
+      - name: Cleanup ephemeral private key
+        if: always()
+        shell: bash
+        run: |
+          rm -f /tmp/p01-preview-key /tmp/p01-preview-key.pub
