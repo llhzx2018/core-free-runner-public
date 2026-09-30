@@ -58,6 +58,7 @@ local_node_version() {
 }
 
 run_network_node() {
+  screen_clear
   if [[ "$(local_node_version || true)" == "$VF_NODE_EXPECTED" ]]; then
     vf-node
     return $?
@@ -99,6 +100,7 @@ render_vps_audit_output() {
 }
 
 run_vps_audit() {
+  screen_clear
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
 
   local tmp actual_sha version build_id rc cmd
@@ -173,6 +175,7 @@ local_server_ops_build() {
 }
 
 run_server_ops() {
+  screen_clear
   if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" && \
         "$(local_server_ops_build || true)" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then
     vfops
@@ -208,6 +211,7 @@ local_system_care_version() {
 }
 
 run_system_care() {
+  screen_clear
   if [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]; then
     vf-system-care menu
     return $?
