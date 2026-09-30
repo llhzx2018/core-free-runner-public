@@ -1,0 +1,97 @@
+name: P07 Release14 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release14-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release14 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: e1a8e7e2aac3b136614e3b6db21ab85d992b35da
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'e1a8e7e2aac3b136614e3b6db21ab85d992b35da'
+          test "$(cat BUILD_ID)" = '0.1.0-release14'
+          grep -Fq '## Stable Final Verification Contract' docs/authority/RPD.md
+          grep -Fq '| B46 | Stable Final Verification / Exact Beginner Diagnosis |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'verify_package_stable' lib/package_core.py
+          grep -Fq 'verification_failure_code' lib/package_core.py
+          grep -Fq 'SITE_ARCHIVE_INVALID' lib/diagnostics.py
+          grep -Fq "blocker_text='网站文件压缩包无法完整读取" lib/terminal_ui.sh
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops
+          bash -n bin/vfops-site-ui
+          bash -n lib/terminal_ui.sh
+          python3 -m py_compile lib/package.py lib/package_core.py lib/diagnostics.py
+
+      - name: Release14 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_release14_final_verify             tests.test_release13_mysql_snapshot             tests.test_release12_backup_freshness             tests.test_backup             tests.test_backup_frontend             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Stable verification fail-closed assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          core=Path('lib/package_core.py').read_text(encoding='utf-8')
+          assert 'consecutive_passes: int = 2' in core
+          assert 'attempts: int = 4' in core
+          assert 'pass_count = 0' in core
+          assert 'backup failed post-commit fresh verification [' in core
+
+          diag=Path('lib/diagnostics.py').read_text(encoding='utf-8')
+          for token in (
+              'MYSQL_SNAPSHOT_INVALID','SQLITE_SNAPSHOT_INVALID',
+              'SITE_ARCHIVE_EMPTY','SITE_ARCHIVE_INVALID',
+              'CHECKSUM_INDEX_MISSING','CHECKSUM_INDEX_INVALID',
+              'EXTERNAL_LINK_FOUND','MANIFEST_CHANGED','PACKAGE_FILE_CHANGED',
+          ):
+              assert token in diag
+          PY
+
+      - name: Security and safety boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'DNS：未修改' bin/vfops-site-ui
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE14_EXACT_SOURCE=e1a8e7e2aac3b136614e3b6db21ab85d992b35da'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
