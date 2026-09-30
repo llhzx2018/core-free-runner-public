@@ -1,0 +1,290 @@
+name: S01-C02 V1.21.964 R15 Screenshot Closure Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-v121964-r15-screenshot-gate.yml'
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_SHA: e589a53efa7d3556a5b546c87fb4cb70d3c004db
+  BASE_SHA: 57dc667c3713c71f3ad7efeb859d5e7fe1926551
+  TARGET_VERSION: 1.21.964
+  BASE_VERSION: 1.21.963
+  ARTIFACT_NAME: vf-tools-ops_V1.21.964.zip
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact bounded diff and R15 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '$TARGET_VERSION'" target/vf-ops.php
+          grep -Fq "S01-PAGE-BODY-V2-PRODUCTION-REALUSE-R15" target/vf-ops.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          cat > /tmp/allowed <<'EOF'
+          CHANGELOG.md
+          VERSION
+          assets/css/current/admin-s01-page-frame-r15.css
+          assets/js/admin-s01-page-frame-r15.js
+          includes/views/admin-style-helpers/admin-s01-uiux-polish.php
+          tests/s01-c02-prod-realuse-r15-production-screenshot-closure-contract.php
+          vf-ops.php
+          EOF
+          sort -u evidence/changed-files.txt >/tmp/actual
+          sort -u /tmp/allowed >/tmp/expected
+          diff -u /tmp/expected /tmp/actual
+          php target/tests/s01-c02-prod-realuse-r15-production-screenshot-closure-contract.php
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          ! grep -RIlE --exclude-dir=.git -- '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,})' target | grep -q .
+          echo 'R15_SOURCE_CONTRACT=PASS'
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): out[rel.as_posix()]=p.read_bytes()
+              return dict(sorted(out.items()))
+          def fp(fs):
+              h=hashlib.sha256()
+              for rel,data in sorted(fs.items()):
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return h.hexdigest()
+          def pack(root,out):
+              fs=files(root)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(fs.items()):
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,30,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+              return fs
+          rows={}
+          for label,root,ver,out in [('baseline',Path('baseline'),'1.21.963',Path('/tmp/vf-tools-ops_V1.21.963.zip')),('candidate',Path('target'),'1.21.964',Path('/tmp/vf-tools-ops_V1.21.964.zip'))]:
+              fs=pack(root,out)
+              rows[label]={'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':fp(fs)}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          cp "/tmp/$ARTIFACT_NAME" "evidence/$ARTIFACT_NAME"
+          unzip -tq "evidence/$ARTIFACT_NAME"
+
+      - name: Upgrade preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r15g-${GITHUB_RUN_ID}"; DB="vf-r15g-db-${GITHUB_RUN_ID}"; WP="vf-r15g-wp-${GITHUB_RUN_ID}"
+          PORT="$((19000 + (GITHUB_RUN_ID % 9000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V1.21.963.zip "$WP:/tmp/base.zip"
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/candidate.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R15 Gate' --admin_user=admin --admin_password='VF-R15-Gate!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/base.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html 'update_option("vf_ops_r15_fixture",["keep"=>"yes"],false);'
+          docker exec "$WP" wp plugin install /tmp/candidate.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            do_action("admin_init");
+            if (VF_OPS_VERSION!=="1.21.964") exit(2);
+            $x=get_option("vf_ops_r15_fixture",[]);
+            if (($x["keep"]??"")!=="yes") exit(3);
+            if (count(vf_tools_ops_v6_table_suffixes())!==48) exit(4);
+            echo "UPGRADE_PRESERVATION=PASS\n";
+          '
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated browser regression
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R15-Gate!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node browser-e2e.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/browser.json"
+          jq -e '.result=="PASS" and .login=="PASS" and .blocking_errors==0 and .responsive_failures==0' "$GITHUB_WORKSPACE/evidence/browser.json" >/dev/null
+
+      - name: R15 Production-screenshot composition proof
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R15-Gate!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          cat > r15-visual-proof.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          (async()=>{
+            const base=process.argv[2], out=process.argv[3];
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage({viewport:{width:1440,height:1100}});
+            await page.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#user_login','admin');
+            await page.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),page.click('#wp-submit')]);
+
+            const routes=[
+              ['dashboard','/wp-admin/admin.php?page=vf-toolsite-ops'],
+              ['seo_keywords','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=keywords&vf_keyword_workspace=map'],
+              ['seo_refine','/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=refine'],
+              ['system_plugins','/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=plugins'],
+              ['system_recovery','/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=recovery']
+            ];
+            const rows=[];
+            for(const [name,path] of routes){
+              await page.goto(base+path,{waitUntil:'networkidle'});
+              await page.waitForTimeout(120);
+              rows.push(await page.evaluate((name)=>{
+                const head=document.querySelector('[data-vf-unified-pagehead="r44"]');
+                const rect=head?.getBoundingClientRect();
+                const css=[...document.querySelectorAll('link[rel="stylesheet"]')];
+                const r14=css.find(x=>x.href.includes('admin-s01-page-frame-r14.css'));
+                const r15=css.find(x=>x.href.includes('admin-s01-page-frame-r15.css'));
+                const common={
+                  name,
+                  ready:document.documentElement.getAttribute('data-vf-r15-screenshot-closure')==='ready',
+                  head:!!head,
+                  headHeight:rect?Math.round(rect.height):0,
+                  r15AfterR14:!!r15 && (!r14 || css.indexOf(r15)>css.indexOf(r14)),
+                  overflow:document.documentElement.scrollWidth>window.innerWidth,
+                  productFooter:!!document.querySelector('.vf-v14-product-footer')
+                };
+                if(name==='dashboard'){
+                  const toolbar=document.querySelector('.vf-v9-toolbar');
+                  common.dashboard={
+                    summaryInHead:!!head?.querySelector('.vf-r15-pagehead-context .vf-v9-summary'),
+                    actionsInHead:(head?.querySelectorAll('[data-vf-r15-pagehead-actions] .button').length||0)>=2,
+                    detachedToolbarGone:!toolbar || getComputedStyle(toolbar).display==='none'
+                  };
+                }
+                if(name==='seo_keywords'){
+                  const hero=document.querySelector('.vf-keyword-hero');
+                  common.keyword={
+                    metricsInHead:!!head?.querySelector('.vf-r15-pagehead-context .vf-keyword-hero-meta'),
+                    oldHeroGone:!hero || getComputedStyle(hero).display==='none'
+                  };
+                }
+                if(name==='seo_refine'){
+                  const hero=document.querySelector('.vf-o7-selector-hero');
+                  common.refine={
+                    metricsInHead:!!head?.querySelector('.vf-r15-pagehead-context .vf-o7-summary'),
+                    oldHeroGone:!hero || getComputedStyle(hero).display==='none'
+                  };
+                }
+                if(name==='system_plugins'){
+                  const status=head?.querySelector('.vf-plugin-head-status small');
+                  const dep=document.querySelector('#vf-plugin-dependency');
+                  const overview=document.querySelector('.vf-system-overview');
+                  common.system={
+                    humanStatus:!!status && status.textContent.includes('最终线上验收') && !status.textContent.includes('FINAL_ONLINE_PASS'),
+                    dependencyCollapsed:!!dep && !dep.open,
+                    overviewColumns:overview?getComputedStyle(overview).gridTemplateColumns.split(' ').filter(Boolean).length:0
+                  };
+                }
+                if(name==='system_recovery'){
+                  const oldHead=document.querySelector('.vf-recovery-head');
+                  const faults=document.querySelector('#vf-recovery-faults');
+                  const baseline=document.querySelector('#vf-recovery-baseline');
+                  const hb=head?.getBoundingClientRect(), bb=baseline?.getBoundingClientRect();
+                  common.recovery={
+                    summaryInHead:!!head?.querySelector('.vf-r15-pagehead-context .vf-recovery-summary'),
+                    nextInHead:!!head?.querySelector('.vf-r15-pagehead-context .vf-recovery-next'),
+                    oldHeroGone:!oldHead || getComputedStyle(oldHead).display==='none',
+                    faultsCollapsed:!!faults && !faults.open,
+                    firstSectionGap:(hb&&bb)?Math.round(bb.top-hb.bottom):999
+                  };
+                }
+                return common;
+              },name));
+            }
+            const pass=rows.every(x=>
+              x.ready && x.head && x.headHeight>0 && x.headHeight<210 && x.r15AfterR14 && !x.overflow && x.productFooter &&
+              (!x.dashboard || (x.dashboard.summaryInHead && x.dashboard.actionsInHead && x.dashboard.detachedToolbarGone)) &&
+              (!x.keyword || (x.keyword.metricsInHead && x.keyword.oldHeroGone)) &&
+              (!x.refine || (x.refine.metricsInHead && x.refine.oldHeroGone)) &&
+              (!x.system || (x.system.humanStatus && x.system.dependencyCollapsed && x.system.overviewColumns===3)) &&
+              (!x.recovery || (x.recovery.summaryInHead && x.recovery.nextInHead && x.recovery.oldHeroGone && x.recovery.faultsCollapsed && x.recovery.firstSectionGap<40))
+            );
+            fs.writeFileSync(out,JSON.stringify({result:pass?'PASS':'FAIL',routes:rows},null,2));
+            await browser.close();
+            if(!pass) process.exit(1);
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          node r15-visual-proof.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/r15-visual.json" || true
+          cat "$GITHUB_WORKSPACE/evidence/r15-visual.json"
+          jq -e '.result=="PASS"' "$GITHUB_WORKSPACE/evidence/r15-visual.json" >/dev/null
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$TARGET_SHA" --arg version "$TARGET_VERSION" --argjson package "$(cat evidence/package.json)" --argjson browser "$(cat evidence/browser.json)" --argjson visual "$(cat evidence/r15-visual.json)" '{status:"PASS",candidate_sha:$sha,candidate_version:$version,package:$package,browser:$browser,r15_visual:$visual,upgrade:"PASS",security:"PASS",r15_contract:"PASS",production:"NOT_EXECUTED"}' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "evidence/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+          echo 'S01-C02 V1.21.964 R15 SCREENSHOT CLOSURE MACHINE PASS'
+
+      - name: Upload exact candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.964-r15-candidate
+          path: evidence/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
