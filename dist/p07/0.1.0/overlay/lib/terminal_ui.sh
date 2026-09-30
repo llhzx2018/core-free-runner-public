@@ -80,4 +80,22 @@ ui_safe_diagnostic() {
   [[ -n "$blocker" ]] && ui_note "原因代码：$blocker"
   return 0
 }
+
+ui_safety_tier() {
+  local tier="${1:-read}" text="${2:-}"
+  case "$tier" in
+    read) say "${C_GREEN}只读：${C_RESET}${text}" ;;
+    write) say "${C_YELLOW}会修改配置：${C_RESET}${text}" ;;
+    migration) say "${C_MAGENTA}迁移 / 切换：${C_RESET}${text}" ;;
+    danger) say "${C_RED}高风险写入：${C_RESET}${text}" ;;
+    *) say "$text" ;;
+  esac
+}
+ui_confirm_exact() {
+  local token="$1" prompt="${2:-输入 $1 继续：}" value
+  ui_prompt "$prompt"
+  read -r value || return 1
+  [[ "$value" == "$token" ]]
+}
+
 ui_prompt() { printf '%b' "${C_BOLD}$*${C_RESET}"; }
