@@ -19,13 +19,11 @@ class Menu3ModularTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for text in (
-            "1. 服务器与网站概况",
-            "2. 备份网站",
-            "3. 恢复网站",
-            "4. 服务器迁移（整机 / 单站）",
-            "5. 自动备份 / 异地备份",
-            "6. 网站管理",
-            "7. 面板管理（CloudPanel）",
+            "1. 网站与服务器概况",
+            "2. 备份与恢复",
+            "3. 服务器迁移",
+            "4. 网站管理",
+            "5. 面板管理（CloudPanel）",
         ):
             self.assertIn(text, proc.stdout)
 
@@ -37,6 +35,12 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("vfops-cloudpanel-ui", text)
         self.assertIn('run_module "$CLOUDPANEL_UI" site', text)
         self.assertIn('run_module "$CLOUDPANEL_UI" admin', text)
+        self.assertIn("backup_menu()", text)
+        self.assertIn("立即备份一个网站", text)
+        self.assertIn("从备份恢复网站", text)
+        self.assertIn("自动备份 / 异地备份", text)
+        self.assertNotIn('8) run_module "$DIAG_UI"', text)
+        self.assertNotIn('10) run_module "$SELFCHECK_UI"', text)
         self.assertIn("--advanced", text)
 
     def test_restore_ui_exposes_restore_as_and_preserves_no_overwrite(self) -> None:
