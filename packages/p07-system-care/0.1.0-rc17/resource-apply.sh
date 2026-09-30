@@ -23,18 +23,18 @@ calibrate_readonly() {
   local profile_engine="$SCRIPT_DIR/lib/resource_profile.py"
   [[ -f "$profile_engine" ]] || { fail '资源配置方案 引擎不存在。'; return 3; }
 
-  ui_title "P07 · 生产环境只读校准"
+  ui_title "P07 · 自动调整适用性检查"
   say
   ui_note '本动作只读取当前 CPU / 内存 / 交换分区（Swap）/ 负载 / PHP / MySQL 与配置。'
   ui_good '不会应用配置，不会重新加载或重启服务，不会写入 PHP / MySQL / Swap / systemd 配置。'
   say
-  say "${C_BOLD}${C_CYAN}===== 配置方案预览 =====${C_RESET}"
+  say "${C_BOLD}${C_CYAN}===== 推荐配置预览 =====${C_RESET}"
   python3 "$profile_engine" preview --mode balanced
   say
-  say "${C_BOLD}${C_MAGENTA}===== 安全计划 =====${C_RESET}"
+  say "${C_BOLD}${C_MAGENTA}===== 准备修改的内容 =====${C_RESET}"
   python3 "$ENGINE" plan --mode balanced
   say
-  say "${C_BOLD}${C_YELLOW}===== 校准判断提示 =====${C_RESET}"
+  say "${C_BOLD}${C_YELLOW}===== 是否适合自动调整 =====${C_RESET}"
   ui_good '若当前 生产环境已按推荐值调优，安全计划应主要显示“保持 / 无变化”。'
   ui_bad '若出现大量“调整 / 已阻止” 或识别错误，不应执行应用，应先修算法。'
   say
@@ -60,7 +60,7 @@ apply_balanced() {
 }
 
 list_backups() {
-  ui_title "最近资源应用状态"
+  ui_title "最近配置调整状态"
   say
   if [[ ! -d "$BACKUP_ROOT" ]]; then
     say '暂无 资源应用备份 / 执行记录。'
@@ -96,13 +96,13 @@ menu() {
   local choice
   while true; do
     screen_clear
-    ui_title "P07 · 资源安全应用"
+    ui_title "P07 · 高级配置管理"
     say
-    ui_menu_good 1 '生产环境只读校准（预览 + 安全计划）'
-    ui_menu_info 2 '查看安全计划'
-    ui_menu_danger 3 '执行平衡方案安全应用（仅已校准规格）'
-    ui_menu_info 4 '查看最近备份 / 执行记录'
-    ui_menu_danger 5 '回滚指定备份'
+    ui_menu_good 1 '检查当前服务器是否适合自动调整（只读）'
+    ui_menu_info 2 '查看准备修改什么'
+    ui_menu_danger 3 '应用推荐配置（仅已验证规格）'
+    ui_menu_info 4 '查看最近配置备份 / 执行记录'
+    ui_menu_danger 5 '恢复到之前配置'
     ui_menu_back 0 '返回'
     say
     ui_note '红色项会写配置或执行回滚；均要求显式确认。'
@@ -130,15 +130,15 @@ case "${1:-menu}" in
   rollback) shift; rollback_state "${1:-}" ;;
   -h|--help)
     cat <<'HELP'
-P07 · 资源安全应用
+P07 · 高级配置管理
 
 用法：
   resource-apply.sh menu                         进入菜单
   resource-apply.sh calibrate                    生产环境只读校准
-  resource-apply.sh plan [--mode ...]            查看安全计划
+  resource-apply.sh plan [--mode ...]            查看准备修改什么
   resource-apply.sh apply                        应用平衡方案
   resource-apply.sh backups                      查看备份 / 执行记录
-  resource-apply.sh rollback [backup_dir]        回滚指定备份
+  resource-apply.sh rollback [backup_dir]        恢复到之前配置
 
 自动应用只允许已完成生产校准的 1 核 / 2GB 平衡方案。
 其它规格保持只读预览，不能自动写配置。
