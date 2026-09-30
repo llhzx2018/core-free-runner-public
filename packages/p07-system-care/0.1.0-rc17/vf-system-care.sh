@@ -5,10 +5,12 @@ SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 VERSION='UNKNOWN'
 IFS= read -r VERSION < "$SCRIPT_DIR/VERSION" 2>/dev/null || VERSION='UNKNOWN'
 source "$SCRIPT_DIR/lib/common.sh"
+VFOPS_DIR="\${P07_VFOPS_DIR:-/opt/vf-server-ops}"
+VFOPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-final.sh'
 
 show_help() {
   cat <<'HELP'
-P07 · 系统维护 / 安全
+P07 · 服务器维护 / 安全
 
 用法：
   vf-system-care.sh menu                         进入菜单
@@ -37,7 +39,7 @@ HELP
 
 show_header() {
   screen_clear
-  say "${C_BOLD}${C_CYAN}P07 · 系统维护 / 安全${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}"
+  say "${C_BOLD}${C_CYAN}P07 · 服务器维护 / 安全${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}"
   say
 
   local health advisories evidence events scheduler
@@ -54,31 +56,31 @@ show_header() {
   esac
 
   if [[ "$advisories" =~ ^[0-9]+$ ]] && (( advisories > 0 )); then
-    printf '安全建议    %b%s 项%b · 按 6 查看\n' "$C_YELLOW" "$advisories" "$C_RESET"
+    printf '安全建议    %b%s 项%b · 按 3 查看\n' "$C_YELLOW" "$advisories" "$C_RESET"
   fi
 
   case "$evidence" in
     NORMAL) printf '网站安全    %b正常%b\n' "$C_GREEN" "$C_RESET" ;;
     ATTENTION)
       if [[ "$events" =~ ^[0-9]+$ ]] && (( events > 0 )); then
-        printf '网站安全    %b需查看%b · %s 条异常 · 按 7 查看\n' "$C_YELLOW" "$C_RESET" "$events"
+        printf '网站安全    %b需查看%b · %s 条异常 · 按 3 查看\n' "$C_YELLOW" "$C_RESET" "$events"
       else
-        printf '网站安全    %b需查看%b · 按 7 查看\n' "$C_YELLOW" "$C_RESET"
+        printf '网站安全    %b需查看%b · 按 3 查看\n' "$C_YELLOW" "$C_RESET"
       fi
       ;;
-    FAILED) printf '网站安全    %b检查失败%b · 按 7 查看原因\n' "$C_RED" "$C_RESET" ;;
-    NOT_ENABLED) printf '网站安全    未开启 · 按 7 查看\n' ;;
-    *) printf '网站安全    %b未检查%b · 按 7 查看\n' "$C_GRAY" "$C_RESET" ;;
+    FAILED) printf '网站安全    %b检查失败%b · 按 3 查看原因\n' "$C_RED" "$C_RESET" ;;
+    NOT_ENABLED) printf '网站安全    未开启 · 按 3 查看\n' ;;
+    *) printf '网站安全    %b未检查%b · 按 3 查看\n' "$C_GRAY" "$C_RESET" ;;
   esac
 
   case "$scheduler" in
     systemd|cron) printf '自动检查    %b已开启%b\n' "$C_GREEN" "$C_RESET" ;;
-    broken) printf '自动检查    %b异常%b · 按 7 修复\n' "$C_RED" "$C_RESET" ;;
+    broken) printf '自动检查    %b异常%b · 按 3 查看\n' "$C_RED" "$C_RESET" ;;
     none)
       if [[ "$evidence" == NOT_ENABLED ]]; then
         printf '自动检查    未开启\n'
       else
-        printf '自动检查    未开启 · 按 7 查看\n'
+        printf '自动检查    未开启 · 按 3 查看\n'
       fi
       ;;
     *) printf '自动检查    %b未检查%b\n' "$C_GRAY" "$C_RESET" ;;
@@ -185,37 +187,62 @@ resource_menu_beginner() {
   done
 }
 
-menu() {
+
+ensure_vfops_tools() {
+  local required="$1"
+  [[ -x "$VFOPS_DIR/bin/$required" ]] && return 0
+  command -v curl >/dev/null 2>&1 || { fail '缺少下载工具 curl，无法准备共享运维组件。'; return 1; }
+  local tmp
+  tmp="$(mktemp -t p07-shared-runtime.XXXXXX)"
+  ui_note '首次使用此功能：正在准备 P07 共享运行文件。不会迁移服务器、修改域名解析或恢复网站。'
+  if ! curl -fsSL "$VFOPS_INSTALLER" -o "$tmp"; then
+    rm -f "$tmp"; fail 'P07 共享运行文件下载失败。'; return 1
+  fi
+  if ! P07_NO_EXEC=1 bash "$tmp"; then
+    rm -f "$tmp"; fail 'P07 共享运行文件准备失败。'; return 1
+  fi
+  rm -f "$tmp"
+  [[ -x "$VFOPS_DIR/bin/$required" ]] || { fail '需要的 P07 功能仍未就绪。'; return 1; }
+}
+
+run_vfops_tool() {
+  local tool="$1"
+  ensure_vfops_tools "$tool" || { pause_menu; return 0; }
+  set +e
+  bash "$VFOPS_DIR/bin/$tool"
+  local rc=$?
+  set -e
+  [[ $rc -eq 0 ]] || warn '功能没有正常完成，请按页面提示处理。'
+  return 0
+}
+
+maintenance_menu() {
   local choice
   while true; do
     show_header
     ui_rule
     say
-    ui_menu_good 1 '一键系统体检'
-    ui_menu_warn 2 '系统更新'
-    ui_menu_warn 3 '磁盘空间清理'
-    ui_menu_info 4 '内存检查'
-    ui_menu_info 5 '异常服务检查'
-    ui_menu_warn 6 '登录与安全检查'
-    ui_menu_info 7 '网站安全检查'
-    ui_menu_good 8 '资源配置建议'
+    ui_menu_good 1 '服务器体检'
+    ui_menu_info 2 '日常维护'
+    ui_menu_warn 3 '安全检查'
+    ui_menu_warn 4 '新服务器初始化'
+    ui_menu_good 5 'P07 检查 / 修复'
+    ui_menu_info 6 '最近操作'
     ui_menu_back 0 '返回'
     say
-    ui_note '绿色=检查/推荐 · 黄色=会修改配置或需要关注 · 红色=高风险/回滚'
+    ui_note '网站备份、恢复、迁移和网站管理统一放在主菜单 3；这里专门负责服务器维护与 P07 自身。'
     say
-    printf '%b' "${C_BOLD}请选择 [0-8]：${C_RESET}"
+    printf '%b' "${C_BOLD}请选择 [0-6]：${C_RESET}"
     read -r choice || return 0
     case "$choice" in
-      1) run_action audit.sh; pause_menu ;;
-      2) updates_menu_beginner ;;
-      3) cleanup_menu_beginner ;;
-      4) run_action_friendly memory.sh; pause_menu ;;
-      5) run_action_friendly services.sh; pause_menu ;;
-      6) run_action_friendly security-audit.sh; pause_menu ;;
-      7) run_action intrusion-evidence-entry.sh menu ;;
-      8) resource_menu_beginner ;;
+      1) run_vfops_tool vfops-diagnostics-ui ;;
+      2) maintenance_menu ;;
+      3) security_menu ;;
+      4) run_vfops_tool vfops-init-ui ;;
+      5) run_vfops_tool vfops-selfcheck-ui ;;
+      6) run_vfops_tool vfops-history-ui ;;
       0) return 0 ;;
-      *) warn '无效选择，请输入 0-8。'; sleep 1 ;;
+      *) warn '无效选择，请输入 0-6。'; sleep 1 ;;
     esac
   done
 }
