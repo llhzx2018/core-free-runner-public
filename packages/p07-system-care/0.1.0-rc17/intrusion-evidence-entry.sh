@@ -68,13 +68,13 @@ preflight_enable() {
   classify_before_menu
   case "$WP_DISCOVERY_STATUS" in
     READY)
-      say "CloudPanel   ${WP_CLOUDPANEL_SITES} 个网站"
+      say "网站面板（CloudPanel） ${WP_CLOUDPANEL_SITES} 个网站"
       say "WordPress    ${WP_SITES} 个"
       say
       exec bash "$BASE" enable
       ;;
     NO_WORDPRESS)
-      say "CloudPanel   ${WP_CLOUDPANEL_SITES} 个网站"
+      say "网站面板（CloudPanel） ${WP_CLOUDPANEL_SITES} 个网站"
       say 'WordPress    0 个'
       say
       warn '结果         当前没有 WordPress，不需要开启网站安全保护。'
@@ -104,11 +104,11 @@ menu_not_enabled() {
   classify_before_menu
   while true; do
     screen_clear
-    ui_title "P07 · 网站入侵留证"
+    ui_title "P07 · 网站安全检查"
     say
     case "$WP_DISCOVERY_STATUS" in
       READY)
-        printf 'CloudPanel   %s 个网站\n' "$WP_CLOUDPANEL_SITES"
+        printf '网站面板（CloudPanel） %s 个网站\n' "$WP_CLOUDPANEL_SITES"
         printf 'WordPress    %s 个\n' "$WP_SITES"
         say "网站安全    ${C_YELLOW}未开启${C_RESET}"
         say "自动检查    ${C_YELLOW}未开启${C_RESET}"
@@ -126,7 +126,7 @@ menu_not_enabled() {
         esac
         ;;
       NO_WORDPRESS)
-        printf 'CloudPanel   %s 个网站\n' "$WP_CLOUDPANEL_SITES"
+        printf '网站面板（CloudPanel） %s 个网站\n' "$WP_CLOUDPANEL_SITES"
         say 'WordPress    0 个'
         say "网站安全    ${C_GREEN}当前不需要开启${C_RESET}"
         say '自动检查    不需要'
