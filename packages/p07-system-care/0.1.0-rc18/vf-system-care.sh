@@ -219,6 +219,58 @@ run_vfops_tool() {
 maintenance_menu() {
   local choice
   while true; do
+    screen_clear
+    ui_title 'P07 · 日常维护'
+    say
+    ui_menu_warn 1 '系统更新'
+    ui_menu_warn 2 '磁盘空间清理'
+    ui_menu_info 3 '内存检查'
+    ui_menu_info 4 '异常服务检查'
+    ui_menu_good 5 '资源配置建议'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '这里处理服务器日常维护，不管理网站备份或迁移。'
+    say
+    printf '%b' "${C_BOLD}请选择 [0-5]：${C_RESET}"
+    read -r choice || return 0
+    case "$choice" in
+      1) updates_menu_beginner ;;
+      2) cleanup_menu_beginner ;;
+      3) run_action_friendly memory.sh; pause_menu ;;
+      4) run_action_friendly services.sh; pause_menu ;;
+      5) resource_menu_beginner ;;
+      0) return 0 ;;
+      *) warn '无效选择，请输入 0-5。'; sleep 1 ;;
+    esac
+  done
+}
+
+security_menu() {
+  local choice
+  while true; do
+    screen_clear
+    ui_title 'P07 · 安全检查'
+    say
+    ui_menu_warn 1 '登录与安全检查'
+    ui_menu_info 2 '网站安全检查'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '默认只检查；需要修改配置时会再次明确确认。'
+    say
+    printf '%b' "${C_BOLD}请选择 [0-2]：${C_RESET}"
+    read -r choice || return 0
+    case "$choice" in
+      1) run_action_friendly security-audit.sh; pause_menu ;;
+      2) run_action intrusion-evidence-entry.sh menu ;;
+      0) return 0 ;;
+      *) warn '无效选择，请输入 0-2。'; sleep 1 ;;
+    esac
+  done
+}
+
+menu() {
+  local choice
+  while true; do
     show_header
     ui_rule
     say
