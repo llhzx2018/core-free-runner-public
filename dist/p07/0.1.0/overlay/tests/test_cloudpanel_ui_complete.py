@@ -32,26 +32,26 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
             "新增数据库",
             "导出数据库",
             "导入数据库",
-            "SSL 状态",
-            "申请 / 安装 Let’s Encrypt",
+            "HTTPS 证书状态",
+            "申请免费 HTTPS 证书（Let’s Encrypt）",
             "安装自定义证书",
             "修复网站权限",
-            "清理 Varnish 缓存",
-            "CloudPanel 管理",
+            "清理网站加速缓存（Varnish）",
+            "面板管理（CloudPanel）",
             "创建网站",
-            "CloudPanel 安全",
-            "CloudPanel 用户",
+            "面板登录安全",
+            "面板用户",
             "平台基础能力检查",
         ):
             self.assertIn(label, self.parent)
         self.assertIn("ui_menu_flow 98 '更换网站'", self.parent)
         self.assertIn("ui_menu_back 0 '返回 P07 主菜单'", self.parent)
         self.assertNotIn("  4. Vhost 模板", self.parent)
-        self.assertIn("Vhost 模板由 CloudPanel / P07 自动处理", self.parent)
+        self.assertIn("网站底层配置模板（Vhost）由面板和 P07 自动处理", self.parent)
 
     def test_vhost_maintenance_is_retained_as_advanced_internal_capability(self) -> None:
         self.assertIn("vhost_tools()", self.admin)
-        self.assertIn("Vhost Templates（高级）", self.admin)
+        self.assertIn("网站配置模板（Vhost）· 高级", self.admin)
         for adapter in (
             "cloudpanel.list_vhost_templates",
             "cloudpanel.import_vhost_templates",

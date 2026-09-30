@@ -602,3 +602,33 @@ P07 自检 / 修复
 - 新 VPS 初始化默认先做只读 Preflight；低风险基线写入必须输入 `APPLY_BASELINE`；CloudPanel 安装必须额外输入 `INSTALL_CLOUDPANEL`。
 - 初始化不得自动修改 DNS、不得自动关闭 SSH、不得自动收紧防火墙导致远程失联、不得删除旧服务器。
 - 安全等级统一为：绿色只读、黄色配置写入、洋红迁移/切换、红色高风险写入；高风险操作使用 exact-token confirmation。
+
+
+## Beginner Chinese Menu Contract
+
+普通用户菜单必须优先使用中文任务名称，不要求用户理解 Linux / 面板 / 网络工程术语。
+
+规则：
+
+```text
+菜单：说“用户想做什么”
+说明：必要时补充技术名词（英文/产品名）
+详情：工程词只在诊断或高级页面出现
+```
+
+示例：
+
+```text
+APT                → 软件安装缓存 / 系统更新
+systemd journal    → 系统运行日志
+Swap               → 虚拟内存（Swap）
+SSH                → 远程登录（SSH）
+Varnish            → 网站加速缓存（Varnish）
+SSL                 → HTTPS 证书
+2FA                 → 两步验证（2FA）
+Vhost               → 网站配置模板（Vhost）
+rclone              → 异地备份组件（rclone）
+VPS                 → 服务器（必要时括号保留 VPS）
+```
+
+P07 Toolbox 主菜单不得用手工空格拼接版本/状态列。主菜单只显示功能；版本进入对应模块查看。若所有模块可用，只显示一条“功能状态：全部可用”摘要。

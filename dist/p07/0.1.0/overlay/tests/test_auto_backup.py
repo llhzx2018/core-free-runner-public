@@ -250,7 +250,7 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("Google 实时：正常 ✓", output)
             self.assertIn("B2 实时：正常 ✓", output)
             self.assertIn("启用 / 更新自动备份", output)
-            self.assertIn("不会修改 CloudPanel Cron", output)
+            self.assertIn("不会修改定时任务（Cron）", output)
 
     def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
         with tempfile.TemporaryDirectory() as td:
@@ -271,7 +271,7 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("状态：需关注（实时远程异常）", output)
             self.assertIn("Google 实时：不可用", output)
             self.assertIn("B2 实时：正常 ✓", output)
-            self.assertIn("设置 / 检查 Google + B2", output)
+            self.assertIn("设置 / 检查异地备份", output)
             self.assertNotIn("DO-NOT-PRINT", output)
 
     def test_status_menu_shows_last_site_result_and_busy_retry_guidance(self):

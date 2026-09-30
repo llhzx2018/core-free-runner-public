@@ -2,7 +2,7 @@ ssl_status() {
   local rc fields domain ssl days
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; ssl="${fields[8]}"; days="${fields[9]}"
-  say; ui_title 'SSL 状态'; ui_rule
+  say; ui_title 'HTTPS 证书状态'; ui_rule
   say "域名：${C_CYAN}$domain${C_RESET}"
   case "$ssl" in
     YES) ui_good "配置：$ssl · 剩余天数：$days" ;;
@@ -17,7 +17,7 @@ issue_lets_encrypt() {
   if select_site; then :; else rc=$?; [[ $rc -eq 2 ]] && return 0; pause; return 0; fi
   mapfile -t fields < <(site_fields); domain="${fields[0]}"
   printf '附加域名 SAN（可留空；多个用逗号分隔）：'; read -r sans || true
-  ui_attention 'CloudPanel 申请 Let’s Encrypt 前要求 DNS 已正确指向本机。P07 不会修改 DNS。'; ui_prompt '继续？[y/N]：'; read -r confirm || true
+  ui_attention '申请免费 HTTPS 证书前，域名必须已经指向这台服务器。P07 不会自动修改域名解析（DNS）。'; ui_prompt '继续？[y/N]：'; read -r confirm || true
   [[ "$confirm" =~ ^[Yy]$ ]] || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$domain" "$sans" <<'PY'
 import sys
@@ -25,7 +25,7 @@ import cloudpanel
 sans=[x.strip() for x in sys.argv[2].split(',') if x.strip()]
 cloudpanel.install_lets_encrypt(sys.argv[1],subject_alt_names=sans)
 PY
-  then ui_good 'Let’s Encrypt 安装完成 ✓'; else printf '%b\n' "${C_RED}证书申请/安装未完成；DNS 未被 P07 修改。${C_RESET}" >&2; fi
+  then ui_good '免费 HTTPS 证书已安装 ✓'; else printf '%b\n' "${C_RED}证书申请/安装未完成；DNS 未被 P07 修改。${C_RESET}" >&2; fi
   pause
 }
 
@@ -52,9 +52,9 @@ PY
 
 ssl_tools() {
   while true; do
-    say; ui_title 'SSL / HTTPS'; ui_rule
-    ui_menu_info 1 '查看 SSL 状态'
-    ui_menu_warn 2 '申请 / 安装 Let’s Encrypt'
+    say; ui_title 'HTTPS 证书'; ui_rule
+    ui_menu_info 1 '查看 HTTPS 证书状态'
+    ui_menu_warn 2 '申请免费 HTTPS 证书（Let’s Encrypt）'
     ui_menu_warn 3 '安装自定义证书'
     ui_menu_back 0 '返回'
     ui_prompt '请选择 [0-3]：'; read -r choice || return 0
@@ -93,14 +93,14 @@ purge_varnish() {
   mapfile -t fields < <(site_fields); domain="${fields[0]}"; user="${fields[1]}"
   [[ "$user" != UNKNOWN ]] || { printf '网站用户无法识别，已停止。\n'; pause; return 0; }
   printf '清理目标 [all=全部]（也可输入 URL 或 tag1,tag2）：'; read -r target || true; target="${target:-all}"
-  say; ui_attention "将清理 $domain 的 Varnish 缓存：$target"; ui_note '不会删除网站文件。'; ui_prompt '继续？[Y/n]：'; read -r confirm || true
+  say; ui_attention "将清理 $domain 的 网站加速缓存（Varnish）：$target"; ui_note '不会删除网站文件。'; ui_prompt '继续？[Y/n]：'; read -r confirm || true
   [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]] || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$target" <<'PY'
 import sys
 import cloudpanel_site
 cloudpanel_site.purge_varnish(sys.argv[1],sys.argv[2])
 PY
-  then ui_good 'Varnish 缓存已清理 ✓'; else printf '%b\n' "${C_RED}Varnish 清理未完成；可能该网站未启用 Varnish。网站文件未修改。${C_RESET}" >&2; fi
+  then ui_good '网站加速缓存（Varnish）已清理 ✓'; else printf '%b\n' "${C_RED}网站加速缓存（Varnish）清理未完成；可能该网站未启用 Varnish。网站文件未修改。${C_RESET}" >&2; fi
   pause
 }
 
@@ -108,7 +108,7 @@ maintenance_tools() {
   while true; do
     say; ui_title '权限 / 缓存'; ui_rule
     ui_menu_warn 1 '修复网站权限'
-    ui_menu_warn 2 '清理 Varnish 缓存'
+    ui_menu_warn 2 '清理 网站加速缓存（Varnish）'
     ui_menu_back 0 '返回'
     ui_prompt '请选择 [0-2]：'; read -r choice || return 0
     case "$choice" in

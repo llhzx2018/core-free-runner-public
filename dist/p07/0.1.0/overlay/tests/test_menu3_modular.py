@@ -19,13 +19,13 @@ class Menu3ModularTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for text in (
-            "1. 服务器 / 网站概览",
+            "1. 服务器与网站概况",
             "2. 备份网站",
             "3. 恢复网站",
             "4. 服务器迁移（整机 / 单站）",
-            "5. 自动备份 / 远程灾备",
+            "5. 自动备份 / 异地备份",
             "6. 网站管理",
-            "7. CloudPanel 管理",
+            "7. 面板管理（CloudPanel）",
         ):
             self.assertIn(text, proc.stdout)
 
@@ -93,18 +93,18 @@ class Menu3ModularTests(unittest.TestCase):
             "网站管理",
             "数据库清单",
             "新增数据库",
-            "SSL 状态",
+            "HTTPS 证书状态",
             "修复网站权限",
-            "清理 Varnish 缓存",
-            "CloudPanel 管理",
-            "CloudPanel 安全",
-            "CloudPanel 用户",
-            "Vhost Templates（高级）",
+            "清理网站加速缓存（Varnish）",
+            "面板管理（CloudPanel）",
+            "面板登录安全",
+            "面板用户",
+            "网站配置模板（Vhost）· 高级",
         ):
             self.assertIn(marker, text)
         parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
         self.assertNotIn("  4. Vhost 模板", parent)
-        self.assertIn("Vhost 模板由 CloudPanel / P07 自动处理", parent)
+        self.assertIn("网站底层配置模板（Vhost）由面板和 P07 自动处理", parent)
         for forbidden in (
             "site:delete",
             "db:delete",
@@ -124,47 +124,43 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn('SELECTED_DOMAIN=""', common)
         self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', common)
 
-    def test_migration_ui_prioritizes_resumable_whole_server_path(self) -> None:
+    def test_migration_ui_prioritizes_target_pull_and_resume(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
         for marker in (
-            "整机迁移（推荐）",
-            "继续已有整机迁移",
-            "全 Home SQLite",
-            "唯一人工确认：现在修改 DNS",
+            "P07 · 服务器迁移",
+            "当前：",
+            "这台新服务器（接收数据）",
+            "整机迁入",
+            "单站迁入",
+            "继续未完成迁移",
+            "旧服务器 IP",
             "server-migrate prepare",
             "server-migrate resume",
             "server-migrate cutover",
             "server-migrate finalize",
-            "源服务器继续保留作为恢复副本",
-            "P07 专用临时密钥",
-            "RETAINED_FOR_RECOVERY",
-            "结束恢复保护并清理 P07 专用迁移密钥",
-            "CLEANUP_MANAGED_SSH_KEY:",
-            "只删除 P07 自己创建的迁移密钥",
-            "恢复 / 清理通道",
-            "目标服务器 → 源服务器数据对账/反向同步",
-            "禁止直接“只开旧机”回滚",
-            "CUTOVER_RUNNING",
-            "最终切换已从断点继续完成",
-            "自动安装 CloudPanel",
-            "BOOTSTRAP_CLOUDPANEL:",
-            "MySQL 8.4",
-            "源服务器额外公网服务",
-            "非 CloudPanel 公网服务",
+            "新服务器开始从旧服务器复制数据",
+            "旧服务器：继续保留为恢复副本",
+            "PREPARE_PULL_MIGRATION",
+            "CUTOVER_PULL:",
+            "BOOTSTRAP_LOCAL_CLOUDPANEL",
+            "非网站面板管理的公网服务",
         ):
             self.assertIn(marker, text)
+        self.assertNotIn("目标服务器 IP", text)
         self.assertNotIn("回滚 Runtime 到 SOURCE", text)
-        self.assertNotIn("SOURCE 可安全识别的公网地址", text)
         self.assertNotIn("DNS：自动修改", text)
-        self.assertIn("DNS：不会自动修改", text)
 
-    def test_migration_preserves_source_dns_and_target_collision_boundaries(self) -> None:
-        text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
-        self.assertIn("TARGET_SITE_CONFLICT", text)
-        self.assertIn("P07 不会覆盖", text)
-        self.assertIn("DNS：未修改", text)
-        self.assertIn("源服务器：保留", text)
-        self.assertIn("ssh-copy-id", text)
+    def test_migration_preserves_old_server_dns_and_target_collision_boundaries(self) -> None:
+        ui = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
+        engine = (ROOT / "lib/server_migration_pull.py").read_text(encoding="utf-8")
+        self.assertIn("新服务器已有资源不覆盖", ui)
+        self.assertIn("DNS 不自动修改", ui)
+        self.assertIn("旧服务器永不自动删除", ui)
+        self.assertIn("ssh-copy-id", ui)
+        self.assertIn("existing_target_overwrite_allowed", engine)
+        self.assertIn("source_delete_allowed", engine)
+        self.assertIn("dns_changed_by_p07", engine)
+        self.assertIn("CURRENT_SERVER_PULLS_OLD_SERVER", engine)
 
 
 if __name__ == "__main__":

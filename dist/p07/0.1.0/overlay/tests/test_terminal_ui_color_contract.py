@@ -135,7 +135,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release9\n")
+        self.assertEqual(build, "0.1.0-release10\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -152,14 +152,14 @@ class TerminalUiColorContractTests(unittest.TestCase):
         self.assertIn("ui_menu_flow 2 '单站迁入'", migrate)
         self.assertIn("ui_menu_flow 3 '继续未完成迁移'", migrate)
         self.assertIn("旧服务器 IP（输入 0 返回）", migrate)
-        self.assertIn("新服务器 / 接收端", migrate)
+        self.assertIn("这台新服务器（接收数据）", migrate)
         self.assertIn("唯一剩余人工步骤", migrate)
         self.assertNotIn("目标服务器 IP（输入 0 返回）", migrate)
         self.assertIn("ui_menu_warn 1 '恢复为新网站", site)
         self.assertIn("DISABLE-AUTOBACKUP", auto)
         self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
         self.assertIn("ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'", admin)
-        self.assertIn("ui_menu_danger 4 '关闭用户 2FA'", admin)
+        self.assertIn("ui_menu_danger 4 '关闭两步验证（2FA）'", admin)
 
     def test_chinese_first_and_lazy_dependency_contract(self) -> None:
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -181,15 +181,15 @@ class TerminalUiColorContractTests(unittest.TestCase):
         cloudpanel = (ROOT / "bin" / "vfops-cloudpanel-ui").read_text(encoding="utf-8")
 
         self.assertIn("ui_screen_clear", user)
-        self.assertIn("ui_page 'P07 · 服务器 / 网站概览'", site)
+        self.assertIn("ui_page 'P07 · 服务器与网站概况'", site)
         self.assertIn("ui_page 'P07 · 备份网站'", site)
         self.assertIn("ui_page 'P07 · 恢复网站'", site)
         self.assertIn("ui_page 'P07 · 服务器迁移'", migrate)
         self.assertIn("ui_page 'P07 · 整机迁入'", migrate)
         self.assertIn("ui_page 'P07 · 单站迁入'", migrate)
-        self.assertIn("ui_page 'P07 · 自动备份 / 远程灾备'", auto)
+        self.assertIn("ui_page 'P07 · 自动备份 / 异地备份'", auto)
         self.assertIn("ui_page 'P07 · 网站管理'", cloudpanel)
-        self.assertIn("ui_page 'P07 · CloudPanel 管理'", cloudpanel)
+        self.assertIn("ui_page 'P07 · 面板管理（CloudPanel）'", cloudpanel)
         self.assertIn("ui_empty_state 'P07 · 恢复网站'", site)
 
     def test_color_contract_is_in_owning_authority(self) -> None:
