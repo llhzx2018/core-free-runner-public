@@ -298,10 +298,10 @@ P07 · VF 服务器运维 ${VERSION}
 用法：
   p07-toolbox
 
-1. 网络节点 / V2Ray              ${VF_NODE_PUBLIC}
-2. VPS 一键验机                  ${VPS_AUDIT_PUBLIC}（可用）
-3. CloudPanel 备份 / 恢复 / 迁移  ${VF_SERVER_OPS_PUBLIC}（可用）
-4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}（可用）
+1. 网络代理节点（V2Ray）          ${VF_NODE_PUBLIC}
+2. 服务器性能检测（VPS 验机）    ${VPS_AUDIT_PUBLIC}
+3. 网站备份 / 恢复 / 迁移（CloudPanel）  ${VF_SERVER_OPS_PUBLIC}
+4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}
 
 说明：普通界面只显示 Vx.x.x 公共版本；内部构建标识只用于工程校验，不要求用户理解。
 EOF
