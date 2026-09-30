@@ -95,6 +95,9 @@ ui_safe_diagnostic() {
     PACKAGE_FILE_CHANGED) blocker_text='备份中的文件在最终封存后发生变化，P07 已停止使用这个备份。' ;;
     MYSQL_SNAPSHOT_INVALID) blocker_text='MySQL 数据库备份文件无法完整读取，P07 已停止使用这个备份。' ;;
     SQLITE_SNAPSHOT_INVALID) blocker_text='SQLite 数据库备份完整性检查失败，P07 已停止使用这个备份。' ;;
+    SQLITE_AUXILIARY_FILE_FOUND) blocker_text='SQLite 备份目录出现未登记的辅助文件，P07 已停止使用这个备份。' ;;
+    SQLITE_MANIFEST_INVALID) blocker_text='SQLite 备份清单异常，P07 已停止使用这个备份。' ;;
+    MANIFEST_INVALID) blocker_text='备份清单无法读取，P07 已停止使用这个备份。' ;;
     SITE_ARCHIVE_EMPTY) blocker_text='网站文件压缩包为空，P07 已停止使用这个备份。' ;;
     SITE_ARCHIVE_INVALID) blocker_text='网站文件压缩包无法完整读取，P07 已停止使用这个备份。' ;;
     CHECKSUM_INDEX_MISSING) blocker_text='备份完整性清单缺失，P07 已停止使用这个备份。' ;;
