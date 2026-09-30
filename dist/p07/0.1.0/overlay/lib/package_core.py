@@ -165,6 +165,10 @@ def backup_sqlite(root: Path, sqlite_paths: list[str], out_dir: Path) -> list[di
             src_conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=5)
             dst_conn = sqlite3.connect(target)
             src_conn.backup(dst_conn)
+            dst_conn.commit()
+            journal = dst_conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+            if not journal or str(journal[0]).lower() != "delete":
+                raise RuntimeError(f"SQLite snapshot journal normalization failed: {absolute}")
             row = dst_conn.execute("PRAGMA integrity_check").fetchone()
             if not row or row[0] != "ok":
                 raise RuntimeError(f"SQLite integrity check failed: {absolute}")
@@ -175,8 +179,10 @@ def backup_sqlite(root: Path, sqlite_paths: list[str], out_dir: Path) -> list[di
                 dst_conn.close()
             if src_conn is not None:
                 src_conn.close()
+        for suffix in ("-wal", "-shm", "-journal"):
+            target.with_name(target.name + suffix).unlink(missing_ok=True)
         chmod_private(target)
-        results.append({"source": absolute, "file": f"sqlite/{target.name}", "method": "sqlite_backup_api"})
+        results.append({"source": absolute, "file": f"sqlite/{target.name}", "method": "sqlite_backup_api_delete_journal"})
     return results
 
 
@@ -480,6 +486,53 @@ def write_checksums(package_dir: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def declared_sqlite_snapshots(package_dir: Path) -> tuple[list[Path], list[str]]:
+    failures: list[str] = []
+    manifest_path = package_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], ["manifest:invalid"]
+
+    contents = manifest.get("contents", {})
+    rows = contents.get("sqlite", []) if isinstance(contents, dict) else []
+    if not isinstance(rows, list):
+        return [], ["manifest:sqlite-invalid"]
+
+    snapshots: list[Path] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            failures.append("manifest:sqlite-invalid")
+            continue
+        rel = row.get("file")
+        if not isinstance(rel, str) or not rel.startswith("sqlite/"):
+            failures.append("manifest:sqlite-invalid")
+            continue
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts or len(rel_path.parts) != 2:
+            failures.append("manifest:sqlite-invalid")
+            continue
+        target = package_dir / rel_path
+        snapshots.append(target)
+    return snapshots, failures
+
+
+def verify_sqlite_snapshot(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    conn = None
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro&immutable=1"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        return bool(row and row[0] == "ok")
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def verify_package(package_dir: Path) -> dict[str, Any]:
     checksums = package_dir / "checksums.sha256"
     failures: list[str] = []
@@ -513,14 +566,16 @@ def verify_package(package_dir: Path) -> dict[str, Any]:
     except (tarfile.TarError, OSError):
         failures.append("archive:invalid")
 
-    for path in sorted((package_dir / "sqlite").glob("*")) if (package_dir / "sqlite").exists() else []:
-        try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-            row = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
-            if not row or row[0] != "ok":
-                failures.append(f"sqlite:{path.name}")
-        except sqlite3.Error:
+    sqlite_snapshots, sqlite_manifest_failures = declared_sqlite_snapshots(package_dir)
+    failures.extend(sqlite_manifest_failures)
+    declared_sqlite = {path.resolve() for path in sqlite_snapshots}
+    sqlite_dir = package_dir / "sqlite"
+    if sqlite_dir.exists():
+        for path in sorted(sqlite_dir.iterdir()):
+            if path.is_file() and path.resolve() not in declared_sqlite:
+                failures.append(f"sqlite-unexpected:{path.name}")
+    for path in sqlite_snapshots:
+        if not verify_sqlite_snapshot(path):
             failures.append(f"sqlite:{path.name}")
 
     for path in sorted((package_dir / "mysql").glob("*.sql.gz")) if (package_dir / "mysql").exists() else []:
@@ -546,8 +601,11 @@ def verification_failure_code(failures: list[str]) -> str:
         ("checksum:files/", "SITE_SNAPSHOT_CHANGED"),
         ("checksum:metadata/", "METADATA_SNAPSHOT_CHANGED"),
         ("checksum:manifest.json", "MANIFEST_CHANGED"),
+        ("manifest:sqlite-invalid", "SQLITE_MANIFEST_INVALID"),
+        ("manifest:invalid", "MANIFEST_INVALID"),
         ("checksum:", "PACKAGE_FILE_CHANGED"),
         ("mysql:", "MYSQL_SNAPSHOT_INVALID"),
+        ("sqlite-unexpected:", "SQLITE_AUXILIARY_FILE_FOUND"),
         ("sqlite:", "SQLITE_SNAPSHOT_INVALID"),
         ("archive:empty", "SITE_ARCHIVE_EMPTY"),
         ("archive:invalid", "SITE_ARCHIVE_INVALID"),
