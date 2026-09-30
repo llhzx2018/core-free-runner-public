@@ -207,7 +207,11 @@ run_server_ops() {
 
 local_system_care_version() {
   command -v vf-system-care >/dev/null 2>&1 || return 1
-  NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true
+  local version contract
+  version="$(NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true)"
+  contract="$(NO_COLOR=1 vf-system-care --ui-contract 2>/dev/null || true)"
+  [[ "$contract" == 'P07_BEGINNER_ZH_V1' ]] || return 1
+  printf '%s' "$version"
 }
 
 run_system_care() {
