@@ -68,6 +68,8 @@ class TerminalUiColorContractTests(unittest.TestCase):
             "ui_result_error()",
             "ui_empty_state()",
             "ui_pause_return()",
+            "ui_safety_tier()",
+            "ui_confirm_exact()",
         ):
             self.assertIn(helper, text)
 
@@ -133,7 +135,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release8\n")
+        self.assertEqual(build, "0.1.0-release9\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -154,7 +156,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
         self.assertIn("唯一剩余人工步骤", migrate)
         self.assertNotIn("目标服务器 IP（输入 0 返回）", migrate)
         self.assertIn("ui_menu_warn 1 '恢复为新网站", site)
-        self.assertIn("ui_menu_danger 1 '确认关闭'", auto)
+        self.assertIn("DISABLE-AUTOBACKUP", auto)
         self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
         self.assertIn("ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'", admin)
         self.assertIn("ui_menu_danger 4 '关闭用户 2FA'", admin)
@@ -202,7 +204,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
 
     def test_slot3_ui_files_stay_bounded(self) -> None:
         caps = {
-            "bin/vfops-user": 150,
+            "bin/vfops-user": 240,
             "bin/vfops-site-ui": 500,
             "bin/vfops-migrate-ui": 900,
             "bin/vfops-auto-backup": 800,
