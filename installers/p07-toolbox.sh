@@ -22,7 +22,7 @@ VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release10"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc17"
+SYSTEM_CARE_EXPECTED="0.1.0-rc18"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -48,8 +48,8 @@ show_menu() {
   say
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）"
-  say "  ${C_GREEN}3.${C_RESET} 网站备份 / 恢复 / 迁移（CloudPanel）"
-  say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全"
+  say "  ${C_GREEN}3.${C_RESET} 网站与数据（CloudPanel）"
+  say "  ${C_GREEN}4.${C_RESET} 服务器维护 / 安全"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -300,8 +300,8 @@ P07 · VF 服务器运维 ${VERSION}
 
 1. 网络代理节点（V2Ray）          ${VF_NODE_PUBLIC}
 2. 服务器性能检测（VPS 验机）    ${VPS_AUDIT_PUBLIC}
-3. 网站备份 / 恢复 / 迁移（CloudPanel）  ${VF_SERVER_OPS_PUBLIC}
-4. 系统维护 / 安全                ${SYSTEM_CARE_PUBLIC}
+3. 网站与数据（CloudPanel）  ${VF_SERVER_OPS_PUBLIC}
+4. 服务器维护 / 安全                ${SYSTEM_CARE_PUBLIC}
 
 说明：普通界面只显示 Vx.x.x 公共版本；内部构建标识只用于工程校验，不要求用户理解。
 EOF
