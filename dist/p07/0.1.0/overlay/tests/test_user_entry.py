@@ -316,12 +316,13 @@ exit 0
         self.assertIn("server-migrate prepare --source-ip 203.0.113.10", log)
         self.assertNotIn("migrate transfer-new-site", log)
 
-    def test_unverified_backup_is_hidden_from_beginner_restore(self) -> None:
+    def test_unverified_backup_is_blocked_with_beginner_reason(self) -> None:
         self._make_backup("unverified_backup", verified=False)
         proc = self._run("2\n2\n\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         terminal = proc.stdout + proc.stderr
-        self.assertIn("没有发现已验证、可恢复的 P07 本地备份", terminal)
+        self.assertIn("发现了本地备份，但当前完整性复检未通过", terminal)
+        self.assertIn("缺少创建时校验记录", terminal)
         log = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
         self.assertNotIn("restore plan", log)
 

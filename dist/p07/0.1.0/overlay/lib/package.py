@@ -6,10 +6,79 @@ from __future__ import annotations
 # CloudPanel foundation adapter, while build_backup keeps the safe application-
 # config credential discovery used by current CloudPanel schemas.
 import gzip
+import os
 from pathlib import Path
+import time
 
 import cloudpanel as _cloudpanel
 import package_core as _core
+
+
+def _file_open_elsewhere(path: Path) -> bool:
+    try:
+        target = path.stat()
+    except OSError:
+        return False
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return False
+    current_pid = str(os.getpid())
+    try:
+        pids = list(proc.iterdir())
+    except OSError:
+        return False
+    for pid in pids:
+        if not pid.name.isdigit() or pid.name == current_pid:
+            continue
+        fd_dir = pid / "fd"
+        try:
+            for fd in fd_dir.iterdir():
+                try:
+                    opened = fd.stat()
+                except OSError:
+                    continue
+                if opened.st_dev == target.st_dev and opened.st_ino == target.st_ino:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _wait_for_quiescent_gzip(path: Path, database: str, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    last: tuple[int, int] | None = None
+    quiet_since: float | None = None
+    while True:
+        now = time.monotonic()
+        try:
+            stat_now = path.stat()
+            current = (stat_now.st_size, stat_now.st_mtime_ns)
+        except OSError:
+            current = (0, 0)
+        busy = current[0] > 0 and _file_open_elsewhere(path)
+        if current[0] > 0 and not busy and current == last:
+            if quiet_since is None:
+                quiet_since = now
+            if now - quiet_since >= 0.5:
+                try:
+                    total = 0
+                    with gzip.open(path, "rb") as handle:
+                        while True:
+                            chunk = handle.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                    after = path.stat()
+                except (OSError, EOFError) as exc:
+                    raise RuntimeError(f"MySQL gzip validation failed: {database}") from exc
+                if total > 0 and (after.st_size, after.st_mtime_ns) == current and not _file_open_elsewhere(path):
+                    return
+        else:
+            quiet_since = None
+        last = current
+        if now >= deadline:
+            raise RuntimeError(f"MySQL export did not become stable: {database}")
+        time.sleep(0.1)
 
 
 def _export_mysql_via_cloudpanel(databases: list[str], out_dir: Path, clpctl: str) -> list[dict]:
@@ -27,11 +96,7 @@ def _export_mysql_via_cloudpanel(databases: list[str], out_dir: Path, clpctl: st
                 f"CloudPanel database export failed: {database} (exit {exit_code})"
             ) from exc
         _core.chmod_private(target)
-        try:
-            with gzip.open(target, "rb") as handle:
-                handle.read(64)
-        except OSError as exc:
-            raise RuntimeError(f"MySQL gzip validation failed: {database}") from exc
+        _wait_for_quiescent_gzip(target, database)
         results.append({
             "database": database,
             "file": f"mysql/{filename}",

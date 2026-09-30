@@ -673,3 +673,21 @@ P07 Toolbox 主菜单不得用手工空格拼接版本/状态列。主菜单只�
 工程词默认不作为菜单主词。用户可见安全确认优先使用中文，例如 P07 修复确认使用“修复”，不得要求理解 REPAIR。
 
 备份包必须是不可变快照：包内 metadata 不得保留指向源服务器实时文件的外部 symlink。恢复列表只展示当前仍通过 fresh verification 的备份。
+
+## Release / Preview Applicability Contract
+
+P07 是需要在真实服务器 root 环境运行的交互式终端运维产品，当前没有独立、Owner 可见且与 Production 隔离的 Preview Runtime。为了避免把“为了预览而在真实服务器运行候选安装/升级”误当成低风险动作，P07 的普通 Source / Public Distribution Release 输入固定为：
+
+```text
+OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A
+```
+
+适用理由与边界：
+
+- Candidate 必须先通过 exact-source Machine Gate、相关 Public Authority Gate、Secret / Data / Upgrade / Installer 边界和隔离安装验证；
+- Public Distribution 是独立 Gate；只有 OWNER 明确要求发布/继续分发时才执行；
+- Public Distribution 完成后，OWNER 可在真实服务器通过正常一行入口升级并进行 Real Use；在 OWNER 实际反馈之前，`OWNER_REAL_USE` 保持 `PENDING / NOT_YET_VERIFIED`，不得由 Machine PASS 推导；
+- 不得为了让 Preview Gate 变绿而创建第三 Runner、临时 VPS、Quick Tunnel、Preview Provider 或在 Production 服务器执行 Candidate 安装；
+- 真实 Restore / Migration / DNS / Provider / Destructive / Production Write 永远是独立高风险 Gate，不受本 N_A 规则授权；
+- 若未来 P07 正式建立独立 Preview Runtime，本条必须重新评估，不得继续机械沿用 N_A。
+

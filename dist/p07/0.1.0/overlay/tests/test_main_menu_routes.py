@@ -44,7 +44,8 @@ class MainMenuRouteContractTests(unittest.TestCase):
         self.assertIn('return 0', self.user)
 
     def test_restore_empty_state_waits_for_owner_to_read_it(self) -> None:
-        self.assertIn("没有发现已验证、可恢复的 P07 本地备份。", self.site)
+        self.assertIn("没有发现 P07 本地备份。", self.site)
+        self.assertIn("发现了本地备份，但当前完整性复检未通过", self.site)
         self.assertIn("返回后进入“备份与恢复”，选择“立即备份一个网站”。", self.site)
         self.assertIn("ui_empty_state 'P07 · 恢复网站'", self.site)
 
