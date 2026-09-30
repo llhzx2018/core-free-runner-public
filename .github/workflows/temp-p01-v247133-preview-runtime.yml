@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           IP="$(tr -d '[:space:]' </tmp/p01-preview-target)"
           test -n "$IP"
+          HOST="${IP//./-}.sslip.io"
           chmod 600 /tmp/p01-preview-key
 
           for i in $(seq 1 60); do
@@ -100,14 +101,14 @@ jobs:
           done
           dpkg --configure -a || true
           apt-get update -y
-          apt-get install -y nginx php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-curl php8.3-zip php8.3-mbstring php8.3-xml curl ca-certificates
+          apt-get install -y nginx php8.3-fpm php8.3-cli php8.3-sqlite3 php8.3-curl php8.3-zip php8.3-mbstring php8.3-xml curl ca-certificates certbot python3-certbot-nginx
           mkdir -p /var/www/p01-preview
           rm -rf /var/www/p01-preview/*
           REMOTE
 
           tar -C product/src -czf - . | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'tar -xzf - -C /var/www/p01-preview'
 
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" 'bash -s' <<'REMOTE'
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/p01-known-hosts -i /tmp/p01-preview-key root@"$IP" "PREVIEW_HOST='$HOST' bash -s" <<'REMOTE'
           set -euo pipefail
           chown -R www-data:www-data /var/www/p01-preview
           find /var/www/p01-preview -type d -exec chmod 0755 {} +
@@ -116,7 +117,7 @@ jobs:
           server {
               listen 80 default_server;
               listen [::]:80 default_server;
-              server_name _;
+              server_name PREVIEW_HOST;
               root /var/www/p01-preview;
               index index.php index.html;
               client_max_body_size 32m;
@@ -135,27 +136,32 @@ jobs:
               }
           }
           NGINX
+          sed -i "s/PREVIEW_HOST/$PREVIEW_HOST/g" /etc/nginx/sites-available/p01-preview
           rm -f /etc/nginx/sites-enabled/default
           ln -sfn /etc/nginx/sites-available/p01-preview /etc/nginx/sites-enabled/p01-preview
           nginx -t
           systemctl enable --now php8.3-fpm nginx
           systemctl restart php8.3-fpm nginx
+          certbot --nginx --non-interactive --agree-tos --register-unsafely-without-email -d "$PREVIEW_HOST" --redirect
+          nginx -t
+          systemctl reload nginx
           REMOTE
 
-          for i in $(seq 1 30); do
-            code="$(curl -sS -o /tmp/setup.html -w '%{http_code}' "http://$IP/setup.php" || true)"
+          for i in $(seq 1 45); do
+            code="$(curl -sS -L -o /tmp/setup.html -w '%{http_code}' "https://$HOST/setup.php" || true)"
             if [ "$code" = "200" ]; then
               break
             fi
             sleep 2
           done
           grep -q 'VF Start' /tmp/setup.html
-          printf '%s\n' "$IP" > preview-coordination/P01_V247133.ready
+          test "$(curl -fsS "https://$HOST/VERSION.txt")" = "2.47.133"
+          printf 'https://%s/\n' "$HOST" > preview-coordination/P01_V247133.ready
           git add preview-coordination/P01_V247133.ready
           git commit -m 'sandbox(P01): record preview runtime ready'
           git push origin HEAD:sandbox-p01-v247133-preview-runtime-20260930
           echo "P01_PREVIEW_RUNTIME_READY=YES"
-          echo "P01_PREVIEW_URL=http://$IP/"
+          echo "P01_PREVIEW_URL=https://$HOST/"
           echo "P01_PREVIEW_EXACT_SOURCE=fa2741d17bb54ce2e204a944a2f710d8436473ca"
 
       - name: Cleanup ephemeral private key
