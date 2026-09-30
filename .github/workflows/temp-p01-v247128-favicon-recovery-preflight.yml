@@ -1,0 +1,248 @@
+name: P01 V2.47.128 Favicon Recovery Preflight
+
+on:
+  push:
+    branches:
+      - test-p01-v247128-favicon-recovery-preflight-20260930
+    paths:
+      - '.github/workflows/temp-p01-v247128-favicon-recovery-preflight.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      TARGET_SHA: fac9aab3b82d4b08e72d6cfe42773330d7abe96c
+      TARGET_TREE: 3fec2138a747fd41a91ac5dda4b97298e079ceea
+      VERSION: 2.47.128
+      SOURCE_VERSION: 2.47.127
+      ART: /tmp/p01-v247128-artifacts
+      REL: /tmp/p01-v247128-baseline
+      WORK: /tmp/p01-v247128-gate
+
+    steps:
+      - name: Checkout runner carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: fac9aab3b82d4b08e72d6cfe42773330d7abe96c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product
+
+      - name: Checkout stable P01 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.127
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: stable
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq sqlite3 >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          php -m | grep -Fx curl
+          echo P01_V247128_PREFLIGHT_RUNTIME=PASS
+
+      - name: Bind exact source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < product/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = "$VERSION"
+          grep -Fq "define('VF_VERSION', '$VERSION')" product/src/app/bootstrap.php
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE_VERSION"
+          test -z "$(git -C product status --porcelain)"
+          echo P01_V247128_EXACT_SOURCE=PASS
+
+      - name: Focused favicon recovery contracts
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php tests/unit/navigation_v247126_rail_icon_fix_contract.php
+          php tests/unit/navigation_v247127_favicon_provider_privacy_contract.php
+          php tests/unit/navigation_v247127_favicon_reliability_contract.php
+          php tests/unit/navigation_v247127_favicon_hotpath_contract.php
+          php tests/unit/navigation_v247127_safe_svg_favicon_contract.php
+          php tests/unit/navigation_v247128_favicon_recovery_queue_contract.php
+          echo P01_V247128_FOCUSED_FAVICON_RECOVERY=PASS
+
+      - name: Canonical regression against V2.47.127
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash tests/canonical_release_regression.sh . ../stable --require-zero-debt | tee /tmp/p01-v247128-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-v247128-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-v247128-canonical.txt
+          test -z "$(git status --porcelain)"
+          echo P01_V247128_CANONICAL_RELEASE_PROOF=PASS
+
+      - name: Build exact maintenance artifacts without publishing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$REL" "$ART"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "v$SOURCE_VERSION" -R "$PRODUCT_REPO" -D "$REL"             -p "VF-Start-V${SOURCE_VERSION}-FULL.zip"             -p "VF_Start_V${SOURCE_VERSION}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V${SOURCE_VERSION}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE_VERSION}_UPDATE.zip" -d "$REL/update"
+          python3 runner/scripts/p01-maintenance-release.py             --candidate product/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE_VERSION}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE_VERSION"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" >/tmp/p01-v247128-build.json
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          unzip -t "$ART/VF-Start-V${VERSION}-FULL.zip" >/dev/null
+          unzip -t "$ART/VF_Start_V${VERSION}_UPDATE.zip" >/dev/null
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$ART/VF_Start_V${VERSION}_UPDATE.zip" -d "$WORK/update"
+          php "$WORK/update/repair-v${VERSION}.php" --self-test | tee /tmp/p01-v247128-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-v247128-selftest.json
+          echo P01_V247128_ARTIFACT_BUILD_SELFTEST=PASS
+
+      - name: Clean FULL and legacy fallback runtime recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$WORK/full"
+          COOKIE=/tmp/p01-v247128-cookie.txt
+          rm -rf "$ROOT" "$COOKIE"
+          mkdir -p "$ROOT"
+          unzip -q "$ART/VF-Start-V${VERSION}-FULL.zip" -d "$ROOT"
+          (
+            cd "$ROOT"
+            php -S 127.0.0.1:18628 -t . >/tmp/p01-v247128-server.log 2>&1 &
+            echo $! >/tmp/p01-v247128-server.pid
+          )
+          pid="$(cat /tmp/p01-v247128-server.pid)"
+          for _ in $(seq 1 40); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" http://127.0.0.1:18628/setup.php -o /tmp/p01-v247128-setup.html; then break; fi
+            sleep 1
+          done
+          kill -0 "$pid"
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-v247128-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+          pass='P01-V247128-Gate!'
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST http://127.0.0.1:18628/setup.php             --data-urlencode "setup_csrf=$csrf"             --data-urlencode "site_title=VF Start 2.47.128 Gate"             --data-urlencode "admin_password=$pass"             --data-urlencode "admin_password_confirm=$pass"             -o /tmp/p01-v247128-setup-post.html
+          kill "$pid" >/dev/null 2>&1 || true
+          (cd "$ROOT" && php cli/verify.php) | tee /tmp/p01-v247128-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-v247128-verify.txt
+
+          cat >"$ROOT/recovery-gate.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $cat=$repo->createCategory([
+              'name'=>'Favicon Recovery Gate',
+              'description'=>'synthetic',
+              'icon'=>'',
+              'is_private'=>1,
+              'sort_order'=>0,
+          ]);
+          $link=$repo->saveLink(null,[
+              'surface'=>'start',
+              'category_id'=>$cat,
+              'title'=>'Legacy accepted fallback',
+              'url'=>'https://github.com/settings/tokens?token=SYNTHETIC_ONLY',
+              'description'=>'synthetic',
+              'tags'=>['favicon-recovery'],
+              'is_private'=>1,
+              'is_pending'=>0,
+          ]);
+          $id=(int)$link['id'];
+          $sig=VfIconCache::signature(['url'=>$link['url'],'icon'=>'']);
+          $now=gmdate('c');
+          $stmt=$db->prepare("INSERT OR REPLACE INTO icon_cache(link_id,status,source_url,file_name,file_hash,mime_type,byte_size,width,height,link_signature,fetched_at,retry_after,last_error,updated_at,failure_kind,attempt_count,last_attempt_at,attempted_urls,accepted_fallback) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+          $stmt->execute([$id,'failed','','','','',0,0,0,$sig,'','', 'legacy direct resolver failure',$now,'no_icon',3,$now,json_encode(['https://github.com/favicon.ico']),1]);
+
+          $icons=new VfIconCache($db);
+          $result=$icons->refreshVisibleMissing([$id],1);
+          $item=$result['results'][0]??[];
+          if(empty($item['success'])||($item['provider']??'')!=='favicon.im') {
+              fwrite(STDERR,json_encode($result,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n");
+              exit(31);
+          }
+          $row=$db->query('SELECT status,accepted_fallback,attempted_urls FROM icon_cache WHERE link_id='.(int)$id)->fetch(PDO::FETCH_ASSOC);
+          if(!$row||$row['status']!=='success'||(int)$row['accepted_fallback']!==0) exit(32);
+
+          $link2=$repo->saveLink(null,[
+              'surface'=>'start',
+              'category_id'=>$cat,
+              'title'=>'Current provider accepted fallback',
+              'url'=>'https://github.com/private/path?secret=SYNTHETIC_ONLY',
+              'description'=>'synthetic',
+              'tags'=>['favicon-recovery'],
+              'is_private'=>1,
+              'is_pending'=>0,
+          ]);
+          $id2=(int)$link2['id'];
+          $sig2=VfIconCache::signature(['url'=>$link2['url'],'icon'=>'']);
+          $provider='https://a.favicon.im/github.com?throw-error-on-404=true';
+          $stmt->execute([$id2,'failed','','','','',0,0,0,$sig2,'','', 'current provider failure',$now,'no_icon',1,$now,json_encode([$provider]),1]);
+          $result2=$icons->refreshVisibleMissing([$id2],1);
+          $item2=$result2['results'][0]??[];
+          if(($item2['reason']??'')!=='fallback'||empty($item2['skipped'])) exit(33);
+          $row2=$db->query('SELECT accepted_fallback,attempted_urls FROM icon_cache WHERE link_id='.(int)$id2)->fetch(PDO::FETCH_ASSOC);
+          if(!$row2||(int)$row2['accepted_fallback']!==1||!str_contains((string)$row2['attempted_urls'],'a.favicon.im')) exit(34);
+
+          echo json_encode([
+              'legacy_fallback_recovered'=>true,
+              'current_provider_fallback_respected'=>true,
+              'provider'=>'favicon.im'
+          ],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES)."\n";
+          PHP
+          php "$ROOT/recovery-gate.php" | tee /tmp/p01-v247128-recovery-runtime.json
+          jq -e '.legacy_fallback_recovered==true and .current_provider_fallback_respected==true and .provider=="favicon.im"' /tmp/p01-v247128-recovery-runtime.json >/dev/null
+          rm "$ROOT/recovery-gate.php"
+          echo P01_V247128_LEGACY_FALLBACK_RUNTIME=PASS
+
+      - name: Preflight closure
+        shell: bash
+        run: |
+          cat <<'EOF'
+          EXACT_SOURCE=PASS
+          FOCUSED_FAVICON_RECOVERY=PASS
+          CANONICAL_ZERO_DEBT=PASS
+          MAINTENANCE_ARTIFACT_BUILD=PASS
+          CLEAN_FULL=PASS
+          LEGACY_ACCEPTED_FALLBACK_RECOVERY=PASS
+          CURRENT_PROVIDER_ACCEPTED_FALLBACK_RESPECTED=PASS
+          OWNER_PREVIEW_RUNTIME_APPLICABILITY=REQUIRED
+          OWNER_PREVIEW_RUNTIME=BLOCKED_OWNER_PREVIEW
+          OWNER_REAL_USE=BLOCKED_OWNER_PREVIEW
+          FORMAL_RELEASE=NOT_AUTHORIZED_IN_THIS_WORKFLOW
+          DISTRIBUTION=NOT_AUTHORIZED_IN_THIS_WORKFLOW
+          PRODUCTION=UNCHANGED
+          P01_V247128_FAVICON_RECOVERY_PREFLIGHT=PASS
+          EOF
