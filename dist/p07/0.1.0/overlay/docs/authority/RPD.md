@@ -720,3 +720,40 @@ External exporter work path
 - post-commit fresh verification 仍是最终硬 Gate，不得因为前面已经 PASS 而跳过；
 - 普通用户错误页必须输出中文阶段与中文原因，不要求理解 `BACKUP`、`FRESH_VERIFY_NOT_PASS`、`MYSQL_SNAPSHOT_CHANGED` 等机器 token；机器 token 仅保留给内部诊断。
 
+## Stable Final Verification Contract
+
+Portable Backup Package 的 post-commit 验证必须兼顾两件事：不能把短暂读取异常误报成不可恢复，也不能因为重试而放松 fail-closed。
+
+固定规则：
+
+```text
+atomic commit
+→ full verify
+→ 若 PASS，继续下一次 full verify
+→ 必须连续 PASS >= 2 次
+→ 才允许显示“已验证，可恢复”
+```
+
+若验证失败：
+
+- 允许在一个短、固定、有限的窗口内重试；
+- checksum / archive / MySQL / SQLite / metadata / manifest 等验证条件不变；
+- 最终没有达到连续 PASS 时必须 fail closed；
+- 失败必须归类为固定安全类别，普通界面显示中文原因；
+- 不得只显示 `FRESH_VERIFY_NOT_PASS` 这类泛化机器码；
+- 不得因为某一次 PASS 就覆盖前后持续的不一致；
+- 旧失败包不保留为“可恢复”备份。
+
+当前固定分类至少包括：
+
+```text
+MySQL 快照变化 / 无法读取
+SQLite 快照变化 / 完整性失败
+网站压缩包变化 / 为空 / 无法读取
+网站配置快照变化
+manifest 变化
+checksums 缺失 / 格式异常
+外部链接残留
+其它备份文件变化
+```
+
