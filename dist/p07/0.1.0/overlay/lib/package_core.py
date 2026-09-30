@@ -397,7 +397,7 @@ def copy_runtime_metadata(
             if domain not in text:
                 continue
             target = vhost_out / source.name
-            copy_private(source, target)
+            copy_private_follow(root, source, target)
             copied.append(f"metadata/vhost/{source.name}")
 
             for kind, directive in (("certificate", "ssl_certificate"), ("private_key", "ssl_certificate_key")):
@@ -425,7 +425,7 @@ def copy_runtime_metadata(
         ensure_within(root, source)
         if source.is_file():
             target = cron_out / safe_name(source_path.strip("/").replace("/", "__"))
-            copy_private(source, target)
+            copy_private_follow(root, source, target)
             copied.append(f"metadata/cron/{target.name}")
 
     user = str(site.get("site_user", UNKNOWN))
@@ -433,7 +433,7 @@ def copy_runtime_metadata(
         source = rooted(root, f"/home/{user}/.pm2/dump.pm2")
         if source.is_file():
             target = out_dir / "pm2" / "dump.pm2"
-            copy_private(source, target)
+            copy_private_follow(root, source, target)
             copied.append("metadata/pm2/dump.pm2")
 
     private_panel = copy_cloudpanel_private_metadata(
@@ -465,6 +465,8 @@ def sha256_file(path: Path) -> str:
 def write_checksums(package_dir: Path) -> None:
     entries: list[str] = []
     for path in sorted(package_dir.rglob("*")):
+        if path.is_symlink():
+            raise RuntimeError(f"backup package contains external symlink: {path.relative_to(package_dir).as_posix()}")
         if not path.is_file() or path.name in {"checksums.sha256", "verification.json"}:
             continue
         rel = path.relative_to(package_dir)
@@ -486,6 +488,9 @@ def verify_package(package_dir: Path) -> dict[str, Any]:
     except OSError:
         checksum_lines = []
         failures.append("checksums:missing")
+    for path in sorted(package_dir.rglob("*")):
+        if path.is_symlink():
+            failures.append(f"symlink:{path.relative_to(package_dir).as_posix()}")
     for line in checksum_lines:
         if not line.strip():
             continue

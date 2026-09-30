@@ -84,7 +84,13 @@ def cloudpanel_version(root: Path) -> str:
                 continue
             text = (proc.stdout or proc.stderr).strip()
             if proc.returncode == 0 and text:
-                return text.splitlines()[0][:80]
+                first = text.splitlines()[0]
+                for token in first.replace("(", " ").replace(")", " ").split():
+                    candidate = token.strip().strip(",;:")
+                    if candidate and candidate[0].isdigit() and candidate.count(".") >= 1:
+                        if all(part.isdigit() for part in candidate.split(".") if part):
+                            return candidate
+                return first[:32]
     return UNKNOWN
 
 

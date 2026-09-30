@@ -42,11 +42,11 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertIn("semantic_terminal_colors", s["capabilities"])
         self.assertIn("pty_color_preservation", s["capabilities"])
 
-    def test_slot3_contains_release10_beginner_ui_candidate(self):
+    def test_slot3_contains_release11_beginner_ui_distribution(self):
         s = self.data["slots"][2]
-        self.assertEqual(s["internal_version"], "0.1.0-release10")
+        self.assertEqual(s["internal_version"], "0.1.0-release11")
         self.assertEqual(s["integration_state"], "RELEASE_CANDIDATE_FOR_PUBLIC_MAIN")
-        self.assertEqual(s["source_main_commit"], "46273be9c306f6ceed3182e5dd9d98d50b0c8112")
+        self.assertEqual(s["source_main_commit"], "90217676ca343b0a64de3d072d824ece17f6bad2")
         self.assertEqual(s["terminal_ui_color_system"], "CANONICAL_V1")
         self.assertEqual(s["full_server_migration_integration_commit"], "5c447fc99030f75c098934ddb9aa300b934564bb")
 
@@ -59,7 +59,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual(self.data["release_blockers"], [])
         self.assertEqual(self.data["release"]["tag"], "p07-v0.1.0")
         self.assertEqual(self.data["release"]["status"], "PUBLISHED")
-        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release10")
+        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release11")
         self.assertEqual(self.data["release"]["slot3_distribution"], "PUBLIC_PR_CANDIDATE")
 
     def test_production_is_not_implicitly_promoted_by_distribution(self):
@@ -72,7 +72,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual(p["release7_install_status"], "NOT_YET_OWNER_VERIFIED")
         self.assertEqual(p["release8_install_status"], "NOT_YET_OWNER_VERIFIED")
         self.assertEqual(p["release9_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release10_install_status"], "NOT_YET_OWNER_VERIFIED")
+        self.assertEqual(p["release11_install_status"], "NOT_YET_OWNER_VERIFIED")
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]

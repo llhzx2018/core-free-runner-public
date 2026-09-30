@@ -337,7 +337,9 @@ def restore_as(
     target_domain = cloudpanel.validate_domain(target_domain)
     fresh = package_engine.verify_package(package_dir)
     if fresh.get("status") != "PASS":
-        raise RestoreAsError("backup package failed fresh verification")
+        failures = fresh.get("failures", [])
+        reason = ",".join(str(item) for item in failures[:4]) if isinstance(failures, list) else "UNKNOWN"
+        raise RestoreAsError(f"backup package failed fresh verification; reason={reason or 'UNKNOWN'}")
     manifest = load_manifest(package_dir)
     source_site = manifest.get("site", {}) if isinstance(manifest.get("site"), dict) else {}
     source_domain = cloudpanel.validate_domain(str(source_site.get("domain", "")))

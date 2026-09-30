@@ -34,7 +34,7 @@ class BeginnerRemoteBackupTests(unittest.TestCase):
         self.harness.tearDown()
 
     def test_no_storage_config_adds_no_extra_question(self) -> None:
-        proc = self.harness._run("2\n1\ny\n\n0\n")
+        proc = self.harness._run("2\n1\n1\ny\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("备份完成 ✓", proc.stdout)
         self.assertIn("状态：已验证，可恢复", proc.stdout)
@@ -45,7 +45,7 @@ class BeginnerRemoteBackupTests(unittest.TestCase):
     def test_configured_remote_is_one_question_and_uses_auto_target(self) -> None:
         self.storage_config.write_text("{}\n", encoding="utf-8")
         proc = self.harness._run(
-            "2\n1\ny\n\n0\n",
+            "2\n1\n1\ny\n\n0\n0\n",
             {"VFOPS_STORAGE_CONFIG": str(self.storage_config)},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -58,7 +58,7 @@ class BeginnerRemoteBackupTests(unittest.TestCase):
     def test_remote_failure_never_demotes_verified_local_backup(self) -> None:
         self.storage_config.write_text("{}\n", encoding="utf-8")
         proc = self.harness._run(
-            "2\n1\ny\n\n0\n",
+            "2\n1\n1\ny\n\n0\n0\n",
             {
                 "VFOPS_STORAGE_CONFIG": str(self.storage_config),
                 "VFOPS_TEST_STORAGE_FAIL": "1",

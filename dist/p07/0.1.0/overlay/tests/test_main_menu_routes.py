@@ -13,22 +13,25 @@ class MainMenuRouteContractTests(unittest.TestCase):
         cls.site = (ROOT / "bin" / "vfops-site-ui").read_text(encoding="utf-8")
         cls.common = (ROOT / "lib" / "cloudpanel_ui_common.sh").read_text(encoding="utf-8")
 
-    def test_all_seven_user_routes_are_wired(self) -> None:
+    def test_five_top_level_routes_and_backup_group_are_wired(self) -> None:
         expected = (
             '1) run_module "$SITE_UI" overview ;;',
-            '2) run_module "$SITE_UI" backup ;;',
-            '3) run_module "$SITE_UI" restore ;;',
-            '4) run_module "$MIGRATE_UI" ;;',
-            '5) run_module "$AUTO_UI" ;;',
-            '6) run_module "$CLOUDPANEL_UI" site ;;',
-            '7) run_module "$CLOUDPANEL_UI" admin ;;',
-            '8) run_module "$DIAG_UI" ;;',
-            '9) run_module "$HISTORY_UI" ;;',
-            '10) run_module "$SELFCHECK_UI" ;;',
-            '11) run_module "$INIT_UI" ;;',
+            '2) backup_menu ;;',
+            '3) run_module "$MIGRATE_UI" ;;',
+            '4) run_module "$CLOUDPANEL_UI" site ;;',
+            '5) run_module "$CLOUDPANEL_UI" admin ;;',
         )
         for route in expected:
             self.assertIn(route, self.user)
+        for route in (
+            '1) run_module "$SITE_UI" backup ;;',
+            '2) run_module "$SITE_UI" restore ;;',
+            '3) run_module "$AUTO_UI" ;;',
+        ):
+            self.assertIn(route, self.user)
+        self.assertNotIn('8) run_module "$DIAG_UI" ;;', self.user)
+        self.assertNotIn('11) run_module "$INIT_UI" ;;', self.user)
+
 
     def test_child_entry_clears_parent_screen(self) -> None:
         self.assertIn("ui_screen_clear", self.user)
@@ -42,7 +45,7 @@ class MainMenuRouteContractTests(unittest.TestCase):
 
     def test_restore_empty_state_waits_for_owner_to_read_it(self) -> None:
         self.assertIn("没有发现已验证、可恢复的 P07 本地备份。", self.site)
-        self.assertIn("返回主菜单后选择“备份网站”创建并验证一个备份。", self.site)
+        self.assertIn("返回后进入“备份与恢复”，选择“立即备份一个网站”。", self.site)
         self.assertIn("ui_empty_state 'P07 · 恢复网站'", self.site)
 
     def test_backup_empty_site_state_waits_before_main_menu_redraw(self) -> None:

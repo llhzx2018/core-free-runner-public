@@ -4,15 +4,18 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 
 class OpsConsoleR9Tests(unittest.TestCase):
-    def test_new_routes_exist(self):
+    def test_ops_tools_are_kept_out_of_slot3_menu(self):
         text=(ROOT/"bin/vfops-user").read_text(encoding="utf-8")
         for route in (
             '8) run_module "$DIAG_UI" ;;',
             '9) run_module "$HISTORY_UI" ;;',
             '10) run_module "$SELFCHECK_UI" ;;',
             '11) run_module "$INIT_UI" ;;',
-        ): self.assertIn(route,text)
-        self.assertIn("状态摘要：",text)
+        ):
+            self.assertNotIn(route,text)
+        for tool in ("vfops-diagnostics-ui","vfops-history-ui","vfops-selfcheck-ui","vfops-init-ui"):
+            self.assertTrue((ROOT/"bin"/tool).is_file())
+        self.assertIn("网站与数据",text)
 
     def test_history_round_trip(self):
         with tempfile.TemporaryDirectory() as td:
@@ -42,7 +45,7 @@ class OpsConsoleR9Tests(unittest.TestCase):
     def test_selfcheck_and_init_are_guarded(self):
         selfcheck=(ROOT/"bin/vfops-selfcheck-ui").read_text(encoding="utf-8")
         init=(ROOT/"bin/vfops-init-ui").read_text(encoding="utf-8")
-        self.assertIn("ui_confirm_exact REPAIR",selfcheck)
+        self.assertIn("ui_confirm_exact '修复'",selfcheck)
         self.assertIn("APPLY_BASELINE",init)
         self.assertIn("INSTALL_CLOUDPANEL",init)
         self.assertIn("DNS、生产切流、旧服务器删除均不属于初始化自动步骤",init)
