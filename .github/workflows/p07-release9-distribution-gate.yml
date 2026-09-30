@@ -1,0 +1,87 @@
+name: P07 Release9 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release9-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release identity
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = '0.1.0-release9'
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release9"' installers/p07-toolbox.sh
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release9"' installers/p07-final.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="7c9d1d0f5c40716b7804bdca9906941a86d355d7"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="8d27ef751532609fea0fe01d39dae3781d8be7d2"' installers/p07.sh
+
+      - name: Verify runtime manifest
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path):
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          rows=[]
+          for line in (root/'RUNTIME.gitblob').read_text().splitlines():
+              if not line.strip(): continue
+              h,p=line.split('  ',1); rows.append((h,p))
+          for h,p in rows:
+              path=root/p
+              assert path.is_file(), p
+              assert blob(path)==h, (p,blob(path),h)
+          required={'bin/vfops-diagnostics-ui','bin/vfops-history-ui','bin/vfops-selfcheck-ui','bin/vfops-init-ui','lib/ops_diagnostics.py','lib/ops_history.py'}
+          assert required <= {p for _,p in rows}
+          PY
+
+      - name: Focused product tests
+        run: |
+          set -Eeuo pipefail
+          python3 dist/p07/0.1.0/overlay/tests/test_ops_console_r9.py
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          ! grep -Fq 'guided-init' installers/p07-final.sh
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release9'
+          test -f "$tmp/install/bin/vfops-diagnostics-ui"
+          test -f "$tmp/install/bin/vfops-history-ui"
+          test -f "$tmp/install/bin/vfops-selfcheck-ui"
+          test -f "$tmp/install/bin/vfops-init-ui"
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE9_DISTRIBUTION_GATE=PASS'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'

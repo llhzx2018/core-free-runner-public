@@ -22,6 +22,10 @@ class MainMenuRouteContractTests(unittest.TestCase):
             '5) run_module "$AUTO_UI" ;;',
             '6) run_module "$CLOUDPANEL_UI" site ;;',
             '7) run_module "$CLOUDPANEL_UI" admin ;;',
+            '8) run_module "$DIAG_UI" ;;',
+            '9) run_module "$HISTORY_UI" ;;',
+            '10) run_module "$SELFCHECK_UI" ;;',
+            '11) run_module "$INIT_UI" ;;',
         )
         for route in expected:
             self.assertIn(route, self.user)
