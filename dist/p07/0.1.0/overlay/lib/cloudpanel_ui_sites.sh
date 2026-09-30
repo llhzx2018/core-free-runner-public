@@ -1,6 +1,6 @@
 create_site() {
   local type domain user version port template proxy confirm rc
-  say; ui_title '创建 CloudPanel 网站'; ui_rule
+  say; ui_title '创建网站'; ui_rule
   ui_menu_warn 1 'PHP'
   ui_menu_warn 2 '静态 HTML'
   ui_menu_warn 3 'Node.js'
@@ -21,7 +21,7 @@ create_site() {
   prompt_secret_twice '网站用户密码' || { pause; return 0; }
   version=""; port=""; template=""; proxy=""
   case "$type" in
-    1) printf 'PHP 版本 [8.4]：'; read -r version || true; version="${version:-8.4}"; printf 'Vhost 模板 [Generic]：'; read -r template || true; template="${template:-Generic}" ;;
+    1) printf '网站运行版本（PHP）[8.4]：'; read -r version || true; version="${version:-8.4}"; printf '网站配置模板（Vhost）[Generic]：'; read -r template || true; template="${template:-Generic}" ;;
     3) printf 'Node.js 版本 [22]：'; read -r version || true; version="${version:-22}"; printf '应用端口 [3000]：'; read -r port || true; port="${port:-3000}" ;;
     4) printf 'Python 版本 [3.13]：'; read -r version || true; version="${version:-3.13}"; printf '应用端口 [8000]：'; read -r port || true; port="${port:-8000}" ;;
     5) printf '反向代理 URL（例如 http://127.0.0.1:8000）：'; read -r proxy || true ;;
