@@ -17,11 +17,11 @@ class StorageOnboardingUXTests(unittest.TestCase):
 
     def test_first_screen_is_preparation_first(self) -> None:
         self.assertIn("首次使用前请先准备", self.setup)
-        self.assertIn("Google：OAuth 客户端 ID + 客户端密钥", self.setup)
-        self.assertIn("B2：存储桶 + 应用密钥 ID + 应用密钥", self.setup)
+        self.assertIn("Google：授权客户端（OAuth）的 ID + 密钥", self.setup)
+        self.assertIn("B2：备份空间（Bucket）+ 应用密钥", self.setup)
         self.assertIn("恢复密钥：", self.setup)
         self.assertIn("P07 自动生成，无需提前准备", self.setup)
-        self.assertIn("已准备好，一键初始化 Google + B2", self.setup)
+        self.assertIn("已准备好，开始设置异地备份", self.setup)
         self.assertIn("查看完整准备教程", self.setup)
 
     def test_google_tutorial_is_embedded_before_secret_prompts(self) -> None:
