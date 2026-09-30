@@ -1,0 +1,94 @@
+name: P07 Release13 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release13-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release13 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 16f620c4f803cd800bfb4007c989b8f85743a2e4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Exact identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '16f620c4f803cd800bfb4007c989b8f85743a2e4'
+          test "$(cat BUILD_ID)" = '0.1.0-release13'
+          grep -Fq '## External Database Export Snapshot Contract' docs/authority/RPD.md
+          grep -Fq '| B45 | Package-owned MySQL Snapshot |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'OWNER_REAL_RELEASE12_FAIL' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'clpctl_db_export_immutable_snapshot' lib/package.py
+          grep -Fq 'MYSQL_SNAPSHOT_CHANGED' lib/diagnostics.py
+          grep -Fq "阶段：$stage_text" lib/terminal_ui.sh
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops
+          bash -n bin/vfops-site-ui
+          bash -n lib/terminal_ui.sh
+          python3 -m py_compile lib/package.py lib/package_core.py lib/diagnostics.py lib/cloudpanel.py
+
+      - name: Release13 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_release13_mysql_snapshot             tests.test_release12_backup_freshness             tests.test_backup             tests.test_backup_frontend             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: External-export immutability assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('lib/package.py').read_text(encoding='utf-8')
+          assert 'TemporaryDirectory(prefix=".vfops-mysql-export-"' in text
+          assert '_snapshot_quiescent_gzip(export_source, target, database)' in text
+          assert 'source_digest != snapshot_digest' in text
+          assert 'os.replace(snapshot, target)' in text
+          assert 'quiet_seconds=2.0' in text
+
+          test=Path('tests/test_release13_mysql_snapshot.py').read_text(encoding='utf-8')
+          assert 'os.close(fd)' in test
+          assert 'time.sleep(2.4)' in test
+          assert 'os.replace(replacement, target)' in test
+          PY
+
+      - name: Security and safety boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'DNS：未修改' bin/vfops-site-ui
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE13_EXACT_SOURCE=16f620c4f803cd800bfb4007c989b8f85743a2e4'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
