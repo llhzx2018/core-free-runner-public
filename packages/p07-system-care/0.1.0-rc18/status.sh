@@ -62,7 +62,7 @@ case "$reboot" in
   NO) reboot_text='否' ;;
   *) reboot_text='未知' ;;
 esac
-say "${C_BOLD}${C_CYAN}P07 · 系统维护 / 安全 · 快速状态${C_RESET}"
+say "${C_BOLD}${C_CYAN}P07 · 服务器维护 / 安全 · 快速状态${C_RESET}"
 say
 printf '服务器状态   %s\n' "$health_text"
 printf '可更新       %s\n' "$updates"
