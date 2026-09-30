@@ -362,7 +362,11 @@ exit 0
         proc = self._run("2\n1\n1\ny\n\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("备份完整性检查没有通过", proc.stdout)
-        self.assertIn("阶段：BACKUP", proc.stdout)
+        self.assertIn("阶段：备份", proc.stdout)
+        self.assertIn("原因：备份最终完整性复检没有通过", proc.stdout)
+        self.assertNotIn("阶段：BACKUP", proc.stdout)
+        self.assertNotIn("FRESH_VERIFY_NOT_PASS", proc.stdout)
+        self.assertNotIn("原因代码", proc.stdout)
         self.assertNotIn("raw-private-looking-detail", proc.stdout)
 
 

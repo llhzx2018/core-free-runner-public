@@ -691,3 +691,32 @@ OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A
 - 真实 Restore / Migration / DNS / Provider / Destructive / Production Write 永远是独立高风险 Gate，不受本 N_A 规则授权；
 - 若未来 P07 正式建立独立 Preview Runtime，本条必须重新评估，不得继续机械沿用 N_A。
 
+## External Database Export Snapshot Contract
+
+CloudPanel 等外部数据库导出器写入的路径属于“外部工作文件”，不得直接成为 P07 Portable Backup Package 的 checksum 对象。
+
+固定流程：
+
+```text
+External exporter work path
+→ 等待文件稳定且无外部写入
+→ 完整读取 gzip
+→ P07 复制为 package-owned snapshot
+→ fsync
+→ 再次观察外部工作文件
+→ source/snapshot digest 一致
+→ 仅把 package-owned snapshot 写入 checksum
+→ staging verify
+→ atomic commit
+→ final fresh verify
+```
+
+硬边界：
+
+- 外部导出器拿到的文件路径与正式备份包中的 MySQL 文件必须是不同路径；
+- checksum / verification 只能覆盖 P07 已接管的不可变快照，不得覆盖 Provider / CloudPanel 仍可能修改的工作文件；
+- 外部工作目录必须在写 checksum 前退出备份包内容面，不能被误收入 Portable Package；
+- 若外部文件在 settle / snapshot 期间继续变化，P07 必须继续等待或 fail closed，不能显示“已验证，可恢复”；
+- post-commit fresh verification 仍是最终硬 Gate，不得因为前面已经 PASS 而跳过；
+- 普通用户错误页必须输出中文阶段与中文原因，不要求理解 `BACKUP`、`FRESH_VERIFY_NOT_PASS`、`MYSQL_SNAPSHOT_CHANGED` 等机器 token；机器 token 仅保留给内部诊断。
+
