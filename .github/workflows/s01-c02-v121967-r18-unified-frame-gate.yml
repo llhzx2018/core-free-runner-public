@@ -1,0 +1,264 @@
+name: S01-C02 V1.21.967 R18 Unified Frame Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-v121967-r18-unified-frame-gate.yml'
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_SHA: 86230c03d6e12aafa0be3984e487ff0c51d0ecb9
+  BASE_SHA: bbc254dbbe567bb61f251e86befff7fac2154dc3
+  TARGET_VERSION: 1.21.967
+  BASE_VERSION: 1.21.966
+  ARTIFACT_NAME: vf-tools-ops_V1.21.967.zip
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Exact bounded diff and R18 contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "VF_OPS_VERSION', '$TARGET_VERSION'" target/vf-ops.php
+          grep -Fq "S01-PAGE-BODY-V2-PRODUCTION-REALUSE-R18" target/vf-ops.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          cat > /tmp/allowed <<'EOF'
+          CHANGELOG.md
+          VERSION
+          assets/css/current/admin-s01-page-frame-r18.css
+          assets/js/admin-s01-page-frame-r18.js
+          includes/views/admin-shell-tabs-parts/02-shell-navigation.php
+          includes/views/admin-style-helpers/admin-s01-uiux-polish.php
+          tests/s01-c02-prod-realuse-r18-unified-page-frame-contract.php
+          vf-ops.php
+          EOF
+          sort -u evidence/changed-files.txt >/tmp/actual
+          sort -u /tmp/allowed >/tmp/expected
+          diff -u /tmp/expected /tmp/actual
+          php target/tests/s01-c02-prod-realuse-r18-unified-page-frame-contract.php
+          node --check target/assets/js/admin-s01-page-frame-r18.js
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          ! grep -RIlE --exclude-dir=.git -- '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,})' target | grep -q .
+          echo 'R18_SOURCE_CONTRACT=PASS'
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): out[rel.as_posix()]=p.read_bytes()
+              return dict(sorted(out.items()))
+          def fp(fs):
+              h=hashlib.sha256()
+              for rel,data in sorted(fs.items()):
+                  h.update(rel.encode()); h.update(b'\0'); h.update(hashlib.sha256(data).hexdigest().encode()); h.update(b'\n')
+              return h.hexdigest()
+          def pack(root,out):
+              fs=files(root)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(fs.items()):
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,9,30,0,0,0)); info.compress_type=zipfile.ZIP_DEFLATED; info.external_attr=0o100644<<16; z.writestr(info,data)
+              return fs
+          rows={}
+          for label,root,ver,out in [
+              ('baseline',Path('baseline'),'1.21.966',Path('/tmp/vf-tools-ops_V1.21.966.zip')),
+              ('candidate',Path('target'),'1.21.967',Path('/tmp/vf-tools-ops_V1.21.967.zip'))
+          ]:
+              fs=pack(root,out)
+              rows[label]={'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':fp(fs)}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          cp "/tmp/$ARTIFACT_NAME" "evidence/$ARTIFACT_NAME"
+          unzip -tq "evidence/$ARTIFACT_NAME"
+
+      - name: Upgrade preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-r18g-${GITHUB_RUN_ID}"; DB="vf-r18g-db-${GITHUB_RUN_ID}"; WP="vf-r18g-wp-${GITHUB_RUN_ID}"
+          PORT="$((19000 + (GITHUB_RUN_ID % 9000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V1.21.966.zip "$WP:/tmp/base.zip"
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/candidate.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF R18 Gate' --admin_user=admin --admin_password='VF-R18-Gate!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/base.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp option update vf_ops_r18_fixture '{"keep":"yes"}' --format=json --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp plugin install /tmp/candidate.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          test "$(docker exec "$WP" wp plugin get vf-ops --field=version --allow-root --path=/var/www/html)" = "1.21.967"
+          test "$(docker exec "$WP" wp option get vf_ops_r18_fixture --format=json --allow-root --path=/var/www/html | jq -r '.keep')" = "yes"
+
+          docker exec "$WP" wp eval --allow-root --path=/var/www/html '
+            if (!function_exists("vf_ops_s01_r27_canonical_route_keys_v1") || !function_exists("vf_ops_v13_route_url_v121391")) { exit(2); }
+            $out=[];
+            foreach (vf_ops_s01_r27_canonical_route_keys_v1() as $key) { $out[$key]=vf_ops_v13_route_url_v121391($key); }
+            echo wp_json_encode($out);
+          ' > evidence/routes.json
+          jq -e 'type=="object" and length>=10' evidence/routes.json >/dev/null
+          echo "UPGRADE_PRESERVATION=PASS"
+          echo "VF_BASE_URL=$BASE_URL" >> "$GITHUB_ENV"; echo "VF_WP_CONTAINER=$WP" >> "$GITHUB_ENV"; echo "VF_DB_CONTAINER=$DB" >> "$GITHUB_ENV"; echo "VF_DOCKER_NETWORK=$NET" >> "$GITHUB_ENV"
+          trap - EXIT
+
+      - name: Authenticated browser regression
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R18-Gate!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          node browser-e2e.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/browser.json"
+          jq -e '.result=="PASS" and .login=="PASS" and .blocking_errors==0 and .responsive_failures==0' "$GITHUB_WORKSPACE/evidence/browser.json" >/dev/null
+
+      - name: R18 all-route page-frame proof
+        shell: bash
+        env:
+          WP_ADMIN_PASSWORD: VF-R18-Gate!
+        run: |
+          set -Eeuo pipefail
+          cd target/.github/phase3
+          cat > r18-frame-proof.js <<'JS'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const base = process.argv[2];
+          const routesFile = process.argv[3];
+          const out = process.argv[4];
+          const raw = JSON.parse(fs.readFileSync(routesFile,'utf8'));
+          const routes = Object.entries(raw);
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const context=await browser.newContext({viewport:{width:1440,height:1100}});
+            const page=await context.newPage();
+            const errors=[];
+            page.on('pageerror',e=>errors.push(String(e.message||e)));
+            page.on('console',m=>{ if(m.type()==='error' && !/favicon/i.test(m.text())) errors.push(m.text()); });
+            await page.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await page.fill('#user_login','admin');
+            await page.fill('#user_pass',process.env.WP_ADMIN_PASSWORD);
+            await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.click('#wp-submit')]);
+            const rows=[];
+            for(const [key,url] of routes){
+              const u=new URL(url,base); u.protocol=new URL(base).protocol; u.host=new URL(base).host;
+              await page.goto(u.toString(),{waitUntil:'domcontentloaded',timeout:30000});
+              await page.waitForTimeout(180);
+              const row=await page.evaluate((key)=>{
+                const visible = el => {
+                  if(!el) return false;
+                  const s=getComputedStyle(el), r=el.getBoundingClientRect();
+                  return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
+                };
+                const head=document.querySelector('[data-vf-page-frame="r18"]');
+                const footer=document.querySelector('[data-vf-product-footer="r18"]');
+                const canvas=document.querySelector('.vf-v6-page-canvas[data-vf-v13-route]');
+                const localH1=canvas ? [...canvas.querySelectorAll('h1')].filter(visible).length : -1;
+                const oldScripts=[...document.scripts].filter(s=>/admin-s01-page-frame-r1[45]\.js/.test(s.src)).length;
+                const r18Scripts=[...document.scripts].filter(s=>/admin-s01-page-frame-r18\.js/.test(s.src)).length;
+                const advanced=document.querySelector('[data-vf-r18-advanced]');
+                const headRect=head?.getBoundingClientRect();
+                return {
+                  key,
+                  route:canvas?.getAttribute('data-vf-v13-route')||'',
+                  ready:document.documentElement.getAttribute('data-vf-r18-page-frame')==='ready',
+                  head:!!head,
+                  headHeight:headRect?Math.round(headRect.height):0,
+                  title:(head?.querySelector('h1')?.textContent||'').trim(),
+                  localVisibleH1:localH1,
+                  footer:!!footer,
+                  oldScripts,
+                  r18Scripts,
+                  advancedOpen:advanced?advanced.open:false,
+                  overflow:document.documentElement.scrollWidth>window.innerWidth+3
+                };
+              },key);
+              rows.push(row);
+            }
+            const pass=errors.length===0 && rows.length>=10 && rows.every(r=>
+              r.ready && r.head && r.title && r.headHeight>=70 && r.headHeight<=210 &&
+              r.localVisibleH1===0 && r.footer && r.oldScripts===0 && r.r18Scripts===1 &&
+              !r.advancedOpen && !r.overflow
+            );
+            fs.writeFileSync(out,JSON.stringify({result:pass?'PASS':'FAIL',errors,route_count:rows.length,routes:rows},null,2));
+            await browser.close();
+            if(!pass) process.exit(1);
+          })().catch(e=>{console.error(e);process.exit(2)});
+          JS
+          node r18-frame-proof.js "$VF_BASE_URL" "$GITHUB_WORKSPACE/evidence/routes.json" "$GITHUB_WORKSPACE/evidence/r18-frame.json" || true
+          cat "$GITHUB_WORKSPACE/evidence/r18-frame.json"
+          jq -e '.result=="PASS"' "$GITHUB_WORKSPACE/evidence/r18-frame.json" >/dev/null
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$TARGET_SHA" --arg version "$TARGET_VERSION" --argjson package "$(cat evidence/package.json)" --argjson browser "$(cat evidence/browser.json)" --argjson frame "$(cat evidence/r18-frame.json)" '{status:"PASS",candidate_sha:$sha,candidate_version:$version,package:$package,browser:$browser,r18_frame:$frame,upgrade:"PASS",security:"PASS",r18_contract:"PASS",production:"NOT_EXECUTED"}' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "evidence/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+          echo 'S01-C02 V1.21.967 R18 UNIFIED FRAME MACHINE PASS'
+
+      - name: Upload exact candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.967-r18-candidate
+          path: evidence/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${VF_WP_CONTAINER:-}" "${VF_DB_CONTAINER:-}" >/dev/null 2>&1 || true
+          docker network rm "${VF_DOCKER_NETWORK:-}" >/dev/null 2>&1 || true
