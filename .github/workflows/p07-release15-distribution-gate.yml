@@ -1,0 +1,216 @@
+name: P07 Release15 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release15-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release15 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release15'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release15"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release15"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="eb0d6635e846a19822b354fd114e7c8a74d4fac6"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="29009fcf49fd79458e391103bbe8be1a868c4c4b"' installers/p07.sh
+          grep -Fq '## SQLite WAL Snapshot / Manifest-only Verification Contract' "$root/docs/authority/RPD.md"
+          grep -Fq '| B47 | SQLite WAL Snapshot / Manifest-only Verification |' "$root/docs/authority/ACCEPTANCE_MATRIX.md"
+          grep -Fq 'OWNER_REAL_RELEASE14_FAIL' "$root/docs/authority/ACCEPTANCE_MATRIX.md"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              manifest=root/name
+              for line in manifest.read_text(encoding='utf-8').splitlines():
+                  if not line.strip():
+                      continue
+                  expected, rel=line.split('  ',1)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  actual=blob(path)
+                  assert actual==expected, (name, rel, actual, expected)
+
+          runtime=(root/'RUNTIME.gitblob').read_text(encoding='utf-8')
+          assert '5480e1f4926236a1d5c98b130e16abd4d1d62543  BUILD_ID' in runtime
+          assert 'd8228d46cb419ebd891bbfc2305c9e07e749f1e3  lib/package_core.py' in runtime
+          assert '3c378b81e4de0b8bb1bc4652bcd66272cc26e4ff  lib/diagnostics.py' in runtime
+          assert 'd37b276056957c8df156f9b79ac9c6ec82bad412  lib/terminal_ui.sh' in runtime
+          PY
+
+      - name: Release15 SQLite WAL contract
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq 'PRAGMA journal_mode=DELETE' "$root/lib/package_core.py"
+          grep -Fq 'def declared_sqlite_snapshots' "$root/lib/package_core.py"
+          grep -Fq 'immutable=1' "$root/lib/package_core.py"
+          grep -Fq 'sqlite_backup_api_delete_journal' "$root/lib/package_core.py"
+          grep -Fq 'sqlite-unexpected:' "$root/lib/package_core.py"
+          ! grep -Fq '(package_dir / "sqlite").glob("*")' "$root/lib/package_core.py"
+          grep -Fq 'SQLITE_AUXILIARY_FILE_FOUND' "$root/lib/diagnostics.py"
+          grep -Fq 'SQLite 备份目录出现未登记的辅助文件' "$root/lib/terminal_ui.sh"
+
+      - name: Public overlay WAL regression
+        run: |
+          set -Eeuo pipefail
+          root="$PWD/dist/p07/0.1.0/overlay"
+          export PYTHONPATH="$root/lib"
+          python3 - <<'PY'
+          import io
+          import json
+          from pathlib import Path
+          import sqlite3
+          import tarfile
+          import tempfile
+          import package_core
+
+          with tempfile.TemporaryDirectory() as tmp:
+              base=Path(tmp)
+              root=base/'root'
+              source=root/'site'/'data'/'app.sqlite'
+              source.parent.mkdir(parents=True)
+              live=sqlite3.connect(source)
+              live.execute('PRAGMA wal_autocheckpoint=0')
+              mode=live.execute('PRAGMA journal_mode=WAL').fetchone()
+              assert str(mode[0]).lower()=='wal'
+              live.execute('CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT)')
+              live.execute("INSERT INTO items(name) VALUES ('one')")
+              live.commit()
+              live.execute("INSERT INTO items(name) VALUES ('two')")
+              live.commit()
+              assert source.with_name(source.name+'-wal').exists()
+
+              out=base/'sqlite'
+              rows=package_core.backup_sqlite(root,['/site/data/app.sqlite'],out)
+              live.close()
+
+              assert rows[0]['method']=='sqlite_backup_api_delete_journal'
+              target=out/'01_app.sqlite'
+              assert target.is_file()
+              for suffix in ('-wal','-shm','-journal'):
+                  assert not target.with_name(target.name+suffix).exists()
+
+              conn=sqlite3.connect(target)
+              try:
+                  assert str(conn.execute('PRAGMA journal_mode').fetchone()[0]).lower()=='delete'
+                  assert conn.execute('SELECT COUNT(*) FROM items').fetchone()[0]==2
+                  assert conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+              finally:
+                  conn.close()
+
+              assert package_core.verify_sqlite_snapshot(target)
+              for suffix in ('-wal','-shm','-journal'):
+                  assert not target.with_name(target.name+suffix).exists()
+
+          with tempfile.TemporaryDirectory() as tmp:
+              package=Path(tmp)/'package'
+              (package/'files').mkdir(parents=True)
+              (package/'sqlite').mkdir(parents=True)
+
+              archive=package/'files'/'site.tar.gz'
+              with tarfile.open(archive,'w:gz') as tf:
+                  payload=b'ok'
+                  info=tarfile.TarInfo('site/index.txt')
+                  info.size=len(payload)
+                  tf.addfile(info,io.BytesIO(payload))
+
+              db=package/'sqlite'/'01_app.sqlite'
+              conn=sqlite3.connect(db)
+              conn.execute('CREATE TABLE demo(id INTEGER PRIMARY KEY)')
+              conn.commit()
+              conn.close()
+
+              manifest={'contents':{'sqlite':[{'source':'/site/app.sqlite','file':'sqlite/01_app.sqlite'}]}}
+              (package/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+              package_core.write_checksums(package)
+              first=package_core.verify_package(package)
+              assert first['status']=='PASS', first
+
+              sidecar=package/'sqlite'/'01_app.sqlite-shm'
+              sidecar.write_bytes(b'synthetic stray sidecar')
+              second=package_core.verify_package(package)
+              assert second['status']=='FAIL', second
+              assert 'sqlite-unexpected:01_app.sqlite-shm' in second['failures']
+              assert package_core.verification_failure_code(second['failures'])=='SQLITE_AUXILIARY_FILE_FOUND'
+          PY
+
+      - name: Focused overlay regressions
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          bash -n bin/vfops
+          bash -n bin/vfops-site-ui
+          bash -n lib/terminal_ui.sh
+          python3 -m py_compile lib/package.py lib/package_core.py lib/diagnostics.py
+          python3 -m unittest -q             tests.test_release14_final_verify             tests.test_release13_mysql_snapshot             tests.test_release12_backup_freshness             tests.test_backup             tests.test_backup_frontend             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release15'
+          grep -Fq 'lib/package_core.py' "$tmp/install/.runtime-manifest.gitblob"
+          grep -Fq 'lib/diagnostics.py' "$tmp/install/.runtime-manifest.gitblob"
+          grep -Fq 'lib/terminal_ui.sh' "$tmp/install/.runtime-manifest.gitblob"
+
+          NO_COLOR=1 bash -c "source '$tmp/install/lib/terminal_ui.sh'; ui_safe_diagnostic 'VFOPS_DIAGNOSTIC_V1 stage=BACKUP error_class=BACKUP_ERROR blocker=SQLITE_AUXILIARY_FILE_FOUND cleanup=NOT_REPORTED exit_code=4'" >"$tmp/diag.txt"
+          grep -Fq '阶段：备份' "$tmp/diag.txt"
+          grep -Fq '原因：SQLite 备份目录出现未登记的辅助文件' "$tmp/diag.txt"
+          ! grep -Fq 'SQLITE_AUXILIARY_FILE_FOUND' "$tmp/diag.txt"
+          ! grep -Fq '原因代码' "$tmp/diag.txt"
+
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          ! grep -R -n -E '(PRIVATE KEY|BEGIN OPENSSH|ghp_[A-Za-z0-9]|github_pat_)' "$root/bin" "$root/lib" installers/p07*.sh
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' installers/p07*.sh "$root/bin" "$root/lib"
+          grep -Fq 'DNS：未修改' "$root/bin/vfops-site-ui"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE15_DISTRIBUTION_GATE=COMPLETE'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
