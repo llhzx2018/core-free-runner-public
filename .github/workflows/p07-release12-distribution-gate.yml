@@ -1,0 +1,131 @@
+name: P07 Release12 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release12-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release12 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release12'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release12"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release12"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="5a278aec6d9a49c257589f762d8abeb09847f990"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="61ef13cd9de032000c5da1ad496429f03b72cf09"' installers/p07.sh
+          grep -Fq 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' "$root/docs/authority/RPD.md"
+          grep -Fq '| B44 | Backup Freshness / Restore Visibility |' "$root/docs/authority/ACCEPTANCE_MATRIX.md"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              manifest=root/name
+              for line in manifest.read_text().splitlines():
+                  if not line.strip():
+                      continue
+                  expected, rel=line.split('  ',1)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  actual=blob(path)
+                  assert actual==expected, (name, rel, actual, expected)
+
+          runtime=(root/'RUNTIME.gitblob').read_text()
+          assert 'fe988adcbe76d31c1f13dfb0dade4443868f9210  lib/inventory.py' in runtime
+          assert '30fe61b2503374d2e4791a2c7b4c89638ec80a1f  lib/package.py' in runtime
+          assert '857651f282a10b54135f75624bab30377bd1fd4d  lib/package_core.py' in runtime
+          assert '16700e6693afd5697f6d70aa5ae2620baf7592fe  bin/vfops-site-ui' in runtime
+          PY
+
+      - name: Backup freshness and restore visibility contract
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq 'def _wait_for_quiescent_gzip' "$root/lib/package.py"
+          grep -Fq '_file_open_elsewhere' "$root/lib/package.py"
+          grep -Fq 'final_verification = verify_package(final_dir)' "$root/lib/package_core.py"
+          grep -Fq 'backup failed post-commit fresh verification' "$root/lib/package_core.py"
+          grep -Fq '发现了本地备份，但当前完整性复检未通过' "$root/bin/vfops-site-ui"
+          grep -Fq 'MySQL 备份文件在创建后发生变化' "$root/bin/vfops-site-ui"
+          ! grep -Fq $'except Exception:\n            pass' "$root/bin/vfops-site-ui"
+
+      - name: Focused overlay regressions
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_release12_backup_freshness             tests.test_backup             tests.test_main_menu_routes             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Isolated current-runtime install and inventory renderer
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release12'
+          grep -Fq 'lib/inventory.py' "$tmp/install/.runtime-manifest.gitblob"
+
+          mkdir -p "$tmp/bin"
+          cat >"$tmp/bin/clpctl" <<'EOF'
+          #!/usr/bin/env bash
+          printf '%s\n' 'CloudPanel CLI 6.0.8 (env: prod, debug: false) #StandWithUkraine https://sf.to/u'
+          EOF
+          chmod +x "$tmp/bin/clpctl"
+          PATH="$tmp/bin:$PATH" PYTHONPATH="$tmp/install/lib" python3 - <<'PY'
+          from pathlib import Path
+          import inventory
+          value=inventory.cloudpanel_version(Path('/'))
+          assert value == '6.0.8', value
+          PY
+
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq 'DNS：未修改' "$root/bin/vfops-site-ui"
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' installers/p07*.sh "$root/bin" "$root/lib"
+          ! grep -R -n -E '(PRIVATE KEY|BEGIN OPENSSH|ghp_[A-Za-z0-9]|github_pat_)' "$root" installers/p07*.sh
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE12_DISTRIBUTION_GATE=COMPLETE'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
