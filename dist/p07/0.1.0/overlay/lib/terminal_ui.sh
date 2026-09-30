@@ -71,13 +71,34 @@ ui_warn() { ui_attention "$@"; }
 ui_bad() { say "${C_RED}$*${C_RESET}"; }
 ui_flow() { say "${C_MAGENTA}$*${C_RESET}"; }
 ui_safe_diagnostic() {
-  local raw="${1:-}" diag stage blocker
+  local raw="${1:-}" diag stage blocker stage_text blocker_text
   diag="$(printf '%s\n' "$raw" | grep '^VFOPS_DIAGNOSTIC_V1 ' | tail -n1 || true)"
   [[ -n "$diag" ]] || return 1
   stage="$(printf '%s\n' "$diag" | sed -n 's/.* stage=\([A-Z0-9_]*\).*/\1/p')"
   blocker="$(printf '%s\n' "$diag" | sed -n 's/.* blocker=\([A-Z0-9_+-]*\).*/\1/p')"
-  [[ -n "$stage" ]] && ui_note "阶段：$stage"
-  [[ -n "$blocker" ]] && ui_note "原因代码：$blocker"
+  case "$stage" in
+    BACKUP) stage_text='备份' ;;
+    RESTORE|RESTORE_PLAN) stage_text='恢复' ;;
+    INVENTORY) stage_text='读取服务器与网站信息' ;;
+    STORAGE) stage_text='异地备份' ;;
+    MIGRATION|TRANSPORT|CROSS_SERVER_VERIFY|CUTOVER_VERIFY) stage_text='服务器迁移' ;;
+    RUNTIME_ACTIVATION|RUNTIME_PLAN) stage_text='网站运行环境' ;;
+    VERIFY) stage_text='完整性验证' ;;
+    *) stage_text='当前操作' ;;
+  esac
+  case "$blocker" in
+    MYSQL_SNAPSHOT_CHANGED) blocker_text='MySQL 数据库导出在封存时仍发生变化，P07 已停止使用这个备份。' ;;
+    SQLITE_SNAPSHOT_CHANGED) blocker_text='SQLite 数据库备份在封存时仍发生变化，P07 已停止使用这个备份。' ;;
+    SITE_SNAPSHOT_CHANGED) blocker_text='网站文件备份在封存时发生变化，P07 已停止使用这个备份。' ;;
+    METADATA_SNAPSHOT_CHANGED) blocker_text='网站配置快照在封存时发生变化，P07 已停止使用这个备份。' ;;
+    FRESH_VERIFY_NOT_PASS) blocker_text='备份最终完整性复检没有通过，P07 已停止使用这个备份。' ;;
+    DB_EXPORT_FAILED) blocker_text='MySQL 数据库导出没有完成。' ;;
+    DB_EXPORT_INVALID) blocker_text='MySQL 数据库导出文件不完整或无法读取。' ;;
+    DB_ASSOCIATION_UNKNOWN) blocker_text='无法安全确定这个网站关联的 MySQL 数据库。' ;;
+    *) blocker_text='操作已安全停止；需要根据当前结果继续排查。' ;;
+  esac
+  ui_note "阶段：$stage_text"
+  ui_note "原因：$blocker_text"
   return 0
 }
 
