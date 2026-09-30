@@ -39,6 +39,19 @@ OPERATION_STAGE = {
 }
 
 BLOCKER_RULES = (
+    ("[mysql_snapshot_changed]", "MYSQL_SNAPSHOT_CHANGED"),
+    ("[sqlite_snapshot_changed]", "SQLITE_SNAPSHOT_CHANGED"),
+    ("[site_snapshot_changed]", "SITE_SNAPSHOT_CHANGED"),
+    ("[metadata_snapshot_changed]", "METADATA_SNAPSHOT_CHANGED"),
+    ("[manifest_changed]", "MANIFEST_CHANGED"),
+    ("[package_file_changed]", "PACKAGE_FILE_CHANGED"),
+    ("[mysql_snapshot_invalid]", "MYSQL_SNAPSHOT_INVALID"),
+    ("[sqlite_snapshot_invalid]", "SQLITE_SNAPSHOT_INVALID"),
+    ("[site_archive_empty]", "SITE_ARCHIVE_EMPTY"),
+    ("[site_archive_invalid]", "SITE_ARCHIVE_INVALID"),
+    ("[checksum_index_missing]", "CHECKSUM_INDEX_MISSING"),
+    ("[checksum_index_invalid]", "CHECKSUM_INDEX_INVALID"),
+    ("[external_link_found]", "EXTERNAL_LINK_FOUND"),
     ("application database recovery credentials could not be discovered safely", "DB_RECOVERY_DISCOVERY_FAILED"),
     ("portable database recovery credentials unavailable", "DB_RECOVERY_INPUT_REQUIRED"),
     ("cloudpanel private metadata is required for portable mysql recovery", "DB_RECOVERY_INPUT_REQUIRED"),
