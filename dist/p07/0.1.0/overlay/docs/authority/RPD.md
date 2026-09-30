@@ -579,3 +579,26 @@ ui_pause_return
 ```
 
 Slot 3 的主菜单、服务器 / 网站概览、备份、恢复、服务器迁移、自动备份、网站管理、CloudPanel 管理必须使用该页面模型。P07 Toolbox 及其它 Slot 的普通交互入口应采用同一视觉层级；独立 benchmark / machine output 可保留其专用输出结构。
+
+
+## Ops Console V1
+
+P07 在 Terminal UX System V2 之上新增统一运维控制面：
+
+```text
+状态摘要
+诊断中心
+最近操作
+P07 自检 / 修复
+新 VPS 初始化
+```
+
+产品合同：
+
+- 主菜单显示轻量状态摘要，但不得自动执行修复。
+- 诊断中心只读检查 P07、CloudPanel、Nginx、MySQL、PHP-FPM、磁盘、内存、Swap 与最近验证备份。
+- 最近操作使用本机 JSONL 轻量历史；只记录动作、结果与简短摘要，不保存认证资料。
+- P07 自检检查自身运行文件、入口与链接；重新安装当前正式 Runtime 必须精确输入 `REPAIR`。
+- 新 VPS 初始化默认先做只读 Preflight；低风险基线写入必须输入 `APPLY_BASELINE`；CloudPanel 安装必须额外输入 `INSTALL_CLOUDPANEL`。
+- 初始化不得自动修改 DNS、不得自动关闭 SSH、不得自动收紧防火墙导致远程失联、不得删除旧服务器。
+- 安全等级统一为：绿色只读、黄色配置写入、洋红迁移/切换、红色高风险写入；高风险操作使用 exact-token confirmation。
