@@ -44,12 +44,15 @@ show_header() {
 
 show_menu() {
   show_header
-  say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）              ${C_GRAY}${VF_NODE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）                  ${C_GRAY}${VPS_AUDIT_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}3.${C_RESET} 网站备份 / 恢复 / 迁移（CloudPanel）  ${C_GRAY}${VF_SERVER_OPS_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
-  say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全                ${C_GRAY}${SYSTEM_CARE_PUBLIC}${C_RESET}      ${C_GREEN}可用${C_RESET}"
+  say "${C_GREEN}功能状态：4 项均可用${C_RESET}"
+  say
+  say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）"
+  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）"
+  say "  ${C_GREEN}3.${C_RESET} 网站备份 / 恢复 / 迁移（CloudPanel）"
+  say "  ${C_GREEN}4.${C_RESET} 系统维护 / 安全"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
+  say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
 }
 
 local_node_version() {
