@@ -1,7 +1,7 @@
 panel_security() {
   while true; do
-    say; ui_title 'CloudPanel 安全'; ui_rule
-    ui_menu_good 1 '启用面板基础认证（Basic Auth）'
+    say; ui_title '面板登录安全'; ui_rule
+    ui_menu_good 1 '启用额外登录保护（Basic Auth）'
     ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'
     ui_menu_warn 3 '更新 Cloudflare 可信 IP 清单'
     ui_menu_back 0 '返回'
@@ -32,7 +32,7 @@ PY
         fi
         pause ;;
       3)
-        ui_attention '这只刷新 CloudPanel 的 Cloudflare IP allowlist，不修改 DNS。'; ui_prompt '继续？[Y/n]：'; read -r confirm || true
+        ui_attention '这只刷新 CloudPanel 的 Cloudflare 允许访问的 IP 列表，不修改 DNS。'; ui_prompt '继续？[Y/n]：'; read -r confirm || true
         if [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]]; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
 import cloudpanel
@@ -49,11 +49,11 @@ PY
 
 panel_users() {
   while true; do
-    say; ui_title 'CloudPanel 用户'; ui_rule
+    say; ui_title '面板用户'; ui_rule
     ui_menu_info 1 '查看用户'
     ui_menu_warn 2 '新增用户'
     ui_menu_warn 3 '重置用户密码'
-    ui_menu_danger 4 '关闭用户 2FA'
+    ui_menu_danger 4 '关闭两步验证（2FA）'
     ui_menu_back 0 '返回'
     ui_prompt '请选择 [0-4]：'; read -r choice || return 0
     case "$choice" in
@@ -95,7 +95,7 @@ PY
         SECRET_VALUE=""; pause ;;
       4)
         printf '用户名：'; read -r username || continue
-        ui_bad '关闭 2FA 会降低该用户登录保护。'; ui_safety_tier danger '会降低该用户登录保护。'
+        ui_bad '关闭两步验证（2FA）会降低该用户登录保护。'; ui_safety_tier danger '会降低该用户登录保护。'
         if ui_confirm_exact DISABLE-MFA '输入 DISABLE-MFA 继续：'; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - "$username" <<'PY'
 import sys
@@ -116,7 +116,7 @@ vhost_tools() {
   while true; do
     cat <<'EOF2'
 
-Vhost Templates（高级）
+网站配置模板（Vhost）· 高级
 ----------------------------------------
   1. 查看模板
   2. 刷新官方模板
@@ -197,9 +197,9 @@ templates=cloudpanel.list_vhost_templates().strip().splitlines()
 print('Vhost 配置模板：'+(paint('已就绪',green)+'（建站自动使用）' if templates else paint('为空/未知',yellow)))
 print('站点类型：PHP / 静态 HTML / Node.js / Python / 反向代理')
 print('数据库：新增 / 导出 / 导入')
-print('SSL：状态 / Let’s Encrypt / 自定义证书')
+print('HTTPS 证书：状态 / 免费证书 / 自定义证书')
 print('面板安全：基础认证 / Cloudflare 可信 IP')
-print('用户：列表 / 新增 / 重置密码 / 关闭 2FA')
+print('用户：列表 / 新增 / 重置密码 / 关闭两步验证（2FA）')
 PY
   then
     if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then ui_good 'NGINX：已就绪'; else ui_bad 'NGINX：未知/未就绪'; fi
