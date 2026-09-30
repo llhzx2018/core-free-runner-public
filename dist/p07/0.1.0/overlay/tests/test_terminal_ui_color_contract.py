@@ -135,7 +135,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release11\n")
+        self.assertEqual(build, "0.1.0-release12\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
