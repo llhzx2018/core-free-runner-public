@@ -274,7 +274,7 @@ show_failure_reason() {
 show_status() {
   refresh_cache
   local sched="$IE_SCHEDULER"
-  say "${C_BOLD}P07 · 网站入侵留证${C_RESET}"
+  say "${C_BOLD}P07 · 网站安全检查${C_RESET}"
   say
   if [[ "$IE_ENABLED" != 1 ]]; then
     say '网站安全   未开启'
@@ -344,7 +344,7 @@ show_baseline_failure() {
   case "$BASELINE_ERROR" in
     UnsupportedWordPressLayoutError)
       fail '识别到 WordPress，但站点目录不符合 P07 的安全读取规则。'
-      say '说明       P07 不会跟随不安全的 wp-config.php / 站点路径，也不会建立半套参考状态。'
+      say '说明       P07 不会跟随不安全的 WordPress 配置文件（wp-config.php）/ 站点路径，也不会建立半套参考状态。'
       ;;
     ScanBudgetExceededError)
       fail '首次参考状态超过安全资源上限，已停止。'
@@ -370,7 +370,7 @@ show_baseline_failure() {
 enable_evidence() {
   require_root || return $?
   require_python || return $?
-  say 'P07 会优先读取 CloudPanel 已知站点，并把当前 WordPress 文件状态保存为以后比较用的参考状态。'
+  say 'P07 会优先读取网站面板（CloudPanel）中的已知站点，并把当前 WordPress 文件状态保存为以后比较用的参考状态。'
   say '这不是木马扫描，不能证明当前站点没有已经存在的问题。'
   say '开启后每天静默检查；不会修改网站，也不会自动删除文件。'
   say

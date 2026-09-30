@@ -5,8 +5,8 @@ VERSION='0.1.0-rc17'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 SOURCE_REF="${P07_SYSTEM_CARE_SOURCE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${SOURCE_REF}/${PACKAGE_PATH}"
-MANIFEST_BLOB='70fe4da27d9907707e56ad0a8ca85daad0f8a0f5'
-BEGINNER_UI_BLOB='42d1437a875eb819ca887521fdedba795ce28df0'
+MANIFEST_BLOB='0111fce32a25288f7e2319219c03b99a4b9f04df'
+BEGINNER_UI_BLOB='a472f85ae5477ebe5c4a2175650bc5dafffc5c3d'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 

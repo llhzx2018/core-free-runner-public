@@ -16,18 +16,18 @@ P07 · 系统维护 / 安全
   vf-system-care.sh audit                        执行完整体检
   vf-system-care.sh updates                      系统更新
   vf-system-care.sh cleanup                      磁盘 / 日志清理
-  vf-system-care.sh memory                       内存 / Swap / OOM
+  vf-system-care.sh memory                       内存检查（含虚拟内存 Swap / 内存不足保护 OOM）
   vf-system-care.sh services                     服务异常诊断
-  vf-system-care.sh security                     SSH / 安全检查
+  vf-system-care.sh security                     登录与安全检查（含远程登录 SSH）
   vf-system-care.sh resources [...]              资源优化 / 配置推荐
   vf-system-care.sh evidence [...]               网站入侵留证
   vf-system-care.sh --version                    显示版本
   vf-system-care.sh --help                       显示帮助
 
 安全边界：
-  - 与 CloudPanel 配合使用，不替代网站、PHP、Vhost、SSL、数据库管理。
+  - 与网站面板（CloudPanel）配合使用，不替代网站运行环境（PHP）、网站配置模板（Vhost）、HTTPS 证书和数据库管理。
   - 菜单首页只读取缓存；耗时检查只在你明确选择后执行。
-  - 系统运行状态与安全建议分开判断，不把 SSH 登录方式直接当作服务器故障。
+  - 系统运行状态与安全建议分开判断，不把远程登录（SSH）方式直接当作服务器故障。
   - 资源优化默认只生成建议；只有已完成真实校准的规格才允许安全应用。
   - 网站入侵留证只读取网站文件和访问日志，不自动修改或删除网站文件。
   - 系统更新和清理必须经过预检与确认，不自动重启。
