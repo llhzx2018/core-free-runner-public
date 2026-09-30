@@ -1,0 +1,94 @@
+name: P07 Release15 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release15-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release15 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ad048ebf0063216a748b2f4bcbef07cbe255c797
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'ad048ebf0063216a748b2f4bcbef07cbe255c797'
+          test "$(cat BUILD_ID)" = '0.1.0-release15'
+          grep -Fq '## SQLite WAL Snapshot / Manifest-only Verification Contract' docs/authority/RPD.md
+          grep -Fq '| B47 | SQLite WAL Snapshot / Manifest-only Verification |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'def declared_sqlite_snapshots' lib/package_core.py
+          grep -Fq 'immutable=1' lib/package_core.py
+          grep -Fq 'sqlite_backup_api_delete_journal' lib/package_core.py
+          grep -Fq 'SQLITE_AUXILIARY_FILE_FOUND' lib/diagnostics.py
+          grep -Fq 'SQLite 备份目录出现未登记的辅助文件' lib/terminal_ui.sh
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops
+          bash -n bin/vfops-site-ui
+          bash -n lib/terminal_ui.sh
+          python3 -m py_compile lib/package.py lib/package_core.py lib/diagnostics.py
+
+      - name: Release15 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_release15_sqlite_wal             tests.test_release14_final_verify             tests.test_release13_mysql_snapshot             tests.test_release12_backup_freshness             tests.test_backup             tests.test_backup_frontend             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: SQLite WAL hard assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          core=Path('lib/package_core.py').read_text(encoding='utf-8')
+          assert 'PRAGMA journal_mode=DELETE' in core
+          assert 'for suffix in ("-wal", "-shm", "-journal")' in core
+          assert 'manifest.get("contents", {})' in core
+          assert 'sqlite-unexpected:' in core
+          assert 'path.resolve().as_uri() + "?mode=ro&immutable=1"' in core
+          assert '(package_dir / "sqlite").glob("*")' not in core
+          test=Path('tests/test_release15_sqlite_wal.py').read_text(encoding='utf-8')
+          assert 'PRAGMA journal_mode=WAL' in test
+          assert 'sqlite-unexpected:01_app.sqlite-shm' in test
+          PY
+
+      - name: Security and safety boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'DNS：未修改' bin/vfops-site-ui
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE15_EXACT_SOURCE=ad048ebf0063216a748b2f4bcbef07cbe255c797'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
