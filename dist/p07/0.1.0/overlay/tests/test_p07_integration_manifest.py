@@ -42,11 +42,11 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertIn("semantic_terminal_colors", s["capabilities"])
         self.assertIn("pty_color_preservation", s["capabilities"])
 
-    def test_slot3_contains_release7_menu_interaction_candidate(self):
+    def test_slot3_contains_release8_terminal_ux_candidate(self):
         s = self.data["slots"][2]
-        self.assertEqual(s["internal_version"], "0.1.0-release7")
+        self.assertEqual(s["internal_version"], "0.1.0-release8")
         self.assertEqual(s["integration_state"], "RELEASE_CANDIDATE_FOR_PUBLIC_MAIN")
-        self.assertEqual(s["source_main_commit"], "e84ce4414f1bd409387a9f66bf8ddf1ac714c894")
+        self.assertEqual(s["source_main_commit"], "ef53ff439d30017f8c5c349a2132ef3a4e54a91d")
         self.assertEqual(s["terminal_ui_color_system"], "CANONICAL_V1")
         self.assertEqual(s["full_server_migration_integration_commit"], "5c447fc99030f75c098934ddb9aa300b934564bb")
 
@@ -59,7 +59,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual(self.data["release_blockers"], [])
         self.assertEqual(self.data["release"]["tag"], "p07-v0.1.0")
         self.assertEqual(self.data["release"]["status"], "PUBLISHED")
-        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release7")
+        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release8")
         self.assertEqual(self.data["release"]["slot3_distribution"], "PUBLIC_PR_CANDIDATE")
 
     def test_production_is_not_implicitly_promoted_by_distribution(self):
@@ -70,6 +70,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual(p["release5_install_status"], "NOT_YET_OWNER_VERIFIED")
         self.assertEqual(p["release6_install_status"], "NOT_YET_OWNER_VERIFIED")
         self.assertEqual(p["release7_install_status"], "NOT_YET_OWNER_VERIFIED")
+        self.assertEqual(p["release8_install_status"], "NOT_YET_OWNER_VERIFIED")
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]

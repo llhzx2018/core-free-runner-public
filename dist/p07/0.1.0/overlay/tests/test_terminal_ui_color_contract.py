@@ -59,6 +59,15 @@ class TerminalUiColorContractTests(unittest.TestCase):
             "ui_attention()",
             "ui_bad()",
             "ui_flow()",
+            "ui_screen_clear()",
+            "ui_page()",
+            "ui_section()",
+            "ui_kv()",
+            "ui_result_ok()",
+            "ui_result_attention()",
+            "ui_result_error()",
+            "ui_empty_state()",
+            "ui_pause_return()",
         ):
             self.assertIn(helper, text)
 
@@ -124,7 +133,7 @@ class TerminalUiColorContractTests(unittest.TestCase):
             check=True,
         ).stdout
         self.assertEqual(version, "VF Server Ops 0.1.0\n")
-        self.assertEqual(build, "0.1.0-release7\n")
+        self.assertEqual(build, "0.1.0-release8\n")
         self.assertNotIn("\x1b[", version + build)
 
         core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
@@ -162,10 +171,31 @@ class TerminalUiColorContractTests(unittest.TestCase):
         self.assertIn("ensure_rclone", storage)
         self.assertIn("现在才按需安装", storage)
 
+    def test_terminal_ux_v2_page_isolation_is_adopted(self) -> None:
+        user = (ROOT / "bin" / "vfops-user").read_text(encoding="utf-8")
+        site = (ROOT / "bin" / "vfops-site-ui").read_text(encoding="utf-8")
+        migrate = (ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        auto = (ROOT / "bin" / "vfops-auto-backup").read_text(encoding="utf-8")
+        cloudpanel = (ROOT / "bin" / "vfops-cloudpanel-ui").read_text(encoding="utf-8")
+
+        self.assertIn("ui_screen_clear", user)
+        self.assertIn("ui_page 'P07 · 服务器 / 网站概览'", site)
+        self.assertIn("ui_page 'P07 · 备份网站'", site)
+        self.assertIn("ui_page 'P07 · 恢复网站'", site)
+        self.assertIn("ui_page 'P07 · 服务器迁移'", migrate)
+        self.assertIn("ui_page 'P07 · 整机迁入'", migrate)
+        self.assertIn("ui_page 'P07 · 单站迁入'", migrate)
+        self.assertIn("ui_page 'P07 · 自动备份 / 远程灾备'", auto)
+        self.assertIn("ui_page 'P07 · 网站管理'", cloudpanel)
+        self.assertIn("ui_page 'P07 · CloudPanel 管理'", cloudpanel)
+        self.assertIn("ui_empty_state 'P07 · 恢复网站'", site)
+
     def test_color_contract_is_in_owning_authority(self) -> None:
         rpd = (ROOT / "docs" / "authority" / "RPD.md").read_text(encoding="utf-8")
         matrix = (ROOT / "docs" / "authority" / "ACCEPTANCE_MATRIX.md").read_text(encoding="utf-8")
         self.assertIn("Terminal UI / Color System Contract", rpd)
+        self.assertIn("Terminal UX System V2", rpd)
+        self.assertIn("一屏一任务", rpd)
         self.assertIn("Terminal UI Color Contract", matrix)
         for term in ("Cyan", "Green", "Yellow", "Red", "Magenta", "Gray", "NO_COLOR", "non-TTY"):
             self.assertIn(term, rpd)

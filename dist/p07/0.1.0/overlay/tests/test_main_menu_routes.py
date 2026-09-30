@@ -26,16 +26,20 @@ class MainMenuRouteContractTests(unittest.TestCase):
         for route in expected:
             self.assertIn(route, self.user)
 
+    def test_child_entry_clears_parent_screen(self) -> None:
+        self.assertIn("ui_screen_clear", self.user)
+        self.assertIn("ui_result_error '功能没有正常完成'", self.user)
+
     def test_module_failure_is_visible_and_does_not_kill_main_menu(self) -> None:
         self.assertIn('set +e\n  bash "$file" "$@"\n  rc=$?\n  set -e', self.user)
-        self.assertIn('功能没有正常完成：', self.user)
+        self.assertIn("ui_result_error '功能没有正常完成'", self.user)
         self.assertIn('主菜单仍可继续使用', self.user)
         self.assertIn('return 0', self.user)
 
     def test_restore_empty_state_waits_for_owner_to_read_it(self) -> None:
         self.assertIn("没有发现已验证、可恢复的 P07 本地备份。", self.site)
-        self.assertIn("请先使用“备份网站”创建并验证一个备份。", self.site)
-        self.assertIn("ui_note '请先使用“备份网站”创建并验证一个备份。'; pause; return 2", self.site)
+        self.assertIn("返回主菜单后选择“备份网站”创建并验证一个备份。", self.site)
+        self.assertIn("ui_empty_state 'P07 · 恢复网站'", self.site)
 
     def test_backup_empty_site_state_waits_before_main_menu_redraw(self) -> None:
         self.assertIn("没有发现 CloudPanel 网站。\\n'; pause; return 2", self.site)

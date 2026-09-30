@@ -9,6 +9,53 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
 fi
 
 say() { printf '%b\n' "$*"; }
+
+ui_screen_clear() {
+  [[ -t 1 ]] && printf '\033[H\033[2J' || true
+}
+ui_page() {
+  local title="${1:-P07}" subtitle="${2:-}"
+  ui_screen_clear
+  say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
+  say "${C_CYAN}│${C_RESET}  ${C_BOLD}${title}${C_RESET}"
+  [[ -n "$subtitle" ]] && say "${C_CYAN}│${C_RESET}  ${C_GRAY}${subtitle}${C_RESET}"
+  say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
+  say
+}
+ui_section() {
+  say "${C_BOLD}${C_CYAN}${1:-}${C_RESET}"
+  ui_rule
+}
+ui_kv() {
+  printf '%s：%b\n' "$1" "$2"
+}
+ui_result_ok() {
+  ui_page "${1:-操作完成}" "${2:-}"
+  ui_good '✓ 已完成'
+  say
+}
+ui_result_attention() {
+  ui_page "${1:-需要处理}" "${2:-}"
+  ui_attention '⚠ 需要关注'
+  say
+}
+ui_result_error() {
+  ui_page "${1:-操作未完成}" "${2:-}"
+  ui_bad '✗ 未完成'
+  say
+}
+ui_empty_state() {
+  local title="${1:-暂无内容}" detail="${2:-}" next="${3:-}"
+  ui_page "$title"
+  ui_attention '⚠ 当前没有可用内容'
+  [[ -n "$detail" ]] && { say; say "$detail"; }
+  [[ -n "$next" ]] && { say; ui_section '下一步'; say "$next"; }
+}
+ui_pause_return() {
+  [[ -t 0 ]] || return 0
+  printf '\n按 Enter 返回...'
+  read -r _ || true
+}
 ui_title() { say "${C_BOLD}${C_CYAN}$*${C_RESET}"; }
 ui_rule() { say "${C_GRAY}──────────────────────────────────────────────────────────────${C_RESET}"; }
 ui_menu_good() { say "  ${C_GREEN}$1.${C_RESET} $2"; }
