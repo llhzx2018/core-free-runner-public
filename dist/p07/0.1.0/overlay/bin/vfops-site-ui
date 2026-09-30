@@ -32,7 +32,8 @@ show_overview() {
   C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$INV_FILE" <<'PY'
 import json,os,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
-cyan=os.environ.get("C_CYAN",""); green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def color(name): return os.environ.get(name,"").replace("\\033", chr(27))
+cyan=color("C_CYAN"); green=color("C_GREEN"); yellow=color("C_YELLOW"); gray=color("C_GRAY"); reset=color("C_RESET")
 def paint(text,color): return f"{color}{text}{reset}" if color else text
 system=p.get('system',{}) if isinstance(p.get('system'),dict) else {}
 osinfo=system.get('os',{}) if isinstance(system.get('os'),dict) else {}
@@ -42,7 +43,7 @@ print('\n'+paint('服务器与网站概况',cyan))
 print(paint('----------------------------------------',gray))
 print(f"系统：{osinfo.get('pretty_name','UNKNOWN')}")
 print(f"网站面板（CloudPanel）：{system.get('cloudpanel_version','UNKNOWN')}")
-print(f"网站：{len(sites)}  数据库：MySQL {summary.get('mysql_database_count_known','?')} / SQLite {summary.get('sqlite_file_count_known','?')}")
+print(f"网站：{len(sites)}  ·  数据库：{(summary.get('mysql_database_count_known',0) if isinstance(summary.get('mysql_database_count_known'),int) else 0) + (summary.get('sqlite_file_count_known',0) if isinstance(summary.get('sqlite_file_count_known'),int) else 0)}")
 print('\n'+paint('网站',cyan))
 print(paint('----------------------------------------',gray))
 for i,s in enumerate(sites,1):
@@ -50,10 +51,18 @@ for i,s in enumerate(sites,1):
     mysql=s.get('mysql_databases')
     sqlite=s.get('sqlite_paths')
     ssl=s.get('ssl',{}) if isinstance(s.get('ssl'),dict) else {}
-    print(f"{i}. "+paint(str(s.get('domain','UNKNOWN')),cyan))
-    ssl_text='是' if ssl.get('configured') is True else '否/未知'
-    ssl_text=paint(ssl_text,green if ssl.get('configured') is True else yellow)
-    print(f"   {r.get('type','UNKNOWN')} {r.get('version','')} · MySQL {len(mysql) if isinstance(mysql,list) else '?'} · SQLite {len(sqlite) if isinstance(sqlite,list) else '?'} · HTTPS {ssl_text}")
+    domain=str(s.get('domain','UNKNOWN'))
+    runtime_type=str(r.get('type','UNKNOWN'))
+    runtime_version=str(r.get('version','')).strip()
+    if runtime_type.lower()=='php':
+        runtime=f"PHP {runtime_version}".strip()
+    elif runtime_type=='node_or_reverse_proxy':
+        runtime='Node.js / 反向代理'
+    else:
+        runtime='网站'
+    db_count=(len(mysql) if isinstance(mysql,list) else 0)+(len(sqlite) if isinstance(sqlite,list) else 0)
+    https='已启用' if ssl.get('configured') is True else '未启用/未知'
+    print(f"{i}. {paint(domain,cyan)}  ·  {runtime}  ·  HTTPS {paint(https,green if ssl.get('configured') is True else yellow)}  ·  数据库 {db_count}")
 PY
   pause
 }
@@ -125,20 +134,28 @@ backup_site() {
 }
 
 list_backups() {
-  python3 - "$BACKUP_DIR" <<'PY'
+  python3 - "$BACKUP_DIR" "$ROOT_DIR/lib" <<'PY'
 import json,sys
 from pathlib import Path
-base=Path(sys.argv[1]); rows=[]
+base=Path(sys.argv[1]); lib=Path(sys.argv[2]); rows=[]
+sys.path.insert(0,str(lib))
+import package as package_engine
 if base.is_dir():
     for m in base.glob('*/manifest.json'):
         try:
             d=json.loads(m.read_text(encoding='utf-8'))
             v=m.parent/'verification.json'
-            if not v.is_file() or json.loads(v.read_text(encoding='utf-8')).get('status')!='PASS': continue
+            if not v.is_file() or json.loads(v.read_text(encoding='utf-8')).get('status')!='PASS':
+                continue
+            fresh=package_engine.verify_package(m.parent)
+            if fresh.get('status')!='PASS':
+                continue
             rows.append((m.parent,d.get('site',{}).get('domain','UNKNOWN'),d.get('backup_id','UNKNOWN'),d.get('created_at','UNKNOWN')))
-        except Exception: pass
+        except Exception:
+            pass
 rows.sort(key=lambda x:x[3],reverse=True)
-for i,(path,domain,bid,created) in enumerate(rows,1): print(f"{i}\t{path}\t{domain}\t{bid}\t{created}")
+for i,(path,domain,bid,created) in enumerate(rows,1):
+    print(f"{i}\t{path}\t{domain}\t{bid}\t{created}")
 PY
 }
 
@@ -147,7 +164,7 @@ select_backup() {
   local raw count choice
   raw="$(list_backups)"
   [[ -n "$raw" ]] || {
-    ui_empty_state 'P07 · 恢复网站' '没有发现已验证、可恢复的 P07 本地备份。' '1. 返回主菜单后选择“备份网站”创建并验证一个备份。'
+    ui_empty_state 'P07 · 恢复网站' '没有发现已验证、可恢复的 P07 本地备份。' '1. 返回后进入“备份与恢复”，选择“立即备份一个网站”。'
     pause
     return 2
   }
@@ -207,7 +224,8 @@ render_restore_as_result() {
   C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$1" "${2:-NOT_SAVED}" <<'PY'
 import json,os,sys
 p=json.load(open(sys.argv[1],encoding='utf-8'))
-green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); gray=os.environ.get("C_GRAY",""); reset=os.environ.get("C_RESET","")
+def color(name): return os.environ.get(name,"").replace("\\033", chr(27))
+green=color("C_GREEN"); yellow=color("C_YELLOW"); gray=color("C_GRAY"); reset=color("C_RESET")
 def paint(text,color): return f"{color}{text}{reset}" if color else text
 evidence=sys.argv[2]
 v=p.get('local_verification',{}) if isinstance(p.get('local_verification'),dict) else {}
@@ -250,6 +268,27 @@ if os.environ.get('P07_SHOW_MACHINE_SUMMARY') == '1':
 PY
 }
 
+render_restore_failure() {
+  local err_file="$1"
+  if grep -Fq 'backup package failed fresh verification' "$err_file" 2>/dev/null; then
+    ui_bad '备份文件完整性复检失败，P07 已停止恢复。'
+    ui_note '这个备份不能安全用于恢复；原网站没有修改，新网站也不会继续创建。'
+    if grep -Fq 'symlink:' "$err_file" 2>/dev/null; then
+      ui_note '原因：备份中发现旧版外部链接。升级 P07 后请重新创建一次备份。'
+    else
+      ui_note '建议：升级 P07 后重新备份一次，再执行恢复。'
+    fi
+    return 0
+  fi
+  if grep -Fq 'CloudPanel' "$err_file" 2>/dev/null; then
+    ui_bad '网站面板操作没有完成，P07 已停止恢复。'
+    ui_note '原网站没有修改；请先检查面板状态，再重新尝试。'
+    return 0
+  fi
+  ui_bad '恢复没有完成，P07 已停止后续写入。'
+  ui_note '原网站没有修改。技术错误已隐藏，避免把工程信息直接显示给普通用户。'
+}
+
 restore_as_new_site() {
   local source_domain="$1" backup_id="$2" target_domain confirm tmp rc evidence
   while true; do
@@ -288,9 +327,8 @@ restore_as_new_site() {
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
-    printf '%b\n' "${C_RED}恢复为新网站没有完成。P07 已尝试清理本次新建目标；原网站未修改。${C_RESET}" >&2
-    sed -n '1,8p' "${tmp}.err" >&2 || true
-    printf '%b\n' "${C_GRAY}DNS：未修改 · 源服务器：保留${C_RESET}" >&2
+    render_restore_failure "${tmp}.err"
+    ui_note '域名解析：未修改 · 原网站：保留'
     rm -f "$tmp" "${tmp}.err"
     pause; return 0
   fi
