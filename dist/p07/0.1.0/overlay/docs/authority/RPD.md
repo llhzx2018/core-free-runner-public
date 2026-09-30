@@ -757,3 +757,33 @@ checksums 缺失 / 格式异常
 其它备份文件变化
 ```
 
+## SQLite WAL Snapshot / Manifest-only Verification Contract
+
+SQLite 备份不能把目录扫描结果当成最终验证对象。WAL 模式数据库可能产生 `-wal` / `-shm` / `-journal` 辅助文件，这些文件不是独立 SQLite 数据库，也不能被下一轮完整性校验误当数据库。
+
+固定规则：
+
+```text
+live SQLite (可能 WAL)
+→ SQLite Backup API
+→ destination commit
+→ destination journal_mode = DELETE
+→ integrity_check
+→ close
+→ 清理 destination -wal / -shm / -journal
+→ checksum
+→ manifest 登记 snapshot file
+→ verify 只读取 manifest.contents.sqlite[].file
+→ immutable read-only integrity_check
+```
+
+硬边界：
+
+- `sqlite/` 目录不能再用 `glob("*")` 作为数据库真相；
+- 只有 `manifest.json -> contents.sqlite[].file` 明确登记的快照才允许进入 SQLite 完整性验证；
+- 验证连接必须使用 immutable read-only，不能因为验证动作本身再创建 WAL / SHM；
+- `sqlite/` 中出现未登记普通文件必须 fail closed，并显示中文“SQLite 备份目录出现未登记的辅助文件”；
+- manifest 中 SQLite 路径非法、越界或结构异常必须 fail closed；
+- WAL 源库的已提交数据必须通过 Backup API 合并进独立快照，不能依赖复制裸 `.sqlite` 文件；
+- Machine PASS 不替代 OWNER Real Use。
+
