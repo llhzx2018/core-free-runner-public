@@ -73,7 +73,8 @@ class Release12BackupFreshnessTests(unittest.TestCase):
 
     def test_backup_is_verified_after_atomic_commit(self) -> None:
         text = (ROOT / "lib" / "package_core.py").read_text(encoding="utf-8")
-        self.assertIn("final_verification = verify_package(final_dir)", text)
+        self.assertIn("final_verification = verify_package_stable(final_dir)", text)
+        self.assertIn("consecutive_passes: int = 2", text)
         self.assertIn("backup failed post-commit fresh verification", text)
 
 

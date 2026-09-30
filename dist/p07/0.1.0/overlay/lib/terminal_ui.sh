@@ -91,6 +91,15 @@ ui_safe_diagnostic() {
     SQLITE_SNAPSHOT_CHANGED) blocker_text='SQLite 数据库备份在封存时仍发生变化，P07 已停止使用这个备份。' ;;
     SITE_SNAPSHOT_CHANGED) blocker_text='网站文件备份在封存时发生变化，P07 已停止使用这个备份。' ;;
     METADATA_SNAPSHOT_CHANGED) blocker_text='网站配置快照在封存时发生变化，P07 已停止使用这个备份。' ;;
+    MANIFEST_CHANGED) blocker_text='备份清单在最终封存后发生变化，P07 已停止使用这个备份。' ;;
+    PACKAGE_FILE_CHANGED) blocker_text='备份中的文件在最终封存后发生变化，P07 已停止使用这个备份。' ;;
+    MYSQL_SNAPSHOT_INVALID) blocker_text='MySQL 数据库备份文件无法完整读取，P07 已停止使用这个备份。' ;;
+    SQLITE_SNAPSHOT_INVALID) blocker_text='SQLite 数据库备份完整性检查失败，P07 已停止使用这个备份。' ;;
+    SITE_ARCHIVE_EMPTY) blocker_text='网站文件压缩包为空，P07 已停止使用这个备份。' ;;
+    SITE_ARCHIVE_INVALID) blocker_text='网站文件压缩包无法完整读取，P07 已停止使用这个备份。' ;;
+    CHECKSUM_INDEX_MISSING) blocker_text='备份完整性清单缺失，P07 已停止使用这个备份。' ;;
+    CHECKSUM_INDEX_INVALID) blocker_text='备份完整性清单格式异常，P07 已停止使用这个备份。' ;;
+    EXTERNAL_LINK_FOUND) blocker_text='备份中仍存在指向外部文件的链接，P07 已停止使用这个备份。' ;;
     FRESH_VERIFY_NOT_PASS) blocker_text='备份最终完整性复检没有通过，P07 已停止使用这个备份。' ;;
     DB_EXPORT_FAILED) blocker_text='MySQL 数据库导出没有完成。' ;;
     DB_EXPORT_INVALID) blocker_text='MySQL 数据库导出文件不完整或无法读取。' ;;
