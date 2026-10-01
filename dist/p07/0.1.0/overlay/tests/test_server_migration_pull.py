@@ -338,6 +338,52 @@ class TargetPullContractTests(unittest.TestCase):
                 pull.source_nginx_stop(source, "NO")
             remote.assert_not_called()
 
+    def test_local_nginx_status_reads_current_machine_without_ssh(self) -> None:
+        responses = [
+            subprocess.CompletedProcess([], 3, "inactive\n", ""),
+            subprocess.CompletedProcess([], 0, "active\n", ""),
+            subprocess.CompletedProcess([], 0, "LISTEN 0 511 0.0.0.0:8443 0.0.0.0:*\n", ""),
+        ]
+        with mock.patch.object(pull, "run_local", side_effect=responses) as local:
+            result = pull.local_nginx_status()
+        self.assertFalse(result["site_nginx_running"])
+        self.assertEqual(result["site_nginx_state"], "inactive")
+        self.assertEqual(result["cloudpanel_nginx_state"], "active")
+        self.assertEqual(result["web_listener_80_443"], "NO")
+        self.assertEqual(result["cloudpanel_listener_8443"], "YES")
+        self.assertEqual(local.call_args_list[0].args[0], ["systemctl", "is-active", "nginx"])
+        self.assertEqual(local.call_args_list[1].args[0], ["systemctl", "is-active", "clp-nginx"])
+
+    def test_local_nginx_start_checks_config_and_never_touches_cloudpanel_service(self) -> None:
+        with mock.patch.object(
+            pull, "local_nginx_status",
+            side_effect=[{"site_nginx_running": False}, {"site_nginx_running": True, "site_nginx_state": "active"}],
+        ), mock.patch.object(
+            pull, "run_local",
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ],
+        ) as local:
+            result = pull.local_nginx_start("START_LOCAL_NGINX")
+        self.assertEqual(result["status"], "STARTED")
+        self.assertEqual(local.call_args_list[0].args[0], ["nginx", "-t"])
+        self.assertEqual(local.call_args_list[1].args[0], ["systemctl", "start", "nginx"])
+        self.assertNotIn("clp-nginx", " ".join(" ".join(call.args[0]) for call in local.call_args_list))
+
+    def test_local_nginx_stop_only_stops_current_website_service(self) -> None:
+        with mock.patch.object(
+            pull, "local_nginx_status",
+            side_effect=[{"site_nginx_running": True}, {"site_nginx_running": False, "site_nginx_state": "inactive"}],
+        ), mock.patch.object(
+            pull, "run_local",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as local:
+            result = pull.local_nginx_stop("STOP_LOCAL_NGINX")
+        self.assertEqual(result["status"], "STOPPED")
+        local.assert_called_once()
+        self.assertEqual(local.call_args.args[0], ["systemctl", "stop", "nginx"])
+
     def test_source_recovery_state_has_separate_root(self) -> None:
         self.assertNotEqual(pull.SOURCE_RECOVERY_ROOT, pull.STATE_ROOT)
         self.assertIn("source-recovery", str(pull.SOURCE_RECOVERY_ROOT))
@@ -361,14 +407,15 @@ class TargetPullUiContractTests(unittest.TestCase):
             "新服务器已有资源不覆盖",
             "PREPARE_PULL_MIGRATION",
             "CUTOVER_PULL:",
-            "旧服务器网站开关",
-            "开启旧服务器全部网站",
-            "停止旧服务器全部网站",
-            "一次操作整台旧服务器的网站，不需要一个网站一个网站处理",
+            "当前服务器网站开关",
+            "开启这台服务器全部网站",
+            "停止这台服务器全部网站",
+            "迁移后如果你登录的是旧服务器，就直接在这里操作，不需要输入 IP",
+            "一次操作整台服务器的网站，不需要一个网站一个网站处理",
             "不会影响 CloudPanel 后台，也不会修改 DNS",
-            "source-nginx-status",
-            "source-nginx-start",
-            "source-nginx-stop",
+            "local-nginx-status",
+            "local-nginx-start",
+            "local-nginx-stop",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("目标服务器 IP", text)
@@ -390,6 +437,10 @@ class TargetPullUiContractTests(unittest.TestCase):
             self.assertNotIn(technical, ordinary)
         self.assertIn("输入“开启”确认", ordinary)
         self.assertIn("输入“停止”确认", ordinary)
+        self.assertNotIn("read_old_ip", ordinary)
+        self.assertNotIn("OLD_SERVER_IP", ordinary)
+        self.assertNotIn("ensure_source_access", ordinary)
+        self.assertNotIn("source_args", ordinary)
 
     def test_cli_routes_ordinary_server_migration_to_pull_engine(self) -> None:
         text = (ROOT / "bin/vfops").read_text(encoding="utf-8")
@@ -398,6 +449,9 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertIn("source-nginx-status --source-ip OLD_IP", text)
         self.assertIn("source-nginx-start --source-ip OLD_IP", text)
         self.assertIn("source-nginx-stop --source-ip OLD_IP", text)
+        self.assertIn("server-migrate local-nginx-status", text)
+        self.assertIn("server-migrate local-nginx-start", text)
+        self.assertIn("server-migrate local-nginx-stop", text)
         self.assertNotIn("server-migrate plan --target-ip", text)
 
     def test_migration_dependencies_are_lazy_and_include_pull_transport(self) -> None:
