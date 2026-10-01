@@ -872,17 +872,24 @@ nginx -T
 
 ## Restore-As Guarded Nginx Reload Contract
 
-Restore-As 创建新 CloudPanel 站点后，在最终本机 Host/SNI 验证前，必须确保运行中的 Nginx 已加载磁盘上的新 vhost。
+Restore-As 创建新 CloudPanel 站点后，在最终本机 Host/SNI 验证前，必须确保运行中的 Nginx 已加载磁盘上的新 vhost。CloudPanel / Ubuntu 上 Nginx 由 systemd 管理时，reload 必须优先走 systemd；只有 systemd 不处于 active / 可用状态时，才允许使用 Nginx direct signal 作为兼容 fallback。
 
 固定：
 
 ```text
 nginx -t
-→ PASS 才允许
-nginx -s reload
+→ PASS 才允许继续
+→ systemctl is-active nginx
+   → active: systemctl reload nginx
+   → inactive / unavailable: nginx -s reload
 → reload 成功
 → target listener / Host / SNI verification
 ```
+
+固定安全边界：
+- systemd 已 active 但 `systemctl reload nginx` 失败时，必须 fail closed，不得静默退回 direct signal 绕过真实服务管理失败；
+- reload 结果必须记录实际 mode（`SYSTEMD` / `DIRECT_SIGNAL`），用于工程证据，不向普通用户泄漏原始 stderr；
+- `nginx -t` 仍是 reload 前硬前置条件。
 
 失败分类至少包括：
 
