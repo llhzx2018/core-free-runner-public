@@ -195,12 +195,21 @@ def sqlite_relative_paths(manifest: dict[str, Any], site_root: str) -> set[str]:
     return result
 
 
+def sqlite_archive_excluded_paths(manifest: dict[str, Any], site_root: str) -> set[str]:
+    primary = sqlite_relative_paths(manifest, site_root)
+    excluded = set(primary)
+    for rel in primary:
+        for suffix in ("-wal", "-shm", "-journal"):
+            excluded.add(rel + suffix)
+    return excluded
+
+
 def verify_files(package_dir: Path, manifest: dict[str, Any], target_site: Path, site_root: str) -> dict[str, Any]:
     archive_ref = manifest.get("contents", {}).get("files_archive")
     if not isinstance(archive_ref, str):
         raise RestoreVerifyError("files archive reference is missing")
     archive = restore_plan.safe_package_path(package_dir, archive_ref)
-    skip = sqlite_relative_paths(manifest, site_root)
+    skip = sqlite_archive_excluded_paths(manifest, site_root)
     expected, expected_symlinks = archive_expected_files(archive, skip)
     missing: list[str] = []
     mismatched: list[str] = []
@@ -252,13 +261,17 @@ def verify_sqlite(package_dir: Path, manifest: dict[str, Any], target_site: Path
         if not target.is_file() or package_engine.sha256_file(target) != package_engine.sha256_file(package_file):
             failures.append(f"SQLITE_HASH_MISMATCH:{source}")
             continue
+        conn = None
         try:
-            conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+            uri = target.resolve().as_uri() + "?mode=ro&immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
             row = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
         except sqlite3.Error:
             failures.append(f"SQLITE_INTEGRITY_FAIL:{source}")
             continue
+        finally:
+            if conn is not None:
+                conn.close()
         if not row or row[0] != "ok":
             failures.append(f"SQLITE_INTEGRITY_FAIL:{source}")
     return {"status": "PASS" if not failures else "FAIL", "checked": checked, "failures": failures}
