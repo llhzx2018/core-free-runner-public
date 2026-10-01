@@ -44,6 +44,15 @@ def _reload_failure_class(proc: subprocess.CompletedProcess[str]) -> str:
         return "PERMISSION_DENIED"
     if any(token in detail for token in ("failed to connect to bus", "not been booted with systemd")):
         return "SYSTEMD_BUS_UNAVAILABLE"
+    if any(
+        token in detail
+        for token in (
+            "job type reload is not applicable",
+            "does not support reload",
+            "not applicable for unit",
+        )
+    ):
+        return "RELOAD_NOT_SUPPORTED"
     if "pid" in detail:
         return "PID_UNAVAILABLE"
     return "COMMAND_FAILED"
@@ -57,6 +66,30 @@ def _systemd_nginx_active(systemctl: str) -> bool:
     return state.returncode == 0 and state.stdout.strip() == "active"
 
 
+def _systemd_main_hup_reload(systemctl: str) -> str:
+    if not _systemd_nginx_active(systemctl):
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=SYSTEMD_MAIN_HUP; reason=SERVICE_NOT_ACTIVE"
+        )
+
+    signaled = _run(
+        [systemctl, "kill", "--kill-whom=main", "--signal=HUP", "nginx"],
+        timeout=30,
+    )
+    if signaled.returncode != 0:
+        reason = _reload_failure_class(signaled)
+        raise RestoreAsVerificationError(
+            f"nginx reload failed; mode=SYSTEMD_MAIN_HUP; reason={reason}"
+        )
+
+    time.sleep(0.25)
+    if not _systemd_nginx_active(systemctl):
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=SYSTEMD_MAIN_HUP; reason=SERVICE_NOT_ACTIVE"
+        )
+    return "SYSTEMD_MAIN_HUP"
+
+
 def _reload_nginx(nginx: str, *, systemctl: str = "/usr/bin/systemctl") -> str:
     syntax = _run([nginx, "-t"], timeout=30)
     if syntax.returncode != 0:
@@ -64,12 +97,19 @@ def _reload_nginx(nginx: str, *, systemctl: str = "/usr/bin/systemctl") -> str:
 
     if _systemd_nginx_active(systemctl):
         reloaded = _run([systemctl, "reload", "nginx"], timeout=30)
-        if reloaded.returncode != 0:
-            reason = _reload_failure_class(reloaded)
+        if reloaded.returncode == 0:
+            return "SYSTEMD"
+
+        reason = _reload_failure_class(reloaded)
+        if reason in {"PERMISSION_DENIED", "SYSTEMD_BUS_UNAVAILABLE"}:
             raise RestoreAsVerificationError(
                 f"nginx reload failed; mode=SYSTEMD; reason={reason}"
             )
-        return "SYSTEMD"
+
+        # Some packaged/service-unit reload actions can fail even while systemd
+        # still tracks the live Nginx master correctly. After nginx -t has passed,
+        # ask systemd to deliver the standard graceful HUP specifically to MAINPID.
+        return _systemd_main_hup_reload(systemctl)
 
     reloaded = _run([nginx, "-s", "reload"], timeout=30)
     if reloaded.returncode != 0:
