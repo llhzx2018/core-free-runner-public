@@ -37,6 +37,8 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
   await page.locator('[data-vf-brand-discard]').click();assert.equal(await page.locator(input('siteName')).inputValue(),original);
   const save=async name=>{
    await page.locator(input('siteName')).fill(name);
+   const invalid=await page.locator('[data-vf-brand-form]').evaluate(n=>[...n.querySelectorAll(':invalid')].map(el=>el.name));
+   assert.deepEqual(invalid,[],'test dataset must satisfy existing required fields');
    const response=page.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().postData()?.includes('vf_theme_brand_save'));
    await page.locator('[data-vf-brand-save]').click();
    const payload=await (await response).json();assert(payload.success,JSON.stringify(payload));

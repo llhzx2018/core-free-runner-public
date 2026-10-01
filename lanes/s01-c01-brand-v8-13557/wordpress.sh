@@ -24,6 +24,7 @@ curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-
 docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp";docker exec "$WP" chmod 0755 /usr/local/bin/wp
 cli(){ docker exec --user www-data -e TARGET_VERSION="$TARGET_VERSION" -e SOURCE_VERSION="$SOURCE_VERSION" "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic VF Update' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli option update blogdescription 'Synthetic Runner tagline, preserved across native upgrade' >/dev/null
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set VF_WP_UPDATE_GITHUB_API_BASE http://vf-update.test:18881 >/dev/null
 docker cp "previous/vf-tools-theme_V${SOURCE_VERSION}.zip" "$WP:/var/www/html/previous.zip"
