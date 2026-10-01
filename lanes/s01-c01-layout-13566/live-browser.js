@@ -11,6 +11,7 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
  await page.goto(origin+'/wp-login.php');
  await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');
  await Promise.all([page.waitForURL(/wp-admin/),page.locator('#wp-submit').click()]);
+ const layout=await require('../target/tests/layout-v8-browser-check')(page,context,browser,origin);
  const checks=[];
  for(const width of [1920,1440,1319,1024,768,390]){
   await page.setViewportSize({width,height:1000});await page.goto(url);
@@ -156,7 +157,6 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
   assert.equal(await page.locator(input('siteName')).inputValue(),original);
   checks.push({width,...state,preview,preview_controls:'PASS',preview_scroll:'PASS',advanced,advanced_controls:'PASS',advanced_interactions:'PASS',numbers,number_controls:'PASS',choice:choiceMetric,choice_controls:'PASS',recovery_controls:'PASS',save_reload:'PASS',discard:'PASS',bad_nonce:'PASS',logged_out_write:'PASS',revision_conflict:'PASS',preview_link:'PASS',keyboard_disclosure:'PASS',frozen_header_parity:'PASS'});
  }
- const layout=await require('../target/tests/layout-v8-browser-check')(page,context,browser,origin);
  const regressions=[];
  for(const tab of ['overview','layout','render','navigation','seo','preview','recovery']){
   await page.goto(origin+'/wp-admin/themes.php?page=vf-theme-modules&tab='+tab);
