@@ -67,25 +67,97 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 "restore.example.com",
                 "http",
                 80,
-                attempts=4,
+                addresses=("127.0.0.1",),
+                attempts_per_address=2,
                 delay=0.01,
             )
         self.assertEqual((rc, code), (0, "301"))
         self.assertEqual(probe.call_count, 2)
         sleep.assert_called_once()
 
+    def test_nginx_listener_discovery_uses_only_target_server_blocks(self) -> None:
+        nginx_dump = """
+server {
+    listen 80;
+    listen [::]:80;
+    server_name other.example.com;
+}
+server {
+    listen 192.0.2.44:80;
+    listen [2001:db8::44]:80;
+    listen 443 ssl;
+    server_name restore.example.com www.restore.example.com;
+    location / { try_files $uri =404; }
+}
+"""
+        proc = subprocess.CompletedProcess([], 0, stdout=nginx_dump, stderr="")
+        with mock.patch.object(restore_as_verified, "_run", return_value=proc):
+            http = restore_as_verified._nginx_target_listener_addresses(
+                "/usr/sbin/nginx",
+                "restore.example.com",
+                80,
+            )
+            https = restore_as_verified._nginx_target_listener_addresses(
+                "/usr/sbin/nginx",
+                "restore.example.com",
+                443,
+            )
+        self.assertEqual(http, ["192.0.2.44", "2001:db8::44"])
+        self.assertEqual(https, ["127.0.0.1"])
+
+    def test_nginx_listener_discovery_maps_wildcards_to_loopback(self) -> None:
+        nginx_dump = """
+server {
+    listen 80;
+    listen [::]:80;
+    server_name restore.example.com;
+}
+"""
+        proc = subprocess.CompletedProcess([], 0, stdout=nginx_dump, stderr="")
+        with mock.patch.object(restore_as_verified, "_run", return_value=proc):
+            addresses = restore_as_verified._nginx_target_listener_addresses(
+                "/usr/sbin/nginx",
+                "restore.example.com",
+                80,
+            )
+        self.assertEqual(addresses, ["127.0.0.1", "::1"])
+
+    def test_http_probe_tries_discovered_listener_addresses(self) -> None:
+        with mock.patch.object(
+            restore_as_verified,
+            "_http_code",
+            side_effect=[(7, "000"), (0, "200")],
+        ) as probe:
+            rc, code = restore_as_verified._http_probe(
+                "/usr/bin/curl",
+                "restore.example.com",
+                "http",
+                80,
+                addresses=("192.0.2.44", "192.0.2.45"),
+                attempts_per_address=1,
+            )
+        self.assertEqual((rc, code), (0, "200"))
+        self.assertEqual(probe.call_args_list[0].kwargs["address"], "192.0.2.44")
+        self.assertEqual(probe.call_args_list[1].kwargs["address"], "192.0.2.45")
+
     def test_local_verification_accepts_https_sni_probe(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             result = self.base_result(root)
-            calls = [
-                subprocess.CompletedProcess([], 0, stdout="200", stderr=""),
-                subprocess.CompletedProcess([], 0, stdout="302", stderr=""),
-            ]
-            with mock.patch.object(restore_as_verified, "_run", side_effect=calls):
+            with mock.patch.object(
+                restore_as_verified,
+                "_nginx_target_listener_addresses",
+                side_effect=[["192.0.2.44"], ["192.0.2.44"]],
+            ), mock.patch.object(
+                restore_as_verified,
+                "_http_probe",
+                side_effect=[(0, "200"), (0, "302")],
+            ):
                 verified = restore_as_verified.verify_local_restore(root, result)
             self.assertEqual(verified["status"], "PASS")
             self.assertEqual(verified["host"]["http_code"], "200")
+            self.assertEqual(verified["host"]["mode"], "LOCAL_HTTP_NGINX_LISTENER")
+            self.assertEqual(verified["host"]["listener_candidates"], 1)
             self.assertEqual(verified["sni"]["mode"], "LOCAL_HTTPS_SNI")
             self.assertGreaterEqual(verified["files"]["file_count"], 1)
             self.assertFalse(verified["dns_changed"])
@@ -96,6 +168,10 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             root = Path(td)
             result = self.base_result(root)
             with mock.patch.object(
+                restore_as_verified,
+                "_nginx_target_listener_addresses",
+                side_effect=[["127.0.0.1"], ["127.0.0.1"]],
+            ), mock.patch.object(
                 restore_as_verified,
                 "_http_probe",
                 side_effect=[(0, "200"), (35, "000")],
@@ -118,8 +194,8 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             result = self.base_result(root)
             with mock.patch.object(
                 restore_as_verified,
-                "_http_probe",
-                return_value=(7, "000"),
+                "_nginx_target_listener_addresses",
+                return_value=[],
             ), mock.patch.object(
                 restore_as_verified,
                 "_nginx_has_target_vhost",
@@ -131,14 +207,14 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 ):
                     restore_as_verified.verify_local_restore(root, result)
 
-    def test_failed_http_probe_reports_present_target_vhost(self) -> None:
+    def test_present_vhost_without_http_listener_is_classified(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             result = self.base_result(root)
             with mock.patch.object(
                 restore_as_verified,
-                "_http_probe",
-                return_value=(7, "000"),
+                "_nginx_target_listener_addresses",
+                return_value=[],
             ), mock.patch.object(
                 restore_as_verified,
                 "_nginx_has_target_vhost",
@@ -146,7 +222,26 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     restore_as_verified.RestoreAsVerificationError,
-                    "target_vhost=PRESENT",
+                    "target_listener=MISSING",
+                ):
+                    restore_as_verified.verify_local_restore(root, result)
+
+    def test_failed_http_probe_reports_present_target_vhost(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = self.base_result(root)
+            with mock.patch.object(
+                restore_as_verified,
+                "_nginx_target_listener_addresses",
+                return_value=["192.0.2.44"],
+            ), mock.patch.object(
+                restore_as_verified,
+                "_http_probe",
+                return_value=(7, "000"),
+            ):
+                with self.assertRaisesRegex(
+                    restore_as_verified.RestoreAsVerificationError,
+                    "target_listener=UNREACHABLE",
                 ):
                     restore_as_verified.verify_local_restore(root, result)
 
