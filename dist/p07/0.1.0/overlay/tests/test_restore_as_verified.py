@@ -40,15 +40,67 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             "existing_site_overwrite_allowed": False,
         }
 
-    def test_nginx_reload_requires_syntax_pass_then_reload(self) -> None:
+    def test_nginx_reload_prefers_active_systemd_after_syntax_pass(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ]
         with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
-            restore_as_verified._reload_nginx("/usr/sbin/nginx")
+            mode = restore_as_verified._reload_nginx(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual(mode, "SYSTEMD")
         self.assertEqual(run.call_args_list[0].args[0], ["/usr/sbin/nginx", "-t"])
-        self.assertEqual(run.call_args_list[1].args[0], ["/usr/sbin/nginx", "-s", "reload"])
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["/usr/bin/systemctl", "is-active", "nginx"],
+        )
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["/usr/bin/systemctl", "reload", "nginx"],
+        )
+
+    def test_nginx_reload_falls_back_to_direct_signal_without_active_systemd(self) -> None:
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+        ]
+        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+            mode = restore_as_verified._reload_nginx(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual(mode, "DIRECT_SIGNAL")
+        self.assertEqual(
+            run.call_args_list[2].args[0],
+            ["/usr/sbin/nginx", "-s", "reload"],
+        )
+
+    def test_nginx_systemd_reload_failure_is_classified_and_does_not_fallback(self) -> None:
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="Access denied INTERNAL_SECRET_DETAIL",
+            ),
+        ]
+        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+            with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
+                restore_as_verified._reload_nginx(
+                    "/usr/sbin/nginx",
+                    systemctl="/usr/bin/systemctl",
+                )
+        message = str(caught.exception)
+        self.assertIn("mode=SYSTEMD", message)
+        self.assertIn("reason=PERMISSION_DENIED", message)
+        self.assertNotIn("INTERNAL_SECRET_DETAIL", message)
+        self.assertEqual(len(run.call_args_list), 3)
 
     def test_nginx_reload_preflight_failure_is_fail_closed(self) -> None:
         proc = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
@@ -293,6 +345,7 @@ server {
             ), mock.patch.object(
                 restore_as_verified,
                 "_reload_nginx",
+                return_value="SYSTEMD",
             ) as reload_nginx, mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
@@ -305,9 +358,13 @@ server {
                     "clpctl",
                     "CONFIRM",
                 )
-            reload_nginx.assert_called_once_with("/usr/sbin/nginx")
+            reload_nginx.assert_called_once_with(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
             self.assertEqual(result["status"], "RESTORE_AS_VERIFIED")
             self.assertEqual(result["local_verification"]["status"], "PASS")
+            self.assertEqual(result["nginx_reload"], {"status": "PASS", "mode": "SYSTEMD"})
             self.assertEqual(result["machine_verification_scope"], "FILES_DB_APP_HOST_SNI")
 
     def test_local_verification_failure_rolls_back_only_new_target(self) -> None:
