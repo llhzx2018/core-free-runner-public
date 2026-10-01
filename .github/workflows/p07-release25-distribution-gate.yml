@@ -1,0 +1,138 @@
+name: P07 Release25 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release25-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release25 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release25'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release25"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release25"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="5e688084e88e533d8446905950ca7d4519b4ff5e"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="fb88cf8f05d36866ea3e396ca6ac6992def3cd05"' installers/p07.sh
+          grep -Fq 'RESTORE_AS_OFFLINE_VERIFIED' "$root/lib/restore_as_verified.py"
+          grep -Fq 'OFFLINE_STATIC' "$root/lib/restore_as_verified.py"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              seen=set()
+              for line in (root/name).read_text(encoding='utf-8').splitlines():
+                  if not line.strip():
+                      continue
+                  expected, rel=line.split('  ',1)
+                  assert rel not in seen, (name, rel)
+                  seen.add(rel)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  assert blob(path)==expected, (name, rel, blob(path), expected)
+          runtime=(root/'RUNTIME.gitblob').read_text(encoding='utf-8')
+          required={
+              'BUILD_ID':'66800e13bd52eec300ccef86ed5db1e4c9cce95c',
+              'bin/vfops-site-ui':'5c5058dfc5c303b73ec051e5f47fa15ed87481e8',
+              'lib/restore_as_verified.py':'88907bccb4c787ef202c8812964241ac92a4ea48',
+              'lib/restore_failure_ui.sh':'83bcaee4c9f4b5a82ef2ec3878d5d78622de1d3d',
+          }
+          for rel, expected in required.items():
+              assert f'{expected}  {rel}' in runtime, rel
+          PY
+
+      - name: Release25 offline Recovery contract
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq 'return "OFFLINE_STATIC", ()' "$root/lib/restore_as_verified.py"
+          grep -Fq 'def verify_offline_restore' "$root/lib/restore_as_verified.py"
+          grep -Fq 'RESTORE_AS_OFFLINE_VERIFIED' "$root/lib/restore_as_verified.py"
+          grep -Fq '"status": "NOT_RUN"' "$root/lib/restore_as_verified.py"
+          grep -Fq '"reason": "SITE_NGINX_NOT_RUNNING"' "$root/lib/restore_as_verified.py"
+          grep -Fq '离线验证通过' "$root/bin/vfops-site-ui"
+          grep -Fq '在线 Host / SNI' "$root/bin/vfops-site-ui"
+          ! grep -R -n -E 'systemctl[[:space:]]+(start|restart)[[:space:]]+nginx' "$root/bin" "$root/lib"
+
+      - name: Syntax and compile
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          bash -n "$root/bin/vfops-site-ui"
+          bash -n "$root/lib/restore_failure_ui.sh"
+          python3 -m py_compile             "$root/lib/restore_as_verified.py"             "$root/lib/restore_as.py"             "$root/tests/test_restore_as_verified.py"             "$root/tests/test_restore_as_machine_e2e.py"
+
+      - name: Public overlay release25 regressions
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_restore_as_machine_e2e             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_menu3_modular             tests.test_p07_integration_manifest             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Offline Recovery E2E proof
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -v             tests.test_restore_as_machine_e2e.RestoreAsMachineE2ETests.test_backup_to_restore_as_offline_success_skips_online_probe_and_keeps_target             tests.test_restore_as_verified.RestoreAsVerifiedTests.test_offline_restore_keeps_verified_target_and_never_reloads_nginx             tests.test_restore_as_verified.RestoreAsVerifiedTests.test_offline_verification_fails_when_target_vhost_is_missing
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release25'
+          grep -Fq 'lib/restore_as_verified.py' "$tmp/install/.runtime-manifest.gitblob"
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          ! grep -R -n -E '(PRIVATE KEY|BEGIN OPENSSH|ghp_[A-Za-z0-9]|github_pat_)' "$root/bin" "$root/lib" installers/p07*.sh
+          ! grep -R -n -E 'systemctl[[:space:]]+(start|restart)[[:space:]]+nginx' "$root/bin" "$root/lib"
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' installers/p07*.sh "$root/bin" "$root/lib"
+          grep -Fq 'cleanup_database' "$root/lib/restore_as_verified.py"
+          grep -Fq 'cleanup_site' "$root/lib/restore_as_verified.py"
+          grep -Fq 'DNS：未修改' "$root/bin/vfops-site-ui"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE25_DISTRIBUTION_GATE=COMPLETE'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
+          echo 'P07_NGINX_START_RESTART=NOT_RUN'

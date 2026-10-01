@@ -29,15 +29,12 @@ render_restore_failure() {
   esac
 
   if grep -Fq 'site nginx preflight failed' "$err_file" 2>/dev/null; then
-    if grep -Fq 'reason=SITE_NGINX_NOT_RUNNING' "$err_file" 2>/dev/null; then
-      ui_bad '网站 Nginx 当前没有运行，P07 已在创建新网站前停止。'
-      ui_note 'CloudPanel 后台服务可以仍然正常，但它不是承载网站 80/443 流量的 Nginx。'
-      ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
-    elif grep -Fq 'reason=CONFIG_INVALID' "$err_file" 2>/dev/null; then
+    if grep -Fq 'reason=CONFIG_INVALID' "$err_file" 2>/dev/null; then
       ui_bad '网站 Nginx 配置自检没有通过，P07 已在创建新网站前停止。'
+      ui_note '网站 Nginx 即使处于停止状态，也必须先保证配置可安全读取。'
       ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
     else
-      ui_bad '网站 Nginx 运行状态检查没有通过，P07 已在创建新网站前停止。'
+      ui_bad '网站 Nginx 配置检查没有通过，P07 已在创建新网站前停止。'
       ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
     fi
     return 0
@@ -84,6 +81,17 @@ render_restore_failure() {
         ui_note '这表示新站配置已经生成，但运行中的 Nginx 没有成功加载它。'
       fi
       ui_note 'DNS 没有修改，原网站没有修改。'
+      return 0
+    fi
+    if grep -Fq 'offline Nginx config verification failed' "$err_file" 2>/dev/null; then
+      if grep -Fq 'target_vhost=MISSING' "$err_file" 2>/dev/null; then
+        ui_bad '新网站数据已经恢复，但离线 Nginx 配置中没有找到这个新域名，P07 已回滚新目标。'
+      elif grep -Fq 'target_listener=MISSING' "$err_file" 2>/dev/null; then
+        ui_bad '新网站数据已经恢复，但离线 Nginx 配置中没有找到可用的网站监听配置，P07 已回滚新目标。'
+      else
+        ui_bad '新网站数据已经恢复，但离线 Nginx 配置校验没有通过，P07 已回滚新目标。'
+      fi
+      ui_note 'P07 没有启动或重启网站 Nginx；DNS 没有修改，原网站没有修改。'
       return 0
     fi
     if grep -Fq 'local Host routing verification failed' "$err_file" 2>/dev/null; then

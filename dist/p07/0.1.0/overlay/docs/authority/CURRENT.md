@@ -145,14 +145,14 @@ Four-slot Integration Manifest       = PRESENT
 Product-wide terminal language       = ZH_FIRST
 Slot 1 Network Node                  = 0.1.0-rc10 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Slot 2 VPS Audit                     = V2.2.2 / 2.2.2-rc2-chinese-first / PUBLIC_DISTRIBUTED
-Slot 3 CloudPanel Ops                = 0.1.0-release23 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
+Slot 3 CloudPanel Ops                = 0.1.0-release24 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
 Slot 4 System Care                   = 0.1.0-rc18 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Automatic DNS mutation               = DENY
 Automatic SOURCE deletion            = DENY
 Resource Safe Apply auto-run         = DENY
 Formal Release Tag                    = p07-v0.1.0
 GitHub Release                        = PUBLISHED
-Public Distribution                   = b063d07c7c1bb807ad1ada51becc46030cb40c3e
+Public Distribution                   = 9151216074fd3dc4bf049f575657d44e460ae085
 ```
 
 Formal Tag/Release is complete. main is the canonical released source. Production destructive actions remain separately gated.
@@ -2776,4 +2776,158 @@ Owner Real Use                       NOT_RUN
 ```
 
 安全边界保持：不自动 start/restart Nginx，不修改 DNS，不删除 SOURCE，不覆盖 existing target。当前 Public Distribution 仍为 release23。
+
+## Slot 3 release24 site-serving Nginx role separation distribution closure
+
+release24 已完成 V0.1.0 Public Distribution。它修正 release22 / release23 对 CloudPanel Nginx 实例角色的错误归属：仅发现 root Nginx master 不代表该实例承载网站 80/443 流量。
+
+release24 固定：
+
+```text
+Restore-As preflight before target write
+→ active nginx.service = managed website-Nginx path
+→ otherwise enumerate live root Nginx masters
+→ run each instance's own nginx -T runtime args
+→ only 80/443 site-serving instance qualifies
+→ control-plane-only Nginx is ignored
+→ no site-serving Nginx = fail closed before target creation
+→ only qualified site Nginx may be reloaded / HUPed
+→ Host / listener / SNI remain local verification; DNS not required
+```
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release24
+Exact runtime source merge            2a57a0c32a44cb30f15a49dece253ec917c901ca
+Source authority closure merge        b5beec4133acede30ad8a40de067df505b2fd141
+Public distribution main              9151216074fd3dc4bf049f575657d44e460ae085
+Runtime manifest blob                 c6435a15a576c3dd7bd7c48cd8828f782391a2c9
+Full overlay manifest blob            b08f5fee96505eed64a5b88f02d1f2279047fa39
+Final installer blob                  2448051ba708af11e2de3fb53deb13a4dadc86c5
+Stable installer blob                 e309806cf4a6218baee5b0982df753d14022ea28
+Toolbox blob                          eec990218e260745cd847382bdbf0576a316a976
+```
+
+Machine / Distribution proof：
+
+```text
+Release24 Candidate Gate              36854715322 PASS
+Release24 runtime source main CI      36855594436 PASS
+Release24 source closure PR CI        36855828760 PASS
+Release24 Distribution Gate           36858661463 PASS
+Toolbox Smoke                         36858661096 PASS
+System Care Smoke                     36858661074 PASS
+Beginner Menu Gate                    36858661080 PASS
+Public Runner Trigger Scope           36858661072 PASS
+Workflow Archive Integrity            36858661109 PASS
+Public main Toolbox Smoke             36858734545 PASS
+Public main System Care Smoke         36858734543 PASS
+Public main Current Self Test         36858734529 PASS
+```
+
+旧 release-specific workflow、Stable Installer / R2 Onboarding 中仍可能存在旧身份硬编码失败；它们不是 release24 owning evidence。
+
+Current Production truth：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release22
+release23 Owner real-use evidence              REAL_FAIL / TARGET_VHOST_MISSING
+release24 Production install                   NOT_YET_OWNER_VERIFIED
+release24 Owner Real Use                       PENDING
+DNS write                                      NO
+SOURCE delete                                  NO
+Existing target overwrite                      NO
+Automatic Nginx start/restart                  NO
+Resource Safe Apply                            NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，应先确认 Build 已升级到 release24，再自行输入任意合法、未占用且不覆盖现有站点的目标域名执行 Restore-As-New 真机验证。P07 不预设目标域名，也不要求测试域名提前修改 DNS。
+
+## Slot 3 release25 offline Recovery Restore-As source closure · Public Distribution pending
+
+2026-10-01，OWNER 明确确认本轮备份 / Restore-As 真机验证一直在**保留的旧 Linode Recovery Copy** 上执行，并不是误连测试机。该机器在 2026-09-24 Linode → DigitalOcean 迁移过程中主动停止了网站 `nginx.service`，用于保留旧机恢复副本；CloudPanel 控制面 `clp-nginx` 仍监听 8443。
+
+release24 真机证据：
+
+```text
+environment                         preserved Linode Recovery Copy
+website nginx.service               inactive / intentionally stopped after migration
+CloudPanel control Nginx            active / 8443
+site 80/443 live listeners          none
+default /etc/nginx config           present
+default nginx -t                    PASS
+Restore-As release24 result         SAFE_STOP / SITE_NGINX_NOT_RUNNING
+target created                      NO
+DNS write                           NO
+SOURCE mutation                     NO
+automatic Nginx start/restart       NO
+```
+
+这证明 release24 的**Nginx 角色分离**是正确的：P07 不再把 8443-only CloudPanel 控制面 Nginx 当成网站 Nginx，也没有 HUP 错误实例。但同时暴露出一个真实 Recovery 场景缺口：网站 Nginx 被有意停机时，release24 在恢复前直接阻断整个 Restore-As，无法完成“离线恢复验证”。
+
+release25 将 Restore-As 明确分成两种验证模式：
+
+```text
+A. ONLINE
+   website Nginx running
+   → existing reload / Host / SNI path
+   → files / DB / app / Host / SNI PASS required
+
+B. OFFLINE_STATIC
+   website Nginx intentionally not running
+   → pre-write static nginx -t required
+   → CloudPanel new target + files + DB restore allowed
+   → post-restore nginx -t / nginx -T
+   → target vhost + configured 80/443 listener presence
+   → files / DB / app / Nginx config verification
+   → Host / SNI = NOT_RUN
+   → no Nginx start / restart / reload
+```
+
+离线成功必须使用独立结果身份：
+
+```text
+RESTORE_AS_OFFLINE_VERIFIED
+verification_mode = OFFLINE_STATIC
+machine_verification_scope = FILES_DB_APP_NGINX_CONFIG
+online_verification = NOT_RUN / SITE_NGINX_NOT_RUNNING
+nginx_reload = NOT_RUN
+```
+
+不得把离线恢复写成完整在线 PASS。若离线 `nginx -t` 失败、目标 vhost 缺失或没有网站 listener 配置，仍回滚**仅本次新建目标**。DNS、SOURCE、existing target 与旧证书安全边界保持不变。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release25
+Candidate PR                         #109
+Candidate head                       2caaedc93724fa8e1ebbd197568243ba5a5034bf
+Candidate exact-source CI            36878240140 PASS
+Private source main merge            4260aa6553c6a4f20c631a2f6b6ea5baec3f3f82
+Source main CI                       36879393432 PASS
+offline preflight regression         PASS
+offline no-reload regression         PASS
+offline Recovery machine E2E         PASS
+online Restore-As path               PASS
+rollback / DNS / SOURCE safety       PASS
+```
+
+当前阶段严格保持：
+
+```text
+Current Public Distribution          0.1.0-release24
+Production exact independently proven 0.1.0-release22
+release24 Recovery real-use          SAFE_STOP / SITE_NGINX_NOT_RUNNING
+release25 Private Source             MERGED
+release25 Public Distribution        NOT_RUN
+release25 Production install         NOT_RUN
+release25 Owner Real Use             NOT_RUN
+DNS / SOURCE delete                  NOT_RUN
+Existing target overwrite            NOT_RUN
+Automatic Nginx start/restart        NO
+```
+
+release25 只有完成独立 Public Distribution Gate 后，OWNER 才继续在同一 Linode Recovery Copy 上执行新的 Restore-As 真机验证。Public Distribution 仍不等于 Production 或完整在线 Restore PASS。
 
