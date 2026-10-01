@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Sequence
 
 import cloudpanel
@@ -49,6 +50,8 @@ def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str
         "5",
         "--max-time",
         "15",
+        "--noproxy",
+        "*",
         "--resolve",
         f"{domain}:{port}:127.0.0.1",
     ]
@@ -64,6 +67,26 @@ def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str
 
 def _valid_http_code(value: str) -> bool:
     return bool(re.fullmatch(r"[1-5][0-9]{2}", value))
+
+
+def _http_probe(
+    curl: str,
+    domain: str,
+    scheme: str,
+    port: int,
+    *,
+    attempts: int = 4,
+    delay: float = 1.0,
+) -> tuple[int, str]:
+    attempts = max(1, attempts)
+    last = (1, "")
+    for index in range(attempts):
+        last = _http_code(curl, domain, scheme, port)
+        if last[0] == 0 and _valid_http_code(last[1]):
+            return last
+        if index + 1 < attempts:
+            time.sleep(delay)
+    return last
 
 
 def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
@@ -212,11 +235,14 @@ def verify_local_restore(
     if file_count < 1:
         raise RestoreAsVerificationError("restored site contains no files")
 
-    http_rc, http_code = _http_code(curl, target_domain, "http", 80)
+    http_rc, http_code = _http_probe(curl, target_domain, "http", 80)
     if http_rc != 0 or not _valid_http_code(http_code):
-        raise RestoreAsVerificationError("local Host routing verification failed")
+        vhost_state = "PRESENT" if _nginx_has_target_vhost(nginx, target_domain) else "MISSING"
+        raise RestoreAsVerificationError(
+            f"local Host routing verification failed; target_vhost={vhost_state}"
+        )
 
-    https_rc, https_code = _http_code(curl, target_domain, "https", 443)
+    https_rc, https_code = _http_probe(curl, target_domain, "https", 443)
     if https_rc == 0 and _valid_http_code(https_code):
         sni = {
             "status": "PASS",
