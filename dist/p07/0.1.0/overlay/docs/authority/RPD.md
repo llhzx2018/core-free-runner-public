@@ -870,3 +870,36 @@ nginx -T
 - 不向普通用户显示真实 IP、Secret、DB Password 或原始 stderr；
 - 失败继续回滚新目标；DNS、SOURCE、existing target 不自动修改。
 
+## Restore-As Guarded Nginx Reload Contract
+
+Restore-As 创建新 CloudPanel 站点后，在最终本机 Host/SNI 验证前，必须确保运行中的 Nginx 已加载磁盘上的新 vhost。
+
+固定：
+
+```text
+nginx -t
+→ PASS 才允许
+nginx -s reload
+→ reload 成功
+→ target listener / Host / SNI verification
+```
+
+失败分类至少包括：
+
+```text
+NGINX_CONFIG_INVALID
+NGINX_RELOAD_FAILED
+CONNECT_FAILED
+TIMEOUT
+EMPTY_REPLY
+OTHER
+```
+
+普通用户只显示安全中文分类，不显示真实 listener IP、原始 stderr、Secret、数据库口令。
+
+任何 reload 或最终本机验证失败都必须继续 fail closed：
+- 回滚本次新目标；
+- DNS 不修改；
+- SOURCE 不修改；
+- existing target 不覆盖。
+
