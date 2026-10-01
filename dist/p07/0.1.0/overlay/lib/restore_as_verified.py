@@ -294,17 +294,23 @@ def _site_nginx_preflight(
         return "SYSTEMD", ()
 
     master = _stable_site_nginx_master(nginx, ps=ps, attempts=8, delay=0.25)
-    if master is None:
-        raise RestoreAsVerificationError(
-            "site nginx preflight failed; reason=SITE_NGINX_NOT_RUNNING"
-        )
-    runtime_args = tuple(master.get("runtime_args", ()))
-    syntax = _run([nginx, "-t", *runtime_args], timeout=30)
+    if master is not None:
+        runtime_args = tuple(master.get("runtime_args", ()))
+        syntax = _run([nginx, "-t", *runtime_args], timeout=30)
+        if syntax.returncode != 0:
+            raise RestoreAsVerificationError(
+                "site nginx preflight failed; reason=CONFIG_INVALID"
+            )
+        return "LIVE_MASTER", runtime_args
+
+    # Recovery/offline servers may intentionally keep the website Nginx stopped.
+    # Validate the managed site configuration statically, but never start/restart it.
+    syntax = _run([nginx, "-t"], timeout=30)
     if syntax.returncode != 0:
         raise RestoreAsVerificationError(
             "site nginx preflight failed; reason=CONFIG_INVALID"
         )
-    return "LIVE_MASTER", runtime_args
+    return "OFFLINE_STATIC", ()
 
 
 def _reload_nginx(
@@ -630,14 +636,9 @@ def _database_compat_context(
     return CompatContext()
 
 
-def verify_local_restore(
+def _verify_restore_core(
     target_root: Path,
     result: dict[str, Any],
-    *,
-    curl: str = "/usr/bin/curl",
-    nginx: str = "/usr/sbin/nginx",
-    systemctl: str = "/usr/bin/systemctl",
-    nginx_args: Sequence[str] = (),
 ) -> dict[str, Any]:
     source_domain = cloudpanel.validate_domain(str(result.get("source_domain", "")))
     target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
@@ -660,6 +661,36 @@ def verify_local_restore(
     file_count = sum(1 for item in final_site.rglob("*") if item.is_file() and not item.is_symlink())
     if file_count < 1:
         raise RestoreAsVerificationError("restored site contains no files")
+
+    return {
+        "status": "PASS",
+        "files": {"status": "PASS", "file_count": file_count},
+        "database": {
+            "status": "PASS" if result.get("database_import_verified_before_transform") else "NOT_APPLICABLE",
+            "source_match_before_transform": bool(result.get("database_import_verified_before_transform")),
+        },
+        "application": {
+            "status": "PASS",
+            "mode": result.get("application_config_mode", "UNKNOWN"),
+            "wordpress_urls": result.get("wordpress_urls"),
+        },
+        "dns_changed": False,
+        "source_deleted": False,
+        "source_certificate_reused": False,
+    }
+
+
+def verify_local_restore(
+    target_root: Path,
+    result: dict[str, Any],
+    *,
+    curl: str = "/usr/bin/curl",
+    nginx: str = "/usr/sbin/nginx",
+    systemctl: str = "/usr/bin/systemctl",
+    nginx_args: Sequence[str] = (),
+) -> dict[str, Any]:
+    verified = _verify_restore_core(target_root, result)
+    target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
 
     http_addresses = _nginx_target_listener_addresses(
         nginx,
@@ -715,9 +746,6 @@ def verify_local_restore(
             "certificate_trust": "NOT_ASSERTED_UNTIL_TARGET_DNS_CERTIFICATE",
         }
     elif _nginx_has_target_vhost(nginx, target_domain, nginx_args=nginx_args):
-        # DNS may not yet point at this server and no target-domain certificate is
-        # installed by Restore-As. The vhost identity is still verified locally;
-        # certificate issuance remains explicitly deferred rather than reusing SOURCE.
         sni = {
             "status": "PASS",
             "mode": "TARGET_VHOST_PRESENT_TLS_DEFERRED",
@@ -727,30 +755,72 @@ def verify_local_restore(
     else:
         raise RestoreAsVerificationError("local SNI/vhost verification failed")
 
-    return {
+    verified["verification_mode"] = "ONLINE"
+    verified["host"] = {
         "status": "PASS",
-        "files": {"status": "PASS", "file_count": file_count},
-        "database": {
-            "status": "PASS" if result.get("database_import_verified_before_transform") else "NOT_APPLICABLE",
-            "source_match_before_transform": bool(result.get("database_import_verified_before_transform")),
-        },
-        "application": {
-            "status": "PASS",
-            "mode": result.get("application_config_mode", "UNKNOWN"),
-            "wordpress_urls": result.get("wordpress_urls"),
-        },
-        "host": {
-            "status": "PASS",
-            "mode": "LOCAL_HTTP_NGINX_LISTENER",
-            "http_code": http_code,
-            "listener_candidates": len(http_addresses),
-        },
-        "sni": sni,
-        "dns_changed": False,
-        "source_deleted": False,
-        "source_certificate_reused": False,
+        "mode": "LOCAL_HTTP_NGINX_LISTENER",
+        "http_code": http_code,
+        "listener_candidates": len(http_addresses),
     }
+    verified["sni"] = sni
+    return verified
 
+
+def verify_offline_restore(
+    target_root: Path,
+    result: dict[str, Any],
+    *,
+    nginx: str = "/usr/sbin/nginx",
+    nginx_args: Sequence[str] = (),
+) -> dict[str, Any]:
+    verified = _verify_restore_core(target_root, result)
+    target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
+
+    syntax = _run([nginx, "-t", *nginx_args], timeout=30)
+    if syntax.returncode != 0:
+        raise RestoreAsVerificationError(
+            "offline Nginx config verification failed; reason=CONFIG_INVALID"
+        )
+    if not _nginx_has_target_vhost(nginx, target_domain, nginx_args=nginx_args):
+        raise RestoreAsVerificationError(
+            "offline Nginx config verification failed; target_vhost=MISSING"
+        )
+
+    http_addresses = _nginx_target_listener_addresses(
+        nginx,
+        target_domain,
+        80,
+        nginx_args=nginx_args,
+    )
+    https_addresses = _nginx_target_listener_addresses(
+        nginx,
+        target_domain,
+        443,
+        nginx_args=nginx_args,
+    )
+    if not http_addresses and not https_addresses:
+        raise RestoreAsVerificationError(
+            "offline Nginx config verification failed; target_listener=MISSING"
+        )
+
+    verified["verification_mode"] = "OFFLINE_STATIC"
+    verified["nginx_config"] = {
+        "status": "PASS",
+        "mode": "STATIC_CONFIG_ONLY",
+        "target_vhost": "PRESENT",
+        "http_listener_configured": bool(http_addresses),
+        "https_listener_configured": bool(https_addresses),
+    }
+    verified["host"] = {
+        "status": "NOT_RUN",
+        "reason": "SITE_NGINX_NOT_RUNNING",
+    }
+    verified["sni"] = {
+        "status": "NOT_RUN",
+        "reason": "SITE_NGINX_NOT_RUNNING",
+        "certificate_trust": "NOT_ASSERTED",
+    }
+    return verified
 
 def _rollback_verified_target(result: dict[str, Any], *, clpctl: str) -> dict[str, bool]:
     database = result.get("target_database")
@@ -779,7 +849,7 @@ def restore_as_verified(
     package_dir = package_dir.resolve()
     target_root = target_root.resolve()
     target_domain = cloudpanel.validate_domain(target_domain)
-    _site_nginx_preflight(
+    preflight_mode, preflight_args = _site_nginx_preflight(
         nginx,
         systemctl=systemctl,
         ps=ps,
@@ -795,18 +865,27 @@ def restore_as_verified(
             wp=wp,
         )
     try:
-        reload_mode, nginx_args = _reload_nginx(
-            nginx,
-            systemctl=systemctl,
-            ps=ps,
-        )
-        local = verify_local_restore(
-            target_root,
-            result,
-            curl=curl,
-            nginx=nginx,
-            nginx_args=nginx_args,
-        )
+        if preflight_mode == "OFFLINE_STATIC":
+            local = verify_offline_restore(
+                target_root,
+                result,
+                nginx=nginx,
+                nginx_args=preflight_args,
+            )
+            reload_mode = "SITE_NGINX_NOT_RUNNING"
+        else:
+            reload_mode, nginx_args = _reload_nginx(
+                nginx,
+                systemctl=systemctl,
+                ps=ps,
+            )
+            local = verify_local_restore(
+                target_root,
+                result,
+                curl=curl,
+                nginx=nginx,
+                nginx_args=nginx_args,
+            )
     except Exception as exc:
         rollback = _rollback_verified_target(result, clpctl=clpctl)
         rollback_status = "PASS" if all(rollback.values()) else "PARTIAL"
@@ -817,11 +896,26 @@ def restore_as_verified(
 
     final = dict(result)
     final["schema"] = RESULT_SCHEMA
-    final["status"] = "RESTORE_AS_VERIFIED"
     final["restore_engine_status"] = result.get("status")
     final["local_verification"] = local
-    final["nginx_reload"] = {"status": "PASS", "mode": reload_mode}
-    final["machine_verification_scope"] = "FILES_DB_APP_HOST_SNI"
+    if preflight_mode == "OFFLINE_STATIC":
+        final["status"] = "RESTORE_AS_OFFLINE_VERIFIED"
+        final["verification_mode"] = "OFFLINE_STATIC"
+        final["nginx_reload"] = {
+            "status": "NOT_RUN",
+            "mode": "SITE_NGINX_NOT_RUNNING",
+        }
+        final["online_verification"] = {
+            "status": "NOT_RUN",
+            "reason": "SITE_NGINX_NOT_RUNNING",
+        }
+        final["machine_verification_scope"] = "FILES_DB_APP_NGINX_CONFIG"
+    else:
+        final["status"] = "RESTORE_AS_VERIFIED"
+        final["verification_mode"] = "ONLINE"
+        final["nginx_reload"] = {"status": "PASS", "mode": reload_mode}
+        final["online_verification"] = {"status": "PASS"}
+        final["machine_verification_scope"] = "FILES_DB_APP_HOST_SNI"
     return final
 
 
