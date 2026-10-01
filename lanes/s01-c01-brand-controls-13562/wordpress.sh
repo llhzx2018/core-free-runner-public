@@ -45,7 +45,7 @@ cli eval 'if(get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new
 cli eval 'VF_Theme_Update_Client_V1::clear_cache();delete_site_transient("update_themes");wp_update_themes();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||($r!==true&&!is_array($r))){throw new Exception("second upgrade failed");}' >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
-cli eval '$r=vf_theme_temporary_visual_override_save(["label"=>"Synthetic inactive visual","enabled"=>false,"startsAt"=>time()-60,"expiresAt"=>time()+86400,"tokens"=>["brand"=>"#2563eb"]]);if(empty($r["ok"])||!empty($r["state"]["active"])){throw new Exception("synthetic inactive visual fixture invalid");}' >/dev/null
+cli eval 'require_once get_template_directory()."/inc/options/options-inheritance.php";$r=vf_theme_temporary_visual_override_save(["label"=>"Synthetic inactive visual","enabled"=>false,"startsAt"=>time()-60,"expiresAt"=>time()+86400,"tokens"=>["brand"=>"#2563eb"]]);if(empty($r["ok"])||!empty($r["state"]["active"])){throw new Exception("synthetic inactive visual fixture invalid");}' >/dev/null
 node lane/live-browser.js
 curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
