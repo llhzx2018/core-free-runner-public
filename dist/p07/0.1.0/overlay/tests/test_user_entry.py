@@ -35,6 +35,7 @@ class UserEntryTests(unittest.TestCase):
             shutil.copy2(src, dst)
             os.chmod(dst, 0o755)
         shutil.copy2(REPO_ROOT / "lib" / "terminal_ui.sh", self.root / "lib" / "terminal_ui.sh")
+        shutil.copy2(REPO_ROOT / "lib" / "restore_failure_ui.sh", self.root / "lib" / "restore_failure_ui.sh")
         (self.root / "VERSION").write_text("0.1.0\n", encoding="utf-8")
         (self.root / "BUILD_ID").write_text("0.1.0-release6\n", encoding="utf-8")
         self.log = self.tmp / "core.log"
