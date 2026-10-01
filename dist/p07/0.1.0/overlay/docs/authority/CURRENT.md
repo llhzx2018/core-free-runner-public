@@ -145,14 +145,14 @@ Four-slot Integration Manifest       = PRESENT
 Product-wide terminal language       = ZH_FIRST
 Slot 1 Network Node                  = 0.1.0-rc10 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Slot 2 VPS Audit                     = V2.2.2 / 2.2.2-rc2-chinese-first / PUBLIC_DISTRIBUTED
-Slot 3 CloudPanel Ops                = 0.1.0-release18 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
+Slot 3 CloudPanel Ops                = 0.1.0-release19 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
 Slot 4 System Care                   = 0.1.0-rc18 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Automatic DNS mutation               = DENY
 Automatic SOURCE deletion            = DENY
 Resource Safe Apply auto-run         = DENY
 Formal Release Tag                    = p07-v0.1.0
 GitHub Release                        = PUBLISHED
-Public Distribution                   = f618aad35da7df05fb298455be186691d4b5362b
+Public Distribution                   = 1c218b5dd2ed5c1ef1193ce664c8de42180a51cf
 ```
 
 Formal Tag/Release is complete. main is the canonical released source. Production destructive actions remain separately gated.
@@ -2090,4 +2090,172 @@ release19 Owner Real Use             NOT_RUN
 Migration / DNS / SOURCE delete      NOT_RUN
 Existing target overwrite            NOT_RUN
 ```
+
+## Slot 3 release19 guarded Nginx reload distribution closure
+
+release19 已完成 Public Distribution，用于收敛 OWNER 在 release18-era Restore-As 真机验证中暴露的“目标 listener 已发现，但本机 HTTP 仍不可达”问题。
+
+release19 固定：
+
+```text
+CloudPanel create/restore
+→ nginx -t
+→ syntax PASS 才允许 nginx -s reload
+→ target listener / Host / SNI verification
+→ curl failure classify CONNECT_FAILED / TIMEOUT / EMPTY_REPLY / OTHER
+→ beginner Chinese diagnosis
+→ any failure = rollback new target
+```
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release19
+Exact runtime source merge            728568b00505a206f7e6b66740bede0ad25034ed
+Public distribution main              1c218b5dd2ed5c1ef1193ce664c8de42180a51cf
+Runtime manifest blob                 67f40e615003d8c302ec391c73c836f05113db57
+Full overlay manifest blob            07a4ba0aa2a4679cb80324bfcd11e6cc785ba6b6
+Final installer blob                  ab42d2d1b84669372b8615819de63f0c19619067
+Stable installer blob                 3a1853e4fdf30c0327a1e6d4390fb8b6de57ca35
+Toolbox blob                          83a7b38e69c6db1d30a16f1f648172163f693b5e
+```
+
+Machine / Distribution proof：
+
+```text
+Release19 Exact-source Gate           36815000676 PASS
+Release19 Distribution Gate           36816117494 PASS
+Toolbox Smoke                         36816117429 PASS
+System Care Smoke                     36816117478 PASS
+Beginner Menu Gate                    36816117399 PASS
+Public Runner Trigger Scope           36816117468 PASS
+Workflow Archive Integrity            36816117483 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+public overlay release19 regressions  PASS
+nginx -t then nginx -s reload         PASS
+curl transport diagnosis              PASS
+isolated release19 runtime install    PASS
+beginner Chinese transport rendering  PASS
+rollback / DNS / SOURCE safety        PASS
+Production write                      NOT_RUN
+```
+
+说明：旧 Stable Installer Smoke 与旧 Final Distribution + R2 Onboarding 仍硬编码 `release5 / guided-init16` 身份，因此在 release19 PR 上失败属于历史 workflow debt，不作为 release19 owning evidence。
+
+Current Production truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release14
+release18-era Restore-As                        REAL_FAIL / LISTENER_FOUND / LOCAL_HTTP_UNREACHABLE
+release19 Production install                    NOT_YET_OWNER_VERIFIED
+release19 Owner Real Use                        PENDING
+Migration executed                              NO
+DNS write                                       NO
+SOURCE delete                                   NO
+Existing target overwrite                       NO
+Resource Safe Apply                             NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，先确认 Build 已升级到 release19，再使用全新目标域名继续 Restore-As-New 真机验证。Public Distribution 不等于 Production Restore PASS。
+
+## Slot 3 release19 Owner Real Restore-As · Nginx reload fail
+
+2026-10-01，OWNER 在 release19 Public Distribution 后继续真实 Restore-As-New，目标域名为 `114.kewaro.com`。终端截图显示：
+
+```text
+新网站恢复失败。
+Nginx 配置检查通过，但重新加载失败，P07 已回滚新目标。
+DNS 没有修改，原网站没有修改。
+域名解析：未修改 · 原网站：保留
+```
+
+这把真实故障进一步收敛为：
+
+```text
+backup / restore package                 已通过此前链路
+SQLite / MySQL / files                  已推进到后段
+target site / vhost creation            已推进
+nginx -t                                PASS
+nginx reload                            REAL_FAIL
+new target rollback                     invoked
+DNS write                               NO
+SOURCE mutation                         NO
+```
+
+因此 release19 的 guarded reload 设计本身成功暴露了真正失败点，但 OWNER Real Restore-As 仍未 PASS。
+
+本张截图没有单独显示 `--build-id`，因此仍不把 Production exact installed Build 从已独立证明的 release14 改写成 release19；这里只记录为 release19 Public Distribution 后的真实使用证据。
+
+下一轮必须优先查明本机 Nginx 的真实 reload 方式与失败原因，不得继续通过增加等待、改 listener 或放宽验证来绕过：
+
+```text
+nginx -t PASS
++ nginx -s reload FAIL
+→ inspect actual systemd / master PID / executable / permissions / stderr-safe classification
+→ determine CloudPanel-managed reload path
+→ preserve fail-closed rollback
+```
+
+## Slot 3 release20 systemd-first Nginx reload source closure · Public Distribution pending
+
+2026-10-01，OWNER 在 release19 Public Distribution 后真实 Restore-As-New 到 `114.kewaro.com`，已证明：
+
+```text
+nginx -t                     PASS
+nginx reload                 REAL_FAIL
+new target rollback          invoked
+DNS write                    NO
+SOURCE mutation              NO
+```
+
+release20 不再把 CloudPanel / Ubuntu 上的 Nginx 默认按 direct signal 管理。固定：
+
+```text
+nginx -t
+→ PASS
+→ systemctl is-active nginx
+   → active: systemctl reload nginx
+   → inactive / unavailable: nginx -s reload
+→ reload PASS
+→ target listener / Host / SNI verification
+```
+
+若 systemd 已 active 但 `systemctl reload nginx` 失败，必须 fail closed，不得静默退回 direct signal；失败仍回滚本次新目标，DNS / SOURCE / existing target 均不修改。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                       0.1.0-release20
+Candidate exact-source Gate               36818650825 PASS
+Candidate head                            53067e953183cd7902382db9b76165a33bf0b21f
+Private source main merge                 2b0fc8b51b66a0d01b2e96bc7b91a385004628f6
+systemd-first reload regression           PASS
+direct-signal fallback regression         PASS
+active-systemd failure fail-closed        PASS
+Restore-As verified local gate            PASS
+Real R1 database compatibility gate       PASS
+Synthetic CloudPanel Restore-As E2E       PASS
+full bootstrap CI                         PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution               0.1.0-release19
+Production exact independently proven     0.1.0-release14
+release19-era Restore-As                   REAL_FAIL / NGINX_T_PASS / NGINX_RELOAD_FAIL
+release20 Private Source                   MERGED
+release20 Public Distribution              NOT_RUN
+release20 Production install               NOT_RUN
+release20 Owner Real Use                   NOT_RUN
+Migration / DNS / SOURCE delete            NOT_RUN
+Existing target overwrite                  NOT_RUN
+```
+
+release20 必须完成现有 Public Distribution Gate 后，才进入新的 OWNER 真机 Restore-As 验证；Public Distribution 仍不等于 Production Restore PASS。
 
