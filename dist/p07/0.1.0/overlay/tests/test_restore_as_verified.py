@@ -40,6 +40,31 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             "existing_site_overwrite_allowed": False,
         }
 
+    def test_nginx_reload_requires_syntax_pass_then_reload(self) -> None:
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+        ]
+        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+            restore_as_verified._reload_nginx("/usr/sbin/nginx")
+        self.assertEqual(run.call_args_list[0].args[0], ["/usr/sbin/nginx", "-t"])
+        self.assertEqual(run.call_args_list[1].args[0], ["/usr/sbin/nginx", "-s", "reload"])
+
+    def test_nginx_reload_preflight_failure_is_fail_closed(self) -> None:
+        proc = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
+        with mock.patch.object(restore_as_verified, "_run", return_value=proc):
+            with self.assertRaisesRegex(
+                restore_as_verified.RestoreAsVerificationError,
+                "nginx reload preflight failed",
+            ):
+                restore_as_verified._reload_nginx("/usr/sbin/nginx")
+
+    def test_curl_failure_class_is_safe_and_bounded(self) -> None:
+        self.assertEqual(restore_as_verified._curl_failure_class(7), "CONNECT_FAILED")
+        self.assertEqual(restore_as_verified._curl_failure_class(28), "TIMEOUT")
+        self.assertEqual(restore_as_verified._curl_failure_class(52), "EMPTY_REPLY")
+        self.assertEqual(restore_as_verified._curl_failure_class(99), "OTHER")
+
     def test_http_probe_forces_direct_no_proxy_loopback(self) -> None:
         proc = subprocess.CompletedProcess([], 0, stdout="200", stderr="")
         with mock.patch.object(restore_as_verified, "_run", return_value=proc) as run:
@@ -241,7 +266,7 @@ server {
             ):
                 with self.assertRaisesRegex(
                     restore_as_verified.RestoreAsVerificationError,
-                    "target_listener=UNREACHABLE",
+                    "target_transport=CONNECT_FAILED",
                 ):
                     restore_as_verified.verify_local_restore(root, result)
 
@@ -267,6 +292,9 @@ server {
                 return_value=engine,
             ), mock.patch.object(
                 restore_as_verified,
+                "_reload_nginx",
+            ) as reload_nginx, mock.patch.object(
+                restore_as_verified,
                 "verify_local_restore",
                 return_value=local,
             ):
@@ -277,6 +305,7 @@ server {
                     "clpctl",
                     "CONFIRM",
                 )
+            reload_nginx.assert_called_once_with("/usr/sbin/nginx")
             self.assertEqual(result["status"], "RESTORE_AS_VERIFIED")
             self.assertEqual(result["local_verification"]["status"], "PASS")
             self.assertEqual(result["machine_verification_scope"], "FILES_DB_APP_HOST_SNI")
@@ -297,6 +326,9 @@ server {
                 restore_as_verified.restore_as,
                 "restore_as",
                 return_value=engine,
+            ), mock.patch.object(
+                restore_as_verified,
+                "_reload_nginx",
             ), mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
