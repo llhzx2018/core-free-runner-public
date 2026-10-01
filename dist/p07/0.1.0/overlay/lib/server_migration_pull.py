@@ -1359,6 +1359,139 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _source_service_state(
+    source: dict[str, Any],
+    service: str,
+) -> str:
+    proc = source_remote(
+        source,
+        f"systemctl is-active {shlex.quote(service)}",
+        timeout=30,
+        check=False,
+    )
+    value = proc.stdout.strip().splitlines()
+    return value[-1].strip() if value else "unknown"
+
+
+def _source_listener_ports(source: dict[str, Any]) -> set[int] | None:
+    proc = source_remote(source, "ss -ltnH", timeout=30, check=False)
+    if proc.returncode != 0:
+        return None
+    ports: set[int] = set()
+    for raw in proc.stdout.splitlines():
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3]
+        if ":" not in local:
+            continue
+        value = local.rsplit(":", 1)[-1]
+        if value.isdigit():
+            ports.add(int(value))
+    return ports
+
+
+def source_nginx_status(source: dict[str, Any]) -> dict[str, Any]:
+    site_state = _source_service_state(source, "nginx")
+    panel_state = _source_service_state(source, "clp-nginx")
+    ports = _source_listener_ports(source)
+    return {
+        "schema": SCHEMA,
+        "status": "PASS",
+        "old_server_ip": source["ip"],
+        "site_nginx_service": "nginx.service",
+        "site_nginx_state": site_state,
+        "site_nginx_running": site_state == "active",
+        "cloudpanel_nginx_service": "clp-nginx.service",
+        "cloudpanel_nginx_state": panel_state,
+        "web_listener_80_443": (
+            "UNKNOWN"
+            if ports is None
+            else ("YES" if ports & {80, 443} else "NO")
+        ),
+        "cloudpanel_listener_8443": (
+            "UNKNOWN"
+            if ports is None
+            else ("YES" if 8443 in ports else "NO")
+        ),
+        "writes_performed": False,
+        "dns_changed": False,
+        "source_deleted": False,
+        "secrets_emitted": False,
+    }
+
+
+def source_nginx_start(
+    source: dict[str, Any],
+    confirm: str,
+) -> dict[str, Any]:
+    before = source_nginx_status(source)
+    if before["site_nginx_running"]:
+        result = dict(before)
+        result["status"] = "ALREADY_RUNNING"
+        return result
+
+    expected = f"START_SOURCE_NGINX:{source['ip']}"
+    if confirm != expected:
+        raise PullMigrationError(f"explicit confirmation required: {expected}")
+
+    config = source_remote(source, "nginx -t", timeout=60, check=False)
+    if config.returncode != 0:
+        raise PullMigrationError(
+            "old-server website Nginx config test failed; start denied"
+        )
+
+    started = source_remote(
+        source,
+        "systemctl start nginx",
+        timeout=120,
+        check=False,
+    )
+    if started.returncode != 0:
+        raise PullMigrationError("old-server website Nginx start failed")
+
+    after = source_nginx_status(source)
+    if not after["site_nginx_running"]:
+        raise PullMigrationError("old-server website Nginx did not become active")
+    result = dict(after)
+    result["status"] = "STARTED"
+    result["writes_performed"] = True
+    result["config_test"] = "PASS"
+    return result
+
+
+def source_nginx_stop(
+    source: dict[str, Any],
+    confirm: str,
+) -> dict[str, Any]:
+    before = source_nginx_status(source)
+    if not before["site_nginx_running"]:
+        result = dict(before)
+        result["status"] = "ALREADY_STOPPED"
+        return result
+
+    expected = f"STOP_SOURCE_NGINX:{source['ip']}"
+    if confirm != expected:
+        raise PullMigrationError(f"explicit confirmation required: {expected}")
+
+    stopped = source_remote(
+        source,
+        "systemctl stop nginx",
+        timeout=120,
+        check=False,
+    )
+    if stopped.returncode != 0:
+        raise PullMigrationError("old-server website Nginx stop failed")
+
+    after = source_nginx_status(source)
+    if after["site_nginx_running"]:
+        raise PullMigrationError("old-server website Nginx is still active")
+    result = dict(after)
+    result["status"] = "STOPPED"
+    result["writes_performed"] = True
+    return result
+
 def source_plan_local(domains: list[str]) -> dict[str, Any]:
     try:
         manifest = legacy.current_inventory()
@@ -1619,6 +1752,17 @@ def main() -> int:
     status = sub.add_parser("status")
     status.add_argument("--migration-id", required=True)
 
+    nginx_status = sub.add_parser("source-nginx-status")
+    add_source_args(nginx_status)
+
+    nginx_start = sub.add_parser("source-nginx-start")
+    add_source_args(nginx_start)
+    nginx_start.add_argument("--confirm", required=True)
+
+    nginx_stop = sub.add_parser("source-nginx-stop")
+    add_source_args(nginx_stop)
+    nginx_stop.add_argument("--confirm", required=True)
+
     source_plan = sub.add_parser("_source-plan")
     source_plan.add_argument("--site", action="append", default=[])
 
@@ -1679,6 +1823,12 @@ def main() -> int:
             result = summary(rollback_migration(args.migration_id, args.confirm))
         elif args.command == "status":
             result = summary(load_state(args.migration_id))
+        elif args.command == "source-nginx-status":
+            result = source_nginx_status(source_from_args(args))
+        elif args.command == "source-nginx-start":
+            result = source_nginx_start(source_from_args(args), args.confirm)
+        elif args.command == "source-nginx-stop":
+            result = source_nginx_stop(source_from_args(args), args.confirm)
         elif args.command == "_source-plan":
             result = source_plan_local(args.site)
         elif args.command == "_source-snapshot-sqlite":
