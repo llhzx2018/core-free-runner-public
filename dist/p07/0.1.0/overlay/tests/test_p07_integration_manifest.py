@@ -22,6 +22,13 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertEqual([s["slot"] for s in slots], [1, 2, 3, 4])
         self.assertEqual(len(slots), 4)
 
+    def test_toolbox_has_five_visible_items(self):
+        self.assertEqual(self.data["project"]["toolbox_visible_items"], 5)
+        self.assertEqual(
+            self.data["slots"][2]["server_initialization_contract"],
+            "STANDALONE_TOP_LEVEL_YN_V1",
+        )
+
     def test_public_entry_is_single_toolbox(self):
         self.assertTrue(self.data["project"]["public_entry"].endswith("/installers/p07-toolbox.sh"))
 
@@ -55,9 +62,9 @@ class P07IntegrationManifestTests(unittest.TestCase):
             "5c447fc99030f75c098934ddb9aa300b934564bb",
         )
 
-    def test_slot4_rc18_is_publicly_distributed(self):
+    def test_slot4_rc19_is_publicly_distributed(self):
         s = self.data["slots"][3]
-        self.assertEqual(s["internal_version"], "0.1.0-rc18")
+        self.assertEqual(s["internal_version"], "0.1.0-rc19")
         self.assertEqual(s["integration_state"], "PUBLIC_DISTRIBUTED")
 
     def test_release_is_published(self):
