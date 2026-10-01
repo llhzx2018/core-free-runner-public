@@ -435,8 +435,10 @@ class TargetPullUiContractTests(unittest.TestCase):
             "STOP_NGINX",
         ):
             self.assertNotIn(technical, ordinary)
-        self.assertIn("输入“开启”确认", ordinary)
-        self.assertIn("输入“停止”确认", ordinary)
+        self.assertIn("确认开启？[y/N]", ordinary)
+        self.assertIn("确认停止？[y/N]", ordinary)
+        self.assertNotIn("输入“开启”", ordinary)
+        self.assertNotIn("输入“停止”", ordinary)
         self.assertNotIn("read_old_ip", ordinary)
         self.assertNotIn("OLD_SERVER_IP", ordinary)
         self.assertNotIn("ensure_source_access", ordinary)
