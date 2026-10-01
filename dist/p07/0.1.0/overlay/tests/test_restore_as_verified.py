@@ -160,7 +160,8 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         self.assertEqual((mode, args), ("SYSTEMD", ()))
         run.assert_called_once_with(["/usr/sbin/nginx", "-t"], timeout=30)
 
-    def test_site_nginx_preflight_fails_before_write_when_only_panel_nginx_exists(self) -> None:
+    def test_site_nginx_preflight_allows_static_offline_mode_when_only_panel_nginx_exists(self) -> None:
+        syntax = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with mock.patch.object(
             restore_as_verified,
             "_systemd_nginx_active",
@@ -169,10 +170,36 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             restore_as_verified,
             "_stable_site_nginx_master",
             return_value=None,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_run",
+            return_value=syntax,
+        ) as run:
+            mode, args = restore_as_verified._site_nginx_preflight(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual((mode, args), ("OFFLINE_STATIC", ()))
+        run.assert_called_once_with(["/usr/sbin/nginx", "-t"], timeout=30)
+
+    def test_site_nginx_preflight_offline_mode_still_fails_closed_on_invalid_config(self) -> None:
+        syntax = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
+        with mock.patch.object(
+            restore_as_verified,
+            "_systemd_nginx_active",
+            return_value=False,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_stable_site_nginx_master",
+            return_value=None,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_run",
+            return_value=syntax,
         ):
             with self.assertRaisesRegex(
                 restore_as_verified.RestoreAsVerificationError,
-                "SITE_NGINX_NOT_RUNNING",
+                "CONFIG_INVALID",
             ):
                 restore_as_verified._site_nginx_preflight(
                     "/usr/sbin/nginx",
@@ -609,31 +636,113 @@ server {
                 ):
                     restore_as_verified.verify_local_restore(root, result)
 
-    def test_site_nginx_preflight_failure_stops_before_restore_engine_writes(self) -> None:
+    def test_offline_verification_passes_without_host_or_sni_probe(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            result = self.base_result(root)
+            syntax = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(
+                restore_as_verified,
+                "_run",
+                return_value=syntax,
+            ), mock.patch.object(
+                restore_as_verified,
+                "_nginx_has_target_vhost",
+                return_value=True,
+            ), mock.patch.object(
+                restore_as_verified,
+                "_nginx_target_listener_addresses",
+                side_effect=[["127.0.0.1"], []],
+            ), mock.patch.object(
+                restore_as_verified,
+                "_http_probe",
+            ) as probe:
+                verified = restore_as_verified.verify_offline_restore(root, result)
+            self.assertEqual(verified["status"], "PASS")
+            self.assertEqual(verified["verification_mode"], "OFFLINE_STATIC")
+            self.assertEqual(verified["nginx_config"]["status"], "PASS")
+            self.assertTrue(verified["nginx_config"]["http_listener_configured"])
+            self.assertFalse(verified["nginx_config"]["https_listener_configured"])
+            self.assertEqual(verified["host"]["status"], "NOT_RUN")
+            self.assertEqual(verified["sni"]["status"], "NOT_RUN")
+            probe.assert_not_called()
+
+    def test_offline_verification_fails_when_target_vhost_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = self.base_result(root)
+            syntax = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(
+                restore_as_verified,
+                "_run",
+                return_value=syntax,
+            ), mock.patch.object(
+                restore_as_verified,
+                "_nginx_has_target_vhost",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(
+                    restore_as_verified.RestoreAsVerificationError,
+                    "target_vhost=MISSING",
+                ):
+                    restore_as_verified.verify_offline_restore(root, result)
+
+    def test_offline_restore_keeps_verified_target_and_never_reloads_nginx(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            engine = self.base_result(root)
+            offline = {
+                "status": "PASS",
+                "verification_mode": "OFFLINE_STATIC",
+                "files": {"status": "PASS", "file_count": 1},
+                "database": {"status": "PASS", "source_match_before_transform": True},
+                "application": {"status": "PASS", "mode": "WORDPRESS_WP_CONFIG"},
+                "nginx_config": {"status": "PASS", "target_vhost": "PRESENT"},
+                "host": {"status": "NOT_RUN", "reason": "SITE_NGINX_NOT_RUNNING"},
+                "sni": {"status": "NOT_RUN", "reason": "SITE_NGINX_NOT_RUNNING"},
+            }
             with mock.patch.object(
                 restore_as_verified,
                 "_site_nginx_preflight",
-                side_effect=restore_as_verified.RestoreAsVerificationError(
-                    "site nginx preflight failed; reason=SITE_NGINX_NOT_RUNNING"
-                ),
+                return_value=("OFFLINE_STATIC", ()),
+            ), mock.patch.object(
+                restore_as_verified,
+                "_database_compat_context",
+                return_value=nullcontext(),
             ), mock.patch.object(
                 restore_as_verified.restore_as,
                 "restore_as",
-            ) as engine:
-                with self.assertRaisesRegex(
-                    restore_as_verified.RestoreAsVerificationError,
-                    "SITE_NGINX_NOT_RUNNING",
-                ):
-                    restore_as_verified.restore_as_verified(
-                        root / "backup",
-                        "restore.example.com",
-                        root,
-                        "clpctl",
-                        "CONFIRM",
-                    )
-            engine.assert_not_called()
+                return_value=engine,
+            ), mock.patch.object(
+                restore_as_verified,
+                "verify_offline_restore",
+                return_value=offline,
+            ) as offline_verify, mock.patch.object(
+                restore_as_verified,
+                "_reload_nginx",
+            ) as reload_nginx, mock.patch.object(
+                restore_as_verified,
+                "verify_local_restore",
+            ) as online_verify, mock.patch.object(
+                restore_as_verified,
+                "_rollback_verified_target",
+            ) as rollback:
+                result = restore_as_verified.restore_as_verified(
+                    root / "backup",
+                    "restore.example.com",
+                    root,
+                    "clpctl",
+                    "CONFIRM",
+                )
+            offline_verify.assert_called_once()
+            reload_nginx.assert_not_called()
+            online_verify.assert_not_called()
+            rollback.assert_not_called()
+            self.assertEqual(result["status"], "RESTORE_AS_OFFLINE_VERIFIED")
+            self.assertEqual(result["verification_mode"], "OFFLINE_STATIC")
+            self.assertEqual(result["nginx_reload"]["status"], "NOT_RUN")
+            self.assertEqual(result["online_verification"]["status"], "NOT_RUN")
+            self.assertEqual(result["machine_verification_scope"], "FILES_DB_APP_NGINX_CONFIG")
 
     def test_success_is_returned_only_after_local_verification(self) -> None:
         with tempfile.TemporaryDirectory() as td:
