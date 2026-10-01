@@ -874,22 +874,33 @@ nginx -T
 
 Restore-As 创建新 CloudPanel 站点后，在最终本机 Host/SNI 验证前，必须确保运行中的 Nginx 已加载磁盘上的新 vhost。CloudPanel / Ubuntu 上 Nginx 由 systemd 管理时，reload 必须优先走 systemd；只有 systemd 不处于 active / 可用状态时，才允许使用 Nginx direct signal 作为兼容 fallback。
 
-固定：
+release21 固定：
 
 ```text
 nginx -t
 → PASS 才允许继续
 → systemctl is-active nginx
-   → active: systemctl reload nginx
+   → active:
+       systemctl reload nginx
+       → PASS: continue
+       → FAIL:
+           reject permission/bus failures
+           re-check nginx active
+           systemctl kill --kill-whom=main --signal=HUP nginx
+           re-check nginx active
    → inactive / unavailable: nginx -s reload
 → reload 成功
 → target listener / Host / SNI verification
 ```
 
 固定安全边界：
-- systemd 已 active 但 `systemctl reload nginx` 失败时，必须 fail closed，不得静默退回 direct signal 绕过真实服务管理失败；
-- reload 结果必须记录实际 mode（`SYSTEMD` / `DIRECT_SIGNAL`），用于工程证据，不向普通用户泄漏原始 stderr；
-- `nginx -t` 仍是 reload 前硬前置条件。
+- `nginx -t` 仍是任何 reload / HUP 前硬前置条件；
+- systemd 已 active 时不得回退到 PID-file based direct signal；
+- `systemctl reload nginx` 遇到权限拒绝或 systemd bus 不可用时必须立即 fail closed；
+- 只有常规 systemd reload 返回普通命令失败且 Nginx 仍 active 时，才允许由 systemd 向其跟踪的主进程发送标准 HUP；
+- managed HUP 后 Nginx 必须仍为 active，否则 fail closed；
+- 不允许使用 restart 作为 Restore-As 自动恢复手段；
+- reload 结果必须记录实际 mode（`SYSTEMD` / `SYSTEMD_MAIN_HUP` / `DIRECT_SIGNAL`），用于工程证据，不向普通用户泄漏原始 stderr。
 
 失败分类至少包括：
 
