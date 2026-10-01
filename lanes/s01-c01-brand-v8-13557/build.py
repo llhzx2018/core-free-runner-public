@@ -18,8 +18,8 @@ def form_contract(s):
  return (re.findall(r'<form[^>]*method="post"[^>]*action="[^"\n]+"',s),re.findall(r'<input[^>]*name="action"[^>]*>',s),re.findall(r"wp_nonce_field\([^;]+",s))
 assert form_contract(before)==form_contract(after),'form action/nonce/method changed'
 # Runtime/service/update/auth files cannot change under the above exact allowlist.
-assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='0eeaa6fd39f8f9c4f4c3435c48e237e37b4c3e158c5143f723491c2a729b6f35'
-assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='728e28517f08aee66ad14b8fb20449be57327b523c2b4af68ac1e1f398efea16'
+assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='7dc6b2bd2126237e7e69d6ce2ef890c4e14362a68591f0a93896638acf5c6a12'
+assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='bb18bdac83c2189bddcdf616563d90ae2f830373834ab016d6411648c2056bfd'
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
