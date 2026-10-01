@@ -841,3 +841,32 @@ target vhost missing  -> fail closed / classify Nginx target vhost not loaded
 
 不得因为探针失败保留未验证的新目标。失败继续回滚新建站点与新建数据库；DNS、SOURCE、existing target 均不得自动修改。
 
+## Restore-As Nginx Listener-aware Verification Contract
+
+Restore-As 最终本机 HTTP/SNI 验证不得固定假设 `127.0.0.1:80/443` 一定是目标 Nginx 实际监听入口。
+
+release18 固定：
+
+```text
+nginx -T
+→ 只解析 target domain 自己的 server block
+→ 提取该 block 的 listen directives
+→ wildcard IPv4  -> 127.0.0.1
+→ wildcard IPv6  -> ::1
+→ explicit local/listen IP -> exact configured IP
+→ curl --noproxy "*"
+→ --resolve target:port:<discovered listener>
+→ bounded per-listener retry
+→ 任一真实 listener 返回 HTTP 100..599 = route PASS
+```
+
+硬边界：
+
+- 不得从其它网站 server block 借用 listener 作为 target domain 证据；
+- 不得因为 `server_name` 存在就直接把 HTTP route 判 PASS；
+- 找不到 target domain 的 80 端口 listener 时必须 fail closed；
+- 找到 listener 但全部不可达时必须 fail closed；
+- 错误分类必须区分 `target_listener=MISSING` 与 `target_listener=UNREACHABLE`；
+- 不向普通用户显示真实 IP、Secret、DB Password 或原始 stderr；
+- 失败继续回滚新目标；DNS、SOURCE、existing target 不自动修改。
+
