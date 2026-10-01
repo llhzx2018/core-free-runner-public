@@ -145,14 +145,14 @@ Four-slot Integration Manifest       = PRESENT
 Product-wide terminal language       = ZH_FIRST
 Slot 1 Network Node                  = 0.1.0-rc10 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Slot 2 VPS Audit                     = V2.2.2 / 2.2.2-rc2-chinese-first / PUBLIC_DISTRIBUTED
-Slot 3 CloudPanel Ops                = 0.1.0-release19 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
+Slot 3 CloudPanel Ops                = 0.1.0-release20 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
 Slot 4 System Care                   = 0.1.0-rc18 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Automatic DNS mutation               = DENY
 Automatic SOURCE deletion            = DENY
 Resource Safe Apply auto-run         = DENY
 Formal Release Tag                    = p07-v0.1.0
 GitHub Release                        = PUBLISHED
-Public Distribution                   = 1c218b5dd2ed5c1ef1193ce664c8de42180a51cf
+Public Distribution                   = 25f192fb6d54242515e007a5b4ffa34c98bad8d7
 ```
 
 Formal Tag/Release is complete. main is the canonical released source. Production destructive actions remain separately gated.
@@ -2258,4 +2258,139 @@ Existing target overwrite                  NOT_RUN
 ```
 
 release20 必须完成现有 Public Distribution Gate 后，才进入新的 OWNER 真机 Restore-As 验证；Public Distribution 仍不等于 Production Restore PASS。
+
+## Slot 3 release20 systemd-first Nginx reload distribution closure
+
+release20 已完成现有 V0.1.0 Public Distribution，用来修复 release19-era 真机 Restore-As 已明确暴露的 `nginx -t PASS / nginx reload FAIL`。
+
+release20 固定：
+
+```text
+CloudPanel create/restore
+→ nginx -t
+→ systemctl is-active nginx
+   → active: systemctl reload nginx
+   → inactive / unavailable: nginx -s reload
+→ target listener / Host / SNI verification
+→ any failure = rollback new target
+```
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release20
+Exact runtime source merge            2b0fc8b51b66a0d01b2e96bc7b91a385004628f6
+Source authority closure merge        f0a74e99ea4341ce6bcf3a8defb45db4312f90a4
+Public distribution main              25f192fb6d54242515e007a5b4ffa34c98bad8d7
+Runtime manifest blob                 0b5de474284a2ee5f52030736ab64c0a0e07182a
+Full overlay manifest blob            6628a1fe5245894dc36ff67120bd97ba159bf38a
+Final installer blob                  c94e9abad001d9724f31f435265691257801cff6
+Stable installer blob                 104af730d80df1272157a73835fcdd656d446a73
+Toolbox blob                          56f7861090b5666481d2a4fa5695b0a885f3bdd3
+```
+
+Machine / Distribution proof：
+
+```text
+Release20 Candidate Exact-source Gate 36818650825 PASS
+Source main bootstrap CI              36819895048 PASS
+Source closure CI                     36820623277 PASS
+Release20 Distribution Gate           36820647201 PASS
+Toolbox Smoke                         36820647232 PASS
+System Care Smoke                     36820647145 PASS
+Beginner Menu Gate                    36820647193 PASS
+Public Runner Trigger Scope           36820647152 PASS
+Workflow Archive Integrity            36820647185 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+systemd-first nginx reload             PASS
+inactive/unavailable direct fallback  PASS
+active-systemd failure fail-closed    PASS
+exact runtime / overlay manifests     PASS
+isolated release20 runtime install    PASS
+rollback / DNS / SOURCE safety        PASS
+Production write                      NOT_RUN
+```
+
+历史 release6–19 workflow 仍可能因硬编码旧 Build 身份而在 release20 PR 上失败；这些属于历史 workflow debt，不作为 release20 owning evidence。release20 owning Gate 与当前公共 smoke 已独立 PASS。
+
+Current Production truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release14
+release19-era Restore-As                        REAL_FAIL / NGINX_T_PASS / NGINX_RELOAD_FAIL
+release20 Production install                    NOT_YET_OWNER_VERIFIED
+release20 Owner Real Use                        PENDING
+Migration executed                              NO
+DNS write                                       NO
+SOURCE delete                                   NO
+Existing target overwrite                       NO
+Resource Safe Apply                             NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，应先确认 Build 已升级到 release20，再使用全新目标域名继续 Restore-As-New 真机验证。Public Distribution 不等于 Production Restore PASS。
+
+## Slot 3 release21 managed Nginx main-process HUP source closure · Public Distribution pending
+
+2026-10-01，OWNER 在 release20 Public Distribution 后继续真实 Restore-As-New，目标域名为 `116.kewaro.com`。终端结果：
+
+```text
+new target site/config          created
+Nginx reload                    REAL_FAIL
+new target rollback             invoked
+DNS write                       NO
+SOURCE mutation                 NO
+```
+
+截图没有单独显示 exact installed Build，因此 Production exact independently proven Build 仍保持 release14；这里只记录为 release20 Public Distribution 后的真实使用证据。
+
+release21 针对“systemctl reload nginx 仍失败”增加受管的主进程 HUP fallback：
+
+```text
+nginx -t
+→ systemd active
+→ systemctl reload nginx
+   → PASS: continue
+   → non-permission/non-bus FAIL:
+       confirm nginx still active
+       systemctl kill --kill-whom=main --signal=HUP nginx
+       confirm nginx still active
+→ listener / Host / SNI verification
+```
+
+不允许自动 restart。任何阶段失败仍回滚本次新目标；DNS、SOURCE、existing target 均不自动修改。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release21
+Candidate exact-source Gate          36826060883 PASS
+Private source main merge            71f5089e42e56b0f432ee59d7cfc7a70854da2f0
+managed main-process HUP success      PASS
+managed HUP failure fail-closed       PASS
+permission failure no-fallback        PASS
+inactive-systemd direct fallback      PASS
+Restore-As / migration regressions    PASS
+full candidate CI                     43/43 PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution           0.1.0-release20
+Production exact independently proven 0.1.0-release14
+release20-era Restore-As              REAL_FAIL / NGINX_RELOAD_FAIL
+release21 Private Source              MERGED
+release21 Public Distribution         NOT_RUN
+release21 Production install          NOT_RUN
+release21 Owner Real Use              NOT_RUN
+DNS / SOURCE delete                   NOT_RUN
+Existing target overwrite             NOT_RUN
+```
+
+release21 只有完成 Public Distribution 后，才进入下一次 OWNER 真机 Restore-As 验证；Public Distribution 不等于 Production Restore PASS。
 
