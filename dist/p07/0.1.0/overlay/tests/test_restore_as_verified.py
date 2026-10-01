@@ -79,6 +79,73 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             ["/usr/sbin/nginx", "-s", "reload"],
         )
 
+    def test_nginx_systemd_reload_failure_uses_managed_main_hup_fallback(self) -> None:
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="Job type reload is not applicable for unit nginx.service.",
+            ),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+        ]
+        with mock.patch.object(
+            restore_as_verified,
+            "_run",
+            side_effect=calls,
+        ) as run, mock.patch.object(restore_as_verified.time, "sleep"):
+            mode = restore_as_verified._reload_nginx(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual(mode, "SYSTEMD_MAIN_HUP")
+        self.assertEqual(
+            run.call_args_list[3].args[0],
+            ["/usr/bin/systemctl", "is-active", "nginx"],
+        )
+        self.assertEqual(
+            run.call_args_list[4].args[0],
+            [
+                "/usr/bin/systemctl",
+                "kill",
+                "--kill-whom=main",
+                "--signal=HUP",
+                "nginx",
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[5].args[0],
+            ["/usr/bin/systemctl", "is-active", "nginx"],
+        )
+
+    def test_nginx_managed_hup_failure_is_safe_and_fail_closed(self) -> None:
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            subprocess.CompletedProcess([], 1, stdout="", stderr="reload command failed"),
+            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="Main PID unavailable INTERNAL_SECRET_DETAIL",
+            ),
+        ]
+        with mock.patch.object(restore_as_verified, "_run", side_effect=calls):
+            with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
+                restore_as_verified._reload_nginx(
+                    "/usr/sbin/nginx",
+                    systemctl="/usr/bin/systemctl",
+                )
+        message = str(caught.exception)
+        self.assertIn("mode=SYSTEMD_MAIN_HUP", message)
+        self.assertIn("reason=PID_UNAVAILABLE", message)
+        self.assertNotIn("INTERNAL_SECRET_DETAIL", message)
+
     def test_nginx_systemd_reload_failure_is_classified_and_does_not_fallback(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
