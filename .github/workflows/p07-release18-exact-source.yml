@@ -1,0 +1,117 @@
+name: P07 Release18 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release18-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release18 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 1ed27df8bca854af802bf64cb1ab845451c6c70e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '1ed27df8bca854af802bf64cb1ab845451c6c70e'
+          test "$(cat BUILD_ID)" = '0.1.0-release18'
+          grep -Fq '## Restore-As Nginx Listener-aware Verification Contract' docs/authority/RPD.md
+          grep -Fq '| B50 | Restore-As Target Nginx Listener Discovery |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'def _nginx_target_listener_addresses' lib/restore_as_verified.py
+          grep -Fq 'target_listener=UNREACHABLE' lib/restore_as_verified.py
+          grep -Fq 'target_listener=MISSING' lib/restore_failure_ui.sh
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops-site-ui
+          bash -n lib/restore_failure_ui.sh
+          python3 -m py_compile             lib/restore_as_verified.py             lib/restore_as.py             lib/restore_apply_core.py             lib/verify.py
+
+      - name: Release18 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Listener parser assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 - <<'PY'
+          import subprocess
+          from unittest import mock
+          import restore_as_verified as r
+
+          dump = """
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name other.example.com;
+          }
+          server {
+              listen 192.0.2.44:80;
+              listen [2001:db8::44]:80;
+              listen 443 ssl;
+              server_name restore.example.com www.restore.example.com;
+              location / { try_files $uri =404; }
+          }
+          """
+          proc=subprocess.CompletedProcess([],0,stdout=dump,stderr="")
+          with mock.patch.object(r,'_run',return_value=proc):
+              http=r._nginx_target_listener_addresses('/usr/sbin/nginx','restore.example.com',80)
+              https=r._nginx_target_listener_addresses('/usr/sbin/nginx','restore.example.com',443)
+          assert http==['192.0.2.44','2001:db8::44'], http
+          assert https==['127.0.0.1'], https
+          assert '127.0.0.1' not in http
+
+          with mock.patch.object(r,'_http_code',side_effect=[(7,'000'),(0,'200')]) as probe:
+              rc,code=r._http_probe('/usr/bin/curl','restore.example.com','http',80,
+                                    addresses=('192.0.2.44','192.0.2.45'),
+                                    attempts_per_address=1)
+          assert (rc,code)==(0,'200')
+          assert probe.call_args_list[0].kwargs['address']=='192.0.2.44'
+          assert probe.call_args_list[1].kwargs['address']=='192.0.2.45'
+          PY
+
+      - name: Security and fail-closed boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'cleanup_database' lib/restore_as_verified.py
+          grep -Fq 'cleanup_site' lib/restore_as_verified.py
+          grep -Fq 'DNS 没有修改，原网站没有修改。' lib/restore_failure_ui.sh
+          ! grep -Fq 'listener address:' lib/restore_failure_ui.sh
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE18_EXACT_SOURCE=1ed27df8bca854af802bf64cb1ab845451c6c70e'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
