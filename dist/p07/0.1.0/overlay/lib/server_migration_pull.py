@@ -1492,6 +1492,124 @@ def source_nginx_stop(
     result["writes_performed"] = True
     return result
 
+
+def _local_service_state(service: str) -> str:
+    proc = run_local(
+        ["systemctl", "is-active", service],
+        timeout=30,
+        check=False,
+    )
+    value = proc.stdout.strip().splitlines()
+    return value[-1].strip() if value else "unknown"
+
+
+def _local_listener_ports() -> set[int] | None:
+    proc = run_local(["ss", "-ltnH"], timeout=30, check=False)
+    if proc.returncode != 0:
+        return None
+    ports: set[int] = set()
+    for raw in proc.stdout.splitlines():
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3]
+        if ":" not in local:
+            continue
+        value = local.rsplit(":", 1)[-1]
+        if value.isdigit():
+            ports.add(int(value))
+    return ports
+
+
+def local_nginx_status() -> dict[str, Any]:
+    site_state = _local_service_state("nginx")
+    panel_state = _local_service_state("clp-nginx")
+    ports = _local_listener_ports()
+    return {
+        "schema": SCHEMA,
+        "status": "PASS",
+        "site_nginx_state": site_state,
+        "site_nginx_running": site_state == "active",
+        "cloudpanel_nginx_state": panel_state,
+        "web_listener_80_443": (
+            "UNKNOWN"
+            if ports is None
+            else ("YES" if ports & {80, 443} else "NO")
+        ),
+        "cloudpanel_listener_8443": (
+            "UNKNOWN"
+            if ports is None
+            else ("YES" if 8443 in ports else "NO")
+        ),
+        "writes_performed": False,
+        "dns_changed": False,
+        "source_deleted": False,
+        "secrets_emitted": False,
+    }
+
+
+def local_nginx_start(confirm: str) -> dict[str, Any]:
+    before = local_nginx_status()
+    if before["site_nginx_running"]:
+        result = dict(before)
+        result["status"] = "ALREADY_RUNNING"
+        return result
+    if confirm != "START_LOCAL_NGINX":
+        raise PullMigrationError(
+            "explicit confirmation required: START_LOCAL_NGINX"
+        )
+
+    config = run_local(["nginx", "-t"], timeout=60, check=False)
+    if config.returncode != 0:
+        raise PullMigrationError(
+            "local website Nginx config test failed; start denied"
+        )
+
+    started = run_local(
+        ["systemctl", "start", "nginx"],
+        timeout=120,
+        check=False,
+    )
+    if started.returncode != 0:
+        raise PullMigrationError("local website Nginx start failed")
+
+    after = local_nginx_status()
+    if not after["site_nginx_running"]:
+        raise PullMigrationError("local website Nginx did not become active")
+    result = dict(after)
+    result["status"] = "STARTED"
+    result["writes_performed"] = True
+    result["config_test"] = "PASS"
+    return result
+
+
+def local_nginx_stop(confirm: str) -> dict[str, Any]:
+    before = local_nginx_status()
+    if not before["site_nginx_running"]:
+        result = dict(before)
+        result["status"] = "ALREADY_STOPPED"
+        return result
+    if confirm != "STOP_LOCAL_NGINX":
+        raise PullMigrationError(
+            "explicit confirmation required: STOP_LOCAL_NGINX"
+        )
+
+    stopped = run_local(
+        ["systemctl", "stop", "nginx"],
+        timeout=120,
+        check=False,
+    )
+    if stopped.returncode != 0:
+        raise PullMigrationError("local website Nginx stop failed")
+
+    after = local_nginx_status()
+    if after["site_nginx_running"]:
+        raise PullMigrationError("local website Nginx is still active")
+    result = dict(after)
+    result["status"] = "STOPPED"
+    result["writes_performed"] = True
+    return result
+
 def source_plan_local(domains: list[str]) -> dict[str, Any]:
     try:
         manifest = legacy.current_inventory()
@@ -1763,6 +1881,14 @@ def main() -> int:
     add_source_args(nginx_stop)
     nginx_stop.add_argument("--confirm", required=True)
 
+    local_status = sub.add_parser("local-nginx-status")
+
+    local_start = sub.add_parser("local-nginx-start")
+    local_start.add_argument("--confirm", required=True)
+
+    local_stop = sub.add_parser("local-nginx-stop")
+    local_stop.add_argument("--confirm", required=True)
+
     source_plan = sub.add_parser("_source-plan")
     source_plan.add_argument("--site", action="append", default=[])
 
@@ -1829,6 +1955,12 @@ def main() -> int:
             result = source_nginx_start(source_from_args(args), args.confirm)
         elif args.command == "source-nginx-stop":
             result = source_nginx_stop(source_from_args(args), args.confirm)
+        elif args.command == "local-nginx-status":
+            result = local_nginx_status()
+        elif args.command == "local-nginx-start":
+            result = local_nginx_start(args.confirm)
+        elif args.command == "local-nginx-stop":
+            result = local_nginx_stop(args.confirm)
         elif args.command == "_source-plan":
             result = source_plan_local(args.site)
         elif args.command == "_source-snapshot-sqlite":
