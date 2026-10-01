@@ -1,0 +1,94 @@
+name: P07 Release17 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release17-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release17 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 74b860232f99db88e9b908054134b96feb535e37
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '74b860232f99db88e9b908054134b96feb535e37'
+          test "$(cat BUILD_ID)" = '0.1.0-release17'
+          grep -Fq '## Restore-As Local Route Verification Contract' docs/authority/RPD.md
+          grep -Fq '| B49 | Restore-As Direct Local HTTP Probe |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq -- '--noproxy' lib/restore_as_verified.py
+          grep -Fq 'def _http_probe' lib/restore_as_verified.py
+          grep -Fq 'target_vhost=PRESENT' lib/restore_failure_ui.sh
+          grep -Fq 'target_vhost=MISSING' lib/restore_failure_ui.sh
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops-site-ui
+          bash -n lib/restore_failure_ui.sh
+          python3 -m py_compile             lib/restore_as_verified.py             lib/restore_as.py             lib/restore_apply_core.py             lib/verify.py
+
+      - name: Release17 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Probe behavior assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('lib/restore_as_verified.py').read_text(encoding='utf-8')
+          ui=Path('lib/restore_failure_ui.sh').read_text(encoding='utf-8')
+          assert '"--noproxy",' in text
+          assert '"*",' in text
+          assert 'f"{domain}:{port}:127.0.0.1"' in text
+          assert 'attempts: int = 4' in text
+          assert 'time.sleep(delay)' in text
+          assert 'target_vhost={vhost_state}' in text
+          assert 'target_vhost=PRESENT' in ui
+          assert 'target_vhost=MISSING' in ui
+          PY
+
+      - name: Security and safety boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'DNS 没有修改，原网站没有修改。' lib/restore_failure_ui.sh
+          grep -Fq 'cleanup_database' lib/restore_as_verified.py
+          grep -Fq 'cleanup_site' lib/restore_as_verified.py
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE17_EXACT_SOURCE=74b860232f99db88e9b908054134b96feb535e37'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
