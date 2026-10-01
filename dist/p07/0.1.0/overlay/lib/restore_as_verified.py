@@ -114,16 +114,41 @@ def _discover_nginx_master(
     return found[0] if found else None
 
 
+def _stable_nginx_master(
+    nginx: str,
+    *,
+    ps: str = "/usr/bin/ps",
+    attempts: int = 20,
+    delay: float = 0.25,
+) -> dict[str, Any] | None:
+    previous: dict[str, Any] | None = None
+    for index in range(max(1, attempts)):
+        current = _discover_nginx_master(nginx, ps=ps)
+        if current is not None and previous is not None:
+            if (
+                current.get("pid") == previous.get("pid")
+                and current.get("runtime_args") == previous.get("runtime_args")
+            ):
+                return current
+        previous = current
+        if index + 1 < max(1, attempts):
+            time.sleep(delay)
+    return None
+
+
 def _live_master_hup_reload(
     nginx: str,
     master: dict[str, Any],
     *,
     ps: str = "/usr/bin/ps",
 ) -> str:
-    current = _discover_nginx_master(nginx, ps=ps)
+    current = _stable_nginx_master(nginx, ps=ps, attempts=8, delay=0.25)
+    if current is None:
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_STABLE"
+        )
     if (
-        current is None
-        or current.get("pid") != master.get("pid")
+        current.get("pid") != master.get("pid")
         or current.get("runtime_args") != master.get("runtime_args")
     ):
         raise RestoreAsVerificationError(
@@ -137,13 +162,23 @@ def _live_master_hup_reload(
             "nginx reload failed; mode=LIVE_MASTER_HUP; reason=SIGNAL_FAILED"
         ) from None
 
-    time.sleep(0.25)
-    after = _discover_nginx_master(nginx, ps=ps)
-    if after is None or after.get("pid") != master.get("pid"):
+    for index in range(12):
+        time.sleep(0.25)
+        after = _discover_nginx_master(nginx, ps=ps)
+        if after is None:
+            continue
+        if (
+            after.get("pid") == master.get("pid")
+            and after.get("runtime_args") == master.get("runtime_args")
+        ):
+            return "LIVE_MASTER_HUP"
         raise RestoreAsVerificationError(
-            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_RUNNING"
+            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_CHANGED"
         )
-    return "LIVE_MASTER_HUP"
+
+    raise RestoreAsVerificationError(
+        "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_RUNNING"
+    )
 
 
 def _systemd_nginx_active(systemctl: str) -> bool:
@@ -184,7 +219,7 @@ def _reload_nginx(
     systemctl: str = "/usr/bin/systemctl",
     ps: str = "/usr/bin/ps",
 ) -> tuple[str, tuple[str, ...]]:
-    master = _discover_nginx_master(nginx, ps=ps)
+    master = _stable_nginx_master(nginx, ps=ps, attempts=20, delay=0.25)
     runtime_args = tuple(master.get("runtime_args", ())) if master is not None else ()
 
     syntax = _run([nginx, "-t", *runtime_args], timeout=30)
@@ -207,13 +242,9 @@ def _reload_nginx(
     if master is not None:
         return _live_master_hup_reload(nginx, master, ps=ps), runtime_args
 
-    reloaded = _run([nginx, "-s", "reload", *runtime_args], timeout=30)
-    if reloaded.returncode != 0:
-        reason = _reload_failure_class(reloaded)
-        raise RestoreAsVerificationError(
-            f"nginx reload failed; mode=DIRECT_SIGNAL; reason={reason}"
-        )
-    return "DIRECT_SIGNAL", runtime_args
+    raise RestoreAsVerificationError(
+        "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_FOUND"
+    )
 
 
 def _curl_failure_class(returncode: int) -> str:
