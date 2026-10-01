@@ -1,0 +1,42 @@
+import os, pathlib, zipfile, hashlib, json, re, subprocess
+root=pathlib.Path('target/src'); out=pathlib.Path('proof'); out.mkdir(exist_ok=True)
+version=os.environ['TARGET_VERSION']; sha=os.environ['TARGET_SHA']
+assert pathlib.Path('target/VERSION').read_text().strip()==version
+assert 'Version: '+version in (root/'style.css').read_text()
+assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
+changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
+allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/brand.php','src/inc/admin/admin-shell.php','src/inc/admin/admin-s01-uiux-polish.php','src/assets/js/admin/admin-brand.js','src/assets/css/admin/pages/brand/admin-page-brand-v8.css','tests/brand-page-live-preview-contract.php','tests/brand-v8-render-fixture.php','tests/brand-v8-browser-proof.js','evidence/ui/theme-brand-v8-source.json'}
+assert set(changed)==allowed,changed
+def original(p): return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
+shell=(root/'inc/admin/admin-shell.php').read_text()
+# The only shell-file change is the brand-specific page head early-return branch.
+a=shell.index("    if ($tab === 'brand') {",shell.index('function vf_theme_admin_render_page_head'))
+b=shell.index('    $meta = vf_theme_admin_tab_meta($tab);',a)
+assert shell[:a]+shell[b:]==original('src/inc/admin/admin-shell.php'),'non-brand shell change'
+before=original('src/inc/admin/views/brand.php');after=(root/'inc/admin/views/brand.php').read_text()
+def form_contract(s):
+ return (re.findall(r'<form[^>]*method="post"[^>]*action="[^"\n]+"',s),re.findall(r'<input[^>]*name="action"[^>]*>',s),re.findall(r"wp_nonce_field\([^;]+",s))
+assert form_contract(before)==form_contract(after),'form action/nonce/method changed'
+# Runtime/service/update/auth files cannot change under the above exact allowlist.
+assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='0eeaa6fd39f8f9c4f4c3435c48e237e37b4c3e158c5143f723491c2a729b6f35'
+assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='728e28517f08aee66ad14b8fb20449be57327b523c2b4af68ac1e1f398efea16'
+asset='vf-tools-theme_V'+version+'.zip'
+for name in [asset,'rebuild.zip']:
+ with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+  for p in sorted(root.rglob('*')):
+   if not p.is_file(): continue
+   rel=p.relative_to(root).as_posix()
+   assert not p.is_symlink()
+   if rel.lower() in ['readme.md','changelog.md']: continue
+   assert not re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I),rel
+   assert not re.search(r'\.(?:sql|sqlite3?|db|log|zip|tar|gz|bak|tmp)$',rel,re.I),rel
+   assert pathlib.Path(rel).name not in ['.env','wp-config.php']
+   data=p.read_bytes()
+   assert not re.search(rb'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}',data),rel
+   info=zipfile.ZipInfo('vf-tools-theme/'+rel,(1980,1,1,0,0,0)); info.create_system=3; info.external_attr=(0o100644)<<16
+   z.writestr(info,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+assert (out/asset).read_bytes()==(out/'rebuild.zip').read_bytes()
+(out/'rebuild.zip').unlink()
+data=(out/asset).read_bytes()
+meta={'source_sha':sha,'source_tree':os.environ['TARGET_TREE'],'version':version,'asset':asset,'asset_bytes':len(data),'asset_sha256':hashlib.sha256(data).hexdigest(),'frozen_shell_header_menu':'PASS','security_boundary':'PASS','owner_product_acceptance':'PENDING_OWNER_REAL_USE','owner_preview_runtime_applicability':'N_A','changed_files':changed}
+(out/'identity.json').write_text(json.dumps(meta,indent=2)); print(json.dumps(meta))
