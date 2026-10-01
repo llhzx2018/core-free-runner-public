@@ -150,11 +150,24 @@ class Menu3ModularTests(unittest.TestCase):
             "CUTOVER_PULL:",
             "BOOTSTRAP_LOCAL_CLOUDPANEL",
             "非网站面板管理的公网服务",
+            "旧服务器网站开关",
+            "开启旧服务器全部网站",
+            "停止旧服务器全部网站",
+            "一键开启或停止旧服务器全部网站",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("目标服务器 IP", text)
         self.assertNotIn("回滚 Runtime 到 SOURCE", text)
         self.assertNotIn("DNS：自动修改", text)
+        start = text.index("old_server_nginx_control()")
+        end = text.index("select_existing_migration()", start)
+        ordinary = text[start:end]
+        self.assertNotIn("nginx.service", ordinary)
+        self.assertNotIn("clp-nginx.service", ordinary)
+        self.assertNotIn("systemctl", ordinary)
+        self.assertNotIn("nginx -t", ordinary)
+        self.assertNotIn("80/443", ordinary)
+        self.assertNotIn("8443", ordinary)
 
     def test_migration_preserves_old_server_dns_and_target_collision_boundaries(self) -> None:
         ui = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
