@@ -10,7 +10,7 @@ assert set(changed)==allowed,changed
 before=subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':src/inc/update/class-vf-wp-update-admin-v1.php'],text=True)
 after=(root/'inc/update/class-vf-wp-update-admin-v1.php').read_text()
 def backend(s):
- return s[s.index('    public function handle_actions'):s.index('    public function render')]
+ return s[s.index('    public function handle_actions'):s.index('    private function notice')]
 assert backend(before)==backend(after),'action handlers changed'
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
