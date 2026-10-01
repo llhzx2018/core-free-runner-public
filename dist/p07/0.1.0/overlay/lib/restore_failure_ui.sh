@@ -35,8 +35,21 @@ render_restore_failure() {
       ui_note 'DNS 没有修改，原网站没有修改。'
       return 0
     elif grep -Fq 'nginx reload failed' "$err_file" 2>/dev/null; then
-      ui_bad '新网站已恢复，但 Nginx 重新加载没有完成，P07 已回滚新目标。'
-      ui_note '这表示新站配置已经生成，但运行中的 Nginx 没有成功加载它。'
+      if grep -Fq 'mode=SYSTEMD_MAIN_HUP' "$err_file" 2>/dev/null; then
+        ui_bad '新网站已恢复，但 Nginx 常规重载和备用优雅重载都没有完成，P07 已回滚新目标。'
+        if grep -Fq 'reason=SERVICE_NOT_ACTIVE' "$err_file" 2>/dev/null; then
+          ui_note '原因：Nginx 服务状态异常，P07 没有继续保留未验证的新站。'
+        elif grep -Fq 'reason=PERMISSION_DENIED' "$err_file" 2>/dev/null; then
+          ui_note '原因：系统拒绝了 Nginx 重载操作。'
+        else
+          ui_note 'P07 已尝试由系统服务管理器对 Nginx 主进程执行优雅重载，但没有成功。'
+        fi
+      elif grep -Fq 'reason=PERMISSION_DENIED' "$err_file" 2>/dev/null; then
+        ui_bad '新网站已恢复，但系统拒绝了 Nginx 重载操作，P07 已回滚新目标。'
+      else
+        ui_bad '新网站已恢复，但 Nginx 重新加载没有完成，P07 已回滚新目标。'
+        ui_note '这表示新站配置已经生成，但运行中的 Nginx 没有成功加载它。'
+      fi
       ui_note 'DNS 没有修改，原网站没有修改。'
       return 0
     fi
