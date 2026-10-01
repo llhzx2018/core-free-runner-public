@@ -1,0 +1,178 @@
+name: P07 Release17 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release17-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release17 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release17'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release17"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release17"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="a783b1cbdb9473ea73cf263d0a7b2b798c9c8b3d"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="d988fcb80e1c196254d0e8a1ae66f2244ea64867"' installers/p07.sh
+          grep -Fq '## Restore-As Local Route Verification Contract' "$root/docs/authority/RPD.md"
+          grep -Fq '| B49 | Restore-As Direct Local HTTP Probe |' "$root/docs/authority/ACCEPTANCE_MATRIX.md"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              seen=set()
+              for line in (root/name).read_text(encoding='utf-8').splitlines():
+                  if not line.strip():
+                      continue
+                  expected, rel=line.split('  ',1)
+                  assert rel not in seen, (name, rel)
+                  seen.add(rel)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  assert blob(path)==expected, (name, rel, blob(path), expected)
+
+          runtime=(root/'RUNTIME.gitblob').read_text(encoding='utf-8')
+          required={
+            'BUILD_ID':'8e4caedee86a1d370d2c852e752278d6ea4dbaa1',
+            'lib/restore_as_verified.py':'cc716cbef86359b7b99913bbaa514ba009333922',
+            'lib/restore_failure_ui.sh':'4e608fdb37fe94ff9534a0e64d377669814742c5',
+          }
+          for rel,sha in required.items():
+              assert f'{sha}  {rel}' in runtime
+          PY
+
+      - name: Release17 local probe contract
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq -- '"--noproxy",' "$root/lib/restore_as_verified.py"
+          grep -Fq -- '"*",' "$root/lib/restore_as_verified.py"
+          grep -Fq 'f"{domain}:{port}:127.0.0.1"' "$root/lib/restore_as_verified.py"
+          grep -Fq 'def _http_probe' "$root/lib/restore_as_verified.py"
+          grep -Fq 'attempts: int = 4' "$root/lib/restore_as_verified.py"
+          grep -Fq 'time.sleep(delay)' "$root/lib/restore_as_verified.py"
+          grep -Fq 'target_vhost={vhost_state}' "$root/lib/restore_as_verified.py"
+          grep -Fq 'target_vhost=PRESENT' "$root/lib/restore_failure_ui.sh"
+          grep -Fq 'target_vhost=MISSING' "$root/lib/restore_failure_ui.sh"
+
+      - name: Syntax and compile
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          bash -n "$root/bin/vfops-site-ui"
+          bash -n "$root/lib/restore_failure_ui.sh"
+          python3 -m py_compile             "$root/lib/restore_as_verified.py"             "$root/lib/restore_as.py"             "$root/lib/restore_apply_core.py"             "$root/lib/verify.py"
+
+      - name: Public overlay release17 regressions
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Direct probe behavior
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          export PYTHONPATH="$PWD/lib"
+          python3 - <<'PY'
+          import subprocess
+          from unittest import mock
+          import restore_as_verified as r
+
+          ok=subprocess.CompletedProcess([],0,stdout='200',stderr='')
+          with mock.patch.object(r,'_run',return_value=ok) as run:
+              rc,code=r._http_code('/usr/bin/curl','restore.example.com','http',80)
+          assert (rc,code)==(0,'200')
+          cmd=run.call_args.args[0]
+          assert '--noproxy' in cmd and '*' in cmd
+          assert 'restore.example.com:80:127.0.0.1' in cmd
+
+          with mock.patch.object(r,'_http_code',side_effect=[(7,'000'),(0,'302')]) as probe,                mock.patch.object(r.time,'sleep') as sleep:
+              rc,code=r._http_probe('/usr/bin/curl','restore.example.com','http',80,attempts=4,delay=0.01)
+          assert (rc,code)==(0,'302')
+          assert probe.call_count==2
+          sleep.assert_called_once()
+          PY
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release17'
+          grep -Fq 'lib/restore_as_verified.py' "$tmp/install/.runtime-manifest.gitblob"
+          grep -Fq 'lib/restore_failure_ui.sh' "$tmp/install/.runtime-manifest.gitblob"
+
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Beginner failure classification
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          tmp="$(mktemp -d)"
+          cat >"$tmp/present.err" <<'EOF'
+          ERROR: Restore-As local verification failed; rollback=PASS; reason=local Host routing verification failed; target_vhost=PRESENT
+          EOF
+          NO_COLOR=1 bash -c "source '$root/lib/terminal_ui.sh'; source '$root/lib/restore_failure_ui.sh'; render_restore_failure '$tmp/present.err'" >"$tmp/present.out"
+          grep -Fq 'Nginx 也已有新站点配置' "$tmp/present.out"
+          ! grep -Fq 'target_vhost=PRESENT' "$tmp/present.out"
+
+          cat >"$tmp/missing.err" <<'EOF'
+          ERROR: Restore-As local verification failed; rollback=PASS; reason=local Host routing verification failed; target_vhost=MISSING
+          EOF
+          NO_COLOR=1 bash -c "source '$root/lib/terminal_ui.sh'; source '$root/lib/restore_failure_ui.sh'; render_restore_failure '$tmp/missing.err'" >"$tmp/missing.out"
+          grep -Fq 'Nginx 还没有加载到这个新域名' "$tmp/missing.out"
+          ! grep -Fq 'target_vhost=MISSING' "$tmp/missing.out"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          ! grep -R -n -E '(PRIVATE KEY|BEGIN OPENSSH|ghp_[A-Za-z0-9]|github_pat_)' "$root/bin" "$root/lib" installers/p07*.sh
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' installers/p07*.sh "$root/bin" "$root/lib"
+          grep -Fq 'cleanup_database' "$root/lib/restore_as_verified.py"
+          grep -Fq 'cleanup_site' "$root/lib/restore_as_verified.py"
+          grep -Fq 'DNS 没有修改，原网站没有修改。' "$root/lib/restore_failure_ui.sh"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE17_DISTRIBUTION_GATE=COMPLETE'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
