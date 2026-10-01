@@ -1,0 +1,100 @@
+name: P07 Release16 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release16-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release16 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 023db2877c966ae9f80a9eb1fdc77cdd00862ee0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '023db2877c966ae9f80a9eb1fdc77cdd00862ee0'
+          test "$(cat BUILD_ID)" = '0.1.0-release16'
+          grep -Fq '## Restore-As SQLite Canonical Snapshot Contract' docs/authority/RPD.md
+          grep -Fq '| B48 | Restore-As Canonical SQLite / Safe Stage Diagnosis |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'failure_stage = "SQLITE_SNAPSHOT_RESTORE"' lib/restore_as.py
+          grep -Fq 'restore_apply.restore_sqlite(package_dir, manifest, staged_site, source_site_root)' lib/restore_as.py
+          grep -Fq 'sqlite_archive_excluded_paths' lib/verify.py
+          grep -Fq 'immutable=1' lib/verify.py
+          grep -Fq 'SQLite 数据库快照恢复没有完成' bin/vfops-site-ui
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops
+          bash -n bin/vfops-site-ui
+          bash -n lib/terminal_ui.sh
+          python3 -m py_compile             lib/restore_as.py             lib/restore_apply.py             lib/restore_apply_core.py             lib/verify.py             lib/package_core.py
+
+      - name: Release16 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_release15_sqlite_wal             tests.test_release14_final_verify             tests.test_release13_mysql_snapshot             tests.test_release12_backup_freshness             tests.test_backup             tests.test_backup_frontend             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Restore ordering and fail-closed assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          restore=Path('lib/restore_as.py').read_text(encoding='utf-8')
+          verify=Path('lib/verify.py').read_text(encoding='utf-8')
+          apply=Path('lib/restore_apply_core.py').read_text(encoding='utf-8')
+          ui=Path('bin/vfops-site-ui').read_text(encoding='utf-8')
+
+          call='restore_apply.restore_sqlite(package_dir, manifest, staged_site, source_site_root)'
+          verify_call='verify_engine.verify_sqlite(package_dir, manifest, staged_site, source_site_root)'
+          assert call in restore and verify_call in restore
+          assert restore.index(call) < restore.index(verify_call)
+          assert 'for suffix in ("-wal", "-shm", "-journal")' in apply
+          assert '?mode=ro&immutable=1' in apply
+          assert 'sqlite_archive_excluded_paths' in verify
+          assert 'rel + suffix' in verify
+          assert 'APPLICATION_CONFIG_REMAP)' in ui
+          assert 'SITE_FILES_VERIFY)' in ui
+          PY
+
+      - name: Security and safety boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+          grep -Fq 'DNS：未修改' bin/vfops-site-ui
+          grep -Fq '原网站：保留' bin/vfops-site-ui
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE16_EXACT_SOURCE=023db2877c966ae9f80a9eb1fdc77cdd00862ee0'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
