@@ -1,635 +1,2093 @@
-# P07 · VF Server Ops · RC3 CURRENT TRUTH
+# P07 · VF Server Ops · CURRENT AUTHORITY RESOLVER
 
-Last reconciled: 2026-09-26 (America/Los_Angeles)
+Status: `CURRENT_AUTHORITY_RESOLVER`  
+Policy: `DYNAMIC_TRUTH_NOT_STORED_HERE`  
+Authority: `llhzx2018/vf-server-ops` + each owning external authority
 
-> This file is the current Authority for the Slot 3 RC3 candidate line. Machine/Runner closure, Real VPS/User evidence, Formal Release, Production, DNS cutover, and SOURCE retirement are separate states and must never be conflated.
+> 本文件位于 `main`，负责 **fresh-window 路由与 fail-closed 解析**，不把 Working Phase、Candidate Runtime SHA、Machine/Real Gate、Release、Production 或 Next Action 缓存成 main 的长期 Current Truth。
 
-## 1. Current product position
+## 1. Current Development Line Pointer
 
-P07 ordinary users have exactly one permanent Toolbox entry:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-toolbox.sh)
+```text
+Stable / canonical baseline branch = main (V0.1.0 release source)
+Current working authority branch   = main
 ```
 
-Top-level Toolbox remains:
+`current working authority branch` 只是读取路由：
+
+```text
+branch pointer != merge to main
+branch pointer != Formal Release
+branch pointer != Distribution
+branch pointer != Production
+branch pointer != OWNER Real/User PASS
+```
+
+OWNER 最新明确任务若锁定了另一条 exact branch / PR，则 OWNER 指令优先，并必须用 live Git 验证；不得静默沿用本 Pointer。
+
+当 P07 正式切换 current working line 时，只更新本 Pointer / `VF_PROJECT.json.current_working_branch`，不要把整套动态 Gate/Phase/Next Action 再复制回 main。
+
+## 2. Fresh-window Current Resolver
+
+进入 P07 bounded task 时按以下顺序解析：
+
+```text
+1. OWNER 最新明确指令
+2. llhzx2018/gov-doc/main/CURRENT.md -> Current Runtime Entry
+3. main/AGENTS.md
+4. 本 CURRENT Resolver
+5. resolve exact task line:
+   - stable/main task -> main
+   - ordinary current development -> current working authority branch
+   - OWNER named branch/PR -> that exact live branch/PR
+6. exact line docs/authority/CURRENT.md + VERSION + BUILD_ID/module identity when relevant
+7. live Git branch / PR / changed-file / workflow evidence required by the task
+8. Release / Distribution / Production evidence only when the task actually enters those stages
+```
+
+不得从 main 的历史 Bootstrap snapshot 推断当前 development phase，也不得因为某个旧 OPEN PR 存在就自动选择它。
+
+## 3. Dynamic Truth Ownership
+
+| Fact | Owning truth | Resolver rule |
+|---|---|---|
+| Stable product baseline | `main` + stable RPD / SSOT / Acceptance | 只代表已晋级稳定合同/源码，不代表 current working candidate |
+| Current working line | 本文件 branch pointer + live Git | branch 必须真实存在；任务开始时重新验证 |
+| Current working runtime / BUILD_ID | exact working branch files | 不复制到 main Resolver |
+| Current Phase / Next Action | OWNER instruction + exact working branch Current + live PR/Git | 不写进 main `VF_PROJECT.json` |
+| Machine / Real evidence | exact-source workflow / registered Runner / evidence | `UNKNOWN / NOT_RUN != PASS` |
+| Formal Release / Tag / assets | GitHub Release / Tag live-read | working branch merge不能外推 Release |
+| Distribution | owning distribution manifest / core-updates | 与 Source 独立 |
+| Production / Server state | OWNER-authorized runtime / Production evidence | 不从 Git branch 推导 |
+
+## 4. Fail-Closed Rules
+
+以下任一情况必须停止动态结论并标记 `RECOVERY_REQUIRED / UNKNOWN / NOT_PROVEN`：
+
+- `current working authority branch` 不存在或已被替换；
+- OWNER 当前任务与本 Pointer 指向不同且无法确定 exact branch/PR；
+- main Resolver、working branch Current、live Git 相互冲突；
+- 试图使用旧 `VF_PROJECT.json` 的 phase/status/next_action 作为当前事实；
+- Machine evidence 没有绑定 exact source；
+- Release / Distribution / Production 无法从 owning source live-read。
+
+禁止退回 2026-09-05 Bootstrap / Phase 1 snapshot 自证当前状态。
+
+## 5. Stable Product Guard
+
+P07 长期产品边界继续由 `RPD.md` / `SSOT.md` / `ACCEPTANCE_MATRIX.md` 定义。本 Resolver 不重写产品合同。
+
+稳定安全边界至少包括：
+
+```text
+ordinary user = one P07 Toolbox entry
+no automatic DNS cutover
+no SOURCE deletion by default
+no existing TARGET overwrite
+remote private backup requires encryption
+BACKUP_CREATED != RECOVERABLE
+Production Restore / Migration / Cutover / Destructive Action = separate OWNER gate
+Secret / PRIVATE_DATA / Production backup != public Git / public Runner
+```
+
+CloudPanel 已拥有的常规面板能力不得被 P07 重建成第二套通用 Web 面板。
+
+## 6. VF_PROJECT Boundary
+
+`VF_PROJECT.json` 只保存结构 metadata 与 Authority pointers：
+
+```text
+project identity
+repository
+branch roles / current working-line pointer
+authority paths
+```
+
+以下动态字段禁止重新作为长期 main cache，除非先证明存在不可替代的 active machine consumer：
+
+```text
+lifecycle / status / current_phase
+working/candidate/release/production version snapshots
+machine_gate / latest_ci / last_real_gate
+owner_acceptance / next_action
+full backup/restore/migration Gate result matrices
+```
+
+历史 Git 中的旧字段继续保留 provenance，不回填到 Current。
+
+## 7. Same-project Continuation / Handoff
+
+P07 不复制 shared Runtime/Handoff 版本。每次 continuation 先读：
+
+```text
+llhzx2018/gov-doc/main/CURRENT.md
+-> Current Runtime Entry
+-> P07 main/AGENTS.md
+-> 本 Resolver
+-> exact working branch truth
+```
+
+同一 ChatGPT Project 新聊天不是 Handoff，`OLD_WINDOW_ACTION = NONE`。真正跨 Project / Workspace / Environment、不可重建输入、OWNER 明确要求或 Disaster Recovery 才进入 root Current 指向的 `skill-handoff`。
+
+存在更高层 Master Mission 时：
+
+```text
+Master Mission > P07 validation sample > current P07 task / branch / PR
+```
+
+项目任务完成不得冒充 Master Mission 完成。
+
+## 8. V0.1.0 Release State
+
+```text
+P07 V0.1.0 Final Integration Source  = RELEASED
+Four-slot Integration Manifest       = PRESENT
+Product-wide terminal language       = ZH_FIRST
+Slot 1 Network Node                  = 0.1.0-rc10 / ZH_FIRST / PUBLIC_DISTRIBUTED
+Slot 2 VPS Audit                     = V2.2.2 / 2.2.2-rc2-chinese-first / PUBLIC_DISTRIBUTED
+Slot 3 CloudPanel Ops                = 0.1.0-release18 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
+Slot 4 System Care                   = 0.1.0-rc18 / ZH_FIRST / PUBLIC_DISTRIBUTED
+Automatic DNS mutation               = DENY
+Automatic SOURCE deletion            = DENY
+Resource Safe Apply auto-run         = DENY
+Formal Release Tag                    = p07-v0.1.0
+GitHub Release                        = PUBLISHED
+Public Distribution                   = f618aad35da7df05fb298455be186691d4b5362b
+```
+
+Formal Tag/Release is complete. main is the canonical released source. Production destructive actions remain separately gated.
+
+
+## 9. V0.1.0 Production Installation Closure
+
+On 2026-09-28, the released P07 V0.1.0 was installed and verified on the real DigitalOcean Production server through the permanent public Toolbox route.
+
+```text
+P07_V010_PRODUCTION_INSTALL          PASS
+P07_FOUR_SLOT_TOOLBOX                PASS
+P07_SLOT3_FINAL_RUNTIME              PASS
+P07_SLOT4_RC15                       PASS
+CONFIG_BYTES_UNCHANGED               PASS
+SERVICE_PID_UNCHANGED                PASS
+MIGRATION_EXECUTED                   NO
+DNS_WRITE                            NONE
+SOURCE_DELETE                        NONE
+RESOURCE_SAFE_APPLY                  NOT_RUN
+```
+
+Installed identities:
+
+```text
+VF Server Ops                        0.1.0
+Slot 3 Build                         0.1.0-release1
+System Care                          0.1.0-rc15
+```
+
+The four top-level Toolbox entries were visible and routable:
 
 ```text
 1. 网络节点 / V2Ray
 2. VPS 一键验机
 3. CloudPanel 备份 / 恢复 / 迁移
 4. 系统维护 / 安全
-0. 退出
 ```
 
-Slot 3 remains `测试中` until current Real gates R1-R4 are complete. Slot 4 is System Care RC15 and remains `可用`.
-
-No second ordinary-user entry is authorized.
-
-## 2. Current exact runtime identity — guided-init16
-
-Source repository: `llhzx2018/vf-server-ops`  
-Candidate line: `candidate-p07-v0.1.0-rc3`  
-Source PR: `#19`  
-Source runtime merge: `78691699d3b5186ff902550ec65facf0976c89a1`
+Slot 3 Final Release self-test passed:
 
 ```text
-Version                                      VF Server Ops 0.1.0 RC3
-BUILD_ID                                     0.1.0-rc3-guided-init16
-BUILD_ID blob                                622b752887d46c17a8a5d05046037a2dc6a35475
-bin/vfops-storage-setup blob                 b279677ae561f9feb689964bd8f09be98c9211c9
-lib/google_device_oauth.py blob              3b023f307bf744650a351e19bde01b3597469992
-tests/test_google_device_oauth.py blob       c72c938a5ed81b074c1ae8a3afbb0943df0aa683
-tests/test_storage_onboarding_ux.py blob     59bf88d6b6a6493c536919ab67318513330d091f
+9 tests   PASS
+4 tests   PASS
+49 tests  PASS
 ```
 
-Runtime identity is defined by the source merge plus exact code/blob identity. Later Authority-only commits may advance the candidate branch HEAD without changing this runtime identity.
-
-Public repository: `llhzx2018/core-free-runner-public`  
-Public PR: `#846`  
-Public main merge: `fd02a3db860a0773a3587bf5d78de0daf4875861`
+Core services remained active with unchanged MainPID during the installation:
 
 ```text
-init16 installer blob                        4a7889ea606fa2353f194abbb2c6b27345f35050
-stable p07.sh blob                           006e6bf7766ac8f10227ed6e88605bfdc7efe9ee
-Toolbox blob                                 69be6c8623addd6251e8f7fac596d1e93bc34789
-Toolbox Slot3 expected                       0.1.0-rc3-guided-init16
-Toolbox public version                       V0.1.0
-Toolbox Slot3 public status                  测试中
-System Care expected                         0.1.0-rc15
+cron
+nginx
+mysql
+php7.3-fpm
+php8.3-fpm
+php8.4-fpm
 ```
 
-## 3. Why guided-init16 supersedes guided-init15
+Swap note:
 
-The Owner required the R2 first-time flow to be preparation-first and as close to one-click as possible. `guided-init15` implemented that direction, but before Owner Real R2 testing the Google Device OAuth contract was re-verified and the init15 assumption that token polling could omit the OAuth Client Secret was rejected.
+The first closure helper attempted a util-linux `swapon --output=...` syntax that is not supported by this server build, so that specific shell assertion is not used as evidence.
 
-`guided-init16` keeps the improved UX and corrects the credential contract:
+The final direct runtime readback confirmed:
 
 ```text
-device authorization request  client_id only
-token polling                 client_id + client_secret
-Client Secret input           hidden terminal input
-helper transport              stdin, not argv
-rclone persistence            obscured value only
-secret echo/log               DENY
+NAME         /home/.swap
+TYPE         file
+SIZE         2G
+PRIO         -2
 ```
 
-`guided-init15` is now only the fixed verified baseline for the init16 layered installer. It is not the current Owner Real-test identity.
+No Swap write operation was executed by the P07 installation.
 
-## 4. Current R2 first-time user flow
-
-Before starting, the UI explicitly tells the user what must be prepared:
+Resource observation at closure:
 
 ```text
-Google：OAuth Client ID + Client Secret
-B2：Bucket + Application Key ID + Application Key
-Recovery Key：P07 自动生成，无需提前准备
+RAM total      1.9 GiB
+RAM used       1.1 GiB
+RAM available  869 MiB
+Swap total     2.0 GiB
+Swap used      ~950 MiB
+Load average   0.58 / 0.62 / 0.38
 ```
 
-The embedded tutorial explains:
-
-- create/select Google Cloud project;
-- enable Google Drive API;
-- create OAuth Client of type `TVs and Limited Input devices`;
-- save Client ID + Client Secret;
-- create/select Backblaze B2 Bucket;
-- create Application Key with required read/write and Bucket-list permissions;
-- save Application Key ID + Application Key;
-- Recovery Key does not need to be created by the user.
-
-The menu is:
+Rollback copy retained:
 
 ```text
-1. 已准备好，一键初始化 Google + B2
-2. 查看完整准备教程
-3. 从已有 P07 服务器导入
-4. 检查当前设置
-0. 返回
+/root/p07-before-v010-20260928-092139
 ```
 
-After the user supplies the prepared third-party credentials, P07 automatically performs:
+Final classification:
 
 ```text
-Google Device OAuth browser authorization
-→ Google direct verification
-→ B2 Bucket discovery
-→ automatic Recovery Key generation
-→ Google crypt + B2 crypt creation
-→ storage configuration
-→ Google + B2 real health verification
-→ reveal Recovery Key once only after health PASS
+P07_V0.1.0_SOURCE_MAIN               RELEASED
+P07_V0.1.0_PUBLIC_DISTRIBUTION       RELEASED
+P07_V0.1.0_GITHUB_RELEASE            PUBLISHED
+P07_V0.1.0_PRODUCTION_INSTALL        PASS
+P07_V0.1.0_FOUR_SLOT_INTEGRATION     PASS
 ```
 
-The plaintext Recovery Key is not persisted to P07 config or logs.
+Production destructive actions remain separately gated and were not executed by this installation.
 
-## 5. Current Menu 3 and capability state
 
-The ordinary-user Slot 3 structure remains the single product path for:
+## 10. VPS Audit V2.2.2 usage-value verdict + semantic terminal colors
+
+Current P07 Slot 2 public route:
 
 ```text
-网站管理 / 备份
-Restore-As / 原域恢复
-跨 VPS 迁移
-Google + B2 远程灾备
-Guarded Scheduler
+Public version                         V2.2.2
+Internal build                         2.2.2-rc1-semantic-color
+Public main                            70d1b32e731f8cb7dd7a0f4b36efe273b09525d7
+Candidate SHA256                       376f3cf791dcac00ba870697db9233a5ad4f765400a4dbe4418c20aafbc3b401
+```
+
+V2.2 keeps the existing benchmark scope and adds a user-facing value verdict so a single VPS can be judged without another VPS for comparison.
+
+It reports:
+
+```text
+machine performance
+single-core CPU class
+database-style I/O class
+CPU steal class
+CloudPanel / WordPress fit
+main bottlenecks
+suitable / unsuitable workloads
+retain / replace guidance
+price/performance = NOT CLAIMED when monthly price is unknown
+```
+
+Calibration fixtures:
+
+```text
+DO-like 1C/2GB     weak single-core -> machine verdict 偏弱
+Linode-like 1C/1GB strong CPU/I/O -> 良好, but RAM is the CloudPanel limitation
+Balanced 2C/4GB    良好
+```
+
+This is a P07 workload-fit classification, not a global VPS market ranking.
+
+
+V2.2.1 makes the judgment thresholds visible to the user and exposes the same table through `--reference`.
+
+```text
+Single-core SHA256
+  Strong        >= 900 MB/s
+  Good          >= 500 MB/s
+  Usable        >= 250 MB/s
+  Weak          >= 150 MB/s
+  Very weak     < 150 MB/s
+
+Database-style I/O
+  Strong        >=1000 IOPS and fsync P95 <=2.5 ms
+  Good          >=500 IOPS and fsync P95 <=5 ms
+  Usable        >=300 IOPS and fsync P95 <=10 ms
+  Weak          otherwise
+
+CPU Steal
+  Normal        <=2%
+  Acceptable    <=5%
+  Watch         <=10%
+  Abnormal      >10%
+
+CloudPanel memory baseline
+  >=1800 MiB    treated as 2GB-class
+  <1800 MiB     memory bottleneck
+```
+
+These are P07 workload-fit thresholds for CloudPanel / WordPress / PHP / MySQL / tool sites, not a global VPS market ranking.
+
+
+V2.2.2 restores the original colored section hierarchy through a PTY when the user is in an interactive terminal, while retaining plain output for NO_COLOR / non-TTY use.
+
+Semantic color contract:
+
+```text
+Green   strong / good / normal / recommended
+Yellow  usable / attention / constrained
+Red     weak / abnormal / not recommended
+Gray    explanatory boundary / note
+Cyan    section / summary title
+```
+
+Machine proof:
+
+```text
+Bash syntax                         PASS
+DO / Linode / 2C4G verdicts        PASS
+PTY color preservation             PASS
+ANSI semantic-color smoke          PASS
+Toolbox Smoke                      PASS
+System Care Smoke                  PASS
+Slot 3 Onboarding regression       PASS
+```
+
+## 11. Slot 3 release2 terminal UI distribution closure
+
+On 2026-09-29, Slot 3 was promoted from the released V0.1.0 source line to internal Build `0.1.0-release2` without changing the top-level public product version.
+
+Source and distribution identities:
+
+```text
+P07 public product version            V0.1.0
+Slot 3 source version                 0.1.0
+Slot 3 Build                          0.1.0-release2
+Runtime source main                   b52c710519430122ac443b7f7ebc54a84a9a2be4
+Public distribution main              70d1b32e731f8cb7dd7a0f4b36efe273b09525d7
+Overlay manifest blob                 bf6d14d55546013801b275d4a1740fced1df2661
+Final installer blob                  2e0185bba6b69ce79818836b723ab8faff0cb5eb
+Stable installer blob                 0fba033a74df0b688b9ec1937066601bb9a3c7a1
+```
+
+The canonical Terminal UI / Color System is now part of the owning RPD and Acceptance Matrix. Slot 3 normal-user surfaces use one shared semantic mapping:
+
+```text
+Cyan      title / structure / neutral information
+Green     PASS / READY / safe / healthy / recommended
+Yellow    attention / configuration / restore / review
+Red       fail / block / destructive / rollback / high-risk
+Magenta   migration / cutover / transactional flow
+Gray      version / boundary / help / immutable safety rule / back
+```
+
+Machine proof bound to the exact merged private source passed:
+
+```text
+Bash syntax                           PASS
+Python compile                        PASS
+Interactive TTY ANSI hierarchy       PASS
+Semantic status colors               PASS
+NO_COLOR plain text                  PASS
+Non-TTY plain text                   PASS
+Machine-output boundary              PASS
+Secret boundary                      PASS
+Slot 3 regressions                    PASS
+Migration regressions                 PASS
+Backup / Restore regressions          PASS
+CloudPanel regressions                PASS
+UI bloat guard                        PASS
+```
+
+Public distribution proof passed:
+
+```text
+Stable Installer Smoke               PASS
+Final Distribution + R2 Onboarding   PASS
+Toolbox Smoke                         PASS
+System Care Smoke                     PASS
+Runner Trigger Scope Gate             PASS
+Runner Archive Integrity Gate         PASS
+```
+
+Production is deliberately not promoted by distribution alone:
+
+```text
+Production currently verified Slot 3 Build   0.1.0-release1
+release2 Production install                  NOT_YET_OWNER_VERIFIED
+Production migration / DNS / SOURCE delete   NOT_RUN
+Restore overwrite                            NOT_RUN
+Resource Safe Apply                          NOT_RUN
+```
+
+The Owner must run the normal one-line Toolbox route and visually verify release2 before Production truth is advanced.
+
+## 12. Slot 3 release3 中文优先终端文案 distribution closure
+
+On 2026-09-29, Owner Production visual acceptance exposed a terminology problem: ordinary-user migration screens still required understanding internal engineering words such as `TARGET`, `SOURCE`, `READY`, `Runtime`, `Gate`, and `Recovery`.
+
+Slot 3 was therefore advanced to internal Build `0.1.0-release3` while the public product version remains `V0.1.0`.
+
+Current exact identities:
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release3
+Exact runtime source main             424b539b331236d85a35b310943b810046be0927
+Public distribution main              477d88f775356f82a661e74baacf7977242b8748
+Overlay manifest blob                 f8b5c7e9031c2b8adc40ffd24cf30e2c817189b6
+Final installer blob                  2a7f554f5cdf2f94742391b7aeeaf384c30dd0fb
+Stable installer blob                 7f360a78d4faf3aaa8c0ce581b8ffa57fea92d63
+Toolbox blob                          4037706ee489be40bf1eb1bfa57e3da2a3d39e35
+```
+
+The user-facing terminal contract is now Chinese-first:
+
+```text
+TARGET           -> 目标服务器
+SOURCE           -> 源服务器
+READY            -> 已就绪
+PASS / FAIL      -> 通过 / 失败
+Runtime          -> 运行环境
+Production       -> 正式环境
+Recovery         -> 恢复保护 / 恢复副本
+Gate             -> 人工确认
+Migration ID     -> 迁移任务编号
+SSH Key          -> SSH 密钥
+```
+
+Stable machine tokens, JSON fields, shell variables, confirmation tokens, and parser contracts remain unchanged. Common product/protocol names such as CloudPanel, DNS, SSH, IP, MySQL, SQLite, Cron, PM2, and HTTPS may remain in English with Chinese surrounding explanation.
+
+Exact-source Machine Proof on merged private main:
+
+```text
+Source                                      424b539b331236d85a35b310943b810046be0927
+Workflow run                                36526229331
+Bash syntax                                 PASS
+Python compile                              PASS
+Chinese-first terminal copy                 PASS
+Terminal semantic color contract            PASS
+Slot 3 product regressions                  PASS
+Machine-output boundary                     PASS
+Secret boundary                             PASS
+```
+
+Public distribution PR/head gates all passed before merge:
+
+```text
+Stable Installer Smoke                      PASS
+Final Distribution + R2 Onboarding          PASS
+Toolbox Smoke                               PASS
+System Care Smoke                           PASS
+Runner Trigger Scope Gate                   PASS
+Runner Archive Integrity Gate               PASS
+```
+
+Public main readback confirms `0.1.0-release3` and the exact installer / overlay identities above.
+
+Production truth after Owner visual acceptance:
+
+```text
+Production currently verified Slot 3 Build  0.1.0-release3
+release3 Production install                 OWNER_VERIFIED
+Migration executed                          NO
+DNS write                                   NO
+SOURCE delete                               NO
+Restore overwrite                           NO
+Resource Safe Apply                         NO
+```
+
+Owner screenshots and terminal output confirmed the release3 Chinese-first migration screen and Build identity on 2026-09-29.
+
+## 13. Slot 3 release4 按需加载 / 当前运行时直接安装 distribution closure
+
+On 2026-09-29, Owner Production output showed that entering Slot 3 still replayed the historical RC / guided-init installer chain and re-ran many tests before reaching the already-released current runtime.
+
+This was classified as installer debt, not desired product behavior. Slot 3 was advanced to internal Build `0.1.0-release4` while the public product version remains `V0.1.0`.
+
+Current exact identities:
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release4
+Exact runtime source main             532eeab3fbe62f33a281dbf4af3c22f3e51d3d26
+Public distribution main              0311e657393e2fb98f366b264b56fbe85b9fb2ff
+Full overlay manifest blob            f7b95e33b319beadf768fe234e9f562d8b6c1ae1
+Runtime manifest blob                 43c88e83ae8f1325395086b9225bd0b9decfacdd
+Final installer blob                  cf140e00dfb507a698c925a59a9b6e0d157117e0
+Stable installer blob                 49bc8364e87cd6dc0aac4d73ae1f249d445185ba
+Toolbox blob                          cd232fe6025ff73f7c77c9810a019af3fc0aefd6
+```
+
+Canonical loading behavior is now:
+
+```text
+Open Toolbox
+    -> no Slot 3 download
+
+Choose Slot 3
+    -> if current Build is already installed: run local runtime immediately
+    -> if install/upgrade is required: install the current runtime directly
+    -> do not replay RC / guided-init history
+    -> do not run the full unit/regression suite on Production install
+
+Enter Remote Backup
+    -> only then check/install rclone
+
+Enter Server Migration
+    -> only then check/install OpenSSH client
+```
+
+The Slot 3 runtime itself is installed as one coherent local product rather than downloading individual scripts every time a page is opened. This avoids network/runtime fragility while keeping feature-specific external dependencies lazy.
+
+Exact-source Machine Proof on merged private main:
+
+```text
+Source                                      532eeab3fbe62f33a281dbf4af3c22f3e51d3d26
+Workflow run                                36532156972
+Bash syntax / Python compile                PASS
+Chinese-first UI contract                   PASS
+Lazy dependency contract                    PASS
+Terminal UI color contract                  PASS
+Full Slot 3 regressions                     PASS
+Root-only auto-backup UX                    PASS
+Machine-output boundary                     PASS
+Secret boundary                             PASS
+```
+
+Public distribution PR/head gates all passed before merge:
+
+```text
+Stable Installer Smoke                      PASS
+Final Distribution + R2 Onboarding          PASS
+Toolbox Smoke                               PASS
+System Care Smoke                           PASS
+Runner Trigger Scope Gate                   PASS
+Runner Archive Integrity Gate               PASS
+```
+
+Production truth remains separate:
+
+```text
+Production currently verified Slot 3 Build  0.1.0-release3
+release4 Production install                 NOT_YET_OWNER_VERIFIED
+Migration executed                          NO
+DNS write                                   NO
+SOURCE delete                               NO
+Restore overwrite                           NO
+Resource Safe Apply                         NO
+```
+
+The next Owner run of the normal one-line Toolbox route should upgrade Slot 3 directly to release4 without replaying guided-init history.
+
+## 14. P07 全产品中文优先 / Slot 3 release5 distribution closure
+
+2026-09-29，Owner 明确要求“中文化”不是只改 Slot 3，而是 **整个 P07 普通用户界面**。本轮因此同时收口 Toolbox、Slot 1、Slot 2、Slot 3、Slot 4 的普通终端文案，并保留机器接口的稳定英文状态码。
+
+当前公共路由：
+
+```text
+P07 public product version             V0.1.0
+Toolbox public main                    ce836793de0c542b8254aada060071bb933edc7b
+
+Slot 1 网络节点                        0.1.0-rc10 / 中文优先
+Slot 2 VPS 一键验机                    V2.2.2 / 2.2.2-rc2-chinese-first
+Slot 3 CloudPanel 运维                 0.1.0-release5 / 中文优先
+Slot 4 系统维护 / 安全                 0.1.0-rc17 / 中文优先
+```
+
+关键公开身份：
+
+```text
+Toolbox blob                           64b3680baadbaf7cf929b5bbb8942df9b6c40a66
+Slot 1 installer blob                  67c2dbb0229f70fba6cf2f673924b27c43792c22
+Slot 2 pinned source commit            29f737e68d1464fb209565acd9b77e297c1bb81b
+Slot 2 SHA256                          1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f36
+Slot 3 exact private runtime source    eaed2a423cfec7bcf4e57b3aa0d38c6db610606e
+Slot 3 public distribution commit      ce836793de0c542b8254aada060071bb933edc7b
+Slot 3 runtime manifest blob           320c0c9030c1185bf6bc0a3de9bfee8475791da9
+Slot 3 final installer blob            288cc1f9f4dbb4a027e6242b44bf2a8662f0b859
+Slot 3 stable installer blob           79586aa4695da23e197173aab0c3c1c611401e64
+Slot 4 installer blob                  7cceece3e7c97cef6112ca9f61ab871156577116
+```
+
+普通用户文案规则：
+
+```text
+优先中文：
+  源服务器 / 目标服务器
+  已就绪 / 通过 / 未通过
+  运行环境 / 正式环境验证
+  恢复保护 / 人工确认 / 迁移任务编号
+  网站公开目录 / 资源清单 / 网站数量
+
+允许保留通用技术名：
+  CloudPanel / DNS / SSH / IP
+  MySQL / SQLite / Cron / PM2 / HTTPS
+  Google Drive / Backblaze B2 / OAuth / rclone
+```
+
+内部状态码、JSON 字段、Shell 变量、确认令牌和机器输出仍保持稳定英文，不得为了界面中文化破坏解析器或自动化合同。
+
+按需加载合同继续有效：
+
+```text
+Toolbox                 只显示入口，不预装所有 Slot
+已安装当前 Slot         直接本地运行
+首次安装 / 升级         只安装当前正式运行时，不回放 guided-init 历史链
+远程备份                使用时才检查 / 安装 rclone
+服务器迁移              使用时才检查 / 安装 OpenSSH 客户端
+```
+
+Public distribution gates 已通过：
+
+```text
+P07 Network Node Package Gate           PASS
+P07 Network Node Installer Smoke        PASS
+P07 Toolbox Smoke                       PASS
+P07 System Care Smoke                   PASS
+P07 Server Ops Final Distribution       PASS
+Public Runner Trigger Scope Gate        PASS
+Public Runner Archive Integrity Gate    PASS
+```
+
+Production truth 仍单独记录：
+
+```text
+Production currently verified Slot 3 Build   0.1.0-release3
+release4 Production install                  NOT_YET_OWNER_VERIFIED
+release5 Production install                  NOT_YET_OWNER_VERIFIED
+Migration executed                           NO
+DNS write                                    NO
+SOURCE delete                                NO
+Restore overwrite                            NO
+Resource Safe Apply                          NO
+```
+
+发布到 public main 不等于 Owner 正式机已经升级。下一次 Owner 运行正常一行入口后，再按实际 Build 回读更新 Production truth。
+
+
+
+## 15. Slot 3 release6 Target-owned Pull migration distribution closure
+
+2026-09-29，服务器迁移普通正式流程已从旧的“旧服务器发起并推送到新服务器”改为 **Target-owned Pull Model**。
+
+固定用户模型：
+
+```text
+登录新服务器
+→ 运行 P07
+→ 服务器迁移
+→ 整机迁入 / 单站迁入
+→ 输入旧服务器 IP
+→ 新服务器主动 SSH / rsync 拉取旧服务器
+→ 首轮迁入
+→ 最终增量同步
+→ 新服务器本地验证
+→ DNS 唯一人工确认
+→ 正式环境验证
+→ 旧服务器继续保留为 Recovery Copy
+```
+
+当前身份：
+
+```text
+P07 public product version             V0.1.0
+Slot 3 Build                           0.1.0-release6
+Private source main                    3cb565eaf3d15764fc6a77840bd92ee6a385fe85
+Public distribution main               96faec305fd5a43a17ff4757490cae929496c84c
+Runtime manifest blob                  6871192d26ed875f68b7eeb3959871c6d856e0d4
+Final installer blob                   f3fdea95a97f59ca32e3777e2c7d6e410e512037
+Toolbox Slot 3 expected build          0.1.0-release6
+```
+
+Exact-source / distribution evidence：
+
+```text
+Private exact-source Gate              36563032316 PASS
+Authority exact-source Gate            36563389838 PASS
+Public release6 distribution Gate      36576986038 PASS
+Toolbox Smoke                          36576985964 PASS
+Public Runner Scope Gate               PASS
+Public Runner Archive Integrity        PASS
+```
+
+旧 workflow 的 release5 / guided-init16 固定身份断言在 release6 candidate 上会提前失败；该失败发生在旧身份校验阶段，不是 release6 Runtime 行为失败。release6 的 owning distribution Gate 已覆盖当前 Runtime manifest、Pull Model、中文界面、Lazy Install、隔离安装、重复执行短路和安全边界。
+
+Production truth 仍保持：
+
+```text
+Production currently verified Slot 3 Build   0.1.0-release3
+release6 Production install                  NOT_YET_OWNER_VERIFIED
+Migration executed                           NO
+DNS write                                    NO
+SOURCE delete                                NO
+Restore overwrite                            NO
+Resource Safe Apply                          NO
+```
+
+Public Distribution 不得被解释为 Production 已升级。
+
+
+## 16. Slot 3 release7 全菜单可见反馈修复
+
+2026-09-29，Owner 在真实 FinalShell TTY 中确认：Slot 3 主菜单选择“3. 恢复网站”时，在没有可恢复备份的情况下看起来“没有反应”。
+
+根因：
+
+```text
+空状态提示已经打印
+→ 子模块立即 return
+→ P07 主菜单重新绘制
+→ 真实 TTY 执行清屏
+→ 提示被瞬间擦除
+→ 用户感知为“按钮没反应”
+```
+
+release7 将该问题提升为整个 Slot 3 主菜单 1–7 的统一交互合同：
+
+```text
+1. 服务器 / 网站概览
+2. 备份网站
+3. 恢复网站
+4. 服务器迁移
+5. 自动备份 / 远程灾备
+6. 网站管理
+7. CloudPanel 管理
+```
+
+固定：
+
+```text
+无网站 / 无备份 / 模块异常 -> 中文可见结果 + 等待用户确认后返回
+子模块非零退出 -> 主菜单显示失败入口与退出码，并继续可用
+明确 0 / 返回 -> 可以直接返回
+真实 TTY 清屏不得吞掉需要用户看到的信息
+```
+
+当前身份：
+
+```text
+P07 public product version             V0.1.0
+Slot 3 Build                           0.1.0-release7
+Private source main                    afed5e68d431b45bd5316d3bd456634d96b73e6b
+Public distribution main               84e186448ea2afda4b09bbae578977721987146a
+Runtime manifest blob                  43469d018a72f4e24ea3fd644ac7af5970a06c74
+Final installer blob                   a3ffbdfb35ed201411bfa9463c8fea6e26702582
+Toolbox expected Build                 0.1.0-release7
+```
+
+Machine / Distribution evidence：
+
+```text
+Exact-source full-menu Gate             36580337400 PASS
+Release7 distribution Gate              36581173176 PASS
+Toolbox Smoke                            36581172601 PASS
+Runner Trigger Scope Gate                PASS
+Runner Archive Integrity Gate            PASS
+```
+
+Production truth 仍保持独立：
+
+```text
+Production currently verified Slot 3 Build   0.1.0-release3
+release7 Production install                  NOT_YET_OWNER_VERIFIED
+Migration executed                           NO
+DNS write                                    NO
+SOURCE delete                                NO
+Restore overwrite                            NO
+Resource Safe Apply                          NO
+```
+
+Public Distribution 不得解释为 Production 已升级。
+
+
+## 17. Slot 3 release8 Terminal UX System V2 distribution closure
+
+2026-09-30，P07 普通终端交互进入 Terminal UX System V2。Owner 的真实反馈是：提示、上一级菜单、历史输出混在同一屏，虽然功能存在，但阅读层级混乱。
+
+本轮把 Slot 3 普通用户主路径收敛为：
+
+```text
+清屏
+→ 独立页面标题
+→ 当前状态 / 当前对象
+→ 主要内容
+→ 下一步动作
+→ 返回
+```
+
+已采用该页面模型的 Slot 3 入口：
+
+```text
+主菜单
+服务器 / 网站概览
+备份网站
+恢复网站
+服务器迁移
+整机迁入
+单站迁入
+自动备份 / 远程灾备
+网站管理
 CloudPanel 管理
 ```
 
-Current implementation includes:
+结果 / 空状态规则：
 
 ```text
-CloudPanel inventory / site management               IMPLEMENTED
-verified local backup                                IMPLEMENTED
-Restore-As to new domain                              IMPLEMENTED
-TARGET site + DB automatic creation                  IMPLEMENTED
-DB import/export verification                        IMPLEMENTED
-app config remap / WordPress URL remap               IMPLEMENTED
-Host + HTTPS SNI local verification                  IMPLEMENTED
-cross-VPS migration path                             IMPLEMENTED
-Google Device OAuth guided onboarding                IMPLEMENTED
-Backblaze B2 guided onboarding                       IMPLEMENTED
-dual crypt remote protection                         IMPLEMENTED
-current-site-set first-verification guard            IMPLEMENTED
-Guarded Scheduler                                    IMPLEMENTED
+成功结果 -> 独立结果页
+失败结果 -> 独立错误页
+无网站 / 无备份 / 无迁移任务 -> 独立空状态页
+子模块异常 -> 不杀死 P07 主菜单
+机器输出 / 非 TTY / --version / --build-id -> 保持稳定、无 ANSI / 无清屏副作用
 ```
 
-Implementation and Machine PASS do not equal current Real Owner/User PASS.
+Toolbox 顶层 Slot 1 / 2 / 3 / 4 在进入子模块前也会先清屏，避免 Toolbox 菜单残留与子模块内容混在一起。Slot 1 / Slot 4 自身已有重绘菜单；Slot 2 是一次性验机结果。本轮没有声称把 Slot 1 / Slot 4 的所有深层页面都重写成同一实现原语。
 
-## 6. Current layered installer contract
-
-Permanent route:
+当前身份：
 
 ```text
-P07 Toolbox
-→ stable installers/p07.sh
-→ installers/p07-rc3-r2-oauth-contract.sh
-→ fixed verified guided-init15 public main aa4dbc32cdddd81a188d55714c050de6b28436f2
-→ source-exact guided-init16 overlay
+P07 public product version             V0.1.0
+Slot 3 Build                           0.1.0-release8
+Private source main                    4ba15df96425bdba832ae80dd08dbfcb5dd19169
+Public distribution main               70dd9d238ee6bd7bf1bd172a6e1acbf8ddbde576
+Runtime manifest blob                  e7cee6c3614c00a51598f3ec2b4a57ccc9f344e4
+Final installer blob                   73fff27c1d9ca6d8c757813723228680495b05fc
+Stable installer blob                  fab78a8a5401a1ec84a31f296f37dc61857fe8f0
+Toolbox blob                           23689f19140637058158c31b4864c7feea4821b0
 ```
 
-The installer verifies exact blobs and syntax before commit. `P07_INIT16_TEST_FAIL=1` fault injection proves a failed init16 upgrade restores the exact pre-run init15 installation tree rather than leaving a partial upgrade.
-
-The older layered chain below init15 remains historical fixed infrastructure and is not the current identity.
-
-## 7. guided-init16 Machine / distribution closure
-
-Canonical evidence:
-
-- `docs/evidence/P07_GUIDED_INIT16_R2_ONBOARDING_MACHINE_CLOSURE_20260911.md`
-- `docs/evidence/P07_GUIDED_INIT12_REAL_R1_DBADD_CLOSURE_20260911.md` — retained Restore-As remediation evidence
-- `docs/evidence/P07_GUIDED_INIT10_CLOUDPANEL_FOUNDATION_MACHINE_CLOSURE_20260911.md` — retained CloudPanel foundation evidence
-- `docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md` — historical Real engineering evidence for its exact older identities
-
-Dedicated init16 public gate:
+Machine / Distribution evidence：
 
 ```text
-PR #846 run 34670251605      PASS
-main run 34670304430         PASS
-System Care main 34670304410 PASS
+Exact-source Terminal UX V2 Gate       36651107701 PASS
+Release8 Distribution Gate             36651592677 PASS
+Toolbox Smoke                           36651592618 PASS
+Public Runner Scope Gate                PASS
+Public Runner Archive Integrity Gate    PASS
 ```
 
-The dedicated gate proves:
+旧 release6 / release7 / guided-init 身份型 workflow 在 release8 candidate 上可能因旧固定身份断言而失败；这不代表 release8 Runtime 行为失败。release8 owning exact-source 与 distribution Gate 已覆盖当前源码、Runtime manifest、页面隔离、Lazy Install、隔离安装、重复执行短路、机器输出和安全边界。
+
+Production truth 仍独立：
 
 ```text
-exact init16 blobs                                 PASS
-combined current runtime                           PASS
-Google OAuth tests                                 PASS
-onboarding UX tests                                PASS
-storage_setup regression                           PASS
-auto_backup regression                             PASS
-first-run / scheduler guard regression             PASS
-preparation-first + secret-boundary contract       PASS
-init15 → injected init16 failure exact rollback    PASS
-init15 → init16 normal upgrade                     PASS
-stable p07.sh route                                PASS
-permanent Toolbox route                            PASS
-System Care RC12 preservation at guided-init16     PASS / HISTORICAL
+Production currently verified Slot 3 Build   0.1.0-release3
+release8 Production install                  NOT_YET_OWNER_VERIFIED
+Migration executed                           NO
+DNS write                                    NO
+SOURCE delete                                NO
+Restore overwrite                            NO
+Resource Safe Apply                          NO
 ```
 
-## 8. Ordinary-user safety boundary
+Public Distribution 不得解释为 Production 已升级。
+
+
+## 18. Slot 3 release9 Ops Console
+
+2026-09-30：0.1.0-release9 已分发到 public main `e053b8a0c87034868f2e6aeb5a847b96acca8bae`。新增诊断中心、最近操作、P07 自检和新 VPS 初始化入口。Exact-source Gate `36654984844` PASS；Distribution Gate `36655669100` PASS。Production 仍以 Owner 已验证 release3 为准，release9 尚未正式机验收。
+
+
+## 19. Slot 3 release10 小白化中文菜单
+
+2026-09-30，Owner 真实 FinalShell 截图确认 P07 普通菜单仍有两个问题：
 
 ```text
-DNS automatic mutation                        DENY
-SOURCE / old-server automatic deletion        DENY
-TARGET existing same-domain overwrite         DENY
-SOURCE-domain certificate reuse on Restore-As DENY
-site / DB / panel-user delete in ordinary UX  DENY / NOT EXPOSED
-manual empty TARGET prerequisite              DENY
-normal-user naked rclone config UX             DENY
-Google account password request               DENY
-Google Client Secret argv exposure            DENY
-Google Client Secret terminal echo            DENY
-plaintext Recovery Key persistence             DENY
-secret output in logs                          DENY
-scheduler before required first verification  DENY
-old PASS covering newly added sites            DENY
-runtime self-claim of REAL_PASS                DENY
+1. Toolbox 主菜单把版本号与“可用”用手工空格拼在每一行，视觉错乱；
+2. APT / systemd / Swap / OOM / SSH / SSL / Varnish / 2FA / Vhost / rclone 等工程词直接暴露给普通用户。
 ```
 
-If a current transaction fails, P07 may roll back only resources/configuration created or changed by that transaction. SOURCE and DNS remain outside automatic mutation scope.
-
-## 9. Current Real evidence and acceptance boundary
-
-Historical Owner Restore-As failures remain evidence and are not erased by later Machine fixes:
+release10 建立 Beginner Chinese Menu Contract：
 
 ```text
-R1 attempt #1  guided-init10  MYSQL_CREATE_IMPORT_VERIFY / CloudPanelError
-R1 attempt #2  guided-init11  db_add exit=1
+菜单：只说“用户想做什么”
+说明：必要时补充技术名词（括号）
+详情 / 高级页：才保留工程词
 ```
 
-The current required Real sequence remains:
+Toolbox 主菜单改为：
 
 ```text
-R1 Current Real Restore-As New Domain             RETRY_REQUIRED / NOT_PASS
-R2 Current Full Local + Google + B2 First Verify  NOT_RUN
-R3 Current Guarded Scheduler Real Gate            NOT_RUN
-R4 Current Guided Cross-VPS Restore/Migration     NOT_RUN
-CURRENT_RC3_REAL_OWNER_USER_PASS                  NOT_PROVEN
+功能状态：4 项均可用
+
+1. 网络代理节点（V2Ray）
+2. 服务器性能检测（VPS 验机）
+3. 网站备份 / 恢复 / 迁移（CloudPanel）
+4. 系统维护 / 安全
+0. 退出
 ```
 
-The init16 Machine closure does not promote any of these Real gates.
+不再在每行显示版本 / 可用列；版本进入对应功能后查看。
 
-R2 can become `REAL_PASS` only after the Owner VPS uses the current permanent Toolbox/init16 flow, completes Google+B2 onboarding, refreshes the current CloudPanel site inventory, and successfully completes the required Local + Google + B2 first verification for the current site set.
-
-R3 may run only after that current first-verification evidence exists. R4 still requires genuine cross-VPS execution evidence.
-
-Until R1-R4 are complete, Slot 3 remains `测试中`.
-
-## 10. Workflow / governance anomaly classification
-
-Some older P07 workflows still encode a previous current BUILD_ID such as guided-init14 and may stop at an identity/setup assertion before running behavioral tests. Those red runs are current-identity migration debt, not proof that unchanged CloudPanel or Restore-As behavior failed.
-
-Repository-global Public Runner Trigger / Workflow Archive findings remain separate pre-existing S01 governance debt. P07 must not mutate unrelated S01 history merely to manufacture green.
-
-## 11. Current classification
+System Care 与 Slot 3 同步小白化：
 
 ```text
-GUIDED_INIT16_SOURCE                         CURRENT / MERGED_TO_CANDIDATE
-PUBLIC_GUIDED_INIT16_DISTRIBUTION            MAIN / TESTING
-GUIDED_INIT16_R2_ONBOARDING_MACHINE_GATE     PASS
-GUIDED_INIT16_TRANSACTION_ROLLBACK_GATE      PASS
-GUIDED_INIT16_STABLE_TOOLBOX_ROUTING_GATE    PASS
-SYSTEM_CARE_RC15                             MAIN / MACHINE_PASS
-RESOURCE_PROFILE_1C_2G_BALANCED              PRODUCTION_CALIBRATED_VERIFIED
-RESOURCE_PROFILE_2C_4G_BALANCED              CANDIDATE / REAL_NOT_RUN
-RESOURCE_SAFE_APPLY_PRODUCTION               NOT_RUN
-SYSTEM_CARE_RC14_PRODUCTION_INSTALL           PASS / HISTORICAL
-SYSTEM_CARE_RC15_PRODUCTION_INSTALL           PASS
-SYSTEM_CARE_RC15_PERMANENT_ROUTE              PASS
-CLOUDPANEL_FOUNDATION_COMPLETE               MACHINE_PASS
-RESTORE_AS_IMPLEMENTATION                    MACHINE_PASS
-CURRENT_RESTORE_AS_NEW_DOMAIN_REAL_VPS       RETRY_REQUIRED / NOT_PASS
-CURRENT_GOOGLE_B2_ALL_SITE_FIRST_VERIFY      NOT_RUN
-CURRENT_GUARDED_SCHEDULER_REAL_GATE          NOT_RUN
-CURRENT_CROSS_VPS_GUIDED_MIGRATION_REAL      NOT_RUN
-CURRENT_RC3_REAL_OWNER_USER_PASS             NOT_PROVEN
-MENU3_PUBLIC_STATUS                          TESTING
-FORMAL_TAG_RELEASE                           NOT_AUTHORIZED
-PRODUCTION_CUTOVER                           NOT_AUTHORIZED
-DNS_CUTOVER                                  NOT_RUN
-SOURCE_RETIREMENT                            NOT_RUN
+APT               -> 软件安装缓存 / 系统更新
+systemd journal   -> 系统运行日志
+Swap              -> 虚拟内存（Swap）
+SSH               -> 远程登录（SSH）
+SSL               -> HTTPS 证书
+Varnish           -> 网站加速缓存（Varnish）
+2FA               -> 两步验证（2FA）
+Vhost             -> 网站配置模板（Vhost）
+rclone            -> 异地备份组件（rclone）
+VPS               -> 服务器（必要时括号保留 VPS）
 ```
 
-## 12. Slot 4 Resource Intelligence RC14 current truth
-
-On 2026-09-26, P07 System Care Slot 4 advanced from RC12 to RC14 on public main.
-
-Current public main after the route-contract follow-up:
+Slot 3 普通菜单同时统一：
 
 ```text
-core-free-runner-public main                  6c83875527271b90ddfc42cf9892d2e100e37813
-System Care current package                   0.1.0-rc14
-System Care manifest blob                     8c0498949d2ec5c255ba14c25e9cdbe0ce82c83e
-Toolbox SYSTEM_CARE_EXPECTED                  0.1.0-rc14
+服务器与网站概况
+自动备份 / 异地备份
+面板管理（CloudPanel）
+新服务器初始化
+HTTPS 证书状态
+申请免费 HTTPS 证书（Let’s Encrypt）
+网站加速缓存（Varnish）
+面板登录安全
+两步验证（2FA）
+异地备份设置
+远程连接与文件同步组件（SSH / rsync）
 ```
 
-RC14 provides:
+最后一次完整回归还发现“主菜单已改为服务器与网站概况，但页面标题仍为旧文案”，已作为真实遗漏修复，不以修改测试绕过。
+
+当前身份：
 
 ```text
-Resource Profile Engine
-1G / 2G / 4G / 8G / Custom
-1 / 2 / 4 vCPU / Custom
-Conservative / Balanced / Performance
-Production read-only calibration
-Safe Plan
-Backup → Validate → CAP-ONLY Apply → Verify → Receipt → Rollback
+P07 public product version             V0.1.0
+Slot 3 Build                           0.1.0-release10
+Private source main                    90217676ca343b0a64de3d072d824ece17f6bad2
+Public distribution main               0567d9cbfe8cd83cd3569f6bc37880bfca523cdd
+Runtime manifest blob                  623d479a86aba977f98047c5edb1d42ebd12dbd0
+Final installer blob                   9b3f168edf0e1dee2b79476dfddc709b76648d98
 ```
 
-First Production-calibrated profile:
+Machine / Distribution evidence：
 
 ```text
-VF-RP-2G-1C-BALANCED                         PRODUCTION_CALIBRATED_VERIFIED
-Real Production read-only reconciliation      PASS
-MySQL expected settings                       5 / 5 KEEP
-Referenced PHP pools                          16 / 16 KEEP
-Unexpected CHANGE                             0
-Production Apply                              NOT_RUN
+Release10 exact-source Gate            36677009690 PASS
+Release10 Distribution Gate            36677155521 PASS
+Toolbox Smoke                           36677155588 PASS
+System Care Smoke                       36677155502 PASS
+Beginner Menu Gate                      PASS
+Runner Trigger Scope                    PASS
+Archive Integrity                       PASS
 ```
 
-Main proof for the RC14 content merge at `28b4dde1bbf3a71aafd476c57bd953872ea28609`:
+Production truth 保持独立：
 
 ```text
-P07 System Care Smoke #236                    SUCCESS
-P07 Toolbox Smoke #343                        SUCCESS
-P07 System Care Real Mutation Smoke #16       SUCCESS
-Public Runner Current Self Test #709          SUCCESS
+Production currently verified Slot 3 Build   0.1.0-release3
+release10 Production install                 NOT_YET_OWNER_VERIFIED
+Migration executed                           NO
+DNS write                                    NO
+SOURCE delete                                NO
+Restore overwrite                            NO
+Resource Safe Apply                          NO
 ```
 
-The first main push exposed one stale Slot 3 workflow assertion that still hard-coded System Care RC12. Slot 3 implementation checks themselves passed; only the old route identity assertion failed.
+Public Distribution 不得解释为 Production 已升级。
 
-That workflow contract was repaired by PR #1382 and merged. Current main became `6c83875527271b90ddfc42cf9892d2e100e37813`.
 
-Post-fix main proof:
+## 20. release11 菜单 3 / 4 重构与恢复可靠性
+
+Owner 真实 FinalShell 验证暴露出四类问题：网站概况工程信息过多且出现 ANSI 转义文本；刚创建的备份在恢复前 fresh verification 失败；P07 自检错误要求不存在于运行包的 Authority 文档；菜单 3 混入诊断、自检、初始化等服务器运维能力。
+
+release11 固化两条用户主线：
 
 ```text
-P07 Server Ops RC3 R2 One-Click Onboarding #28 SUCCESS
-Public Runner Current Self Test #710            SUCCESS
+主菜单 3 = 网站与数据
+主菜单 4 = 服务器维护 / 安全
 ```
 
-This Slot 4 promotion does not alter Slot 3 Real gate truth:
+菜单 3：
 
 ```text
-R1 Current Real Restore-As New Domain             RETRY_REQUIRED / NOT_PASS
-R2 Current Full Local + Google + B2 First Verify  NOT_RUN
-R3 Current Guarded Scheduler Real Gate            NOT_RUN
-R4 Current Guided Cross-VPS Restore/Migration     NOT_RUN
-CURRENT_RC3_REAL_OWNER_USER_PASS                  NOT_PROVEN
+1. 网站与服务器概况
+2. 备份与恢复
+3. 服务器迁移
+4. 网站管理
+5. 面板管理（CloudPanel）
+0. 返回
 ```
 
-Merge / Distribution / Production Apply remain separate states. RC14 being current on public main does not mean a Production Safe Apply was executed.
-
-## 13. Slot 4 RC14 Production installation closure
-
-On 2026-09-26, the Owner executed the permanent public System Care route on the current DigitalOcean Production server.
-
-Pre-install observation:
+菜单 4：
 
 ```text
-System Care installed                         NO / NOT_INSTALLED
-Production server                             1 vCPU / 1973 MB detected / 2047 MB Swap
+1. 服务器体检
+2. 日常维护
+3. 安全检查
+4. 新服务器初始化
+5. P07 检查 / 修复
+6. 最近操作
+0. 返回
 ```
 
-Permanent distribution readback before install:
+恢复可靠性修复：
 
 ```text
-Toolbox SYSTEM_CARE_EXPECTED                  0.1.0-rc14
-Toolbox System Care installer                 main/installers/p07-system-care.sh
-Installer VERSION                             0.1.0-rc14
-Installer MANIFEST_BLOB                       8c0498949d2ec5c255ba14c25e9cdbe0ce82c83e
-PERMANENT_ROUTE                               PASS
-INSTALLER_IDENTITY                            PASS
+- 备份 metadata 不再保留指向源服务器实时文件的外部 symlink；
+- 包写入 / fresh verify 对外部 symlink fail closed；
+- 恢复列表只展示当前仍通过 fresh verification 的备份；
+- 恢复失败默认中文解释，不直接把 Python / CloudPanel 工程异常原文扔给普通用户；
+- 自检只验证实际安装运行文件，不再把 docs/authority/P07_INTEGRATION_MANIFEST.json 当 Runtime 必需文件；
+- 修复确认改为中文“修复”，不再要求输入 REPAIR。
 ```
 
-Production install / capability verification:
+当前身份：
 
 ```text
-Installed System Care                         0.1.0-rc14
-Resource menu                                 PASS
-resource_profile.py                           PRESENT
-resource_apply.py                             PRESENT
-Production read-only calibration              PASS
-Safe Plan                                     ELIGIBLE
-MySQL expected settings                       5 / 5 KEEP
-Referenced PHP pools                          16 / 16 KEEP
-Unexpected CHANGE                             0
+Slot 3 Build                           0.1.0-release11
+Slot 4 System Care                     0.1.0-rc18
+Private source main                    9e4df79c2c6918d6d61d7413b1e856ddb162bcda
+Public distribution main               3f5210fc8c4123fe168298d6a85abfc47845ecf0
+Runtime manifest blob                  6cdba91349d0f4659f06ddb89b5a30d86273ef38
+Final installer blob                   54680a674367dfb32a434c267bb5f19eedee0af7
+Stable installer blob                  8da410897f11b47330653f82b11a0769ad8cdfc8
+Toolbox blob                           c5bad778f56e9f43ad083f25abeedbdc3c277fe2
 ```
 
-The post-install runtime measurement changed the PHP Worker RSS reference from the earlier idle/fallback observation to 132 MB, and the aggregate PHP child budget adapted from 7 to 5 while the single-core hot-pool ceiling remained 2. This is expected adaptive behavior; the Production plan still reconciled all real referenced pools as KEEP.
-
-Write/restart proof:
+Evidence：
 
 ```text
-MySQL/PHP/WP-Cron config bytes                UNCHANGED
-cron PID                                      UNCHANGED
-nginx PID                                     UNCHANGED
-mysql PID                                     UNCHANGED
-php7.3-fpm PID                                UNCHANGED
-php8.3-fpm PID                                UNCHANGED
-php8.4-fpm PID                                UNCHANGED
-Swap                                          UNCHANGED
-Production Safe Apply                         NOT_RUN
+Release11 exact-source Gate            36684513855 PASS
+Release11 Distribution Gate            36686124730 PASS
+Toolbox Smoke                           36686124599 PASS
+System Care Smoke                       36686124872 PASS
+Beginner Menu Gate                      PASS
+Runner Trigger Scope                    PASS
+Archive Integrity                       PASS
 ```
 
-Required services remained active after installation.
+旧 release6/7/8/9/10 Distribution workflows 对 release11 失败属于历史固定身份工作流，不作为 release11 owning Gate。
 
-Resource observation at closure:
+Production truth 仍独立：
 
 ```text
-RAM total                                     1.9 GiB
-RAM used                                      1.3 GiB
-RAM available                                 624 MiB
-Swap used                                     ~409 MiB / 2 GiB
-Load average                                  0.76 / 0.63 / 0.57
+Production verified Slot 3 Build        0.1.0-release3
+release11 Production install            NOT_YET_OWNER_VERIFIED
+Production System Care                  0.1.0-rc15
+Migration executed                      NO
+DNS write                               NO
+SOURCE delete                           NO
+Restore overwrite                       NO
+Resource Safe Apply                     NO
 ```
 
-Final Production installation classification:
+## Slot 3 release12 备份新鲜度 / 恢复可见性 distribution closure
+
+2026-09-30 的 OWNER 真实服务器使用暴露了一个 release11-era 备份/恢复缺口：刚创建的 `123.kewaro.com` 备份在界面中显示“已验证，可恢复”，但紧接着进入恢复列表时没有被列出。该真实会话没有独立回读当时已安装的内部 Build，因此此证据只证明产品行为失败，不反向修改 Production 的 exact Build identity。
+
+release12 将该失败收敛为 B44：
 
 ```text
-P07_SYSTEM_CARE_RC14_PRODUCTION_INSTALL       PASS
-P07_PERMANENT_DISTRIBUTION_READBACK           PASS
-P07_RESOURCE_CALIBRATION_AFTER_INSTALL        PASS
-RESOURCE_SAFE_APPLY                           NOT_RUN
-MYSQL_CONFIG_WRITE                            NONE
-PHP_CONFIG_WRITE                              NONE
-SERVICE_RESTART                               NONE
-SWAP_WRITE                                    NONE
+MySQL 导出结束
+→ 等待导出文件无外部写入且稳定
+→ 完整读取 gzip
+→ 写入 checksum
+→ staging verify
+→ atomic commit
+→ final fresh verify
+→ 成功后才允许显示“已验证，可恢复”
 ```
 
-A local rollback location was retained at installation time:
+恢复列表不再吞掉 fresh verification 异常并伪装成“没有备份”；不能恢复的本地备份会保持 fail-closed，并用中文显示阻断原因。与此同时，`lib/inventory.py` 被正式加入 Runtime manifest，避免基础包旧 renderer 继续显示 CloudPanel CLI 的整段工程输出；当前解析只显示版本号，例如 `6.0.8`。
+
+Exact identities：
 
 ```text
-/root/p07-system-care-before-rc14-20260926-041103
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release12
+Exact runtime source merge            e4a72657cc87ff970012c7e89adf4ba143cd0a44
+Public distribution main              ec8d2587c411b36178c12160960a8ea3bf62cf6c
+Runtime manifest blob                 5a278aec6d9a49c257589f762d8abeb09847f990
+Full overlay manifest blob            d743dc37bf6d7fd5649513b24372d30f205a0400
+Final installer blob                  61ef13cd9de032000c5da1ad496429f03b72cf09
+Stable installer blob                 cfb88ff2491dc9fb606e087256dab502d0f285a7
+Toolbox blob                          121dbebdf9c3e85577be0a279c00b177012e8475
+Inventory runtime blob                fe988adcbe76d31c1f13dfb0dade4443868f9210
 ```
 
-Because System Care was not installed before this run, the rollback directory is retained as transaction evidence but is not evidence of a prior installed System Care version.
-
-This closes Distribution + Production Installation for Slot 4 RC14 only. It does not promote Slot 3 R1-R4, does not execute Resource Safe Apply, and does not authorize Source retirement or DNS mutation.
-
-## 14. Slot 4 Resource Calibration Registry RC15 current truth
-
-On 2026-09-26, P07 System Care advanced on public main from RC14 to RC15.
-
-RC15 does not change the existing resource recommendation formulas. It introduces a Calibration Registry so recommendation math and Production verification state are separate truths.
-
-Current public main:
+Machine / Distribution proof：
 
 ```text
-core-free-runner-public main                  99b2552606c68b6b278e3310b0cb2a0006474ad9
-System Care current package                   0.1.0-rc15
-System Care manifest blob                     e22557ae08fb79a13dffda6fbc91b34cdaf7ca1e
-Toolbox SYSTEM_CARE_EXPECTED                  0.1.0-rc15
+Release12 Exact-source Gate           36699115238 PASS
+Release12 Distribution Gate           36701825127 PASS
+Toolbox Smoke                         36701825096 PASS
+System Care Smoke                     36701825068 PASS
+Beginner Menu Gate                    36701825112 PASS
+Public Runner Trigger Scope           36701825010 PASS
+Workflow Archive Integrity            36701825140 PASS
 ```
 
-Registry states:
+Release12 Distribution Gate 还在隔离路径证明：
 
 ```text
-PRODUCTION_VERIFIED
-CANDIDATE
-PREVIEW_ONLY
+focused backup / restore regressions  PASS
+isolated current-runtime install      PASS
+second install short-circuit          PASS
+inventory.py installed by Runtime     PASS
+CloudPanel long CLI output → 6.0.8    PASS
+DNS / SOURCE delete / overwrite       NOT_RUN
+Production write                      NOT_RUN
 ```
 
-Initial registry truth:
+Current Production truth 不由 Public Distribution 推导：
 
 ```text
-VF-RP-2G-1C-BALANCED                         PRODUCTION_VERIFIED
-VF-RP-4G-2C-BALANCED                         CANDIDATE
-all other non-registered profiles             PREVIEW_ONLY
+Production exact verified Slot 3 Build  0.1.0-release3
+release12 Production install            NOT_YET_OWNER_VERIFIED
+release12 Owner Real Use                PENDING
+Migration executed                      NO
+DNS write                               NO
+SOURCE delete                           NO
+Restore overwrite                       NO
+Resource Safe Apply                     NO
 ```
 
-Safe Apply is now registry-gated. A recommendation can be numerically valid while still being blocked from automatic Production mutation.
+OWNER 后续通过永久一行 Toolbox 路由升级后，需要用**新创建的备份**重新验证“立即备份 → 立即进入恢复列表 → 可选中备份 → 受控恢复”的 Real path。旧失败备份不能替代 release12 Real proof。
 
-2C/4GB Balanced candidate baseline:
+## Slot 3 release13 source closure · Public Distribution pending
+
+2026-09-30，OWNER 在永久 Toolbox 路径重新创建 `123.kewaro.com` 备份时，release12 真实服务器仍在备份阶段 fail closed：
 
 ```text
-innodb_buffer_pool_size                       512M
-max_connections                               120
-tmp_table_size                                48M
-max_heap_table_size                           48M
-table_open_cache                              2000
-hot PHP pool ceiling                          4
-low-traffic PHP ceiling                       2
-Swap recommendation                           2GB
+备份完整性检查没有通过
+阶段：BACKUP
+原因代码：FRESH_VERIFY_NOT_PASS
+原网站未修改
 ```
 
-This 2C/4GB line is not Production-calibrated.
+该证据把 release12 的 Owner Real Use 判定为 **REAL_FAIL**；由于截图没有独立显示 `--build-id` 回读，Production exact installed Build 不从该截图反推，原已验证 Production identity 继续保持 release3。
 
-Machine proof on exact candidate head `a44513cd66a652c7be51ac878929238ebe9c8c94`:
+release13 源码修复：
 
 ```text
-P07 System Care Smoke #237                    SUCCESS
-Resource Profile tests                        11 / 11 PASS
-Resource Safe Apply tests                     12 / 12 PASS
-P07 Toolbox Smoke #344                        SUCCESS
-P07 Server Ops Onboarding #29                 SUCCESS
-Trigger Scope #2047                           SUCCESS
-Archive Integrity #648                        SUCCESS
+CloudPanel export path
+→ external work file only
+→ true detached-writer settle observation
+→ full gzip read
+→ separate P07-owned snapshot
+→ fsync
+→ source/snapshot digest equality
+→ checksum only immutable snapshot
+→ staging verify
+→ atomic commit
+→ final fresh verify
 ```
 
-Main push proof after merge:
+同时普通错误页把机器 token 转成中文：
 
 ```text
-P07 System Care Smoke #238                    SUCCESS
-P07 System Care Real Mutation Smoke #17       SUCCESS
-P07 Toolbox Smoke #345                        SUCCESS
-P07 Server Ops Onboarding #30                 SUCCESS
-Public Runner Current Self Test #711          SUCCESS
+BACKUP                 → 备份
+FRESH_VERIFY_NOT_PASS  → 备份最终完整性复检没有通过
+MYSQL_SNAPSHOT_CHANGED → MySQL 数据库导出在封存时仍发生变化
 ```
 
-A read-only DigitalOcean inventory check found no existing 2C/4GB Droplet. No paid Droplet was created and the current Production server was not resized.
-
-Therefore:
+Exact source evidence：
 
 ```text
-VF-RP-4G-2C-BALANCED_REAL_CALIBRATION         NOT_RUN
-VF-RP-4G-2C-BALANCED_PRODUCTION_VERIFIED      NOT_PROVEN
-VF-RP-4G-2C-BALANCED_AUTO_APPLY               BLOCKED
+Slot 3 source Build                  0.1.0-release13
+Private source main merge            d7cdcd45370bc0a177b4b2dceec38e95a67a3824
+Release13 Exact-source Gate          36705735350 PASS
+Detached delayed atomic replace      PASS
+Focused backup regressions           PASS
+Chinese diagnostic regression        PASS
+Secret / DNS / delete boundary       PASS
 ```
 
-Production installation truth remains separate:
+当前阶段严格保持：
 
 ```text
-Public main System Care                       RC15
-Current Production installed System Care      RC15
-RC15 Production installation                  PASS
-Resource Safe Apply                           NOT_RUN
+release13 Private Source             MERGED
+release13 Public Distribution        NOT_RUN
+release13 Production install         NOT_RUN
+release13 Owner Real Use             NOT_RUN
+Migration / DNS / SOURCE delete      NOT_RUN
+Restore overwrite                    NOT_RUN
 ```
 
-The next Production step is only an RC14 → RC15 System Care software upgrade plus read-only reconciliation. It must not execute Resource Safe Apply and must not change PHP/MySQL/Swap/service state.
+因此 release13 现在是 **Source Ready**，但永久一行 Toolbox 仍指向 public main 的 release12；只有经过单独 Public Distribution Gate 后，OWNER 才能在真实服务器测试 release13。
 
-## 15. Slot 4 RC15 Production upgrade closure
+## Slot 3 release13 immutable MySQL snapshot distribution closure
 
-On 2026-09-26, the Owner upgraded the real DigitalOcean Production server from System Care RC14 to RC15 through the permanent public P07 route.
+release13 已完成 Public Distribution，用来收敛 release12 在 OWNER 真实服务器上的备份阶段失败。release12 的真实失败仍保留为 Real evidence；Machine PASS 不覆盖它。
 
-Pre-upgrade identity:
+release13 的核心修复不是继续延长等待时间，而是把 CloudPanel 导出路径降级为外部工作文件：
 
 ```text
-Installed System Care                         0.1.0-rc14
+CloudPanel export work path
+→ settle + no-open-writer observation
+→ full gzip read
+→ copy to separate P07-owned snapshot
+→ fsync
+→ observe source again
+→ source/snapshot digest equality
+→ checksum only P07-owned snapshot
+→ staging verify
+→ atomic commit
+→ final fresh verify
 ```
 
-Permanent distribution and installer identity:
+普通用户诊断同时改为中文阶段 / 中文原因，不再要求理解 `BACKUP`、`FRESH_VERIFY_NOT_PASS`、`MYSQL_SNAPSHOT_CHANGED`。
+
+Exact identities：
 
 ```text
-Toolbox SYSTEM_CARE_EXPECTED                  0.1.0-rc15
-Toolbox installer                             main/installers/p07-system-care.sh
-Permanent route                               PASS
-RC15 installer identity                       PASS
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release13
+Exact runtime source merge            d7cdcd45370bc0a177b4b2dceec38e95a67a3824
+Public distribution main              cc94582ff03766820e489eb03bfa4f12b343142c
+Runtime manifest blob                 2a3bb3dee14e6236138a86e271dac74df81f17eb
+Full overlay manifest blob            24d2dd09d04e6330a73ec28d928ef9e435a94984
+Final installer blob                  e62cbde514c77270fc75ed9c72d6752776092a36
+Stable installer blob                 1eebe7cd4e8146b38fc056be76501b398a29c078
+Toolbox blob                          011ce3b7e1d7de6a94d036f49c137530a96f7b86
 ```
 
-Upgrade result:
+Machine / Distribution proof：
 
 ```text
-Installed System Care                         0.1.0-rc15
-Calibration Registry files                    PASS
+Release13 Exact-source Gate           36705735350 PASS
+Release13 Distribution Gate           36707407078 PASS
+Toolbox Smoke                         36707407264 PASS
+System Care Smoke                     36707407171 PASS
+Beginner Menu Gate                    36707407121 PASS
+Public Runner Trigger Scope           36707407236 PASS
+Workflow Archive Integrity            36707407314 PASS
 ```
 
-Real 1C/2GB read-only reconciliation:
+Distribution Gate 还证明：
 
 ```text
-Profile                                       VF-RP-2G-1C-BALANCED
-Calibration                                  PRODUCTION_VERIFIED
-Apply State                                  ELIGIBLE
-MySQL expected settings                       5 / 5 KEEP
-Referenced PHP pools                          16 / 16 KEEP
-Unexpected CHANGE                             0
-Production calibration                        READ_ONLY_COMPLETE
+Public overlay focused regressions    PASS
+detached delayed atomic replace       PASS
+isolated release13 runtime install    PASS
+second install short-circuit          PASS
+beginner Chinese diagnostics          PASS
+DNS / SOURCE delete / overwrite       NOT_RUN
+Production write                      NOT_RUN
 ```
 
-Registry matrix readback:
+Current Production truth 继续独立：
 
 ```text
-VF-RP-2G-1C-BALANCED                         PRODUCTION_VERIFIED
-VF-RP-4G-2C-BALANCED                         CANDIDATE
-other tested cells                            PREVIEW_ONLY
+Production exact verified Slot 3 Build  0.1.0-release3
+release12 Owner real backup path        REAL_FAIL / FRESH_VERIFY_NOT_PASS
+release13 Production install            NOT_YET_OWNER_VERIFIED
+release13 Owner Real Use                PENDING
+Migration executed                      NO
+DNS write                               NO
+SOURCE delete                           NO
+Restore overwrite                       NO
+Resource Safe Apply                     NO
 ```
 
-Write/restart immutability proof:
+下一次 OWNER 运行永久 Toolbox 后，必须用**新创建的备份**验证 release13 的真实链路。旧失败备份和 Machine PASS 都不能替代 release13 Owner Real Use。
+
+## Slot 3 release14 source closure · Public Distribution pending
+
+2026-09-30，OWNER 在 release13 Public Runtime 上再次创建 `123.kewaro.com` 备份，仍在最终完整性复检阶段 fail closed。与 release12 相比，release13 的中文诊断已生效，但原因仍被归为泛化的“备份最终完整性复检没有通过”。
+
+因此 release14 不再继续猜测 MySQL，而是同时收敛两件事：
 
 ```text
-MySQL/PHP/WP-Cron config bytes                UNCHANGED
-cron PID                                      UNCHANGED
-nginx PID                                     UNCHANGED
-mysql PID                                     UNCHANGED
-php7.3-fpm PID                                UNCHANGED
-php8.3-fpm PID                                UNCHANGED
-php8.4-fpm PID                                UNCHANGED
-Swap                                          UNCHANGED
-Resource Safe Apply                           NOT_RUN
+1. post-commit final verify 使用 bounded stability window；
+2. 最终失败必须归类到具体组件并显示中文原因。
 ```
 
-All required services remained active after the RC15 upgrade.
-
-Resource observation at closure:
+稳定复检规则：
 
 ```text
-RAM total                                     1.9 GiB
-RAM used                                      1.0 GiB
-RAM available                                 923 MiB
-Swap used                                     ~660 MiB / 2 GiB
-Load average                                  0.25 / 0.34 / 0.37
+atomic commit
+→ full verify
+→ full verify
+→ 连续 PASS >= 2
+→ 才允许“已验证，可恢复”
 ```
 
-Final RC15 Production classification:
+持续失败仍然 fail closed；分类至少覆盖 MySQL、SQLite、网站压缩包、metadata、manifest、checksum index、external link 与其它 package file change。
+
+Exact source evidence：
 
 ```text
-P07_SYSTEM_CARE_RC15_PRODUCTION_UPGRADE       PASS
-P07_RC15_PERMANENT_DISTRIBUTION               PASS
-P07_RC15_1C2G_REGRESSION                      PASS
-P07_RC15_CALIBRATION_REGISTRY                 PASS
-VF_RP_2G_1C_BALANCED                          PRODUCTION_VERIFIED
-VF_RP_4G_2C_BALANCED                          CANDIDATE
-RESOURCE_SAFE_APPLY                           NOT_RUN
-MYSQL_CONFIG_WRITE                            NONE
-PHP_CONFIG_WRITE                              NONE
-SERVICE_RESTART                               NONE
-SWAP_WRITE                                    NONE
+Slot 3 source Build                  0.1.0-release14
+Private source main merge            1dd186ef9786cd538d8c55c329f9857aa6dca240
+Release14 Exact-source Gate          36708781490 PASS
+Focused regressions                  PASS
+Stable verifier fail-closed          PASS
+Exact Chinese diagnosis              PASS
+Secret / DNS / delete boundary       PASS
 ```
 
-Rollback evidence retained at:
+当前阶段：
 
 ```text
-/root/p07-system-care-before-rc15-20260926-093327
+release13 Owner Real Use             REAL_FAIL / FINAL_VERIFY_NOT_PASS
+release14 Private Source             MERGED
+release14 Public Distribution        NOT_RUN
+release14 Production install         NOT_RUN
+release14 Owner Real Use             NOT_RUN
+Migration / DNS / SOURCE delete      NOT_RUN
+Restore overwrite                    NOT_RUN
 ```
 
-This closes RC15 Production software upgrade and Registry readback only.
+因此永久一行 Toolbox 目前仍是 Public release13；只有单独完成 release14 Public Distribution Gate 后，OWNER 才能测试 release14。
 
-It does not promote VF-RP-4G-2C-BALANCED beyond CANDIDATE and does not execute Resource Safe Apply.
+## Slot 3 release14 stable final verification distribution closure
+
+release14 已完成 Public Distribution，用来收敛 release13 在 OWNER 真实服务器上的最终完整性复检失败。release13 的真实失败继续保留为 Real evidence；Machine PASS 不覆盖它。
+
+release14 的核心合同：
+
+```text
+atomic commit
+→ full verify
+→ full verify
+→ 连续 PASS >= 2
+→ 才允许“已验证，可恢复”
+```
+
+若最终仍失败，必须 fail closed，并将原因归类到固定安全类别：MySQL、SQLite、网站压缩包、metadata、manifest、checksum index、external link 或其它 package file change。普通用户只看到中文原因，不要求理解机器 token。
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release14
+Exact runtime source merge            1dd186ef9786cd538d8c55c329f9857aa6dca240
+Public distribution main              32d53b8350145f6a229211cc96ea591b1b8045da
+Runtime manifest blob                 e437d91b0ba6f257464659b50858e96a099184ce
+Full overlay manifest blob            543d50ee7eb6bd1870e3fbe007e875132b0d9852
+Final installer blob                  28c92ee9abb0cb36f190567fde2de4fe36305521
+Stable installer blob                 1d3e0dfc2b0ac97afd677fc2109006d193175dc0
+Toolbox blob                          3b3e445cb86e15db29f203b447064a522224ddb7
+```
+
+Machine / Distribution proof：
+
+```text
+Release14 Exact-source Gate           36708781490 PASS
+Release14 Distribution Gate           36710551712 PASS
+Toolbox Smoke                         36710551825 PASS
+System Care Smoke                     36710551566 PASS
+Beginner Menu Gate                    36710551659 PASS
+Public Runner Trigger Scope           36710551743 PASS
+Workflow Archive Integrity            36710551623 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+Public overlay focused regressions    PASS
+stable final verifier                 PASS
+persistent failure fail-closed        PASS
+component-level Chinese diagnosis     PASS
+isolated release14 runtime install    PASS
+second install short-circuit          PASS
+DNS / SOURCE delete / overwrite       NOT_RUN
+Production write                      NOT_RUN
+```
+
+Current Production truth 继续独立：
+
+```text
+Production exact verified Slot 3 Build  0.1.0-release3
+release13 Owner real backup path        REAL_FAIL / FINAL_VERIFY_NOT_PASS
+release14 Production install            NOT_YET_OWNER_VERIFIED
+release14 Owner Real Use                PENDING
+Migration executed                      NO
+DNS write                               NO
+SOURCE delete                           NO
+Restore overwrite                       NO
+Resource Safe Apply                     NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，必须用**新创建的备份**验证 release14 的真实链路；如果仍失败，界面应给出具体组件级中文原因。旧失败备份与 Machine PASS 都不能替代 release14 Owner Real Use。
+
+## Slot 3 release15 SQLite WAL source closure · Public Distribution pending
+
+2026-09-30，OWNER 在真实服务器明确回读安装结果：
+
+```text
+构建：0.1.0-release14
+```
+
+因此 Production exact installed Slot 3 Build 从旧的 release3 更新为 **0.1.0-release14**。同一真实会话随后对 `123.kewaro.com` 执行新备份，release14 fail closed：
+
+```text
+阶段：备份
+原因：SQLite 数据库备份完整性检查失败，P07 已停止使用这个备份。
+```
+
+这证明 release14 的组件级中文诊断已生效，也把真实失败点钉到 SQLite verification。
+
+代码根因：旧 verifier 用 `sqlite/*.glob("*")` 把目录内所有文件都当独立 SQLite 数据库；WAL 模式快照校验可能出现 `-wal` / `-shm` / `-journal` 辅助文件，后续 fresh verify 会把这些辅助文件错误当成数据库执行 `PRAGMA integrity_check`。
+
+release15 固化：
+
+```text
+live WAL SQLite
+→ SQLite Backup API
+→ destination commit
+→ journal_mode = DELETE
+→ integrity_check
+→ close
+→ remove destination -wal / -shm / -journal
+→ checksum
+→ manifest-declared snapshot only
+→ immutable read-only integrity_check
+```
+
+并且 `sqlite/` 中任何未登记普通文件都会 fail closed，不再被误当数据库。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release15
+Private source main merge            63e1ebdb0ce043bcb65ec06dbadc9ee69f162954
+Release15 Exact-source Gate          36724452422 PASS
+WAL source snapshot regression        PASS
+Manifest-only SQLite verification     PASS
+Undeclared WAL/SHM fail-closed        PASS
+Beginner Chinese diagnosis            PASS
+Secret / DNS / delete boundary        PASS
+```
+
+当前阶段：
+
+```text
+Production exact installed Slot 3    0.1.0-release14
+release14 Owner Real Use             REAL_FAIL / SQLITE_INTEGRITY
+release15 Private Source             MERGED
+release15 Public Distribution        NOT_RUN
+release15 Production install         NOT_RUN
+release15 Owner Real Use             NOT_RUN
+Migration / DNS / SOURCE delete      NOT_RUN
+Restore overwrite                    NOT_RUN
+```
+
+因此永久一行 Toolbox 当前仍为 Public release14；只有单独完成 release15 Public Distribution Gate 后，OWNER 才能测试 release15。
+
+## Slot 3 release15 SQLite WAL verification distribution closure
+
+release15 已完成 Public Distribution，用来收敛 release14 在 OWNER 真实服务器上的 SQLite 完整性失败。release14 的真实失败继续保留为 Real evidence；Machine PASS 不覆盖它。
+
+release15 的核心合同：
+
+```text
+live SQLite（可能 WAL）
+→ SQLite Backup API
+→ destination commit
+→ journal_mode = DELETE
+→ integrity_check
+→ close
+→ remove destination -wal / -shm / -journal
+→ checksum
+→ manifest-declared SQLite snapshot only
+→ immutable read-only integrity_check
+```
+
+额外 fail-closed：
+
+```text
+sqlite/ 中出现未登记普通文件
+→ FAIL
+→ 中文提示“SQLite 备份目录出现未登记的辅助文件”
+```
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release15
+Exact runtime source merge            63e1ebdb0ce043bcb65ec06dbadc9ee69f162954
+Public distribution main              75ffa26993d79e0d9768c2d0ef13fe42c9ffda25
+Runtime manifest blob                 eb0d6635e846a19822b354fd114e7c8a74d4fac6
+Full overlay manifest blob            9fba2e9207831df97df60a9dd3452fe25c1aa70d
+Final installer blob                  29009fcf49fd79458e391103bbe8be1a868c4c4b
+Stable installer blob                 5c35e9e05a0f99e559e79c930e118761e07d3d04
+Toolbox blob                          1860eeea3b939c8ca5a475af20c2ef295542ce75
+```
+
+Machine / Distribution proof：
+
+```text
+Release15 Exact-source Gate           36724452422 PASS
+Release15 Distribution Gate           36726942820 PASS
+Toolbox Smoke                         36726942702 PASS
+System Care Smoke                     36726942525 PASS
+Beginner Menu Gate                    36726943008 PASS
+Public Runner Trigger Scope           36726942502 PASS
+Workflow Archive Integrity            36726942585 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+Public overlay WAL-source regression   PASS
+manifest-only SQLite verification      PASS
+undeclared WAL/SHM fail-closed         PASS
+isolated release15 runtime install     PASS
+beginner Chinese diagnosis             PASS
+second install short-circuit           PASS
+DNS / SOURCE delete / overwrite        NOT_RUN
+Production write                       NOT_RUN
+```
+
+说明：历史 release6/7/8/9/10/11/12/13/14 和旧 Stable/R2 Gate 中仍有硬编码旧 Build 的 Workflow，在 release15 PR 上出现身份失败属于 workflow archive debt，不作为 release15 owning evidence。release15 owning Gate 与当前通用 Toolbox / System Care / Beginner Menu / Runner Scope / Archive Integrity 均已 PASS。
+
+Current Production truth 继续独立：
+
+```text
+Production exact installed Slot 3 Build  0.1.0-release14
+release14 Owner real backup path         REAL_FAIL / SQLITE_INTEGRITY
+release15 Production install             NOT_YET_OWNER_VERIFIED
+release15 Owner Real Use                 PENDING
+Migration executed                       NO
+DNS write                                NO
+SOURCE delete                            NO
+Restore overwrite                        NO
+Resource Safe Apply                      NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，必须用**新创建的备份**验证 release15 的真实链路。只有新备份成功通过验证并出现在恢复列表，才能推进真正恢复测试。
+
+## Slot 3 release15 Owner Real Backup PASS · Restore list next
+
+2026-10-01，OWNER 在真实 DigitalOcean / CloudPanel 服务器上通过永久 Toolbox 路径新建 `123.kewaro.com` 备份，终端截图显示：
+
+```text
+P07 · 备份完成
+已创建并通过恢复校验
+
+备份完成 ✓
+网站：123.kewaro.com
+大小：2.7M
+状态：已验证，可恢复
+位置：/var/backups/vf-server-ops/123.kewaro.com_20261001T024818Z
+DNS：未修改 · 源服务器：保留
+```
+
+这证明 release15 分发之后的真实备份链已经从 release14 的 SQLite integrity fail 推进到：
+
+```text
+OWNER_REAL_BACKUP = PASS
+BACKUP_CREATED = YES
+FRESH_VERIFY = PASS
+RECOVERABLE_FLAG = YES
+DNS_WRITE = NO
+SOURCE_DELETE = NO
+```
+
+但本张截图没有同时显示 `--build-id` / 安装页，因此不单凭该截图把 Production exact installed Build 从已证实的 release14 改写成 release15。release15 安装身份仍需同一真实会话中的独立 Build 回读，或后续截图证据。
+
+下一步仅验证：
+
+```text
+备份与恢复
+→ 从备份恢复网站
+→ 新备份必须出现在恢复列表
+```
+
+只有恢复列表 PASS 后，才进入单独高风险 Restore-As-New Real Gate；不得直接覆盖现有网站。
+
+## Slot 3 release16 Restore-As SQLite source closure · Public Distribution pending
+
+2026-10-01，OWNER 使用新备份 `123.kewaro.com_20261001T024818Z` 进入恢复流程：
+
+```text
+恢复列表：
+1. 123.kewaro.com (2026-10-01T02:48:18+00:00)
+另外有 2 个旧备份未通过当前复检，已禁止恢复。
+```
+
+因此：
+
+```text
+RESTORE_LIST = PASS
+OLD_INVALID_BACKUPS = FAIL_CLOSED
+```
+
+随后 OWNER 选择“恢复为新网站”，输入 `455.kewaro.com` 并显式确认真实 Restore-As 写入。P07 创建 / 恢复 / 自动验证过程中 fail closed：
+
+```text
+Restore-As-New = REAL_FAIL
+SOURCE = retained / unchanged
+DNS = unchanged
+existing source overwrite = NO
+```
+
+截图没有给出内部 failure stage，也没有独立证明新目标清理结果，因此不虚报 target cleanup PASS。
+
+源码核对发现 Restore-As 与成熟 sandbox 恢复路径不一致：
+
+```text
+backup files/site.tar.gz = 整站 broad archive，可能包含 live SQLite + WAL/SHM
+backup sqlite/           = SQLite Backup API 生成的 canonical consistent snapshot
+
+旧 Restore-As：
+extract broad archive
+→ 直接 verify archived SQLite against canonical snapshot
+→ WAL/live bytes 可能不一致
+→ fail
+
+sandbox path：
+extract broad archive
+→ restore canonical sqlite snapshot
+→ verify
+```
+
+release16 将 Restore-As 统一到正确顺序：
+
+```text
+extract broad site archive
+→ restore manifest-declared canonical SQLite snapshots
+→ remove archived -wal / -shm / -journal
+→ regular-file verify excludes SQLite main + sidecars
+→ immutable SQLite verify
+→ MySQL / config remap / ownership / atomic commit
+→ local Host / SNI verify
+```
+
+同时 Restore-As 错误页保留固定中文阶段，例如 CloudPanel 建站、SQLite 快照恢复、文件验证、MySQL、应用配置改写、原子提交、WordPress 域名、权限、本机 Host / SNI；不向普通用户输出原始 stderr / secret。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                    0.1.0-release16
+Private source main merge              bb5b92f2b6cfa2bd63a6dcca3d837f34bfb0ef88
+Release16 Exact-source Gate            36808626280 PASS
+Archived stale SQLite/WAL regression   PASS
+Canonical snapshot restore ordering    PASS
+Restore-As focused regressions         PASS
+Bounded site UI                        PASS
+Secret / DNS / source safety           PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution            0.1.0-release15
+Production exact independently proven  0.1.0-release14
+release15-era backup                    PASS
+release15-era restore list              PASS
+release15-era Restore-As-New            REAL_FAIL
+release16 Private Source                MERGED
+release16 Public Distribution           NOT_RUN
+release16 Production install            NOT_RUN
+release16 Owner Real Use                NOT_RUN
+Migration / DNS / SOURCE delete         NOT_RUN
+Existing target overwrite               NOT_RUN
+```
+
+只有单独完成 release16 Public Distribution Gate 后，OWNER 才应再次创建 / 选择已验证备份并测试 Restore-As-New。恢复属于高风险独立 Gate，不从 Source/Machine PASS 自动推进。
+
+## Slot 3 release16 Restore-As canonical SQLite distribution closure
+
+release16 已完成 Public Distribution，用来收敛 OWNER 在 release15-era 真实恢复链中暴露的 Restore-As-New fail-closed 问题。release15-era 的真实恢复失败继续保留为 Real evidence；Machine PASS 不覆盖它。
+
+release16 固定 Restore-As SQLite 真相来源：
+
+```text
+files/site.tar.gz = broad site archive，可能包含 live SQLite / WAL / SHM
+sqlite/            = manifest-declared canonical SQLite snapshots
+
+Restore-As:
+extract broad site archive
+→ restore canonical SQLite snapshots
+→ remove archived -wal / -shm / -journal
+→ regular-file verification excludes SQLite main + sidecars
+→ immutable SQLite integrity verification
+→ MySQL / application config remap / ownership / atomic commit
+→ local Host / SNI verification
+```
+
+普通错误页同时改为安全中文阶段，不再把真实 `stage=...` 丢成一句泛化错误。阶段至少覆盖 CloudPanel 建站、网站文件、SQLite 快照、文件/SQLite 校验、MySQL、应用配置改写、权限、原子提交、WordPress 域名以及本机 Host / SNI 验证。
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release16
+Exact runtime source merge            bb5b92f2b6cfa2bd63a6dcca3d837f34bfb0ef88
+Public distribution main              850e41b8aeb4d58f930e5e0f9ba432840c8f962e
+Runtime manifest blob                 3461782c9326bd599e841fa437477dabeb472f4c
+Full overlay manifest blob            e71740c9614f500351b3375b35c7c870794e9217
+Final installer blob                  867e5d99ba2eb6241caaafb94dc43753644cc2e4
+Stable installer blob                 36d47f187d45a0f2129afc87a3717994466a5182
+Toolbox blob                          ca80a5d82c91f4adc757e69cc3c10f9731a816c4
+```
+
+Machine / Distribution proof：
+
+```text
+Release16 Exact-source Gate           36808626280 PASS
+Release16 Distribution Gate           36809546508 PASS
+Toolbox Smoke                         36809546788 PASS
+System Care Smoke                     36809546554 PASS
+Beginner Menu Gate                    36809546704 PASS
+Public Runner Trigger Scope           36809546481 PASS
+Workflow Archive Integrity            36809546609 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+public overlay Restore-As regressions  PASS
+archived stale SQLite/WAL regression   PASS
+canonical SQLite restore ordering      PASS
+isolated release16 runtime install     PASS
+restore_failure_ui runtime presence    PASS
+beginner Chinese failure-stage UI      PASS
+DNS / SOURCE delete / overwrite        NOT_RUN
+Production write                       NOT_RUN
+```
+
+说明：旧 Stable Installer Smoke / Final Distribution + R2 Onboarding 仍硬编码 release5，因此在 release16 PR 上的 identity failure 属于历史 workflow debt，不作为 release16 owning evidence。
+
+Current Production truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release14
+release15-era new backup                         PASS
+release15-era restore list                       PASS
+release15-era Restore-As-New                     REAL_FAIL
+release16 Production install                     NOT_YET_OWNER_VERIFIED
+release16 Owner Real Use                         PENDING
+Migration executed                               NO
+DNS write                                        NO
+SOURCE delete                                    NO
+Existing target overwrite                        NO
+Resource Safe Apply                              NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，先确认 Build 已升级到 release16，再使用已验证备份测试“恢复为新网站”。Restore 仍是独立高风险 Gate；Public Distribution 不等于 Production Restore PASS。
+
+## Slot 3 release17 local HTTP probe source closure · Public Distribution pending
+
+2026-10-01，OWNER 在 release16 Public Distribution 之后继续真实 Restore-As-New 测试，目标域名为 `111.kewaro.com`。终端截图显示恢复主体已推进到最终本机验证阶段，但 HTTP 路由探针失败，P07 按 fail-closed 规则回滚新目标：
+
+```text
+新网站已恢复，但本机 HTTP 路由验证没有通过，P07 已回滚新目标。
+DNS 没有修改，原网站没有修改。
+域名解析：未修改 · 原网站：保留
+```
+
+因此本轮真实证据分类为：
+
+```text
+Restore-As core restore path       reached local verification
+Local HTTP verification           REAL_FAIL
+New target retained               NO / rollback path invoked
+DNS write                         NO
+SOURCE mutation                   NO
+```
+
+该截图没有单独显示 `--build-id`，因此不把 Production exact installed Build 从已独立证明的 release14 直接改写为 release16；只记录为 release16 Public Distribution 后的真实 Restore-As 证据。
+
+源码核对发现本机 HTTP/SNI probe 仍有两个真机缺口：
+
+```text
+1. curl 继承服务器代理环境，未强制本机直连；
+2. CloudPanel / Nginx 新站点创建后只探测一次，没有 bounded reload retry。
+```
+
+release17 固化：
+
+```text
+curl --noproxy "*"
++ --resolve target:port:127.0.0.1
++ bounded retry
++ accept any real HTTP status 100..599
++ final failure classify target_vhost=PRESENT / MISSING
++ failure still rolls back new target
+```
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release17
+Private source main merge            3b115516f52f61d535606d89fefbb9877afbf3ef
+Release17 Exact-source Gate          36810512935 PASS
+Direct no-proxy loopback regression  PASS
+Transient retry regression           PASS
+vhost PRESENT/MISSING classification PASS
+Restore-As regressions               PASS
+Rollback / DNS / SOURCE safety       PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution          0.1.0-release16
+Production exact independently proven 0.1.0-release14
+release16-era Restore-As             REAL_FAIL / LOCAL_HTTP_ROUTE
+release17 Private Source             MERGED
+release17 Public Distribution        NOT_RUN
+release17 Production install         NOT_RUN
+release17 Owner Real Use             NOT_RUN
+Migration / DNS / SOURCE delete      NOT_RUN
+Existing target overwrite            NOT_RUN
+```
+
+## Slot 3 release17 local HTTP probe distribution closure
+
+release17 已完成 Public Distribution，用来收敛 OWNER 在 release16-era 真实 Restore-As 中暴露的最终本机 HTTP 路由验证失败。release16-era 的真实失败继续保留为 Real evidence；Machine PASS 不覆盖它。
+
+release17 固化本机验证：
+
+```text
+curl --noproxy "*"
++ --resolve target:port:127.0.0.1
++ bounded retry
++ accept any real HTTP status 100..599
++ final failure classify target_vhost=PRESENT / MISSING
++ failure still rolls back new target
+```
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release17
+Exact runtime source merge            3b115516f52f61d535606d89fefbb9877afbf3ef
+Public distribution main              7240858005bc29bb4a705a95ab1e8126862c940c
+Runtime manifest blob                 a783b1cbdb9473ea73cf263d0a7b2b798c9c8b3d
+Full overlay manifest blob            40f8d364c92a25ebcddf70146a32e1d980b6c311
+Final installer blob                  d988fcb80e1c196254d0e8a1ae66f2244ea64867
+Stable installer blob                 12fcc03c7818487b1c19be0fd096e0b49ae6f71c
+Toolbox blob                          b1928d11294b7103d6ae9ab44051812f45d49f51
+```
+
+Machine / Distribution proof：
+
+```text
+Release17 Exact-source Gate           36810512935 PASS
+Release17 Distribution Gate           36811305606 PASS
+Toolbox Smoke                         36811305815 PASS
+System Care Smoke                     36811305720 PASS
+Beginner Menu Gate                    36811305588 PASS
+Public Runner Trigger Scope           36811305755 PASS
+Workflow Archive Integrity            36811305608 PASS
+```
+
+Distribution Gate 还证明：
+
+```text
+Public overlay release17 regressions  PASS
+direct no-proxy loopback probe        PASS
+bounded retry                         PASS
+target vhost classification           PASS
+isolated release17 runtime install    PASS
+beginner Chinese failure rendering    PASS
+rollback / DNS / SOURCE safety        PASS
+Production write                      NOT_RUN
+```
+
+说明：旧 Stable Installer Smoke 仍硬编码检查 `0.1.0-release5`，因此在 release17 PR 上 identity failure 属于历史 workflow debt，不作为 release17 owning evidence。
+
+Current Production truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release14
+release16-era Restore-As                        REAL_FAIL / LOCAL_HTTP_ROUTE
+release17 Production install                    NOT_YET_OWNER_VERIFIED
+release17 Owner Real Use                        PENDING
+Migration executed                              NO
+DNS write                                       NO
+SOURCE delete                                   NO
+Existing target overwrite                       NO
+Resource Safe Apply                             NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，先确认 Build 已升级到 release17，再用全新目标域名继续 Restore-As-New 真机验证。Public Distribution 不等于 Production Restore PASS。
+
+## Slot 3 release18 Nginx listener-aware source closure · Public Distribution pending
+
+2026-10-01，OWNER 在 release17 Public Distribution 后继续真实 Restore-As-New，目标域名为 `112.kewaro.com`。release17 新诊断明确证明：
+
+```text
+target vhost                  PRESENT
+fixed loopback HTTP probe     FAIL
+new target rollback           invoked
+DNS write                     NO
+SOURCE mutation               NO
+```
+
+终端普通用户信息为：
+
+```text
+新网站已恢复，Nginx 也已有新站点配置，但本机 HTTP 直连暂未响应，P07 已回滚新目标。
+DNS 没有修改，原网站没有修改。
+```
+
+因此 release17 已把问题从 backup / SQLite / MySQL / config / vhost creation 收敛到最终本机 listener probe。截图仍未单独显示 exact installed Build，因此 Production exact installed Build 继续只保留已独立证明的 release14，不从聊天推断 release17 installed PASS。
+
+release18 不再固定假设 `127.0.0.1:80/443` 是目标 Nginx 实际监听入口，改为：
+
+```text
+nginx -T
+→ parse only target-domain server blocks
+→ derive target-domain listen directives
+→ listen 80 / 0.0.0.0:80 -> 127.0.0.1
+→ listen [::]:80             -> ::1
+→ explicit IP:80             -> exact configured IP
+→ curl --noproxy "*"
+→ --resolve target:port:<listener>
+→ bounded per-listener retry
+→ any real HTTP 100..599 = PASS
+```
+
+Fail-closed 分类：
+
+```text
+target vhost missing                 -> target_vhost=MISSING
+target vhost present / no port 80    -> target_listener=MISSING
+target listeners found / all fail    -> target_listener=UNREACHABLE
+```
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                     0.1.0-release18
+Private source main merge               26e9235edd92d34d4837abe3a1876a8d78a2e555
+Release18 Exact-source Gate             36812999690 PASS
+Target-only server-block parsing        PASS
+Wildcard IPv4 / IPv6 listener mapping   PASS
+Explicit listener-IP mapping            PASS
+Cross-site listener isolation           PASS
+Multi-listener probing                  PASS
+Restore-As / SQLite regressions         PASS
+Rollback / DNS / SOURCE safety          PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution             0.1.0-release17
+Production exact independently proven   0.1.0-release14
+release17-era Restore-As                 REAL_FAIL / VHOST_PRESENT / FIXED_LOOPBACK_HTTP_FAIL
+release18 Private Source                 MERGED
+release18 Public Distribution            NOT_RUN
+release18 Production install             NOT_RUN
+release18 Owner Real Use                 NOT_RUN
+Migration / DNS / SOURCE delete          NOT_RUN
+Existing target overwrite                NOT_RUN
+```
+
+release18 必须单独完成 Public Distribution Gate 后，OWNER 才继续新的 Restore-As 真机验证。
+
+## Slot 3 release18 Nginx listener-aware distribution closure
+
+release18 已完成 Public Distribution。它针对 release17-era 真机证据中“目标 vhost 已存在，但固定 127.0.0.1 HTTP 探针失败”的问题，把最终本机验证改为读取目标域名自己的 Nginx `listen`。
+
+Exact identities：
+
+```text
+Slot 3 Build                          0.1.0-release18
+Exact runtime source merge            26e9235edd92d34d4837abe3a1876a8d78a2e555
+Public distribution main              f618aad35da7df05fb298455be186691d4b5362b
+Runtime manifest blob                 a7ae163c8c6ddbe402ad04797098e321d8f42e64
+Full overlay manifest blob            4cce8bcf9b91452359dba6c5175f8fc1582ed6fe
+Final installer blob                  3e5e6bf4cfbbf1232d3a28f9696efb29430d234c
+Stable installer blob                 e5c38062d6c4d821e303c4caebfb103c6517d085
+Toolbox blob                          143e5fbc28adfa05c61248829e5f56540823643b
+```
+
+Machine / Distribution proof：
+
+```text
+Release18 Exact-source Gate           36812999690 PASS
+Release18 Distribution Gate           36813781522 PASS
+Toolbox Smoke                         36813781495 PASS
+System Care Smoke                     36813781475 PASS
+Beginner Menu Gate                    36813781578 PASS
+Public Runner Trigger Scope           36813781483 PASS
+Workflow Archive Integrity            36813781472 PASS
+```
+
+Distribution Gate 证明 target-only Nginx server block 解析、wildcard / explicit listen 映射、多 listener 探测、Public overlay Restore-As 回归、隔离安装、中文 listener 错误分类以及 rollback / DNS / SOURCE 安全边界均 PASS。
+
+旧 Stable Installer Smoke 仍硬编码 `0.1.0-release5`，其 identity failure 属于历史 workflow debt，不作为 release18 owning evidence。
+
+Current Production truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release14
+release17-era Restore-As                        REAL_FAIL / VHOST_PRESENT / FIXED_LOOPBACK_HTTP_FAIL
+release18 Production install                    NOT_YET_OWNER_VERIFIED
+release18 Owner Real Use                        PENDING
+Migration executed                              NO
+DNS write                                       NO
+SOURCE delete                                   NO
+Existing target overwrite                       NO
+Resource Safe Apply                             NO
+```
+
+## Slot 3 release19 guarded Nginx reload source closure · Public Distribution pending
+
+2026-10-01，OWNER 在 release18 Public Distribution 后继续真实 Restore-As-New，目标域名为 `113.kewaro.com`。release18 诊断明确证明：
+
+```text
+target Nginx listener           FOUND
+local HTTP verification         REAL_FAIL
+new target rollback             invoked
+DNS write                       NO
+SOURCE mutation                 NO
+```
+
+普通用户终端信息为：
+
+```text
+新网站已恢复，P07 也找到了 Nginx 实际 HTTP 监听地址，但本机仍无法连通，已回滚新目标。
+这表示问题已经缩小到服务器本机监听/网络层，不是备份、SQLite 或数据库恢复本身。
+DNS 没有修改，原网站没有修改。
+```
+
+该证据证明 release18 已排除“只是假设 127.0.0.1”的问题，但仍不能证明运行中的 Nginx 已加载磁盘上的新 vhost。release19 因此增加 guarded reload：
+
+```text
+CloudPanel new site exists
+→ nginx -t
+→ only PASS may continue
+→ nginx -s reload
+→ listener / Host / SNI verification
+```
+
+若最终本机 HTTP 仍失败，release19 同时把 curl transport 安全分类为：
+
+```text
+CONNECT_FAILED
+TIMEOUT
+EMPTY_REPLY
+OTHER
+```
+
+不向普通用户暴露真实 listener IP、原始 stderr、Secret 或数据库口令。
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release19
+Private source main merge            728568b00505a206f7e6b66740bede0ad25034ed
+Release19 Exact-source Gate          36815000676 PASS
+Guarded nginx -t -> reload ordering  PASS
+Reload fail-closed regression        PASS
+Transport classification             PASS
+Restore-As / SQLite regressions      PASS
+Rollback / DNS / SOURCE safety       PASS
+Secret boundary                      PASS
+```
+
+当前阶段：
+
+```text
+Current Public Distribution          0.1.0-release18
+Production exact independently proven 0.1.0-release14
+release18-era Restore-As             REAL_FAIL / LISTENER_FOUND / LOCAL_HTTP_UNREACHABLE
+release19 Private Source             MERGED
+release19 Public Distribution        NOT_RUN
+release19 Production install         NOT_RUN
+release19 Owner Real Use             NOT_RUN
+Migration / DNS / SOURCE delete      NOT_RUN
+Existing target overwrite            NOT_RUN
+```
+
