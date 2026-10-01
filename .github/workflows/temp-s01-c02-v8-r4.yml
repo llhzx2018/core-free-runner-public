@@ -1,0 +1,107 @@
+name: S01-C02 V8 Production Acceptance R4
+
+on:
+  push:
+    branches:
+      - task/s01-c02-v8-r4-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+  TARGET_SHA: 9181989a93852b29c9a8188f0380370c83cd2996
+  BASE_SHA: c957a4a5cfab1a8224dcf5a74a094f8b1919bff4
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and frozen boundary
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --name-only "$BASE_SHA..$TARGET_SHA" | tee /tmp/changed.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          changed=set(Path('/tmp/changed.txt').read_text().splitlines())
+          expected={
+            'assets/css/v13/system/plugins.css',
+            'includes/admin-v13/views/seo-keyword-map.php',
+            'includes/admin-v13/views/system_plugins.php',
+            'tests/s01-c02-v8-reference-body-contract.php',
+          }
+          if changed != expected: raise SystemExit('changed set mismatch: '+repr(sorted(changed)))
+          bad=[p for p in changed if any(x in p.lower() for x in ('shell','header-menu','header_menu','global-header','admin-shell'))]
+          if bad: raise SystemExit('frozen shell/header/menu touched: '+repr(bad))
+          print('EXACT_SOURCE=PASS')
+          print('FROZEN_SHELL_HEADER_MENU_BOUNDARY=PASS')
+          PY
+
+      - name: Syntax and contracts
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l includes/admin-v13/views/system_plugins.php
+          php -l tests/s01-c02-v8-reference-body-contract.php
+          node --check tests/s01-c02-v8-browser-proof.js
+          php tests/s01-c02-v8-reference-body-contract.php
+          php tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          php tests/s01-c02-prod-realuse-r18-unified-page-frame-contract.php
+          php tests/s01-c02-prod-realuse-r20-production-screenshot-closure-contract.php
+          php tests/s01-c02-page-body-system-v2-full-surface-contract.php
+          echo "SOURCE_REGRESSION=PASS"
+
+      - name: Browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/v8-node
+          cd /tmp/v8-node
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.55.0 >/dev/null
+          npx playwright install chromium >/dev/null
+          echo "NODE_PATH=/tmp/v8-node/node_modules" >> "$GITHUB_ENV"
+
+      - name: Real-width source-render proof
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export V8_PROOF_DIR=/tmp/v8-r4-proof
+          node tests/s01-c02-v8-browser-proof.js | tee /tmp/v8-r4-output.txt
+          python3 - <<'PY'
+          import json
+          p=json.load(open('/tmp/v8-r4-proof/browser-proof.json'))
+          assert p['pass'] is True
+          assert p['widths'] == [1440,1366,1280,1024,768,390]
+          assert len(p['checks']) == 48
+          assert all(not x['failures'] for x in p['checks'])
+          for width in (1440,1366,1280,1024,768,390):
+              rows=[x for x in p['checks'] if x['width']==width]
+              assert all(not x['overflow'] for x in rows)
+          print('REAL_WIDTH_48=PASS')
+          PY
+
+      - name: Upload proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v8-r4-proof-${{ github.run_id }}
+          path: /tmp/v8-r4-proof
+          retention-days: 14
+          if-no-files-found: warn
