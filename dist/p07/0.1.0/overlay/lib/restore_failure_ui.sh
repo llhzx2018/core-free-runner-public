@@ -30,7 +30,14 @@ render_restore_failure() {
 
   if grep -Fq 'Restore-As local verification failed' "$err_file" 2>/dev/null; then
     if grep -Fq 'local Host routing verification failed' "$err_file" 2>/dev/null; then
-      ui_bad '新网站已恢复，但本机 HTTP 路由验证没有通过，P07 已回滚新目标。'
+      if grep -Fq 'target_vhost=PRESENT' "$err_file" 2>/dev/null; then
+        ui_bad '新网站已恢复，Nginx 也已有新站点配置，但本机 HTTP 直连暂未响应，P07 已回滚新目标。'
+        ui_note '这通常是本机探针或新站点刚加载时的短暂连通问题；P07 不会因此保留未验证的新站。'
+      elif grep -Fq 'target_vhost=MISSING' "$err_file" 2>/dev/null; then
+        ui_bad '新网站已恢复，但 Nginx 还没有加载到这个新域名，P07 已回滚新目标。'
+      else
+        ui_bad '新网站已恢复，但本机 HTTP 路由验证没有通过，P07 已回滚新目标。'
+      fi
     elif grep -Fq 'local SNI/vhost verification failed' "$err_file" 2>/dev/null; then
       ui_bad '新网站已恢复，但本机 HTTPS/SNI 路由验证没有通过，P07 已回滚新目标。'
     else
