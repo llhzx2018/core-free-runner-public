@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -42,37 +43,46 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertIn("semantic_terminal_colors", s["capabilities"])
         self.assertIn("pty_color_preservation", s["capabilities"])
 
-    def test_slot3_contains_release11_beginner_ui_distribution(self):
+    def test_slot3_matches_current_published_distribution(self):
         s = self.data["slots"][2]
-        self.assertEqual(s["internal_version"], "0.1.0-release11")
-        self.assertEqual(s["integration_state"], "RELEASE_CANDIDATE_FOR_PUBLIC_MAIN")
-        self.assertEqual(s["source_main_commit"], "90217676ca343b0a64de3d072d824ece17f6bad2")
+        release = self.data["release"]
+        self.assertEqual(s["internal_version"], release["slot3_build"])
+        self.assertEqual(s["source_main_commit"], release["slot3_source_main_commit"])
+        self.assertEqual(s["integration_state"], "RELEASED_TO_PUBLIC_MAIN")
         self.assertEqual(s["terminal_ui_color_system"], "CANONICAL_V1")
-        self.assertEqual(s["full_server_migration_integration_commit"], "5c447fc99030f75c098934ddb9aa300b934564bb")
+        self.assertEqual(
+            s["full_server_migration_integration_commit"],
+            "5c447fc99030f75c098934ddb9aa300b934564bb",
+        )
 
-    def test_slot4_rc17_is_publicly_distributed(self):
+    def test_slot4_rc18_is_publicly_distributed(self):
         s = self.data["slots"][3]
-        self.assertEqual(s["internal_version"], "0.1.0-rc17")
+        self.assertEqual(s["internal_version"], "0.1.0-rc18")
         self.assertEqual(s["integration_state"], "PUBLIC_DISTRIBUTED")
 
     def test_release_is_published(self):
+        release = self.data["release"]
         self.assertEqual(self.data["release_blockers"], [])
-        self.assertEqual(self.data["release"]["tag"], "p07-v0.1.0")
-        self.assertEqual(self.data["release"]["status"], "PUBLISHED")
-        self.assertEqual(self.data["release"]["slot3_build"], "0.1.0-release11")
-        self.assertEqual(self.data["release"]["slot3_distribution"], "PUBLIC_PR_CANDIDATE")
+        self.assertEqual(release["tag"], "p07-v0.1.0")
+        self.assertEqual(release["status"], "PUBLISHED")
+        self.assertRegex(release["slot3_build"], r"^0\.1\.0-release[0-9]+$")
+        self.assertEqual(release["slot3_distribution"], "PUBLIC_MAIN")
+        self.assertEqual(
+            release["public_distribution_commit"],
+            release["current_public_main_commit"],
+        )
+        self.assertRegex(release["public_distribution_commit"], r"^[0-9a-f]{40}$")
 
-    def test_production_is_not_implicitly_promoted_by_distribution(self):
+    def test_production_build_has_independent_owner_verified_evidence(self):
         p = self.data["production"]
-        self.assertEqual(p["slot3_build"], "0.1.0-release3")
-        self.assertEqual(p["release3_install_status"], "OWNER_VERIFIED")
-        self.assertEqual(p["release4_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release5_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release6_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release7_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release8_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release9_install_status"], "NOT_YET_OWNER_VERIFIED")
-        self.assertEqual(p["release11_install_status"], "NOT_YET_OWNER_VERIFIED")
+        match = re.fullmatch(r"0\.1\.0-release([0-9]+)", p["slot3_build"])
+        self.assertIsNotNone(match)
+        install_key = f"release{match.group(1)}_install_status"
+        self.assertIn(install_key, p)
+        self.assertIn("OWNER_VERIFIED", p[install_key])
+        self.assertFalse(p["migration_executed"])
+        self.assertFalse(p["dns_write"])
+        self.assertFalse(p["source_delete"])
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]

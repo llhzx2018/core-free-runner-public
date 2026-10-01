@@ -38,13 +38,46 @@ def _run(command: Sequence[str], *, timeout: int = 20) -> subprocess.CompletedPr
         raise RestoreAsVerificationError("local verification command failed") from exc
 
 
-def _reload_nginx(nginx: str) -> None:
+def _reload_failure_class(proc: subprocess.CompletedProcess[str]) -> str:
+    detail = f"{proc.stdout}\n{proc.stderr}".lower()
+    if any(token in detail for token in ("permission denied", "access denied", "authentication is required")):
+        return "PERMISSION_DENIED"
+    if any(token in detail for token in ("failed to connect to bus", "not been booted with systemd")):
+        return "SYSTEMD_BUS_UNAVAILABLE"
+    if "pid" in detail:
+        return "PID_UNAVAILABLE"
+    return "COMMAND_FAILED"
+
+
+def _systemd_nginx_active(systemctl: str) -> bool:
+    try:
+        state = _run([systemctl, "is-active", "nginx"], timeout=15)
+    except RestoreAsVerificationError:
+        return False
+    return state.returncode == 0 and state.stdout.strip() == "active"
+
+
+def _reload_nginx(nginx: str, *, systemctl: str = "/usr/bin/systemctl") -> str:
     syntax = _run([nginx, "-t"], timeout=30)
     if syntax.returncode != 0:
         raise RestoreAsVerificationError("nginx reload preflight failed")
+
+    if _systemd_nginx_active(systemctl):
+        reloaded = _run([systemctl, "reload", "nginx"], timeout=30)
+        if reloaded.returncode != 0:
+            reason = _reload_failure_class(reloaded)
+            raise RestoreAsVerificationError(
+                f"nginx reload failed; mode=SYSTEMD; reason={reason}"
+            )
+        return "SYSTEMD"
+
     reloaded = _run([nginx, "-s", "reload"], timeout=30)
     if reloaded.returncode != 0:
-        raise RestoreAsVerificationError("nginx reload failed")
+        reason = _reload_failure_class(reloaded)
+        raise RestoreAsVerificationError(
+            f"nginx reload failed; mode=DIRECT_SIGNAL; reason={reason}"
+        )
+    return "DIRECT_SIGNAL"
 
 
 def _curl_failure_class(returncode: int) -> str:
@@ -328,6 +361,7 @@ def verify_local_restore(
     *,
     curl: str = "/usr/bin/curl",
     nginx: str = "/usr/sbin/nginx",
+    systemctl: str = "/usr/bin/systemctl",
 ) -> dict[str, Any]:
     source_domain = cloudpanel.validate_domain(str(result.get("source_domain", "")))
     target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
@@ -449,6 +483,7 @@ def restore_as_verified(
     wp: str = "wp",
     curl: str = "/usr/bin/curl",
     nginx: str = "/usr/sbin/nginx",
+    systemctl: str = "/usr/bin/systemctl",
 ) -> dict[str, Any]:
     package_dir = package_dir.resolve()
     target_root = target_root.resolve()
@@ -464,7 +499,7 @@ def restore_as_verified(
             wp=wp,
         )
     try:
-        _reload_nginx(nginx)
+        reload_mode = _reload_nginx(nginx, systemctl=systemctl)
         local = verify_local_restore(target_root, result, curl=curl, nginx=nginx)
     except Exception as exc:
         rollback = _rollback_verified_target(result, clpctl=clpctl)
@@ -479,6 +514,7 @@ def restore_as_verified(
     final["status"] = "RESTORE_AS_VERIFIED"
     final["restore_engine_status"] = result.get("status")
     final["local_verification"] = local
+    final["nginx_reload"] = {"status": "PASS", "mode": reload_mode}
     final["machine_verification_scope"] = "FILES_DB_APP_HOST_SNI"
     return final
 
@@ -493,6 +529,7 @@ def main() -> int:
     parser.add_argument("--wp", default=os.environ.get("VFOPS_WP", "wp"))
     parser.add_argument("--curl", default=os.environ.get("VFOPS_CURL", "/usr/bin/curl"))
     parser.add_argument("--nginx", default=os.environ.get("VFOPS_NGINX", "/usr/sbin/nginx"))
+    parser.add_argument("--systemctl", default=os.environ.get("VFOPS_SYSTEMCTL", "/usr/bin/systemctl"))
     parser.add_argument("--confirm", required=True)
     args = parser.parse_args()
     try:
@@ -506,6 +543,7 @@ def main() -> int:
             wp=args.wp,
             curl=args.curl,
             nginx=args.nginx,
+            systemctl=args.systemctl,
         )
     except (
         RestoreAsVerificationError,
