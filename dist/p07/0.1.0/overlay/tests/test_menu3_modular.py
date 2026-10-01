@@ -148,7 +148,8 @@ class Menu3ModularTests(unittest.TestCase):
             "旧服务器：继续保留为恢复副本",
             "PREPARE_PULL_MIGRATION",
             "CUTOVER_PULL:",
-            "BOOTSTRAP_LOCAL_CLOUDPANEL",
+            "请返回 P07 一级菜单 → 5. 初始化服务器",
+            "迁移流程本身不再负责安装或初始化服务器",
             "非网站面板管理的公网服务",
             "当前服务器网站开关",
             "开启这台服务器全部网站",
@@ -173,6 +174,24 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("local-nginx-status", ordinary)
         self.assertIn("local-nginx-start", ordinary)
         self.assertIn("local-nginx-stop", ordinary)
+        self.assertIn("确认开启？[y/N]", ordinary)
+        self.assertIn("确认停止？[y/N]", ordinary)
+        self.assertNotIn("ui_confirm_exact 开启", ordinary)
+        self.assertNotIn("ui_confirm_exact 停止", ordinary)
+        self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
+
+
+    def test_server_initialization_is_standalone_and_uses_yes_no(self) -> None:
+        user = (ROOT / "bin/vfops-user").read_text(encoding="utf-8")
+        init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
+        self.assertIn('exec bash "$INIT_UI"', user)
+        self.assertIn("--init", user)
+        self.assertIn("P07 · 初始化服务器", init)
+        self.assertIn("确认应用这些基础设置？[y/N]", init)
+        self.assertIn("确认安装 CloudPanel？[y/N]", init)
+        self.assertNotIn("输入 APPLY_BASELINE", init)
+        self.assertNotIn("输入 INSTALL_CLOUDPANEL", init)
+        self.assertIn("/^SwapTotal:/", init)
 
     def test_migration_preserves_old_server_dns_and_target_collision_boundaries(self) -> None:
         ui = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
