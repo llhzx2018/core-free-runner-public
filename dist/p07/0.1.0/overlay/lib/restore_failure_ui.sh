@@ -36,11 +36,17 @@ render_restore_failure() {
       return 0
     elif grep -Fq 'nginx reload failed' "$err_file" 2>/dev/null; then
       if grep -Fq 'mode=LIVE_MASTER_HUP' "$err_file" 2>/dev/null; then
-        ui_bad '已找到 CloudPanel 实际运行的 Nginx，但优雅重载仍未完成，P07 已回滚新目标。'
-        if grep -Fq 'reason=MASTER_CHANGED' "$err_file" 2>/dev/null; then
-          ui_note '原因：重载前 Nginx 主进程发生变化，P07 为避免误操作已停止。'
+        ui_bad 'CloudPanel 的实际 Nginx 没有在安全窗口内完成优雅重载，P07 已回滚新目标。'
+        if grep -Fq 'reason=MASTER_NOT_FOUND' "$err_file" 2>/dev/null; then
+          ui_note '原因：创建新站后，P07 在等待窗口内没有确认到稳定的 Nginx 主进程。'
+        elif grep -Fq 'reason=MASTER_NOT_STABLE' "$err_file" 2>/dev/null; then
+          ui_note '原因：Nginx 主进程仍在切换，P07 为避免误操作没有继续。'
+        elif grep -Fq 'reason=MASTER_CHANGED' "$err_file" 2>/dev/null; then
+          ui_note '原因：重载前后 Nginx 主进程发生变化，P07 为避免误操作已停止。'
         elif grep -Fq 'reason=MASTER_NOT_RUNNING' "$err_file" 2>/dev/null; then
           ui_note '原因：发送优雅重载后没有再确认到原 Nginx 主进程。'
+        elif grep -Fq 'reason=SIGNAL_FAILED' "$err_file" 2>/dev/null; then
+          ui_note '原因：系统没有接受对 Nginx 主进程的优雅重载信号。'
         else
           ui_note 'P07 没有重启 Nginx，也没有保留未验证的新站。'
         fi

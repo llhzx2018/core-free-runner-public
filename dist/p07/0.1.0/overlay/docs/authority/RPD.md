@@ -949,3 +949,34 @@ discover live nginx master
 - 不修改 DNS、SOURCE 或 existing target；
 - 真实运行实例的 `-c` 配置必须同时用于 `nginx -t` 与 `nginx -T`，不得测试一份配置、验证另一份配置。
 
+## Restore-As Live Nginx Stabilization Window Contract
+
+CloudPanel 新站创建动作与真实 Nginx master 的运行状态之间可能存在短暂切换窗口。Restore-As 不得用单次 `ps` 结果决定是否退回默认 Nginx reload。
+
+release23 固定：
+
+```text
+CloudPanel restore/create complete
+→ bounded live-master stabilization window
+→ require two consecutive matching observations
+   (same root master PID + same live -p/-c args)
+→ nginx -t with those exact runtime args
+→ managed systemd reload when systemd owns nginx
+→ otherwise re-confirm stable live master
+→ SIGHUP only to that exact master PID
+→ bounded post-HUP confirmation
+→ nginx -T with the same runtime args
+→ Host / listener / SNI verification
+```
+
+固定安全边界：
+- systemd inactive 且稳定 live master 未找到时，必须 `MASTER_NOT_FOUND` fail closed；
+- 禁止在上述情况下回退到默认 `nginx -s reload`，避免控制错误实例；
+- master 在确认窗口内持续变化时必须 fail closed；
+- HUP 前必须再次确认同一 PID 与同一 runtime args；
+- HUP 后允许短暂查询不到 master，但只在 bounded window 内重试；
+- HUP 后发现不同 master identity 时 fail closed；
+- 不自动 restart；
+- DNS、SOURCE、existing target 均不自动修改；
+- 普通用户错误信息只显示 bounded reason，不泄漏原始 stderr / Secret。
+

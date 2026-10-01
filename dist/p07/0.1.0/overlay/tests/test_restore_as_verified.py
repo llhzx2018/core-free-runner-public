@@ -62,6 +62,25 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             ("-c", "/home/clp/services/nginx/nginx.conf"),
         )
 
+    def test_nginx_master_stabilization_waits_for_two_matching_samples(self) -> None:
+        master = {
+            "pid": 856,
+            "executable": "/usr/sbin/nginx",
+            "runtime_args": ("-c", "/home/clp/services/nginx/nginx.conf"),
+        }
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            side_effect=[None, master, master],
+        ), mock.patch.object(restore_as_verified.time, "sleep") as sleep:
+            current = restore_as_verified._stable_nginx_master(
+                "/usr/sbin/nginx",
+                attempts=4,
+                delay=0.25,
+            )
+        self.assertEqual(current, master)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_nginx_reload_prefers_active_systemd_after_syntax_pass(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
@@ -70,7 +89,7 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(
             restore_as_verified,
@@ -103,6 +122,10 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
         ]
         with mock.patch.object(
+            restore_as_verified,
+            "_stable_nginx_master",
+            return_value=master,
+        ), mock.patch.object(
             restore_as_verified,
             "_discover_nginx_master",
             return_value=master,
@@ -137,26 +160,25 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         )
         kill.assert_called_once_with(856, restore_as_verified.signal.SIGHUP)
 
-    def test_nginx_reload_falls_back_to_direct_signal_without_live_master(self) -> None:
+    def test_nginx_reload_fails_closed_without_stable_live_master(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
             subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
-            mode, nginx_args = restore_as_verified._reload_nginx(
-                "/usr/sbin/nginx",
-                systemctl="/usr/bin/systemctl",
-            )
-        self.assertEqual((mode, nginx_args), ("DIRECT_SIGNAL", ()))
-        self.assertEqual(
-            run.call_args_list[2].args[0],
-            ["/usr/sbin/nginx", "-s", "reload"],
-        )
+            with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
+                restore_as_verified._reload_nginx(
+                    "/usr/sbin/nginx",
+                    systemctl="/usr/bin/systemctl",
+                )
+        message = str(caught.exception)
+        self.assertIn("mode=LIVE_MASTER_HUP", message)
+        self.assertIn("reason=MASTER_NOT_FOUND", message)
+        self.assertEqual(len(run.call_args_list), 2)
 
     def test_nginx_systemd_reload_failure_uses_managed_main_hup_fallback(self) -> None:
         calls = [
@@ -174,7 +196,7 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(
             restore_as_verified,
@@ -220,7 +242,7 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(restore_as_verified, "_run", side_effect=calls):
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
@@ -246,7 +268,7 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
@@ -264,7 +286,7 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         proc = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_nginx_master",
             return_value=None,
         ), mock.patch.object(restore_as_verified, "_run", return_value=proc):
             with self.assertRaisesRegex(
