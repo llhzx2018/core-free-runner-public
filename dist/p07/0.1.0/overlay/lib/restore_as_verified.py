@@ -38,6 +38,25 @@ def _run(command: Sequence[str], *, timeout: int = 20) -> subprocess.CompletedPr
         raise RestoreAsVerificationError("local verification command failed") from exc
 
 
+def _reload_nginx(nginx: str) -> None:
+    syntax = _run([nginx, "-t"], timeout=30)
+    if syntax.returncode != 0:
+        raise RestoreAsVerificationError("nginx reload preflight failed")
+    reloaded = _run([nginx, "-s", "reload"], timeout=30)
+    if reloaded.returncode != 0:
+        raise RestoreAsVerificationError("nginx reload failed")
+
+
+def _curl_failure_class(returncode: int) -> str:
+    return {
+        7: "CONNECT_FAILED",
+        28: "TIMEOUT",
+        35: "TLS_FAILED",
+        52: "EMPTY_REPLY",
+        56: "RECV_FAILED",
+    }.get(returncode, "OTHER")
+
+
 def _curl_resolve_address(address: str) -> str:
     return f"[{address}]" if ":" in address and not address.startswith("[") else address
 
@@ -349,9 +368,11 @@ def verify_local_restore(
         addresses=http_addresses,
     )
     if http_rc != 0 or not _valid_http_code(http_code):
+        transport = _curl_failure_class(http_rc)
         raise RestoreAsVerificationError(
             "local Host routing verification failed; "
-            "target_vhost=PRESENT; target_listener=UNREACHABLE"
+            "target_vhost=PRESENT; target_listener=UNREACHABLE; "
+            f"target_transport={transport}"
         )
 
     https_addresses = _nginx_target_listener_addresses(nginx, target_domain, 443)
@@ -443,6 +464,7 @@ def restore_as_verified(
             wp=wp,
         )
     try:
+        _reload_nginx(nginx)
         local = verify_local_restore(target_root, result, curl=curl, nginx=nginx)
     except Exception as exc:
         rollback = _rollback_verified_target(result, clpctl=clpctl)
