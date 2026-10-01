@@ -2931,3 +2931,278 @@ Automatic Nginx start/restart        NO
 
 release25 只有完成独立 Public Distribution Gate 后，OWNER 才继续在同一 Linode Recovery Copy 上执行新的 Restore-As 真机验证。Public Distribution 仍不等于 Production 或完整在线 Restore PASS。
 
+## Slot 3 release25 offline Recovery Restore-As distribution closure
+
+release25 已完成 V0.1.0 Public Distribution，用于补齐保留旧 Linode Recovery Copy 上“网站 Nginx 有意停止”时的 Restore-As 真机恢复场景。release24 的 Nginx 角色分离继续成立：8443-only CloudPanel 控制面 Nginx 不得当作网站 Nginx，也不得被错误 HUP。
+
+release25 固定双模式验证：
+
+```text
+ONLINE
+→ website Nginx running
+→ existing reload + Host / SNI verification
+→ FILES_DB_APP_HOST_SNI
+
+OFFLINE_STATIC
+→ website Nginx intentionally stopped
+→ static nginx -t before write
+→ CloudPanel target + files + DB restore
+→ post-restore nginx -t / nginx -T
+→ target vhost + configured 80/443 listener presence
+→ Host / SNI = NOT_RUN
+→ nginx start / restart / reload = NOT_RUN
+→ FILES_DB_APP_NGINX_CONFIG
+```
+
+离线成功使用独立状态 `RESTORE_AS_OFFLINE_VERIFIED`，不得冒充完整在线 PASS。离线配置校验失败仍只回滚本次新目标；DNS、SOURCE、existing target 与旧证书边界不变。
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release25
+Exact runtime source merge            4260aa6553c6a4f20c631a2f6b6ea5baec3f3f82
+Source authority closure merge        075d24158428282699257053d317a66c85abb5b0
+Public distribution PR                #1685
+Public distribution main              c817251bf4374a69eb27ea6e563e52d67e40d838
+Runtime manifest blob                 5e688084e88e533d8446905950ca7d4519b4ff5e
+Full overlay manifest blob            db6f9c013bed4f3d7cc7953446ea73e6592b271f
+Final installer blob                  fb88cf8f05d36866ea3e396ca6ac6992def3cd05
+Stable installer blob                 e4fde9c740ee7476748f2a1e8ef96508fd89dc23
+Toolbox blob                          7c8f1a6a5a787b2415d08c9af72ce2d32dcac48c
+```
+
+Machine / Distribution proof：
+
+```text
+Release25 Candidate Exact-source CI   36878240140 PASS
+Release25 Source main CI              36879393432 PASS
+Release25 Distribution Gate           36883195967 PASS
+Toolbox Smoke                         36883195907 PASS
+System Care Smoke                     36883195699 PASS
+Beginner Menu Gate                    36883195777 PASS
+Public Runner Trigger Scope           36883195834 PASS
+Workflow Archive Integrity            36883195933 PASS
+Public main Toolbox Smoke             36883343351 PASS
+Public main System Care Smoke         36883343205 PASS
+Public main Current Self Test         36883343207 PASS
+```
+
+Current Production / Owner truth 继续独立：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release22
+release24 Recovery real-use                    SAFE_STOP / SITE_NGINX_NOT_RUNNING
+release25 Production install                   NOT_YET_OWNER_VERIFIED
+release25 Owner Real Use                       PENDING
+DNS write                                      NO
+SOURCE delete                                  NO
+Existing target overwrite                      NO
+Automatic website Nginx start/restart          NO
+```
+
+下一步：OWNER 继续在同一保留的 Linode Recovery Copy 上，通过永久一行 Toolbox 升级到 release25，确认 Build 后再次执行“恢复为新网站”。目标域名由 OWNER 自行输入；DNS 不要求提前解析。预期离线成功应明确显示“离线验证通过 / 在线 Host/SNI 未执行 / Nginx 未启动、未重启、未重载”。
+
+## Slot 3 release25 Owner Real Restore-As · Offline Recovery PASS
+
+2026-10-01，OWNER 在保留的旧 Linode Recovery Copy（网站 `nginx.service` 有意保持停止）上完成 release25-era Restore-As 真机验证。目标域名由 OWNER 自行输入为 `444.ke.com`，未要求提前修改 DNS。
+
+终端结果：
+
+```text
+source domain                        123.kewaro.com
+target domain                        444.ke.com
+CloudPanel target create             PASS
+target site user                     p07444d03b6b
+MySQL                                NO_MYSQL
+application config                   NO_DATABASE
+offline verification                 PASS / FILES_DB_NGINX_CONFIG
+online Host / SNI                    NOT_RUN / SITE_NGINX_NOT_RUNNING
+website Nginx start                  NOT_RUN
+website Nginx restart                NOT_RUN
+website Nginx reload                 NOT_RUN
+source certificate reused            NO
+new certificate                      DNS_REQUIRED_FOR_NEW_CERTIFICATE
+DNS write                             NO
+SOURCE delete                         NO
+existing target overwrite             NO
+```
+
+OWNER 可见结果明确为：
+
+```text
+恢复为新网站完成 · 离线验证通过 ✓
+离线验证：通过 · 文件 / DB / Nginx 配置
+在线 Host / SNI：未执行 · 网站 Nginx 当前未运行
+Nginx：未启动、未重启、未重载
+DNS：未修改
+原网站：未删除、未覆盖
+```
+
+这完成了 release25 的**离线 Recovery Restore-As Owner Real Use PASS**。它不是完整在线 Restore PASS：网站 Nginx 仍未运行，因此 Host / SNI 在线验证按设计保持 NOT_RUN。
+
+本张截图没有把 `--build-id` 与恢复结果同时显示在同一画面，所以 exact installed Build 证据仍单独管理；但该结果页与 release25 新增的 `OFFLINE_STATIC / RESTORE_AS_OFFLINE_VERIFIED` 行为一致。
+
+Current Owner truth：
+
+```text
+release25 Owner Real Use                       PASS_OFFLINE_STATIC_RECOVERY
+offline restore layer                          PASS
+online Host/SNI layer                          NOT_RUN
+DNS write                                      NO
+SOURCE delete                                  NO
+Existing target overwrite                      NO
+Automatic website Nginx start/restart/reload   NO
+Full online Restore PASS                       NOT_YET_PROVEN
+```
+
+下一步不需要为了该结果继续开发 release26。若要证明完整在线 Restore PASS，应在网站 Nginx 正常运行的环境中独立验证 ONLINE 路径；保留旧 Linode Recovery Copy 不因本次离线 PASS 自动启动网站 Nginx。
+
+## Slot 3 release26 source candidate · old-server whole-site switch
+
+OWNER 在 release25 Restore-As 离线 Recovery PASS 后明确补充迁移需求：迁移脚本停掉旧服务器网站服务以后，必须有一个对应的“重新开启旧服务器全部网站”能力，而且普通用户不能被迫理解 Nginx、端口或 systemd 等内部实现。
+
+release26 Source Candidate 已实现并完成一轮 Beginner UX 收敛。普通迁移界面固定为：
+
+```text
+服务器迁移
+→ 旧服务器网站开关
+
+当前状态：
+→ 旧服务器全部网站已开启
+或
+→ 旧服务器全部网站已停止
+
+1. 开启旧服务器全部网站
+2. 停止旧服务器全部网站
+0. 返回
+```
+
+普通界面不再暴露：
+
+```text
+nginx.service
+clp-nginx.service
+80 / 443
+8443
+systemctl
+nginx -t
+START_NGINX / STOP_NGINX
+```
+
+复杂安全逻辑继续保留在后台，不改变已有合同：
+
+```text
+开启
+→ 检查网站服务当前状态
+→ 已开启则直接结束
+→ OWNER 中文确认“开启”
+→ 后台先做配置检查
+→ 只启动网站服务
+→ 回读状态确认成功
+
+停止
+→ 检查网站服务当前状态
+→ 已停止则直接结束
+→ OWNER 中文确认“停止”
+→ 只停止网站服务
+→ 回读状态确认成功
+
+CloudPanel 后台服务                  = 不动
+DNS                                  = 不改
+SOURCE                               = 不删
+existing target                      = 不覆盖
+迁移成功后自动重新开启旧服务器网站       = NO
+```
+
+这仍然是整台旧服务器的网站总开关，不是逐站开关。OWNER 不需要一个网站一个网站处理。
+
+Exact Source identities：
+
+```text
+Source Build                         0.1.0-release26
+Nginx-control feature merge          a4efc4be853bbf0b79ee3c53cbd37eb3b9bad21e
+Feature main CI                      36894317890 PASS
+release26 Candidate exact-source CI  36897336937 PASS
+release26 Source main                b48f14273f06357b2e7fb8abb223486c80302270
+release26 Source main CI             36898401114 PASS
+Beginner UX simplification PR        #118
+Beginner UX source merge             2a4a0065b247f5ba8d5614053c8a6275068155cd
+Beginner UX main CI                  36903446105 PASS
+```
+
+Distribution / Production 保持独立：
+
+```text
+Public Distribution current          0.1.0-release25
+release26 Public Distribution        NOT_RUN
+release26 Production install         NOT_RUN
+real old-server website on/off       NOT_RUN
+DNS write                            NO
+SOURCE delete                        NO
+```
+
+因此当前结论：
+
+```text
+SOURCE_IMPLEMENTATION                PASS
+BEGINNER_UX_SIMPLIFICATION           PASS
+SOURCE_CANDIDATE                     PASS
+PUBLIC_DISTRIBUTION                  release25 / unchanged
+PRODUCTION                           unchanged
+OWNER_REAL_WEBSITE_SWITCH            NOT_RUN
+```
+
+下一步若 OWNER 明确要求“发布”，再独立进入 release26 Public Distribution Gate；在此之前永久一行 Toolbox 仍然是 release25，不得声称这个简化后的“旧服务器网站开关”已经在公共入口可用。
+
+## release26 beginner UI freeze · old-server website switch
+
+OWNER 明确要求该能力不得越做越复杂。release26 的普通迁移界面因此进一步冻结为**整台旧服务器网站的一键开 / 关**，不向普通用户暴露 Nginx / systemd / listener 等工程实现。
+
+普通界面固定为：
+
+```text
+4. 旧服务器网站开关
+
+当前状态：旧服务器全部网站已开启 / 已停止
+
+1. 开启旧服务器全部网站
+2. 停止旧服务器全部网站
+0. 返回
+```
+
+普通界面不得重新暴露：
+
+```text
+nginx.service
+clp-nginx.service
+systemctl
+nginx -t
+80 / 443
+8443
+START_NGINX / STOP_NGINX 等机器确认词
+```
+
+用户确认词改为中文：
+
+```text
+开启
+停止
+```
+
+后台安全合同完全不变：仍只操作网站服务；开启前必须完成配置检查；CloudPanel 后台服务不受控制；DNS 不自动修改；SOURCE 不删除。
+
+Exact evidence：
+
+```text
+Beginner UI PR                   #118
+Beginner UI exact-source CI      36902397147 PASS
+Beginner UI main merge           2a4a0065b247f5ba8d5614053c8a6275068155cd
+Beginner UI main CI              36903446105 PASS
+Source Build                     0.1.0-release26
+Public Distribution              0.1.0-release25 / unchanged
+Production                       unchanged
+```
+
+该条作为后续开发约束：**复杂逻辑可以留在后台，普通菜单只展示用户需要知道的状态、动作和结果。**
+
