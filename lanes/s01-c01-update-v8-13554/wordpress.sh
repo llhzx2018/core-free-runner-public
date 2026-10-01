@@ -32,7 +32,7 @@ test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 cli option update vf_private_update_credential_v1 runner-private-token >/dev/null
 cli eval 'set_theme_mod("vf_v8_preservation_sentinel", "keep-me");' >/dev/null
 cli eval 'VF_Theme_Update_Client_V1::clear_cache();delete_site_transient("update_themes");wp_update_themes();$t=get_site_transient("update_themes");if(($t->response["vf-tools-theme"]["new_version"]??"")!==getenv("TARGET_VERSION")){throw new Exception("discovery failed");}' >/dev/null
-cli eval 'VF_Theme_Update_Client_V1::clear_cache();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||!is_array($r)){throw new Exception("native upgrade failed: ".wp_json_encode(VF_Theme_Update_Client_V1::status()));}' >/dev/null
+cli eval 'VF_Theme_Update_Client_V1::clear_cache();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||($r!==true&&!is_array($r))){throw new Exception("native upgrade failed: ".wp_json_encode(VF_Theme_Update_Client_V1::status()));}' >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 test "$(cli option get stylesheet)" = vf-tools-theme
 cli eval 'if(get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("settings changed");}$r=VF_Theme_Update_Client_V1::recovery();if($r["source_version"]!==getenv("SOURCE_VERSION")||$r["target_version"]!==getenv("TARGET_VERSION")||!is_file($r["path"])||hash_file("sha256",$r["path"])!==$r["sha256"]){throw new Exception("recovery invalid");}$s=VF_Theme_Runtime_Authority_V1::stored();$v=VF_Theme_Runtime_Authority_V1::verify(getenv("TARGET_VERSION"),get_template_directory());if(is_wp_error($v)){throw new Exception($v->get_error_code());}echo wp_json_encode(["upgrade"=>"PASS","source"=>$r["source_version"],"target"=>$r["target_version"],"recovery_sha256"=>$r["sha256"],"settings_preserved"=>true,"runtime"=>$s]);' > proof/upgrade.json
@@ -41,7 +41,7 @@ cli eval '$r=$GLOBALS["vf_theme_update_client_v1"]->restore_latest_recovery();if
 test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 test "$(cli option get stylesheet)" = vf-tools-theme
 cli eval 'if(get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("rollback settings changed");}' >/dev/null
-cli eval 'VF_Theme_Update_Client_V1::clear_cache();delete_site_transient("update_themes");wp_update_themes();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||!is_array($r)){throw new Exception("second upgrade failed");}' >/dev/null
+cli eval 'VF_Theme_Update_Client_V1::clear_cache();delete_site_transient("update_themes");wp_update_themes();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||($r!==true&&!is_array($r))){throw new Exception("second upgrade failed");}' >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
 docker cp lane/components.php "$WP:/var/www/html/wp-content/mu-plugins/v8-components.php"
@@ -55,3 +55,4 @@ import json,pathlib,os
 p=pathlib.Path('proof');m=json.loads((p/'identity.json').read_text());m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',fixture_browser='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID']);(p/'FINAL_EVIDENCE.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
 PY
 echo EXACT_CANDIDATE_GATE=PASS
+
