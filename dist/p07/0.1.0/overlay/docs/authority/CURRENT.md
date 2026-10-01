@@ -145,14 +145,14 @@ Four-slot Integration Manifest       = PRESENT
 Product-wide terminal language       = ZH_FIRST
 Slot 1 Network Node                  = 0.1.0-rc10 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Slot 2 VPS Audit                     = V2.2.2 / 2.2.2-rc2-chinese-first / PUBLIC_DISTRIBUTED
-Slot 3 CloudPanel Ops                = 0.1.0-release22 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
+Slot 3 CloudPanel Ops                = 0.1.0-release23 / ZH_BEGINNER_FIRST_V1 / CURRENT_RUNTIME_LAZY_V1 / TARGET_OWNED_PULL / TERMINAL_UX_V2 / WEBSITE_DATA_ONLY_V1
 Slot 4 System Care                   = 0.1.0-rc18 / ZH_FIRST / PUBLIC_DISTRIBUTED
 Automatic DNS mutation               = DENY
 Automatic SOURCE deletion            = DENY
 Resource Safe Apply auto-run         = DENY
 Formal Release Tag                    = p07-v0.1.0
 GitHub Release                        = PUBLISHED
-Public Distribution                   = 3eeda218ab2f7d8fea6f498ba71c97265cc7d738
+Public Distribution                   = b063d07c7c1bb807ad1ada51becc46030cb40c3e
 ```
 
 Formal Tag/Release is complete. main is the canonical released source. Production destructive actions remain separately gated.
@@ -2652,4 +2652,128 @@ Owner Real Use                        NOT_RUN
 ```
 
 当前 Public Distribution 仍为 release22；不得在 Public Distribution 完成前把 release23 记为已发布。
+
+## Slot 3 release23 Nginx stabilization distribution closure
+
+release23 已完成 V0.1.0 Public Distribution。它针对 release22 的真实差异：独立 `LIVE_MASTER_HUP` 验证 PASS，但 CloudPanel 新站刚创建完成后 Restore-As 仍可能在 Nginx reload 阶段失败。
+
+release23 固定：
+
+```text
+CloudPanel restore/create complete
+→ bounded live-master stabilization window
+→ two consecutive matching master observations
+→ bind exact live -p/-c args
+→ nginx -t
+→ managed systemd reload OR exact-master HUP
+→ bounded post-HUP confirmation
+→ nginx -T with same live args
+→ Host / listener / SNI verification
+```
+
+systemd inactive 且 stable live master 未找到时不再使用默认 direct reload；必须 `MASTER_NOT_FOUND` fail closed。自动 restart 继续禁止。
+
+Exact identities：
+
+```text
+P07 public product version            V0.1.0
+Slot 3 Build                          0.1.0-release23
+Exact runtime source merge            0f8d5175fdd425668021b6c1d106dbee9d1ed6a9
+Source authority closure merge        a1bf2785f61b7c224bdf70f401c38f8d2fe54c1d
+Public distribution main              b063d07c7c1bb807ad1ada51becc46030cb40c3e
+Runtime manifest blob                 346edfe702d95ff2f5ee9b6150e84fcae5adf9fc
+Full overlay manifest blob            1b2ff1798d64b655b8a6d69f87735b82a9d88152
+Final installer blob                  cd37639255976a5de11e022de430f78b7de95621
+Stable installer blob                 51d2d84ab951692ddda4e9bc87038a470030938c
+Toolbox blob                          638789c331fd2987370ec787806aa87c81431448
+```
+
+Machine / Distribution proof：
+
+```text
+Release23 Candidate Gate              36844904239 PASS
+Release23 source main CI              36845778634 PASS
+Release23 source closure PR CI        36846274754 PASS
+Release23 source closure main CI      36847222083 PASS
+Release23 Distribution Gate           36847242129 PASS
+Toolbox Smoke                         36847242134 PASS
+System Care Smoke                     36847242061 PASS
+Beginner Menu Gate                    36847242180 PASS
+Public Runner Trigger Scope           36847242191 PASS
+Workflow Archive Integrity            36847242082 PASS
+Public main Toolbox Smoke             36847342593 PASS
+Public main System Care Smoke         36847342775 PASS
+Public main Current Self Test         36847342628 PASS
+```
+
+旧 Stable Installer / R2 Onboarding 与旧 release workflow 的版本硬编码失败不作为 release23 owning evidence。
+
+Current Production truth：
+
+```text
+Production exact independently proven Slot 3 Build  0.1.0-release22
+release22 Owner real use                       REAL_FAIL / RESTORE_TIME_NGINX_RELOAD
+release22 standalone LIVE_MASTER_HUP            PASS
+release23 Production install                    NOT_YET_OWNER_VERIFIED
+release23 Owner Real Use                        PENDING
+DNS write                                       NO
+SOURCE delete                                   NO
+Existing target overwrite                       NO
+Automatic Nginx restart                         NO
+```
+
+下一次 OWNER 通过永久一行 Toolbox 进入 Slot 3 后，应先确认 Build 已升级到 release23，再自行输入任意合法、未占用且不覆盖现有站点的目标域名执行 Restore-As-New 真机验证。P07 不预设 OWNER 应使用哪个域名。
+
+## Slot 3 release24 site-serving Nginx role separation source closure · Public Distribution pending
+
+OWNER 在 release23-era 真机 Restore-As 中已证明 reload 阶段可越过，但最终得到：
+
+```text
+target domain                         120.ke.com
+Restore-As result                    REAL_FAIL / TARGET_VHOST_MISSING
+rollback                             invoked
+DNS write                            NO
+SOURCE mutation                      NO
+```
+
+结合此前只读真机证据：
+
+```text
+nginx.service                        inactive / dead
+systemd MainPID                      0
+observed root nginx master           PID 856
+observed master config               /home/clp/services/nginx/nginx.conf
+80/443 listener readback             none in captured check
+```
+
+以及 CloudPanel 当前服务边界，release24 修正前几轮的实例归属判断：CloudPanel 控制面 Nginx 与网站 Nginx 不是同一个职责，不能仅凭 root master 身份绑定。
+
+release24 固定：
+
+```text
+preflight before any Restore-As write
+→ active nginx.service = managed website-Nginx path
+→ otherwise inspect each live master with its own nginx -T args
+→ require actual 80/443 website listener role
+→ only qualified site Nginx can be HUPed / verified
+→ no qualified site Nginx = SITE_NGINX_NOT_RUNNING fail closed before target create
+```
+
+Exact source evidence：
+
+```text
+Slot 3 source Build                  0.1.0-release24
+Candidate Gate                       36854715322 PASS
+Private source main merge            2a57a0c32a44cb30f15a49dece253ec917c901ca
+panel-only Nginx rejection           PASS
+site-Nginx preflight-before-write    PASS
+systemd site-Nginx path              PASS
+live site-master path                PASS
+Restore-As machine E2E               PASS
+Public Distribution                  NOT_RUN
+Production install                   NOT_RUN
+Owner Real Use                       NOT_RUN
+```
+
+安全边界保持：不自动 start/restart Nginx，不修改 DNS，不删除 SOURCE，不覆盖 existing target。当前 Public Distribution 仍为 release23。
 

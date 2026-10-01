@@ -980,3 +980,34 @@ CloudPanel restore/create complete
 - DNS、SOURCE、existing target 均不自动修改；
 - 普通用户错误信息只显示 bounded reason，不泄漏原始 stderr / Secret。
 
+## Restore-As Site-serving Nginx Role Separation Contract
+
+CloudPanel 机器可能同时存在至少两类 Nginx：网站流量 Nginx 与 CloudPanel 控制面 Nginx。进程名相同不代表职责相同；Restore-As 不得再把任意 root Nginx master 当作网站 Nginx。
+
+release24 固定：
+
+```text
+before any Restore-As write
+→ if nginx.service active:
+   validate default site Nginx config
+   use managed systemd path
+→ else:
+   enumerate live root Nginx masters
+   run nginx -T with each master's own -p/-c args
+   only a master whose own config exposes website listener 80 and/or 443
+   qualifies as site-serving Nginx
+→ require one stable site-serving master
+→ only that instance may be syntax-tested / HUP / dumped / route-verified
+```
+
+固定安全边界：
+- 仅监听 CloudPanel 控制端口（例如 8443）而不承载 80/443 的 Nginx 不得进入网站恢复 reload 路径；
+- 不得仅凭 `nginx: master process`、PPID 1 或 root 身份认定为网站 Nginx；
+- systemd inactive 且没有可确认的 site-serving Nginx 时，必须在 CloudPanel 新站创建前 `SITE_NGINX_NOT_RUNNING` fail closed；
+- 网站 Nginx 配置自检失败必须在任何新目标写入前 `CONFIG_INVALID` fail closed；
+- 不自动 start/restart 网站 Nginx；
+- 不 HUP CloudPanel 控制面 Nginx；
+- DNS、SOURCE、existing target 均不自动修改。
+
+本合同 supersede release22/23 中“单一 live root Nginx master 即可作为网站 Nginx”的推断；release22/23 的 live-master / stabilization 逻辑仅在候选实例已证明是 site-serving Nginx 后继续适用。
+

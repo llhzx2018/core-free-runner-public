@@ -136,13 +136,79 @@ def _stable_nginx_master(
     return None
 
 
+def _nginx_instance_web_ports(
+    nginx: str,
+    master: dict[str, Any],
+) -> set[int]:
+    runtime_args = tuple(master.get("runtime_args", ()))
+    proc = _run([nginx, "-T", *runtime_args], timeout=30)
+    if proc.returncode != 0:
+        return set()
+    text = f"{proc.stdout}\n{proc.stderr}"
+    ports: set[int] = set()
+    for block in _nginx_server_blocks(text):
+        for match in re.finditer(r"^\s*listen\s+([^;\s]+)", block, re.M):
+            token = match.group(1).strip()
+            if token.isdigit():
+                ports.add(int(token))
+                continue
+            ipv6 = re.fullmatch(r"\[[^\]]+\]:(\d+)", token)
+            if ipv6:
+                ports.add(int(ipv6.group(1)))
+                continue
+            if ":" in token:
+                raw_port = token.rsplit(":", 1)[1]
+                if raw_port.isdigit():
+                    ports.add(int(raw_port))
+    return ports
+
+
+def _discover_site_nginx_master(
+    nginx: str,
+    *,
+    ps: str = "/usr/bin/ps",
+) -> dict[str, Any] | None:
+    matched = [
+        master
+        for master in _nginx_master_candidates(nginx, ps=ps)
+        if _nginx_instance_web_ports(nginx, master) & {80, 443}
+    ]
+    if len(matched) > 1:
+        raise RestoreAsVerificationError(
+            "site nginx discovery failed; reason=AMBIGUOUS_SITE_NGINX"
+        )
+    return matched[0] if matched else None
+
+
+def _stable_site_nginx_master(
+    nginx: str,
+    *,
+    ps: str = "/usr/bin/ps",
+    attempts: int = 12,
+    delay: float = 0.25,
+) -> dict[str, Any] | None:
+    previous: dict[str, Any] | None = None
+    for index in range(max(1, attempts)):
+        current = _discover_site_nginx_master(nginx, ps=ps)
+        if current is not None and previous is not None:
+            if (
+                current.get("pid") == previous.get("pid")
+                and current.get("runtime_args") == previous.get("runtime_args")
+            ):
+                return current
+        previous = current
+        if index + 1 < max(1, attempts):
+            time.sleep(delay)
+    return None
+
+
 def _live_master_hup_reload(
     nginx: str,
     master: dict[str, Any],
     *,
     ps: str = "/usr/bin/ps",
 ) -> str:
-    current = _stable_nginx_master(nginx, ps=ps, attempts=8, delay=0.25)
+    current = _stable_site_nginx_master(nginx, ps=ps, attempts=8, delay=0.25)
     if current is None:
         raise RestoreAsVerificationError(
             "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_STABLE"
@@ -164,7 +230,7 @@ def _live_master_hup_reload(
 
     for index in range(12):
         time.sleep(0.25)
-        after = _discover_nginx_master(nginx, ps=ps)
+        after = _discover_site_nginx_master(nginx, ps=ps)
         if after is None:
             continue
         if (
@@ -213,20 +279,46 @@ def _systemd_main_hup_reload(systemctl: str) -> str:
     return "SYSTEMD_MAIN_HUP"
 
 
+def _site_nginx_preflight(
+    nginx: str,
+    *,
+    systemctl: str = "/usr/bin/systemctl",
+    ps: str = "/usr/bin/ps",
+) -> tuple[str, tuple[str, ...]]:
+    if _systemd_nginx_active(systemctl):
+        syntax = _run([nginx, "-t"], timeout=30)
+        if syntax.returncode != 0:
+            raise RestoreAsVerificationError(
+                "site nginx preflight failed; reason=CONFIG_INVALID"
+            )
+        return "SYSTEMD", ()
+
+    master = _stable_site_nginx_master(nginx, ps=ps, attempts=8, delay=0.25)
+    if master is None:
+        raise RestoreAsVerificationError(
+            "site nginx preflight failed; reason=SITE_NGINX_NOT_RUNNING"
+        )
+    runtime_args = tuple(master.get("runtime_args", ()))
+    syntax = _run([nginx, "-t", *runtime_args], timeout=30)
+    if syntax.returncode != 0:
+        raise RestoreAsVerificationError(
+            "site nginx preflight failed; reason=CONFIG_INVALID"
+        )
+    return "LIVE_MASTER", runtime_args
+
+
 def _reload_nginx(
     nginx: str,
     *,
     systemctl: str = "/usr/bin/systemctl",
     ps: str = "/usr/bin/ps",
 ) -> tuple[str, tuple[str, ...]]:
-    master = _stable_nginx_master(nginx, ps=ps, attempts=20, delay=0.25)
-    runtime_args = tuple(master.get("runtime_args", ())) if master is not None else ()
-
-    syntax = _run([nginx, "-t", *runtime_args], timeout=30)
-    if syntax.returncode != 0:
-        raise RestoreAsVerificationError("nginx reload preflight failed")
-
     if _systemd_nginx_active(systemctl):
+        runtime_args: tuple[str, ...] = ()
+        syntax = _run([nginx, "-t"], timeout=30)
+        if syntax.returncode != 0:
+            raise RestoreAsVerificationError("nginx reload preflight failed")
+
         reloaded = _run([systemctl, "reload", "nginx"], timeout=30)
         if reloaded.returncode == 0:
             return "SYSTEMD", runtime_args
@@ -239,12 +331,17 @@ def _reload_nginx(
 
         return _systemd_main_hup_reload(systemctl), runtime_args
 
-    if master is not None:
-        return _live_master_hup_reload(nginx, master, ps=ps), runtime_args
+    master = _stable_site_nginx_master(nginx, ps=ps, attempts=20, delay=0.25)
+    if master is None:
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=SITE_NGINX; reason=SITE_NGINX_NOT_RUNNING"
+        )
 
-    raise RestoreAsVerificationError(
-        "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_FOUND"
-    )
+    runtime_args = tuple(master.get("runtime_args", ()))
+    syntax = _run([nginx, "-t", *runtime_args], timeout=30)
+    if syntax.returncode != 0:
+        raise RestoreAsVerificationError("nginx reload preflight failed")
+    return _live_master_hup_reload(nginx, master, ps=ps), runtime_args
 
 
 def _curl_failure_class(returncode: int) -> str:
@@ -682,6 +779,11 @@ def restore_as_verified(
     package_dir = package_dir.resolve()
     target_root = target_root.resolve()
     target_domain = cloudpanel.validate_domain(target_domain)
+    _site_nginx_preflight(
+        nginx,
+        systemctl=systemctl,
+        ps=ps,
+    )
     with _database_compat_context(package_dir, target_domain, target_root):
         result = restore_as.restore_as(
             package_dir,

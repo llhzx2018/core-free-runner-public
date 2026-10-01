@@ -1,0 +1,170 @@
+name: P07 Release24 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - '.github/workflows/p07-release24-distribution-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release24 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release24'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release24"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release24"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="c6435a15a576c3dd7bd7c48cd8828f782391a2c9"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="2448051ba708af11e2de3fb53deb13a4dadc86c5"' installers/p07.sh
+          grep -Fq '| B56 | Restore-As Site-serving Nginx Role Separation |' "$root/docs/authority/ACCEPTANCE_MATRIX.md"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              seen=set()
+              for line in (root/name).read_text(encoding='utf-8').splitlines():
+                  if not line.strip():
+                      continue
+                  expected, rel=line.split('  ',1)
+                  assert rel not in seen, (name, rel)
+                  seen.add(rel)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  assert blob(path)==expected, (name, rel, blob(path), expected)
+          runtime=(root/'RUNTIME.gitblob').read_text(encoding='utf-8')
+          required={
+              'BUILD_ID':'67b1dd7770324bd8fe39d69f3c63278761263488',
+              'lib/restore_as_verified.py':'29302c6e0923117664fda57928aa46ca4a36e171',
+              'lib/restore_failure_ui.sh':'42e224651d461b2315cca749804ea1521d0e74a4',
+          }
+          for rel, expected in required.items():
+              assert f'{expected}  {rel}' in runtime, rel
+          PY
+
+      - name: Release24 site-Nginx role contract
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          grep -Fq 'def _nginx_instance_web_ports' "$root/lib/restore_as_verified.py"
+          grep -Fq 'def _discover_site_nginx_master' "$root/lib/restore_as_verified.py"
+          grep -Fq 'def _stable_site_nginx_master' "$root/lib/restore_as_verified.py"
+          grep -Fq 'def _site_nginx_preflight' "$root/lib/restore_as_verified.py"
+          grep -Fq 'SITE_NGINX_NOT_RUNNING' "$root/lib/restore_as_verified.py"
+          grep -Fq '& {80, 443}' "$root/lib/restore_as_verified.py"
+          grep -Fq 'os.kill(int(master["pid"]), signal.SIGHUP)' "$root/lib/restore_as_verified.py"
+          ! grep -R -n -E 'systemctl[[:space:]]+restart[[:space:]]+nginx' "$root/bin" "$root/lib"
+
+      - name: Syntax and compile
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          bash -n "$root/bin/vfops-site-ui"
+          bash -n "$root/lib/restore_failure_ui.sh"
+          python3 -m py_compile             "$root/lib/restore_as_verified.py"             "$root/lib/restore_as.py"             "$root/lib/restore_apply_core.py"             "$root/lib/verify.py"
+
+      - name: Public overlay release24 regressions
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_p07_integration_manifest             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Site Nginx role separation behavior
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          export PYTHONPATH="$PWD/$root/lib"
+          python3 - <<'PY'
+          import subprocess
+          from unittest import mock
+          import restore_as_verified as r
+
+          panel={
+              'pid':856,
+              'executable':'/usr/sbin/nginx',
+              'runtime_args':('-c','/home/clp/services/nginx/nginx.conf'),
+          }
+          site={
+              'pid':1200,
+              'executable':'/usr/sbin/nginx',
+              'runtime_args':(),
+          }
+          with mock.patch.object(r,'_nginx_master_candidates',return_value=[panel,site]),                mock.patch.object(r,'_nginx_instance_web_ports',side_effect=[{8443},{80,443}]):
+              chosen=r._discover_site_nginx_master('/usr/sbin/nginx')
+          assert chosen==site
+
+          with mock.patch.object(r,'_systemd_nginx_active',return_value=False),                mock.patch.object(r,'_stable_site_nginx_master',return_value=None):
+              try:
+                  r._site_nginx_preflight('/usr/sbin/nginx')
+              except r.RestoreAsVerificationError as exc:
+                  assert 'SITE_NGINX_NOT_RUNNING' in str(exc)
+              else:
+                  raise AssertionError('panel-only Nginx must not qualify as site Nginx')
+          PY
+
+      - name: Preflight stays before target writes
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified.RestoreAsVerifiedTests.test_site_nginx_preflight_failure_stops_before_restore_engine_writes             tests.test_restore_as_verified.RestoreAsVerifiedTests.test_site_nginx_discovery_ignores_cloudpanel_control_nginx
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release24'
+          grep -Fq 'lib/restore_as_verified.py' "$tmp/install/.runtime-manifest.gitblob"
+
+          bash installers/p07-final.sh >"$tmp/second.log"
+          grep -Fq '已是当前版本，无需下载或重复安装' "$tmp/second.log"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          ! grep -R -n -E '(PRIVATE KEY|BEGIN OPENSSH|ghp_[A-Za-z0-9]|github_pat_)' "$root/bin" "$root/lib" installers/p07*.sh
+          ! grep -R -n -E 'systemctl[[:space:]]+(start|restart)[[:space:]]+nginx' "$root/bin" "$root/lib"
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' installers/p07*.sh "$root/bin" "$root/lib"
+          grep -Fq 'cleanup_database' "$root/lib/restore_as_verified.py"
+          grep -Fq 'cleanup_site' "$root/lib/restore_as_verified.py"
+          grep -Fq '本次没有创建新网站、没有修改 DNS，也没有修改原网站。' "$root/lib/restore_failure_ui.sh"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE24_DISTRIBUTION_GATE=COMPLETE'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'

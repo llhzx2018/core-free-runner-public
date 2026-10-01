@@ -28,6 +28,21 @@ render_restore_failure() {
     POST_RESTORE_PERMISSIONS) ui_bad 'CloudPanel 新网站权限最终整理没有完成，P07 已停止恢复。'; return 0 ;;
   esac
 
+  if grep -Fq 'site nginx preflight failed' "$err_file" 2>/dev/null; then
+    if grep -Fq 'reason=SITE_NGINX_NOT_RUNNING' "$err_file" 2>/dev/null; then
+      ui_bad '网站 Nginx 当前没有运行，P07 已在创建新网站前停止。'
+      ui_note 'CloudPanel 后台服务可以仍然正常，但它不是承载网站 80/443 流量的 Nginx。'
+      ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
+    elif grep -Fq 'reason=CONFIG_INVALID' "$err_file" 2>/dev/null; then
+      ui_bad '网站 Nginx 配置自检没有通过，P07 已在创建新网站前停止。'
+      ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
+    else
+      ui_bad '网站 Nginx 运行状态检查没有通过，P07 已在创建新网站前停止。'
+      ui_note '本次没有创建新网站、没有修改 DNS，也没有修改原网站。'
+    fi
+    return 0
+  fi
+
   if grep -Fq 'Restore-As local verification failed' "$err_file" 2>/dev/null; then
     if grep -Fq 'nginx reload preflight failed' "$err_file" 2>/dev/null; then
       ui_bad '新网站已恢复，但 Nginx 配置自检没有通过，P07 已回滚新目标。'
@@ -35,7 +50,10 @@ render_restore_failure() {
       ui_note 'DNS 没有修改，原网站没有修改。'
       return 0
     elif grep -Fq 'nginx reload failed' "$err_file" 2>/dev/null; then
-      if grep -Fq 'mode=LIVE_MASTER_HUP' "$err_file" 2>/dev/null; then
+      if grep -Fq 'mode=SITE_NGINX' "$err_file" 2>/dev/null; then
+        ui_bad '网站 Nginx 在恢复过程中变为不可用，P07 已回滚新目标。'
+        ui_note 'CloudPanel 后台 Nginx 不会被当作网站 Nginx 使用。'
+      elif grep -Fq 'mode=LIVE_MASTER_HUP' "$err_file" 2>/dev/null; then
         ui_bad 'CloudPanel 的实际 Nginx 没有在安全窗口内完成优雅重载，P07 已回滚新目标。'
         if grep -Fq 'reason=MASTER_NOT_FOUND' "$err_file" 2>/dev/null; then
           ui_note '原因：创建新站后，P07 在等待窗口内没有确认到稳定的 Nginx 主进程。'
