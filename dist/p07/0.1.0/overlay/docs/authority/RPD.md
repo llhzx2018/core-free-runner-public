@@ -921,3 +921,31 @@ OTHER
 - SOURCE 不修改；
 - existing target 不覆盖。
 
+## Restore-As Live Nginx Instance Contract
+
+CloudPanel 机器上的真实 Nginx 不得假设由 `nginx.service` 管理，也不得假设使用编译默认 `/etc/nginx/nginx.conf` 或默认 PID 文件。Restore-As 在 reload / vhost verification 前必须先识别真实运行中的单一 root Nginx master，并绑定该实例的运行参数。
+
+固定：
+
+```text
+discover live nginx master
+→ require single root master with PPID 1
+→ extract live -p / -c runtime args
+→ nginx -t using the same runtime args
+→ if systemd owns nginx: existing managed reload path
+→ otherwise:
+   re-read and match the same master PID + runtime args
+   send SIGHUP only to that exact master PID
+   confirm the same master remains present
+→ nginx -T using the same runtime args
+→ target listener / Host / SNI verification
+```
+
+安全边界：
+- 发现多个候选 master 时 fail closed；
+- reload 前 master 身份变化时 fail closed；
+- 不使用空/错误 PID 文件猜测进程；
+- 不自动 restart；
+- 不修改 DNS、SOURCE 或 existing target；
+- 真实运行实例的 `-c` 配置必须同时用于 `nginx -t` 与 `nginx -T`，不得测试一份配置、验证另一份配置。
+
