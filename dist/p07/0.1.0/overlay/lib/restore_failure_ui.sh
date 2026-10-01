@@ -29,12 +29,32 @@ render_restore_failure() {
   esac
 
   if grep -Fq 'Restore-As local verification failed' "$err_file" 2>/dev/null; then
+    if grep -Fq 'nginx reload preflight failed' "$err_file" 2>/dev/null; then
+      ui_bad '新网站已恢复，但 Nginx 配置自检没有通过，P07 已回滚新目标。'
+      ui_note 'P07 没有继续重新加载 Nginx，也没有保留未验证的新站。'
+      ui_note 'DNS 没有修改，原网站没有修改。'
+      return 0
+    elif grep -Fq 'nginx reload failed' "$err_file" 2>/dev/null; then
+      ui_bad '新网站已恢复，但 Nginx 重新加载没有完成，P07 已回滚新目标。'
+      ui_note '这表示新站配置已经生成，但运行中的 Nginx 没有成功加载它。'
+      ui_note 'DNS 没有修改，原网站没有修改。'
+      return 0
+    fi
     if grep -Fq 'local Host routing verification failed' "$err_file" 2>/dev/null; then
       if grep -Fq 'target_listener=MISSING' "$err_file" 2>/dev/null; then
         ui_bad '新网站已恢复，Nginx 也有新站点配置，但没有发现可用于本机 HTTP 验证的 80 端口监听，P07 已回滚新目标。'
         ui_note 'P07 不会猜测服务器监听地址，也不会因此保留未验证的新站。'
       elif grep -Fq 'target_listener=UNREACHABLE' "$err_file" 2>/dev/null; then
-        ui_bad '新网站已恢复，P07 也找到了 Nginx 实际 HTTP 监听地址，但本机仍无法连通，已回滚新目标。'
+        if grep -Fq 'target_transport=EMPTY_REPLY' "$err_file" 2>/dev/null; then
+          ui_bad '新网站已恢复，也找到了 Nginx HTTP 监听，但 Nginx 返回了空响应，P07 已回滚新目标。'
+          ui_note '这通常表示运行中的 Nginx 还没有真正加载这个新域名，或请求被默认站直接丢弃。'
+        elif grep -Fq 'target_transport=CONNECT_FAILED' "$err_file" 2>/dev/null; then
+          ui_bad '新网站已恢复，也找到了 Nginx HTTP 监听，但本机连接被拒绝，P07 已回滚新目标。'
+        elif grep -Fq 'target_transport=TIMEOUT' "$err_file" 2>/dev/null; then
+          ui_bad '新网站已恢复，也找到了 Nginx HTTP 监听，但本机连接超时，P07 已回滚新目标。'
+        else
+          ui_bad '新网站已恢复，P07 也找到了 Nginx 实际 HTTP 监听地址，但本机仍无法连通，已回滚新目标。'
+        fi
         ui_note '这表示问题已经缩小到服务器本机监听/网络层，不是备份、SQLite 或数据库恢复本身。'
       elif grep -Fq 'target_vhost=MISSING' "$err_file" 2>/dev/null; then
         ui_bad '新网站已恢复，但 Nginx 还没有加载到这个新域名，P07 已回滚新目标。'
