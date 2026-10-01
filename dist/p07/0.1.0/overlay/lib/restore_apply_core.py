@@ -231,14 +231,23 @@ def restore_sqlite(package_dir: Path, manifest: dict[str, Any], staged_site: Pat
         rel = PurePosixPath(source_abs).relative_to(PurePosixPath(site_root))
         target = staged_site / Path(*rel.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_not_symlink(staged_site, target)
+        if target.is_symlink():
+            target.unlink()
+        for suffix in ("-wal", "-shm", "-journal"):
+            target.with_name(target.name + suffix).unlink(missing_ok=True)
         shutil.copy2(package_file, target)
         os.chmod(target, 0o600)
+        conn = None
         try:
-            conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+            uri = target.resolve().as_uri() + "?mode=ro&immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
             row = conn.execute("PRAGMA integrity_check").fetchone()
-            conn.close()
         except sqlite3.Error as exc:
             raise SandboxRestoreError(f"restored SQLite validation failed: {source_abs}") from exc
+        finally:
+            if conn is not None:
+                conn.close()
         if not row or row[0] != "ok":
             raise SandboxRestoreError(f"restored SQLite validation failed: {source_abs}")
         count += 1

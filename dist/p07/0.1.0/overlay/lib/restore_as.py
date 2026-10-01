@@ -398,10 +398,24 @@ def restore_as(
         restore_apply.extract_site_archive(archive, staged_site)
 
         source_site_root = restore_plan.safe_absolute_site_path(str(source_site.get("site_root", "")))
+
+        # The site archive is a broad file snapshot and may contain a live SQLite
+        # main/WAL/SHM view. The dedicated sqlite/ package snapshots are the
+        # authoritative consistent database copies. Materialize them before any
+        # restore verification so Restore-As matches the mature sandbox path.
+        failure_stage = "SQLITE_SNAPSHOT_RESTORE"
+        try:
+            restore_apply.restore_sqlite(package_dir, manifest, staged_site, source_site_root)
+        except Exception as exc:
+            raise RestoreAsError("SQLite snapshot restore failed") from exc
+
+        failure_stage = "SITE_FILES_VERIFY"
         files_check = verify_engine.verify_files(package_dir, manifest, staged_site, source_site_root)
+        if files_check.get("status") != "PASS":
+            raise RestoreAsError("restored site file verification failed")
         sqlite_check = verify_engine.verify_sqlite(package_dir, manifest, staged_site, source_site_root)
-        if files_check.get("status") != "PASS" or sqlite_check.get("status") != "PASS":
-            raise RestoreAsError("restored files failed pre-transform verification")
+        if sqlite_check.get("status") != "PASS":
+            raise RestoreAsError("restored SQLite snapshot verification failed")
 
         failure_stage = "MYSQL_CREATE_IMPORT_VERIFY"
         if mysql_entries:

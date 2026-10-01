@@ -787,3 +787,31 @@ live SQLite (可能 WAL)
 - WAL 源库的已提交数据必须通过 Backup API 合并进独立快照，不能依赖复制裸 `.sqlite` 文件；
 - Machine PASS 不替代 OWNER Real Use。
 
+## Restore-As SQLite Canonical Snapshot Contract
+
+Restore-As 解压 `files/site.tar.gz` 后，不得把归档中的 live SQLite 主文件、WAL、SHM 或 journal 当成数据库恢复真相。
+
+固定顺序：
+
+```text
+verified backup package
+→ create isolated target site
+→ extract broad site archive
+→ materialize manifest-declared sqlite/ canonical snapshots
+→ remove archived SQLite -wal / -shm / -journal sidecars
+→ regular-file verification（排除 SQLite 主文件与 sidecars）
+→ immutable SQLite integrity verification
+→ MySQL / application remap / ownership / atomic commit
+→ local Host / SNI verification
+```
+
+硬边界：
+
+- `contents.sqlite[].file` 指向的独立快照是 SQLite 恢复唯一真相；
+- 网站归档中的 SQLite 主文件与其 `-wal` / `-shm` / `-journal` 只视为 live archive 副本，不参与普通文件一致性；
+- Restore-As 必须在任何 SQLite 完整性验证前，把独立快照恢复到 staged site；
+- 恢复 SQLite 前必须拒绝父路径 symlink，并移除目标同名 sidecars；
+- 恢复后的 SQLite 使用 immutable read-only `PRAGMA integrity_check`；
+- Restore-As 失败必须保留 fail-closed 回滚，并向普通用户显示固定中文阶段，不输出 secret / DB password / 原始工程 stderr；
+- DNS 不自动修改，SOURCE 不删除，existing target 不覆盖。
+

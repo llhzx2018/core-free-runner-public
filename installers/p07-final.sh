@@ -10,10 +10,10 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/0.1.0-rc2"
 BASE_PACKAGE="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 BASE_SHA256="de28a5e9dada500357be725e78e9e5cbacd51d26f1ec9bbb55ff92d21d49ada5"
 RUNTIME_URL="${PUBLIC_ROOT}/dist/p07/0.1.0/overlay"
-RUNTIME_MANIFEST_BLOB="eb0d6635e846a19822b354fd114e7c8a74d4fac6"
+RUNTIME_MANIFEST_BLOB="3461782c9326bd599e841fa437477dabeb472f4c"
 
 EXPECTED_VERSION="VF Server Ops 0.1.0"
-EXPECTED_BUILD_ID="0.1.0-release15"
+EXPECTED_BUILD_ID="0.1.0-release16"
 
 say() { printf '\n[P07] %s\n' "$*"; }
 fail() { printf '\n[P07] 错误：%s\n' "$*" >&2; exit 1; }
@@ -111,7 +111,7 @@ cp "$TMP_DIR/RUNTIME.gitblob" "$SRC_DIR/.runtime-manifest.gitblob"
 chmod 0644 "$SRC_DIR/.runtime-manifest.gitblob"
 
 say "执行轻量安装前自检..."
-for file in "$SRC_DIR"/bin/* "$SRC_DIR"/lib/cloudpanel_ui_*.sh "$SRC_DIR"/lib/terminal_ui.sh; do
+for file in "$SRC_DIR"/bin/* "$SRC_DIR"/lib/cloudpanel_ui_*.sh "$SRC_DIR"/lib/terminal_ui.sh "$SRC_DIR"/lib/restore_failure_ui.sh; do
   [[ -f "$file" ]] || continue
   bash -n "$file"
 done
