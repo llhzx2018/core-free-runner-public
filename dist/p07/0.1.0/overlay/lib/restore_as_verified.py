@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -37,7 +38,18 @@ def _run(command: Sequence[str], *, timeout: int = 20) -> subprocess.CompletedPr
         raise RestoreAsVerificationError("local verification command failed") from exc
 
 
-def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str]:
+def _curl_resolve_address(address: str) -> str:
+    return f"[{address}]" if ":" in address and not address.startswith("[") else address
+
+
+def _http_code(
+    curl: str,
+    domain: str,
+    scheme: str,
+    port: int,
+    *,
+    address: str = "127.0.0.1",
+) -> tuple[int, str]:
     command = [
         curl,
         "--silent",
@@ -53,7 +65,7 @@ def _http_code(curl: str, domain: str, scheme: str, port: int) -> tuple[int, str
         "--noproxy",
         "*",
         "--resolve",
-        f"{domain}:{port}:127.0.0.1",
+        f"{domain}:{port}:{_curl_resolve_address(address)}",
     ]
     if scheme == "https":
         # The target certificate is intentionally not copied from SOURCE. Before DNS
@@ -75,18 +87,107 @@ def _http_probe(
     scheme: str,
     port: int,
     *,
-    attempts: int = 4,
+    addresses: Sequence[str] = ("127.0.0.1",),
+    attempts_per_address: int = 2,
     delay: float = 1.0,
 ) -> tuple[int, str]:
-    attempts = max(1, attempts)
+    candidates = tuple(dict.fromkeys(addresses)) or ("127.0.0.1",)
+    attempts_per_address = max(1, attempts_per_address)
     last = (1, "")
-    for index in range(attempts):
-        last = _http_code(curl, domain, scheme, port)
-        if last[0] == 0 and _valid_http_code(last[1]):
-            return last
-        if index + 1 < attempts:
-            time.sleep(delay)
+    for address in candidates:
+        for index in range(attempts_per_address):
+            last = _http_code(curl, domain, scheme, port, address=address)
+            if last[0] == 0 and _valid_http_code(last[1]):
+                return last
+            if index + 1 < attempts_per_address:
+                time.sleep(delay)
     return last
+
+
+def _nginx_server_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    collecting = False
+    depth = 0
+    current: list[str] = []
+    for raw in text.splitlines():
+        clean = raw.split("#", 1)[0]
+        if not collecting:
+            if re.match(r"^\s*server\s*\{", clean):
+                collecting = True
+                current = [raw]
+                depth = clean.count("{") - clean.count("}")
+                if depth <= 0:
+                    blocks.append("\n".join(current))
+                    collecting = False
+            continue
+        current.append(raw)
+        depth += clean.count("{") - clean.count("}")
+        if depth <= 0:
+            blocks.append("\n".join(current))
+            collecting = False
+            current = []
+    return blocks
+
+
+def _nginx_target_server_blocks(text: str, domain: str) -> list[str]:
+    wanted = domain.lower()
+    matched: list[str] = []
+    for block in _nginx_server_blocks(text):
+        for match in re.finditer(r"\bserver_name\s+([^;]+);", block):
+            names = {item.strip().lower() for item in match.group(1).split()}
+            if wanted in names:
+                matched.append(block)
+                break
+    return matched
+
+
+def _listen_address(token: str, port: int) -> str | None:
+    token = token.strip()
+    if not token or token.startswith("unix:"):
+        return None
+
+    host: str
+    value_port: int
+    if token.isdigit():
+        host, value_port = "0.0.0.0", int(token)
+    else:
+        ipv6 = re.fullmatch(r"\[([^\]]+)\]:(\d+)", token)
+        if ipv6:
+            host, value_port = ipv6.group(1), int(ipv6.group(2))
+        else:
+            if ":" not in token:
+                return None
+            host, raw_port = token.rsplit(":", 1)
+            if not raw_port.isdigit():
+                return None
+            value_port = int(raw_port)
+    if value_port != port:
+        return None
+
+    host = host.strip()
+    if host in {"", "*", "0.0.0.0"}:
+        return "127.0.0.1"
+    if host == "::":
+        return "::1"
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    return host
+
+
+def _nginx_target_listener_addresses(nginx: str, domain: str, port: int) -> list[str]:
+    proc = _run([nginx, "-T"], timeout=30)
+    if proc.returncode != 0:
+        return []
+    text = f"{proc.stdout}\n{proc.stderr}"
+    addresses: list[str] = []
+    for block in _nginx_target_server_blocks(text, domain):
+        for match in re.finditer(r"^\s*listen\s+([^;\s]+)", block, re.M):
+            address = _listen_address(match.group(1), port)
+            if address is not None and address not in addresses:
+                addresses.append(address)
+    return addresses
 
 
 def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
@@ -94,11 +195,7 @@ def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
     if proc.returncode != 0:
         return False
     text = f"{proc.stdout}\n{proc.stderr}"
-    for match in re.finditer(r"\bserver_name\s+([^;]+);", text):
-        names = {item.strip().lower() for item in match.group(1).split()}
-        if domain.lower() in names:
-            return True
-    return False
+    return bool(_nginx_target_server_blocks(text, domain))
 
 
 def _cloudpanel_error_detail(exc: BaseException) -> tuple[str, str] | None:
@@ -235,14 +332,36 @@ def verify_local_restore(
     if file_count < 1:
         raise RestoreAsVerificationError("restored site contains no files")
 
-    http_rc, http_code = _http_probe(curl, target_domain, "http", 80)
-    if http_rc != 0 or not _valid_http_code(http_code):
+    http_addresses = _nginx_target_listener_addresses(nginx, target_domain, 80)
+    if not http_addresses:
         vhost_state = "PRESENT" if _nginx_has_target_vhost(nginx, target_domain) else "MISSING"
+        listener_state = "MISSING" if vhost_state == "PRESENT" else "UNKNOWN"
         raise RestoreAsVerificationError(
-            f"local Host routing verification failed; target_vhost={vhost_state}"
+            f"local Host routing verification failed; target_vhost={vhost_state}; "
+            f"target_listener={listener_state}"
         )
 
-    https_rc, https_code = _http_probe(curl, target_domain, "https", 443)
+    http_rc, http_code = _http_probe(
+        curl,
+        target_domain,
+        "http",
+        80,
+        addresses=http_addresses,
+    )
+    if http_rc != 0 or not _valid_http_code(http_code):
+        raise RestoreAsVerificationError(
+            "local Host routing verification failed; "
+            "target_vhost=PRESENT; target_listener=UNREACHABLE"
+        )
+
+    https_addresses = _nginx_target_listener_addresses(nginx, target_domain, 443)
+    https_rc, https_code = _http_probe(
+        curl,
+        target_domain,
+        "https",
+        443,
+        addresses=https_addresses or ("127.0.0.1",),
+    )
     if https_rc == 0 and _valid_http_code(https_code):
         sni = {
             "status": "PASS",
@@ -275,7 +394,12 @@ def verify_local_restore(
             "mode": result.get("application_config_mode", "UNKNOWN"),
             "wordpress_urls": result.get("wordpress_urls"),
         },
-        "host": {"status": "PASS", "mode": "LOCAL_HTTP_RESOLVE", "http_code": http_code},
+        "host": {
+            "status": "PASS",
+            "mode": "LOCAL_HTTP_NGINX_LISTENER",
+            "http_code": http_code,
+            "listener_candidates": len(http_addresses),
+        },
         "sni": sni,
         "dns_changed": False,
         "source_deleted": False,
