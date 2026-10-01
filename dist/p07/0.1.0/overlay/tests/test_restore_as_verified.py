@@ -40,18 +40,48 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             "existing_site_overwrite_allowed": False,
         }
 
+    def test_nginx_master_discovery_reads_cloudpanel_live_config(self) -> None:
+        proc = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=(
+                "    856       1 root     nginx: master process "
+                "/usr/sbin/nginx -g daemon on; master_process on; "
+                "-c /home/clp/services/nginx/nginx.conf\n"
+                "    900     856 www-data nginx: worker process\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(restore_as_verified, "_run", return_value=proc):
+            master = restore_as_verified._discover_nginx_master("/usr/sbin/nginx")
+        self.assertIsNotNone(master)
+        assert master is not None
+        self.assertEqual(master["pid"], 856)
+        self.assertEqual(
+            master["runtime_args"],
+            ("-c", "/home/clp/services/nginx/nginx.conf"),
+        )
+
     def test_nginx_reload_prefers_active_systemd_after_syntax_pass(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
             subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ]
-        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
-            mode = restore_as_verified._reload_nginx(
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_run",
+            side_effect=calls,
+        ) as run:
+            mode, nginx_args = restore_as_verified._reload_nginx(
                 "/usr/sbin/nginx",
                 systemctl="/usr/bin/systemctl",
             )
-        self.assertEqual(mode, "SYSTEMD")
+        self.assertEqual((mode, nginx_args), ("SYSTEMD", ()))
         self.assertEqual(run.call_args_list[0].args[0], ["/usr/sbin/nginx", "-t"])
         self.assertEqual(
             run.call_args_list[1].args[0],
@@ -62,18 +92,67 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             ["/usr/bin/systemctl", "reload", "nginx"],
         )
 
-    def test_nginx_reload_falls_back_to_direct_signal_without_active_systemd(self) -> None:
+    def test_nginx_reload_uses_live_cloudpanel_master_when_systemd_is_inactive(self) -> None:
+        master = {
+            "pid": 856,
+            "executable": "/usr/sbin/nginx",
+            "runtime_args": ("-c", "/home/clp/services/nginx/nginx.conf"),
+        }
+        calls = [
+            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
+        ]
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=master,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_run",
+            side_effect=calls,
+        ) as run, mock.patch.object(
+            restore_as_verified.os,
+            "kill",
+        ) as kill, mock.patch.object(
+            restore_as_verified.time,
+            "sleep",
+        ):
+            mode, nginx_args = restore_as_verified._reload_nginx(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual(mode, "LIVE_MASTER_HUP")
+        self.assertEqual(
+            nginx_args,
+            ("-c", "/home/clp/services/nginx/nginx.conf"),
+        )
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                "/usr/sbin/nginx",
+                "-t",
+                "-c",
+                "/home/clp/services/nginx/nginx.conf",
+            ],
+        )
+        kill.assert_called_once_with(856, restore_as_verified.signal.SIGHUP)
+
+    def test_nginx_reload_falls_back_to_direct_signal_without_live_master(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
             subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ]
-        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
-            mode = restore_as_verified._reload_nginx(
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+            mode, nginx_args = restore_as_verified._reload_nginx(
                 "/usr/sbin/nginx",
                 systemctl="/usr/bin/systemctl",
             )
-        self.assertEqual(mode, "DIRECT_SIGNAL")
+        self.assertEqual((mode, nginx_args), ("DIRECT_SIGNAL", ()))
         self.assertEqual(
             run.call_args_list[2].args[0],
             ["/usr/sbin/nginx", "-s", "reload"],
@@ -95,14 +174,18 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(
+            restore_as_verified,
             "_run",
             side_effect=calls,
         ) as run, mock.patch.object(restore_as_verified.time, "sleep"):
-            mode = restore_as_verified._reload_nginx(
+            mode, nginx_args = restore_as_verified._reload_nginx(
                 "/usr/sbin/nginx",
                 systemctl="/usr/bin/systemctl",
             )
-        self.assertEqual(mode, "SYSTEMD_MAIN_HUP")
+        self.assertEqual((mode, nginx_args), ("SYSTEMD_MAIN_HUP", ()))
         self.assertEqual(
             run.call_args_list[3].args[0],
             ["/usr/bin/systemctl", "is-active", "nginx"],
@@ -135,7 +218,11 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 stderr="Main PID unavailable INTERNAL_SECRET_DETAIL",
             ),
         ]
-        with mock.patch.object(restore_as_verified, "_run", side_effect=calls):
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(restore_as_verified, "_run", side_effect=calls):
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
                 restore_as_verified._reload_nginx(
                     "/usr/sbin/nginx",
@@ -157,7 +244,11 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 stderr="Access denied INTERNAL_SECRET_DETAIL",
             ),
         ]
-        with mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
                 restore_as_verified._reload_nginx(
                     "/usr/sbin/nginx",
@@ -171,7 +262,11 @@ class RestoreAsVerifiedTests(unittest.TestCase):
 
     def test_nginx_reload_preflight_failure_is_fail_closed(self) -> None:
         proc = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
-        with mock.patch.object(restore_as_verified, "_run", return_value=proc):
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_nginx_master",
+            return_value=None,
+        ), mock.patch.object(restore_as_verified, "_run", return_value=proc):
             with self.assertRaisesRegex(
                 restore_as_verified.RestoreAsVerificationError,
                 "nginx reload preflight failed",
@@ -265,6 +360,37 @@ server {
                 80,
             )
         self.assertEqual(addresses, ["127.0.0.1", "::1"])
+
+    def test_nginx_listener_discovery_uses_live_runtime_args(self) -> None:
+        proc = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="""
+server {
+    listen 80;
+    server_name restore.example.com;
+}
+""",
+            stderr="",
+        )
+        with mock.patch.object(restore_as_verified, "_run", return_value=proc) as run:
+            addresses = restore_as_verified._nginx_target_listener_addresses(
+                "/usr/sbin/nginx",
+                "restore.example.com",
+                80,
+                nginx_args=("-c", "/home/clp/services/nginx/nginx.conf"),
+            )
+        self.assertEqual(addresses, ["127.0.0.1"])
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/sbin/nginx",
+                "-T",
+                "-c",
+                "/home/clp/services/nginx/nginx.conf",
+            ],
+        )
+
 
     def test_http_probe_tries_discovered_listener_addresses(self) -> None:
         with mock.patch.object(
@@ -412,7 +538,7 @@ server {
             ), mock.patch.object(
                 restore_as_verified,
                 "_reload_nginx",
-                return_value="SYSTEMD",
+                return_value=("SYSTEMD", ()),
             ) as reload_nginx, mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
@@ -428,6 +554,7 @@ server {
             reload_nginx.assert_called_once_with(
                 "/usr/sbin/nginx",
                 systemctl="/usr/bin/systemctl",
+                ps="/usr/bin/ps",
             )
             self.assertEqual(result["status"], "RESTORE_AS_VERIFIED")
             self.assertEqual(result["local_verification"]["status"], "PASS")
@@ -453,6 +580,7 @@ server {
             ), mock.patch.object(
                 restore_as_verified,
                 "_reload_nginx",
+                return_value=("SYSTEMD", ()),
             ), mock.patch.object(
                 restore_as_verified,
                 "verify_local_restore",
