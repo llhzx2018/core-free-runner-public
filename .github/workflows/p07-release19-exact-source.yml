@@ -1,0 +1,101 @@
+name: P07 Release19 Exact-source Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release19-exact-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Verify private read token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+
+      - name: Checkout exact private release19 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: f1c92e118255c0d2ae371600c1c6c7420b8f5be8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: source
+
+      - name: Identity and contract
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 'f1c92e118255c0d2ae371600c1c6c7420b8f5be8'
+          test "$(cat BUILD_ID)" = '0.1.0-release19'
+          grep -Fq '## Restore-As Guarded Nginx Reload Contract' docs/authority/RPD.md
+          grep -Fq '| B51 | Restore-As Guarded Nginx Reload / Transport Diagnosis |' docs/authority/ACCEPTANCE_MATRIX.md
+          grep -Fq 'def _reload_nginx' lib/restore_as_verified.py
+          grep -Fq 'def _curl_failure_class' lib/restore_as_verified.py
+
+      - name: Syntax and compile
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          bash -n bin/vfops-site-ui
+          bash -n lib/restore_failure_ui.sh
+          python3 -m py_compile             lib/restore_as_verified.py             lib/restore_as.py             lib/restore_apply_core.py             lib/verify.py
+
+      - name: Release19 focused regressions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_restore_as_verified             tests.test_release16_restore_as_sqlite             tests.test_restore_as             tests.test_terminal_ui_color_contract             tests.test_user_entry
+
+      - name: Guarded reload assertions
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          export PYTHONPATH="$PWD/lib"
+          python3 - <<'PY'
+          import subprocess
+          from unittest import mock
+          import restore_as_verified as r
+
+          calls=[
+              subprocess.CompletedProcess([],0,stdout='',stderr=''),
+              subprocess.CompletedProcess([],0,stdout='',stderr=''),
+          ]
+          with mock.patch.object(r,'_run',side_effect=calls) as run:
+              r._reload_nginx('/usr/sbin/nginx')
+          assert run.call_args_list[0].args[0]==['/usr/sbin/nginx','-t']
+          assert run.call_args_list[1].args[0]==['/usr/sbin/nginx','-s','reload']
+
+          assert r._curl_failure_class(7)=='CONNECT_FAILED'
+          assert r._curl_failure_class(28)=='TIMEOUT'
+          assert r._curl_failure_class(52)=='EMPTY_REPLY'
+          assert r._curl_failure_class(99)=='OTHER'
+          PY
+
+      - name: Fail-closed rollback and secret boundary
+        working-directory: source
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/secret_scan.py --root lib
+          python3 scripts/secret_scan.py --root bin
+          python3 scripts/secret_scan.py --root docs
+          grep -Fq 'cleanup_database' lib/restore_as_verified.py
+          grep -Fq 'cleanup_site' lib/restore_as_verified.py
+          grep -Fq 'DNS 没有修改，原网站没有修改。' lib/restore_failure_ui.sh
+          grep -Fq 'nginx reload preflight failed' lib/restore_failure_ui.sh
+          grep -Fq 'target_transport=EMPTY_REPLY' lib/restore_failure_ui.sh
+          ! grep -R -n -E '(^|[^A-Za-z])(rm[[:space:]]+-rf[[:space:]]+/($|[[:space:]]))' bin lib
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'P07_RELEASE19_EXACT_SOURCE=f1c92e118255c0d2ae371600c1c6c7420b8f5be8'
+          echo 'P07_PRODUCTION_WRITE=NOT_RUN'
