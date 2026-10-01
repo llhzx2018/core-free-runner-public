@@ -815,3 +815,29 @@ verified backup package
 - Restore-As 失败必须保留 fail-closed 回滚，并向普通用户显示固定中文阶段，不输出 secret / DB password / 原始工程 stderr；
 - DNS 不自动修改，SOURCE 不删除，existing target 不覆盖。
 
+## Restore-As Local Route Verification Contract
+
+Restore-As 完成文件、SQLite、MySQL、应用配置、权限与提交后，必须继续做本机路由验证，但本机探针不得被服务器代理环境或 Nginx 短暂 reload 窗口误导。
+
+固定：
+
+```text
+local HTTP probe
+→ curl direct loopback
+→ --noproxy "*"
+→ --resolve target:80:127.0.0.1
+→ bounded retry
+→ accept any real HTTP status 100..599
+```
+
+HTTPS 同样使用直连 loopback + bounded retry；证书信任在 DNS / target certificate 未就绪前不作为 Restore-As 成功前提，但必须证明 target SNI/vhost 路由存在。
+
+若 HTTP 最终仍失败：
+
+```text
+target vhost present  -> fail closed / classify local transport or reload-path issue
+target vhost missing  -> fail closed / classify Nginx target vhost not loaded
+```
+
+不得因为探针失败保留未验证的新目标。失败继续回滚新建站点与新建数据库；DNS、SOURCE、existing target 均不得自动修改。
+
