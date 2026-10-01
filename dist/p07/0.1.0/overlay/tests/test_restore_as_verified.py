@@ -62,18 +62,80 @@ class RestoreAsVerifiedTests(unittest.TestCase):
             ("-c", "/home/clp/services/nginx/nginx.conf"),
         )
 
-    def test_nginx_master_stabilization_waits_for_two_matching_samples(self) -> None:
-        master = {
+    def test_nginx_instance_web_ports_distinguishes_panel_from_site_nginx(self) -> None:
+        private_dump = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="server {\n  listen 8443 ssl;\n  server_name _;\n}\n",
+            stderr="",
+        )
+        site_dump = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=(
+                "server {\n  listen 80;\n  server_name example.com;\n}\n"
+                "server {\n  listen [::]:443 ssl;\n  server_name example.com;\n}\n"
+            ),
+            stderr="",
+        )
+        master = {"runtime_args": ("-c", "/home/clp/services/nginx/nginx.conf")}
+        with mock.patch.object(
+            restore_as_verified,
+            "_run",
+            side_effect=[private_dump, site_dump],
+        ):
+            self.assertEqual(
+                restore_as_verified._nginx_instance_web_ports(
+                    "/usr/sbin/nginx",
+                    master,
+                ),
+                {8443},
+            )
+            self.assertEqual(
+                restore_as_verified._nginx_instance_web_ports(
+                    "/usr/sbin/nginx",
+                    {"runtime_args": ()},
+                ),
+                {80, 443},
+            )
+
+    def test_site_nginx_discovery_ignores_cloudpanel_control_nginx(self) -> None:
+        private = {
             "pid": 856,
             "executable": "/usr/sbin/nginx",
             "runtime_args": ("-c", "/home/clp/services/nginx/nginx.conf"),
         }
+        site = {
+            "pid": 1200,
+            "executable": "/usr/sbin/nginx",
+            "runtime_args": (),
+        }
         with mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_nginx_master_candidates",
+            return_value=[private, site],
+        ), mock.patch.object(
+            restore_as_verified,
+            "_nginx_instance_web_ports",
+            side_effect=[{8443}, {80, 443}],
+        ):
+            selected = restore_as_verified._discover_site_nginx_master(
+                "/usr/sbin/nginx"
+            )
+        self.assertEqual(selected, site)
+
+    def test_site_nginx_stabilization_waits_for_two_matching_samples(self) -> None:
+        master = {
+            "pid": 1200,
+            "executable": "/usr/sbin/nginx",
+            "runtime_args": (),
+        }
+        with mock.patch.object(
+            restore_as_verified,
+            "_discover_site_nginx_master",
             side_effect=[None, master, master],
         ), mock.patch.object(restore_as_verified.time, "sleep") as sleep:
-            current = restore_as_verified._stable_nginx_master(
+            current = restore_as_verified._stable_site_nginx_master(
                 "/usr/sbin/nginx",
                 attempts=4,
                 delay=0.25,
@@ -81,16 +143,51 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         self.assertEqual(current, master)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_site_nginx_preflight_accepts_active_systemd_site_nginx(self) -> None:
+        with mock.patch.object(
+            restore_as_verified,
+            "_systemd_nginx_active",
+            return_value=True,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_run",
+            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+        ) as run:
+            mode, args = restore_as_verified._site_nginx_preflight(
+                "/usr/sbin/nginx",
+                systemctl="/usr/bin/systemctl",
+            )
+        self.assertEqual((mode, args), ("SYSTEMD", ()))
+        run.assert_called_once_with(["/usr/sbin/nginx", "-t"], timeout=30)
+
+    def test_site_nginx_preflight_fails_before_write_when_only_panel_nginx_exists(self) -> None:
+        with mock.patch.object(
+            restore_as_verified,
+            "_systemd_nginx_active",
+            return_value=False,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_stable_site_nginx_master",
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                restore_as_verified.RestoreAsVerificationError,
+                "SITE_NGINX_NOT_RUNNING",
+            ):
+                restore_as_verified._site_nginx_preflight(
+                    "/usr/sbin/nginx",
+                    systemctl="/usr/bin/systemctl",
+                )
+
     def test_nginx_reload_prefers_active_systemd_after_syntax_pass(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=None,
+            "_systemd_nginx_active",
+            return_value=True,
         ), mock.patch.object(
             restore_as_verified,
             "_run",
@@ -104,86 +201,67 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].args[0], ["/usr/sbin/nginx", "-t"])
         self.assertEqual(
             run.call_args_list[1].args[0],
-            ["/usr/bin/systemctl", "is-active", "nginx"],
-        )
-        self.assertEqual(
-            run.call_args_list[2].args[0],
             ["/usr/bin/systemctl", "reload", "nginx"],
         )
 
-    def test_nginx_reload_uses_live_cloudpanel_master_when_systemd_is_inactive(self) -> None:
+    def test_nginx_reload_uses_live_site_master_when_systemd_is_inactive(self) -> None:
         master = {
-            "pid": 856,
+            "pid": 1200,
             "executable": "/usr/sbin/nginx",
-            "runtime_args": ("-c", "/home/clp/services/nginx/nginx.conf"),
+            "runtime_args": ("-c", "/srv/site-nginx/nginx.conf"),
         }
-        calls = [
-            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
-        ]
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=master,
+            "_systemd_nginx_active",
+            return_value=False,
         ), mock.patch.object(
             restore_as_verified,
-            "_discover_nginx_master",
+            "_stable_site_nginx_master",
             return_value=master,
         ), mock.patch.object(
             restore_as_verified,
             "_run",
-            side_effect=calls,
+            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
         ) as run, mock.patch.object(
-            restore_as_verified.os,
-            "kill",
-        ) as kill, mock.patch.object(
-            restore_as_verified.time,
-            "sleep",
-        ):
+            restore_as_verified,
+            "_live_master_hup_reload",
+            return_value="LIVE_MASTER_HUP",
+        ) as hup:
             mode, nginx_args = restore_as_verified._reload_nginx(
                 "/usr/sbin/nginx",
                 systemctl="/usr/bin/systemctl",
             )
         self.assertEqual(mode, "LIVE_MASTER_HUP")
-        self.assertEqual(
-            nginx_args,
-            ("-c", "/home/clp/services/nginx/nginx.conf"),
+        self.assertEqual(nginx_args, ("-c", "/srv/site-nginx/nginx.conf"))
+        run.assert_called_once_with(
+            ["/usr/sbin/nginx", "-t", "-c", "/srv/site-nginx/nginx.conf"],
+            timeout=30,
         )
-        self.assertEqual(
-            run.call_args_list[0].args[0],
-            [
-                "/usr/sbin/nginx",
-                "-t",
-                "-c",
-                "/home/clp/services/nginx/nginx.conf",
-            ],
-        )
-        kill.assert_called_once_with(856, restore_as_verified.signal.SIGHUP)
+        hup.assert_called_once_with("/usr/sbin/nginx", master, ps="/usr/bin/ps")
 
-    def test_nginx_reload_fails_closed_without_stable_live_master(self) -> None:
-        calls = [
-            subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 3, stdout="inactive\n", stderr=""),
-        ]
+    def test_nginx_reload_refuses_non_site_nginx_when_systemd_is_inactive(self) -> None:
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
+            "_systemd_nginx_active",
+            return_value=False,
+        ), mock.patch.object(
+            restore_as_verified,
+            "_stable_site_nginx_master",
             return_value=None,
-        ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
+        ), mock.patch.object(restore_as_verified.os, "kill") as kill:
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
                 restore_as_verified._reload_nginx(
                     "/usr/sbin/nginx",
                     systemctl="/usr/bin/systemctl",
                 )
         message = str(caught.exception)
-        self.assertIn("mode=LIVE_MASTER_HUP", message)
-        self.assertIn("reason=MASTER_NOT_FOUND", message)
-        self.assertEqual(len(run.call_args_list), 2)
+        self.assertIn("mode=SITE_NGINX", message)
+        self.assertIn("reason=SITE_NGINX_NOT_RUNNING", message)
+        kill.assert_not_called()
 
     def test_nginx_systemd_reload_failure_uses_managed_main_hup_fallback(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess(
                 [],
                 1,
@@ -196,8 +274,8 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=None,
+            "_systemd_nginx_active",
+            side_effect=[True, True, True],
         ), mock.patch.object(
             restore_as_verified,
             "_run",
@@ -208,12 +286,13 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 systemctl="/usr/bin/systemctl",
             )
         self.assertEqual((mode, nginx_args), ("SYSTEMD_MAIN_HUP", ()))
+        self.assertEqual(run.call_args_list[0].args[0], ["/usr/sbin/nginx", "-t"])
         self.assertEqual(
-            run.call_args_list[3].args[0],
-            ["/usr/bin/systemctl", "is-active", "nginx"],
+            run.call_args_list[1].args[0],
+            ["/usr/bin/systemctl", "reload", "nginx"],
         )
         self.assertEqual(
-            run.call_args_list[4].args[0],
+            run.call_args_list[2].args[0],
             [
                 "/usr/bin/systemctl",
                 "kill",
@@ -222,17 +301,11 @@ class RestoreAsVerifiedTests(unittest.TestCase):
                 "nginx",
             ],
         )
-        self.assertEqual(
-            run.call_args_list[5].args[0],
-            ["/usr/bin/systemctl", "is-active", "nginx"],
-        )
 
     def test_nginx_managed_hup_failure_is_safe_and_fail_closed(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess([], 1, stdout="", stderr="reload command failed"),
-            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess(
                 [],
                 1,
@@ -242,8 +315,8 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=None,
+            "_systemd_nginx_active",
+            side_effect=[True, True],
         ), mock.patch.object(restore_as_verified, "_run", side_effect=calls):
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
                 restore_as_verified._reload_nginx(
@@ -258,7 +331,6 @@ class RestoreAsVerifiedTests(unittest.TestCase):
     def test_nginx_systemd_reload_failure_is_classified_and_does_not_fallback(self) -> None:
         calls = [
             subprocess.CompletedProcess([], 0, stdout="", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout="active\n", stderr=""),
             subprocess.CompletedProcess(
                 [],
                 1,
@@ -268,8 +340,8 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         ]
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=None,
+            "_systemd_nginx_active",
+            return_value=True,
         ), mock.patch.object(restore_as_verified, "_run", side_effect=calls) as run:
             with self.assertRaises(restore_as_verified.RestoreAsVerificationError) as caught:
                 restore_as_verified._reload_nginx(
@@ -280,14 +352,14 @@ class RestoreAsVerifiedTests(unittest.TestCase):
         self.assertIn("mode=SYSTEMD", message)
         self.assertIn("reason=PERMISSION_DENIED", message)
         self.assertNotIn("INTERNAL_SECRET_DETAIL", message)
-        self.assertEqual(len(run.call_args_list), 3)
+        self.assertEqual(len(run.call_args_list), 2)
 
     def test_nginx_reload_preflight_failure_is_fail_closed(self) -> None:
         proc = subprocess.CompletedProcess([], 1, stdout="", stderr="bad config")
         with mock.patch.object(
             restore_as_verified,
-            "_stable_nginx_master",
-            return_value=None,
+            "_systemd_nginx_active",
+            return_value=True,
         ), mock.patch.object(restore_as_verified, "_run", return_value=proc):
             with self.assertRaisesRegex(
                 restore_as_verified.RestoreAsVerificationError,
@@ -537,6 +609,32 @@ server {
                 ):
                     restore_as_verified.verify_local_restore(root, result)
 
+    def test_site_nginx_preflight_failure_stops_before_restore_engine_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with mock.patch.object(
+                restore_as_verified,
+                "_site_nginx_preflight",
+                side_effect=restore_as_verified.RestoreAsVerificationError(
+                    "site nginx preflight failed; reason=SITE_NGINX_NOT_RUNNING"
+                ),
+            ), mock.patch.object(
+                restore_as_verified.restore_as,
+                "restore_as",
+            ) as engine:
+                with self.assertRaisesRegex(
+                    restore_as_verified.RestoreAsVerificationError,
+                    "SITE_NGINX_NOT_RUNNING",
+                ):
+                    restore_as_verified.restore_as_verified(
+                        root / "backup",
+                        "restore.example.com",
+                        root,
+                        "clpctl",
+                        "CONFIRM",
+                    )
+            engine.assert_not_called()
+
     def test_success_is_returned_only_after_local_verification(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -550,6 +648,10 @@ server {
                 "sni": {"status": "PASS", "mode": "LOCAL_HTTPS_SNI", "http_code": "200"},
             }
             with mock.patch.object(
+                restore_as_verified,
+                "_site_nginx_preflight",
+                return_value=("SYSTEMD", ()),
+            ), mock.patch.object(
                 restore_as_verified,
                 "_database_compat_context",
                 return_value=nullcontext(),
@@ -592,6 +694,10 @@ server {
             sentinel.write_text("preserve\n", encoding="utf-8")
             engine = self.base_result(root)
             with mock.patch.object(
+                restore_as_verified,
+                "_site_nginx_preflight",
+                return_value=("SYSTEMD", ()),
+            ), mock.patch.object(
                 restore_as_verified,
                 "_database_compat_context",
                 return_value=nullcontext(),
