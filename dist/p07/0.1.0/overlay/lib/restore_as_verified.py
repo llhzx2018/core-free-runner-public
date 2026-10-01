@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -58,6 +59,93 @@ def _reload_failure_class(proc: subprocess.CompletedProcess[str]) -> str:
     return "COMMAND_FAILED"
 
 
+def _nginx_master_candidates(
+    nginx: str,
+    *,
+    ps: str = "/usr/bin/ps",
+) -> list[dict[str, Any]]:
+    proc = _run([ps, "-eo", "pid=,ppid=,user=,args="], timeout=15)
+    if proc.returncode != 0:
+        return []
+
+    expected_name = Path(nginx).name
+    found: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^\s*(\d+)\s+(\d+)\s+(\S+)\s+nginx: master process\s+(.+)$"
+    )
+    for raw in proc.stdout.splitlines():
+        match = pattern.match(raw)
+        if not match:
+            continue
+        pid, ppid, user, command = match.groups()
+        if ppid != "1" or user != "root":
+            continue
+        executable = command.split(None, 1)[0]
+        if Path(executable).name != expected_name:
+            continue
+
+        runtime_args: list[str] = []
+        prefix = re.search(r"(?:^|\s)-p\s+(\S+)", command)
+        config = re.search(r"(?:^|\s)-c\s+(\S+)", command)
+        if prefix:
+            runtime_args.extend(["-p", prefix.group(1)])
+        if config:
+            runtime_args.extend(["-c", config.group(1)])
+        found.append(
+            {
+                "pid": int(pid),
+                "executable": executable,
+                "runtime_args": tuple(runtime_args),
+            }
+        )
+    return found
+
+
+def _discover_nginx_master(
+    nginx: str,
+    *,
+    ps: str = "/usr/bin/ps",
+) -> dict[str, Any] | None:
+    found = _nginx_master_candidates(nginx, ps=ps)
+    if len(found) > 1:
+        raise RestoreAsVerificationError(
+            "nginx live master discovery failed; reason=AMBIGUOUS_MASTER"
+        )
+    return found[0] if found else None
+
+
+def _live_master_hup_reload(
+    nginx: str,
+    master: dict[str, Any],
+    *,
+    ps: str = "/usr/bin/ps",
+) -> str:
+    current = _discover_nginx_master(nginx, ps=ps)
+    if (
+        current is None
+        or current.get("pid") != master.get("pid")
+        or current.get("runtime_args") != master.get("runtime_args")
+    ):
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_CHANGED"
+        )
+
+    try:
+        os.kill(int(master["pid"]), signal.SIGHUP)
+    except (OSError, TypeError, ValueError):
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=SIGNAL_FAILED"
+        ) from None
+
+    time.sleep(0.25)
+    after = _discover_nginx_master(nginx, ps=ps)
+    if after is None or after.get("pid") != master.get("pid"):
+        raise RestoreAsVerificationError(
+            "nginx reload failed; mode=LIVE_MASTER_HUP; reason=MASTER_NOT_RUNNING"
+        )
+    return "LIVE_MASTER_HUP"
+
+
 def _systemd_nginx_active(systemctl: str) -> bool:
     try:
         state = _run([systemctl, "is-active", "nginx"], timeout=15)
@@ -90,15 +178,23 @@ def _systemd_main_hup_reload(systemctl: str) -> str:
     return "SYSTEMD_MAIN_HUP"
 
 
-def _reload_nginx(nginx: str, *, systemctl: str = "/usr/bin/systemctl") -> str:
-    syntax = _run([nginx, "-t"], timeout=30)
+def _reload_nginx(
+    nginx: str,
+    *,
+    systemctl: str = "/usr/bin/systemctl",
+    ps: str = "/usr/bin/ps",
+) -> tuple[str, tuple[str, ...]]:
+    master = _discover_nginx_master(nginx, ps=ps)
+    runtime_args = tuple(master.get("runtime_args", ())) if master is not None else ()
+
+    syntax = _run([nginx, "-t", *runtime_args], timeout=30)
     if syntax.returncode != 0:
         raise RestoreAsVerificationError("nginx reload preflight failed")
 
     if _systemd_nginx_active(systemctl):
         reloaded = _run([systemctl, "reload", "nginx"], timeout=30)
         if reloaded.returncode == 0:
-            return "SYSTEMD"
+            return "SYSTEMD", runtime_args
 
         reason = _reload_failure_class(reloaded)
         if reason in {"PERMISSION_DENIED", "SYSTEMD_BUS_UNAVAILABLE"}:
@@ -106,18 +202,18 @@ def _reload_nginx(nginx: str, *, systemctl: str = "/usr/bin/systemctl") -> str:
                 f"nginx reload failed; mode=SYSTEMD; reason={reason}"
             )
 
-        # Some packaged/service-unit reload actions can fail even while systemd
-        # still tracks the live Nginx master correctly. After nginx -t has passed,
-        # ask systemd to deliver the standard graceful HUP specifically to MAINPID.
-        return _systemd_main_hup_reload(systemctl)
+        return _systemd_main_hup_reload(systemctl), runtime_args
 
-    reloaded = _run([nginx, "-s", "reload"], timeout=30)
+    if master is not None:
+        return _live_master_hup_reload(nginx, master, ps=ps), runtime_args
+
+    reloaded = _run([nginx, "-s", "reload", *runtime_args], timeout=30)
     if reloaded.returncode != 0:
         reason = _reload_failure_class(reloaded)
         raise RestoreAsVerificationError(
             f"nginx reload failed; mode=DIRECT_SIGNAL; reason={reason}"
         )
-    return "DIRECT_SIGNAL"
+    return "DIRECT_SIGNAL", runtime_args
 
 
 def _curl_failure_class(returncode: int) -> str:
@@ -268,8 +364,14 @@ def _listen_address(token: str, port: int) -> str | None:
     return host
 
 
-def _nginx_target_listener_addresses(nginx: str, domain: str, port: int) -> list[str]:
-    proc = _run([nginx, "-T"], timeout=30)
+def _nginx_target_listener_addresses(
+    nginx: str,
+    domain: str,
+    port: int,
+    *,
+    nginx_args: Sequence[str] = (),
+) -> list[str]:
+    proc = _run([nginx, "-T", *nginx_args], timeout=30)
     if proc.returncode != 0:
         return []
     text = f"{proc.stdout}\n{proc.stderr}"
@@ -282,8 +384,13 @@ def _nginx_target_listener_addresses(nginx: str, domain: str, port: int) -> list
     return addresses
 
 
-def _nginx_has_target_vhost(nginx: str, domain: str) -> bool:
-    proc = _run([nginx, "-T"], timeout=30)
+def _nginx_has_target_vhost(
+    nginx: str,
+    domain: str,
+    *,
+    nginx_args: Sequence[str] = (),
+) -> bool:
+    proc = _run([nginx, "-T", *nginx_args], timeout=30)
     if proc.returncode != 0:
         return False
     text = f"{proc.stdout}\n{proc.stderr}"
@@ -402,6 +509,7 @@ def verify_local_restore(
     curl: str = "/usr/bin/curl",
     nginx: str = "/usr/sbin/nginx",
     systemctl: str = "/usr/bin/systemctl",
+    nginx_args: Sequence[str] = (),
 ) -> dict[str, Any]:
     source_domain = cloudpanel.validate_domain(str(result.get("source_domain", "")))
     target_domain = cloudpanel.validate_domain(str(result.get("target_domain", "")))
@@ -425,9 +533,18 @@ def verify_local_restore(
     if file_count < 1:
         raise RestoreAsVerificationError("restored site contains no files")
 
-    http_addresses = _nginx_target_listener_addresses(nginx, target_domain, 80)
+    http_addresses = _nginx_target_listener_addresses(
+        nginx,
+        target_domain,
+        80,
+        nginx_args=nginx_args,
+    )
     if not http_addresses:
-        vhost_state = "PRESENT" if _nginx_has_target_vhost(nginx, target_domain) else "MISSING"
+        vhost_state = (
+            "PRESENT"
+            if _nginx_has_target_vhost(nginx, target_domain, nginx_args=nginx_args)
+            else "MISSING"
+        )
         listener_state = "MISSING" if vhost_state == "PRESENT" else "UNKNOWN"
         raise RestoreAsVerificationError(
             f"local Host routing verification failed; target_vhost={vhost_state}; "
@@ -449,7 +566,12 @@ def verify_local_restore(
             f"target_transport={transport}"
         )
 
-    https_addresses = _nginx_target_listener_addresses(nginx, target_domain, 443)
+    https_addresses = _nginx_target_listener_addresses(
+        nginx,
+        target_domain,
+        443,
+        nginx_args=nginx_args,
+    )
     https_rc, https_code = _http_probe(
         curl,
         target_domain,
@@ -464,7 +586,7 @@ def verify_local_restore(
             "http_code": https_code,
             "certificate_trust": "NOT_ASSERTED_UNTIL_TARGET_DNS_CERTIFICATE",
         }
-    elif _nginx_has_target_vhost(nginx, target_domain):
+    elif _nginx_has_target_vhost(nginx, target_domain, nginx_args=nginx_args):
         # DNS may not yet point at this server and no target-domain certificate is
         # installed by Restore-As. The vhost identity is still verified locally;
         # certificate issuance remains explicitly deferred rather than reusing SOURCE.
@@ -524,6 +646,7 @@ def restore_as_verified(
     curl: str = "/usr/bin/curl",
     nginx: str = "/usr/sbin/nginx",
     systemctl: str = "/usr/bin/systemctl",
+    ps: str = "/usr/bin/ps",
 ) -> dict[str, Any]:
     package_dir = package_dir.resolve()
     target_root = target_root.resolve()
@@ -539,8 +662,18 @@ def restore_as_verified(
             wp=wp,
         )
     try:
-        reload_mode = _reload_nginx(nginx, systemctl=systemctl)
-        local = verify_local_restore(target_root, result, curl=curl, nginx=nginx)
+        reload_mode, nginx_args = _reload_nginx(
+            nginx,
+            systemctl=systemctl,
+            ps=ps,
+        )
+        local = verify_local_restore(
+            target_root,
+            result,
+            curl=curl,
+            nginx=nginx,
+            nginx_args=nginx_args,
+        )
     except Exception as exc:
         rollback = _rollback_verified_target(result, clpctl=clpctl)
         rollback_status = "PASS" if all(rollback.values()) else "PARTIAL"
@@ -570,6 +703,7 @@ def main() -> int:
     parser.add_argument("--curl", default=os.environ.get("VFOPS_CURL", "/usr/bin/curl"))
     parser.add_argument("--nginx", default=os.environ.get("VFOPS_NGINX", "/usr/sbin/nginx"))
     parser.add_argument("--systemctl", default=os.environ.get("VFOPS_SYSTEMCTL", "/usr/bin/systemctl"))
+    parser.add_argument("--ps", default=os.environ.get("VFOPS_PS", "/usr/bin/ps"))
     parser.add_argument("--confirm", required=True)
     args = parser.parse_args()
     try:
@@ -584,6 +718,7 @@ def main() -> int:
             curl=args.curl,
             nginx=args.nginx,
             systemctl=args.systemctl,
+            ps=args.ps,
         )
     except (
         RestoreAsVerificationError,
