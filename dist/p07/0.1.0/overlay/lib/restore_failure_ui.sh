@@ -35,7 +35,16 @@ render_restore_failure() {
       ui_note 'DNS 没有修改，原网站没有修改。'
       return 0
     elif grep -Fq 'nginx reload failed' "$err_file" 2>/dev/null; then
-      if grep -Fq 'mode=SYSTEMD_MAIN_HUP' "$err_file" 2>/dev/null; then
+      if grep -Fq 'mode=LIVE_MASTER_HUP' "$err_file" 2>/dev/null; then
+        ui_bad '已找到 CloudPanel 实际运行的 Nginx，但优雅重载仍未完成，P07 已回滚新目标。'
+        if grep -Fq 'reason=MASTER_CHANGED' "$err_file" 2>/dev/null; then
+          ui_note '原因：重载前 Nginx 主进程发生变化，P07 为避免误操作已停止。'
+        elif grep -Fq 'reason=MASTER_NOT_RUNNING' "$err_file" 2>/dev/null; then
+          ui_note '原因：发送优雅重载后没有再确认到原 Nginx 主进程。'
+        else
+          ui_note 'P07 没有重启 Nginx，也没有保留未验证的新站。'
+        fi
+      elif grep -Fq 'mode=SYSTEMD_MAIN_HUP' "$err_file" 2>/dev/null; then
         ui_bad '新网站已恢复，但 Nginx 常规重载和备用优雅重载都没有完成，P07 已回滚新目标。'
         if grep -Fq 'reason=SERVICE_NOT_ACTIVE' "$err_file" 2>/dev/null; then
           ui_note '原因：Nginx 服务状态异常，P07 没有继续保留未验证的新站。'
