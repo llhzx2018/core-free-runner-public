@@ -18,11 +18,11 @@ VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release27"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release28"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc18"
+SYSTEM_CARE_EXPECTED="0.1.0-rc19"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -44,12 +44,13 @@ show_header() {
 
 show_menu() {
   show_header
-  say "${C_GREEN}功能状态：4 项均可用${C_RESET}"
+  say "${C_GREEN}功能状态：5 项均可用${C_RESET}"
   say
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据（CloudPanel）"
   say "  ${C_GREEN}4.${C_RESET} 服务器维护 / 安全"
+  say "  ${C_GREEN}5.${C_RESET} 初始化服务器"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -177,12 +178,10 @@ local_server_ops_build() {
   printf '%s' "$value"
 }
 
-run_server_ops() {
-  screen_clear
+ensure_server_ops_current() {
   if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" && \
         "$(local_server_ops_build || true)" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then
-    vfops
-    return $?
+    return 0
   fi
 
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
@@ -201,11 +200,43 @@ run_server_ops() {
   fi
 
   set +e
-  P07_TOOLBOX_PARENT=1 bash "$tmp"
+  P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$tmp"
   rc=$?
   set -e
   rm -f "$tmp"
   return "$rc"
+}
+
+server_ops_root() {
+  local entry
+  entry="$(readlink -f "$(command -v vfops)" 2>/dev/null || true)"
+  case "$entry" in
+    */bin/vfops-user) printf '%s' "${entry%/bin/vfops-user}" ;;
+    */bin/vfops) printf '%s' "${entry%/bin/vfops}" ;;
+    *) return 1 ;;
+  esac
+}
+
+run_server_ops() {
+  screen_clear
+  ensure_server_ops_current || return $?
+  vfops
+}
+
+run_server_init() {
+  screen_clear
+  ensure_server_ops_current || return $?
+  local root init_ui
+  root="$(server_ops_root)" || {
+    say "${C_RED}✗ 无法定位初始化脚本。${C_RESET}" >&2
+    return 6
+  }
+  init_ui="$root/bin/vfops-init-ui"
+  [[ -x "$init_ui" ]] || {
+    say "${C_RED}✗ 初始化脚本未就绪。${C_RESET}" >&2
+    return 7
+  }
+  bash "$init_ui"
 }
 
 local_system_care_version() {
@@ -251,7 +282,7 @@ main_menu() {
   local choice rc
   while true; do
     show_menu
-    printf '请选择 [0-4]：'
+    printf '请选择 [0-5]：'
     read -r choice || return 0
     case "$choice" in
       1)
@@ -283,8 +314,15 @@ main_menu() {
         set -e
         [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 系统维护模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
         ;;
+      5)
+        set +e
+        run_server_init
+        rc=$?
+        set -e
+        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 初始化服务器模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        ;;
       0) return 0 ;;
-      *) say "${C_YELLOW}⚠ 无效选择，请输入 0-4。${C_RESET}" ;;
+      *) say "${C_YELLOW}⚠ 无效选择，请输入 0-5。${C_RESET}" ;;
     esac
   done
 }
@@ -302,8 +340,9 @@ P07 · VF 服务器运维 ${VERSION}
 2. 服务器性能检测（VPS 验机）    ${VPS_AUDIT_PUBLIC}
 3. 网站与数据（CloudPanel）  ${VF_SERVER_OPS_PUBLIC}
 4. 服务器维护 / 安全                ${SYSTEM_CARE_PUBLIC}
+5. 初始化服务器                     ${VF_SERVER_OPS_PUBLIC}
 
-说明：普通界面只显示 Vx.x.x 公共版本；内部构建标识只用于工程校验，不要求用户理解。
+说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
 EOF
     ;;
   "")

@@ -5,12 +5,12 @@ source "$ROOT_DIR/lib/terminal_ui.sh"
 CORE="$ROOT_DIR/bin/vfops"
 
 preflight() {
-  ui_page 'P07 · 新服务器初始化' '先检查，再决定是否写入'
+  ui_page 'P07 · 初始化服务器' '先检查，再决定是否写入'
   ui_section '当前服务器'
   ui_kv '系统' "$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-未知}" )"
   ui_kv 'CPU' "$(nproc 2>/dev/null || printf '?') 核"
   ui_kv '内存' "$(awk '/MemTotal/{printf "%.1f GB",$2/1024/1024}' /proc/meminfo 2>/dev/null || printf '?')"
-  ui_kv '虚拟内存（Swap）' "$(awk '/虚拟内存（Swap）Total/{printf "%.1f GB",$2/1024/1024}' /proc/meminfo 2>/dev/null || printf '?')"
+  ui_kv '虚拟内存（Swap）' "$(awk '/^SwapTotal:/{printf "%.1f GB",$2/1024/1024}' /proc/meminfo 2>/dev/null || printf '?')"
   ui_kv '时区' "$(timedatectl show -p Timezone --value 2>/dev/null || printf '未知')"
   ui_kv 'CloudPanel' "$([[ -d /home/clp ]] && printf '已检测' || printf '未检测')"
   say
@@ -23,6 +23,7 @@ preflight() {
   ui_note '远程登录（SSH）锁定、防火墙收紧、域名解析（DNS）修改都不会自动执行，避免把自己锁在服务器外。'
 }
 while true; do
+  answer=""
   preflight
   ui_menu_good 1 '重新检查'
   ui_menu_warn 2 '应用低风险基础项'
@@ -34,8 +35,10 @@ while true; do
     1) ;;
     2)
       ui_page 'P07 · 初始化写入确认'
-      ui_safety_tier write '当前只允许：时区 Asia/Shanghai；缺少 虚拟内存（Swap） 时创建 2GB 虚拟内存（Swap）。'
-      if ui_confirm_exact APPLY_BASELINE '输入 APPLY_BASELINE 继续：'; then
+      ui_safety_tier write '当前只允许：时区 Asia/Shanghai；缺少虚拟内存（Swap）时创建 2GB Swap。'
+      ui_prompt '确认应用这些基础设置？[y/N]：'
+      read -r answer || continue
+      if [[ "$answer" =~ ^[Yy]$ ]]; then
         timedatectl set-timezone Asia/Shanghai
         if ! swapon --show --noheadings 2>/dev/null | grep -q .; then
           fallocate -l 2G /swapfile
@@ -51,16 +54,33 @@ while true; do
       ;;
     3)
       ui_page 'P07 · 面板准备（CloudPanel）'
-      ui_safety_tier write 'CloudPanel 安装属于明显系统写入，只允许空白/受支持新服务器执行。'
-      if "$CORE" server-migrate target-status --bootstrap-preflight >/tmp/p07-init-preflight.json 2>/dev/null; then
+      ui_safety_tier write 'CloudPanel 安装属于明显系统写入，只允许空白、受支持的新服务器执行。'
+      payload="$("$CORE" server-migrate target-status 2>/dev/null || true)"
+      status="$(printf '%s' "$payload" | python3 -c 'import json,sys; 
+try: print(json.load(sys.stdin).get("status","UNKNOWN"))
+except Exception: print("UNKNOWN")')"
+      if [[ "$status" == "CLOUDPANEL_READY" ]]; then
         ui_good 'CloudPanel 当前已就绪，无需重复安装。'
-      else
-        ui_attention '当前服务器尚未就绪。P07 会先执行已有的空服务器安全预检。'
-        if ui_confirm_exact INSTALL_CLOUDPANEL '确认是新服务器后输入 INSTALL_CLOUDPANEL：'; then
-          "$CORE" server-migrate bootstrap-local --confirm BOOTSTRAP_LOCAL_CLOUDPANEL
+        ui_pause_return
+        continue
+      fi
+
+      ui_note '先做空服务器安全预检；检查不通过就不会安装。'
+      if ! payload="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
+        ui_bad '当前服务器不满足 CloudPanel 自动安装条件。'
+        ui_pause_return
+        continue
+      fi
+      ui_good '空服务器安全预检通过 ✓'
+      ui_prompt '确认安装 CloudPanel？[y/N]：'
+      read -r answer || continue
+      if [[ "$answer" =~ ^[Yy]$ ]]; then
+        if "$CORE" server-migrate bootstrap-local --confirm BOOTSTRAP_LOCAL_CLOUDPANEL; then
+          ui_result_ok 'P07 · CloudPanel 安装完成'
+        else
+          ui_result_error 'CloudPanel 安装未完成'
         fi
       fi
-      rm -f /tmp/p07-init-preflight.json
       ui_pause_return
       ;;
     4)
