@@ -1,0 +1,127 @@
+name: S01-C02 V1.21.1004 Package Gate
+
+on:
+  push:
+    branches:
+      - release/s01-c02-1211004-accepted-pages-consistency
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: llhzx2018/vf-tools-ops
+  TARGET_SHA: bd7d95271a2f59daf189395c843e129989f6512a
+  BASE_SHA: 29e3176533f5219791b6ab25868ddeed090fefde
+  TARGET_VERSION: 1.21.1004
+  BASE_VERSION: 1.21.1003
+  ARTIFACT_NAME: vf-tools-ops_V1.21.1004.zip
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): out[rel.as_posix()]=p.read_bytes()
+              return dict(sorted(out.items()))
+          def fp(fs):
+              h=hashlib.sha256()
+              for rel,data in sorted(fs.items()):
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return h.hexdigest()
+          def pack(root,out):
+              fs=files(root)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(fs.items()):
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,2,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+              return fs
+          rows={}
+          for label,root,ver,out in [
+              ('baseline',Path('baseline'),'1.21.1003',Path('/tmp/vf-tools-ops_V1.21.1003.zip')),
+              ('candidate',Path('target'),'1.21.1004',Path('/tmp/vf-tools-ops_V1.21.1004.zip'))
+          ]:
+              fs=pack(root,out)
+              rows[label]={'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':fp(fs)}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          unzip -tq "/tmp/$ARTIFACT_NAME"
+
+      - name: Upgrade preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-rsp-${GITHUB_RUN_ID}"; DB="vf-rsp-db-${GITHUB_RUN_ID}"; WP="vf-rsp-wp-${GITHUB_RUN_ID}"
+          PORT="$((19000 + (GITHUB_RUN_ID % 9000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V1.21.1003.zip "$WP:/tmp/base.zip"
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/candidate.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF Accepted Pages Consistency' --admin_user=admin --admin_password='VF-Responsive!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/base.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp option update vf_ops_v1211004_fixture '{"keep":"yes"}' --format=json --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp plugin install /tmp/candidate.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          test "$(docker exec "$WP" wp plugin get vf-ops --field=version --allow-root --path=/var/www/html)" = "$TARGET_VERSION"
+          test "$(docker exec "$WP" wp option get vf_ops_v1211004_fixture --format=json --allow-root --path=/var/www/html | jq -r '.keep')" = "yes"
+          echo UPGRADE_PRESERVATION=PASS
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$TARGET_SHA" --arg version "$TARGET_VERSION" --argjson package "$(cat evidence/package.json)" '{status:"PASS",candidate_sha:$sha,candidate_version:$version,package:$package,upgrade:"PASS",production:"NOT_EXECUTED"}' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "/tmp/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v1.21.1004-package-gate
+          path: evidence/
+          retention-days: 30
