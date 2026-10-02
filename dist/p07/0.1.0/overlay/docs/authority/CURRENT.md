@@ -3206,3 +3206,102 @@ Production                       unchanged
 
 该条作为后续开发约束：**复杂逻辑可以留在后台，普通菜单只展示用户需要知道的状态、动作和结果。**
 
+## release28 · initialization first-level separation + standard Y/N confirmations
+
+OWNER real-use on release27 exposed two ordinary-UX issues:
+
+1. Linux terminal confirmation must use standard Y/N instead of requiring Chinese words such as “开启 / 停止”.
+2. Server initialization must be a standalone script and a P07 first-level menu item, not embedded inside the migration flow or duplicated inside System Care.
+
+release28 freezes the ordinary IA as:
+
+```text
+P07 first-level menu
+
+1. 网络代理节点（V2Ray）
+2. 服务器性能检测（VPS 验机）
+3. 网站与数据（CloudPanel）
+4. 服务器维护 / 安全
+5. 初始化服务器
+0. 退出
+```
+
+Initialization implementation remains the standalone `bin/vfops-init-ui` script. Toolbox item 5 prepares the current VF Server Ops runtime if needed and launches that script directly.
+
+Migration boundary is now explicit:
+
+```text
+current server CloudPanel ready
+→ migration may continue
+
+current server not initialized
+→ migration stops
+→ tell OWNER: return to first-level menu → 5. 初始化服务器
+→ migration does NOT install / initialize CloudPanel
+```
+
+Ordinary confirmation input is standardized:
+
+```text
+开启这台服务器全部网站？ [y/N]
+停止这台服务器全部网站？ [y/N]
+应用初始化基础项？        [y/N]
+安装 CloudPanel？         [y/N]
+```
+
+Machine confirmation tokens remain backend-only and are not exposed to ordinary users.
+
+System Care is simultaneously simplified to remove the duplicated initialization entry:
+
+```text
+1. 服务器体检
+2. 日常维护
+3. 安全检查
+4. P07 检查 / 修复
+5. 最近操作
+0. 返回
+```
+
+Exact identities and proof:
+
+```text
+Source Build                         0.1.0-release28
+Source PR                            #121
+Source candidate CI                  36914704500 PASS
+Source main                          2265bd2b69c0ddd82ebc07eb01ad7c156ef78507
+Source main CI                       36915934302 PASS
+
+Public Distribution PR              #1706
+Public main                          03b0549c52ba10ced6eb1e92e4655b34004b11db
+Release28 Distribution Gate          36917500446 PASS
+Toolbox Smoke                        36917500367 PASS
+System Care Smoke                    36917500505 PASS
+Beginner Menu Gate                   36917500523 PASS
+Stable Installer Smoke               36917500600 PASS
+Public Runner Trigger Scope          36917500563 PASS
+Workflow Archive Integrity           36917500494 PASS
+
+Public main Toolbox Smoke             36917600701 PASS
+Public main System Care Smoke         36917600697 PASS
+Public main Current Self Test         36917600514 PASS
+Public main Stable Installer Smoke    36917600557 PASS
+
+Runtime manifest blob                5eb6a7461f38d073005fe6f98fe79b3063431187
+Final installer blob                 083d5e16e9e03a23274e12c696e52ecb0521718d
+Stable installer blob                ab53dde1627b88e358edda1677f50f5e524fc7a5
+Toolbox blob                         8b76392af65e544067efe78c811a8f5e7081b097
+System Care                          0.1.0-rc19
+```
+
+Current Production / Owner truth remains independent:
+
+```text
+release28 Public Distribution        PASS
+release28 Production install         NOT_YET_OWNER_VERIFIED
+release28 initialization real-use    NOT_RUN
+DNS write                            NO
+SOURCE delete                        NO
+```
+
+This supersedes the release26 ordinary-confirmation wording that required Chinese action words. The backend safety checks remain unchanged; only the ordinary interaction and information architecture were simplified.
+

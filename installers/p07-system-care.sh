@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc19'
+VERSION='0.1.0-rc20'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 SOURCE_REF="${P07_SYSTEM_CARE_SOURCE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${SOURCE_REF}/${PACKAGE_PATH}"
-MANIFEST_BLOB='a978c99b0fe12371fbc5768c9385c59795799aec'
-BEGINNER_UI_BLOB='0d0039386fce1bc72e6a4a711a1d2569712f0bf6'
+MANIFEST_BLOB='d7b08da271566093b0e2d1a1af2bca7ebb69e6e7'
+BEGINNER_UI_BLOB='a5f56a9b2ad1e35d3f14e745faae10f39b36419d'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -67,7 +67,7 @@ install_runtime() {
   manifest="$tmp/MANIFEST.gitblob"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info "校验并安装 P07 服务器维护 / 安全 ${VERSION}..."
+  info "校验并安装 服务器维护与安全 ${VERSION}..."
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.gitblob" -o "$manifest"; then
     rm -rf "$tmp" "$stage"
     fail '运行清单下载失败。'
@@ -121,14 +121,14 @@ install_runtime() {
 
   NO_COLOR=1 "$ENTRY" evidence refresh-cache >/dev/null 2>&1 || true
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
-  ok "服务器维护 / 安全 ${VERSION} 已就绪"
+  ok "服务器维护与安全 ${VERSION} 已就绪"
 }
 
 ensure_manager() {
   manager_ready && return 0
   local current
   current="$(installed_version)"
-  [[ -n "$current" ]] && info "更新服务器维护 / 安全：${current} → ${VERSION}"
+  [[ -n "$current" ]] && info "更新服务器维护与安全：${current} → ${VERSION}"
   install_runtime
 }
 
@@ -137,10 +137,10 @@ require_root
 case "${1:-}" in
   -h|--help)
     cat <<'HELP'
-P07 · 服务器维护 / 安全
+服务器维护与安全
 
-此脚本仅供 P07 Toolbox 内部安装/更新模块使用。
-普通用户继续使用唯一 P07 Toolbox 主入口。
+此脚本仅供 服务器工具箱 内部安装/更新模块使用。
+普通用户继续使用唯一 服务器工具箱 主入口。
 
 命令：
   menu

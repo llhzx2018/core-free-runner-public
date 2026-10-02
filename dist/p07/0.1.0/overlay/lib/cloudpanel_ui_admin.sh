@@ -1,8 +1,8 @@
 panel_security() {
   while true; do
     say; ui_title '面板登录安全'; ui_rule
-    ui_menu_good 1 '启用额外登录保护（Basic Auth）'
-    ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'
+    ui_menu_good 1 '开启额外登录保护（Basic Auth）'
+    ui_menu_danger 2 '关闭额外登录保护（Basic Auth）'
     ui_menu_warn 3 '更新 Cloudflare 可信 IP 清单'
     ui_menu_back 0 '返回'
     ui_prompt '请选择 [0-3]：'; read -r choice || return 0
@@ -23,7 +23,8 @@ PY
         SECRET_VALUE=""; pause ;;
       2)
         ui_bad '关闭后 CloudPanel 将失去这一层额外认证。'; ui_safety_tier danger '会降低 CloudPanel 登录保护。'
-        if ui_confirm_exact DISABLE '输入 DISABLE 继续：'; then
+        ui_prompt '确认关闭额外登录保护？[y/N]：'; read -r confirm || true
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
 import cloudpanel
 cloudpanel.disable_panel_basic_auth()
@@ -96,7 +97,8 @@ PY
       4)
         printf '用户名：'; read -r username || continue
         ui_bad '关闭两步验证（2FA）会降低该用户登录保护。'; ui_safety_tier danger '会降低该用户登录保护。'
-        if ui_confirm_exact DISABLE-MFA '输入 DISABLE-MFA 继续：'; then
+        ui_prompt '确认关闭这个用户的两步验证？[y/N]：'; read -r confirm || true
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
           if PYTHONPATH="$ROOT_DIR/lib" python3 - "$username" <<'PY'
 import sys
 import cloudpanel
@@ -186,7 +188,7 @@ PY
 }
 
 platform_status() {
-  say; ui_title 'CloudPanel 基础能力自检'; ui_rule
+  say; ui_title '面板状态检查'; ui_rule
   if C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_RESET="$C_RESET" PYTHONPATH="$ROOT_DIR/lib" python3 - <<'PY'
 import os,cloudpanel
 green=os.environ.get("C_GREEN",""); yellow=os.environ.get("C_YELLOW",""); reset=os.environ.get("C_RESET","")
@@ -214,7 +216,7 @@ print('网站数量：'+str(len(p.get('sites',[]) if isinstance(p.get('sites'),l
 PY
     else ui_bad '资源清单：未就绪'; fi
   else
-    printf '%b\n' "${C_RED}CloudPanel 基础能力检查没有完成。${C_RESET}" >&2
+    printf '%b\n' "${C_RED}面板状态检查没有完成。${C_RESET}" >&2
   fi
   ui_note '安全边界：不改 DNS / 不删除源服务器 / 不覆盖已有目标。'
   pause

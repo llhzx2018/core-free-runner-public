@@ -49,7 +49,7 @@ def collect()->dict:
     def add(key,label,status,detail): rows.append({"key":key,"label":label,"status":status,"detail":detail})
     required=[ROOT/"bin/vfops-user",ROOT/"bin/vfops",ROOT/"lib/terminal_ui.sh",ROOT/"VERSION",ROOT/"BUILD_ID"]
     missing=[str(p.relative_to(ROOT)) for p in required if not p.is_file()]
-    add("p07","P07 自身","ERROR" if missing else "OK","缺少："+ "、".join(missing) if missing else "运行文件完整")
+    add("p07","工具自身","ERROR" if missing else "OK","缺少："+ "、".join(missing) if missing else "运行文件完整")
     cp=Path("/home/clp").exists() or shutil.which("clpctl") is not None
     add("cloudpanel","CloudPanel","OK" if cp else "WARN","已检测" if cp else "未检测到 CloudPanel")
     for key,label,names in (("nginx","Nginx",["nginx"]),("mysql","MySQL",["mysql","mysqld","percona-server"])):
@@ -63,7 +63,7 @@ def collect()->dict:
     stotal=mi.get("SwapTotal",0); sfree=mi.get("SwapFree",0); spct=round((1-sfree/stotal)*100) if stotal else 0
     add("swap","Swap","WARN" if stotal and spct>=80 else "OK","未配置 Swap" if not stotal else f"Swap 已使用约 {spct}%")
     age=latest_backup_age_hours()
-    if age is None: add("backup","最近备份","WARN","未发现已验证的 P07 本地备份")
+    if age is None: add("backup","最近备份","WARN","未发现已验证的本地备份")
     elif age>72: add("backup","最近备份","WARN",f"最近已验证备份约 {round(age)} 小时前")
     else: add("backup","最近备份","OK",f"最近已验证备份约 {round(age,1)} 小时前")
     verdict="ERROR" if any(x["status"]=="ERROR" for x in rows) else "WARN" if any(x["status"]=="WARN" for x in rows) else "OK"
