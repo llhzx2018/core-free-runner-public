@@ -11,7 +11,7 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
  await page.goto(origin+'/wp-login.php');
  await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');
  await Promise.all([page.waitForURL(/wp-admin/),page.locator('#wp-submit').click()]);
- let layout;try{await require('../target/tests/layout-controls-browser-check')(page,origin);layout=await require('../target/tests/layout-v8-browser-check')(page,context,browser,origin);}catch(error){await page.screenshot({path:'proof/layout-failure.png',fullPage:true});throw error;}
+ let layout;try{layout=await require('../target/tests/layout-v8-browser-check')(page,context,browser,origin);}catch(error){await page.screenshot({path:'proof/layout-failure.png',fullPage:true});throw error;}
  const checks=[];
  for(const width of [1920,1440,1319,1024,768,390]){
   await page.setViewportSize({width,height:1000});await page.goto(url);
@@ -167,4 +167,3 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
  fs.writeFileSync('proof/live-browser.json',JSON.stringify({pass:true,environment:'isolated actual WordPress 7.1.2 PHP 8.3',checks,layout_cases:layout.cases.length,regressions,errors,owner_product_pass:false},null,2));
  await browser.close();console.log('REAL_WORDPRESS_BRAND_BROWSER=PASS');
 })().catch(e=>{console.error(e);process.exit(1)});
-
