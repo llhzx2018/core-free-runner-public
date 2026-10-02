@@ -1,0 +1,198 @@
+name: P01 Owner Preview
+
+on:
+  pull_request:
+    paths:
+      - "preview-requests/P01.json"
+      - ".github/workflows/p01-owner-preview.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Checkout runner request
+        uses: actions/checkout@v4
+
+      - name: Bind exact preview request
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f preview-requests/P01.json
+          PROJECT_ID="$(jq -r '.project_id' preview-requests/P01.json)"
+          VERSION="$(jq -r '.version' preview-requests/P01.json)"
+          TARGET_SHA="$(jq -r '.target_sha' preview-requests/P01.json)"
+          test "$PROJECT_ID" = "P01"
+          test "$VERSION" = "2.47.183"
+          test "$TARGET_SHA" = "cb4962b2e6805b9a66d2d477b4121704286067d0"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact P01 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ steps.request.outputs.target_sha }}
+          path: product
+
+      - name: Prepare PHP runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring sqlite3 curl
+          php -v
+          php -m | grep -qi pdo_sqlite
+          php -m | grep -qi curl
+
+      - name: Install clean exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -S 127.0.0.1:8080 -t product/src >/tmp/p01-php.log 2>&1 &
+          echo $! >/tmp/p01-php.pid
+          for i in {1..30}; do
+            if curl -fsS -c /tmp/p01.cookies http://127.0.0.1:8080/setup.php -o /tmp/setup.html; then break; fi
+            sleep 1
+          done
+          CSRF="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' /tmp/setup.html | head -n1)"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/p01.cookies -c /tmp/p01.cookies             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode "site_title=VF Start V2.47.183 Preview"             --data-urlencode "admin_password=VFPreview183-Owner"             --data-urlencode "admin_password_confirm=VFPreview183-Owner"             http://127.0.0.1:8080/setup.php -o /tmp/setup-result.html
+          test -f product/src/app/.runtime.php
+          grep -q "VF Start 安装完成\|VF Start" /tmp/setup-result.html
+
+      - name: Seed synthetic public preview fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/p01-preview-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__ . '/product/src/app/bootstrap.php';
+          $repo = new VfRepository(vf_db());
+          $categoryId = $repo->createCategory([
+              'name' => 'Preview · Tools / Software',
+              'description' => 'Synthetic public fixtures for OWNER preview only',
+              'is_private' => 0,
+              'sort_order' => 10,
+          ]);
+          $items = [
+              ['Wappalyzer','https://www.wappalyzer.com/','在线网站技术栈分析，打开网页即可使用。',['场景:网站与开发']],
+              ['PageSpeed Insights','https://pagespeed.web.dev/','在线性能与网页检查。',['场景:网站与开发']],
+              ['Ahrefs Keyword Generator','https://ahrefs.com/keyword-generator','在线关键词与 SEO 分析。',['场景:SEO 与流量']],
+              ['TinyPNG','https://tinypng.com/','在线图片压缩，无需安装。',['场景:图片与素材']],
+              ['Online M3U8 Downloader','https://example.com/m3u8','在线工具，网页版 M3U8 下载器，无需安装。',['场景:视频与媒体']],
+              ['DNSChecker','https://dnschecker.org/','在线 DNS / IP / 网络检测。',['场景:网络检测']],
+              ['DeepL Translator','https://www.deepl.com/translator','在线翻译与文本处理。',['场景:内容处理']],
+              ['Visual Studio Code','https://code.visualstudio.com/','Windows / macOS / Linux 代码编辑器，需要安装。',['软件:开发 / 编程','platform:windows']],
+              ['v2rayN','https://github.com/2dust/v2rayN','Windows 代理客户端，需要安装。',['软件:网络','platform:windows']],
+              ['VLC','https://www.videolan.org/vlc/','Windows / macOS / Linux 播放器，需要安装。',['软件:下载 / 影音','platform:windows']],
+              ['7-Zip','https://www.7-zip.org/','Windows 压缩软件，需要安装。',['软件:系统基础','platform:windows']],
+              ['Termius','https://termius.com/','SSH 客户端，需要安装。',['软件:服务器 / SSH','platform:windows']],
+              ['Chrome Extension Sample','https://chromewebstore.google.com/','浏览器扩展，长期安装使用。',['软件:浏览器扩展','platform:extension']],
+          ];
+          foreach ($items as [$title,$url,$description,$tags]) {
+              $repo->saveLink(null,[
+                  'surface'=>'start',
+                  'category_id'=>$categoryId,
+                  'title'=>$title,
+                  'url'=>$url,
+                  'description'=>$description,
+                  'tags'=>$tags,
+                  'is_private'=>0,
+                  'is_pending'=>0,
+                  'is_favorite'=>0,
+              ],'manual');
+          }
+          $tools = VfWorkspaceViewCatalog::assets(
+              array_map(static function(array $row): array {
+                  $row['tags']=json_decode((string)($row['tags']??'[]'),true)?:[];
+                  $row['surface']='start';
+                  return $row;
+              }, vf_db()->query("SELECT * FROM links WHERE lifecycle_state='active'")->fetchAll(PDO::FETCH_ASSOC)),
+              'tools'
+          );
+          $software = VfWorkspaceViewCatalog::assets(
+              array_map(static function(array $row): array {
+                  $row['tags']=json_decode((string)($row['tags']??'[]'),true)?:[];
+                  $row['surface']='start';
+                  return $row;
+              }, vf_db()->query("SELECT * FROM links WHERE lifecycle_state='active'")->fetchAll(PDO::FETCH_ASSOC)),
+              'software'
+          );
+          $toolIds=array_map(static fn(array $row):int=>(int)$row['id'],$tools);
+          $softwareIds=array_map(static fn(array $row):int=>(int)$row['id'],$software);
+          if (array_intersect($toolIds,$softwareIds)!==[]) throw new RuntimeException('Preview fixtures are not mutually exclusive.');
+          if (count($tools)<6 || count($software)<5) throw new RuntimeException('Preview fixture projection is incomplete.');
+          echo "P01_PREVIEW_SYNTHETIC_FIXTURE=PASS tools=".count($tools)." software=".count($software)."\n";
+          PHP
+          php /tmp/p01-preview-seed.php
+
+      - name: Verify local preview pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:8080/tools.php -o /tmp/tools.html
+          curl -fsS http://127.0.0.1:8080/software.php -o /tmp/software.html
+          grep -q "在线任务工具" /tmp/tools.html
+          grep -q "网站与开发" /tmp/tools.html
+          grep -q "软件与装机" /tmp/software.html
+          if grep -q ">Web<" /tmp/software.html; then
+            echo "Software preview unexpectedly exposes Web platform" >&2
+            exit 1
+          fi
+          echo "P01_PREVIEW_LOCAL_UI=PASS"
+
+      - name: Open temporary Owner-visible tunnel
+        id: tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64             -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8080 --no-autoupdate >/tmp/cloudflared.log 2>&1 &
+          echo $! >/tmp/cloudflared.pid
+          URL=""
+          for i in {1..60}; do
+            URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n1 || true)"
+            if [ -n "$URL" ]; then break; fi
+            sleep 1
+          done
+          if [ -z "$URL" ]; then
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+          curl -fsS --retry 10 --retry-delay 2 "$URL/tools.php" >/tmp/public-tools.html
+          curl -fsS --retry 10 --retry-delay 2 "$URL/software.php" >/tmp/public-software.html
+          grep -q "在线任务工具" /tmp/public-tools.html
+          grep -q "软件与装机" /tmp/public-software.html
+          echo "P01_OWNER_PREVIEW_URL=$URL"
+          echo "P01_OWNER_PREVIEW_TOOLS=$URL/tools.php"
+          echo "P01_OWNER_PREVIEW_SOFTWARE=$URL/software.php"
+          echo "P01_OWNER_PREVIEW_EXACT_SHA=${{ steps.request.outputs.target_sha }}"
+          echo "P01_OWNER_PREVIEW_RUNTIME=READY"
+          {
+            echo "## P01 V2.47.183 Owner Preview"
+            echo ""
+            echo "- Exact SHA: `${{ steps.request.outputs.target_sha }}`"
+            echo "- Tools: $URL/tools.php"
+            echo "- Software: $URL/software.php"
+            echo "- Data: synthetic public fixture only; no Production SQLite"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep preview available for Owner review
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "P01_OWNER_PREVIEW_HOLD=START"
+          for i in {1..300}; do
+            kill -0 "$(cat /tmp/p01-php.pid)" 2>/dev/null || { echo "PHP preview stopped" >&2; exit 1; }
+            kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null || { echo "Tunnel stopped" >&2; cat /tmp/cloudflared.log; exit 1; }
+            sleep 60
+          done
+          echo "P01_OWNER_PREVIEW_HOLD=EXPIRED"
