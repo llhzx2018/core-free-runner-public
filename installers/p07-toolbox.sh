@@ -37,7 +37,7 @@ screen_clear() { if [[ -t 1 ]]; then printf '\033[H\033[2J'; fi; }
 show_header() {
   screen_clear
   say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}P07 · VF 服务器运维${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                  ${C_CYAN}│${C_RESET}"
+  say "${C_CYAN}│${C_RESET}  ${C_BOLD}服务器工具箱${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                       ${C_CYAN}│${C_RESET}"
   say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
   say
 }
@@ -46,9 +46,9 @@ show_menu() {
   show_header
   say "${C_GREEN}功能状态：5 项均可用${C_RESET}"
   say
-  say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）"
-  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS 验机）"
-  say "  ${C_GREEN}3.${C_RESET} 网站与数据（CloudPanel）"
+  say "  ${C_GREEN}1.${C_RESET} 网络代理节点"
+  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测"
+  say "  ${C_GREEN}3.${C_RESET} 网站与数据"
   say "  ${C_GREEN}4.${C_RESET} 服务器维护 / 安全"
   say "  ${C_GREEN}5.${C_RESET} 初始化服务器"
   say "  ${C_GRAY}0.${C_RESET} 退出"
@@ -328,10 +328,10 @@ main_menu() {
 }
 
 case "${1:-}" in
-  --version|-V) printf 'P07 Toolbox %s\n' "$VERSION" ;;
+  --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
-P07 · VF 服务器运维 ${VERSION}
+服务器工具箱 ${VERSION}
 
 用法：
   p07-toolbox
@@ -346,7 +346,7 @@ P07 · VF 服务器运维 ${VERSION}
 EOF
     ;;
   "")
-    if [[ -t 0 && -t 1 ]]; then main_menu; else printf '错误：P07 主菜单需要交互式终端。\n' >&2; exit 2; fi
+    if [[ -t 0 && -t 1 ]]; then main_menu; else printf '错误：服务器工具箱主菜单需要交互式终端。\n' >&2; exit 2; fi
     ;;
   *) printf '错误：未知参数：%s\n' "$1" >&2; exit 2 ;;
 esac
