@@ -3,7 +3,7 @@ const {chromium}=require('playwright'),fs=require('fs');
  const browser=await chromium.launch({headless:true,args:['--no-sandbox']}),page=await browser.newPage(),origin='http://127.0.0.1:18880',checks=[],failures=[];
  page.on('pageerror',e=>failures.push({error:e.message}));
  await page.goto(origin+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();
- const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool','blog_index','article_detail','guide_index','guide_detail','problem_index','problem_detail','faq_page','glossary_index','glossary_detail','archive_list','search','html_sitemap','not_found','legal'];
+ const contexts=['blog_index'];
  const scan=async(c,width,area)=>{
   const controls=page.locator('[data-vf-layout-page] input[type="checkbox"]:visible,[data-vf-layout-page] select:visible');
   for(let i=0;i<await controls.count();i++){
@@ -24,7 +24,7 @@ const {chromium}=require('playwright'),fs=require('fs');
    }catch(e){const details=await control.evaluate(n=>{const r=n.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2),s=getComputedStyle(n);return {checked:n.checked,hit:hit?.outerHTML.slice(0,500),box:r.toJSON(),pointer:s.pointerEvents,before:getComputedStyle(n,'::before').content};});failures.push({c,width,area,...info,error:e.message,details});}
   }
  };
- for(const width of [1440,390]){
+ for(const width of [1319]){
   await page.setViewportSize({width,height:660});
   for(const c of contexts){
    await page.goto(origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout&context='+c);
