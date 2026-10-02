@@ -114,7 +114,7 @@ class ResourceProfileTests(unittest.TestCase):
 
     def test_matrix_surfaces_registered_calibration_states_in_chinese(self):
         text = rp.render_matrix("balanced")
-        self.assertIn("P07 · 资源配置参考矩阵 · 平衡", text)
+        self.assertIn("性能配置参考矩阵 · 平衡", text)
         self.assertIn("生产环境已验证", text)
         self.assertIn("候选验证", text)
         self.assertIn("仅预览", text)
