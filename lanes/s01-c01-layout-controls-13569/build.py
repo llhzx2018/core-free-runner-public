@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'src/assets/js/admin/admin-layout.js', 'tests/layout-controls-browser-check.js', 'src/inc/admin/views/partials/layout-home-tool-workspaces.php', 'src/inc/runtime-constants.php', 'src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css', 'src/assets/js/admin/admin-layout-page-refinement-v1.js', 'tests/layout-v8-browser-check.js', 'VERSION', 'src/style.css'}
+allowed={'src/inc/admin/admin-s01-uiux-polish.php', 'src/assets/js/admin/admin-layout.js', 'tests/layout-controls-browser-check.js', 'src/inc/admin/views/partials/layout-home-tool-workspaces.php', 'src/inc/runtime-constants.php', 'src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css', 'src/assets/js/admin/admin-layout-page-refinement-v1.js', 'tests/layout-v8-browser-check.js', 'VERSION', 'src/style.css'}
 assert set(changed)==allowed,changed
 def original(p): return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 shell=(root/'inc/admin/admin-shell.php').read_text()
@@ -15,6 +15,16 @@ def form_contract(s):
  return (re.findall(r'<form[^>]*method="post"[^>]*action="[^"\n]+"',s),re.findall(r'<input[^>]*name="action"[^>]*>',s),re.findall(r"wp_nonce_field\([^;]+",s))
 assert form_contract(before)==form_contract(after),'form action/nonce/method changed'
 base_js=original('src/assets/js/admin/admin-layout.js'); expected_js=base_js.replace("    var first = q('input:not([type=\"hidden\"]),select,textarea,button', editor);","    var first = qa('button,input:not([type=\"hidden\"]),select,textarea', editor).filter(function (control) {\n      return !control.disabled && control.getClientRects().length;\n    })[0];").replace("    if (moduleEditor) moduleEditor.hidden = !!(((integratedBlogCockpit || integratedDirectoryCockpit) && key === 'post_list') || ownedModules.indexOf(key) !== -1);","    if (moduleEditor) moduleEditor.hidden = !!(((integratedBlogCockpit || integratedDirectoryCockpit) && key === 'post_list') || ownedModules.indexOf(key) !== -1);\n    if (moduleEditor && moduleEditor.hidden) closeLayoutModuleEditor(false);"); expected_js=expected_js.replace('    map[currentContext()] = rows;', '    // Named canonical fields also live in owned workspaces without a generic\n    // card/control-scope. Preserve their values for inactive modules too.\n    var switchNames = new Set(qa(\'input[type="checkbox"][name],input[type="radio"][name]\', form).map(function (element) { return element.name; }));\n    qa(\'[name^="layout[activeModuleSettings]"]\', form).forEach(function (element) {\n      var match = element.name.match(/^layout\\[activeModuleSettings\\]\\[([^\\]]+)\\]\\[([^\\]]+)\\]$/);\n      if (!match || (element.type === \'hidden\' && switchNames.has(element.name))) return;\n      var module = match[1], key = match[2];\n      var row = rows[module] || { override: true };\n      row[key] = element.type === \'checkbox\' ? element.checked : element.value;\n      rows[module] = row;\n    });\n\n'+'    map[currentContext()] = rows;',1); assert (root/'assets/js/admin/admin-layout.js').read_text()==expected_js,'unexpected canonical/save handler delta'
+base_loader=original('src/inc/admin/admin-s01-uiux-polish.php')
+cache_patch="""        // The base controller changes with layout refinements too. Fixed-time
+        // release ZIPs must not reuse its old filemtime-only browser cache key.
+        $scripts = wp_scripts();
+        if (isset($scripts->registered['vf-theme-admin-layout'])) {
+            $scripts->registered['vf-theme-admin-layout']->ver = VF_THEME_VERSION . '-' . vf_toolsite_asset_version('assets/js/admin/admin-layout.js');
+        }
+
+"""
+assert (root/'inc/admin/admin-s01-uiux-polish.php').read_text()==base_loader.replace("    if ($tab === 'layout') {\n","    if ($tab === 'layout') {\n"+cache_patch,1),'unexpected asset loader delta'
 assert re.findall(r'name=\"([^\"]+)\"',before)==re.findall(r'name=\"([^\"]+)\"',after),'submitted field names changed'
 # Runtime/service/update/auth files cannot change under the above exact allowlist.
 assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='7dc6b2bd2126237e7e69d6ce2ef890c4e14362a68591f0a93896638acf5c6a12'
