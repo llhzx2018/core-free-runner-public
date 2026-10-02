@@ -62,10 +62,32 @@ class P07IntegrationManifestTests(unittest.TestCase):
             "5c447fc99030f75c098934ddb9aa300b934564bb",
         )
 
-    def test_slot4_rc19_is_publicly_distributed(self):
+    def test_slot4_rc20_is_publicly_distributed(self):
         s = self.data["slots"][3]
-        self.assertEqual(s["internal_version"], "0.1.0-rc19")
+        self.assertEqual(s["internal_version"], "0.1.0-rc20")
         self.assertEqual(s["integration_state"], "PUBLIC_DISTRIBUTED")
+
+    def test_beginner_public_names_hide_project_code(self):
+        self.assertEqual(self.data["project"]["public_ui_name"], "服务器工具箱")
+        self.assertTrue(self.data["project"]["user_facing_project_code_hidden"])
+        self.assertEqual(self.data["slots"][2]["name"], "网站与数据")
+        self.assertEqual(self.data["slots"][3]["name"], "服务器维护与安全")
+        self.assertEqual(
+            self.data["slots"][2]["beginner_naming_contract"],
+            "BEGINNER_PURPOSE_FIRST_NO_PROJECT_CODE_V1",
+        )
+        self.assertEqual(
+            self.data["slots"][2]["website_management_contract"],
+            "GROUPED_SITE_TOOLS_V1",
+        )
+        self.assertEqual(
+            self.data["slots"][2]["migration_dependency_contract"],
+            "LAZY_ONLY_AFTER_ACTION_SELECT_V1",
+        )
+        self.assertEqual(
+            self.data["release"]["release29_distribution_status"],
+            "PENDING",
+        )
 
     def test_release_is_published(self):
         release = self.data["release"]
