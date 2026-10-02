@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'src/assets/js/admin/admin-layout.js', 'tests/layout-controls-browser-check.js', 'src/inc/runtime-constants.php', 'src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css', 'src/assets/js/admin/admin-layout-page-refinement-v1.js', 'tests/layout-v8-browser-check.js', 'VERSION', 'src/style.css'}
+allowed={'src/assets/js/admin/admin-layout.js', 'tests/layout-controls-browser-check.js', 'src/inc/admin/views/partials/layout-home-tool-workspaces.php', 'src/inc/runtime-constants.php', 'src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css', 'src/assets/js/admin/admin-layout-page-refinement-v1.js', 'tests/layout-v8-browser-check.js', 'VERSION', 'src/style.css'}
 assert set(changed)==allowed,changed
 def original(p): return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 shell=(root/'inc/admin/admin-shell.php').read_text()
