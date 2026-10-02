@@ -24,7 +24,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
 
     def test_grouped_site_and_admin_navigation_are_exposed(self) -> None:
         for label in (
-            "网站管理",
+            "网站创建与维护",
             "管理已有网站",
             "创建新网站",
             "当前网站：",
@@ -33,7 +33,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
             "数据库",
             "网站证书（HTTPS）",
             "权限与缓存",
-            "网站面板（CloudPanel）",
+            "面板账号与安全（CloudPanel）",
             "登录安全",
             "面板用户",
             "面板状态检查",
