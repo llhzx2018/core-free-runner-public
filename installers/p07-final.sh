@@ -50,7 +50,7 @@ verify_installed_current() {
 }
 
 if verify_installed_current; then
-  say "CloudPanel 运维模块已是当前版本，无需下载或重复安装 ✓"
+  say "网站与数据功能已是当前版本，无需下载或重复安装 ✓"
   if [[ -t 0 && -t 1 && "${P07_NO_EXEC:-0}" != "1" ]]; then exec "$BIN_LINK"; fi
   exit 0
 fi
@@ -148,11 +148,11 @@ if ! verify_installed_current; then
 fi
 
 COMMITTED=1
-say "CloudPanel 运维模块安装 / 升级完成 ✓"
+say "网站与数据功能安装 / 升级完成 ✓"
 printf '版本：%s\n' "$EXPECTED_VERSION"
 printf '构建：%s\n' "$EXPECTED_BUILD_ID"
-printf '加载方式：只安装第 3 模块当前运行时，不回放历史候选版 / 初始化升级链。\n'
-printf '按需依赖：进入远程备份时才安装 rclone；进入服务器迁移时才安装 OpenSSH 客户端 + rsync。\n'
+printf '更新方式：只更新当前正式功能，不重复执行历史升级步骤。\n'
+printf '按需组件：使用异地备份或服务器迁移时，才准备对应的远程连接与文件同步工具。\n'
 printf '安全边界：不自动改 DNS、不自动删除源服务器、不自动覆盖已有目标服务器。\n'
 
 if [[ -t 0 && -t 1 && "${P07_NO_EXEC:-0}" != "1" ]]; then
