@@ -22,8 +22,8 @@ class Menu3ModularTests(unittest.TestCase):
             "1. 网站与数据概况",
             "2. 备份与恢复",
             "3. 服务器迁移",
-            "4. 网站管理",
-            "5. 网站面板（CloudPanel）",
+            "4. 网站创建与维护",
+            "5. 面板账号与安全（CloudPanel）",
         ):
             self.assertIn(text, proc.stdout)
 
@@ -96,13 +96,13 @@ class Menu3ModularTests(unittest.TestCase):
         ]
         text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         for marker in (
-            "网站管理",
+            "网站创建与维护",
             "数据库清单",
             "新增数据库",
             "HTTPS 证书状态",
             "修复网站权限",
             "清理网站缓存（Varnish）",
-            "网站面板（CloudPanel）",
+            "面板账号与安全（CloudPanel）",
             "面板登录安全",
             "面板用户",
             "网站配置模板（Vhost）· 高级",
@@ -218,7 +218,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("网站与数据概况", text)
         self.assertIn("服务器健康检查", text)
         self.assertIn("工具检查 / 修复", text)
-        self.assertIn("网站面板（CloudPanel）", text)
+        self.assertIn("面板账号与安全（CloudPanel）", text)
 
     def test_migration_preserves_old_server_dns_and_target_collision_boundaries(self) -> None:
         ui = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
