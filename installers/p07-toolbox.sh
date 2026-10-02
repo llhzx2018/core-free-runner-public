@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release31"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release32"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -46,16 +46,11 @@ show_menu() {
   show_header
   say "${C_GREEN}功能状态：5 项均可用${C_RESET}"
   say
-  say "  ${C_GREEN}1.${C_RESET} 网络代理节点"
-  say "     ${C_GRAY}V2Ray / 代理节点管理${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测"
-  say "     ${C_GRAY}VPS / CPU / 磁盘 / 网络${C_RESET}"
-  say "  ${C_GREEN}3.${C_RESET} 网站与数据"
-  say "     ${C_GRAY}CloudPanel / 网站 / 数据库 / 备份 / 迁移${C_RESET}"
-  say "  ${C_GREEN}4.${C_RESET} 日常维护与安全"
-  say "     ${C_GRAY}Linux / 更新 / 清理 / 安全检查${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化"
-  say "     ${C_GRAY}CloudPanel / 时区 / Swap / 基础设置${C_RESET}"
+  say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS${C_RESET}"
+  say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}CloudPanel${C_RESET}"
+  say "  ${C_GREEN}4.${C_RESET} 日常维护与安全      ${C_GRAY}Linux${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}CloudPanel${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
