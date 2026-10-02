@@ -24,11 +24,11 @@ class Menu3ModularTests(unittest.TestCase):
             "3. 服务器迁移",
             "4. 网站创建与维护",
             "5. 面板账号与安全",
-            "Status",
-            "Backup",
-            "Migration",
-            "Site",
-            "CloudPanel",
+            "网站状态",
+            "网站数据",
+            "整机/单站",
+            "网站/数据库",
+            "面板账户",
         ):
             self.assertIn(text, proc.stdout)
 
