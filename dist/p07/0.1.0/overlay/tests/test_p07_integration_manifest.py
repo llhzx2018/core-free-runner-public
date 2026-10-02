@@ -78,7 +78,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             self.data["slots"][2]["website_management_contract"],
-            "GROUPED_SITE_TOOLS_ROLE_CLEAR_WITH_SUBTITLES_V3",
+            "GROUPED_SITE_TOOLS_SINGLE_LINE_TWO_COLUMN_V4",
         )
         self.assertEqual(
             self.data["slots"][2]["migration_dependency_contract"],
