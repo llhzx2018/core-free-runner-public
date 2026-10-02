@@ -1,0 +1,183 @@
+name: S01-C02 V1.21.1002 Formal Release
+
+on:
+  push:
+    branches:
+      - release/s01-c02-1211002-formal
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: 1e929cf6ce4677dad94add86c8e26e9045297a59
+      PROMOTED_MAIN_SHA: e8a0356a683dfb4802fd79d194b9ee2fdf5822ea
+      TARGET_VERSION: 1.21.1002
+      RELEASE_TAG: v1.21.1002
+      ASSET_NAME: vf-tools-ops_V1.21.1002.zip
+      TESTED_RUN_ID: '36995334587'
+      TESTED_ARTIFACT: s01-c02-v1.21.1002-technical-state-matrix
+      EXPECTED_BYTES: '3475942'
+      EXPECTED_SHA256: 7d0509b589c98d1ffde711c3a1018ad1b029d1699cde1d660df71c3d1026a495
+      EXPECTED_RUNTIME_FILES: '975'
+      EXPECTED_RUNTIME_FP: 0c7eaf97ac132b744b432be9155aa1b7767983a8e662e65674642a8bc67b32bb
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify promotion and candidate evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/branches/main" --jq '.commit.sha')" = "$PROMOTED_MAIN_SHA"
+          GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/commits/$PROMOTED_MAIN_SHA" --jq '.parents[].sha' | grep -Fx "$TARGET_SHA" >/dev/null
+
+          mkdir tested
+          gh run download "$TESTED_RUN_ID" --repo llhzx2018/core-free-runner-public --name "$TESTED_ARTIFACT" --dir tested
+          jq -e --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION" '
+            .status=="PASS" and
+            .candidate_sha==$sha and
+            .candidate_version==$ver and
+            .state_matrix.result=="PASS" and
+            .state_matrix.checks==49 and
+            .state_matrix.owner_product_pass==false and
+            .responsive_regression.result=="PASS" and
+            .upgrade=="PASS" and
+            .frozen_shell_header_menu=="PASS" and
+            .private_source_persisted==false and
+            .production=="NOT_EXECUTED"
+          ' tested/FINAL_EVIDENCE.json >/dev/null
+          test "$(jq -r '.candidate.bytes' tested/package.json)" = "$EXPECTED_BYTES"
+          test "$(jq -r '.candidate.sha256' tested/package.json)" = "$EXPECTED_SHA256"
+          test "$(jq -r '.candidate.files' tested/package.json)" = "$EXPECTED_RUNTIME_FILES"
+          test "$(jq -r '.candidate.runtime_fingerprint' tested/package.json)" = "$EXPECTED_RUNTIME_FP"
+          echo EXACT_CANDIDATE_AND_EVIDENCE=PASS
+
+      - name: Rebuild exact deterministic release package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,re,zipfile
+          from pathlib import Path
+
+          root=Path('target')
+          out=Path('/tmp/vf-tools-ops_V1.21.1002.zip')
+
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+
+          fs={}
+          for p in root.rglob('*'):
+              if p.is_file() and not p.is_symlink():
+                  rel=p.relative_to(root)
+                  if keep(rel):
+                      fs[rel.as_posix()]=p.read_bytes()
+          fs=dict(sorted(fs.items()))
+
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,data in sorted(fs.items()):
+                  info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,2,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.external_attr=0o100644<<16
+                  z.writestr(info,data)
+
+          h=hashlib.sha256()
+          for rel,data in sorted(fs.items()):
+              h.update(rel.encode()); h.update(b'\0'); h.update(hashlib.sha256(data).hexdigest().encode()); h.update(b'\n')
+
+          print('RUNTIME_FILES='+str(len(fs)))
+          print('RUNTIME_FINGERPRINT='+h.hexdigest())
+          print('PACKAGE_BYTES='+str(out.stat().st_size))
+          print('PACKAGE_SHA256='+hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+
+          test "$(stat -c %s "/tmp/$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "/tmp/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          test "$(unzip -Z1 "/tmp/$ASSET_NAME" | grep -Ec '(^|/)\.\.?(/|$)')" = "0"
+          echo DETERMINISTIC_PACKAGE=PASS
+
+      - name: Publish formal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat > notes.md <<'EOF'
+          S01-C02 · VF Tools Ops · V1.21.1002
+
+          Technical & Indexing · State Matrix Consistency Closure
+          - 修复站点级“待处理 / 全部”状态在页面筛选、分页之间被无意重置的问题
+          - PASS / BLOCKED / NOT_VERIFIED 只改变状态语义，不再改变页面骨架
+          - “查看其余”与“专业边界”保持原生展开/收起，展开只增长所属内容区
+          - 刷新后 disclosure 回到默认折叠；从问题处理返回时 URL 驱动的筛选、分页、站点范围保持
+          - 1440 / 1366 / 1280 / 1224 / 1024 / 768 / 390 七宽度、多状态组合 browser proof PASS
+          - 1.21.1000 的技术页重复全局 GATE_BLOCKED notice 抑制边界保持不变
+          - Shell / Header / Header Menu 与其它已验收页面冻结不变
+          - 1.21.1001 → 1.21.1002 upgrade preservation PASS
+          - exact source: 1e929cf6ce4677dad94add86c8e26e9045297a59
+          - main promotion: e8a0356a683dfb4802fd79d194b9ee2fdf5822ea
+          - Candidate Gate: 36995334587
+          - package SHA256: 7d0509b589c98d1ffde711c3a1018ad1b029d1699cde1d660df71c3d1026a495
+
+          OWNER Preview = N_A under bounded reversible files-only Admin UX/UI continuous-delivery authority.
+          OWNER Real Use / Product Acceptance remain post-Production and are not claimed PASS.
+          EOF
+
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          else
+            gh release create "$RELEASE_TAG" "/tmp/$ASSET_NAME" --repo "$TARGET_REPOSITORY" --target "$TARGET_SHA" --title "VF Tools Ops V1.21.1002" --notes-file notes.md
+          fi
+
+      - name: Remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' <<<"$JSON")"
+          PUB="$(jq -r '.published_at' <<<"$JSON")"
+          test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          test "$SIZE" = "$EXPECTED_BYTES"
+          mkdir readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback --clobber
+          test "$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "readback/$ASSET_NAME" >/dev/null
+          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
+          echo RELEASE_ID=$RID
+          echo ASSET_ID=$AID
+          echo PUBLISHED_AT=$PUB
+          echo ASSET_BYTES=$SIZE
+          echo ASSET_SHA256=$EXPECTED_SHA256
+          echo RUNTIME_FILES=$EXPECTED_RUNTIME_FILES
+          echo RUNTIME_FINGERPRINT=$EXPECTED_RUNTIME_FP
+          echo PRIVATE_SOURCE_PERSISTED_TO_PUBLIC_ARTIFACT=false
