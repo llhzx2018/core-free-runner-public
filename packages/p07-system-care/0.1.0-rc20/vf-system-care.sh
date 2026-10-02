@@ -120,7 +120,7 @@ updates_menu_beginner() {
     ui_menu_back 0 '返回'
     say
     ui_note '安全更新：主要修复系统漏洞。'
-    ui_note '全部更新：还会升级普通系统软件；P07 会先做安全检查，不会自动重启。'
+    ui_note '全部更新：还会升级普通系统软件；工具会先做安全检查，不会自动重启。'
     say
     printf '%b' "${C_BOLD}请选择 [0-3]：${C_RESET}"
     read -r choice || return 0
