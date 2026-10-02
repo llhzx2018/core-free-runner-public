@@ -13,8 +13,8 @@ class Release11BeginnerIaTests(unittest.TestCase):
             "网站与数据概况",
             "备份与恢复",
             "服务器迁移",
-            "网站管理",
-            "网站面板（CloudPanel）",
+            "网站创建与维护",
+            "面板账号与安全（CloudPanel）",
         ):
             self.assertIn(label, text)
         self.assertIn("backup_menu()", text)

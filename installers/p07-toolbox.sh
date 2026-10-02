@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release29"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release30"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -49,8 +49,8 @@ show_menu() {
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS${C_RESET}"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}CloudPanel${C_RESET}"
-  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}Linux${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 初始化服务器        ${C_GRAY}CloudPanel${C_RESET}"
+  say "  ${C_GREEN}4.${C_RESET} 日常维护与安全      ${C_GRAY}Linux${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}CloudPanel${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -339,8 +339,8 @@ case "${1:-}" in
 1. 网络代理节点        V2Ray        ${VF_NODE_PUBLIC}
 2. 服务器性能检测      VPS          ${VPS_AUDIT_PUBLIC}
 3. 网站与数据          CloudPanel   ${VF_SERVER_OPS_PUBLIC}
-4. 服务器维护与安全    Linux        ${SYSTEM_CARE_PUBLIC}
-5. 初始化服务器        CloudPanel   ${VF_SERVER_OPS_PUBLIC}
+4. 日常维护与安全      Linux        ${SYSTEM_CARE_PUBLIC}
+5. 新服务器初始化      CloudPanel   ${VF_SERVER_OPS_PUBLIC}
 
 说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
 EOF

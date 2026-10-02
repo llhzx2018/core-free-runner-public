@@ -78,7 +78,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             self.data["slots"][2]["website_management_contract"],
-            "GROUPED_SITE_TOOLS_V1",
+            "GROUPED_SITE_TOOLS_ROLE_CLEAR_V2",
         )
         self.assertEqual(
             self.data["slots"][2]["migration_dependency_contract"],
@@ -86,7 +86,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             self.data["release"]["release29_distribution_status"],
-            "PENDING",
+            "PASS",
         )
 
     def test_release_is_published(self):
