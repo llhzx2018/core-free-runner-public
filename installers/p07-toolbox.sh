@@ -22,7 +22,7 @@ VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release28"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc19"
+SYSTEM_CARE_EXPECTED="0.1.0-rc20"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
@@ -49,7 +49,7 @@ show_menu() {
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据"
-  say "  ${C_GREEN}4.${C_RESET} 服务器维护 / 安全"
+  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全"
   say "  ${C_GREEN}5.${C_RESET} 初始化服务器"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
