@@ -19,11 +19,11 @@ class Menu3ModularTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for text in (
-            "1. 网站与服务器概况",
+            "1. 网站与数据概况",
             "2. 备份与恢复",
             "3. 服务器迁移",
             "4. 网站管理",
-            "5. 面板管理（CloudPanel）",
+            "5. 网站面板（CloudPanel）",
         ):
             self.assertIn(text, proc.stdout)
 
@@ -38,7 +38,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("backup_menu()", text)
         self.assertIn("立即备份一个网站", text)
         self.assertIn("从备份恢复网站", text)
-        self.assertIn("自动备份 / 异地备份", text)
+        self.assertIn("自动备份与异地备份", text)
         self.assertNotIn('8) run_module "$DIAG_UI"', text)
         self.assertNotIn('10) run_module "$SELFCHECK_UI"', text)
         self.assertIn("--advanced", text)
@@ -51,10 +51,10 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("恢复后会先验证文件、数据库和 Nginx 配置", text)
         self.assertIn("网站 Nginx 正在运行时，再做 Host / SNI 在线验证", text)
         self.assertIn("不会自动启动或重启", text)
-        self.assertIn("离线验证通过 / 在线验证未执行", text)
+        self.assertIn("只做离线恢复验证", text)
         self.assertIn("无需先在 CloudPanel 手工创建空网站", text)
         self.assertIn("按原域名恢复", text)
-        self.assertIn("P07 不会覆盖", text)
+        self.assertIn("不会覆盖", text)
         self.assertIn("DNS：未修改", text)
 
     def test_restore_ui_persists_secret_safe_result_evidence(self) -> None:
@@ -101,8 +101,8 @@ class Menu3ModularTests(unittest.TestCase):
             "新增数据库",
             "HTTPS 证书状态",
             "修复网站权限",
-            "清理网站加速缓存（Varnish）",
-            "面板管理（CloudPanel）",
+            "清理网站缓存（Varnish）",
+            "网站面板（CloudPanel）",
             "面板登录安全",
             "面板用户",
             "网站配置模板（Vhost）· 高级",
@@ -110,7 +110,7 @@ class Menu3ModularTests(unittest.TestCase):
             self.assertIn(marker, text)
         parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
         self.assertNotIn("  4. Vhost 模板", parent)
-        self.assertIn("网站底层配置模板（Vhost）由面板和 P07 自动处理", parent)
+        self.assertIn("网站底层配置由 CloudPanel 和工具自动处理", parent)
         for forbidden in (
             "site:delete",
             "db:delete",
@@ -124,20 +124,23 @@ class Menu3ModularTests(unittest.TestCase):
     def test_cloudpanel_site_management_selects_once_and_can_change_explicitly(self) -> None:
         parent = (ROOT / "bin/vfops-cloudpanel-ui").read_text(encoding="utf-8")
         common = (ROOT / "lib/cloudpanel_ui_common.sh").read_text(encoding="utf-8")
-        self.assertIn("网站只选择一次", parent)
+        self.assertIn("管理已有网站", parent)
+        self.assertIn("创建新网站", parent)
+        self.assertIn("ui_menu_info 3 '数据库'", parent)
+        self.assertIn("ui_menu_info 4 '网站证书（HTTPS）'", parent)
+        self.assertIn("ui_menu_warn 5 '权限与缓存'", parent)
         self.assertIn("ui_menu_flow 98 '更换网站'", parent)
-        self.assertIn("ui_menu_back 0 '返回 P07 主菜单'", parent)
         self.assertIn('SELECTED_DOMAIN=""', common)
         self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', common)
 
     def test_migration_ui_prioritizes_target_pull_and_resume(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
         for marker in (
-            "P07 · 服务器迁移",
+            "服务器迁移",
             "当前：",
             "这台新服务器（接收数据）",
-            "整机迁入",
-            "单站迁入",
+            "迁入整台旧服务器",
+            "迁入一个网站",
             "继续未完成迁移",
             "旧服务器 IP",
             "server-migrate prepare",
@@ -148,13 +151,13 @@ class Menu3ModularTests(unittest.TestCase):
             "旧服务器：继续保留为恢复副本",
             "PREPARE_PULL_MIGRATION",
             "CUTOVER_PULL:",
-            "请返回 P07 一级菜单 → 5. 初始化服务器",
+            "请返回一级菜单 → 5. 初始化服务器",
             "迁移流程本身不再负责安装或初始化服务器",
             "非网站面板管理的公网服务",
-            "当前服务器网站开关",
+            "旧服务器网站开关",
             "开启这台服务器全部网站",
             "停止这台服务器全部网站",
-            "迁移后在旧服务器上使用；不需要输入 IP",
+            "仅在旧服务器上使用；直接操作当前机器，不需要输入 IP",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("目标服务器 IP", text)
@@ -186,12 +189,36 @@ class Menu3ModularTests(unittest.TestCase):
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
         self.assertIn('exec bash "$INIT_UI"', user)
         self.assertIn("--init", user)
-        self.assertIn("P07 · 初始化服务器", init)
+        self.assertIn("初始化服务器", init)
         self.assertIn("确认应用这些基础设置？[y/N]", init)
         self.assertIn("确认安装 CloudPanel？[y/N]", init)
+        self.assertIn("应用基础设置（时区 / Swap）", init)
+        self.assertIn("检查 / 安装 CloudPanel", init)
+        self.assertNotIn("重新检查", init)
+        self.assertNotIn("查看初始化完成条件", init)
         self.assertNotIn("输入 APPLY_BASELINE", init)
         self.assertNotIn("输入 INSTALL_CLOUDPANEL", init)
         self.assertIn("/^SwapTotal:/", init)
+
+
+    def test_beginner_surfaces_hide_project_code_and_group_site_tools(self) -> None:
+        paths = [
+            ROOT / "bin/vfops-user",
+            ROOT / "bin/vfops-site-ui",
+            ROOT / "bin/vfops-migrate-ui",
+            ROOT / "bin/vfops-cloudpanel-ui",
+            ROOT / "bin/vfops-auto-backup",
+            ROOT / "bin/vfops-init-ui",
+            ROOT / "bin/vfops-diagnostics-ui",
+            ROOT / "bin/vfops-selfcheck-ui",
+            ROOT / "bin/vfops-history-ui",
+        ]
+        text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        self.assertNotIn("P07 ·", text)
+        self.assertIn("网站与数据概况", text)
+        self.assertIn("服务器健康检查", text)
+        self.assertIn("工具检查 / 修复", text)
+        self.assertIn("网站面板（CloudPanel）", text)
 
     def test_migration_preserves_old_server_dns_and_target_collision_boundaries(self) -> None:
         ui = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")

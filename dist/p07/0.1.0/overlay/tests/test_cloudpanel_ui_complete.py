@@ -22,12 +22,31 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         cls.common = HELPERS[0].read_text(encoding="utf-8")
         cls.admin = HELPERS[3].read_text(encoding="utf-8")
 
-    def test_flat_site_and_admin_navigation_are_exposed(self) -> None:
+    def test_grouped_site_and_admin_navigation_are_exposed(self) -> None:
         for label in (
             "网站管理",
+            "管理已有网站",
+            "创建新网站",
             "当前网站：",
             "网站概览",
-            "健康检查",
+            "网站健康检查",
+            "数据库",
+            "网站证书（HTTPS）",
+            "权限与缓存",
+            "网站面板（CloudPanel）",
+            "登录安全",
+            "面板用户",
+            "面板状态检查",
+        ):
+            self.assertIn(label, self.parent)
+        self.assertIn("database_tools", self.parent)
+        self.assertIn("ssl_tools", self.parent)
+        self.assertIn("maintenance_tools", self.parent)
+        self.assertIn("ui_menu_flow 98 '更换网站'", self.parent)
+        self.assertIn("ui_menu_back 0 '返回'", self.parent)
+        self.assertNotIn("  4. Vhost 模板", self.parent)
+        self.assertIn("网站底层配置由 CloudPanel 和工具自动处理", self.parent)
+        for detailed in (
             "数据库清单",
             "新增数据库",
             "导出数据库",
@@ -36,18 +55,12 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
             "申请免费 HTTPS 证书（Let’s Encrypt）",
             "安装自定义证书",
             "修复网站权限",
-            "清理网站加速缓存（Varnish）",
-            "面板管理（CloudPanel）",
-            "创建网站",
+            "清理网站缓存（Varnish）",
             "面板登录安全",
             "面板用户",
-            "平台基础能力检查",
         ):
-            self.assertIn(label, self.parent)
-        self.assertIn("ui_menu_flow 98 '更换网站'", self.parent)
-        self.assertIn("ui_menu_back 0 '返回 P07 主菜单'", self.parent)
-        self.assertNotIn("  4. Vhost 模板", self.parent)
-        self.assertIn("网站底层配置模板（Vhost）由面板和 P07 自动处理", self.parent)
+            self.assertIn(detailed, self.helpers)
+
 
     def test_vhost_maintenance_is_retained_as_advanced_internal_capability(self) -> None:
         self.assertIn("vhost_tools()", self.admin)
@@ -71,7 +84,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         self.assertIn('if [[ -n "$SELECTED_DOMAIN" ]]', self.common)
         self.assertIn('wanted=sys.argv[2].strip().lower().rstrip', self.common)
         self.assertIn('SELECTED_DOMAIN="$(python3', self.common)
-        self.assertIn("网站只选择一次", self.parent)
+        self.assertIn("ui_menu_flow 98 '更换网站'", self.parent)
 
     def test_parent_is_thin_and_sources_bounded_helpers(self) -> None:
         self.assertLess(len(self.parent.splitlines()), 140)
@@ -127,12 +140,13 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, self.all_text)
 
-    def test_dns_source_and_target_boundaries_are_explicit(self) -> None:
-        self.assertIn("不自动修改 DNS", self.parent)
-        self.assertIn("不删除源服务器", self.parent)
-        self.assertIn("不覆盖已有目标服务器", self.parent)
+    def test_dns_delete_and_overwrite_boundaries_are_explicit(self) -> None:
+        self.assertIn("不会自动修改域名解析（DNS）", self.parent)
+        self.assertIn("删除网站不在普通入口", self.parent)
+        self.assertIn("不会覆盖已有网站", self.parent)
         for forbidden in ("update_dns", "write_dns", "set_dns", "delete_dns"):
             self.assertNotIn(forbidden, self.all_text)
+
 
     def test_passwords_are_silent_and_not_passed_as_cli_arguments(self) -> None:
         self.assertIn("read -r -s", self.helpers)
@@ -142,7 +156,7 @@ class CloudPanelCompleteUiTests(unittest.TestCase):
 
     def test_site_collision_is_checked_before_creation(self) -> None:
         self.assertIn('site_domain_exists "$domain"', self.helpers)
-        self.assertIn("目标服务器已存在同名目标，P07 不会覆盖", self.helpers)
+        self.assertIn("这台服务器已经存在同名网站，不会覆盖", self.helpers)
 
     def test_health_check_is_local_without_hosts_or_dns_mutation(self) -> None:
         self.assertIn('--resolve "$domain:80:127.0.0.1"', self.helpers)

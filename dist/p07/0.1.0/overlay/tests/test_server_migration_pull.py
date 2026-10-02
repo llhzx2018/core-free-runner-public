@@ -393,11 +393,11 @@ class TargetPullUiContractTests(unittest.TestCase):
     def test_ordinary_ui_uses_new_server_receiver_language(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
         for marker in (
-            "P07 · 服务器迁移",
+            "服务器迁移",
             "当前：",
             "这台新服务器（接收数据）",
-            "整机迁入",
-            "单站迁入",
+            "迁入整台旧服务器",
+            "迁入一个网站",
             "继续未完成迁移",
             "旧服务器 IP",
             "新服务器开始从旧服务器复制数据",
@@ -407,7 +407,7 @@ class TargetPullUiContractTests(unittest.TestCase):
             "新服务器已有资源不覆盖",
             "PREPARE_PULL_MIGRATION",
             "CUTOVER_PULL:",
-            "当前服务器网站开关",
+            "旧服务器网站开关",
             "开启这台服务器全部网站",
             "停止这台服务器全部网站",
             "迁移后如果你登录的是旧服务器，就直接在这里操作，不需要输入 IP",
@@ -461,7 +461,7 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertIn("ssh-copy-id", text)
         self.assertIn("rsync", text)
         self.assertIn("首次使用服务器迁移", text)
-        self.assertIn("按需安装", text)
+        self.assertIn("按需准备", text)
 
 
 if __name__ == "__main__":

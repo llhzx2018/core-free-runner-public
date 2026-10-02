@@ -114,7 +114,7 @@ JSON
         ;;
       plan)
         if [[ "${VFOPS_TEST_MIGRATION_PLAN:-ready}" == "conflict" ]]; then
-          printf '新服务器已存在同名网站：one.example；P07 不会覆盖。\n' >&2
+          printf '新服务器已存在同名网站：one.example；不会覆盖现有网站。\n' >&2
           exit 13
         fi
         printf '{"status":"READY","migration_direction":"CURRENT_SERVER_PULLS_OLD_SERVER","current_server_role":"RECEIVER","old_server_ip":"203.0.113.10","site_count":1,"sites":[{"domain":"one.example","runtime":{"type":"php","version":"8.3"},"mysql_databases":[]}],"capacity_estimate":{"target_required_bytes":1048576},"old_server_external_listeners":[],"automatic_dns_change":false,"old_server_delete_allowed":false,"existing_target_overwrite_allowed":false}\n'
@@ -296,7 +296,7 @@ exit 0
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("迁移预检未通过", proc.stdout)
         self.assertIn("新服务器已存在同名网站：one.example", proc.stderr)
-        self.assertIn("P07 不会覆盖", proc.stderr)
+        self.assertIn("不会覆盖现有网站", proc.stderr)
         log = self.log.read_text(encoding="utf-8")
         self.assertIn("server-migrate plan --source-ip 203.0.113.10", log)
         self.assertNotIn("server-migrate prepare", log)
@@ -305,7 +305,7 @@ exit 0
         self._ready_ssh()
         proc = self._run("3\n1\n203.0.113.10\ny\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("P07 · 服务器迁移", proc.stdout)
+        self.assertIn("服务器迁移", proc.stdout)
         self.assertIn("当前：这台新服务器（接收数据）", proc.stdout)
         self.assertIn("旧服务器：203.0.113.10", proc.stdout)
         self.assertIn("新服务器开始从旧服务器复制数据", proc.stdout)

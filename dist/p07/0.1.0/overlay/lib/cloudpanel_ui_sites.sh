@@ -13,7 +13,7 @@ create_site() {
   printf '域名：'; read -r domain || return 0
   printf '网站用户：'; read -r user || return 0
   if site_domain_exists "$domain"; then
-    ui_bad '目标服务器已存在同名目标，P07 不会覆盖。'; pause; return 0
+    ui_bad '这台服务器已经存在同名网站，不会覆盖。'; pause; return 0
   else
     rc=$?
     [[ $rc -eq 1 ]] || { ui_bad '无法安全确认目标是否已存在，已停止。'; pause; return 0; }
@@ -44,12 +44,12 @@ PY
     if site_domain_exists "$domain"; then
       ui_good '网站已创建并读回确认 ✓'
     else
-      ui_attention 'CloudPanel 已返回成功，但 P07 暂未在资源清单中读回该网站；未执行删除或覆盖，请稍后查看。'
+      ui_attention 'CloudPanel 已返回成功，但暂时还没有在网站清单中读到它；没有执行删除或覆盖，请稍后查看。'
     fi
     ui_note 'DNS：未修改 · 源网站：未删除'
   else
     SECRET_VALUE=""
-    printf '%b\n' "${C_RED}网站创建未完成；P07 未修改 DNS，也未删除源网站。${C_RESET}" >&2
+    printf '%b\n' "${C_RED}网站创建未完成；DNS 未修改，也没有删除其它网站。${C_RESET}" >&2
   fi
   pause
 }
@@ -117,7 +117,8 @@ import_site_database() {
   [[ -f "$src" ]] || { printf '文件不存在。\n'; pause; return 0; }
   say; ui_attention "注意：导入会修改数据库 $db 的数据，但不会删除数据库或网站。"
   ui_safety_tier danger "将写入数据库 $db。"
-  ui_confirm_exact IMPORT '输入 IMPORT 继续：' || return 0
+  ui_prompt '确认导入到这个数据库？[y/N]：'; read -r confirm || return 0
+  [[ "$confirm" =~ ^[Yy]$ ]] || return 0
   if PYTHONPATH="$ROOT_DIR/lib" python3 - "$user" "$db" "$src" <<'PY'
 import sys
 import cloudpanel_site
@@ -129,7 +130,7 @@ PY
 
 database_tools() {
   while true; do
-    say; ui_title '数据库工具'; ui_rule
+    say; ui_title '数据库'; ui_rule
     ui_menu_info 1 '查看数据库'
     ui_menu_warn 2 '新增数据库'
     ui_menu_good 3 '导出数据库'
