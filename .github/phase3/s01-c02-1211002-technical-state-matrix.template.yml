@@ -1,0 +1,191 @@
+name: S01-C02 V{{TARGET_VERSION}} Technical State Matrix Consistency
+
+on:
+  push:
+    branches:
+      - release/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: {{REPOSITORY}}
+  TARGET_SHA: {{TARGET_SHA}}
+  BASE_SHA: {{BASE_SHA}}
+  TARGET_VERSION: {{TARGET_VERSION}}
+  BASE_VERSION: {{BASE_VERSION}}
+  ARTIFACT_NAME: vf-tools-ops_V{{TARGET_VERSION}}.zip
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout runner lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+
+      - name: Lane identity preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner/scripts/ephemeral_lane_spec.py validate --spec runner/.github/phase3/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix.spec.json
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/.github/phase3/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix.spec.json --input runner/.github/workflows/temp-s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix.yml
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Source exact gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -Fq "Version: $TARGET_VERSION" target/vf-ops.php
+          grep -Fq "{{ROUND_ID}}" target/vf-ops.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          php target/tests/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix-contract.php\n          php target/tests/s01-c02-1211001-technical-responsive-consistency-contract.php
+          php target/tests/s01-c02-121999-technical-gate-state-contract.php
+          php target/tests/s01-c02-121998-technical-production-polish-contract.php
+          php target/tests/s01-c02-121997-technical-page-family-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.2-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          python3 - <<'PY'
+          from pathlib import Path
+          changed=set(Path('evidence/changed-files.txt').read_text().splitlines())
+          allowed={
+            'CHANGELOG.md','VERSION','vf-ops.php',
+            'includes/admin-v13/views/seo_technical.php',
+            'tests/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix-render-fixture.php',
+            'tests/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix-browser-proof.js',
+            'tests/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix-contract.php'
+          }
+          if changed != allowed:
+              raise SystemExit('unexpected diff: '+repr(sorted(changed ^ allowed)))
+          css=Path('target/assets/css/current/admin-s01-technical-index-r1.css').read_text()
+          for forbidden in ['.vf-v6-shell-header','.vf-v6-domain-nav','.vf-v6-domain-menu','.vf-ops-s01-shell']:
+              assert forbidden not in css, forbidden
+          print('BOUNDED_DIFF=PASS')
+          print('FROZEN_SHELL_HEADER_MENU=PASS')
+          PY
+
+      - name: State matrix browser proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vf-node
+          cd /tmp/vf-node
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          cd "$GITHUB_WORKSPACE/target"
+          export NODE_PATH=/tmp/vf-node/node_modules
+          node tests/s01-c02-{{TARGET_VERSION_COMPACT}}-technical-state-matrix-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/state-matrix.json"
+          jq -e '.pass==true and (.matrix|length)==49 and ([.matrix[].failures[]]|length)==0 and .owner_product_pass==false' "$GITHUB_WORKSPACE/evidence/state-matrix.json" >/dev/null
+          node tests/s01-c02-1211001-technical-responsive-consistency-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/responsive-regression.json"
+          jq -e '.pass==true and ([.checks[].failures[]]|length)==0 and .owner_product_pass==false' "$GITHUB_WORKSPACE/evidence/responsive-regression.json" >/dev/null
+          echo TECHNICAL_STATE_MATRIX_49=PASS
+          echo RESPONSIVE_REGRESSION=PASS
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,re,zipfile
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def files(root):
+              out={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): out[rel.as_posix()]=p.read_bytes()
+              return dict(sorted(out.items()))
+          def fp(fs):
+              h=hashlib.sha256()
+              for rel,data in sorted(fs.items()):
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return h.hexdigest()
+          def pack(root,out):
+              fs=files(root)
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in sorted(fs.items()):
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,2,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+              return fs
+          rows={}
+          for label,root,ver,out in [('baseline',Path('baseline'),'1.21.1000',Path('/tmp/vf-tools-ops_V{{BASE_VERSION}}.zip')),('candidate',Path('target'),'{{BASE_VERSION}}',Path('/tmp/vf-tools-ops_V{{TARGET_VERSION}}.zip'))]:
+              fs=pack(root,out)
+              rows[label]={'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':fp(fs)}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+
+          unzip -tq "/tmp/$ARTIFACT_NAME"
+
+      - name: Upgrade preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="vf-rsp-${GITHUB_RUN_ID}"; DB="vf-rsp-db-${GITHUB_RUN_ID}"; WP="vf-rsp-wp-${GITHUB_RUN_ID}"
+          PORT="$((19000 + (GITHUB_RUN_ID % 9000)))"
+          cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT; cleanup; docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_DATABASE=vf_test -e MARIADB_USER=vf_runner -e MARIADB_PASSWORD=vf_runner_ephemeral -e MARIADB_ROOT_PASSWORD=vf_root_ephemeral mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 40); do docker exec "$DB" mariadb-admin ping -uroot -pvf_root_ephemeral --silent >/dev/null 2>&1 && break || sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p "127.0.0.1:${PORT}:80" -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_USER=vf_runner -e WORDPRESS_DB_PASSWORD=vf_runner_ephemeral -e WORDPRESS_DB_NAME=vf_test wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:${PORT}/wp-login.php" >/dev/null 2>&1 && break || sleep 2; done
+          curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar -o /tmp/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod +x /usr/local/bin/wp
+          docker cp /tmp/vf-tools-ops_V{{BASE_VERSION}}.zip "$WP:/tmp/base.zip"
+          docker cp "/tmp/$ARTIFACT_NAME" "$WP:/tmp/candidate.zip"
+          BASE_URL="http://127.0.0.1:${PORT}"
+          docker exec "$WP" wp core install --allow-root --path=/var/www/html --url="$BASE_URL" --title='VF Technical State Matrix' --admin_user=admin --admin_password='VF-Responsive!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+          docker exec "$WP" wp plugin install /tmp/base.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp option update vf_ops_v{{TARGET_VERSION_COMPACT}}_fixture '{"keep":"yes"}' --format=json --allow-root --path=/var/www/html >/dev/null
+          docker exec "$WP" wp plugin install /tmp/candidate.zip --activate --force --allow-root --path=/var/www/html >/dev/null
+          test "$(docker exec "$WP" wp plugin get vf-ops --field=version --allow-root --path=/var/www/html)" = "$TARGET_VERSION"
+          test "$(docker exec "$WP" wp option get vf_ops_v{{TARGET_VERSION_COMPACT}}_fixture --format=json --allow-root --path=/var/www/html | jq -r '.keep')" = "yes"
+          echo UPGRADE_PRESERVATION=PASS
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          jq -n --arg sha "$TARGET_SHA" --arg version "$TARGET_VERSION" --argjson package "$(cat evidence/package.json)" --argjson matrix "$(cat evidence/state-matrix.json)" --argjson responsive "$(cat evidence/responsive-regression.json)" '{status:"PASS",candidate_sha:$sha,candidate_version:$version,package:$package,state_matrix:{result:($matrix.pass|if . then "PASS" else "FAIL" end),checks:($matrix.matrix|length),owner_product_pass:false},responsive_regression:{result:($responsive.pass|if . then "PASS" else "FAIL" end)},upgrade:"PASS",frozen_shell_header_menu:"PASS",private_source_persisted:false,production:"NOT_EXECUTED"}' | tee evidence/FINAL_EVIDENCE.json
+          sha256sum "/tmp/$ARTIFACT_NAME" | tee evidence/SHA256SUMS.txt
+          echo 'S01-C02 V{{TARGET_VERSION}} TECHNICAL STATE MATRIX MACHINE PASS'
+
+      - name: Upload exact candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-v{{TARGET_VERSION}}-technical-state-matrix
+          path: evidence/
+          retention-days: 30
