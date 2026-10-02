@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release28"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release29"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -94,7 +94,7 @@ sha256_file() {
 
 render_vps_audit_output() {
   sed -u \
-    -e "s/P07 VPS 一键验机 2\.0/P07 VPS 一键验机 ${VPS_AUDIT_PUBLIC}/g" \
+    -e "s/服务器性能检测 2\.0/服务器性能检测 ${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.0\.0-rc3-zh/${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g" \
     -e "s/2\.1\.0-rc7-field/${VPS_AUDIT_PUBLIC}/g" \
@@ -111,11 +111,11 @@ run_vps_audit() {
   tmp="$(mktemp -t p07-vps-audit.XXXXXX)"
   chmod 700 "$tmp"
 
-  say "${C_CYAN}正在启动 VPS 一键验机 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
+  say "${C_CYAN}正在启动服务器性能检测 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
 
   if ! curl -fsSL "$VPS_AUDIT_URL" -o "$tmp"; then
     rm -f "$tmp"
-    say "${C_RED}✗ VPS 验机模块下载失败。${C_RESET}" >&2
+    say "${C_RED}✗ 服务器性能检测模块下载失败。${C_RESET}" >&2
     return 4
   fi
 
@@ -127,21 +127,21 @@ run_vps_audit() {
   fi
   if [[ "$actual_sha" != "$VPS_AUDIT_SHA256" ]]; then
     rm -f "$tmp"
-    say "${C_RED}✗ VPS 验机模块完整性校验失败，已停止执行。${C_RESET}" >&2
+    say "${C_RED}✗ 服务器性能检测模块完整性校验失败，已停止执行。${C_RESET}" >&2
     return 6
   fi
 
   version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
   if [[ "$version" != "$VPS_AUDIT_EXPECTED" ]]; then
     rm -f "$tmp"
-    say "${C_RED}✗ VPS 验机模块版本不匹配，已停止执行。${C_RESET}" >&2
+    say "${C_RED}✗ 服务器性能检测模块版本不匹配，已停止执行。${C_RESET}" >&2
     return 7
   fi
 
   build_id="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
   if [[ "$build_id" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
     rm -f "$tmp"
-    say "${C_RED}✗ VPS 验机模块构建身份不匹配，已停止执行。${C_RESET}" >&2
+    say "${C_RED}✗ 服务器性能检测模块构建身份不匹配，已停止执行。${C_RESET}" >&2
     return 8
   fi
 
@@ -190,12 +190,12 @@ ensure_server_ops_current() {
   chmod 700 "$tmp"
   if ! curl -fsSL "$VF_SERVER_OPS_INSTALLER" -o "$tmp"; then
     rm -f "$tmp"
-    say "${C_RED}✗ CloudPanel 运维模块入口下载失败。${C_RESET}" >&2
+    say "${C_RED}✗ 网站与数据模块入口下载失败。${C_RESET}" >&2
     return 4
   fi
   if ! bash -n "$tmp"; then
     rm -f "$tmp"
-    say "${C_RED}✗ CloudPanel 运维模块入口校验失败。${C_RESET}" >&2
+    say "${C_RED}✗ 网站与数据模块入口校验失败。${C_RESET}" >&2
     return 5
   fi
 
@@ -297,7 +297,7 @@ main_menu() {
         run_vps_audit
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || say "${C_YELLOW}⚠ VPS 一键验机模块返回退出码 ${rc}。${C_RESET}"
+        [[ $rc -eq 0 ]] || say "${C_YELLOW}⚠ 服务器性能检测模块返回退出码 ${rc}。${C_RESET}"
         pause_menu
         ;;
       3)
@@ -305,7 +305,7 @@ main_menu() {
         run_server_ops
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ CloudPanel 运维模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 网站与数据模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
         ;;
       4)
         set +e
