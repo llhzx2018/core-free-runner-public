@@ -156,7 +156,7 @@ install_systemd_scheduler() {
 
   if ! atomic_write_owned_file "$service" 0644 <<EOF
 [Unit]
-Description=P07 System Care intrusion evidence scan
+Description=WordPress website security scan
 After=local-fs.target
 
 [Service]
@@ -175,7 +175,7 @@ EOF
 
   if ! atomic_write_owned_file "$timer" 0644 <<'EOF'
 [Unit]
-Description=P07 System Care daily intrusion evidence scan
+Description=Daily WordPress website security scan
 
 [Timer]
 OnCalendar=daily
@@ -212,7 +212,7 @@ EOF
 
 install_cron_scheduler() {
   if ! atomic_write_owned_file "$CRON_FILE" 0644 <<EOF
-# P07 System Care · WordPress 网站安全（P07-owned）
+# WordPress 网站安全（由服务器工具箱管理）
 17 3 * * * root $ENTRY evidence scan-scheduled >/dev/null 2>&1
 EOF
   then
