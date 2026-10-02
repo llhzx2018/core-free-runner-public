@@ -46,11 +46,11 @@ show_menu() {
   show_header
   say "${C_GREEN}功能状态：5 项均可用${C_RESET}"
   say
-  say "  ${C_GREEN}1.${C_RESET} 网络代理节点（V2Ray）"
-  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测（VPS）"
-  say "  ${C_GREEN}3.${C_RESET} 网站与数据（CloudPanel）"
-  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全（Linux）"
-  say "  ${C_GREEN}5.${C_RESET} 初始化服务器（CloudPanel）"
+  say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray${C_RESET}"
+  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS${C_RESET}"
+  say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}CloudPanel${C_RESET}"
+  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}Linux${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 初始化服务器        ${C_GRAY}CloudPanel${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -336,11 +336,11 @@ case "${1:-}" in
 用法：
   p07-toolbox
 
-1. 网络代理节点（V2Ray）         ${VF_NODE_PUBLIC}
-2. 服务器性能检测（VPS）        ${VPS_AUDIT_PUBLIC}
-3. 网站与数据（CloudPanel）      ${VF_SERVER_OPS_PUBLIC}
-4. 服务器维护与安全（Linux）     ${SYSTEM_CARE_PUBLIC}
-5. 初始化服务器（CloudPanel）    ${VF_SERVER_OPS_PUBLIC}
+1. 网络代理节点        V2Ray        ${VF_NODE_PUBLIC}
+2. 服务器性能检测      VPS          ${VPS_AUDIT_PUBLIC}
+3. 网站与数据          CloudPanel   ${VF_SERVER_OPS_PUBLIC}
+4. 服务器维护与安全    Linux        ${SYSTEM_CARE_PUBLIC}
+5. 初始化服务器        CloudPanel   ${VF_SERVER_OPS_PUBLIC}
 
 说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
 EOF
