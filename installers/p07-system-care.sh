@@ -67,7 +67,7 @@ install_runtime() {
   manifest="$tmp/MANIFEST.gitblob"
   mkdir -p "$tmp/pkg/lib" "$stage/lib"
 
-  info "校验并安装 P07 服务器维护 / 安全 ${VERSION}..."
+  info "校验并安装 服务器维护与安全 ${VERSION}..."
   if ! curl -fsSL --proto '=https' --tlsv1.2 "${RAW_BASE}/MANIFEST.gitblob" -o "$manifest"; then
     rm -rf "$tmp" "$stage"
     fail '运行清单下载失败。'
@@ -121,14 +121,14 @@ install_runtime() {
 
   NO_COLOR=1 "$ENTRY" evidence refresh-cache >/dev/null 2>&1 || true
   rm -rf "${TARGET}.previous" "$tmp" "$stage"
-  ok "服务器维护 / 安全 ${VERSION} 已就绪"
+  ok "服务器维护与安全 ${VERSION} 已就绪"
 }
 
 ensure_manager() {
   manager_ready && return 0
   local current
   current="$(installed_version)"
-  [[ -n "$current" ]] && info "更新服务器维护 / 安全：${current} → ${VERSION}"
+  [[ -n "$current" ]] && info "更新服务器维护与安全：${current} → ${VERSION}"
   install_runtime
 }
 
@@ -137,10 +137,10 @@ require_root
 case "${1:-}" in
   -h|--help)
     cat <<'HELP'
-P07 · 服务器维护 / 安全
+服务器维护与安全
 
-此脚本仅供 P07 Toolbox 内部安装/更新模块使用。
-普通用户继续使用唯一 P07 Toolbox 主入口。
+此脚本仅供 服务器工具箱 内部安装/更新模块使用。
+普通用户继续使用唯一 服务器工具箱 主入口。
 
 命令：
   menu
