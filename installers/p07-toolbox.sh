@@ -336,16 +336,11 @@ case "${1:-}" in
 用法：
   p07-toolbox
 
-1. 网络代理节点                  ${VF_NODE_PUBLIC}
-   V2Ray / 代理节点管理
-2. 服务器性能检测                ${VPS_AUDIT_PUBLIC}
-   VPS / CPU / 磁盘 / 网络
-3. 网站与数据                    ${VF_SERVER_OPS_PUBLIC}
-   CloudPanel / 网站 / 数据库 / 备份 / 迁移
-4. 日常维护与安全                ${SYSTEM_CARE_PUBLIC}
-   Linux / 更新 / 清理 / 安全检查
-5. 新服务器初始化                ${VF_SERVER_OPS_PUBLIC}
-   CloudPanel / 时区 / Swap / 基础设置
+1. 网络代理节点          V2Ray       ${VF_NODE_PUBLIC}
+2. 服务器性能检测        VPS         ${VPS_AUDIT_PUBLIC}
+3. 网站与数据            CloudPanel  ${VF_SERVER_OPS_PUBLIC}
+4. 日常维护与安全        Linux       ${SYSTEM_CARE_PUBLIC}
+5. 新服务器初始化        CloudPanel  ${VF_SERVER_OPS_PUBLIC}
 
 说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
 EOF
