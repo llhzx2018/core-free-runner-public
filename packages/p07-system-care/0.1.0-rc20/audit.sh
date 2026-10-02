@@ -98,7 +98,7 @@ password_auth_text="$(display_state "$password_auth")"
 ntp_text="$(display_state "$ntp")"
 write_summary_cache "$health" "$disk" "$inode" "$failed" "$reboot_cache" "$cp" "$security_advisories"
 
-say "${C_BOLD}一键系统体检${C_RESET}"
+say "${C_BOLD}服务器健康检查${C_RESET}"
 say
 printf '系统       %s\n' "${os/UNKNOWN/未知}"
 printf '内核       %s\n' "${kernel/UNKNOWN/未知}"
