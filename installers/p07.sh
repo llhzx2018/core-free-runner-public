@@ -3,9 +3,9 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 INSTALLER_URL="${PUBLIC_ROOT}/installers/p07-final.sh"
-EXPECTED_BLOB="083d5e16e9e03a23274e12c696e52ecb0521718d"
+EXPECTED_BLOB="c3921ff6a94ea6cab08f6eddb63a863a2e9d39b4"
 
-fail() { printf '\n[P07] 错误：%s\n' "$*" >&2; exit 1; }
+fail() { printf '\n[服务器工具箱] 错误：%s\n' "$*" >&2; exit 1; }
 
 if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
   if [[ ${EUID:-$(id -u)} -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
@@ -20,10 +20,10 @@ command -v python3 >/dev/null 2>&1 || fail "缺少依赖：python3"
 TMP="$(mktemp -t p07-server-ops.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 
-curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "$INSTALLER_URL" -o "$TMP" || fail "CloudPanel 运维模块安装器下载失败。"
-bash -n "$TMP" || fail "CloudPanel 运维模块安装器语法校验失败。"
+curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 --connect-timeout 15 "$INSTALLER_URL" -o "$TMP" || fail "网站与数据模块安装器下载失败。"
+bash -n "$TMP" || fail "网站与数据模块安装器语法校验失败。"
 
-python3 - "$TMP" "$EXPECTED_BLOB" <<'PY' || fail "CloudPanel 运维模块安装器身份校验失败。"
+python3 - "$TMP" "$EXPECTED_BLOB" <<'PY' || fail "网站与数据模块安装器身份校验失败。"
 import hashlib,sys
 path,expected=sys.argv[1],sys.argv[2]
 data=open(path,'rb').read()
