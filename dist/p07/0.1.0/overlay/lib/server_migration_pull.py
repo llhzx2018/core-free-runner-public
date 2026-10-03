@@ -419,12 +419,20 @@ def local_bootstrap_preflight() -> dict[str, Any]:
     disk = shutil.disk_usage("/").total
     if arch not in legacy.SUPPORTED_BOOTSTRAP_ARCH:
         raise PullMigrationError("unsupported architecture for CloudPanel")
+
+    # Hardware sizing is advisory only. CloudPanel publishes a 1-core / 2-GB /
+    # 10-GB baseline, but P07 must not turn that recommendation into an owner
+    # policy gate. Real smaller servers may still be intentionally used for
+    # testing or light workloads. Compatibility and empty-server safety checks
+    # below remain fail-closed.
+    hardware_advisories: list[str] = []
     if cores < legacy.CLOUDPANEL_MIN_CORES:
-        raise PullMigrationError("CPU is below CloudPanel minimum")
+        hardware_advisories.append("CPU_BELOW_CLOUDPANEL_PUBLISHED_BASELINE")
     if mem_kb * 1024 < legacy.CLOUDPANEL_MIN_MEMORY_BYTES:
-        raise PullMigrationError("memory is below CloudPanel minimum")
+        hardware_advisories.append("MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE")
     if disk < legacy.CLOUDPANEL_MIN_DISK_BYTES:
-        raise PullMigrationError("disk is below CloudPanel minimum")
+        hardware_advisories.append("DISK_BELOW_CLOUDPANEL_PUBLISHED_BASELINE")
+
     blockers = [
         shutil.which("nginx"), shutil.which("apache2"),
         shutil.which("mysql"), shutil.which("mariadb"),
@@ -452,6 +460,8 @@ def local_bootstrap_preflight() -> dict[str, Any]:
         "cores": cores,
         "memory_bytes": mem_kb * 1024,
         "disk_bytes": disk,
+        "hardware_advisories": hardware_advisories,
+        "hardware_baseline_is_advisory": True,
         "installer_sha256": legacy.CLOUDPANEL_INSTALLER_SHA256,
         "writes_performed": False,
     }
