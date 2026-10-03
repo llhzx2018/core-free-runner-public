@@ -433,18 +433,21 @@ def local_bootstrap_preflight() -> dict[str, Any]:
     if disk < legacy.CLOUDPANEL_MIN_DISK_BYTES:
         hardware_advisories.append("DISK_BELOW_CLOUDPANEL_PUBLISHED_BASELINE")
 
-    blockers = [
-        shutil.which("nginx"), shutil.which("apache2"),
-        shutil.which("mysql"), shutil.which("mariadb"),
-    ]
-    if any(blockers) or any(
-        path.exists()
-        for path in (
-            Path("/etc/nginx"), Path("/etc/apache2"), Path("/home/clp"),
-            Path("/home/mysql"), Path("/var/lib/mysql"), Path("/var/lib/mariadb"),
-        )
+    existing_environment: list[str] = []
+    for command in ("nginx", "apache2", "mysql", "mariadb"):
+        if shutil.which(command):
+            existing_environment.append(command)
+    for path in (
+        Path("/etc/nginx"), Path("/etc/apache2"), Path("/home/clp"),
+        Path("/home/mysql"), Path("/var/lib/mysql"), Path("/var/lib/mariadb"),
     ):
-        raise PullMigrationError("current server is not empty enough for automatic CloudPanel install")
+        if path.exists():
+            existing_environment.append(str(path))
+    if existing_environment:
+        raise PullMigrationError(
+            "current server is not empty enough for automatic CloudPanel install: "
+            + ",".join(existing_environment)
+        )
     if shutil.which("ss"):
         proc = run_local(["ss", "-ltnH"], timeout=30, check=False)
         if proc.returncode == 0:
