@@ -1,0 +1,191 @@
+name: S01-C02 V1.21.1013 Runtime Enqueue Candidate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      TARGET_SHA: 97da0b6280e48e2d9e1194c7da7de5b0122ca1c0
+      BASE_SHA: e0d2844d37e0872d67ad01d5b64f021c912cd616
+      TARGET_VERSION: 1.21.1013
+      BASE_VERSION: 1.21.1012
+      ARTIFACT_NAME: vf-tools-ops_V1.21.1013.zip
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: baseline
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Source and enqueue contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -F "Version: $TARGET_VERSION" target/vf-ops.php >/dev/null
+          php target/tests/s01-c02-1211013-system-runtime-enqueue-contract.php
+          php target/tests/s01-c02-1211012-system-workspace-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          changed=set(Path('evidence/changed-files.txt').read_text().splitlines())
+          allowed={
+            'CHANGELOG.md','VERSION','vf-ops.php',
+            'includes/views/admin-style-helpers/admin-s01-uiux-polish.php',
+            'docs/authority/SSOT.md','docs/authority/ACCEPTANCE_MATRIX.md',
+            'tests/s01-c02-1211013-system-runtime-enqueue-contract.php'
+          }
+          if changed != allowed:
+              raise SystemExit('unexpected diff: '+repr(sorted(changed ^ allowed)))
+          frozen={
+            'assets/css/current/admin-s01-v6-shell-r1.css',
+            'includes/views/admin-shell-tabs-parts/02-shell-navigation.php'
+          }
+          if changed & frozen: raise SystemExit('frozen shell/header/menu changed')
+          print('RUNTIME_ENQUEUE_CONTRACT=PASS')
+          print('BOUNDED_DIFF=PASS')
+          print('FROZEN_SHELL_HEADER_MENU=PASS')
+          PY
+
+      - name: PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.3-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          echo PHP_SYNTAX=PASS
+
+      - name: Browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vf-node && cd /tmp/vf-node
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: System workspace behavior regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/target"
+          export NODE_PATH=/tmp/vf-node/node_modules
+          node tests/s01-c02-1211012-system-workspace-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/system-workspace.json"
+          jq -e '.pass==true and (.failures|length)==0 and .owner_product_pass==false' "$GITHUB_WORKSPACE/evidence/system-workspace.json" >/dev/null
+          echo SYSTEM_WORKSPACE_BEHAVIOR=PASS
+
+      - name: Final UX and axis regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/target"
+          export NODE_PATH=/tmp/vf-node/node_modules
+          node tests/s01-c02-1211009-final-ux-guardrails-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/final-ux.json"
+          jq -e '.pass==true and ([.checks[].failures[]]|length)==0' "$GITHUB_WORKSPACE/evidence/final-ux.json" >/dev/null
+          node tests/s01-c02-1211008-global-workspace-centering-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/workspace-center.json"
+          jq -e '.pass==true and (.checks|length)==112 and ([.checks[].failures[]]|length)==0' "$GITHUB_WORKSPACE/evidence/workspace-center.json" >/dev/null
+          echo REGRESSION=PASS
+
+      - name: Build deterministic packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,re,zipfile,json
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix(); parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def build(root,ver):
+              root=Path(root); out=Path(f'/tmp/vf-tools-ops_V{ver}.zip')
+              fs={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel): fs[rel.as_posix()]=p.read_bytes()
+              fs=dict(sorted(fs.items()))
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in fs.items():
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,4,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=0o100644<<16
+                      z.writestr(info,data)
+              h=hashlib.sha256()
+              for rel,data in fs.items():
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return {'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':h.hexdigest()}
+          rows={'baseline':build('baseline','1.21.1012'),'candidate':build('target','1.21.1013')}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          unzip -tq "/tmp/$ARTIFACT_NAME" >/dev/null
+          echo PACKAGE_BUILD=PASS
+
+      - name: Upgrade preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf /tmp/basepkg /tmp/candpkg
+          mkdir -p /tmp/basepkg /tmp/candpkg
+          unzip -q /tmp/vf-tools-ops_V1.21.1012.zip -d /tmp/basepkg
+          unzip -q /tmp/vf-tools-ops_V1.21.1013.zip -d /tmp/candpkg
+          grep -F "Version: 1.21.1013" /tmp/candpkg/vf-ops/vf-ops.php >/dev/null
+          grep -F "vf_ops_v13_current_route_v121391" /tmp/candpkg/vf-ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php >/dev/null
+          ! grep -F "vf_ops_s01_uiux_route_key" /tmp/candpkg/vf-ops/includes/views/admin-style-helpers/admin-s01-uiux-polish.php >/dev/null
+          test -f /tmp/candpkg/vf-ops/assets/css/current/admin-s01-system-workspace-r2.css
+          echo UPGRADE_PRESERVATION=PASS
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE"
+          jq -n --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION"             --argjson workspace "$(cat evidence/system-workspace.json)"             --argjson ux "$(cat evidence/final-ux.json)"             --argjson center "$(cat evidence/workspace-center.json)"             --argjson package "$(cat evidence/package.json)" '{
+              status:"PASS",candidate_sha:$sha,candidate_version:$ver,
+              runtime_enqueue:"PASS",
+              system_workspace:{result:($workspace.pass|if . then "PASS" else "FAIL" end),rapid_click:"PASS",owner_product_pass:false},
+              final_ux:{result:($ux.pass|if . then "PASS" else "FAIL" end),checks:($ux.checks|length)},
+              workspace_center:{result:($center.pass|if . then "PASS" else "FAIL" end),checks:($center.checks|length)},
+              upgrade:"PASS",package:$package,
+              frozen_shell_header_menu:"PASS",production:"NOT_EXECUTED"
+            }' | tee evidence/FINAL_EVIDENCE.json
+          echo S01_C02_V1211013_MACHINE_PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-v1.21.1013-runtime-enqueue
+          path: evidence/
+          retention-days: 30
