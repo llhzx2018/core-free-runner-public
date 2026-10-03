@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release39"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release40"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
@@ -50,7 +50,7 @@ show_menu() {
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
   say "  ${C_GREEN}4.${C_RESET} 日常维护与安全      ${C_GRAY}系统更新/清理${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}面板/时区/Swap${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}更新/面板/优化${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -223,9 +223,42 @@ run_server_ops() {
   vfops
 }
 
+ensure_system_care_current() {
+  if [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]; then
+    return 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
+  local tmp rc
+  tmp="$(mktemp -t p07-system-care.XXXXXX)"
+  chmod 700 "$tmp"
+  if ! curl -fsSL "$SYSTEM_CARE_INSTALLER" -o "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ 初始化所需的系统维护模块下载失败。${C_RESET}" >&2
+    return 4
+  fi
+  if ! bash -n "$tmp"; then
+    rm -f "$tmp"
+    say "${C_RED}✗ 初始化所需的系统维护模块校验失败。${C_RESET}" >&2
+    return 5
+  fi
+
+  set +e
+  P07_FORCE_INTERACTIVE=0 bash "$tmp" status >/dev/null 2>&1
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  [[ $rc -eq 0 ]] || {
+    say "${C_RED}✗ 初始化所需的系统维护模块准备失败。${C_RESET}" >&2
+    return "$rc"
+  }
+  [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]
+}
+
 run_server_init() {
   screen_clear
   ensure_server_ops_current || return $?
+  ensure_system_care_current || return $?
   local root init_ui
   root="$(server_ops_root)" || {
     say "${C_RED}✗ 无法定位初始化脚本。${C_RESET}" >&2
@@ -236,7 +269,7 @@ run_server_init() {
     say "${C_RED}✗ 初始化脚本未就绪。${C_RESET}" >&2
     return 7
   }
-  bash "$init_ui"
+  P07_SYSTEM_CARE_ROOT=/opt/vf-system-care P07_SYSTEM_CARE_ENTRY=/usr/local/bin/vf-system-care bash "$init_ui"
 }
 
 local_system_care_version() {
@@ -250,32 +283,8 @@ local_system_care_version() {
 
 run_system_care() {
   screen_clear
-  if [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]; then
-    vf-system-care menu
-    return $?
-  fi
-
-  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
-  local tmp rc
-  tmp="$(mktemp -t p07-system-care.XXXXXX)"
-  chmod 700 "$tmp"
-  if ! curl -fsSL "$SYSTEM_CARE_INSTALLER" -o "$tmp"; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 系统维护模块入口下载失败。${C_RESET}" >&2
-    return 4
-  fi
-  if ! bash -n "$tmp"; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 系统维护模块入口校验失败。${C_RESET}" >&2
-    return 5
-  fi
-
-  set +e
-  bash "$tmp" menu
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  return "$rc"
+  ensure_system_care_current || return $?
+  vf-system-care menu
 }
 
 main_menu() {
@@ -340,7 +349,7 @@ case "${1:-}" in
 2. 服务器性能检测        VPS验机     ${VPS_AUDIT_PUBLIC}
 3. 网站与数据            网站/数据库/备份  ${VF_SERVER_OPS_PUBLIC}
 4. 日常维护与安全        系统更新/清理      ${SYSTEM_CARE_PUBLIC}
-5. 新服务器初始化        面板/时区/Swap    ${VF_SERVER_OPS_PUBLIC}
+5. 新服务器初始化        更新/面板/优化    ${VF_SERVER_OPS_PUBLIC}
 
 说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
 EOF
