@@ -151,6 +151,7 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
   await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='preset-diff-ready'),preset.locator('button[type="submit"]').click()]);
   await verifyReturn('preset');
   assert(await page.locator('.vf-brand-preset-diff').isVisible(),'preset preflight did not render diff');
+  assert(!/(generic_toolsite|theme\.(brand|layout|navigation))/.test(await page.locator('.vf-brand-preset-diff').innerText()),'native preset difference exposes internal keys');
   const confirm=page.locator('.vf-brand-preset-confirm [name="confirm"]');await confirm.fill('SAFE-PREVIEW-ONLY');assert.equal(await confirm.inputValue(),'SAFE-PREVIEW-ONLY');await confirm.fill('');
   assert.equal(await page.locator(input('siteName')).inputValue(),original,'read-only preset diff mutated brand');
   await page.locator('.vf-brand-inheritance').screenshot({path:'proof/live-advanced-'+width+'.png'});
