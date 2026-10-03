@@ -485,13 +485,51 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
         ), mock.patch.object(
             pull.shutil, "which", side_effect=which
         ), mock.patch.object(
-            pull.Path, "exists", return_value=True
+            pull.Path, "exists", return_value=False
         ):
             with self.assertRaisesRegex(
                 pull.PullMigrationError,
-                r"nginx,/etc/nginx",
+                r"nginx",
             ):
                 pull.local_bootstrap_preflight()
+
+    def test_stale_apache_config_directory_is_advisory_not_blocked(self) -> None:
+        def exists(path: Path) -> bool:
+            return str(path) == "/etc/apache2"
+
+        with mock.patch.object(
+            pull.os, "geteuid", return_value=0
+        ), mock.patch.object(
+            pull.Path,
+            "read_text",
+            side_effect=[
+                'ID=debian\\nVERSION_ID="13"\\n',
+                "MemTotal:       2500000 kB\\n",
+            ],
+        ), mock.patch.object(
+            pull.legacy,
+            "parse_os_release",
+            return_value=("debian", "13"),
+        ), mock.patch.object(
+            pull.os, "uname", return_value=mock.Mock(machine="x86_64")
+        ), mock.patch.object(
+            pull.os, "cpu_count", return_value=1
+        ), mock.patch.object(
+            pull.shutil,
+            "disk_usage",
+            return_value=mock.Mock(total=20 * 1024**3),
+        ), mock.patch.object(
+            pull.shutil, "which", return_value=None
+        ), mock.patch.object(
+            pull.Path, "exists", autospec=True, side_effect=exists
+        ):
+            result = pull.local_bootstrap_preflight()
+
+        self.assertEqual(result["status"], "READY")
+        self.assertIn(
+            "STALE_CONFIG_DIR:/etc/apache2",
+            result["environment_advisories"],
+        )
 
 
 class TargetPullUiContractTests(unittest.TestCase):
@@ -504,6 +542,7 @@ class TargetPullUiContractTests(unittest.TestCase):
             "当前 CPU 架构不在 CloudPanel 自动安装支持范围内",
             "检测到这台服务器已经存在网站或数据库环境",
             "检测到 80 / 443 网站端口已经被其他程序占用",
+            "检测到残留目录 /etc/apache2，但未发现 Apache 程序；只提示，不阻止安装。",
             "这不是低配限制",
         ):
             self.assertIn(marker, text)

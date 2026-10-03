@@ -437,9 +437,20 @@ def local_bootstrap_preflight() -> dict[str, Any]:
     for command in ("nginx", "apache2", "mysql", "mariadb"):
         if shutil.which(command):
             existing_environment.append(command)
+
+    # A leftover web-server config directory alone is not proof that a
+    # conflicting service is installed or running. Images and removed packages
+    # can leave /etc/nginx or /etc/apache2 behind. Report those as advisories,
+    # while real binaries, CloudPanel state, and database data roots remain
+    # fail-closed.
+    environment_advisories: list[str] = []
+    for path in (Path("/etc/nginx"), Path("/etc/apache2")):
+        if path.exists():
+            environment_advisories.append(f"STALE_CONFIG_DIR:{path}")
+
     for path in (
-        Path("/etc/nginx"), Path("/etc/apache2"), Path("/home/clp"),
-        Path("/home/mysql"), Path("/var/lib/mysql"), Path("/var/lib/mariadb"),
+        Path("/home/clp"), Path("/home/mysql"),
+        Path("/var/lib/mysql"), Path("/var/lib/mariadb"),
     ):
         if path.exists():
             existing_environment.append(str(path))
@@ -465,6 +476,7 @@ def local_bootstrap_preflight() -> dict[str, Any]:
         "disk_bytes": disk,
         "hardware_advisories": hardware_advisories,
         "hardware_baseline_is_advisory": True,
+        "environment_advisories": environment_advisories,
         "installer_sha256": legacy.CLOUDPANEL_INSTALLER_SHA256,
         "writes_performed": False,
     }
