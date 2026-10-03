@@ -12,7 +12,7 @@ assert (root/'style.css').read_text()==original('src/style.css').replace('Versio
 assert (root/'inc/runtime-constants.php').read_text()==original('src/inc/runtime-constants.php').replace("VF_THEME_VERSION', '"+os.environ['SOURCE_VERSION']+"'", "VF_THEME_VERSION', '"+version+"'")
 page='src/inc/admin/views/render.php';new=pathlib.Path('target',page).read_text();old=original(page)
 assert new.split('?>\n<section class="vf-render-page"')[0]==old.split('?>\n<section class="vf-render-page"')[0],'render state calculation changed'
-def fields(s):return [t for t in re.findall(r'<(?:form|input|select|option|textarea)\b[^>]*>',s,re.S) if ' disabled' not in t]
+def fields(s):return [t for t in re.findall(r'<(?:form|input|select|option|textarea)\b(?:<\?php[\s\S]*?\?>|[^<>])*>',s,re.S) if ' disabled' not in t]
 assert fields(new)==fields(old),'submitted form fields/options changed'
 for p in ['src/inc/admin/admin-render-actions.php','src/inc/admin/controllers/render.php','src/inc/services/renderer-config-service.php','src/inc/bootstrap/manifests/admin-tabs/render.php','src/inc/admin/admin-controller.php','src/assets/js/admin/admin-navigation.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' changed'
