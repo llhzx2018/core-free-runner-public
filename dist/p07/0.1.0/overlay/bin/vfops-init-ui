@@ -141,15 +141,97 @@ preflight() {
   ui_note '不会自动修改 DNS、关闭 SSH 或删除任何网站。'
 }
 
+apply_missing_basic_settings() {
+  if [[ "$(current_timezone)" != "Asia/Shanghai" ]]; then
+    timedatectl set-timezone Asia/Shanghai
+  fi
+  if ! swap_enabled; then
+    if [[ -f /swapfile ]]; then
+      swapon /swapfile 2>/dev/null || return 2
+    else
+      fallocate -l 2G /swapfile
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null
+      swapon /swapfile
+    fi
+    grep -q '^/swapfile ' /etc/fstab || printf '/swapfile none swap sw 0 0\n' >> /etc/fstab
+  fi
+  return 0
+}
+
+cloudpanel_status() {
+  local payload
+  payload="$("$CORE" server-migrate target-status 2>/dev/null || true)"
+  printf '%s' "$payload" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("status","UNKNOWN"))
+except Exception: print("UNKNOWN")'
+}
+
+rerun_initialization_check() {
+  local answer='' status
+  ui_page '重新执行初始化检查' '重新检查全部初始化项目；已完成的不重复修改'
+  ui_section '基础设置'
+
+  if [[ "$(current_timezone)" == "Asia/Shanghai" ]]; then
+    ui_good '时区：Asia/Shanghai ✓'
+  else
+    ui_attention "时区：$(current_timezone) → 待补齐"
+  fi
+  if swap_enabled; then
+    ui_good '虚拟内存（Swap）：已启用 ✓'
+  else
+    ui_attention '虚拟内存（Swap）：未启用 → 待补齐'
+  fi
+
+  if ! basic_settings_ready; then
+    ui_prompt '发现缺少的基础设置，确认现在补齐？[y/N]：'
+    read -r answer || answer=''
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      if apply_missing_basic_settings; then
+        ui_good '基础设置已补齐 ✓'
+      else
+        ui_bad '基础设置未全部补齐；检测到已有 /swapfile 但无法安全启用。'
+      fi
+    else
+      ui_note '已跳过基础设置修改。'
+    fi
+  else
+    ui_good '基础设置：已完成，无需重复修改 ✓'
+  fi
+
+  say
+  ui_section 'CloudPanel'
+  status="$(cloudpanel_status)"
+  if [[ "$status" == "CLOUDPANEL_READY" ]]; then
+    ui_good 'CloudPanel：已安装并可用 ✓'
+    ui_note '重新初始化不会重装 CloudPanel。'
+  else
+    ui_attention 'CloudPanel：未安装或当前未就绪'
+    ui_note '如需安装，请返回本页菜单选择「CloudPanel 状态 / 安装」。'
+  fi
+
+  say
+  if basic_settings_ready && [[ "$status" == "CLOUDPANEL_READY" ]]; then
+    ui_result_ok '初始化状态完整'
+  else
+    ui_attention '初始化仍有未完成项目；可以继续在本页补齐。'
+  fi
+  ui_pause_return
+}
+
 while true; do
   answer=""
   preflight
-  ui_menu_warn 1 '检查 / 补齐基础设置（时区 / Swap）'
-  ui_menu_warn 2 '检查 / 安装 CloudPanel'
+  ui_menu_flow 1 '重新执行初始化检查（推荐）'
+  ui_menu_warn 2 '基础设置（时区 / Swap）'
+  ui_menu_warn 3 'CloudPanel 状态 / 安装'
   ui_menu_back 0 '返回'
-  ui_prompt '请选择 [0-2]：'; read -r choice || exit 0
+  ui_prompt '请选择 [0-3]：'; read -r choice || exit 0
   case "$choice" in
     1)
+      rerun_initialization_check
+      ;;
+    2)
       ui_page '检查 / 补齐基础设置' '可重复执行，只补缺少的设置'
       timezone_now="$(current_timezone)"
       if [[ "$timezone_now" == "Asia/Shanghai" ]]; then
@@ -174,36 +256,20 @@ while true; do
       ui_prompt '确认补齐缺少的基础设置？[y/N]：'
       read -r answer || continue
       if [[ "$answer" =~ ^[Yy]$ ]]; then
-        if [[ "$(current_timezone)" != "Asia/Shanghai" ]]; then
-          timedatectl set-timezone Asia/Shanghai
-        fi
-        if ! swap_enabled; then
-          if [[ -f /swapfile ]]; then
-            if ! swapon /swapfile 2>/dev/null; then
-              ui_result_error '检测到已有 /swapfile，但无法安全启用；未覆盖这个文件。'
-              ui_pause_return
-              continue
-            fi
-          else
-            fallocate -l 2G /swapfile
-            chmod 600 /swapfile
-            mkswap /swapfile >/dev/null
-            swapon /swapfile
-          fi
-          grep -q '^/swapfile ' /etc/fstab || printf '/swapfile none swap sw 0 0\n' >> /etc/fstab
+        if ! apply_missing_basic_settings; then
+          ui_result_error '检测到已有 /swapfile，但无法安全启用；未覆盖这个文件。'
+          ui_pause_return
+          continue
         fi
         ui_result_ok '基础设置已补齐'
         ui_note '未修改 DNS；未关闭 SSH；未删除任何服务。'
         ui_pause_return
       fi
       ;;
-    2)
-      ui_page '检查 / 安装 CloudPanel' '网站面板'
+    3)
+      ui_page 'CloudPanel 状态 / 安装' '网站面板'
       ui_safety_tier write '安装 CloudPanel 会写入系统，只允许在准备作为新服务器的机器上执行。'
-      payload="$("$CORE" server-migrate target-status 2>/dev/null || true)"
-      status="$(printf '%s' "$payload" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("status","UNKNOWN"))
-except Exception: print("UNKNOWN")')"
+      status="$(cloudpanel_status)"
       if [[ "$status" == "CLOUDPANEL_READY" ]]; then
         ui_good 'CloudPanel 已安装并可用 ✓'
         ui_note '不会重复安装。初始化入口仍然可以继续用于复查或补齐时区 / Swap。'
@@ -259,6 +325,6 @@ except Exception:
       ui_pause_return
       ;;
     0) exit 0 ;;
-    *) ui_attention '请输入 0-2。'; ui_pause_return ;;
+    *) ui_attention '请输入 0-3。'; ui_pause_return ;;
   esac
 done

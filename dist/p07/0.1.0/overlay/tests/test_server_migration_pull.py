@@ -538,7 +538,10 @@ class TargetPullUiContractTests(unittest.TestCase):
         for marker in (
             "可重复进入：已完成的只检查，缺少的再补齐",
             "这个入口可以重复使用；已经正确的设置不会重复修改，也不会重复安装 CloudPanel。",
-            "检查 / 补齐基础设置（时区 / Swap）",
+            "重新执行初始化检查（推荐）",
+            "重新执行初始化检查",
+            "发现缺少的基础设置，确认现在补齐？[y/N]",
+            "初始化状态完整",
             "基础设置已经完成，无需重复修改",
             "不会重复安装。初始化入口仍然可以继续用于复查或补齐时区 / Swap。",
             "render_indeterminate_bar",
