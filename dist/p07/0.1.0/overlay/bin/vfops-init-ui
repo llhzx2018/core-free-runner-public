@@ -3,6 +3,88 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/lib/terminal_ui.sh"
 CORE="$ROOT_DIR/bin/vfops"
+SYSTEM_CARE_ROOT="${P07_SYSTEM_CARE_ROOT:-/opt/vf-system-care}"
+SYSTEM_CARE_ENTRY="${P07_SYSTEM_CARE_ENTRY:-/usr/local/bin/vf-system-care}"
+declare -a ACTION_LOG=()
+RESOURCE_PROFILE_ID=''
+RESOURCE_PLAN_DETAIL=''
+SYSTEM_UPDATE_PACKAGES=''
+
+record_action() {
+  local state="${1:-INFO}" title="${2:-}" detail="${3:-}"
+  ACTION_LOG+=("${state}|${title}|${detail}")
+}
+
+reset_action_log() {
+  ACTION_LOG=()
+  RESOURCE_PROFILE_ID=''
+  RESOURCE_PLAN_DETAIL=''
+  SYSTEM_UPDATE_PACKAGES=''
+}
+
+render_action_log() {
+  local row state title detail marker
+  say
+  ui_section '本次初始化执行清单'
+  if (( ${#ACTION_LOG[@]} == 0 )); then
+    ui_note '本次没有执行初始化动作。'
+    return 0
+  fi
+  for row in "${ACTION_LOG[@]}"; do
+    IFS='|' read -r state title detail <<<"$row"
+    case "$state" in
+      DONE) marker='✓' ;;
+      KEEP) marker='=' ;;
+      SKIP) marker='○' ;;
+      WARN) marker='!' ;;
+      *) marker='·' ;;
+    esac
+    printf '  %s %s' "$marker" "$title"
+    [[ -n "$detail" ]] && printf '：%s' "$detail"
+    printf '\n'
+  done
+  say
+  ui_note '安全边界：DNS 未修改；旧服务器未删除；网站迁移未执行；网站 Nginx 未自动停止或重启。'
+}
+
+cloudpanel_present_fast() {
+  [[ -d /home/clp || -x /usr/local/bin/clpctl || -x /usr/bin/clpctl ]]
+}
+
+memory_mib() {
+  awk '/^MemTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null || printf '0'
+}
+
+recommended_swap_mib() {
+  local mem
+  mem="$(memory_mib)"
+  if [[ -x "$SYSTEM_CARE_ROOT/resource-profile.sh" ]]; then
+    local json value
+    json="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_profile.py" json --mode balanced 2>/dev/null || true)"
+    value="$(printf '%s' "$json" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(int(d["recommendation"]["swap"]["recommended_mib"]))
+except Exception:
+    print("")' 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 512 )); then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+  if (( mem < 1536 )); then
+    printf '1024'
+  elif (( mem < 6144 )); then
+    printf '2048'
+  else
+    printf '1024'
+  fi
+}
+
+system_care_ready() {
+  [[ -x "$SYSTEM_CARE_ENTRY" && -x "$SYSTEM_CARE_ROOT/resource-profile.sh" && -f "$SYSTEM_CARE_ROOT/lib/resource_apply.py" ]]
+}
+
 
 current_timezone() {
   timedatectl show -p Timezone --value 2>/dev/null || printf '未知'
@@ -125,7 +207,7 @@ show_bootstrap_blocker() {
 }
 
 preflight() {
-  ui_page '初始化服务器' '可重复执行：缺少的补齐，已完成的安全跳过'
+  ui_page '初始化服务器' '完整初始化：更新 / 时区 / Swap / CloudPanel / 性能配置'
   ui_section '当前服务器'
   ui_kv '系统' "$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-未知}" )"
   ui_kv 'CPU' "$(nproc 2>/dev/null || printf '?') 核"
@@ -135,13 +217,15 @@ preflight() {
   ui_kv 'CloudPanel' "$([[ -d /home/clp ]] && printf '已安装' || printf '未安装')"
   ui_kv '基础设置' "$(basic_settings_ready && printf '已完成' || printf '待检查 / 补齐')"
   say
-  ui_note '初始化可以安全重复执行；已经正确的设置会跳过，CloudPanel 已健康时不会重复安装。'
-  ui_note '建议顺序：先做服务器性能检测 → 再初始化服务器 → 最后迁移网站。'
+  ui_note '一键初始化可以安全重复执行；已正确的项目会跳过，CloudPanel 已健康时不会重复安装。'
+  ui_note '建议顺序：先做服务器性能检测 → 再一键初始化服务器 → 最后迁移网站。'
   ui_note 'CPU / 内存 / 磁盘配置只做提示，不作为禁止安装或迁移的条件。'
   ui_note '不会自动修改 DNS、关闭 SSH 或删除任何网站。'
 }
 
 apply_missing_basic_settings() {
+  local swap_mib
+  swap_mib="$(recommended_swap_mib)"
   if [[ "$(current_timezone)" != "Asia/Shanghai" ]]; then
     timedatectl set-timezone Asia/Shanghai
   fi
@@ -149,7 +233,7 @@ apply_missing_basic_settings() {
     if [[ -f /swapfile ]]; then
       swapon /swapfile 2>/dev/null || return 2
     else
-      fallocate -l 2G /swapfile
+      fallocate -l "${swap_mib}M" /swapfile
       chmod 600 /swapfile
       mkswap /swapfile >/dev/null
       swapon /swapfile
@@ -167,108 +251,319 @@ try: print(json.load(sys.stdin).get("status","UNKNOWN"))
 except Exception: print("UNKNOWN")'
 }
 
-run_initialization() {
-  local answer='' status payload advisories environment_advisories
-  ui_page '初始化 / 重新初始化服务器' '安全重跑初始化流程；已完成项目自动跳过'
-  ui_section '1/2 基础设置'
-
-  if [[ "$(current_timezone)" == "Asia/Shanghai" ]]; then
-    ui_good '时区：Asia/Shanghai ✓'
-  else
-    ui_attention "时区：$(current_timezone) → 待补齐"
-  fi
-  if swap_enabled; then
-    ui_good '虚拟内存（Swap）：已启用 ✓'
-  else
-    ui_attention '虚拟内存（Swap）：未启用 → 待补齐'
-  fi
-
-  if ! basic_settings_ready; then
-    ui_prompt '发现缺少的基础设置，确认现在补齐？[y/N]：'
-    read -r answer || answer=''
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      if apply_missing_basic_settings; then
-        ui_good '基础设置已补齐 ✓'
+system_update_new_server() {
+  local simulation rc count names
+  ui_section '2/5 系统更新'
+  if cloudpanel_present_fast; then
+    if command -v apt-get >/dev/null 2>&1; then
+      set +e
+      apt-get -s -o Debug::NoLocking=true upgrade >/tmp/p07-init-updates.$$ 2>&1
+      rc=$?
+      set -e
+      if [[ $rc -eq 0 ]]; then
+        count="$(awk '/^Inst /{n++} END{print n+0}' /tmp/p07-init-updates.$$)"
+        rm -f /tmp/p07-init-updates.$$
+        ui_good "CloudPanel 已安装：仅检查系统更新，发现 ${count} 项可更新；初始化不会自动升级运行中的面板环境 ✓"
+        record_action KEEP '系统更新' "CloudPanel 已安装，仅检查；待更新 ${count} 项，未自动安装"
       else
-        ui_bad '基础设置未全部补齐；检测到已有 /swapfile 但无法安全启用。'
+        rm -f /tmp/p07-init-updates.$$
+        ui_attention 'CloudPanel 已安装：系统更新检查失败；未执行自动升级。'
+        record_action WARN '系统更新' '检查失败，未自动升级'
       fi
     else
-      ui_note '已跳过基础设置修改。'
+      ui_attention '当前系统没有 APT；初始化未执行系统更新。'
+      record_action SKIP '系统更新' '非 APT 系统或 APT 不可用'
     fi
-  else
-    ui_good '基础设置：已完成，安全跳过 ✓'
+    return 0
   fi
 
-  say
-  ui_section '2/2 CloudPanel'
+  if ! command -v apt-get >/dev/null 2>&1; then
+    ui_attention '当前不是 Debian / Ubuntu APT 环境；系统更新步骤跳过。'
+    record_action SKIP '系统更新' '非 APT 系统'
+    return 0
+  fi
+
+  local bootstrap_check=''
+  if ! bootstrap_check="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
+    ui_attention '未确认这是可安全初始化的空服务器；系统更新只检查、不自动安装。'
+    record_action SKIP '系统更新' '空服务器安全检查未通过，未自动升级'
+    return 0
+  fi
+
+  ui_note '已确认是可安全初始化的新服务器：先刷新系统更新列表，再做安全模拟，通过后才安装；不会自动重启。'
+  if ! apt-get update; then
+    ui_bad '系统更新列表刷新失败，已停止更新步骤。'
+    record_action WARN '系统更新' '更新列表刷新失败，未安装更新'
+    return 0
+  fi
+
+  set +e
+  simulation="$(apt-get -s -o Debug::NoLocking=true upgrade 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    ui_bad '系统更新模拟失败，已阻止真实升级。'
+    record_action WARN '系统更新' '模拟升级失败，未安装更新'
+    return 0
+  fi
+  if grep -Eq 'The following packages will be DOWNGRADED:|The following packages will be REMOVED:|^Remv[[:space:]]' <<<"$simulation"; then
+    ui_bad '系统更新计划包含降级或删除软件包，已阻止真实升级。'
+    record_action WARN '系统更新' '检测到降级/删除计划，未安装更新'
+    return 0
+  fi
+
+  count="$(awk '/^Inst /{n++} END{print n+0}' <<<"$simulation")"
+  names="$(awk '/^Inst /{print $2}' <<<"$simulation" | paste -sd, -)"
+  SYSTEM_UPDATE_PACKAGES="$names"
+  if (( count == 0 )); then
+    ui_good '系统软件已经是当前可用版本 ✓'
+    record_action KEEP '系统更新' '没有待安装更新'
+    return 0
+  fi
+
+  ui_note "准备安装 ${count} 项系统更新。"
+  if DEBIAN_FRONTEND=noninteractive apt-get upgrade -y; then
+    ui_good "系统更新完成，共处理 ${count} 项；未自动重启 ✓"
+    if [[ -f /var/run/reboot-required ]]; then
+      record_action DONE '系统更新' "已安装 ${count} 项；系统提示稍后需要重启，但本工具未自动重启"
+    else
+      record_action DONE '系统更新' "已安装 ${count} 项；无需自动重启"
+    fi
+  else
+    ui_bad '系统更新未完整完成；不会自动重试或重启。'
+    record_action WARN '系统更新' "安装过程中失败；计划 ${count} 项"
+  fi
+}
+
+apply_basic_settings_for_init() {
+  local before_tz swap_before swap_target
+  ui_section '1/5 基础设置'
+  before_tz="$(current_timezone)"
+  swap_before="$(awk '/^SwapTotal:/{print int($2/1024); exit}' /proc/meminfo 2>/dev/null || printf '0')"
+  swap_target="$(recommended_swap_mib)"
+
+  if basic_settings_ready; then
+    ui_good "时区：Asia/Shanghai ✓"
+    ui_good "虚拟内存（Swap）：已启用 ✓"
+    record_action KEEP '时区' 'Asia/Shanghai，保持不变'
+    record_action KEEP '虚拟内存（Swap）' "已启用，保持现状（建议值约 ${swap_target} MB）"
+    return 0
+  fi
+
+  if apply_missing_basic_settings; then
+    if [[ "$before_tz" == "Asia/Shanghai" ]]; then
+      record_action KEEP '时区' 'Asia/Shanghai，保持不变'
+    else
+      record_action DONE '时区' "${before_tz} → Asia/Shanghai"
+    fi
+    if (( swap_before > 0 )); then
+      record_action KEEP '虚拟内存（Swap）' "原有 ${swap_before} MB，保持不变"
+    else
+      record_action DONE '虚拟内存（Swap）' "已创建/启用，目标约 ${swap_target} MB"
+    fi
+    ui_good '基础设置完成 ✓'
+  else
+    ui_bad '基础设置未全部完成；不会覆盖已有异常的 /swapfile。'
+    record_action WARN '基础设置' '未全部完成，请查看上方原因'
+  fi
+}
+
+cloudpanel_for_init() {
+  local status payload advisories environment_advisories
+  ui_section '3/5 CloudPanel'
   status="$(cloudpanel_status)"
   if [[ "$status" == "CLOUDPANEL_READY" ]]; then
-    ui_good 'CloudPanel：已安装并可用 ✓'
-    ui_good 'CloudPanel：已完成，安全跳过，不会重复安装 ✓'
-  else
-    ui_attention 'CloudPanel：未安装或当前未就绪'
-    ui_note '正在执行安装前安全检查；检查不通过就不会安装。'
-    if ! payload="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
-      show_bootstrap_blocker "$payload"
-    else
-      ui_good 'CloudPanel 安装前安全检查通过 ✓'
-      advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
+    ui_good 'CloudPanel：已安装并可用，安全跳过 ✓'
+    record_action KEEP 'CloudPanel' '已安装并健康，不重复安装'
+    return 0
+  fi
+
+  ui_note 'CloudPanel 未就绪：先执行空服务器安全检查，通过后才安装。'
+  if ! payload="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
+    show_bootstrap_blocker "$payload"
+    record_action WARN 'CloudPanel' '安装前安全检查未通过，未安装'
+    return 0
+  fi
+
+  advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)
     print("\n".join(data.get("hardware_advisories") or []))
 except Exception:
     pass' 2>/dev/null || true)"
-      environment_advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
+  environment_advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
 try:
     data=json.load(sys.stdin)
     print("\n".join(data.get("environment_advisories") or []))
 except Exception:
     pass' 2>/dev/null || true)"
-      if grep -q 'CPU_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
-        ui_attention 'CPU 低于 CloudPanel 官方公布的 1 核基线；这里只提示，不限制安装。'
-      fi
-      if grep -q 'MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
-        ui_attention '内存低于 CloudPanel 官方公布的 2 GB 基线；这里只提示，不限制安装。'
-      fi
-      if grep -q 'DISK_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
-        ui_attention '磁盘低于 CloudPanel 官方公布的 10 GB 基线；这里只提示，不限制安装。'
-      fi
-      if grep -q 'STALE_CONFIG_DIR:/etc/nginx' <<<"$environment_advisories"; then
-        ui_attention '检测到残留目录 /etc/nginx，但未发现 Nginx 程序；只提示，不阻止安装。'
-      fi
-      if grep -q 'STALE_CONFIG_DIR:/etc/apache2' <<<"$environment_advisories"; then
-        ui_attention '检测到残留目录 /etc/apache2，但未发现 Apache 程序；只提示，不阻止安装。'
-      fi
-      ui_note '是否继续由你决定；服务器工具箱不会因为低配而拒绝安装。'
-      ui_prompt 'CloudPanel 尚未安装，确认现在安装？[y/N]：'
-      read -r answer || answer=''
-      if [[ "$answer" =~ ^[Yy]$ ]]; then
-        if run_cloudpanel_install_with_progress; then
-          ui_result_ok 'CloudPanel 安装完成'
-        else
-          ui_result_error 'CloudPanel 安装未完成'
-          [[ -n "$CLOUDPANEL_INSTALL_OUTPUT" ]] && ui_note "$(printf '%s\n' "$CLOUDPANEL_INSTALL_OUTPUT" | tail -n 1)"
-        fi
-      else
-        ui_note '已跳过 CloudPanel 安装。'
-      fi
-    fi
+
+  if grep -q 'CPU_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+    ui_attention 'CPU 低于 CloudPanel 官方公布基线；这里只提示，不阻止安装。'
+  fi
+  if grep -q 'MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+    ui_attention '内存低于 CloudPanel 官方公布基线；这里只提示，不阻止安装。'
+  fi
+  if grep -q 'DISK_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+    ui_attention '磁盘低于 CloudPanel 官方公布基线；这里只提示，不阻止安装。'
+  fi
+  if grep -q 'STALE_CONFIG_DIR:/etc/nginx' <<<"$environment_advisories"; then
+    ui_attention '检测到残留目录 /etc/nginx，但未发现 Nginx 程序；只提示，不阻止安装。'
+  fi
+  if grep -q 'STALE_CONFIG_DIR:/etc/apache2' <<<"$environment_advisories"; then
+    ui_attention '检测到残留目录 /etc/apache2，但未发现 Apache 程序；只提示，不阻止安装。'
   fi
 
+  if run_cloudpanel_install_with_progress; then
+    ui_result_ok 'CloudPanel 安装完成'
+    record_action DONE 'CloudPanel' '已安装并完成安装后检查'
+  else
+    ui_result_error 'CloudPanel 安装未完成'
+    [[ -n "$CLOUDPANEL_INSTALL_OUTPUT" ]] && ui_note "$(printf '%s\n' "$CLOUDPANEL_INSTALL_OUTPUT" | tail -n 1)"
+    record_action WARN 'CloudPanel' '安装未完成'
+  fi
+}
+
+resource_profile_for_init() {
+  local json plan rc profile summary changes apply_output
+  ui_section '4/5 性能配置'
+  if ! system_care_ready; then
+    ui_attention '性能配置模块未就绪；本次不自动修改资源参数。'
+    record_action SKIP '性能配置' '维护模块未就绪'
+    return 0
+  fi
+  if [[ "$(cloudpanel_status)" != "CLOUDPANEL_READY" ]]; then
+    ui_attention 'CloudPanel 尚未就绪，性能配置暂不应用。'
+    record_action SKIP '性能配置' 'CloudPanel 未就绪'
+    return 0
+  fi
+
+  json="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_profile.py" json --mode balanced 2>/dev/null || true)"
+  if [[ -z "$json" ]]; then
+    ui_attention '无法生成 CPU / 内存资源方案；未修改配置。'
+    record_action WARN '性能配置' '资源方案生成失败'
+    return 0
+  fi
+
+  profile="$(printf '%s' "$json" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d["recommendation"]["profile_id"])' 2>/dev/null || true)"
+  RESOURCE_PROFILE_ID="$profile"
+  summary="$(printf '%s' "$json" | python3 -c 'import json,sys
+d=json.load(sys.stdin); r=d["recommendation"]; h=r["hardware"]; m=r["mysql"]; p=r["php"]; s=r["swap"]
+print(f"{h['cpu_count']}核/{round(h['memory_mib']/1024,1)}GB：MySQL缓冲池 {m['innodb_buffer_pool_size_mib']}MB，连接 {m['max_connections']}，PHP热点上限 {p['hot_pool_max_children']}，Swap建议 {s['recommended_mib']}MB")' 2>/dev/null || true)"
+  ui_good "已识别资源方案：${profile:-未知} ✓"
+  [[ -n "$summary" ]] && ui_note "$summary"
+
+  local existing_sites
+  existing_sites="$(printf '%s' "$json" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(int(d["snapshot"].get("php_referenced_pool_count") or 0))
+except Exception:
+    print(0)' 2>/dev/null || printf '0')"
+  if [[ "$existing_sites" =~ ^[0-9]+$ ]] && (( existing_sites > 0 )); then
+    ui_attention "检测到已有网站运行配置（${existing_sites} 个 PHP Pool）；初始化只给资源建议，不自动改现有站点参数。"
+    record_action SKIP '性能配置' "${profile:-未知}；检测到已有网站，仅生成建议，未自动修改"
+    return 0
+  fi
+
+  plan="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_apply.py" plan --mode balanced --json 2>/dev/null || true)"
+  if [[ -z "$plan" ]]; then
+    ui_attention '资源安全应用计划生成失败；仅保留建议，不修改配置。'
+    record_action WARN '性能配置' "${profile:-未知}；计划生成失败，未修改"
+    return 0
+  fi
+
+  changes="$(printf '%s' "$plan" | python3 -c 'import json,sys
+d=json.load(sys.stdin); out=[]
+for x in d.get("mysql_changes",[]):
+    if x.get("change"): out.append(f"MySQL {x['key']} {x['current_raw']}→{x['new_raw']}")
+for x in d.get("php_changes",[]):
+    if x.get("change"): out.append(f"PHP {x.get('version','')} {x.get('pool','')} {x['current']}→{x['effective']}")
+print("；".join(out) if out else "当前参数无需降低")' 2>/dev/null || true)"
+  RESOURCE_PLAN_DETAIL="$changes"
+
+  set +e
+  apply_output="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_apply.py" apply --mode balanced --confirm APPLY_RESOURCE_PROFILE 2>&1)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 ]]; then
+    ui_good '资源配置已应用并验证 ✓'
+    [[ -n "$changes" ]] && ui_note "$changes"
+    record_action DONE '性能配置' "${profile:-未知}；${changes:-已应用并验证}"
+  elif [[ $rc -eq 77 ]]; then
+    ui_attention '当前规格已有资源建议，但尚未通过自动写入校准；本次不强行修改。'
+    [[ -n "$changes" ]] && ui_note "建议：$changes"
+    record_action SKIP '性能配置' "${profile:-未知}；已生成建议，自动应用未放行"
+  else
+    ui_bad '性能配置应用失败；安全引擎会按自身回滚规则处理，本流程不继续写资源配置。'
+    ui_note "$(printf '%s\n' "$apply_output" | tail -n 1)"
+    record_action WARN '性能配置' "${profile:-未知}；应用失败，已停止"
+  fi
+}
+
+final_init_verify() {
+  local status
+  ui_section '5/5 最终检查'
   status="$(cloudpanel_status)"
-  say
   if basic_settings_ready && [[ "$status" == "CLOUDPANEL_READY" ]]; then
+    ui_good '初始化核心项目完整 ✓'
+    record_action DONE '最终检查' '时区 / Swap / CloudPanel 均已就绪'
+  else
+    ui_attention '初始化仍有未完成项目，可再次运行本入口继续补齐。'
+    record_action WARN '最终检查' '仍有未完成项目'
+  fi
+  record_action SKIP 'DNS' '未修改'
+  record_action SKIP '旧服务器' '未删除'
+  record_action SKIP '网站迁移' '未执行'
+  record_action SKIP '网站 Nginx' '未自动停止或重启'
+}
+
+
+run_initialization() {
+  local answer=''
+  reset_action_log
+  ui_page '一键初始化服务器' '基础设置 → 系统更新 → CloudPanel → 性能配置 → 最终检查'
+  ui_note '这是完整的新服务器初始化；再次执行时，已完成项目会安全跳过。'
+  ui_note '首次空服务器会自动安装系统更新；CloudPanel 已安装的服务器只检查更新，不自动升级面板运行环境。'
+  ui_note '性能配置会按 CPU / 内存自动生成方案；只有已完成安全校准的规格才自动写入，其它规格只给建议。'
+  ui_note '整个流程只确认一次；不会自动修改 DNS、删除旧服务器、迁移网站或停止/重启网站 Nginx。'
+  say
+  ui_prompt '确认开始一键初始化？[y/N]：'
+  read -r answer || answer=''
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    ui_note '已取消，没有执行初始化写入。'
+    record_action SKIP '一键初始化' 'Owner 取消'
+    render_action_log
+    ui_pause_return
+    return 0
+  fi
+
+  apply_basic_settings_for_init
+  say
+  system_update_new_server
+  say
+  cloudpanel_for_init
+  say
+  resource_profile_for_init
+  say
+  final_init_verify
+
+  say
+  if basic_settings_ready && [[ "$(cloudpanel_status)" == "CLOUDPANEL_READY" ]]; then
     ui_result_ok '服务器初始化完成'
   else
-    ui_attention '服务器初始化仍有未完成项目；可以再次运行本入口继续补齐。'
+    ui_attention '服务器初始化未完全结束；请查看执行清单中的未完成项。'
   fi
+  render_action_log
   ui_pause_return
 }
 
 while true; do
   answer=""
   preflight
-  ui_menu_flow 1 '初始化 / 重新初始化服务器（推荐）'
+  ui_menu_flow 1 '一键初始化服务器（推荐）'
   ui_menu_warn 2 '基础设置（时区 / Swap）'
   ui_menu_warn 3 'CloudPanel 状态 / 安装'
   ui_menu_back 0 '返回'
@@ -288,7 +583,7 @@ while true; do
       if swap_enabled; then
         ui_good '虚拟内存（Swap）：已启用 ✓'
       else
-        ui_attention '虚拟内存（Swap）：未启用 → 待创建 / 启用 2GB'
+        ui_attention "虚拟内存（Swap）：未启用 → 将按当前内存采用建议大小（约 $(recommended_swap_mib) MB）"
       fi
 
       if basic_settings_ready; then
@@ -318,7 +613,7 @@ while true; do
       status="$(cloudpanel_status)"
       if [[ "$status" == "CLOUDPANEL_READY" ]]; then
         ui_good 'CloudPanel 已安装并可用 ✓'
-        ui_note '不会重复安装。初始化入口仍然可以继续用于复查或补齐时区 / Swap。'
+        ui_note '不会重复安装；一键初始化仍可继续检查系统更新、基础设置和性能配置。'
         ui_pause_return
         continue
       fi
