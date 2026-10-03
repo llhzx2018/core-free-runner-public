@@ -389,6 +389,73 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertIn("source-recovery", str(pull.SOURCE_RECOVERY_ROOT))
 
 
+
+class BootstrapHardwareSizingContractTests(unittest.TestCase):
+    def test_one_core_one_gb_is_advisory_not_blocked(self) -> None:
+        with mock.patch.object(
+            pull.os, "geteuid", return_value=0
+        ), mock.patch.object(
+            pull.Path,
+            "read_text",
+            side_effect=[
+                'ID=debian\\nVERSION_ID="13"\\n',
+                "MemTotal:       1000000 kB\\n",
+            ],
+        ), mock.patch.object(
+            pull.legacy,
+            "parse_os_release",
+            return_value=("debian", "13"),
+        ), mock.patch.object(
+            pull.os, "uname", return_value=mock.Mock(machine="x86_64")
+        ), mock.patch.object(
+            pull.os, "cpu_count", return_value=1
+        ), mock.patch.object(
+            pull.shutil,
+            "disk_usage",
+            return_value=mock.Mock(total=20 * 1024**3),
+        ), mock.patch.object(
+            pull.shutil, "which", return_value=None
+        ), mock.patch.object(
+            pull.Path, "exists", return_value=False
+        ):
+            result = pull.local_bootstrap_preflight()
+
+        self.assertEqual(result["status"], "READY")
+        self.assertTrue(result["hardware_baseline_is_advisory"])
+        self.assertIn(
+            "MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE",
+            result["hardware_advisories"],
+        )
+
+    def test_unsupported_architecture_still_fails_closed(self) -> None:
+        with mock.patch.object(
+            pull.os, "geteuid", return_value=0
+        ), mock.patch.object(
+            pull.Path,
+            "read_text",
+            side_effect=[
+                'ID=debian\\nVERSION_ID="13"\\n',
+                "MemTotal:       2500000 kB\\n",
+            ],
+        ), mock.patch.object(
+            pull.legacy,
+            "parse_os_release",
+            return_value=("debian", "13"),
+        ), mock.patch.object(
+            pull.os, "uname", return_value=mock.Mock(machine="riscv64")
+        ), mock.patch.object(
+            pull.os, "cpu_count", return_value=1
+        ), mock.patch.object(
+            pull.shutil,
+            "disk_usage",
+            return_value=mock.Mock(total=20 * 1024**3),
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "unsupported architecture",
+            ):
+                pull.local_bootstrap_preflight()
+
 class TargetPullUiContractTests(unittest.TestCase):
     def test_ordinary_ui_uses_new_server_receiver_language(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
