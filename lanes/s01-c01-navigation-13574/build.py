@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/navigation.php','src/inc/admin/admin-s01-uiux-polish.php','src/assets/js/admin/admin-navigation-page-refinement-v1.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css','tests/navigation-v8-render-fixture.php','tests/navigation-controls-browser-check.js','tests/navigation-v8-browser-proof.js'}
+allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/navigation.php','src/inc/admin/admin-s01-uiux-polish.php','src/assets/js/admin/admin-navigation-page-refinement-v1.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css','tests/navigation-v8-render-fixture.php','tests/navigation-controls-browser-check.js','tests/navigation-v8-browser-proof.js','src/inc/bootstrap/manifests/admin-tabs/navigation.php'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
@@ -16,6 +16,7 @@ def fields(s):return re.findall(r'<(?:form|input|select|option|textarea)\b[^>]*>
 assert fields(new)==fields(old),'form contracts changed'
 for p in ['src/assets/js/admin/admin-navigation.js','src/inc/admin/admin-navigation-actions.php','src/inc/admin/controllers/navigation.php','src/inc/services/navigation-service.php','src/inc/admin/admin-shell.php']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' changed'
+p='src/inc/bootstrap/manifests/admin-tabs/navigation.php';assert pathlib.Path('target',p).read_text()==original(p).replace("    'theme-options.php',","    'theme-options.php',\n    'services/brand-design-service.php',"),'navigation dependency manifest changed beyond CSS provider'
 # Runtime/service/update/auth files cannot change under the above exact allowlist.
 assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='7dc6b2bd2126237e7e69d6ce2ef890c4e14362a68591f0a93896638acf5c6a12'
 assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='bb18bdac83c2189bddcdf616563d90ae2f830373834ab016d6411648c2056bfd'
