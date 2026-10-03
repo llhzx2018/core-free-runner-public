@@ -536,23 +536,29 @@ class TargetPullUiContractTests(unittest.TestCase):
     def test_init_ui_is_repeatable_and_shows_install_progress(self) -> None:
         text = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
         for marker in (
-            "可重复执行：缺少的补齐，已完成的安全跳过",
-            "初始化可以安全重复执行；已经正确的设置会跳过，CloudPanel 已健康时不会重复安装。",
-            "初始化 / 重新初始化服务器（推荐）",
-            "初始化 / 重新初始化服务器",
-            "发现缺少的基础设置，确认现在补齐？[y/N]",
-            "CloudPanel 尚未安装，确认现在安装？[y/N]",
+            "完整初始化：更新 / 时区 / Swap / CloudPanel / 性能配置",
+            "一键初始化可以安全重复执行；已正确的项目会跳过，CloudPanel 已健康时不会重复安装。",
+            "一键初始化服务器（推荐）",
+            "一键初始化服务器",
+            "确认开始一键初始化？[y/N]",
+            "基础设置 → 系统更新 → CloudPanel → 性能配置 → 最终检查",
+            "首次空服务器会自动安装系统更新",
+            "CloudPanel 已安装的服务器只检查更新",
+            "性能配置会按 CPU / 内存自动生成方案",
+            "本次初始化执行清单",
             "服务器初始化完成",
-            "基础设置已经完成，无需重复修改",
-            "不会重复安装。初始化入口仍然可以继续用于复查或补齐时区 / Swap。",
             "render_indeterminate_bar",
             "1/3 安装前安全检查已通过",
             "2/3 [%s] 正在安装 CloudPanel · 已耗时 %s",
             "3/3 安装后检查通过",
         ):
             self.assertIn(marker, text)
+        self.assertNotIn("重新执行初始化检查（推荐）", text)
+        self.assertNotIn("初始化 / 重新初始化服务器（推荐）", text)
+        self.assertNotIn("CloudPanel 尚未安装，确认现在安装？[y/N]", text)
         self.assertNotIn("新服务器第一次使用时在这里完成基础设置", text)
         self.assertNotIn("应用基础设置（时区 / Swap）", text)
+
 
     def test_bootstrap_ui_shows_specific_blocker_in_chinese(self) -> None:
         text = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
