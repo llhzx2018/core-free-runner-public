@@ -23,7 +23,7 @@ const base='http://127.0.0.1:18880',url=base+'/wp-admin/tools.php?page=vf-privat
  await page.waitForLoadState('load');assert(await root.isVisible());
  await page.locator('#vf-update-credentials>summary').click();
  const form=page.locator('#vf-update-credentials form').filter({has:page.locator('input[name=vf_update_token]')});
- const fields=await form.evaluate(n=>Object.fromEntries(new FormData(n)));const action=await form.getAttribute('action');
+ const fields=await form.evaluate(n=>Object.fromEntries(new FormData(n)));const action=await form.evaluate(n=>n.action);
  const invalid={...fields,_wpnonce:'invalid-nonce',vf_update_token:'synthetic-wrong-token-rejected'};
  const denied=await context.request.post(action,{form:invalid});assert.equal(denied.status(),403,'invalid nonce accepted');
  const anonymous=await browser.newContext();const loggedOut=await anonymous.request.post(action,{form:{...fields,vf_update_token:'synthetic-wrong-token-rejected'}});
