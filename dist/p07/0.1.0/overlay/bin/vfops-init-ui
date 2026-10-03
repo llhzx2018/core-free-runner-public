@@ -8,6 +8,8 @@ SYSTEM_CARE_ENTRY="${P07_SYSTEM_CARE_ENTRY:-/usr/local/bin/vf-system-care}"
 declare -a ACTION_LOG=()
 RESOURCE_PROFILE_ID=''
 RESOURCE_PLAN_DETAIL=''
+RESOURCE_STATE='NOT_RUN'
+RESOURCE_REASON=''
 SYSTEM_UPDATE_PACKAGES=''
 
 record_action() {
@@ -19,6 +21,8 @@ reset_action_log() {
   ACTION_LOG=()
   RESOURCE_PROFILE_ID=''
   RESOURCE_PLAN_DETAIL=''
+  RESOURCE_STATE='NOT_RUN'
+  RESOURCE_REASON=''
   SYSTEM_UPDATE_PACKAGES=''
 }
 
@@ -85,6 +89,63 @@ system_care_ready() {
   [[ -x "$SYSTEM_CARE_ENTRY" && -x "$SYSTEM_CARE_ROOT/resource-profile.sh" && -f "$SYSTEM_CARE_ROOT/lib/resource_apply.py" ]]
 }
 
+resource_block_reason_cn() {
+  local reasons="${1:-}"
+  python3 - "$reasons" <<'PY'
+import sys
+raw=(sys.argv[1] if len(sys.argv)>1 else "").strip()
+items=[x.strip() for x in raw.split(",") if x.strip()]
+out=[]
+i=0
+while i < len(items):
+    reason=items[i]
+    i+=1
+    if reason.startswith("PROFILE_CALIBRATION_STATE:"):
+        state=reason.split(":",1)[1]
+        out.append(f"当前规格尚未完成自动写入校准（{state}）")
+    elif reason == "MODE_NOT_BALANCED":
+        out.append("当前不是平衡配置方案")
+    elif reason == "CLOUDPANEL_NOT_DETECTED":
+        out.append("未检测到 CloudPanel")
+    elif reason == "MYSQL_NOT_DETECTED":
+        out.append("未检测到 MySQL / Percona")
+    elif reason == "MYSQL_CONFIG_NOT_FOUND":
+        out.append("未找到可安全修改的 MySQL 配置文件")
+    elif reason == "MYSQL_FLAVOR_NOT_SUPPORTED":
+        out.append("当前数据库类型尚未纳入自动调整")
+    elif reason.startswith("MYSQL_CONFIG_KEY_COUNT:") or reason.startswith("MYSQL_CONFIG_UNPARSEABLE:"):
+        out.append("当前 MySQL 配置结构与已校准模板不同")
+    elif reason.startswith("PHP_POOL_NOT_FOUND:") or reason.startswith("PHP_MAX_CHILDREN_COUNT:"):
+        out.append("当前 PHP 进程池配置与已校准模板不同")
+    elif reason == "ROOT_REQUIRED":
+        out.append("需要 root 权限")
+    elif reason == "INTERACTIVE_TTY_REQUIRED":
+        out.append("当前终端不是可交互终端")
+    elif reason == "MYSQL_LOCAL_ADMIN_TOOLING_MISSING":
+        out.append("CloudPanel 本机数据库管理工具未就绪")
+    elif reason == "MYSQL_RUNTIME_NOT_CALIBRATED":
+        out.append("当前数据库运行版本尚未完成自动调整校准")
+    elif reason == "MAX_USED_CONNECTIONS_TOO_CLOSE_TO_TARGET":
+        out.append("数据库当前连接使用量太接近建议上限，为避免影响业务已停止自动调整")
+    elif reason.startswith("PLAN_NOT_ELIGIBLE:"):
+        nested=reason.split(":",1)[1]
+        items.extend([x.strip() for x in nested.split(",") if x.strip()])
+    elif reason:
+        out.append("安全检查未放行自动调整")
+seen=[]
+for x in out:
+    if x not in seen:
+        seen.append(x)
+print("；".join(seen) if seen else "安全检查未放行自动调整")
+PY
+}
+
+resource_result_complete() {
+  case "${RESOURCE_STATE:-NOT_RUN}" in
+    APPLIED|VERIFIED_KEEP|EXISTING_SITES_READONLY) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 current_timezone() {
   timedatectl show -p Timezone --value 2>/dev/null || printf '未知'
@@ -425,23 +486,32 @@ except Exception:
 }
 
 resource_profile_for_init() {
-  local json plan rc profile summary changes apply_output
+  local json plan rc profile summary changes apply_output existing_sites eligible block_reasons block_cn apply_reason
   ui_section '4/5 性能配置'
+  RESOURCE_STATE='NOT_RUN'
+  RESOURCE_REASON=''
+
   if ! system_care_ready; then
     ui_attention '性能配置模块未就绪；本次不自动修改资源参数。'
-    record_action SKIP '性能配置' '维护模块未就绪'
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON='性能配置模块未就绪'
+    record_action WARN '性能配置' "$RESOURCE_REASON"
     return 0
   fi
   if [[ "$(cloudpanel_status)" != "CLOUDPANEL_READY" ]]; then
     ui_attention 'CloudPanel 尚未就绪，性能配置暂不应用。'
-    record_action SKIP '性能配置' 'CloudPanel 未就绪'
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON='CloudPanel 未就绪'
+    record_action WARN '性能配置' "$RESOURCE_REASON"
     return 0
   fi
 
   json="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_profile.py" json --mode balanced 2>/dev/null || true)"
   if [[ -z "$json" ]]; then
     ui_attention '无法生成 CPU / 内存资源方案；未修改配置。'
-    record_action WARN '性能配置' '资源方案生成失败'
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON='资源方案生成失败'
+    record_action WARN '性能配置' "$RESOURCE_REASON"
     return 0
   fi
 
@@ -455,7 +525,6 @@ print(f"{h['cpu_count']}核/{round(h['memory_mib']/1024,1)}GB：MySQL缓冲池 {
   ui_good "已识别资源方案：${profile:-未知} ✓"
   [[ -n "$summary" ]] && ui_note "$summary"
 
-  local existing_sites
   existing_sites="$(printf '%s' "$json" | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin)
@@ -464,42 +533,81 @@ except Exception:
     print(0)' 2>/dev/null || printf '0')"
   if [[ "$existing_sites" =~ ^[0-9]+$ ]] && (( existing_sites > 0 )); then
     ui_attention "检测到已有网站运行配置（${existing_sites} 个 PHP Pool）；初始化只给资源建议，不自动改现有站点参数。"
-    record_action SKIP '性能配置' "${profile:-未知}；检测到已有网站，仅生成建议，未自动修改"
+    RESOURCE_STATE='EXISTING_SITES_READONLY'
+    RESOURCE_REASON="已有网站，仅生成 ${profile:-未知} 建议"
+    record_action KEEP '性能配置' "${profile:-未知}；已有网站，为避免干扰业务仅生成建议"
     return 0
   fi
 
   plan="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_apply.py" plan --mode balanced --json 2>/dev/null || true)"
   if [[ -z "$plan" ]]; then
     ui_attention '资源安全应用计划生成失败；仅保留建议，不修改配置。'
-    record_action WARN '性能配置' "${profile:-未知}；计划生成失败，未修改"
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON='资源安全应用计划生成失败'
+    record_action WARN '性能配置' "${profile:-未知}；$RESOURCE_REASON"
     return 0
   fi
 
   changes="$(printf '%s' "$plan" | python3 -c 'import json,sys
 d=json.load(sys.stdin); out=[]
 for x in d.get("mysql_changes",[]):
-    if x.get("change"): out.append(f"MySQL {x['key']} {x['current_raw']}→{x['new_raw']}")
+    if x.get("change"): out.append("MySQL %s %s→%s" % (x["key"], x["current_raw"], x["new_raw"]))
 for x in d.get("php_changes",[]):
-    if x.get("change"): out.append(f"PHP {x.get('version','')} {x.get('pool','')} {x['current']}→{x['effective']}")
+    if x.get("change"): out.append("PHP %s %s %s→%s" % (x.get("version",""), x.get("pool",""), x["current"], x["effective"]))
 print("；".join(out) if out else "当前参数无需降低")' 2>/dev/null || true)"
   RESOURCE_PLAN_DETAIL="$changes"
+
+  eligible="$(printf '%s' "$plan" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print("YES" if d.get("eligible") else "NO")' 2>/dev/null || printf 'NO')"
+  block_reasons="$(printf '%s' "$plan" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(",".join(str(x) for x in (d.get("block_reasons") or [])))' 2>/dev/null || true)"
+
+  if [[ "$eligible" != 'YES' ]]; then
+    block_cn="$(resource_block_reason_cn "$block_reasons")"
+    ui_attention "当前资源方案不能安全自动写入：$block_cn"
+    [[ -n "$changes" ]] && ui_note "建议：$changes"
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON="$block_cn"
+    record_action WARN '性能配置' "${profile:-未知}；$block_cn"
+    return 0
+  fi
 
   set +e
   apply_output="$(python3 "$SYSTEM_CARE_ROOT/lib/resource_apply.py" apply --mode balanced --confirm APPLY_RESOURCE_PROFILE 2>&1)"
   rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
-    ui_good '资源配置已应用并验证 ✓'
-    [[ -n "$changes" ]] && ui_note "$changes"
-    record_action DONE '性能配置' "${profile:-未知}；${changes:-已应用并验证}"
+    if [[ "$changes" == '当前参数无需降低' ]]; then
+      ui_good '资源配置已经在安全范围内，无需修改 ✓'
+      RESOURCE_STATE='VERIFIED_KEEP'
+      RESOURCE_REASON='当前参数已在安全范围内'
+      record_action KEEP '性能配置' "${profile:-未知}；当前参数已在安全范围内"
+    else
+      ui_good '资源配置已应用并验证 ✓'
+      ui_note "$changes"
+      RESOURCE_STATE='APPLIED'
+      RESOURCE_REASON="$changes"
+      record_action DONE '性能配置' "${profile:-未知}；$changes"
+    fi
   elif [[ $rc -eq 77 ]]; then
-    ui_attention '当前规格已有资源建议，但尚未通过自动写入校准；本次不强行修改。'
+    apply_reason="$(printf '%s
+' "$apply_output" | sed -n 's/^已阻止：//p' | tail -n 1)"
+    block_cn="$(resource_block_reason_cn "$apply_reason")"
+    ui_attention "资源方案已校准，但本机安全检查阻止了自动调整：$block_cn"
     [[ -n "$changes" ]] && ui_note "建议：$changes"
-    record_action SKIP '性能配置' "${profile:-未知}；已生成建议，自动应用未放行"
+    RESOURCE_STATE='BLOCKED'
+    RESOURCE_REASON="$block_cn"
+    record_action WARN '性能配置' "${profile:-未知}；$block_cn"
   else
     ui_bad '性能配置应用失败；安全引擎会按自身回滚规则处理，本流程不继续写资源配置。'
-    ui_note "$(printf '%s\n' "$apply_output" | tail -n 1)"
-    record_action WARN '性能配置' "${profile:-未知}；应用失败，已停止"
+    apply_reason="$(printf '%s
+' "$apply_output" | tail -n 1)"
+    [[ -n "$apply_reason" ]] && ui_note "$apply_reason"
+    RESOURCE_STATE='FAILED'
+    RESOURCE_REASON='应用失败，已停止并保持安全边界'
+    record_action WARN '性能配置' "${profile:-未知}；$RESOURCE_REASON"
   fi
 }
 
@@ -507,12 +615,20 @@ final_init_verify() {
   local status
   ui_section '5/5 最终检查'
   status="$(cloudpanel_status)"
-  if basic_settings_ready && [[ "$status" == "CLOUDPANEL_READY" ]]; then
-    ui_good '初始化核心项目完整 ✓'
-    record_action DONE '最终检查' '时区 / Swap / CloudPanel 均已就绪'
+  if basic_settings_ready && [[ "$status" == "CLOUDPANEL_READY" ]] && resource_result_complete; then
+    ui_good '初始化项目完整 ✓'
+    case "$RESOURCE_STATE" in
+      APPLIED) record_action DONE '最终检查' '时区 / Swap / CloudPanel / 性能配置均已完成' ;;
+      VERIFIED_KEEP) record_action DONE '最终检查' '时区 / Swap / CloudPanel 已就绪；性能参数已在安全范围内' ;;
+      EXISTING_SITES_READONLY) record_action DONE '最终检查' '基础初始化已就绪；已有网站环境按安全规则不自动调参' ;;
+    esac
   else
-    ui_attention '初始化仍有未完成项目，可再次运行本入口继续补齐。'
-    record_action WARN '最终检查' '仍有未完成项目'
+    ui_attention '初始化仍有未完成项目；结果页会明确列出原因。'
+    if [[ "$RESOURCE_STATE" == 'BLOCKED' || "$RESOURCE_STATE" == 'FAILED' || "$RESOURCE_STATE" == 'NOT_RUN' ]]; then
+      record_action WARN '最终检查' "性能配置未闭环：${RESOURCE_REASON:-未执行}"
+    else
+      record_action WARN '最终检查' '时区 / Swap / CloudPanel 仍有未完成项目'
+    fi
   fi
   record_action SKIP 'DNS' '未修改'
   record_action SKIP '旧服务器' '未删除'
@@ -551,7 +667,7 @@ run_initialization() {
   final_init_verify
 
   say
-  if basic_settings_ready && [[ "$(cloudpanel_status)" == "CLOUDPANEL_READY" ]]; then
+  if basic_settings_ready && [[ "$(cloudpanel_status)" == "CLOUDPANEL_READY" ]] && resource_result_complete; then
     ui_result_ok '服务器初始化完成'
   else
     ui_attention '服务器初始化未完全结束；请查看执行清单中的未完成项。'
