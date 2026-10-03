@@ -1,0 +1,207 @@
+name: S01-C02 V1.21.1020 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: cd86de25e7573524f758c2aff89cea38f3d9be73
+      PROMOTED_MAIN_SHA: 501991e135b122f562b9815c275ff3ee7019dd0d
+      TARGET_VERSION: 1.21.1020
+      RELEASE_TAG: v1.21.1020
+      ASSET_NAME: vf-tools-ops_V1.21.1020.zip
+      TESTED_RUN_ID: 37147383546
+      TESTED_ARTIFACT: s01-c02-v1.21.1020-recovery-workspace-rebuild
+      EXPECTED_BYTES: 3505241
+      EXPECTED_SHA256: cb5b180a4b963447741fefa4c5b98a8b90c9d67e9247bd00ff2328045557261e
+      EXPECTED_RUNTIME_FILES: 984
+      EXPECTED_RUNTIME_FP: a82b7998abccec642b32d11e2f6eb8d01ed43f952b14540158e0573842524b33
+      PREVIOUS_TAG: v1.21.1019
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.1019.zip
+      PREVIOUS_SHA256: fb9c146b535898fb42498a922224426a646881436e40cd9dfa11279a90cbba68
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact candidate and promotion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -F "Version: $TARGET_VERSION" target/vf-ops.php >/dev/null
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/branches/main" --jq '.commit.sha')" = "$PROMOTED_MAIN_SHA"
+          GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/commits/$PROMOTED_MAIN_SHA" --jq '.parents[].sha' | grep -Fx "$TARGET_SHA" >/dev/null
+          mkdir -p tested evidence
+          gh run download "$TESTED_RUN_ID" --repo llhzx2018/core-free-runner-public --name "$TESTED_ARTIFACT" --dir tested
+          jq -e --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION" '
+            .status=="PASS" and .candidate_sha==$sha and .candidate_version==$ver and
+            .recovery_rebuild.result=="PASS" and
+            .recovery_rebuild.generic_pagehead_removed=="PASS" and
+            .recovery_rebuild.clean_visual_authority=="PASS" and
+            .recovery_rebuild.owner_product_pass==false and
+            .recovery_behavior.result=="PASS" and
+            .final_ux.result=="PASS" and
+            .workspace_center.result=="PASS" and
+            .upgrade=="PASS" and
+            .frozen_shell_header_menu=="PASS"
+          ' tested/FINAL_EVIDENCE.json >/dev/null
+          test "$(jq -r '.candidate.bytes' tested/package.json)" = "$EXPECTED_BYTES"
+          test "$(jq -r '.candidate.sha256' tested/package.json)" = "$EXPECTED_SHA256"
+          test "$(jq -r '.candidate.runtime_fingerprint' tested/package.json)" = "$EXPECTED_RUNTIME_FP"
+          echo EXACT_CANDIDATE_AND_EVIDENCE=PASS
+
+      - name: Public authority release gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > evidence/public-authority.txt <<'EOF'
+          PUBLIC_AUTHORITY_APPLICABILITY
+          INSTALL=N_A: existing-install UI-only update
+          SECURITY=REQUIRED: admin/recovery surface; no auth/nonces/permissions/restore-security semantics changed
+          TESTING=REQUIRED: exact candidate + regression + release readback
+          UPGRADE=REQUIRED: supported 1.21.1019 -> 1.21.1020 transition + rollback
+          DATA_SCHEMA=N_A: no schema/data/backup/restore semantic change
+          API_PROVIDER=N_A
+          SEO=N_A
+          CRON_JOB=N_A
+          NOTIFICATION=N_A
+          OBSERVABILITY=N_A_AT_FORMAL: Production readback handled as separate Production Gate
+          PERFORMANCE=N_A
+          GIT=REQUIRED: exact source / PR / main promotion / tag target
+          UA_UI=REQUIRED: Recovery reconstruction + multi-viewport browser proof
+          EOF
+          php target/tests/s01-c02-1211020-recovery-workspace-rebuild-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          php target/tests/error-recovery-human-language-contract.php
+          grep -F 'class="vf-recovery-head vf-recovery-pagebar"' target/includes/admin-v13/views/system_recovery.php >/dev/null
+          ! grep -F 'vf-page-head vf-page-head--configuration vf-recovery-head' target/includes/admin-v13/views/system_recovery.php
+          grep -F "admin-s01-recovery-r2.css" target/includes/views/admin-style-helpers/admin-s01-uiux-polish.php >/dev/null
+          echo SECURITY=PASS
+          echo TESTING=PASS
+          echo GIT=PASS
+          echo UA_UI=PASS
+          echo OWNER_DIRECT_REVERSIBLE_UI_RELEASE_AUTHORIZATION=PASS
+          echo OWNER_PREVIEW_RUNTIME=POST_RELEASE_REQUIRED
+          echo OWNER_REAL_USE=POST_PRODUCTION_REQUIRED
+
+      - name: Rebuild package and prove rollback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,re,zipfile
+          from pathlib import Path
+          root=Path('target');out=Path('/tmp/vf-tools-ops_V1.21.1020.zip')
+          def keep(rel):
+              p=rel.as_posix();parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          fs={}
+          for p in root.rglob('*'):
+              if p.is_file() and not p.is_symlink():
+                  rel=p.relative_to(root)
+                  if keep(rel): fs[rel.as_posix()]=p.read_bytes()
+          fs=dict(sorted(fs.items()))
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,data in fs.items():
+                  info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,4,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+          h=hashlib.sha256()
+          for rel,data in fs.items():
+              h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+          print('RUNTIME_FILES='+str(len(fs)))
+          print('RUNTIME_FINGERPRINT='+h.hexdigest())
+          print('PACKAGE_BYTES='+str(out.stat().st_size))
+          print('PACKAGE_SHA256='+hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+          test "$(stat -c %s "/tmp/$ASSET_NAME")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "/tmp/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPOSITORY" --pattern "$PREVIOUS_ASSET" --dir previous --clobber
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "$PREVIOUS_SHA256"
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          echo UPGRADE_1211019_TO_1211020=PASS
+          echo ROLLBACK_TO_1211019=PASS
+
+      - name: Publish formal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat > notes.md <<'EOF'
+          S01-C02 · VF Tools Ops · V1.21.1020
+
+          Backup & Recovery Workspace Rebuild
+          - rebuilds the Recovery page frame from source instead of layering another polish override
+          - removes Recovery's dependency on the shared .vf-page-head presentation class
+          - aligns title/description/primary action as one complete pagebar
+          - consolidates server backup / OPS baseline / current config / faults into one aligned status strip
+          - gives system_recovery one clean visual authority
+          - preserves all Recovery actions, nonces, dialogs, confirmation gates and data/security semantics
+          - Shell / Header / Header Menu remain frozen
+          - exact source: cd86de25e7573524f758c2aff89cea38f3d9be73
+          - main promotion: 501991e135b122f562b9815c275ff3ee7019dd0d
+          - Candidate Gate: 37147383546
+          - SHA256: cb5b180a4b963447741fefa4c5b98a8b90c9d67e9247bd00ff2328045557261e
+
+          OWNER Product Acceptance remains post-Production.
+          EOF
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          else
+            gh release create "$RELEASE_TAG" "/tmp/$ASSET_NAME" --repo "$TARGET_REPOSITORY" --target "$TARGET_SHA" --title "VF Tools Ops V1.21.1020" --notes-file notes.md
+          fi
+
+      - name: Remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' <<<"$JSON")"
+          PUB="$(jq -r '.published_at' <<<"$JSON")"
+          test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          test "$SIZE" = "$EXPECTED_BYTES"
+          mkdir readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback --clobber
+          test "$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "readback/$ASSET_NAME" >/dev/null
+          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
+          echo RELEASE_ID=$RID
+          echo ASSET_ID=$AID
+          echo PUBLISHED_AT=$PUB
+          echo ASSET_BYTES=$SIZE
+          echo ASSET_SHA256=$EXPECTED_SHA256
+          echo RUNTIME_FILES=$EXPECTED_RUNTIME_FILES
+          echo RUNTIME_FINGERPRINT=$EXPECTED_RUNTIME_FP
