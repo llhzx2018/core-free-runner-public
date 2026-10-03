@@ -549,6 +549,8 @@ class TargetPullUiContractTests(unittest.TestCase):
             "当前资源方案不能安全自动写入",
             "资源方案已校准，但本机安全检查阻止了自动调整",
             "性能配置未闭环",
+            "无法从 CloudPanel 读取本机数据库连接信息",
+            "安全检查返回了未识别的阻断条件，已停止自动调整",
             "服务器初始化完成",
             "render_indeterminate_bar",
             "1/3 安装前安全检查已通过",
