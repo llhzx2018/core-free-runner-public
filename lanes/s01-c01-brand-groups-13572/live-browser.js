@@ -13,6 +13,10 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
  await Promise.all([page.waitForURL(/wp-admin/),page.locator('#wp-submit').click()]);
  let controls;try{controls=await require('../target/tests/layout-controls-browser-check')(page,origin);}catch(error){await page.screenshot({path:'proof/controls-failure.png',fullPage:true});throw error;}
  let layout;try{layout=await require('../target/tests/layout-v8-browser-check')(page,context,browser,origin);}catch(error){await page.screenshot({path:'proof/layout-failure.png',fullPage:true});throw error;}
+ const verifyReturn=async key=>{
+  assert(await page.locator('#vf-brand-inheritance').evaluate(n=>n.open),'action return hides advanced settings');
+  assert.deepEqual(await page.locator('[data-vf-brand-advanced-group]').evaluateAll(ns=>ns.filter(n=>n.open).map(n=>n.dataset.vfBrandAdvancedGroup)),[key],'action return expanded an unrelated operation');
+ };
  const checks=[];
  for(const width of [1920,1440,1319,1024,768,390]){
   await page.setViewportSize({width,height:1000});await page.goto(url);
@@ -137,27 +141,30 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
   for(const [name,value] of Object.entries(values)){await temp.locator(`[name="${name}"]`).fill(value);assert.equal(await temp.locator(`[name="${name}"]`).inputValue(),value);}
   await temp.locator('[name="enabled"]').uncheck();
   await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='temporary-visual-saved'),temp.locator('button[type="submit"]').click()]);
-  await page.locator('#vf-brand-inheritance').evaluate(n=>{n.open=true;n.querySelectorAll('details').forEach(d=>d.open=true);});
+  await verifyReturn('temporary');
   for(const [name,value] of Object.entries(values))assert.equal(await page.locator('.vf-brand-inheritance__form--tokens').locator(`[name="${name}"]`).inputValue(),value,'actual temporary form readback '+name);
   assert(!await page.locator('.vf-brand-inheritance__check input').isChecked());
   assert.equal(await page.locator(input('siteName')).inputValue(),original,'temporary save changed canonical brand');
+  await page.locator('[data-vf-brand-advanced-group="preset"]>summary').click();
   const preset=page.locator('.vf-brand-inheritance__form').filter({has:page.locator('[name="action"][value="vf_theme_site_preset_preflight"]')});
   await preset.locator('[name="preset"]').selectOption({index:0});await preset.locator('[name="mode"]').selectOption('identity_only');
   await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='preset-diff-ready'),preset.locator('button[type="submit"]').click()]);
-  await page.locator('#vf-brand-inheritance').evaluate(n=>{n.open=true;n.querySelectorAll('details').forEach(d=>d.open=true);});
+  await verifyReturn('preset');
   assert(await page.locator('.vf-brand-preset-diff').isVisible(),'preset preflight did not render diff');
   const confirm=page.locator('.vf-brand-preset-confirm [name="confirm"]');await confirm.fill('SAFE-PREVIEW-ONLY');assert.equal(await confirm.inputValue(),'SAFE-PREVIEW-ONLY');await confirm.fill('');
   assert.equal(await page.locator(input('siteName')).inputValue(),original,'read-only preset diff mutated brand');
   await page.locator('.vf-brand-inheritance').screenshot({path:'proof/live-advanced-'+width+'.png'});
+  await page.locator('[data-vf-brand-advanced-group="restore"]>summary').click();
   const restore=page.locator('.vf-brand-inheritance__restore form').filter({has:page.locator('[name="action"][value="vf_theme_restore_inherited_token"]')});
   await restore.locator('[name="tokenKey"]').selectOption('brand');
   await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='inherited-value-restored'),restore.locator('button').click()]);
-  await page.locator('#vf-brand-inheritance').evaluate(n=>{n.open=true;n.querySelectorAll('details').forEach(d=>d.open=true);});
+  await verifyReturn('restore');
   assert.equal(await page.locator('.vf-brand-inheritance__restore select option[value="brand"]').count(),0,'restore retained temporary token');
   const disable=page.locator('.vf-brand-inheritance__restore form').filter({has:page.locator('[name="action"][value="vf_theme_temporary_visual_disable"]')});
   await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='temporary-visual-disabled'),disable.locator('button').click()]);
+  await verifyReturn('restore');
   assert.equal(await page.locator(input('siteName')).inputValue(),original);
-  checks.push({width,...state,grouping,advanced_grouping:'PASS',restore_labels:'PASS',form_preservation:'PASS',preview,preview_controls:'PASS',preview_scroll:'PASS',advanced,advanced_controls:'PASS',advanced_interactions:'PASS',numbers,number_controls:'PASS',choice:choiceMetric,choice_controls:'PASS',recovery_controls:'PASS',save_reload:'PASS',discard:'PASS',bad_nonce:'PASS',logged_out_write:'PASS',revision_conflict:'PASS',preview_link:'PASS',keyboard_disclosure:'PASS',frozen_header_parity:'PASS'});
+  checks.push({width,...state,grouping,advanced_action_return:'PASS',advanced_grouping:'PASS',restore_labels:'PASS',form_preservation:'PASS',preview,preview_controls:'PASS',preview_scroll:'PASS',advanced,advanced_controls:'PASS',advanced_interactions:'PASS',numbers,number_controls:'PASS',choice:choiceMetric,choice_controls:'PASS',recovery_controls:'PASS',save_reload:'PASS',discard:'PASS',bad_nonce:'PASS',logged_out_write:'PASS',revision_conflict:'PASS',preview_link:'PASS',keyboard_disclosure:'PASS',frozen_header_parity:'PASS'});
  }
  const regressions=[];
  for(const tab of ['overview','layout','render','navigation','seo','preview','recovery']){
