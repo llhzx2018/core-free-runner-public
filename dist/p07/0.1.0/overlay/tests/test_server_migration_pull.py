@@ -544,7 +544,7 @@ class TargetPullUiContractTests(unittest.TestCase):
             "基础设置 → 系统更新 → CloudPanel → 性能配置 → 最终检查",
             "首次空服务器会自动安装系统更新",
             "CloudPanel 已安装的服务器只检查更新",
-            "性能配置会按 CPU / 内存自动生成方案",
+            "性能配置统一调用“日常维护”里的同一套正式调优；初始化不再维护第二套调优逻辑。",
             "本次初始化执行清单",
             "当前资源方案不能安全自动写入",
             "资源方案已校准，但本机安全检查阻止了自动调整",
@@ -567,6 +567,11 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertNotIn("CloudPanel 尚未安装，确认现在安装？[y/N]", text)
         self.assertNotIn("新服务器第一次使用时在这里完成基础设置", text)
         self.assertNotIn("应用基础设置（时区 / Swap）", text)
+        self.assertIn("resource-profile.sh", text)
+        self.assertIn("resource-apply.sh", text)
+        self.assertIn("apply-confirmed-json", text)
+        self.assertNotIn("lib/resource_profile.py", text)
+        self.assertNotIn("lib/resource_apply.py", text)
 
 
     def test_bootstrap_ui_shows_specific_blocker_in_chinese(self) -> None:
