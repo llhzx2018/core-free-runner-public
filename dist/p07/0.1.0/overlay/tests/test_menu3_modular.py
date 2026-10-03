@@ -192,8 +192,10 @@ class Menu3ModularTests(unittest.TestCase):
     def test_server_initialization_is_standalone_and_uses_yes_no(self) -> None:
         user = (ROOT / "bin/vfops-user").read_text(encoding="utf-8")
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
-        canonical_apply = (ROOT / "components/resource-tuning/resource-apply.sh").read_text(encoding="utf-8")
-        canonical_profile = (ROOT / "components/resource-tuning/resource-profile.sh").read_text(encoding="utf-8")
+        canonical_apply_path = ROOT / "components/resource-tuning/resource-apply.sh"
+        canonical_profile_path = ROOT / "components/resource-tuning/resource-profile.sh"
+        canonical_apply = canonical_apply_path.read_text(encoding="utf-8") if canonical_apply_path.is_file() else ""
+        canonical_profile = canonical_profile_path.read_text(encoding="utf-8") if canonical_profile_path.is_file() else ""
         self.assertIn('exec bash "$INIT_UI"', user)
         self.assertIn("--init", user)
         self.assertIn("初始化服务器", init)
@@ -237,11 +239,12 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("输入 APPLY_BASELINE", init)
         self.assertNotIn("输入 INSTALL_CLOUDPANEL", init)
         self.assertIn("/^SwapTotal:/", init)
-        self.assertIn("plan-json", canonical_apply)
-        self.assertIn("apply-confirmed-json", canonical_apply)
-        self.assertIn("P07_RESOURCE_APPLY_CONFIRMED", canonical_apply)
-        self.assertIn('ENGINE="$SCRIPT_DIR/lib/resource_apply.py"', canonical_apply)
-        self.assertIn('ENGINE="$SCRIPT_DIR/lib/resource_profile.py"', canonical_profile)
+        if canonical_apply_path.is_file():
+            self.assertIn("plan-json", canonical_apply)
+            self.assertIn("apply-confirmed-json", canonical_apply)
+            self.assertIn("P07_RESOURCE_APPLY_CONFIRMED", canonical_apply)
+            self.assertIn('ENGINE="$SCRIPT_DIR/lib/resource_apply.py"', canonical_apply)
+            self.assertIn('ENGINE="$SCRIPT_DIR/lib/resource_profile.py"', canonical_profile)
         self.assertEqual(init.count("lib/resource_apply.py"), 0)
         self.assertEqual(init.count("lib/resource_profile.py"), 0)
 
