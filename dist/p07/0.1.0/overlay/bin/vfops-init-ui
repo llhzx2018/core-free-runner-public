@@ -125,7 +125,7 @@ show_bootstrap_blocker() {
 }
 
 preflight() {
-  ui_page '初始化服务器' '可重复进入：已完成的只检查，缺少的再补齐'
+  ui_page '初始化服务器' '可重复执行：缺少的补齐，已完成的安全跳过'
   ui_section '当前服务器'
   ui_kv '系统' "$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-未知}" )"
   ui_kv 'CPU' "$(nproc 2>/dev/null || printf '?') 核"
@@ -135,7 +135,7 @@ preflight() {
   ui_kv 'CloudPanel' "$([[ -d /home/clp ]] && printf '已安装' || printf '未安装')"
   ui_kv '基础设置' "$(basic_settings_ready && printf '已完成' || printf '待检查 / 补齐')"
   say
-  ui_note '这个入口可以重复使用；已经正确的设置不会重复修改，也不会重复安装 CloudPanel。'
+  ui_note '初始化可以安全重复执行；已经正确的设置会跳过，CloudPanel 已健康时不会重复安装。'
   ui_note '建议顺序：先做服务器性能检测 → 再初始化服务器 → 最后迁移网站。'
   ui_note 'CPU / 内存 / 磁盘配置只做提示，不作为禁止安装或迁移的条件。'
   ui_note '不会自动修改 DNS、关闭 SSH 或删除任何网站。'
@@ -167,10 +167,10 @@ try: print(json.load(sys.stdin).get("status","UNKNOWN"))
 except Exception: print("UNKNOWN")'
 }
 
-rerun_initialization_check() {
-  local answer='' status
-  ui_page '重新执行初始化检查' '重新检查全部初始化项目；已完成的不重复修改'
-  ui_section '基础设置'
+run_initialization() {
+  local answer='' status payload advisories environment_advisories
+  ui_page '初始化 / 重新初始化服务器' '安全重跑初始化流程；已完成项目自动跳过'
+  ui_section '1/2 基础设置'
 
   if [[ "$(current_timezone)" == "Asia/Shanghai" ]]; then
     ui_good '时区：Asia/Shanghai ✓'
@@ -196,25 +196,71 @@ rerun_initialization_check() {
       ui_note '已跳过基础设置修改。'
     fi
   else
-    ui_good '基础设置：已完成，无需重复修改 ✓'
+    ui_good '基础设置：已完成，安全跳过 ✓'
   fi
 
   say
-  ui_section 'CloudPanel'
+  ui_section '2/2 CloudPanel'
   status="$(cloudpanel_status)"
   if [[ "$status" == "CLOUDPANEL_READY" ]]; then
     ui_good 'CloudPanel：已安装并可用 ✓'
-    ui_note '重新初始化不会重装 CloudPanel。'
+    ui_good 'CloudPanel：已完成，安全跳过，不会重复安装 ✓'
   else
     ui_attention 'CloudPanel：未安装或当前未就绪'
-    ui_note '如需安装，请返回本页菜单选择「CloudPanel 状态 / 安装」。'
+    ui_note '正在执行安装前安全检查；检查不通过就不会安装。'
+    if ! payload="$("$CORE" server-migrate target-status --bootstrap-preflight 2>&1)"; then
+      show_bootstrap_blocker "$payload"
+    else
+      ui_good 'CloudPanel 安装前安全检查通过 ✓'
+      advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    print("\n".join(data.get("hardware_advisories") or []))
+except Exception:
+    pass' 2>/dev/null || true)"
+      environment_advisories="$(printf '%s' "$payload" | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    print("\n".join(data.get("environment_advisories") or []))
+except Exception:
+    pass' 2>/dev/null || true)"
+      if grep -q 'CPU_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+        ui_attention 'CPU 低于 CloudPanel 官方公布的 1 核基线；这里只提示，不限制安装。'
+      fi
+      if grep -q 'MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+        ui_attention '内存低于 CloudPanel 官方公布的 2 GB 基线；这里只提示，不限制安装。'
+      fi
+      if grep -q 'DISK_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' <<<"$advisories"; then
+        ui_attention '磁盘低于 CloudPanel 官方公布的 10 GB 基线；这里只提示，不限制安装。'
+      fi
+      if grep -q 'STALE_CONFIG_DIR:/etc/nginx' <<<"$environment_advisories"; then
+        ui_attention '检测到残留目录 /etc/nginx，但未发现 Nginx 程序；只提示，不阻止安装。'
+      fi
+      if grep -q 'STALE_CONFIG_DIR:/etc/apache2' <<<"$environment_advisories"; then
+        ui_attention '检测到残留目录 /etc/apache2，但未发现 Apache 程序；只提示，不阻止安装。'
+      fi
+      ui_note '是否继续由你决定；服务器工具箱不会因为低配而拒绝安装。'
+      ui_prompt 'CloudPanel 尚未安装，确认现在安装？[y/N]：'
+      read -r answer || answer=''
+      if [[ "$answer" =~ ^[Yy]$ ]]; then
+        if run_cloudpanel_install_with_progress; then
+          ui_result_ok 'CloudPanel 安装完成'
+        else
+          ui_result_error 'CloudPanel 安装未完成'
+          [[ -n "$CLOUDPANEL_INSTALL_OUTPUT" ]] && ui_note "$(printf '%s\n' "$CLOUDPANEL_INSTALL_OUTPUT" | tail -n 1)"
+        fi
+      else
+        ui_note '已跳过 CloudPanel 安装。'
+      fi
+    fi
   fi
 
+  status="$(cloudpanel_status)"
   say
   if basic_settings_ready && [[ "$status" == "CLOUDPANEL_READY" ]]; then
-    ui_result_ok '初始化状态完整'
+    ui_result_ok '服务器初始化完成'
   else
-    ui_attention '初始化仍有未完成项目；可以继续在本页补齐。'
+    ui_attention '服务器初始化仍有未完成项目；可以再次运行本入口继续补齐。'
   fi
   ui_pause_return
 }
@@ -222,14 +268,14 @@ rerun_initialization_check() {
 while true; do
   answer=""
   preflight
-  ui_menu_flow 1 '重新执行初始化检查（推荐）'
+  ui_menu_flow 1 '初始化 / 重新初始化服务器（推荐）'
   ui_menu_warn 2 '基础设置（时区 / Swap）'
   ui_menu_warn 3 'CloudPanel 状态 / 安装'
   ui_menu_back 0 '返回'
   ui_prompt '请选择 [0-3]：'; read -r choice || exit 0
   case "$choice" in
     1)
-      rerun_initialization_check
+      run_initialization
       ;;
     2)
       ui_page '检查 / 补齐基础设置' '可重复执行，只补缺少的设置'
