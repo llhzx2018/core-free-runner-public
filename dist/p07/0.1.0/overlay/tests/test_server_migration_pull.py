@@ -551,6 +551,8 @@ class TargetPullUiContractTests(unittest.TestCase):
             "性能配置未闭环",
             "无法从 CloudPanel 读取本机数据库连接信息",
             "CloudPanel 数据库连接信息读取超时",
+            "性能配置处理中 · 已耗时",
+            "低配服务器可能需要几十秒",
             "已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败",
             "安全检查返回了未识别的阻断条件，已停止自动调整",
             "服务器初始化完成",
