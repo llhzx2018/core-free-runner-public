@@ -533,6 +533,23 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
 
 
 class TargetPullUiContractTests(unittest.TestCase):
+    def test_init_ui_is_repeatable_and_shows_install_progress(self) -> None:
+        text = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
+        for marker in (
+            "可重复进入：已完成的只检查，缺少的再补齐",
+            "这个入口可以重复使用；已经正确的设置不会重复修改，也不会重复安装 CloudPanel。",
+            "检查 / 补齐基础设置（时区 / Swap）",
+            "基础设置已经完成，无需重复修改",
+            "不会重复安装。初始化入口仍然可以继续用于复查或补齐时区 / Swap。",
+            "render_indeterminate_bar",
+            "1/3 安装前安全检查已通过",
+            "2/3 [%s] 正在安装 CloudPanel · 已耗时 %s",
+            "3/3 安装后检查通过",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn("新服务器第一次使用时在这里完成基础设置", text)
+        self.assertNotIn("应用基础设置（时区 / Swap）", text)
+
     def test_bootstrap_ui_shows_specific_blocker_in_chinese(self) -> None:
         text = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
         for marker in (
