@@ -218,6 +218,8 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("resource_result_complete", init)
         self.assertIn("性能配置未闭环", init)
         self.assertIn("无法从 CloudPanel 读取本机数据库连接信息", init)
+        self.assertIn("CloudPanel 数据库连接信息读取超时", init)
+        self.assertIn("已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败", init)
         self.assertIn("未找到 MySQL / Percona 服务程序", init)
         self.assertNotIn("重新执行初始化检查（推荐）", init)
         self.assertNotIn("初始化 / 重新初始化服务器（推荐）", init)
