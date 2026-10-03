@@ -456,7 +456,62 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
             ):
                 pull.local_bootstrap_preflight()
 
+
+    def test_existing_environment_reports_detected_conflicts(self) -> None:
+        def which(name: str):
+            return "/usr/sbin/nginx" if name == "nginx" else None
+
+        with mock.patch.object(
+            pull.os, "geteuid", return_value=0
+        ), mock.patch.object(
+            pull.Path,
+            "read_text",
+            side_effect=[
+                'ID=debian\\nVERSION_ID="13"\\n',
+                "MemTotal:       2500000 kB\\n",
+            ],
+        ), mock.patch.object(
+            pull.legacy,
+            "parse_os_release",
+            return_value=("debian", "13"),
+        ), mock.patch.object(
+            pull.os, "uname", return_value=mock.Mock(machine="x86_64")
+        ), mock.patch.object(
+            pull.os, "cpu_count", return_value=1
+        ), mock.patch.object(
+            pull.shutil,
+            "disk_usage",
+            return_value=mock.Mock(total=20 * 1024**3),
+        ), mock.patch.object(
+            pull.shutil, "which", side_effect=which
+        ), mock.patch.object(
+            pull.Path, "exists", return_value=True
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                r"nginx,/etc/nginx",
+            ):
+                pull.local_bootstrap_preflight()
+
+
 class TargetPullUiContractTests(unittest.TestCase):
+    def test_bootstrap_ui_shows_specific_blocker_in_chinese(self) -> None:
+        text = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
+        for marker in (
+            "show_bootstrap_blocker",
+            "需要使用 root 用户执行 CloudPanel 安装检查",
+            "当前 Linux 系统版本不在自动安装支持范围内",
+            "当前 CPU 架构不在 CloudPanel 自动安装支持范围内",
+            "检测到这台服务器已经存在网站或数据库环境",
+            "检测到 80 / 443 网站端口已经被其他程序占用",
+            "这不是低配限制",
+        ):
+            self.assertIn(marker, text)
+        self.assertNotIn(
+            "当前服务器不满足自动安装 CloudPanel 的条件。",
+            text,
+        )
+
     def test_ordinary_ui_uses_new_server_receiver_language(self) -> None:
         text = (ROOT / "bin/vfops-migrate-ui").read_text(encoding="utf-8")
         for marker in (
