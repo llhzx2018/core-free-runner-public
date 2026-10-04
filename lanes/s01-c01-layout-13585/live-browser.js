@@ -10,7 +10,8 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
  const settled=()=>page.waitForFunction(()=>document.querySelector('[data-vf-layout-page]').getAttribute('aria-busy')!=='true');
  const send=async(p=page)=>{const response=p.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().postData()?.includes('vf_theme_layout_save'));await p.locator(saveSel).click();const data=await(await response).json();await p.waitForFunction(()=>document.querySelector('[data-vf-layout-page]').getAttribute('aria-busy')!=='true');return data;};
  const saved=async()=>{const v=await send();assert(v.success&&v.data.ok&&v.data.readback&&v.data.runtimeVerification.ok&&v.data.roundtripEvidence.ok,JSON.stringify(v));assert(!await page.locator(rootSel).evaluate(n=>n.classList.contains('is-dirty')),'client rejected full canonical readback');return v;};
- const openSections=async()=>page.locator(rootSel+' details:not([hidden])').evaluateAll(ns=>ns.forEach(n=>n.open=true));
+ const openSection=async key=>{const section=page.locator('[data-vf-layout-section="'+key+'"]');if(!await section.count())return false;if(!await section.evaluate(n=>n.open))await section.locator(':scope>summary').click();assert(await section.evaluate(n=>n.open));return true;};
+ const openSections=async()=>openSection('modules');
  const clean=async()=>page.reload();
  await login(page);await go();
  if(process.env.PHASE==='baseline'){
@@ -37,17 +38,20 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
  await page.setViewportSize({width:1319,height:1000});
  // Exercise every exposed field through the actual function tabs and disclosures.
  for(const key of contexts){
-  await go(key);await openSections();const visited=new Set(),expected=new Map();
+  await go(key);await openSection('functions');const visited=new Set(),expected=new Map();
   const editVisible=async()=>{
    const inputs=await page.locator('[data-vf-layout-form] input:not([type="hidden"])[name],[data-vf-layout-form] select[name],[data-vf-layout-form] textarea[name]').all();
-   for(const field of inputs){if(!await field.isVisible()||!await field.isEnabled())continue;const name=await field.getAttribute('name');if(visited.has(name))continue;visited.add(name);const meta=await field.evaluate(n=>({tag:n.tagName,type:n.type,value:n.value,min:n.min,max:n.max,options:n.options?[...n.options].filter(o=>!o.disabled).map(o=>o.value):[]}));
+   for(const field of inputs){if(!await field.isVisible()||!await field.isEnabled()||await field.evaluate(n=>n.readOnly))continue;const name=await field.getAttribute('name');if(visited.has(name))continue;visited.add(name);const meta=await field.evaluate(n=>({tag:n.tagName,type:n.type,value:n.value,min:n.min,max:n.max,step:n.step,options:n.options?[...n.options].filter(o=>!o.disabled).map(o=>o.value):[]}));
     if(meta.type==='checkbox'){await field.click();expected.set(name,{type:'checkbox',value:await field.isChecked()});}
     else if(meta.tag==='SELECT'){const next=meta.options.find(v=>v!==meta.value);if(next!==undefined)await field.selectOption(next);expected.set(name,{type:'value',value:await field.inputValue()});}
-    else if(meta.type==='number'){const min=meta.min===''?0:Number(meta.min),max=meta.max===''?999:Number(meta.max),old=Number(meta.value)||min;await field.fill(String(old<max?old+1:Math.max(min,old-1)));expected.set(name,{type:'value',value:await field.inputValue()});}
+    else if(meta.type==='number'){const min=meta.min===''?0:Number(meta.min),max=meta.max===''?999:Number(meta.max),old=Number(meta.value)||min,step=Number(meta.step)||1;await field.fill(String(Number((old+step<=max?old+step:Math.max(min,old-step)).toFixed(10))));expected.set(name,{type:'value',value:await field.inputValue()});}
     else if(!['radio','submit','button'].includes(meta.type)){await field.fill((meta.value||'测试')+' QA');expected.set(name,{type:'value',value:await field.inputValue()});}
    }
   };
-  const tabs=await page.locator('.vf-layout-function-master__item[role="tab"]').all();for(const tab of tabs){if(await tab.isVisible()){await tab.click();await editVisible();}}await editVisible();assert(visited.size>0,key+' has no editable controls');
+  const tabs=await page.locator('.vf-layout-function-master__item[role="tab"]').all();for(const tab of tabs){if(await tab.isVisible()){await tab.click();await editVisible();}}await editVisible();
+  const moduleKeys=await page.locator('[data-vf-layout-list] li').evaluateAll(ns=>ns.map(n=>n.dataset.module));for(const moduleKey of moduleKeys){await openSections();const button=page.locator('[data-vf-layout-list] li[data-module="'+moduleKey+'"] [data-vf-layout-edit-module]');await button.click();await editVisible();const close=page.locator('[data-vf-layout-module-editor-close]');if(await close.isVisible())await close.click();}
+  for(const sectionKey of ['display','reading']){if(await openSection(sectionKey)){const details=await page.locator('[data-vf-layout-section="'+sectionKey+'"] details').all();for(const detail of details){if(await detail.locator(':scope>summary').isVisible()&&!await detail.evaluate(n=>n.open))await detail.locator(':scope>summary').click();}await editVisible();}}
+  assert(visited.size>0,key+' has no editable controls');
   const invalid=await page.locator('[data-vf-layout-form]').evaluate(n=>[...n.querySelectorAll(':invalid')].map(el=>({name:el.name,value:el.value})));assert.deepEqual(invalid,[],key+' generated invalid dataset');const result=await saved();assert.equal(result.data.contextVerification.context,key);assert.equal(result.data.roundtripEvidence.contextCount,20);await page.reload();
   for(const [name,entry]of expected){const values=await page.locator('[data-vf-layout-form] input,[data-vf-layout-form] select,[data-vf-layout-form] textarea').evaluateAll((ns,arg)=>ns.filter(n=>n.name===arg.name&&n.type!=='hidden').map(n=>arg.type==='checkbox'?n.checked:n.value),{name,type:entry.type});assert(values.length&&values.every(v=>String(v)===String(entry.value)),JSON.stringify({key,name,expected:entry.value,values}));}
   assert(!await page.locator(saveSel).isVisible());contextChecks.push({context:key,status:'PASS',editable_controls:visited.size,verified_fields:result.data.roundtripEvidence.totalFieldCount,consumers:20});
