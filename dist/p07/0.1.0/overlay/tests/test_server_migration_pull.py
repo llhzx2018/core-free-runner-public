@@ -554,7 +554,7 @@ class TargetPullUiContractTests(unittest.TestCase):
             "CloudPanel 数据库连接信息读取超时",
             "性能配置处理中 · 已耗时",
             "P07_RESOURCE_APPLY_CONFIRMED=1",
-            "低配服务器可能需要几十秒",
+            "不读取数据库密码，不重启 MySQL / Nginx",
             "已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败",
             "安全检查返回了未识别的阻断条件，已停止自动调整",
             "服务器初始化完成",
@@ -574,7 +574,7 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertNotIn("应用基础设置（时区 / Swap）", text)
         self.assertIn("resource-profile.sh", text)
         self.assertIn("resource-apply.sh", text)
-        self.assertIn("apply-confirmed-json", text)
+        self.assertIn("apply-empty-server-confirmed-json", text)
         self.assertNotIn("lib/resource_profile.py", text)
         self.assertNotIn("lib/resource_apply.py", text)
 
