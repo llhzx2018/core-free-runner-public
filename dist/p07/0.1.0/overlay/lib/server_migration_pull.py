@@ -241,12 +241,14 @@ def stage_source_runtime(source: dict[str, Any], token: str) -> str:
         transport.stream_tar_to_remote(
             "tar",
             ROOT,
-            ["bin", "lib", "VERSION", "BUILD_ID", "VF_PROJECT.json"],
+            ["bin", "lib", "VERSION", "BUILD_ID"],
             source_base(source),
             transport.remote_priv(source["ssh_user"], command),
             "old-server helper staging",
         )
     except transport.TransportError as exc:
+        if "local archive failed" in str(exc):
+            raise PullMigrationError("current-server migration runtime is incomplete") from exc
         raise PullMigrationError("cannot stage migration helper on old server") from exc
     return runtime
 
