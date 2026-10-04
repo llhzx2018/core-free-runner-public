@@ -47,7 +47,13 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){awa
  // A different tab changed a canonical field while this page remained mounted.
  cli('$b=get_option("vf_theme_brand");unset($b["tagline"]);update_option("vf_theme_brand",$b,false);');before=snapshot();r=await action();assert(r.json.success);assert.equal(snapshot(),before);assert.equal((await root.locator('[data-vf-dashboard-config-ready]').innerText()).trim(),'5');assert.equal(await root.getAttribute('data-vf-page-state'),'blocked');assert.equal(new URL(await root.locator('[data-vf-dashboard-next-link]').getAttribute('href')).searchParams.get('tab'),'brand');mark.latest_state_without_reload='PASS';mark.summary_next_synchronized='PASS';await page.screenshot({path:'proof/overview-blocked-1440.png',fullPage:true});
  seed('blocked');await page.goto(url);r=await action();assert.equal(r.json.data.model.rows.find(x=>x.id==='layout').status,'blocked');assert((await root.locator('[data-workspace-id=layout]').innerText()).includes('移动区域顺序无效'));mark.true_invalid_layout='PASS';
- seed('empty');await page.goto(url);r=await action();assert.equal(r.json.data.model.rows.find(x=>x.id==='layout').status,'blocked');mark.missing_canonical_layout='PASS';
+ seed('empty');
+ const layoutTruth=()=>JSON.parse(cli(load+'$l=get_option("vf_theme_layout",[]);echo wp_json_encode(["modules"=>count(array_filter((array)($l["modules"]??[]))),"templates"=>count((array)($l["templates"]??[])),"tocFields"=>count((array)($l["toc"]??[])),"dashboard"=>vf_theme_dashboard_layout_state()["ok"]]);'));
+ const incompleteBefore=layoutTruth();await page.goto(url);r=await action();const incompleteAfter=layoutTruth();
+ fs.writeFileSync('proof/incomplete-layout.json',JSON.stringify({before:incompleteBefore,after:incompleteAfter,row:r.json.data.model.rows.find(x=>x.id==='layout')},null,2));
+ assert.equal(r.json.data.model.rows.find(x=>x.id==='layout').status,incompleteAfter.dashboard?'ready':'blocked');
+ if(incompleteAfter.dashboard)assert(incompleteAfter.modules===20&&incompleteAfter.templates===20&&incompleteAfter.tocFields>=5);else assert(incompleteAfter.modules<20||incompleteAfter.templates<20||incompleteAfter.tocFields<5);
+ mark.incomplete_canonical_layout='PASS';
  seed('bad-renderer');await page.goto(url);r=await action();assert.equal(r.json.data.model.rows.find(x=>x.id==='render').status,'blocked');mark.true_invalid_renderer='PASS';
  seed('legacy');await page.goto(url);r=await action();assert(r.json.success);
  // Detect a changing snapshot, without persisting the fault-injection values.
