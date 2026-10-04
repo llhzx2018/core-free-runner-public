@@ -3811,3 +3811,53 @@ Identities:
 Source Build       0.1.0-release56
 System Care tuning 0.1.0-rc33
 ```
+
+
+## release57 · CloudPanel native crypto credential closure
+
+release56 Owner real-use proved the current env path was correct but direct Defuse decryption with APP_SECRET was not:
+
+```text
+Build                                      0.1.0-release56
+System Care                                0.1.0-rc33
+files/.env                                 present
+APP_SECRET                                 readable
+SQLite database_server.password            present
+Direct Defuse decryptWithPassword          FAIL
+MySQL SELECT 1                             NOT_RUN
+```
+
+Additional source investigation found the actual CloudPanel application pattern: `DatabaseServer::getDecryptedPassword()` delegates to CloudPanel's own `App\\Service\\Crypto::decrypt()`, which owns the real encryption-secret semantics. P07 therefore stops assuming that Symfony APP_SECRET is the database credential encryption password.
+
+release57 canonical credential resolver:
+
+```text
+official clpctl master-credentials
+→ official clpctl master-password
+→ stored credential fallback
+→ load CloudPanel bundled autoloader
+→ read database_server.password from local SQLite
+→ prefer CloudPanel App\\Service\\Crypto::decrypt()
+→ only if that service is unavailable/fails, retain the already-known legacy direct-Defuse compatibility path
+→ mandatory local MySQL SELECT 1
+→ normal Apply / Verify / Rollback
+```
+
+Security properties remain unchanged:
+
+```text
+password shown to Owner = NO
+password persisted by P07 = NO
+secret placed in process argv = NO
+CloudPanel vendor file rewrite = NO
+MySQL restart = NO
+website Nginx restart = NO
+DNS change = NO
+```
+
+Identities:
+
+```text
+Source Build       0.1.0-release57
+System Care tuning 0.1.0-rc34
+```
