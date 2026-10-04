@@ -193,6 +193,8 @@ class Menu3ModularTests(unittest.TestCase):
 
     def test_resource_apply_retries_fresh_cloudpanel_readiness_only(self) -> None:
         path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
         spec = importlib.util.spec_from_file_location("resource_apply_release50", path)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
