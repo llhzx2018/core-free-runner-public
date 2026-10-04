@@ -31,7 +31,7 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
   await page.screenshot({path:'proof/layout-'+width+'.png',fullPage:true});
   const box=page.locator('.vf-layout-function-master__editor input[type="checkbox"]').first();if(await box.count()){const before=await box.isChecked();await box.locator('..').click();assert.equal(await box.isChecked(),!before);await box.focus();await page.keyboard.press('Space');assert.equal(await box.isChecked(),before);const dim=await box.evaluate(n=>{const r=n.getBoundingClientRect();return[r.width,r.height];});assert.deepEqual(dim,[18,18]);}
   await openSections();assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:'proof/layout-expanded-'+width+'.png',fullPage:true});
-  await page.locator('[data-vf-layout-context-catalog-open]').click();const dialog=page.locator('[data-vf-layout-context-dialog]');await dialog.waitFor();assert.equal(await dialog.getAttribute('role'),'dialog');await page.keyboard.press('Escape');assert(!await dialog.isVisible());assert(await page.locator('[data-vf-layout-context-catalog-open]').evaluate(n=>n===document.activeElement));
+  await page.locator('[data-vf-layout-context-catalog-open]').click();const dialog=page.locator('[data-vf-layout-context-catalog-dialog]');await dialog.waitFor();assert.equal(await dialog.getAttribute('role'),'dialog');await page.keyboard.press('Escape');assert(!await dialog.isVisible());assert(await page.locator('[data-vf-layout-context-catalog-open]').evaluate(n=>n===document.activeElement));
   checks.push({width,geometry,control_interactions:'PASS',frozen_header_parity:'PASS'});
  }
  await page.setViewportSize({width:1319,height:1000});
