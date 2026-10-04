@@ -103,9 +103,15 @@ async function metrics(page){
       const titleInput=page.locator('input[name="vf_ops_refinement_proposal[rank_math_title]"]');
       if(await titleInput.count()!==1)failures.push({case:'refine-title-input-missing'});
       else{
-        await titleInput.fill('Synthetic SEO Title 1034');
-        const preview=(await page.locator('[data-vf-serp-title]').innerText()).trim();
-        if(preview!=='Synthetic SEO Title 1034')failures.push({case:'refine-serp-preview',preview});
+        const disabled=await titleInput.isDisabled();
+        if(disabled){
+          const coreProtected=await page.evaluate(()=>document.body.innerText.includes('核心保护')||document.body.innerText.includes('核心页面'));
+          if(!coreProtected)failures.push({case:'refine-disabled-without-core-protection'});
+        }else{
+          await titleInput.fill('Synthetic SEO Title 1034');
+          const preview=(await page.locator('[data-vf-serp-title]').innerText()).trim();
+          if(preview!=='Synthetic SEO Title 1034')failures.push({case:'refine-serp-preview',preview});
+        }
       }
     }
   }
