@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','src/assets/css/admin/pages/preview/admin-page-preview.css','src/inc/admin/admin-s01-uiux-polish.php','tests/preview-workflow-v4-contract.php','tests/preview-controls-browser-check.js'}
+allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','src/assets/css/admin/pages/preview/admin-page-preview.css','src/inc/admin/admin-s01-uiux-polish.php','tests/preview-workflow-v4-contract.php','tests/preview-controls-browser-check.js','src/inc/services/renderer-config-service.php','tests/renderer-revision-bootstrap-contract.php'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
