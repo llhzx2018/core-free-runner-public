@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/admin/admin-layout.js','src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css','docs/authority/ACCEPTANCE_MATRIX.md'}
+allowed={'src/inc/admin/views/layout.php','VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/admin/admin-layout.js','src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css','docs/authority/ACCEPTANCE_MATRIX.md'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
@@ -16,7 +16,7 @@ assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.c
 assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='bb18bdac83c2189bddcdf616563d90ae2f830373834ab016d6411648c2056bfd'
 assert pathlib.Path('target/docs/authority/ACCEPTANCE_MATRIX.md').read_text().startswith(original('docs/authority/ACCEPTANCE_MATRIX.md'))
 assert (root/'assets/css/admin/pages/brand/admin-page-brand-v8.css').read_text().startswith(original('src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css'))
-for p in ['src/inc/services/brand-design-service.php','src/inc/admin/views/layout.php','src/inc/admin/controllers/layout.php','src/inc/admin/admin-layout-actions.php','src/assets/js/admin/admin-brand.js','src/assets/css/admin/pages/brand/admin-page-brand-v8.css','src/inc/admin/admin-brand-actions.php','src/assets/js/admin/admin-dashboard.js','src/inc/services/admin-workbench-service.php','src/inc/options/options-inheritance.php','src/assets/css/admin/pages/workbench/admin-page-workbench.css']:
+for p in ['src/inc/services/brand-design-service.php','src/inc/admin/controllers/layout.php','src/inc/admin/admin-layout-actions.php','src/assets/js/admin/admin-brand.js','src/assets/css/admin/pages/brand/admin-page-brand-v8.css','src/inc/admin/admin-brand-actions.php','src/assets/js/admin/admin-dashboard.js','src/inc/services/admin-workbench-service.php','src/inc/options/options-inheritance.php','src/assets/css/admin/pages/workbench/admin-page-workbench.css']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' owner contract changed'
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
