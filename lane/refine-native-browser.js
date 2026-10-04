@@ -14,7 +14,10 @@ async function metrics(page){
       kicker:[...document.querySelectorAll('.vf-r18-pagehead-kicker')].filter(visible).map(e=>e.textContent.trim()),
       legacyGate:/SEO\s*Gate.*(?:自动运行|Run Gate|阻断|提醒)/i.test(visibleText),
       overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth+2,
-      title:document.title
+      title:document.title,
+      bodyClass:document.body.className,
+      refineScript:[...document.scripts].map(s=>s.src||'').find(src=>src.includes('admin-seo-refine'))||'',
+      r53Style:[...document.querySelectorAll('link[rel="stylesheet"]')].map(l=>l.href||'').find(h=>h.includes('admin-current-r53-product-bundle'))||''
     };
   });
 }
