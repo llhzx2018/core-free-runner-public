@@ -10,8 +10,8 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){awa
 (async()=>{
  const browser=await chromium.launch({headless:true}),context=await browser.newContext({timezoneId:'Asia/Shanghai'}),page=await context.newPage();failurePage=page;page.on('pageerror',e=>errors.push(e.message));await login(page);
  seed('legacy');
- const actual=JSON.parse(cli(load+'echo wp_json_encode(["reading"=>vf_theme_layout_readback()["layout"]["articleReading"]["mobileOrder"],"renderer"=>vf_tools_theme_renderer_runtime_verification()["ok"]]);'));
- assert.deepEqual(actual.reading.slice().sort(),['content','sidebar','toc']);assert(actual.renderer);
+ const actual=JSON.parse(cli(load+'echo wp_json_encode(["reading"=>vf_theme_layout_readback()["layout"]["articleReading"]["mobileOrder"],"renderer"=>vf_tools_theme_renderer_runtime_verification()["ok"],"layoutModuleFamilies"=>count(array_filter(get_option("vf_theme_layout")["modules"])),"layoutTemplateFamilies"=>count(get_option("vf_theme_layout")["templates"])]);'));
+ assert.deepEqual(actual.reading.slice().sort(),['content','sidebar','toc']);assert(actual.renderer);assert.equal(actual.layoutModuleFamilies,20);assert.equal(actual.layoutTemplateFamilies,20);
  await page.goto(url);const root=page.locator('[data-vf-dashboard-root]'),refresh=root.locator('[data-vf-dashboard-refresh]'),feedback=root.locator('[data-vf-dashboard-feedback]');
  const cfg=()=>page.evaluate(()=>({ajaxUrl:VFThemeDashboard.ajaxUrl,nonce:VFThemeDashboard.nonce,action:VFThemeDashboard.action,revision:document.querySelector('[data-vf-dashboard-root]').dataset.vfDashboardRevision}));
  const action=async()=>{const pending=page.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().method()==='POST'&&(r.request().postData()||'').includes('action=vf_theme_dashboard_refresh'));await refresh.click();const response=await pending;const json=await response.json();await page.waitForFunction(()=>document.querySelector('[data-vf-dashboard-root]').getAttribute('aria-busy')==='false');return{response,json};};
@@ -38,6 +38,11 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){awa
   fs.writeFileSync('proof/overview-metrics-'+width+'.json',JSON.stringify(metrics));await page.screenshot({path:'proof/overview-configured-'+width+'.png',fullPage:true});widths.push({width,status:'PASS',rows:'PASS',fonts:'PASS',keyboard:'PASS',feedback:'PASS',overflow:'PASS'});
  }
  mark.six_viewports='PASS';mark.keyboard_focus='PASS';
+ // Exercise the existing content-owner detector through real page and AJAX reads.
+ cli('wp_mkdir_p(WP_CONTENT_DIR."/mu-plugins");file_put_contents(WP_CONTENT_DIR."/mu-plugins/overview-owner-fixture.php", base64_decode("PD9waHAgZGVmaW5lKCJSQU5LX01BVEhfVkVSU0lPTiIsIlNZTlRIRVRJQ19URVNUX09OTFkiKTs="));');
+ before=snapshot();await page.goto(url);r=await action();assert(r.json.success);assert.equal(r.json.data.model.rows.find(x=>x.id==='seo').status,'ready');assert((await root.locator('[data-workspace-id=seo]').innerText()).includes('Rank Math'));assert.equal(snapshot(),before);
+ cli('unlink(WP_CONTENT_DIR."/mu-plugins/overview-owner-fixture.php");');await page.goto(url);r=await action();assert.equal(r.json.data.model.rows.find(x=>x.id==='seo').status,'warning');mark.seo_owner_readback='PASS';
+
  await page.setViewportSize({width:1440,height:1000});await page.goto(url);
  // A different tab changed a canonical field while this page remained mounted.
  cli('$b=get_option("vf_theme_brand");unset($b["tagline"]);update_option("vf_theme_brand",$b,false);');before=snapshot();r=await action();assert(r.json.success);assert.equal(snapshot(),before);assert.equal((await root.locator('[data-vf-dashboard-config-ready]').innerText()).trim(),'5');assert.equal(await root.getAttribute('data-vf-page-state'),'blocked');assert.equal(new URL(await root.locator('[data-vf-dashboard-next-link]').getAttribute('href')).searchParams.get('tab'),'brand');mark.latest_state_without_reload='PASS';mark.summary_next_synchronized='PASS';await page.screenshot({path:'proof/overview-blocked-1440.png',fullPage:true});
