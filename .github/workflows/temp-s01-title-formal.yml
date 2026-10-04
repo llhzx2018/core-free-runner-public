@@ -1,14 +1,13 @@
-name: S01-C02 1.21.1031 Formal Release
+name: S01-C02 1.21.1031 Distribution discovery
 on:
   pull_request:
     branches: [main]
 permissions:
   contents: read
-  actions: read
 jobs:
-  formal:
+  distribution:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     services:
       database:
         image: mariadb:11.4
@@ -24,11 +23,9 @@ jobs:
       TARGET_VERSION: 1.21.1031
       TARGET_SHA: 614923663a94598aa470c1e8d243d4399b9f0bd4
       TARGET_TREE: cbd0a0e3e6227d8cf6650c1cdeac2a434588e76e
-      BASE_SHA: 4ea70ae0e705ac4aabe82bada09bf1486c046e64
       BASE_VERSION: 1.21.1030
-      TESTED_RUN: 37216262305
-      TESTED_SHA: 9cb852ddec4cbbf06719081412a5b48a74dd5679
       GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: Lane identity preflight
@@ -42,151 +39,69 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          repository: llhzx2018/vf-tools-ops
-          ref: 4ea70ae0e705ac4aabe82bada09bf1486c046e64
+          repository: llhzx2018/core-updates
+          ref: main
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          path: baseline
+          path: updates
           persist-credentials: false
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           extensions: mysqli, zip, sodium
-      - name: Exact identity and unchanged functional source
+      - name: Official manifest contract and exact published bytes
         run: |
           set -Eeuo pipefail
-          mkdir -p evidence
-          grep -F "Version: $TARGET_VERSION" target/vf-ops.php >/dev/null
+          mkdir -p evidence remote previous
           test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
           test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
-          test "$(cat target/VERSION)" = "$TARGET_VERSION"
-          php target/tests/s01-c02-1211030-tool-mount-freshness-unit.php
-          php target/tests/s01-c02-1211025-content-freshness-unit.php
-          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
-          for p in includes/content-workflow/scanner.php includes/content-workflow/service.php includes/admin-v13/views/content_workflow_v6.php includes/views/admin-shell-tabs-parts/02-shell-navigation.php assets/js/admin-s01-page-frame-r18.js includes/wp-update; do diff -rq "baseline/$p" "target/$p"; done
-          find target -type f -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/title-lint.txt
-          echo PHP_83_SYNTAX=PASS
-      - name: Browser with actual source and shared runtime cascade
+          python3 updates/scripts/check_manifest_contract.py > /tmp/channel-contract.json
+          jq -e '.status=="PASS"' /tmp/channel-contract.json >/dev/null
+          gh api -H 'Accept: application/vnd.github.raw+json' repos/llhzx2018/core-updates/contents/projects/S01-C02.json?ref=main > channel.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --dir remote
+          (cd remote;sha256sum -c SHA256SUMS.txt)
+          cp "remote/vf-tools-ops_V$TARGET_VERSION.zip" candidate.zip
+          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip" > package.json
+          cmp "remote/vf-tools-ops_V$TARGET_VERSION.zip" "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          p=json.loads(Path('package.json').read_text());m=json.loads(Path('channel.json').read_text());s=json.loads(Path('remote/SOURCE_MANIFEST.json').read_text())
+          assert m['enabled'] and m['target_version']==os.environ['TARGET_VERSION'] and os.environ['BASE_VERSION'] in m['from_versions']
+          for k in ['asset_name','asset_bytes','asset_sha256','runtime_files','runtime_fingerprint']:assert m[k]==p[k],k
+          assert s['source']['commit']==os.environ['TARGET_SHA'] and s['source']['tree']==os.environ['TARGET_TREE']
+          Path('evidence/channel-proof.json').write_text(json.dumps({'status':'PASS','source_sha':s['source']['commit'],'source_tree':s['source']['tree'],'manifest':m,'package':p},ensure_ascii=False,indent=2)+'\n')
+          print('OFFICIAL_MANIFEST_EXACT_RELEASE_CHANNEL=PASS')
+          PY
+          gh release download "v$BASE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$BASE_VERSION.zip" --dir previous
+          cp "previous/vf-tools-ops_V$BASE_VERSION.zip" baseline.zip
+          test "$(sha256sum baseline.zip|cut -d' ' -f1)" = 9d7c60b29260d5d3953b6d0521a9d2813d685f65edbb45483922aa33b8836408
+      - name: Browser dependencies
         run: |
-          set -Eeuo pipefail
           mkdir -p /tmp/title-node && cd /tmp/title-node
           npm init -y >/dev/null
           npm install --no-save playwright@1.58.2 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
-          export NODE_PATH=/tmp/title-node/node_modules
-          cd "$GITHUB_WORKSPACE"
-          cp target/tests/s01-c02-1211031-title-* baseline/tests/
-          if node baseline/tests/s01-c02-1211031-title-cascade-browser-proof.js > evidence/baseline.json; then echo BASELINE_NOT_DETECTED; exit 1; fi
-          jq -e '.failures|any(.case=="unique-visible-title")' evidence/baseline.json
-          node target/tests/s01-c02-1211031-title-cascade-browser-proof.js > evidence/browser.json
-          jq -e '.pass==true and (.failures|length)==0' evidence/browser.json
-      - name: Exact package and current channel readback
-        run: |
-          set -Eeuo pipefail
-          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip" > package.json
-          cp "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip" candidate.zip
-          gh release download "v$BASE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$BASE_VERSION.zip" --dir previous
-          cp "previous/vf-tools-ops_V$BASE_VERSION.zip" baseline.zip
-          test "$(sha256sum baseline.zip | cut -d' ' -f1)" = 9d7c60b29260d5d3953b6d0521a9d2813d685f65edbb45483922aa33b8836408
-          gh api -H 'Accept: application/vnd.github.raw+json' repos/llhzx2018/core-updates/contents/projects/S01-C02.json?ref=main > channel.json
-          cp package.json evidence/package.json
-          python3 - <<'PY'
-          import re,zipfile
-          with zipfile.ZipFile('candidate.zip') as z:
-              assert z.testzip() is None
-              for n in z.namelist():
-                  assert n.startswith('vf-ops/') and '..' not in n.split('/')
-                  assert not re.search(r'(^|/)(?:\.env|\.git|tests?|docs?|evidence|private|backups?)(/|$)',n,re.I),n
-                  assert not re.search(rb'(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)',z.read(n)),n
-          print('PACKAGE_CRC_PRIVACY_SECRET=PASS')
-          PY
-      - name: Native upgrade, actual WordPress browser and source rollback
+      - name: Real GitHub discovery and published native upgrade rollback
         env:
           NODE_PATH: /tmp/title-node/node_modules
         run: bash lane/title-native.sh
-      - name: Public-safe exact proof summary
+      - name: Final distribution proof
         run: |
           python3 - <<'PY'
-          import json,os,subprocess
+          import json,os
           from pathlib import Path
-          p=json.loads(Path('package.json').read_text())
-          rows=[]
-          for item in subprocess.check_output(['git','-C','target','ls-files','-z']).split(b'\0'):
-              if not item: continue
-              name=item.decode();f=Path('target')/name
-              if f.is_file(): rows.append((name,__import__('hashlib').sha256(f.read_bytes()).hexdigest()))
-          h=__import__('hashlib').sha256()
-          for name,digest in rows:h.update((name+'\0'+digest+'\n').encode())
-          proof={'schema':'vf-s01-title-proof/v1','status':'PASS','source_repository':os.environ['TARGET_REPO'],'source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'source_manifest_sha256':h.hexdigest(),'version':os.environ['TARGET_VERSION'],'package':p,'php_83_syntax':'PASS','implicit_language_freshness':'PASS','prior_freshness_regression':'PASS','frozen_shell_header_contract':'PASS','title_real_shared_css_js':'PASS','native_upgrade':'PASS','native_rollback':'PASS','owner_product_pass':False,'production':'NOT_TOUCHED'}
-          Path('evidence/FINAL_EVIDENCE.json').write_text(json.dumps(proof,indent=2)+'\n')
-          print(json.dumps(proof))
+          p=json.loads(Path('evidence/channel-proof.json').read_text())
+          p.update(status='PASS',real_private_github_discovery='PASS',published_native_upgrade='PASS',published_native_rollback='PASS',run_id=os.environ['GITHUB_RUN_ID'],owner_product_pass=False,production='NOT_TOUCHED')
+          Path('evidence/DISTRIBUTION_EVIDENCE.json').write_text(json.dumps(p,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(p,ensure_ascii=False))
           PY
-      - name: Verify published Candidate and current main
-        env:
-          GH_TOKEN: ${{ github.token }}
-          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPO/branches/main" --jq '.commit.sha')" = "$TARGET_SHA"
-          test -z "$(git -C target status --porcelain)"
-          gh run view "$TESTED_RUN" --repo llhzx2018/core-free-runner-public --json conclusion --jq '.conclusion' | grep -Fx success
-          mkdir tested
-          gh run download "$TESTED_RUN" --repo llhzx2018/core-free-runner-public --name s01-title-restore --dir tested
-          jq -e --arg sha "$TESTED_SHA" --arg tree "$TARGET_TREE" '.status=="PASS" and .source_sha==$sha and .source_tree==$tree and .native_upgrade=="PASS" and .native_rollback=="PASS"' tested/FINAL_EVIDENCE.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          a=json.loads(Path('tested/package.json').read_text())
-          b=json.loads(Path('package.json').read_text())
-          assert a==b,(a,b)
-          print('REVERSE_VERIFICATION_EXACT_PACKAGE=PASS')
-          PY
-      - name: Publish immutable formal release
-        env:
-          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          test "$(gh api "repos/$TARGET_REPO/branches/main" --jq '.commit.sha')" = "$TARGET_SHA"
-          mkdir -p publish
-          cp candidate.zip "publish/vf-tools-ops_V$TARGET_VERSION.zip"
-          python3 - <<'PY'
-          import json,os,datetime
-          from pathlib import Path
-          e=json.loads(Path('evidence/FINAL_EVIDENCE.json').read_text())
-          p=json.loads(Path('package.json').read_text())
-          now=datetime.datetime.now(datetime.timezone.utc).isoformat()
-          s=os.environ['TARGET_SHA'];v=os.environ['TARGET_VERSION']
-          manifest={'manifest_type':'VF_SOURCE_MANIFEST','schema_version':'1.1','manifest_id':'S01-C02-v'+v,'project_id':'S01-C02','project_name':'VF Tools Ops','git_governance_contract':'VF-GIT-GOVERNANCE-CONTRACT@1.2','repository':{'provider':'github','owner':'llhzx2018','name':'vf-tools-ops','canonical_remote':'https://github.com/llhzx2018/vf-tools-ops.git'},'source':{'ref':'v'+v,'branch':'main','commit':s,'tree':os.environ['TARGET_TREE'],'base_branch':'main','base_commit':os.environ['BASE_SHA'],'working_tree_clean':True,'source_files_sha256':e['source_manifest_sha256']},'version':{'product':v,'schema':'6.0.0'},'authority_pointers':['VF_PROJECT.json','docs/authority/CURRENT.md','docs/authority/ACCEPTANCE_MATRIX.md','llhzx2018/gov-doc/governance/release/CURRENT.md'],'remote_readback':{'ref':'main','expected_commit':s,'observed_commit':s,'method':'GitHub branches API + exact checkout','checked_at':now,'result':'PASS'},'generated_at':now,'generator':{'name':'core-free-runner-public exact title lane','version':'1'},'artifact':p,'machine_evidence':{'candidate_run':os.environ['TESTED_RUN'],'formal_run':os.environ['GITHUB_RUN_ID'],'exact_final_source_reverified_before_publication':True,'native_rescan_current':'PASS','native_upgrade':'PASS','native_rollback':'PASS'},'public_authority_applicability':json.loads(Path('lane/public-authority.json').read_text()),'owner_preview_runtime_applicability':'N_A','owner_product_pass':False,'production':{'observed_version':'1.21.1030','evidence':'OWNER confirmation','auto_apply':False,'target_manual_upgrade':'1.21.1031'},'authority_closure':{'no_unknown_applicability':True,'no_invalid_dynamic_snapshot':True,'no_historical_state_as_current':True,'no_duplicate_current_truth':True,'readme_not_runtime_authority':True}}
-          Path('publish/SOURCE_MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
-          PY
-          (cd publish;sha256sum "vf-tools-ops_V$TARGET_VERSION.zip" SOURCE_MANIFEST.json > SHA256SUMS.txt)
-          if gh release view "v$TARGET_VERSION" --repo "$TARGET_REPO" >/dev/null 2>&1; then echo IMMUTABLE_RELEASE_ALREADY_EXISTS; exit 1; fi
-          gh release create "v$TARGET_VERSION" publish/* --repo "$TARGET_REPO" --target "$TARGET_SHA" --title "VF Tools Ops V$TARGET_VERSION" --notes-file lane/release-notes.md
-      - name: Remote formal asset and tag readback
-        env:
-          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
-        run: |
-          set -Eeuo pipefail
-          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION" --jq '.object.sha')" = "$TARGET_SHA"
-          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > evidence/release.json
-          mkdir readback
-          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --dir readback
-          (cd readback;sha256sum -c SHA256SUMS.txt)
-          cmp publish/SOURCE_MANIFEST.json readback/SOURCE_MANIFEST.json
-          test "$(sha256sum "readback/vf-tools-ops_V$TARGET_VERSION.zip" | cut -d' ' -f1)" = "$(jq -r .asset_sha256 package.json)"
-          test "$(stat -c %s "readback/vf-tools-ops_V$TARGET_VERSION.zip")" = "$(jq -r .asset_bytes package.json)"
-          cp publish/SOURCE_MANIFEST.json evidence/SOURCE_MANIFEST.json
-          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
-      - name: Evidence
+      - name: Public-safe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: s01-title-restore
+          name: s01-title-distribution
           path: |
-            evidence/baseline.json
-            evidence/browser.json
-            evidence/package.json
+            evidence/channel-proof.json
             evidence/native-browser.json
-            evidence/FINAL_EVIDENCE.json
-            evidence/release.json
-            evidence/SOURCE_MANIFEST.json
+            evidence/DISTRIBUTION_EVIDENCE.json
           retention-days: 30
