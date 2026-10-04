@@ -30,7 +30,7 @@ module.exports=async(page,context,browser,url)=>{
    if(scenario==='timeout'){await new Promise(resolve=>setTimeout(resolve,180));return r.abort('timedout').catch(()=>{});}
    return r.fulfill({status:scenario==='http'?503:200,json:{success:true,data:{}}});
   });await save.click();await page.locator('[data-vf-brand-error-summary]').waitFor();await page.waitForFunction(()=>!document.querySelector('[data-vf-brand-save]').disabled);
-  assert.equal(await field('siteName').inputValue(),'失败保留-'+scenario);assert.equal(await page.locator('[data-vf-brand-revision]').inputValue(),revision);assert.equal(await page.locator('[data-vf-brand-page]').getAttribute('data-vf-brand-dirty'),'1');
+  assert.equal(await field('siteName').inputValue(),'失败保留-'+scenario);assert.equal(await page.locator('[data-vf-brand-revision]').inputValue(),revision);assert.equal(await page.locator('[data-vf-brand-page]').getAttribute('data-vf-brand-dirty'),'1');assert(!await page.locator('[data-vf-brand-error-list]').isVisible());assert(!await page.locator('[data-vf-brand-toast]').isVisible());
   await page.screenshot({path:'proof/brand-error-'+scenario+'.png',fullPage:true});await page.unroute('**/admin-ajax.php');await saved();check[scenario+'_retains_input_and_retry']='PASS';
  }
  // Two real windows: a conflict never promotes the old form's revision or enables an overwrite.
