@@ -236,8 +236,16 @@ run_cloudpanel_install_with_progress() {
   now="$(date +%s)"
   elapsed="$((now - start))"
   if [[ $rc -eq 0 ]]; then
+    local install_status
+    install_status="$(printf '%s' "$CLOUDPANEL_INSTALL_OUTPUT" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("status","UNKNOWN"))
+except Exception: print("UNKNOWN")' 2>/dev/null || true)"
     ui_good "2/3 CloudPanel 安装完成，用时 $(format_elapsed "$elapsed") ✓"
-    ui_good '3/3 安装后检查通过 ✓'
+    if [[ "$install_status" == "CLOUDPANEL_ADMIN_REQUIRED" ]]; then
+      ui_note '3/3 CloudPanel 已安装，等待创建首次管理员后完成数据库初始化。'
+    else
+      ui_good '3/3 安装后检查通过 ✓'
+    fi
   else
     ui_bad "2/3 CloudPanel 安装未完成，用时 $(format_elapsed "$elapsed")"
   fi
@@ -364,6 +372,86 @@ cloudpanel_status() {
   printf '%s' "$payload" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("status","UNKNOWN"))
 except Exception: print("UNKNOWN")'
+}
+run_clpctl_root() {
+  local clp first
+  clp="$(command -v clpctl 2>/dev/null || true)"
+  [[ -n "$clp" ]] || return 127
+  first="$(head -n1 "$clp" 2>/dev/null || true)"
+  if [[ "$first" == *bash* ]]; then
+    bash "$clp" "$@"
+  else
+    "$clp" "$@"
+  fi
+}
+
+cloudpanel_create_first_admin() {
+  local username email password confirm status tries=0
+  [[ -t 0 && -t 1 ]] || {
+    ui_bad 'CloudPanel 首次管理员尚未创建；当前不是交互终端，无法安全读取管理员密码。'
+    return 1
+  }
+
+  ui_attention 'CloudPanel 已安装；首次使用必须先创建管理员，随后 CloudPanel 才会初始化本机数据库服务器。'
+  ui_note '管理员密码只在当前服务器终端隐藏输入；不会发送给 ChatGPT，不写入 P07 日志。'
+
+  printf '管理员用户名 [admin]：'
+  read -r username || return 1
+  username="${username:-admin}"
+  printf '管理员邮箱：'
+  read -r email || return 1
+  [[ "$email" == *@*.* ]] || {
+    ui_bad '管理员邮箱格式不正确。'
+    return 1
+  }
+
+  while (( tries < 3 )); do
+    printf '管理员密码（隐藏输入，至少 8 位）：'
+    IFS= read -r -s password || return 1
+    printf '\n'
+    printf '再次输入管理员密码：'
+    IFS= read -r -s confirm || return 1
+    printf '\n'
+    if [[ "$password" == "$confirm" && ${#password} -ge 8 ]]; then
+      break
+    fi
+    password=''; confirm=''; tries=$((tries + 1))
+    ui_attention '两次密码不一致或少于 8 位，请重新输入。'
+  done
+  if [[ -z "$password" || "$password" != "$confirm" || ${#password} -lt 8 ]]; then
+    ui_bad '管理员密码未通过本机输入校验。'
+    unset password confirm
+    return 1
+  fi
+
+  if ! run_clpctl_root user:add \
+      --userName="$username" \
+      --email="$email" \
+      --firstName=Admin \
+      --lastName=User \
+      --password="$password" \
+      --role=admin \
+      --timezone=Asia/Shanghai \
+      --status=1 >/dev/null 2>&1; then
+    unset password confirm
+    ui_bad 'CloudPanel 首次管理员创建失败；未继续数据库初始化。'
+    return 1
+  fi
+  unset password confirm
+
+  # CloudPanel initializes its local database-server record on the next
+  # application/CLI request after the first user exists.
+  run_clpctl_root user:list >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    status="$(cloudpanel_status)"
+    [[ "$status" == "CLOUDPANEL_READY" ]] && {
+      ui_good 'CloudPanel 首次管理员与本机数据库服务器初始化完成 ✓'
+      return 0
+    }
+    sleep 1
+  done
+  ui_bad 'CloudPanel 管理员已创建，但本机数据库服务器仍未完成初始化。'
+  return 1
 }
 
 system_update_new_server() {
@@ -492,6 +580,14 @@ cloudpanel_for_init() {
     record_action KEEP 'CloudPanel' '已安装并健康，不重复安装'
     return 0
   fi
+  if [[ "$status" == "CLOUDPANEL_ADMIN_REQUIRED" ]]; then
+    if cloudpanel_create_first_admin; then
+      record_action DONE 'CloudPanel' '首次管理员已创建，本机数据库服务器已由 CloudPanel 初始化'
+    else
+      record_action WARN 'CloudPanel' '等待完成首次管理员 / 数据库初始化'
+    fi
+    return 0
+  fi
   if [[ "$status" == "CLOUDPANEL_INCOMPLETE_DATABASE_SERVER" ]]; then
     ui_bad 'CloudPanel 安装不完整：本机数据库服务器主记录缺失。'
     ui_note '为避免制造数据库凭据或覆盖已有环境，P07 不在已安装面板上自动补写内部数据库记录。'
@@ -537,8 +633,22 @@ except Exception:
   fi
 
   if run_cloudpanel_install_with_progress; then
-    ui_result_ok 'CloudPanel 安装完成'
-    record_action DONE 'CloudPanel' '已安装并完成安装后检查'
+    status="$(cloudpanel_status)"
+    if [[ "$status" == "CLOUDPANEL_ADMIN_REQUIRED" ]]; then
+      if cloudpanel_create_first_admin; then
+        ui_result_ok 'CloudPanel 安装与首次初始化完成'
+        record_action DONE 'CloudPanel' '已安装；首次管理员与本机数据库服务器初始化完成'
+      else
+        ui_result_error 'CloudPanel 已安装，但首次管理员初始化未完成'
+        record_action WARN 'CloudPanel' '已安装；等待首次管理员 / 数据库初始化'
+      fi
+    elif [[ "$status" == "CLOUDPANEL_READY" ]]; then
+      ui_result_ok 'CloudPanel 安装完成'
+      record_action DONE 'CloudPanel' '已安装并完成安装后检查'
+    else
+      ui_result_error 'CloudPanel 安装后状态异常'
+      record_action WARN 'CloudPanel' "安装后状态：${status}"
+    fi
   else
     ui_result_error 'CloudPanel 安装未完成'
     [[ -n "$CLOUDPANEL_INSTALL_OUTPUT" ]] && ui_note "$(printf '%s\n' "$CLOUDPANEL_INSTALL_OUTPUT" | tail -n 1)"
