@@ -1,4 +1,4 @@
-name: S01-C02 1.21.1031 Distribution discovery
+name: S01-C02 1.21.1034 Distribution discovery
 on:
   pull_request:
     branches: [main]
@@ -7,36 +7,44 @@ permissions:
 jobs:
   distribution:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       database:
         image: mariadb:11.4
         env:
           MARIADB_ROOT_PASSWORD: fixture-root
-          MARIADB_DATABASE: vf_title
+          MARIADB_DATABASE: vf_refine
           MARIADB_USER: vf
           MARIADB_PASSWORD: vf-fixture-db
         ports: ["3306:3306"]
         options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=30
     env:
       TARGET_REPO: llhzx2018/vf-tools-ops
-      TARGET_VERSION: 1.21.1031
-      TARGET_SHA: 614923663a94598aa470c1e8d243d4399b9f0bd4
-      TARGET_TREE: cbd0a0e3e6227d8cf6650c1cdeac2a434588e76e
-      BASE_VERSION: 1.21.1030
+      TARGET_VERSION: 1.21.1034
+      TARGET_SHA: 50cf699fc34232bda87fffdfffebe68115175f8b
+      TARGET_TREE: 5134c8c707b2d6762c710d487dc92722b1b39866
+      BASE_VERSION: 1.21.1033
+      BASE_SHA256: 8dac96743dadd8a4c49550b730dd0b8e53a2447848de73263b675ae94d3286ff
+      EXPECTED_BYTES: 3504174
+      EXPECTED_SHA256: 9882eb5df7e34e2c3fae9529e063061071f165c9198cb2916b1c8f3dea36e571
+      EXPECTED_RUNTIME_FILES: 986
+      EXPECTED_RUNTIME_FP: 7fd10a73161d159d5116f3c1aacd9ffd0c5a4f5ff3eee94bd6ee0fe2fb9a8756
       GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
       VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Lane identity preflight
         run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec lane/spec.json --input .github/workflows/temp-s01-title-formal.yml
+
       - uses: actions/checkout@v4
         with:
           repository: llhzx2018/vf-tools-ops
-          ref: 614923663a94598aa470c1e8d243d4399b9f0bd4
+          ref: 50cf699fc34232bda87fffdfffebe68115175f8b
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           path: target
           persist-credentials: false
+
       - uses: actions/checkout@v4
         with:
           repository: llhzx2018/core-updates
@@ -44,62 +52,92 @@ jobs:
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           path: updates
           persist-credentials: false
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
           extensions: mysqli, zip, sodium
-      - name: Official manifest contract and exact published bytes
+
+      - name: Official manifest and exact release channel
         run: |
           set -Eeuo pipefail
           mkdir -p evidence remote previous
           test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
           test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
           python3 updates/scripts/check_manifest_contract.py > /tmp/channel-contract.json
           jq -e '.status=="PASS"' /tmp/channel-contract.json >/dev/null
           gh api -H 'Accept: application/vnd.github.raw+json' repos/llhzx2018/core-updates/contents/projects/S01-C02.json?ref=main > channel.json
-          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --dir remote
-          (cd remote;sha256sum -c SHA256SUMS.txt)
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > release.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$TARGET_VERSION.zip" --dir remote
           cp "remote/vf-tools-ops_V$TARGET_VERSION.zip" candidate.zip
           python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip" > package.json
-          cmp "remote/vf-tools-ops_V$TARGET_VERSION.zip" "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip"
+          cmp candidate.zip "$RUNNER_TEMP/vf-tools-ops_V$TARGET_VERSION.zip"
           python3 - <<'PY'
           import json,os
           from pathlib import Path
-          p=json.loads(Path('package.json').read_text());m=json.loads(Path('channel.json').read_text());s=json.loads(Path('remote/SOURCE_MANIFEST.json').read_text())
-          assert m['enabled'] and m['target_version']==os.environ['TARGET_VERSION'] and os.environ['BASE_VERSION'] in m['from_versions']
-          for k in ['asset_name','asset_bytes','asset_sha256','runtime_files','runtime_fingerprint']:assert m[k]==p[k],k
-          assert s['source']['commit']==os.environ['TARGET_SHA'] and s['source']['tree']==os.environ['TARGET_TREE']
-          Path('evidence/channel-proof.json').write_text(json.dumps({'status':'PASS','source_sha':s['source']['commit'],'source_tree':s['source']['tree'],'manifest':m,'package':p},ensure_ascii=False,indent=2)+'\n')
+          p=json.loads(Path('package.json').read_text())
+          m=json.loads(Path('channel.json').read_text())
+          r=json.loads(Path('release.json').read_text())
+          assert m['enabled'] and m['target_version']==os.environ['TARGET_VERSION']
+          assert os.environ['BASE_VERSION'] in m['from_versions']
+          for k in ['asset_name','asset_bytes','asset_sha256','runtime_files','runtime_fingerprint']:
+              assert m[k]==p[k],(k,m[k],p[k])
+          assert p['asset_bytes']==int(os.environ['EXPECTED_BYTES'])
+          assert p['asset_sha256']==os.environ['EXPECTED_SHA256']
+          assert p['runtime_files']==int(os.environ['EXPECTED_RUNTIME_FILES'])
+          assert p['runtime_fingerprint']==os.environ['EXPECTED_RUNTIME_FP']
+          assert r['tag_name']=='v'+os.environ['TARGET_VERSION']
+          assert r['target_commitish']==os.environ['TARGET_SHA']
+          a=next(x for x in r['assets'] if x['name']==p['asset_name'])
+          assert a['size']==p['asset_bytes']
+          assert a.get('digest')=='sha256:'+p['asset_sha256']
+          proof={'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'manifest':m,'package':p,'release_id':r['id'],'asset_id':a['id']}
+          Path('evidence/channel-proof.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n')
           print('OFFICIAL_MANIFEST_EXACT_RELEASE_CHANNEL=PASS')
           PY
           gh release download "v$BASE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$BASE_VERSION.zip" --dir previous
           cp "previous/vf-tools-ops_V$BASE_VERSION.zip" baseline.zip
-          test "$(sha256sum baseline.zip|cut -d' ' -f1)" = 9d7c60b29260d5d3953b6d0521a9d2813d685f65edbb45483922aa33b8836408
+          test "$(sha256sum baseline.zip|cut -d' ' -f1)" = "$BASE_SHA256"
+
       - name: Browser dependencies
         run: |
-          mkdir -p /tmp/title-node && cd /tmp/title-node
+          mkdir -p /tmp/refine-node && cd /tmp/refine-node
           npm init -y >/dev/null
           npm install --no-save playwright@1.58.2 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
+
       - name: Real GitHub discovery and published native upgrade rollback
         env:
-          NODE_PATH: /tmp/title-node/node_modules
-        run: bash lane/title-native.sh
+          NODE_PATH: /tmp/refine-node/node_modules
+        run: bash lane/refine-dist-native.sh
+
       - name: Final distribution proof
         run: |
           python3 - <<'PY'
           import json,os
           from pathlib import Path
           p=json.loads(Path('evidence/channel-proof.json').read_text())
-          p.update(status='PASS',real_private_github_discovery='PASS',published_native_upgrade='PASS',published_native_rollback='PASS',run_id=os.environ['GITHUB_RUN_ID'],owner_product_pass=False,production='NOT_TOUCHED')
+          p.update(
+            status='PASS',
+            real_private_github_discovery='PASS',
+            published_native_upgrade='PASS',
+            published_native_rollback='PASS',
+            candidate_run='37226814568',
+            formal_run='37228250380',
+            run_id=os.environ['GITHUB_RUN_ID'],
+            owner_product_pass=False,
+            production='NOT_TOUCHED'
+          )
           Path('evidence/DISTRIBUTION_EVIDENCE.json').write_text(json.dumps(p,ensure_ascii=False,indent=2)+'\n')
           print(json.dumps(p,ensure_ascii=False))
           PY
+
       - name: Public-safe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: s01-title-distribution
+          name: s01-refine-1034-distribution
           path: |
             evidence/channel-proof.json
             evidence/native-browser.json
