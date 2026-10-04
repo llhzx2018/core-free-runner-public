@@ -3479,3 +3479,48 @@ automatic website Nginx stop/restart = NO
 ```
 
 Source Build：`0.1.0-release49`。
+
+
+## release50 · Fresh CloudPanel database readiness closure
+
+release49 Owner real-use on a freshly initialized Vultr server exposed one remaining timing gap:
+
+```text
+CloudPanel install + post-install health PASS
+→ resource tuning starts immediately
+→ clpctl root database credential output is not ready yet
+→ MYSQL_MASTER_CREDENTIAL_PARSE_FAILED
+→ performance tuning correctly stops fail-closed
+```
+
+release50 keeps the single resource-tuning implementation and fixes the readiness boundary inside the canonical System Care engine.
+
+Canonical behavior:
+
+```text
+_mysql_client()
+→ first try the official CloudPanel master-credentials path
+→ on credential-not-ready / local-login-not-ready only:
+   bounded retry = 13 attempts total / 5 seconds between attempts
+→ credential command timeout still fails closed immediately
+→ all unrelated safety blockers still fail closed immediately
+→ password is never printed or persisted
+```
+
+This does not duplicate credential, Apply, Verify or Rollback logic in initialization.
+
+Identities:
+
+```text
+Source Build       0.1.0-release50
+System Care tuning 0.1.0-rc27
+```
+
+Safety boundaries unchanged:
+
+```text
+DNS write = NO
+SOURCE delete = NO
+Production migration = NO
+automatic website Nginx stop/restart = NO
+```
