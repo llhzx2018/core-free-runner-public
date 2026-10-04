@@ -191,6 +191,41 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
 
 
+    def test_resource_apply_accepts_structured_credentials_from_nonzero_wrapper(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        spec = importlib.util.spec_from_file_location("resource_apply_release52", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        table = """+-----------+-----------+
+| Name      | Value     |
++-----------+-----------+
+| Host      | 127.0.0.1 |
+| User Name | root      |
+| Password  | secret    |
+| Port      | 3306      |
++-----------+-----------+
+"""
+        failed = subprocess.CompletedProcess(["first"], 1, stdout="", stderr="wrapper error")
+        usable = subprocess.CompletedProcess(["second"], 1, stdout=table, stderr="warning")
+        with mock.patch.object(
+            mod,
+            "_clpctl_commands",
+            return_value=[["first"], ["second"]],
+        ), mock.patch.object(
+            mod,
+            "_run_clp_probe",
+            side_effect=[failed, usable],
+        ):
+            self.assertEqual(
+                mod._try_clp_credentials(),
+                ("root", "secret", "127.0.0.1", 3306),
+            )
+
     def test_resource_apply_handles_cloudpanel_608_bash_wrapper(self) -> None:
         path = ROOT / "components/resource-tuning/lib/resource_apply.py"
         if not path.is_file():
