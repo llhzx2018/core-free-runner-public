@@ -213,6 +213,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("resource-profile.sh", init)
         self.assertIn("resource-apply.sh", init)
         self.assertIn("apply-confirmed-json", init)
+        self.assertIn("P07_RESOURCE_APPLY_CONFIRMED=1", init)
         self.assertIn("plan-json --mode balanced", init)
         self.assertNotIn("lib/resource_profile.py", init)
         self.assertNotIn("lib/resource_apply.py", init)
