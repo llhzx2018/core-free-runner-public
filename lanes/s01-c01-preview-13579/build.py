@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','src/assets/css/admin/pages/preview/admin-page-preview.css','src/inc/admin/admin-s01-uiux-polish.php','tests/preview-workflow-v4-contract.php','tests/preview-controls-browser-check.js','src/inc/services/renderer-config-service.php','tests/renderer-revision-bootstrap-contract.php'}
+allowed={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','src/assets/css/admin/pages/preview/admin-page-preview.css','src/inc/admin/admin-s01-uiux-polish.php','tests/preview-workflow-v4-contract.php','tests/preview-controls-browser-check.js','src/inc/services/renderer-config-service.php','tests/renderer-revision-bootstrap-contract.php','src/inc/bootstrap/manifests/theme-action.php'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
@@ -21,6 +21,10 @@ def fields(s):return Counter(re.findall(r'<(?:form|input|select|option|textarea)
 assert fields(new)==fields(old),'submitted form fields/options changed'
 for p in ['src/inc/admin/admin-preview-actions.php','src/inc/admin/controllers/preview.php','src/inc/services/preview-workbench-service.php','src/inc/services/signed-preview-service.php','src/inc/services/acceptance-state-service.php','src/inc/bootstrap/manifests/admin-tabs/preview.php','src/inc/admin/admin-controller.php','src/inc/admin/admin-shell.php','src/inc/admin/views/seo.php','src/assets/js/admin/admin-seo.js','src/assets/css/admin/pages/seo/admin-page-seo-reference-v3.css','src/inc/admin/views/render.php','src/assets/js/admin/admin-render.js','src/assets/css/admin/pages/render/admin-page-render-v8.css','src/assets/js/admin/admin-navigation.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' frozen or backend changed'
+action_manifest='src/inc/bootstrap/manifests/theme-action.php'
+action_source=pathlib.Path('target',action_manifest).read_text()
+action_source=re.sub(r"    'vf_theme_preview_revoke_all' => \[\n        'services/signed-preview-service.php','admin/admin-preview-actions.php',\n    \],\n\n",'',action_source)
+assert action_source==original(action_manifest),'unrelated action bootstrap changed'
 loader='src/inc/admin/admin-s01-uiux-polish.php'
 def without_preview(s):return re.sub(r"    if \(\$tab === 'preview'\) \{.*?(?=    \$preview_language_relative)",'',s,flags=re.S).strip()
 assert without_preview(pathlib.Path('target',loader).read_text())==without_preview(original(loader)),'non-preview loader changed'
