@@ -33,7 +33,9 @@ test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 cli option update vf_private_update_credential_v1 runner-private-token >/dev/null
 cli eval 'set_theme_mod("vf_v8_preservation_sentinel", "keep-me");' >/dev/null
 cli eval 'wp_set_current_user(1);vf_theme_bootstrap_require_many(["theme-options-runtime.php","theme-options.php","services/brand-design-service.php","services/navigation-service.php"]);$s=theme_navigation_readback();$n=$s["navigation"];foreach(array_keys(vf_theme_navigation_menu_field_map()) as $i=>$field){$id=wp_create_nav_menu("Synthetic ".$field);if(is_wp_error($id)){throw new Exception("seed menu failed");}wp_update_nav_menu_item($id,0,["menu-item-title"=>"Synthetic link ".$i,"menu-item-url"=>home_url("/"),"menu-item-status"=>"publish"]);$n[$field]=(int)$id;}$r=theme_navigation_save($n,$s["revision"],1,$s["navigation"]);if(empty($r["ok"])){throw new Exception("seed navigation failed: ".wp_json_encode(["code"=>$r["failureCode"]??"unknown","error_fields"=>array_keys($r["errors"]??[]),"failed_checks"=>array_keys(array_filter($r["runtimeVerification"]["checks"]??[],fn($c)=>empty($c["ok"])))]));}update_option("vf_nav_seed_fingerprint",hash("sha256",wp_json_encode(theme_navigation_readback()["navigation"])));' >/dev/null
-BASELINE=1 node lane/live-browser.js
+BASELINE=1 docker cp lane/default-menu-preservation.php "$WP:/tmp/default-menu-preservation.php"
+cli eval-file /tmp/default-menu-preservation.php > proof/default-menu-preservation.json
+node lane/live-browser.js
 cli eval 'VF_Theme_Update_Client_V1::clear_cache();delete_site_transient("update_themes");wp_update_themes();$t=get_site_transient("update_themes");if(($t->response["vf-tools-theme"]["new_version"]??"")!==getenv("TARGET_VERSION")){throw new Exception("discovery failed");}' >/dev/null
 cli eval 'VF_Theme_Update_Client_V1::clear_cache();require_once ABSPATH."wp-admin/includes/class-wp-upgrader.php";$u=new Theme_Upgrader(new Automatic_Upgrader_Skin());$r=$u->upgrade("vf-tools-theme");if(is_wp_error($r)||($r!==true&&!is_array($r))){throw new Exception("native upgrade failed: ".wp_json_encode(VF_Theme_Update_Client_V1::status()));}' >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
@@ -50,18 +52,30 @@ cli eval 'vf_theme_bootstrap_require_many(["theme-options-runtime.php","theme-op
 cli eval 'update_option("vf_ops_preservation_sentinel",["keep"=>"ops"]);update_option("vf_m3u8_preservation_sentinel",["keep"=>"provider"]);' >/dev/null
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-wordpress-check.php"
 cli eval-file /tmp/recovery-data-wordpress-check.php > proof/recovery-data.json
+docker cp lane/default-menu-preservation.php "$WP:/tmp/default-menu-preservation.php"
+cli eval-file /tmp/default-menu-preservation.php > proof/default-menu-preservation.json
 node lane/live-browser.js
 cli eval 'if(get_option("vf_ops_preservation_sentinel")!==["keep"=>"ops"]||get_option("vf_m3u8_preservation_sentinel")!==["keep"=>"provider"]||get_option("vf_private_update_credential_v1")!=="runner-private-token"||get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("browser action preservation failed");}' >/dev/null
 curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
+# Independent clean component extract/database and first-use/login proof.
+# This database and theme directory belong only to the disposable synthetic container.
+docker exec "$DB" mariadb -uroot -psyntheticroot -e 'DROP DATABASE wordpress; CREATE DATABASE wordpress;'
+docker exec "$WP" rm -rf /var/www/html/wp-content/themes/vf-tools-theme
+cli core install --url=http://127.0.0.1:18880 --title='Synthetic clean VF' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+docker cp "proof/$ASSET" "$WP:/var/www/html/candidate.zip"
+cli theme install /var/www/html/candidate.zip --activate >/dev/null
+test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
+CLEAN=1 node lane/live-browser.js
 python3 - <<'PYPROOF'
 import json,pathlib,os
 p=pathlib.Path('proof');m=json.loads((p/'identity.json').read_text());live=json.loads((p/'live-browser.json').read_text());data=json.loads((p/'recovery-data.json').read_text());baseline=json.loads((p/'baseline.json').read_text())
 assert live['status']=='PASS' and len(live['checks'])==6 and all(c['status']=='PASS' for c in live['checks'])
 assert live['editable_fields']>=30 and all(v=='PASS' for v in live['functional'].values())
 assert data['status']=='PASS' and len(data['checks'])==42 and all(v=='PASS' for v in data['checks'].values())
+assert json.loads((p/'clean-install.json').read_text())['status']=='PASS' and json.loads((p/'default-menu-preservation.json').read_text())['status']=='PASS'
 assert baseline['busy_controls_editable']==baseline['incomplete_response_false_success']=='REPRODUCED'
-m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',navigation_viewports=6,navigation_functional_checks=live['functional'],navigation_editable_fields=live['editable_fields'],baseline_reproduced='PASS',recovery_data='PASS',recovery_data_check_count=42,owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
+m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',clean_component_install='PASS',default_menu_preservation='PASS',navigation_viewports=6,navigation_functional_checks=live['functional'],navigation_editable_fields=live['editable_fields'],baseline_reproduced='PASS',recovery_data='PASS',recovery_data_check_count=42,owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
 PYPROOF
 echo EXACT_CANDIDATE_GATE=PASS
