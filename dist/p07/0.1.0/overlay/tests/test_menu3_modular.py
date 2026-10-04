@@ -220,6 +220,17 @@ class Menu3ModularTests(unittest.TestCase):
                 ("root", "stored-secret", "127.0.0.1", 3306),
             )
 
+    def test_resource_apply_uses_current_cloudpanel_env_location(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('/home/clp/htdocs/app/files/.env', text)
+        self.assertIn('/home/clp/htdocs/app/.env', text)
+        self.assertIn("current_env_file = app / \"files/.env\"", text)
+        self.assertIn("legacy_env_file = app / \".env\"", text)
+
+
     def test_initialization_does_not_rewrite_cloudpanel_vendor_cli(self) -> None:
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
         self.assertNotIn("repair_cloudpanel_cli_shebang_for_init()", init)
