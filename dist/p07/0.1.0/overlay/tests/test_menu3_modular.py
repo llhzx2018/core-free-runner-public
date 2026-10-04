@@ -191,6 +191,33 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
 
 
+    def test_resource_apply_handles_cloudpanel_608_bash_wrapper(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        spec = importlib.util.spec_from_file_location("resource_apply_release51", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        def which(name: str):
+            return {"clpctl": "/usr/bin/clpctl", "bash": "/bin/bash"}.get(name)
+
+        with mock.patch.object(mod.shutil, "which", side_effect=which), \
+             mock.patch.object(mod.Path, "read_text", return_value="#/bin/bash\nprintf '%q'\n"):
+            self.assertEqual(
+                mod._clpctl_command("db:show:master-credentials"),
+                ["/bin/bash", "/usr/bin/clpctl", "db:show:master-credentials"],
+            )
+
+        with mock.patch.object(mod.shutil, "which", side_effect=which), \
+             mock.patch.object(mod.Path, "read_text", return_value="#!/usr/bin/env python3\n"):
+            self.assertEqual(
+                mod._clpctl_command("db:show:master-credentials"),
+                ["/usr/bin/clpctl", "db:show:master-credentials"],
+            )
+
     def test_resource_apply_retries_fresh_cloudpanel_readiness_only(self) -> None:
         path = ROOT / "components/resource-tuning/lib/resource_apply.py"
         if not path.is_file():
