@@ -61,7 +61,7 @@ python3 - <<'PYPROOF'
 import json,pathlib,os
 p=pathlib.Path('proof');m=json.loads((p/'identity.json').read_text());live=json.loads((p/'live-browser.json').read_text())
 assert live['status']=='PASS' and len(live['checks'])==6 and all(c['status']=='PASS' for c in live['checks'])
-required=['first_point_no_reload','real_download','real_preflight','real_import','real_restore','real_defaults','source_isolation','picker_cancel','expired_retry','draft_invalidation','summary_refresh','busy_lock','network_failure','revision_conflict','nonce','guest','permission','confirmation','corruption','upload_abuse','empty_refresh','long_picker','true_blocked']
+required=['first_point_no_reload','real_download','native_no_js_export','real_preflight','real_import','real_restore','real_defaults','source_isolation','picker_cancel','expired_retry','failed_write_retry','draft_invalidation','summary_refresh','busy_lock','network_failure','revision_conflict','nonce','guest','permission','confirmation','corruption','upload_abuse','empty_refresh','long_picker','true_blocked']
 assert all(live[k]=='PASS' for k in required)
 data=json.loads((p/'recovery-data.json').read_text());assert data['status']=='PASS' and isinstance(data['checks'],dict) and len(data['checks'])>=40 and all(v=='PASS' for v in data['checks'].values())
 m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',recovery_viewports=6,recovery_functional_checks=required,recovery_data_check_count=len(data['checks']),recovery_data='PASS',recovery_controls='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
