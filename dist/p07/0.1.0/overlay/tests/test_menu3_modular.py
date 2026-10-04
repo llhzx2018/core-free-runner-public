@@ -191,16 +191,40 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
 
 
-    def test_initialization_repairs_known_cloudpanel_608_shebang(self) -> None:
+    def test_resource_apply_can_use_cloudpanel_stored_master_password_fallback(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        spec = importlib.util.spec_from_file_location("resource_apply_release55", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        empty = subprocess.CompletedProcess(["clpctl"], 0, stdout="", stderr="")
+        with mock.patch.object(
+            mod,
+            "_clpctl_commands",
+            side_effect=lambda action: [[action]],
+        ), mock.patch.object(
+            mod,
+            "_run_clp_probe",
+            side_effect=[empty, empty],
+        ), mock.patch.object(
+            mod,
+            "_cloudpanel_stored_master_password",
+            return_value="stored-secret",
+        ):
+            self.assertEqual(
+                mod._try_clp_credentials(),
+                ("root", "stored-secret", "127.0.0.1", 3306),
+            )
+
+    def test_initialization_does_not_rewrite_cloudpanel_vendor_cli(self) -> None:
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
-        self.assertIn("repair_cloudpanel_cli_shebang_for_init()", init)
-        self.assertIn("[[ \"$first_line\" == '#/bin/bash' ]] || return 0", init)
-        self.assertIn("b\"#!/bin/bash\"", init)
-        self.assertIn("cp -a -- \"$clpctl_path\" \"$backup_path\"", init)
-        self.assertIn("bash -n \"$tmp\"", init)
-        self.assertIn("mv -f -- \"$tmp\" \"$clpctl_path\"", init)
-        self.assertIn("CloudPanel CLI 已修复官方 6.0.8 启动行错误", init)
-        self.assertNotIn("P07_FRESH_INIT_EMPTY_SERVER", init)
+        self.assertNotIn("repair_cloudpanel_cli_shebang_for_init()", init)
+        self.assertNotIn("vendor-backups", init)
+        self.assertNotIn("mv -f -- \"$tmp\" \"$clpctl_path\"", init)
         self.assertNotIn("systemctl restart mysql", init)
 
     def test_resource_apply_accepts_structured_credentials_from_nonzero_wrapper(self) -> None:
@@ -321,9 +345,8 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("resource-apply.sh", init)
         self.assertIn("apply-confirmed-json", init)
         self.assertIn("P07_RESOURCE_APPLY_CONFIRMED=1", init)
-        self.assertIn("repair_cloudpanel_cli_shebang_for_init()", init)
-        self.assertIn("[[ \"$first_line\" == '#/bin/bash' ]] || return 0", init)
-        self.assertIn("CloudPanel CLI 已修复官方 6.0.8 启动行错误", init)
+        self.assertNotIn("repair_cloudpanel_cli_shebang_for_init()", init)
+        self.assertNotIn("vendor-backups", init)
         self.assertNotIn("P07_FRESH_INIT_EMPTY_SERVER", init)
         self.assertNotIn("systemctl restart mysql", init)
         self.assertIn("plan-json --mode balanced", init)
