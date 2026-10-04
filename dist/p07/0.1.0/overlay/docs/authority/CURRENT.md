@@ -3305,3 +3305,177 @@ SOURCE delete                        NO
 
 This supersedes the release26 ordinary-confirmation wording that required Chinese action words. The backend safety checks remain unchanged; only the ordinary interaction and information architecture were simplified.
 
+## release29 · Beginner Menu / Naming Closure
+
+release29 closes the ordinary-user information architecture for first-level menus 3 / 4 / 5.
+
+User-facing product name:
+
+```text
+服务器工具箱
+```
+
+Internal engineering identifiers such as `P07`, repository names, Build IDs and machine confirmation tokens remain internal and must not be used as ordinary menu/page names.
+
+Frozen first-level ordinary menu:
+
+```text
+1. 网络代理节点
+2. 服务器性能检测
+3. 网站与数据
+4. 服务器维护与安全
+5. 初始化服务器
+0. 退出
+```
+
+Menu 3 is frozen as:
+
+```text
+网站与数据
+
+1. 网站与数据概况
+2. 备份与恢复
+3. 服务器迁移
+4. 网站管理
+5. 网站面板（CloudPanel）
+0. 返回
+```
+
+Website Management no longer exposes a flat list of technical actions. After selecting an existing site it uses grouped actions:
+
+```text
+1. 网站概览
+2. 网站健康检查
+3. 数据库
+4. 网站证书（HTTPS）
+5. 权限与缓存
+98. 更换网站
+0. 返回
+```
+
+Creating a website belongs to Website Management. Website Panel keeps only panel-level settings:
+
+```text
+1. 登录安全
+2. 面板用户
+3. 面板状态检查
+0. 返回
+```
+
+Migration naming and routing are frozen as:
+
+```text
+1. 迁入整台旧服务器
+2. 迁入一个网站
+3. 继续未完成迁移
+4. 旧服务器网站开关
+0. 返回
+```
+
+Migration dependencies are lazy: entering the migration menu does not prepare SSH / rsync. Those components are prepared only after selecting a migration action. The old-server website switch operates the current machine directly and does not trigger migration dependency setup.
+
+Menu 4 is frozen as:
+
+```text
+服务器维护与安全
+
+1. 服务器健康检查
+2. 日常维护
+3. 安全检查
+4. 工具检查 / 修复
+5. 最近操作
+0. 返回
+```
+
+WordPress-specific security is explicitly named `WordPress 网站安全`.
+
+Menu 5 is frozen as:
+
+```text
+初始化服务器
+
+1. 应用基础设置（时区 / Swap）
+2. 检查 / 安装 CloudPanel
+0. 返回
+```
+
+`重新检查` and `查看初始化完成条件` are removed as redundant ordinary actions.
+
+Ordinary confirmation input is standardized to `[y/N]`. Machine confirmation tokens remain backend-only.
+
+Exact release evidence:
+
+```text
+Source Build                         0.1.0-release29
+Source PR                            #123
+Source candidate CI                  36988875935 PASS
+Source main                          ce51e3effe51df3627bd0cc5149b34af1eae3cfd
+Source main CI                       36993188227 PASS
+
+Public Distribution PR              #1731
+Public main                          717fd9e84cbb3bbb947f7f485942af4ce8ff60b5
+Release29 Distribution Gate          37000577393 PASS
+Toolbox Smoke                        37000577542 PASS
+Beginner Menu Gate                   37000577592 PASS
+Stable Installer Smoke               37000577524 PASS
+Public Runner Trigger Scope          37000577467 PASS
+Workflow Archive Integrity           37000577403 PASS
+
+Public main Toolbox Smoke             37000742894 PASS
+Public main Stable Installer Smoke    37000742917 PASS
+Public main Current Self Test         37000742928 PASS
+
+Runtime manifest blob                ca410a2be01fb9a93bde54085187027560f8cffb
+Final installer blob                 23c9e50d6fe4106047307ed4701665833002af36
+Stable installer blob                48cfffb2d9ba8ee98f2acc1fa11f02d72c4227d5
+System Care                          0.1.0-rc20
+```
+
+Production / Owner acceptance remains independent:
+
+```text
+release29 Public Distribution        PASS
+release29 Production install         NOT_YET_OWNER_VERIFIED
+release29 Owner real use             PENDING
+DNS write                            NO
+SOURCE delete                        NO
+```
+
+Menu 3 / 4 / 5 IA is now frozen. Future changes should be limited to real functional defects, missing capabilities with clear ownership, or evidence-backed usability issues; do not reopen broad menu redesign by default.
+
+
+
+## release49 · New-server initialization submenu simplification
+
+OWNER 在 release48 Vultr 真机完成「一键初始化服务器」Owner Product PASS 后，确认初始化子菜单不应继续保留被完整流程覆盖的重复入口。
+
+普通界面收敛为：
+
+```text
+初始化服务器
+
+1. 一键初始化服务器（推荐）
+0. 返回
+```
+
+删除普通入口：
+
+```text
+2. 基础设置（时区 / Swap）
+3. CloudPanel 状态 / 安装
+```
+
+功能并未删除：时区、Swap、CloudPanel 检查 / 安装继续由「一键初始化服务器」内部按既有安全规则执行；已正确项目自动保持 / 跳过，健康 CloudPanel 不重复安装。
+
+本次仅做可逆 UI / IA 简化，不改变：
+
+```text
+resource tuning single-source implementation
+CloudPanel bootstrap safety preflight
+DNS write = NO
+SOURCE delete = NO
+Production migration = NO
+automatic website Nginx stop/restart = NO
+```
+
+Source Build：`0.1.0-release49`。
