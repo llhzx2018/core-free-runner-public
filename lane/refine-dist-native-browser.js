@@ -82,10 +82,10 @@ async function metrics(page){
   if(filtered.length<1||filtered.some(t=>!t.includes('Refine Fixture 03')))failures.push({case:'refine-search-filter',filtered});
 
   await page.goto(BASE+'/wp-admin/admin.php?page=vf-toolsite-seo-keywords&tab=planner&workspace=refine',{waitUntil:'networkidle'});
-  const first=page.locator('.vf-o7-task-list>a').first();
-  if(await first.count()!==1)failures.push({case:'refine-no-task'});
+  const enterCurrent=page.locator('.vf-o7-focus-task a.button[href*="post_id="]').first();
+  if(await enterCurrent.count()!==1)failures.push({case:'refine-no-current-entry'});
   else{
-    await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),first.click()]);
+    await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),enterCurrent.click()]);
     const detail=await page.evaluate(()=>({
       detail:!!document.querySelector('[data-vf-refine-page]'),
       steps:document.querySelectorAll('.vf-refine-steps>a').length,
@@ -101,9 +101,9 @@ async function metrics(page){
       const titleInput=page.locator('input[name="vf_ops_refinement_proposal[rank_math_title]"]');
       if(await titleInput.count()!==1)failures.push({case:'refine-title-input-missing'});
       else{
-        await titleInput.fill('Synthetic SEO Title 1033');
+        await titleInput.fill('Synthetic SEO Title 1034');
         const preview=(await page.locator('[data-vf-serp-title]').innerText()).trim();
-        if(preview!=='Synthetic SEO Title 1033')failures.push({case:'refine-serp-preview',preview});
+        if(preview!=='Synthetic SEO Title 1034')failures.push({case:'refine-serp-preview',preview});
       }
     }
   }
