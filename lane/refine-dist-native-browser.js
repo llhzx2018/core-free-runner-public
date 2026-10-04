@@ -108,9 +108,9 @@ async function metrics(page){
           const coreProtected=await page.evaluate(()=>document.body.innerText.includes('核心保护')||document.body.innerText.includes('核心页面'));
           if(!coreProtected)failures.push({case:'refine-disabled-without-core-protection'});
         }else{
-          await titleInput.fill('Synthetic SEO Title 1034');
+          await titleInput.fill('Synthetic SEO Title 1035');
           const preview=(await page.locator('[data-vf-serp-title]').innerText()).trim();
-          if(preview!=='Synthetic SEO Title 1034')failures.push({case:'refine-serp-preview',preview});
+          if(preview!=='Synthetic SEO Title 1035')failures.push({case:'refine-serp-preview',preview});
         }
       }
     }
