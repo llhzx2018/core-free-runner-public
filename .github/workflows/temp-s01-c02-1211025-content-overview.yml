@@ -1,0 +1,151 @@
+name: S01-C02 V1.21.1025 Content Overview Candidate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      TARGET_SHA: adad5d0e7f68a3bcec76f48ec2d2814f120bbae0
+      BASE_SHA: 00f40242ecf40f61a89a7040cc6a0e3c83c1a09f
+      TARGET_VERSION: 1.21.1025
+      ARTIFACT_NAME: vf-tools-ops_V1.21.1025.zip
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: baseline
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Source contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -F "Version: $TARGET_VERSION" target/vf-ops.php >/dev/null
+          grep -F "S01-V10-CONTENT-OVERVIEW-FUNCTIONAL-REVALIDATION" target/vf-ops.php >/dev/null
+          php target/tests/s01-c02-1211025-content-freshness-unit.php
+          php target/tests/s01-c02-1211025-content-overview-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          git -C target diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          ! grep -Eq '^includes/v6/(schema|repository|platform-backup-executor|recovery-service)\.php$' evidence/changed-files.txt
+          ! grep -Eq '^assets/css/current/admin-s01-(product-shell|v6-shell)|^includes/s01/admin-shell-domain-contract\.php$' evidence/changed-files.txt
+          echo SOURCE_CONTRACTS=PASS
+
+      - name: PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run --rm -v "$PWD/target:/src:ro" -w /src php:8.3-cli sh -lc 'find . -path "./.git" -prune -o -name "*.php" -print0 | xargs -0 -n1 php -l >/dev/null'
+          echo PHP_SYNTAX=PASS
+
+      - name: Browser dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vf-node && cd /tmp/vf-node
+          npm init -y >/dev/null 2>&1
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Content Overview browser proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/target"
+          export NODE_PATH=/tmp/vf-node/node_modules
+          node tests/s01-c02-1211025-content-overview-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/browser.json"
+          jq -e '.pass==true and (.failures|length)==0 and .owner_product_pass==false' "$GITHUB_WORKSPACE/evidence/browser.json" >/dev/null
+          node tests/s01-c02-1211008-global-workspace-centering-browser-proof.js | tee "$GITHUB_WORKSPACE/evidence/center.json"
+          jq -e '.pass==true and ([.checks[].failures[]]|length)==0' "$GITHUB_WORKSPACE/evidence/center.json" >/dev/null
+          echo CONTENT_OVERVIEW_BROWSER=PASS
+
+      - name: Build deterministic package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,re,zipfile,json
+          from pathlib import Path
+          def keep(rel):
+              p=rel.as_posix();parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          def build(root,ver):
+              root=Path(root);out=Path(f'/tmp/vf-tools-ops_V{ver}.zip');fs={}
+              for p in root.rglob('*'):
+                  if p.is_file() and not p.is_symlink():
+                      rel=p.relative_to(root)
+                      if keep(rel):fs[rel.as_posix()]=p.read_bytes()
+              fs=dict(sorted(fs.items()))
+              with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for rel,data in fs.items():
+                      info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,4,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+              h=hashlib.sha256()
+              for rel,data in fs.items():
+                  h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+              return {'version':ver,'files':len(fs),'bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_fingerprint':h.hexdigest()}
+          rows={'baseline':build('baseline','1.21.1024'),'candidate':build('target','1.21.1025')}
+          Path('evidence/package.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print(json.dumps(rows,indent=2))
+          PY
+          unzip -tq "/tmp/$ARTIFACT_NAME" >/dev/null
+          echo PACKAGE_BUILD=PASS
+
+      - name: Final evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE"
+          jq -n --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION" \
+            --argjson browser "$(cat evidence/browser.json)" \
+            --argjson center "$(cat evidence/center.json)" \
+            --argjson package "$(cat evidence/package.json)" '{
+              status:"PASS",
+              candidate_sha:$sha,
+              candidate_version:$ver,
+              functional_freshness:"PASS",
+              browser:{result:($browser.pass|if . then "PASS" else "FAIL" end),owner_product_pass:false},
+              workspace_center:{result:($center.pass|if . then "PASS" else "FAIL" end)},
+              ordinary_get_write:"NONE",
+              shell_header_menu:"FROZEN",
+              package:$package,
+              formal_release:"NOT_EXECUTED",
+              production:"NOT_EXECUTED"
+            }' | tee evidence/FINAL_EVIDENCE.json
+          echo S01_C02_V1211025_MACHINE_PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-v1.21.1025-content-overview
+          path: evidence/
+          retention-days: 30
