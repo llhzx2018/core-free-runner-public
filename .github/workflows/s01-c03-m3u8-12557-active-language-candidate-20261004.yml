@@ -1,0 +1,130 @@
+name: S01-C03 M3U8 1.25.57 Active-Language Readiness Candidate
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/s01-c03-m3u8-12557-active-language-candidate-20261004.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.head_ref == 'task/s01-c03-m3u8-12557-active-language-candidate-20261004'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-m3u8
+      TARGET_SHA: 5d9bc1f5f3f8e2384ed72be8233346b442b0f0e6
+      BASE_SHA: 0b883f45135ec55cbdda316c86de7cbd851d4718
+      OPS_REPO: llhzx2018/vf-tools-ops
+      OPS_SHA: 00f40242ecf40f61a89a7040cc6a0e3c83c1a09f
+      VERSION: 1.25.57
+      ASSET: vf-tools-m3u8_V1.25.57.zip
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - name: Checkout exact M3U8 candidate
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: m3u8
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout exact Ops consumer
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.OPS_REPO }}
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: ops
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Exact source and readiness contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C m3u8 rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < m3u8/VERSION)" = "$VERSION"
+          grep -Fq 'Version: 1.25.57' m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_VERSION', '1.25.57'" m3u8/src/vf-tool-m3u8.php
+          grep -Fq "VF_TOOL_M3U8_ROUND', 'R279'" m3u8/src/vf-tool-m3u8.php
+
+          php m3u8/tests/unit/first-run-active-language-readiness-contract.php
+          php m3u8/tests/unit/package-physical-locator-contract.php
+          php m3u8/tests/unit/update-refresh-policy-contract.php
+
+          grep -Fq "vf_m3u8_first_run_readiness" ops/includes/s01/tool-workbench.php
+          grep -Fq "'label'=>'正常'" ops/includes/s01/tool-workbench.php
+          grep -Fq "'status'=>'PASS'" ops/includes/s01/tool-workbench.php
+          grep -Fq "14 种语言" m3u8/CHANGELOG.md
+
+          git -C m3u8 diff --name-only "$BASE_SHA..$TARGET_SHA" | tee evidence/changed-files.txt
+          ! grep -Eq '^src/(database|includes/v510-recovery|includes/update)/' evidence/changed-files.txt
+          echo SOURCE_AND_CONSUMER_CONTRACTS=PASS
+
+      - name: PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r -d '' f; do php -l "$f" >/dev/null; done < <(find m3u8/src -type f -name '*.php' -print0 | sort -z)
+          php -l m3u8/tests/unit/first-run-active-language-readiness-contract.php >/dev/null
+          echo PHP_SYNTAX=PASS
+
+      - name: Build deterministic package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf stage1 stage2 dist
+          mkdir -p stage1/vf-tool-m3u8 stage2/vf-tool-m3u8 dist
+          cp -a m3u8/src/. stage1/vf-tool-m3u8/
+          cp -a m3u8/src/. stage2/vf-tool-m3u8/
+          rm -f stage1/vf-tool-m3u8/README.md stage1/vf-tool-m3u8/PACKAGE_PROFILE.json
+          rm -f stage2/vf-tool-m3u8/README.md stage2/vf-tool-m3u8/PACKAGE_PROFILE.json
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('stage1/vf-tool-m3u8')
+          rows=[]
+          for p in sorted((x for x in root.rglob('*') if x.is_file()), key=lambda x:x.relative_to(root).as_posix()):
+              rel=p.relative_to(root).as_posix()
+              rows.append((rel,hashlib.sha256(p.read_bytes()).hexdigest()))
+          canonical=b''.join(rel.encode()+b'\0'+sha.encode()+b'\n' for rel,sha in rows)
+          Path('/tmp/count').write_text(str(len(rows)))
+          Path('/tmp/fp').write_text(hashlib.sha256(canonical).hexdigest())
+          PY
+          (cd stage1 && zip -X -q -r "../dist/$ASSET" vf-tool-m3u8)
+          (cd stage2 && zip -X -q -r "../dist/rebuild-$ASSET" vf-tool-m3u8)
+          cmp "dist/$ASSET" "dist/rebuild-$ASSET"
+          unzip -tq "dist/$ASSET" >/dev/null
+          test "$(unzip -Z1 "dist/$ASSET" | cut -d/ -f1 | sort -u)" = "vf-tool-m3u8"
+          unzip -p "dist/$ASSET" vf-tool-m3u8/vf-tool-m3u8.php | grep -Fq 'Version: 1.25.57'
+          ! unzip -Z1 "dist/$ASSET" | grep -E '(^|/)(\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)'
+          ! unzip -Z1 "dist/$ASSET" | grep -Ei '\.(sql|sqlite|sqlite3|db|log|tar|gz|bak|tmp)$'
+          sha256sum "dist/$ASSET" | awk '{print $1}' > /tmp/sha
+          stat -c '%s' "dist/$ASSET" > /tmp/bytes
+          jq -n \
+            --arg sha "$TARGET_SHA" \
+            --arg version "$VERSION" \
+            --arg asset "$ASSET" \
+            --arg hash "$(cat /tmp/sha)" \
+            --arg fp "$(cat /tmp/fp)" \
+            --argjson bytes "$(cat /tmp/bytes)" \
+            --argjson files "$(cat /tmp/count)" \
+            '{status:"PASS",candidate_sha:$sha,candidate_version:$version,asset:$asset,asset_bytes:$bytes,asset_sha256:$hash,runtime_files:$files,runtime_fingerprint:$fp,active_language_readiness:"PASS",ops_consumer_contract:"PASS",production:"NOT_EXECUTED"}' \
+            | tee evidence/FINAL_EVIDENCE.json
+          echo S01_C03_V12557_MACHINE_PASS
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c03-v1.25.57-active-language-readiness
+          path: evidence/
+          retention-days: 30
