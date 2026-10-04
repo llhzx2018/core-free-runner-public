@@ -42,6 +42,18 @@ class TargetPullContractTests(unittest.TestCase):
             conn.close()
             self.assertTrue(pull.cloudpanel_database_server_ready_local(db))
 
+    def test_cloudpanel_user_count_models_first_admin_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "db.sq3"
+            conn = sqlite3.connect(db)
+            conn.execute('CREATE TABLE "user" (id INTEGER PRIMARY KEY, user_name TEXT)')
+            conn.commit()
+            self.assertEqual(pull.cloudpanel_user_count_local(db), 0)
+            conn.execute('INSERT INTO "user" (id,user_name) VALUES (1, "admin")')
+            conn.commit()
+            conn.close()
+            self.assertEqual(pull.cloudpanel_user_count_local(db), 1)
+
     def test_resume_fails_before_more_writes_when_cloudpanel_database_server_missing(self) -> None:
         state = {"migration_id": "pull-20261005T000000Z-deadbeef", "status": "PREPARE_FAILED"}
         with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
@@ -657,6 +669,11 @@ class TargetPullUiContractTests(unittest.TestCase):
             "3/3 安装后检查通过",
             "CloudPanel 安装不完整：本机数据库服务器主记录缺失。",
             "这台机器不能作为迁移目标继续使用",
+            "CloudPanel 已安装；首次使用必须先创建管理员",
+            "管理员密码只在当前服务器终端隐藏输入；不会发送给 ChatGPT，不写入 P07 日志。",
+            "CloudPanel 首次管理员与本机数据库服务器初始化完成",
+            "read -r -s password",
+            "CLOUDPANEL_ADMIN_REQUIRED",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("ui_menu_warn 2 '基础设置（时区 / Swap）'", text)
