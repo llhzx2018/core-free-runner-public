@@ -3771,3 +3771,43 @@ Identities:
 Source Build       0.1.0-release55
 System Care tuning 0.1.0-rc32
 ```
+
+
+## release56 · CloudPanel 2.5.4 current APP_SECRET path
+
+release55 Owner real-use on the Debian 13 / CloudPanel 2.5.4-3+clp-trixie target proved the stored-credential fallback was correct in principle but read the wrong env location.
+
+Owner no-secret diagnostics established:
+
+```text
+/home/clp/htdocs/app/files/vendor/autoload.php = present
+/home/clp/htdocs/app/data/db.sq3              = present
+PHP SQLite3                                    = present
+Defuse Crypto                                  = present
+/home/clp/htdocs/app/.env                      = absent
+/home/clp/htdocs/app/files/.env                = present
+APP_SECRET location                            = /home/clp/htdocs/app/files/.env
+root MySQL socket login without credential     = unavailable
+```
+
+release56 fixes only the canonical System Care credential resolver:
+
+```text
+official clpctl master-credentials
+→ official clpctl master-password
+→ stored credential fallback
+→ prefer /home/clp/htdocs/app/files/.env
+→ retain /home/clp/htdocs/app/.env only as narrow legacy-layout compatibility
+→ decrypt database_server.password in memory with bundled Defuse Crypto
+→ mandatory local MySQL SELECT 1
+→ normal Apply / Verify / Rollback
+```
+
+No secret is displayed, persisted by P07, or placed in process argv. Initialization still calls the single formal System Care resource-apply implementation. No MySQL restart, website Nginx restart, DNS write, migration, or vendor-file rewrite is added.
+
+Identities:
+
+```text
+Source Build       0.1.0-release56
+System Care tuning 0.1.0-rc33
+```
