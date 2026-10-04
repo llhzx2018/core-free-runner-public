@@ -37,7 +37,9 @@ wp eval 'require_once ABSPATH."wp-admin/includes/plugin.php";if(VF_OPS_VERSION!=
 php "$TASK_ROOT/wp" --path="$WP" server --host=127.0.0.1 --port=18092 > "$TASK_ROOT/wp-server.log" 2>&1 &
 WP_PID=$!
 for i in $(seq 1 30);do if curl -fsS http://127.0.0.1:18092/wp-login.php >/dev/null;then break;fi;sleep 1;done
-node lane/title-native-browser.js
+BROWSER_EXIT=0
+node lane/title-native-browser.js || BROWSER_EXIT=$?
 wp eval '$r=VF_Ops_Update_Recovery_V1::restore_source();if(is_wp_error($r))throw new RuntimeException($r->get_error_code());echo "SOURCE_ROLLBACK=PASS\n";'
 wp eval 'require_once ABSPATH."wp-admin/includes/plugin.php";if(VF_OPS_VERSION!==getenv("BASE_VERSION")||!is_plugin_active("vf-ops/vf-ops.php"))throw new RuntimeException("ROLLBACK_VERSION_ACTIVE");if(is_wp_error(VF_Ops_Runtime_Authority_V1::verify(VF_OPS_VERSION,WP_PLUGIN_DIR."/vf-ops/")))throw new RuntimeException("ROLLBACK_FINGERPRINT");if(get_option("vf_ops_title_fixture")!==["preserve"=>"yes"])throw new RuntimeException("ROLLBACK_STATE");echo "ROLLBACK_POST_READBACK=PASS\n";'
+test "$BROWSER_EXIT" = 0
 echo EXACT_NATIVE_UPGRADE_ROLLBACK=PASS
