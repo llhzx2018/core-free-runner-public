@@ -1,6 +1,6 @@
 <?php
 wp_set_current_user(1);
-vf_theme_bootstrap_require_many(['theme-options-runtime.php','theme-options.php','services/brand-design-service.php','services/navigation-service.php']);
+vf_theme_bootstrap_require_many(['theme-options-runtime.php','theme-options.php','services/brand-design-service.php','services/navigation-service.php','services/navigation-default-menu-service.php']);
 $original=get_theme_mod('nav_menu_locations',[]);
 $id=(int)($original['mobile']??0);if($id<=0){throw new Exception('missing synthetic menu');}
 try {
