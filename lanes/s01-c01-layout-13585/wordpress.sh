@@ -57,6 +57,7 @@ docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data
 cli eval-file /tmp/recovery-data-wordpress-check.php > proof/recovery-data.json
 node lane/live-browser.js
 cli eval 'if(get_option("vf_private_update_credential_v1")!=="runner-private-token"||get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("browser action preservation failed");}' >/dev/null
+cli eval 'vf_theme_bootstrap_require_many(["theme-options-runtime.php","theme-options.php","services/brand-design-service.php","services/navigation-service.php","services/renderer-config-service.php"]);if(hash("sha256",wp_json_encode(theme_navigation_readback()["navigation"]))!==get_option("vf_nav_seed_fingerprint")||hash("sha256",wp_json_encode(vf_tools_theme_renderer_readback()["renderer"]))!==get_option("vf_render_seed_fingerprint")){throw new Exception("layout crossed owner boundary");}' >/dev/null
 curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
 python3 - <<'PYPROOF'

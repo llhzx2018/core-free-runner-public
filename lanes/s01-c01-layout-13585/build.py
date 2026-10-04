@@ -15,7 +15,7 @@ for p in ['src/inc/admin/admin-shell.php','src/inc/admin/admin-s01-uiux-polish.p
 assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.css').read_bytes()).hexdigest()=='7dc6b2bd2126237e7e69d6ce2ef890c4e14362a68591f0a93896638acf5c6a12'
 assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='bb18bdac83c2189bddcdf616563d90ae2f830373834ab016d6411648c2056bfd'
 assert pathlib.Path('target/docs/authority/ACCEPTANCE_MATRIX.md').read_text().startswith(original('docs/authority/ACCEPTANCE_MATRIX.md'))
-assert (root/'assets/css/admin/pages/brand/admin-page-brand-v8.css').read_text().startswith(original('src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css'))
+assert (root/'assets/css/admin/pages/page-structure/admin-page-layout-v8.css').read_text().startswith(original('src/assets/css/admin/pages/page-structure/admin-page-layout-v8.css'))
 for p in ['src/inc/services/brand-design-service.php','src/inc/admin/controllers/layout.php','src/inc/admin/admin-layout-actions.php','src/assets/js/admin/admin-brand.js','src/assets/css/admin/pages/brand/admin-page-brand-v8.css','src/inc/admin/admin-brand-actions.php','src/assets/js/admin/admin-dashboard.js','src/inc/services/admin-workbench-service.php','src/inc/options/options-inheritance.php','src/assets/css/admin/pages/workbench/admin-page-workbench.css']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' owner contract changed'
 asset='vf-tools-theme_V'+version+'.zip'
