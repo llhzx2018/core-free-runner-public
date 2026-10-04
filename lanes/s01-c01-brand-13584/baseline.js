@@ -11,7 +11,7 @@ module.exports=async(page,context,url)=>{
  await other.locator('[data-vf-brand-input="siteName"]').fill('另一窗口正式值');
  let response=other.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().postData()?.includes('vf_theme_brand_save'));
  await other.locator('[data-vf-brand-save]').click();assert((await (await response).json()).success);await other.close();
- const send=async()=>{const r=page.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().postData()?.includes('vf_theme_brand_save'));await page.locator('[data-vf-brand-save]').click();const v=await (await r).json();await page.waitForFunction(()=>!document.querySelector('[data-vf-brand-save]').disabled);return v;};
+ const send=async()=>{const r=page.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().postData()?.includes('vf_theme_brand_save'));await page.locator('[data-vf-brand-save]').click();const v=await (await r).json();await page.waitForFunction(()=>document.querySelector('[data-vf-brand-save]').textContent!=='正在保存…');return v;};
  const conflict=await send();assert(!conflict.success&&conflict.data.failureCode==='REVISION_CONFLICT');
  assert((await send()).success,'baseline retry did not overwrite');result.conflictRetryOverwritesOtherWindow='REPRODUCED';
  await page.reload();await field('siteName').fill('尚未保存候选');
