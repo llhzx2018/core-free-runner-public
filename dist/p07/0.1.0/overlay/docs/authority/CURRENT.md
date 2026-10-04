@@ -3910,3 +3910,67 @@ Identities:
 Source Build       0.1.0-release58
 System Care tuning 0.1.0-rc35
 ```
+
+
+## release59 · migration first-use flow + helper staging root cause
+
+Owner real-use on the freshly initialized Vultr target reached migration authentication successfully:
+
+```text
+old server SSH       READY
+old CloudPanel       DETECTED
+managed migration key READY
+```
+
+but the first migration plan then failed at:
+
+```text
+cannot stage migration helper on old server
+exit_code=13
+```
+
+Live distribution readback found the actual source-side packaging defect: the installed P07 runtime is assembled from the rc2 base plus the current RUNTIME manifest. `VF_PROJECT.json` is not part of that installed runtime, but `stage_source_runtime()` still tried to archive it. The local tar therefore failed before a valid helper archive could be streamed, and the wrapper misleadingly surfaced that as an old-server staging failure.
+
+release59 fixes both observed Owner issues:
+
+```text
+Migration first-use UX:
+old server IP
+→ existing SSH key check
+→ if no access: directly explain one-time root password handoff
+→ system ssh-copy-id password prompt
+→ dedicated migration SSH key
+→ continue plan
+```
+
+There is no intermediate "prepare migration key" submenu.
+
+Helper staging now packages only files guaranteed to exist in the installed runtime:
+
+```text
+bin/
+lib/
+VERSION
+BUILD_ID
+```
+
+`VF_PROJECT.json` is not required by the source-side migration helper and is no longer included.
+A local archive failure is also classified as a current-server runtime packaging problem instead of being falsely reported as an old-server failure.
+
+Security and migration boundaries remain unchanged:
+
+```text
+Owner password read by P07 = NO
+Owner password stored by P07 = NO
+password recipient = system ssh-copy-id only
+DNS automatic change = NO
+old server delete = NO
+existing target overwrite = NO
+real Production migration = NOT_RUN by release
+```
+
+Identity:
+
+```text
+Source Build 0.1.0-release59
+```

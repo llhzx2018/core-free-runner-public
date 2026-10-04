@@ -119,6 +119,54 @@ class TargetPullContractTests(unittest.TestCase):
                 pull.STATE_ROOT = old_root
                 pull.legacy.STATE_ROOT = old_legacy_root
 
+    def test_source_runtime_staging_uses_only_installed_runtime_files(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "managed_identity_file": False,
+            "ssh": "ssh",
+        }
+        captured = {}
+
+        def fake_stream(tar, source_cwd, members, base, remote_command, stage):
+            captured["members"] = list(members)
+            captured["stage"] = stage
+
+        with mock.patch.object(pull.transport, "stream_tar_to_remote", side_effect=fake_stream):
+            runtime = pull.stage_source_runtime(source, "probe-12345678")
+
+        self.assertEqual(
+            captured["members"],
+            ["bin", "lib", "VERSION", "BUILD_ID"],
+        )
+        self.assertNotIn("VF_PROJECT.json", captured["members"])
+        self.assertEqual(captured["stage"], "old-server helper staging")
+        self.assertTrue(runtime.endswith("/probe-12345678/runtime"))
+
+    def test_local_runtime_archive_failure_is_not_misreported_as_old_server_failure(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "managed_identity_file": False,
+            "ssh": "ssh",
+        }
+        with mock.patch.object(
+            pull.transport,
+            "stream_tar_to_remote",
+            side_effect=pull.transport.TransportError("old-server helper staging local archive failed"),
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "current-server migration runtime is incomplete",
+            ):
+                pull.stage_source_runtime(source, "probe-12345678")
+
     def test_wrong_prepare_token_fails_before_any_source_write(self) -> None:
         with self.assertRaises(pull.PullMigrationError):
             pull.prepare_migration(
@@ -669,6 +717,9 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertIn("rsync", text)
         self.assertIn("首次使用服务器迁移", text)
         self.assertIn("按需准备", text)
+        self.assertIn("第一次连接旧服务器，需要输入旧服务器 root 密码一次", text)
+        self.assertIn("密码只交给系统 ssh-copy-id；P07 不读取、不保存。", text)
+        self.assertNotIn("现在为新服务器准备专用迁移密钥", text)
 
 
 if __name__ == "__main__":
