@@ -191,6 +191,33 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
 
 
+    def test_fresh_init_mysql_recovery_is_empty_server_gated(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        spec = importlib.util.spec_from_file_location("resource_apply_release53", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        completed = subprocess.CompletedProcess(["systemctl"], 0, stdout="active\n", stderr="")
+        with mock.patch.dict(mod.os.environ, {}, clear=False), \
+             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/systemctl"), \
+             mock.patch.object(mod, "_run", return_value=completed) as run:
+            self.assertFalse(mod._restart_mysql_for_fresh_init_recovery("MYSQL_MASTER_CREDENTIAL_PARSE_FAILED"))
+            run.assert_not_called()
+
+        mod._FRESH_INIT_DB_RECOVERY_ATTEMPTED = False
+        mod._FRESH_INIT_DB_RECOVERY_PERFORMED = False
+        with mock.patch.dict(mod.os.environ, {mod.FRESH_INIT_EMPTY_SERVER_ENV: "1"}, clear=False), \
+             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/systemctl"), \
+             mock.patch.object(mod, "_run", return_value=completed) as run, \
+             mock.patch.object(mod.time, "sleep"):
+            self.assertTrue(mod._restart_mysql_for_fresh_init_recovery("MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT"))
+            self.assertTrue(mod._FRESH_INIT_DB_RECOVERY_PERFORMED)
+            self.assertEqual(run.call_args_list[0].args[0], ["/usr/bin/systemctl", "restart", "mysql"])
+
     def test_resource_apply_accepts_structured_credentials_from_nonzero_wrapper(self) -> None:
         path = ROOT / "components/resource-tuning/lib/resource_apply.py"
         if not path.is_file():
@@ -309,6 +336,11 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("resource-apply.sh", init)
         self.assertIn("apply-confirmed-json", init)
         self.assertIn("P07_RESOURCE_APPLY_CONFIRMED=1", init)
+        self.assertIn("fresh_init_empty_cloudpanel()", init)
+        self.assertIn('P07_FRESH_INIT_EMPTY_SERVER="$empty_flag"', init)
+        self.assertIn('SELECT COUNT(*) FROM "site"', init)
+        self.assertIn('SELECT COUNT(*) FROM "database"', init)
+        self.assertIn("MySQL 首次初始化恢复", init)
         self.assertIn("plan-json --mode balanced", init)
         self.assertNotIn("lib/resource_profile.py", init)
         self.assertNotIn("lib/resource_apply.py", init)
