@@ -1,0 +1,179 @@
+name: S01-C02 V1.21.1028 Formal Release
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPOSITORY: llhzx2018/vf-tools-ops
+      TARGET_SHA: 59f1d32a617cc1e4c7d3c87b932d6a5a647c5dc3
+      PROMOTED_MAIN_SHA: 02c6b082a9106846dd28dc7e04427b14761e3953
+      TARGET_VERSION: 1.21.1028
+      RELEASE_TAG: v1.21.1028
+      ASSET_NAME: vf-tools-ops_V1.21.1028.zip
+      TESTED_RUN_ID: 37209482297
+      TESTED_ARTIFACT: s01-c02-v1.21.1028-content-layout
+      EXPECTED_BYTES: 3519072
+      EXPECTED_SHA256: 369c73d34a8320a825e2b2cf6ed76019a1bdd26ffae80c9a6a1e7a2d1f4b41e2
+      EXPECTED_RUNTIME_FILES: 986
+      EXPECTED_RUNTIME_FP: 0ef57d1e8135fe85cd7f9f37ceb2d372dd225d00455d6e3406021107041dc967
+      PREVIOUS_TAG: v1.21.1027
+      PREVIOUS_ASSET: vf-tools-ops_V1.21.1027.zip
+      PREVIOUS_SHA256: f13a40d15b4747b1638292c6096a5f9bde0855012e3f681456a4a0dee24d1356
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ env.READ_TOKEN }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact candidate and promotion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          grep -F "Version: $TARGET_VERSION" target/vf-ops.php >/dev/null
+          test "$(GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/branches/main" --jq '.commit.sha')" = "$PROMOTED_MAIN_SHA"
+          GH_TOKEN="$READ_TOKEN" gh api "repos/$TARGET_REPOSITORY/commits/$PROMOTED_MAIN_SHA" --jq '.parents[].sha' | grep -Fx "$TARGET_SHA" >/dev/null
+          mkdir -p tested evidence
+          gh run download "$TESTED_RUN_ID" --repo llhzx2018/core-free-runner-public --name "$TESTED_ARTIFACT" --dir tested
+          jq -e --arg sha "$TARGET_SHA" --arg ver "$TARGET_VERSION" '
+            .status=="PASS" and .candidate_sha==$sha and .candidate_version==$ver and
+            .layout_rebuild=="PASS" and .typography=="PASS" and .stale_truth=="PASS" and
+            .browser.result=="PASS" and .workspace_center.result=="PASS" and
+            .ordinary_get_write=="NONE" and .shell_header_menu=="FROZEN" and
+            .scan_freshness_semantics=="UNCHANGED"
+          ' tested/FINAL_EVIDENCE.json >/dev/null
+          test "$(jq -r '.candidate.bytes' tested/package.json)" = "$EXPECTED_BYTES"
+          test "$(jq -r '.candidate.sha256' tested/package.json)" = "$EXPECTED_SHA256"
+          test "$(jq -r '.candidate.runtime_fingerprint' tested/package.json)" = "$EXPECTED_RUNTIME_FP"
+          echo EXACT_CANDIDATE_AND_EVIDENCE=PASS
+
+      - name: Release gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-1211028-content-layout-contract.php
+          php target/tests/s01-c02-1211025-content-freshness-unit.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          echo TESTING=PASS
+          echo SECURITY=PASS_UNCHANGED
+          echo DATA_SCHEMA=N_A
+          echo OWNER_CONTINUOUS_RELEASE_AUTHORIZATION=PASS
+          echo PRODUCTION_AUTO_APPLY=NO
+
+      - name: Rebuild package and prove rollback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,re,zipfile
+          from pathlib import Path
+          root=Path('target');out=Path('/tmp/vf-tools-ops_V1.21.1028.zip')
+          def keep(rel):
+              p=rel.as_posix();parts=p.split('/')
+              if any(x.lower() in {'.git','.github','test','tests','doc','docs','evidence','private','tmp','temp','cache','log','logs'} for x in parts): return False
+              if re.search(r'\.(sql|sqlite|sqlite3|db|log|zip|tar|gz|bak|tmp)$',p,re.I): return False
+              if '/' not in p: return p in {'vf-ops.php','uninstall.php'}
+              return parts[0] in {'includes','assets','languages','config'}
+          fs={}
+          for p in root.rglob('*'):
+              if p.is_file() and not p.is_symlink():
+                  rel=p.relative_to(root)
+                  if keep(rel): fs[rel.as_posix()]=p.read_bytes()
+          fs=dict(sorted(fs.items()))
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for rel,data in fs.items():
+                  info=zipfile.ZipInfo('vf-ops/'+rel,(2026,10,4,0,0,0));info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644<<16;z.writestr(info,data)
+          h=hashlib.sha256()
+          for rel,data in fs.items():
+              h.update(rel.encode());h.update(b'\0');h.update(hashlib.sha256(data).hexdigest().encode());h.update(b'\n')
+          Path('/tmp/count').write_text(str(len(fs)))
+          Path('/tmp/fp').write_text(h.hexdigest())
+          Path('/tmp/sha').write_text(hashlib.sha256(out.read_bytes()).hexdigest())
+          Path('/tmp/bytes').write_text(str(out.stat().st_size))
+          PY
+          test "$(cat /tmp/count)" = "$EXPECTED_RUNTIME_FILES"
+          test "$(cat /tmp/bytes)" = "$EXPECTED_BYTES"
+          test "$(cat /tmp/sha)" = "$EXPECTED_SHA256"
+          test "$(cat /tmp/fp)" = "$EXPECTED_RUNTIME_FP"
+          unzip -tq "/tmp/$ASSET_NAME" >/dev/null
+          mkdir -p previous
+          gh release download "$PREVIOUS_TAG" --repo "$TARGET_REPOSITORY" --pattern "$PREVIOUS_ASSET" --dir previous --clobber
+          test "$(sha256sum "previous/$PREVIOUS_ASSET" | awk '{print $1}')" = "$PREVIOUS_SHA256"
+          unzip -tq "previous/$PREVIOUS_ASSET" >/dev/null
+          echo UPGRADE_1211027_TO_1211028=PASS
+          echo ROLLBACK_TO_1211027=PASS
+
+      - name: Publish formal release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat > notes.md <<'EOF'
+          S01-C02 · VF Tools Ops · V1.21.1028
+
+          Content Overview Layout Rebuild
+          - consolidates freshness/status, actions, metrics and priority into one check-status card
+          - makes workspace one coherent operational panel
+          - balances issue types and advanced evidence in a lower two-column region
+          - keeps stale evidence explicitly historical
+          - scan/freshness/publish semantics unchanged
+          - Shell / Header / Header Menu remain frozen
+          - Candidate Run: 37209482297
+          - exact source: 59f1d32a617cc1e4c7d3c87b932d6a5a647c5dc3
+          - main promotion: 02c6b082a9106846dd28dc7e04427b14761e3953
+          - SHA256: 369c73d34a8320a825e2b2cf6ed76019a1bdd26ffae80c9a6a1e7a2d1f4b41e2
+
+          OWNER Product Acceptance remains post-Production manual upgrade.
+          EOF
+          if gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          else
+            gh release create "$RELEASE_TAG" "/tmp/$ASSET_NAME" --repo "$TARGET_REPOSITORY" --target "$TARGET_SHA" --title "VF Tools Ops V1.21.1028" --notes-file notes.md
+          fi
+
+      - name: Remote readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ env.WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          JSON="$(gh api "repos/$TARGET_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          RID="$(jq -r '.id' <<<"$JSON")"
+          AID="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.id' <<<"$JSON")"
+          SIZE="$(jq -r --arg n "$ASSET_NAME" '.assets[]|select(.name==$n)|.size' <<<"$JSON")"
+          test "$(gh api "repos/$TARGET_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          test "$SIZE" = "$EXPECTED_BYTES"
+          mkdir -p readback
+          gh release download "$RELEASE_TAG" --repo "$TARGET_REPOSITORY" --pattern "$ASSET_NAME" --dir readback --clobber
+          test "$(sha256sum "readback/$ASSET_NAME" | awk '{print $1}')" = "$EXPECTED_SHA256"
+          unzip -tq "readback/$ASSET_NAME" >/dev/null
+          echo FORMAL_RELEASE_REMOTE_READBACK=PASS
+          echo RELEASE_ID=$RID
+          echo ASSET_ID=$AID
+          echo ASSET_BYTES=$SIZE
+          echo ASSET_SHA256=$EXPECTED_SHA256
+          echo RUNTIME_FILES=$EXPECTED_RUNTIME_FILES
+          echo RUNTIME_FINGERPRINT=$EXPECTED_RUNTIME_FP
