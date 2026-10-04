@@ -3524,3 +3524,45 @@ SOURCE delete = NO
 Production migration = NO
 automatic website Nginx stop/restart = NO
 ```
+
+
+## release51 · CloudPanel CLI wrapper execution compatibility
+
+release50 Owner real-use disproved the pure-readiness hypothesis: bounded retry still ended in
+`MYSQL_MASTER_CREDENTIAL_PARSE_FAILED`.
+
+CloudPanel official documentation keeps `clpctl db:show:master-credentials` as the root command.
+CloudPanel's own issue tracker documents CLI 6.0.8 installations where `/usr/bin/clpctl` begins
+with malformed `#/bin/bash`; interactive Bash can execute it, but programmatic / nested-shell
+execution can fail.
+
+release51 fixes only the canonical System Care credential invocation layer:
+
+```text
+resolve clpctl path
+→ inspect first line
+→ if it is a Bash wrapper:
+     exec bash /usr/bin/clpctl <official command>
+→ otherwise:
+     exec clpctl <official command>
+→ existing parser / secret handling / retry / Apply / Verify / Rollback unchanged
+```
+
+The tool does not edit `/usr/bin/clpctl`, does not reveal or persist the database password, and
+does not reintroduce the removed legacy `db:show:credentials` path.
+
+Identities:
+
+```text
+Source Build       0.1.0-release51
+System Care tuning 0.1.0-rc28
+```
+
+Safety boundaries remain unchanged:
+
+```text
+DNS write = NO
+SOURCE delete = NO
+Production migration = NO
+automatic website Nginx stop/restart = NO
+```
