@@ -85,7 +85,9 @@ async function metrics(page){
   const enterCurrent=page.locator('.vf-o7-focus-task a.button[href*="post_id="]').first();
   if(await enterCurrent.count()!==1)failures.push({case:'refine-no-current-entry'});
   else{
-    await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),enterCurrent.click()]);
+    const detailHref=await enterCurrent.getAttribute('href');
+    if(!detailHref)failures.push({case:'refine-current-entry-missing-href'});
+    else await page.goto(detailHref,{waitUntil:'networkidle'});
     const detail=await page.evaluate(()=>({
       detail:!!document.querySelector('[data-vf-refine-page]'),
       steps:document.querySelectorAll('.vf-refine-steps>a').length,
