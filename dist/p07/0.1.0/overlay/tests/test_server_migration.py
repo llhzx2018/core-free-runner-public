@@ -314,6 +314,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
         self.assertIn(("ubuntu", "24.04"), engine.SUPPORTED_BOOTSTRAP_OS)
         self.assertEqual(engine.detect_cloud_hint("DigitalOcean Droplet"), "do")
         self.assertEqual(engine.detect_cloud_hint("Amazon EC2"), "aws")
+        self.assertEqual(engine.detect_cloud_hint("Vultr Cloud Compute"), "vultr")
         self.assertEqual(engine.detect_cloud_hint("unknown vendor"), "")
 
     def test_bootstrap_preflight_accepts_supported_two_gb_class_empty_target(self) -> None:

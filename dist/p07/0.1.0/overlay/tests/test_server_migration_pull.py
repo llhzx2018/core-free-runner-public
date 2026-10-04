@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 import tempfile
@@ -21,6 +22,35 @@ spec.loader.exec_module(pull)
 
 
 class TargetPullContractTests(unittest.TestCase):
+    def test_cloudpanel_database_server_readiness_requires_active_default_record(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "db.sq3"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE database_server ("
+                "id INTEGER PRIMARY KEY, is_active INTEGER, is_default INTEGER, "
+                "host TEXT, user_name TEXT, password TEXT)"
+            )
+            conn.commit()
+            self.assertFalse(pull.cloudpanel_database_server_ready_local(db))
+            conn.execute(
+                "INSERT INTO database_server "
+                "(id,is_active,is_default,host,user_name,password) "
+                "VALUES (1,1,1,'127.0.0.1','root','encrypted')"
+            )
+            conn.commit()
+            conn.close()
+            self.assertTrue(pull.cloudpanel_database_server_ready_local(db))
+
+    def test_resume_fails_before_more_writes_when_cloudpanel_database_server_missing(self) -> None:
+        state = {"migration_id": "pull-20261005T000000Z-deadbeef", "status": "PREPARE_FAILED"}
+        with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
+            pull, "cloudpanel_database_server_ready_local", return_value=False
+        ), mock.patch.object(pull, "save_state") as save:
+            with self.assertRaisesRegex(pull.PullMigrationError, "database server metadata is missing"):
+                pull.resume_prepare_migration(state["migration_id"])
+        save.assert_not_called()
+
     def test_plan_is_current_server_receiver_and_old_server_is_source(self) -> None:
         source = {
             "host": "192.0.2.10",
@@ -465,6 +495,8 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
             pull.shutil, "which", return_value=None
         ), mock.patch.object(
             pull.Path, "exists", return_value=False
+        ), mock.patch.object(
+            pull, "local_cloud_hint", return_value="generic"
         ):
             result = pull.local_bootstrap_preflight()
 
@@ -474,6 +506,17 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
             "MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE",
             result["hardware_advisories"],
         )
+
+    def test_local_provider_detection_maps_vultr(self) -> None:
+        def read_text(path: Path, *args, **kwargs) -> str:
+            if str(path).endswith("/sys_vendor"):
+                return "Vultr"
+            if str(path).endswith("/product_name"):
+                return "Cloud Compute"
+            raise OSError("unexpected")
+
+        with mock.patch.object(pull.Path, "read_text", autospec=True, side_effect=read_text):
+            self.assertEqual(pull.local_cloud_hint(), "vultr")
 
     def test_unsupported_architecture_still_fails_closed(self) -> None:
         with mock.patch.object(
@@ -570,6 +613,8 @@ class BootstrapHardwareSizingContractTests(unittest.TestCase):
             pull.shutil, "which", return_value=None
         ), mock.patch.object(
             pull.Path, "exists", autospec=True, side_effect=exists
+        ), mock.patch.object(
+            pull, "local_cloud_hint", return_value="generic"
         ):
             result = pull.local_bootstrap_preflight()
 
@@ -610,6 +655,8 @@ class TargetPullUiContractTests(unittest.TestCase):
             "1/3 安装前安全检查已通过",
             "2/3 [%s] 正在安装 CloudPanel · 已耗时 %s",
             "3/3 安装后检查通过",
+            "CloudPanel 安装不完整：本机数据库服务器主记录缺失。",
+            "这台机器不能作为迁移目标继续使用",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("ui_menu_warn 2 '基础设置（时区 / Swap）'", text)

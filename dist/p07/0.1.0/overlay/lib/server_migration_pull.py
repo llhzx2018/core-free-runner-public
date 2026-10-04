@@ -332,6 +332,36 @@ def cloudpanel_ready_local() -> bool:
     )
 
 
+def cloudpanel_database_server_ready_local(
+    db: Path = Path("/home/clp/htdocs/app/data/db.sq3"),
+) -> bool:
+    if not db.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END), "
+                "MIN(length(trim(host))), MIN(length(trim(user_name))), "
+                "MIN(length(password)) FROM database_server"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return False
+    if not row:
+        return False
+    count, active, host_len, user_len, password_len = row
+    return bool(
+        int(count or 0) > 0
+        and int(active or 0) > 0
+        and int(host_len or 0) > 0
+        and int(user_len or 0) > 0
+        and int(password_len or 0) > 0
+    )
+
+
 def target_identity() -> str:
     try:
         manifest = inventory.build_manifest(Path("/"))
@@ -347,6 +377,8 @@ def target_identity() -> str:
 def target_preflight_local(source_plan: dict[str, Any]) -> dict[str, Any]:
     if not cloudpanel_ready_local():
         raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_MISSING")
+    if not cloudpanel_database_server_ready_local():
+        raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_DATABASE_SERVER_INCOMPLETE")
     required = ("clpctl", "rsync", "python3", "curl", "systemctl", "crontab", "runuser")
     missing = [name for name in required if shutil.which(name) is None]
     if missing:
@@ -399,6 +431,19 @@ def target_preflight_local(source_plan: dict[str, Any]) -> dict[str, Any]:
         "required_bytes": required_bytes,
         "writes_performed": False,
     }
+
+
+def local_cloud_hint() -> str:
+    text = ""
+    for path in (
+        Path("/sys/class/dmi/id/sys_vendor"),
+        Path("/sys/class/dmi/id/product_name"),
+    ):
+        try:
+            text += "\n" + path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            pass
+    return legacy.detect_cloud_hint(text)
 
 
 def local_bootstrap_preflight() -> dict[str, Any]:
@@ -468,10 +513,13 @@ def local_bootstrap_preflight() -> dict[str, Any]:
                 local = line.split()[3] if len(line.split()) > 3 else ""
                 if local.endswith(":80") or local.endswith(":443"):
                     raise PullMigrationError("current server already has Web listeners")
+    cloud_hint = local_cloud_hint()
+
     return {
         "status": "READY",
         "os_id": os_id,
         "version_id": version_id,
+        "cloud_hint": cloud_hint or "generic",
         "architecture": arch,
         "cores": cores,
         "memory_bytes": mem_kb * 1024,
@@ -488,7 +536,8 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
     if confirm != "BOOTSTRAP_LOCAL_CLOUDPANEL":
         raise PullMigrationError("explicit confirmation required: BOOTSTRAP_LOCAL_CLOUDPANEL")
     preflight = local_bootstrap_preflight()
-    script = legacy.cloudpanel_bootstrap_script("")
+    cloud_hint = "" if preflight["cloud_hint"] == "generic" else str(preflight["cloud_hint"])
+    script = legacy.cloudpanel_bootstrap_script(cloud_hint)
     proc = subprocess.run(
         ["bash", "-lc", script],
         text=True,
@@ -498,6 +547,10 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
     )
     if proc.returncode != 0 or not cloudpanel_ready_local():
         raise PullMigrationError("CloudPanel installation on current server failed")
+    if not cloudpanel_database_server_ready_local():
+        raise PullMigrationError(
+            "CloudPanel installation incomplete: local database server metadata is missing"
+        )
     return {
         "schema": SCHEMA,
         "status": "CLOUDPANEL_READY",
@@ -1220,6 +1273,10 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     state = load_state(mid)
     if state.get("status") not in {"PREPARING", "PREPARE_FAILED"}:
         raise PullMigrationError("migration is not resumable from prepare stage")
+    if not cloudpanel_database_server_ready_local():
+        raise PullMigrationError(
+            "new-server CloudPanel database server metadata is missing; migration cannot resume safely"
+        )
     state["status"] = "PREPARING"
     state.pop("last_error_class", None)
     save_state(state)
@@ -1937,10 +1994,17 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "target-status":
-            if cloudpanel_ready_local():
+            if cloudpanel_ready_local() and cloudpanel_database_server_ready_local():
                 result = {
                     "schema": SCHEMA,
                     "status": "CLOUDPANEL_READY",
+                    "current_server_role": "RECEIVER",
+                    "writes_performed": False,
+                }
+            elif cloudpanel_ready_local():
+                result = {
+                    "schema": SCHEMA,
+                    "status": "CLOUDPANEL_INCOMPLETE_DATABASE_SERVER",
                     "current_server_role": "RECEIVER",
                     "writes_performed": False,
                 }

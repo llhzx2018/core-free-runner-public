@@ -3974,3 +3974,74 @@ Identity:
 ```text
 Source Build 0.1.0-release59
 ```
+
+
+## release60 · CloudPanel database-server readiness + Vultr installer closure
+
+Owner real-use on the release59 fresh Vultr receiver proved that CloudPanel could pass the old P07 "ready" check while its internal database-server layer was absent.
+
+No-secret readback:
+
+```text
+P07 Build                   0.1.0-release59
+migration state             PREPARE_FAILED
+target site                 ilovem3u8.kewaro.com = CREATED
+MySQL service               active
+target database marker      NO
+target MySQL database files NO
+CloudPanel database row     NO
+CloudPanel cloud provider   NOT_SET
+
+database_server rows        0
+active rows                 0
+engine/version              NONE
+host/user/password metadata absent
+```
+
+This proves the first database failure happened before SQL import or WordPress config remap. CloudPanel had no active database-server metadata for `db:add` to use.
+
+The P07-owned defect was broader than provider metadata: `cloudpanel_ready_local()` treated only `clpctl + db.sq3` as a complete CloudPanel install. That allowed an incomplete panel install to be declared healthy and later accepted as a migration target.
+
+release60 closes that false-positive path:
+
+```text
+fresh CloudPanel install
+→ detect provider from local DMI
+→ Vultr -> CLOUD=vultr
+→ DB_ENGINE=MYSQL_8.4
+→ installer checksum verification
+→ clpctl + db.sq3 verification
+→ require >=1 active database_server row
+→ require non-empty host / user / encrypted password metadata
+→ only then CLOUDPANEL_READY
+```
+
+CloudPanel's current Vultr installation documentation uses `CLOUD=vultr DB_ENGINE=MYSQL_8.4`. Generic installation remains a documented path for other providers, so release60 does not claim that a missing CLOUD value alone explains every possible incomplete installation. The decisive P07 closure is the stronger post-install/readiness contract.
+
+Migration fail-closed behavior:
+
+```text
+target preflight with incomplete CloudPanel -> BLOCK
+resume PREPARE_FAILED with incomplete DB server -> BLOCK before further writes
+target-status -> CLOUDPANEL_INCOMPLETE_DATABASE_SERVER
+```
+
+P07 does **not** synthesize or directly write CloudPanel internal master-database credentials to repair an already incomplete installation. That would cross the secret/internal-state boundary and could create a panel/MySQL mismatch. An already broken empty receiver should be rebuilt cleanly and initialized again after this fix.
+
+Unchanged safety boundary:
+
+```text
+DNS automatic change       NO
+old server deletion        NO
+Production cutover         NO
+existing target overwrite  NO
+MySQL/Nginx forced restart NO
+Owner secret input to P07  NO
+```
+
+Identity:
+
+```text
+Source Build 0.1.0-release60
+System Care  0.1.0-rc35 (unchanged)
+```
