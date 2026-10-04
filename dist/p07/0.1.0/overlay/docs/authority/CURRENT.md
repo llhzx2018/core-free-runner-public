@@ -3861,3 +3861,52 @@ Identities:
 Source Build       0.1.0-release57
 System Care tuning 0.1.0-rc34
 ```
+
+
+## release58 · empty-server tuning no longer depends on database credentials
+
+Owner real-use after release57 identified the architectural issue: the current target is a newly initialized CloudPanel machine with no websites and no managed databases. New-server initialization should not fail solely because CloudPanel's internal database master credential cannot be obtained.
+
+release58 keeps the single-source tuning rule but separates **empty-server initialization semantics** from **existing-workload runtime tuning**.
+
+Canonical flow:
+
+```text
+vfops-init-ui
+→ resource-profile.sh
+→ resource-apply.sh apply-empty-server-confirmed-json
+→ lib/resource_apply.py
+→ independently prove CloudPanel workload is empty
+   site = 0
+   database = 0
+   referenced PHP pool = 0
+→ use the same calibrated VF-RP-2G-1C-BALANCED CAP-ONLY plan
+→ backup + atomic persistent MySQL config write
+→ mysqld --validate-config
+→ exact persistent value readback
+→ service/Nginx health verification
+→ prove workload is still empty
+→ receipt + rollback state
+```
+
+Explicit boundaries:
+
+```text
+CloudPanel/MySQL master credential required = NO for proven-empty initialization
+MySQL SET GLOBAL                            = NO for proven-empty initialization
+MySQL restart/reload                       = NO
+Nginx restart/reload                       = NO
+website/database secret read               = NO
+existing workload auto-tuning              = NO from initialization
+normal System Care runtime path             = unchanged
+single tuning engine                        = YES
+```
+
+The UI may declare the profile applied and verified only after the persistent configuration transaction and validations succeed, and must explicitly state that verification is at the persistent configuration layer with no MySQL/Nginx restart.
+
+Identities:
+
+```text
+Source Build       0.1.0-release58
+System Care tuning 0.1.0-rc35
+```

@@ -345,6 +345,28 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertEqual(probe.call_count, 1)
         sleeper.assert_not_called()
 
+    def test_empty_server_initialization_uses_persistent_config_without_credentials(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        text = path.read_text(encoding="utf-8")
+        start = text.index("def _production_apply_empty_server(")
+        end = text.index("\ndef production_apply(", start)
+        empty_path = text[start:end]
+        self.assertIn("_assert_empty_server_init(snapshot)", empty_path)
+        self.assertIn("_verify_mysql_persistent_plan(plan)", empty_path)
+        self.assertIn("_validate_mysql()", empty_path)
+        self.assertIn("_verify_services([])", empty_path)
+        self.assertIn('"mysql_credentials_used": False', empty_path)
+        self.assertIn('"mysql_restarted": False', empty_path)
+        self.assertNotIn("_mysql_client(", empty_path)
+        self.assertNotIn("_set_mysql_globals(", empty_path)
+        self.assertNotIn("_reload_php(", empty_path)
+        self.assertIn("SELECT COUNT(*) FROM site", text)
+        self.assertIn('SELECT COUNT(*) FROM "database"', text)
+        self.assertIn('state.get("apply_scope") == "EMPTY_SERVER_PERSISTENT"', text)
+
+
     def test_server_initialization_is_standalone_and_uses_yes_no(self) -> None:
         user = (ROOT / "bin/vfops-user").read_text(encoding="utf-8")
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
@@ -368,7 +390,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("5/5 最终检查", init)
         self.assertIn("resource-profile.sh", init)
         self.assertIn("resource-apply.sh", init)
-        self.assertIn("apply-confirmed-json", init)
+        self.assertIn("apply-empty-server-confirmed-json", init)
         self.assertIn("P07_RESOURCE_APPLY_CONFIRMED=1", init)
         self.assertNotIn("repair_cloudpanel_cli_shebang_for_init()", init)
         self.assertNotIn("vendor-backups", init)
@@ -391,7 +413,7 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("run_resource_apply_with_progress", init)
         self.assertIn("初始化不再维护第二套调优逻辑", init)
         self.assertIn("性能配置处理中 · 已耗时", init)
-        self.assertIn("低配服务器可能需要几十秒", init)
+        self.assertIn("不读取数据库密码，不重启 MySQL / Nginx", init)
         self.assertIn("已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败", init)
         self.assertIn("未找到 MySQL / Percona 服务程序", init)
         self.assertNotIn("重新执行初始化检查（推荐）", init)
@@ -403,6 +425,8 @@ class Menu3ModularTests(unittest.TestCase):
         if canonical_apply_path.is_file():
             self.assertIn("plan-json", canonical_apply)
             self.assertIn("apply-confirmed-json", canonical_apply)
+            self.assertIn("apply-empty-server-confirmed-json", canonical_apply)
+            self.assertIn("--empty-server-init", canonical_apply)
             self.assertIn("P07_RESOURCE_APPLY_CONFIRMED", canonical_apply)
             self.assertIn("--confirmed-noninteractive", canonical_apply)
             canonical_engine = (ROOT / "components/resource-tuning/lib/resource_apply.py").read_text(encoding="utf-8")
