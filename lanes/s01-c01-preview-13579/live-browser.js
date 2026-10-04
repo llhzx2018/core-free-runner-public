@@ -43,6 +43,7 @@ let page;
  try { const changed=await anon.request.get(oldLink);assert.equal(changed.status(),403,'changed renderer profile accepted old token');const diagnostic=JSON.parse(Buffer.from(changed.headers()['x-vf-preview-proof'],'base64').toString());assert.equal(diagnostic.failure,'PROFILE_SCOPE_MISMATCH'); }
  finally {cli('update_option(vf_tools_theme_renderer_option_key(),get_option("vf_renderer_proof_restore"),false);delete_option("vf_renderer_proof_restore");');}
  assert.equal((await anon.request.get(oldLink)).status(),200,'restoring the same renderer did not restore its canonical revision');
+ const otherRoute=new URL(oldLink,base);otherRoute.pathname='/contact/';assert.equal((await anon.request.get(otherRoute.toString())).status(),403,'signed token accepted on another route');
  const tampered=new URL(oldLink,base);const token=tampered.searchParams.get('vf_tools_preview');tampered.searchParams.set('vf_tools_preview',token.slice(0,-1)+(token.endsWith('a')?'b':'a'));assert.equal((await anon.request.get(tampered.toString())).status(),403,'invalid signature accepted');
  await root.locator('[data-vf-preview-workflow-step="preview"]').click();await root.locator('.vf-preview-v510__link-options summary').click();await Promise.all([page.waitForURL(/vf_theme_notice=preview-links-revoked/),root.locator('.vf-preview-revoke-form button').click()]);const revoked=await anon.request.get(oldLink);assert(revoked.status()>=400,'revocation did not invalidate previous signature');await anon.close();
  assert.equal(errors.length,0,JSON.stringify(errors));

@@ -15,8 +15,6 @@ original_preamble=old.split('?>\n<section class="vf-preview-v510"')[0]
 new_preamble=new.split('?>\n<section class="vf-preview-v510"')[0]
 new_preamble=re.sub(r'\$preview_language_locales = \[\];.*?(?=\$signed_target_paths =)', '',new_preamble,flags=re.S)
 new_preamble=new_preamble.replace(', $preview_language_locales, $preview_site_locale','').replace("'locale'=>(string)($preview_language_locales[(string)$language] ?? $preview_site_locale)","'locale'=>(string)$language")
-new_preamble=re.sub(r'        \$preview_route_path = .*?\n        \$preview_route_scope = .*?\n', '',new_preamble)
-new_preamble=new_preamble.replace("            'route'=>'/' . ltrim($preview_route_scope, '/'),\n",'')
 assert new_preamble==original_preamble,'unrelated preview state calculation changed'
 from collections import Counter
 def fields(s):return Counter(re.findall(r'<(?:form|input|select|option|textarea)\b(?:<\?php[\s\S]*?\?>|[^<>])*>',s,re.S))
