@@ -3612,3 +3612,65 @@ SOURCE delete = NO
 Production migration = NO
 automatic website Nginx stop/restart = NO
 ```
+
+
+## release53 · Fresh empty-server MySQL credential recovery
+
+Owner diagnostic on the Vultr initialization target established the real failure shape:
+
+```text
+uid=0
+/usr/bin/clpctl first line = #/bin/bash
+db:show:master-credentials via Bash wrapper:
+  rc=0
+  stdout=0
+  stderr=0
+db:show:master-credentials via Bash login shell:
+  rc=0
+  stdout=0
+  stderr=0
+db:show:master-password:
+  timeout
+```
+
+Therefore release50-release52 compatibility changes were not sufficient: there was no credential
+payload to parse.
+
+release53 adds one narrowly-scoped recovery path for new-server initialization only:
+
+```text
+vfops-init-ui
+→ read CloudPanel db.sq3 read-only
+→ require site count = 0
+→ require registered database count = 0
+→ set P07_FRESH_INIT_EMPTY_SERVER=1 only when both are zero
+→ canonical System Care resource engine
+→ credential lookup parse/timeout failure
+→ restart mysql ONCE
+→ require mysql service active
+→ retry official CloudPanel credential lookup
+→ mandatory MySQL SELECT 1
+→ normal Apply / Verify / Rollback
+```
+
+Ordinary System Care does not set the recovery flag.
+Any CloudPanel site or registered database disables automatic MySQL restart.
+The recovery never modifies DNS, Nginx, websites, databases, or the clpctl file itself.
+
+Identities:
+
+```text
+Source Build       0.1.0-release53
+System Care tuning 0.1.0-rc30
+```
+
+Safety boundaries:
+
+```text
+DNS write = NO
+SOURCE delete = NO
+Production migration = NO
+automatic website Nginx stop/restart = NO
+automatic MySQL restart on existing CloudPanel workloads = NO
+fresh empty-server MySQL recovery = AT MOST ONCE
+```
