@@ -16,7 +16,14 @@ assert hashlib.sha256((root/'assets/css/admin/admin-s01-shell-header-final-r12.c
 assert hashlib.sha256((root/'assets/js/admin/admin-console.js').read_bytes()).hexdigest()=='bb18bdac83c2189bddcdf616563d90ae2f830373834ab016d6411648c2056bfd'
 # Retain every existing authenticated handler, nonce guard and import/restore transaction.
 old=original('src/inc/admin/admin-recovery-v510-actions.php');new=pathlib.Path('target/src/inc/admin/admin-recovery-v510-actions.php').read_text()
-assert new==old.replace('$runtime = vf_theme_recovery_runtime_manifest();','$runtime = vf_theme_recovery_runtime_manifest($diagnostic);')
+def normalized_handlers(text):
+ start=text.index('function vf_theme_recovery_v510_uploaded_json');end=text.index('function vf_theme_handle_recovery_export',start)
+ text=text[:start]+text[end:]
+ return re.sub(r"    if \(strlen\(\$json\) > vf_theme_recovery_import_limits\(\)\['jsonBytes'\]\) \{\n        vf_theme_recovery_(?:v510_redirect|ajax_send)\([^\n]+\);\n    \}\n",'',text)
+assert normalized_handlers(new)==normalized_handlers(old).replace('$runtime = vf_theme_recovery_runtime_manifest();','$runtime = vf_theme_recovery_runtime_manifest($diagnostic);')
+upload=new[new.index('function vf_theme_recovery_v510_uploaded_json'):new.index('function vf_theme_handle_recovery_export')]
+for guard in ["is_uploaded_file($tmp)", "PATHINFO_EXTENSION", "vf_theme_recovery_import_limits()", "strlen($payload) > $limits['fileBytes']"]:assert guard in upload
+assert new.count("strlen($json) > vf_theme_recovery_import_limits()['jsonBytes']")==2
 old=original('src/inc/services/recovery-service.php');new=pathlib.Path('target/src/inc/services/recovery-service.php').read_text()
 assert new[new.index('function vf_theme_import_config_transaction'):new.index('function vf_theme_recovery_failure_label')]==old[old.index('function vf_theme_import_config_transaction'):old.index('function vf_theme_recovery_failure_label')]
 assert new[new.index('function vf_theme_recovery_preflight_ttl'):]==old[old.index('function vf_theme_recovery_preflight_ttl'):]
