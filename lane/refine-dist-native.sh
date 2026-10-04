@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(pwd)"
-TASK_ROOT="$RUNNER_TEMP/s01-refine-1034-distribution"
+TASK_ROOT="$RUNNER_TEMP/s01-refine-1035-distribution"
 WP="$TASK_ROOT/wordpress"
 mkdir -p "$WP" evidence
 export VF_EVIDENCE_DIR="$ROOT/evidence"
