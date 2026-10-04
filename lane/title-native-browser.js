@@ -5,6 +5,7 @@ const fs=require('fs'),{chromium}=require('playwright');
  await page.goto('http://127.0.0.1:18092/wp-login.php');
  await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Title-Fixture-Only!');
  await Promise.all([page.waitForNavigation(),page.locator('#wp-submit').click()]);
+ if(new URL(page.url()).pathname.includes('wp-login.php'))throw new Error('SYNTHETIC_LOGIN_FAILED');
  const failures=[],cases=[];
  await page.goto('http://127.0.0.1:18092/wp-admin/admin.php?page=vf-toolsite-content&tab=workflow&section=queue',{waitUntil:'networkidle'});
  if(await page.locator('[data-vf-cw-scan-action] button').count())await Promise.all([page.waitForNavigation({waitUntil:'networkidle'}),page.locator('[data-vf-cw-scan-action] button').click()]);
