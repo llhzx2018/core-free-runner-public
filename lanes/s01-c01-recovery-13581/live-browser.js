@@ -12,6 +12,7 @@ const changed=name=>JSON.parse(cli(load+'$p=vf_theme_export_config()["payload"];
  const checks=[];
  for(const width of [1920,1440,1319,1024,768,390]){
   await page.setViewportSize({width,height:1000});await page.goto(url);await page.waitForFunction(()=>document.querySelector('[data-vf-recovery-page]')?.getAttribute('aria-busy')===null);
+  fs.writeFileSync('proof/layout-metrics-'+width+'.json',JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('.vf-v6-shell-header,.vf-admin-page-head,.vf-admin-workspace,.vf-recovery-page')].map(n=>({class:n.className,rect:n.getBoundingClientRect().toJSON(),width:getComputedStyle(n).width,margin:getComputedStyle(n).margin,padding:getComputedStyle(n).padding,display:getComputedStyle(n).display,parent:n.parentElement.className})))));
   try{checks.push(await check(page,width));}catch(e){await page.screenshot({path:'proof/recovery-controls-failed-'+width+'.png',fullPage:true});throw e;}await page.screenshot({path:'proof/recovery-default-'+width+'.png',fullPage:true});
   const root=page.locator('[data-vf-recovery-page]');await root.locator('[data-vf-recovery-workflow-step=import]').click();await page.screenshot({path:'proof/recovery-import-empty-'+width+'.png',fullPage:true});
   await root.locator('[data-vf-recovery-workflow-step=restore]').click();await page.screenshot({path:'proof/recovery-restore-empty-'+width+'.png',fullPage:true});
