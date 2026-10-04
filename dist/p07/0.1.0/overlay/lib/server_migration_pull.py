@@ -332,6 +332,24 @@ def cloudpanel_ready_local() -> bool:
     )
 
 
+def cloudpanel_user_count_local(
+    db: Path = Path("/home/clp/htdocs/app/data/db.sq3"),
+) -> int | None:
+    if not db.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute('SELECT COUNT(*) FROM "user"').fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return None
+    if not row:
+        return None
+    return int(row[0] or 0)
+
+
 def cloudpanel_database_server_ready_local(
     db: Path = Path("/home/clp/htdocs/app/data/db.sq3"),
 ) -> bool:
@@ -548,6 +566,21 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
     if proc.returncode != 0 or not cloudpanel_ready_local():
         raise PullMigrationError("CloudPanel installation on current server failed")
     if not cloudpanel_database_server_ready_local():
+        user_count = cloudpanel_user_count_local()
+        if user_count == 0:
+            return {
+                "schema": SCHEMA,
+                "status": "CLOUDPANEL_ADMIN_REQUIRED",
+                "target_role": "CURRENT_SERVER_RECEIVER",
+                "installer_checksum_verified": True,
+                "os_id": preflight["os_id"],
+                "version_id": preflight["version_id"],
+                "cloud_hint": preflight["cloud_hint"],
+                "first_admin_required": True,
+                "dns_changed": False,
+                "source_changed": False,
+                "secrets_emitted": False,
+            }
         raise PullMigrationError(
             "CloudPanel installation incomplete: local database server metadata is missing"
         )
@@ -1999,6 +2032,14 @@ def main() -> int:
                     "schema": SCHEMA,
                     "status": "CLOUDPANEL_READY",
                     "current_server_role": "RECEIVER",
+                    "writes_performed": False,
+                }
+            elif cloudpanel_ready_local() and cloudpanel_user_count_local() == 0:
+                result = {
+                    "schema": SCHEMA,
+                    "status": "CLOUDPANEL_ADMIN_REQUIRED",
+                    "current_server_role": "RECEIVER",
+                    "first_admin_required": True,
                     "writes_performed": False,
                 }
             elif cloudpanel_ready_local():
