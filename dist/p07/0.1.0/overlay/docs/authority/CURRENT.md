@@ -3727,3 +3727,47 @@ System Care tuning 0.1.0-rc31
 ```
 
 release53 is superseded for Owner Product validation.
+
+
+## release55 · CloudPanel stored master credential fallback
+
+Owner validation after release54 still ended at `MYSQL_MASTER_CREDENTIAL_PARSE_FAILED`.
+The release54 vendor-wrapper repair did not close the real initialization failure, so P07 no longer
+rewrites CloudPanel's `clpctl` file during initialization.
+
+CloudPanel already stores its encrypted database-server master password in its local SQLite state.
+release55 keeps the official CLI path first, then falls back to CloudPanel's own stored credential
+when the CLI produces no usable payload:
+
+```text
+official clpctl master-credentials
+→ official clpctl master-password
+→ if still no usable credential:
+   read /home/clp/htdocs/app/.env
+   read encrypted password from data/db.sq3 / database_server
+   decrypt in memory with CloudPanel's bundled Defuse Crypto
+→ mandatory local MySQL SELECT 1
+→ Apply / Verify / Rollback
+```
+
+Security properties:
+
+```text
+password shown to Owner = NO
+password persisted by P07 = NO
+secret placed in process argv = NO
+CloudPanel vendor file rewrite = NO
+MySQL restart = NO
+website Nginx restart = NO
+DNS change = NO
+```
+
+The fallback is part of the single canonical System Care credential resolver, not a second tuning
+implementation.
+
+Identities:
+
+```text
+Source Build       0.1.0-release55
+System Care tuning 0.1.0-rc32
+```
