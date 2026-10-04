@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import subprocess
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -188,6 +190,35 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertNotIn("ui_confirm_exact 停止", ordinary)
         self.assertNotIn("BOOTSTRAP_LOCAL_CLOUDPANEL", text)
 
+
+    def test_resource_apply_retries_fresh_cloudpanel_readiness_only(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        spec = importlib.util.spec_from_file_location("resource_apply_release50", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        ready = (["mysql"], {"MYSQL_PWD": "ephemeral"})
+        with mock.patch.object(
+            mod,
+            "_mysql_client_once",
+            side_effect=[mod.ApplyBlocked("MYSQL_MASTER_CREDENTIAL_PARSE_FAILED"), ready],
+        ) as probe, mock.patch.object(mod.time, "sleep") as sleeper:
+            self.assertEqual(mod._mysql_client(), ready)
+        self.assertEqual(probe.call_count, 2)
+        sleeper.assert_called_once_with(mod.MYSQL_READY_RETRY_DELAY_SECONDS)
+
+        with mock.patch.object(
+            mod,
+            "_mysql_client_once",
+            side_effect=mod.ApplyBlocked("MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT"),
+        ) as probe, mock.patch.object(mod.time, "sleep") as sleeper:
+            with self.assertRaises(mod.ApplyBlocked) as ctx:
+                mod._mysql_client()
+        self.assertEqual(str(ctx.exception), "MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT")
+        self.assertEqual(probe.call_count, 1)
+        sleeper.assert_not_called()
 
     def test_server_initialization_is_standalone_and_uses_yes_no(self) -> None:
         user = (ROOT / "bin/vfops-user").read_text(encoding="utf-8")
