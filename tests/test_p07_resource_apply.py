@@ -5,6 +5,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION = os.environ.get("P07_SYSTEM_CARE_VERSION", "0.1.0-rc16")
@@ -193,6 +194,34 @@ max_connections = 40
             ra._restore_files(state)
             self.assertEqual(mysql.read_bytes(),before_mysql)
             self.assertEqual(pool.read_bytes(),before_pool)
+
+    def test_release48_direct_apply_still_requires_tty(self):
+        class NonTty:
+            @staticmethod
+            def isatty():
+                return False
+
+        with mock.patch.object(ra.os, "geteuid", return_value=0), mock.patch.object(ra.sys, "stdin", NonTty()):
+            with self.assertRaises(ra.ApplyBlocked) as ctx:
+                ra.production_apply("balanced", ra.APPLY_TOKEN)
+        self.assertEqual(str(ctx.exception), "INTERACTIVE_TTY_REQUIRED")
+
+    def test_release48_confirmed_background_bridge_can_drop_inherited_tty_only_after_owner_confirmation(self):
+        argv=[
+            "apply", "--mode", "balanced", "--confirm", ra.APPLY_TOKEN,
+            "--json", "--confirmed-noninteractive",
+        ]
+        with mock.patch.dict(ra.os.environ, {}, clear=True), mock.patch.object(ra, "production_apply") as apply_mock:
+            rc=ra.main(argv)
+        self.assertEqual(rc,77)
+        apply_mock.assert_not_called()
+
+        result={"state":"APPLIED_VERIFIED","backup_dir":"/tmp/p07-test","profile_id":"VF-RP-2G-1C-BALANCED"}
+        with mock.patch.dict(ra.os.environ, {"P07_RESOURCE_APPLY_CONFIRMED":"1"}, clear=False), \
+             mock.patch.object(ra, "production_apply", return_value=result) as apply_mock:
+            rc=ra.main(argv)
+        self.assertEqual(rc,0)
+        apply_mock.assert_called_once_with("balanced",ra.APPLY_TOKEN,require_tty=False)
 
     def test_unused_php_is_suggestion_not_automatic_disable(self):
         with tempfile.TemporaryDirectory() as td:
