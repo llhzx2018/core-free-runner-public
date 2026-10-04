@@ -129,10 +129,6 @@ while i < len(items):
         out.append("CloudPanel 数据库连接信息读取超时；已停止自动调整，不会继续等待或显示内部错误")
     elif reason == "MYSQL_MASTER_CREDENTIAL_CONNECTION_FAILED":
         out.append("已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败；已停止自动调整")
-    elif reason == "MYSQL_FRESH_INIT_RECOVERY_UNAVAILABLE":
-        out.append("确认是空新服务器，但系统服务管理工具不可用；未自动重启数据库")
-    elif reason == "MYSQL_FRESH_INIT_RECOVERY_FAILED":
-        out.append("确认是空新服务器，但 MySQL 首次初始化恢复失败；已停止自动调整")
     elif reason == "MYSQLD_BINARY_MISSING":
         out.append("未找到 MySQL / Percona 服务程序，无法安全校验配置")
     elif reason.startswith("PHP_FPM_BINARY_MISSING:"):
@@ -323,45 +319,68 @@ apply_missing_basic_settings() {
   return 0
 }
 
-fresh_init_empty_cloudpanel() {
-  python3 - <<'PY'
-import sqlite3
-from pathlib import Path
+repair_cloudpanel_cli_shebang_for_init() {
+  local clpctl_path first_line backup_dir backup_path tmp
+  clpctl_path="$(command -v clpctl 2>/dev/null || true)"
+  [[ -n "$clpctl_path" && -f "$clpctl_path" ]] || return 0
 
-path=Path("/home/clp/htdocs/app/data/db.sq3")
-if not path.is_file():
-    print("NO")
-    raise SystemExit(0)
-try:
-    conn=sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
-    names={row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "site" not in names or "database" not in names:
-        print("NO")
-    else:
-        sites=int(conn.execute('SELECT COUNT(*) FROM "site"').fetchone()[0])
-        databases=int(conn.execute('SELECT COUNT(*) FROM "database"').fetchone()[0])
-        print("YES" if sites == 0 and databases == 0 else "NO")
-except Exception:
-    print("NO")
-finally:
-    try:
-        conn.close()
-    except Exception:
-        pass
+  IFS= read -r first_line < "$clpctl_path" || first_line=''
+  [[ "$first_line" == '#/bin/bash' ]] || return 0
+
+  backup_dir='/var/lib/vf-server-ops/vendor-backups'
+  mkdir -p "$backup_dir" || return 1
+  backup_path="$backup_dir/clpctl.$(date -u +%Y%m%d-%H%M%S).bak"
+  cp -a -- "$clpctl_path" "$backup_path" || return 1
+
+  tmp="$(mktemp "$clpctl_path.vf.XXXXXX")" || return 1
+  if ! cp -a -- "$clpctl_path" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  if ! python3 - "$tmp" <<'PY'
+from pathlib import Path
+import sys
+
+path=Path(sys.argv[1])
+data=path.read_bytes()
+lines=data.splitlines(keepends=True)
+if not lines or lines[0].rstrip(b"\r\n") != b"#/bin/bash":
+    raise SystemExit(3)
+ending=b"\r\n" if lines[0].endswith(b"\r\n") else b"\n"
+lines[0]=b"#!/bin/bash"+ending
+path.write_bytes(b"".join(lines))
 PY
+  then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  if ! bash -n "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$clpctl_path"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+
+  IFS= read -r first_line < "$clpctl_path" || first_line=''
+  [[ "$first_line" == '#!/bin/bash' ]] || return 1
+
+  ui_good 'CloudPanel CLI 已修复官方 6.0.8 启动行错误 ✓'
+  ui_note "原文件已备份：$backup_path"
+  record_action DONE 'CloudPanel CLI' '已修复启动行 #/bin/bash → #!/bin/bash，并保留原文件备份'
+  return 0
 }
 
 
 run_resource_apply_with_progress() {
-  local log pid rc start now elapsed frame_index=0 bar empty_flag='0'
+  local log pid rc start now elapsed frame_index=0 bar
   log="$(mktemp -t p07-resource-apply.XXXXXX)"
   RESOURCE_APPLY_OUTPUT=''
 
-  if [[ "$(fresh_init_empty_cloudpanel)" == "YES" ]]; then
-    empty_flag='1'
-  fi
-
-  P07_FRESH_INIT_EMPTY_SERVER="$empty_flag" P07_RESOURCE_APPLY_CONFIRMED=1 bash "$SYSTEM_CARE_ROOT/resource-apply.sh" apply-confirmed-json >"$log" 2>&1 &
+  P07_RESOURCE_APPLY_CONFIRMED=1 bash "$SYSTEM_CARE_ROOT/resource-apply.sh" apply-confirmed-json >"$log" 2>&1 &
   pid=$!
   start="$(date +%s)"
 
@@ -521,6 +540,10 @@ cloudpanel_for_init() {
   if [[ "$status" == "CLOUDPANEL_READY" ]]; then
     ui_good 'CloudPanel：已安装并可用，安全跳过 ✓'
     record_action KEEP 'CloudPanel' '已安装并健康，不重复安装'
+    if ! repair_cloudpanel_cli_shebang_for_init; then
+      ui_attention 'CloudPanel CLI 启动行修复失败；已保留原文件，本次性能配置将继续按安全规则检查。'
+      record_action WARN 'CloudPanel CLI' '检测到官方 6.0.8 启动行错误，但安全修复未完成'
+    fi
     return 0
   fi
 
@@ -563,6 +586,10 @@ except Exception:
   if run_cloudpanel_install_with_progress; then
     ui_result_ok 'CloudPanel 安装完成'
     record_action DONE 'CloudPanel' '已安装并完成安装后检查'
+    if ! repair_cloudpanel_cli_shebang_for_init; then
+      ui_attention 'CloudPanel CLI 启动行修复失败；已保留原文件，本次性能配置将继续按安全规则检查。'
+      record_action WARN 'CloudPanel CLI' '检测到官方 6.0.8 启动行错误，但安全修复未完成'
+    fi
   else
     ui_result_error 'CloudPanel 安装未完成'
     [[ -n "$CLOUDPANEL_INSTALL_OUTPUT" ]] && ui_note "$(printf '%s\n' "$CLOUDPANEL_INSTALL_OUTPUT" | tail -n 1)"
@@ -571,7 +598,7 @@ except Exception:
 }
 
 resource_profile_for_init() {
-  local json plan rc profile summary changes apply_output existing_sites eligible block_reasons block_cn apply_reason recovery_performed
+  local json plan rc profile summary changes apply_output existing_sites eligible block_reasons block_cn apply_reason
   ui_section '4/5 性能配置'
   RESOURCE_STATE='NOT_RUN'
   RESOURCE_REASON=''
@@ -665,15 +692,6 @@ print(",".join(str(x) for x in (d.get("block_reasons") or [])))' 2>/dev/null || 
   apply_output="$RESOURCE_APPLY_OUTPUT"
   set -e
   if [[ $rc -eq 0 ]]; then
-    recovery_performed="$(printf '%s' "$apply_output" | python3 -c 'import json,sys
-try:
-    print("YES" if json.load(sys.stdin).get("fresh_init_mysql_recovery") else "NO")
-except Exception:
-    print("NO")' 2>/dev/null || printf 'NO')"
-    if [[ "$recovery_performed" == 'YES' ]]; then
-      ui_good 'CloudPanel 首次数据库凭据异常已自动恢复 ✓'
-      record_action DONE 'MySQL 首次初始化恢复' '确认空服务器后重启数据库服务 1 次，并重新验证连接'
-    fi
     if [[ "$changes" == '当前参数无需降低' ]]; then
       ui_good '资源配置已经在安全范围内，无需修改 ✓'
       RESOURCE_STATE='VERIFIED_KEEP'
@@ -740,7 +758,6 @@ run_initialization() {
   ui_note '首次空服务器会自动安装系统更新；CloudPanel 已安装的服务器只检查更新，不自动升级面板运行环境。'
   ui_note '性能配置统一调用“日常维护”里的同一套正式调优；初始化不再维护第二套调优逻辑。'
   ui_note '整个流程只确认一次；不会自动修改 DNS、删除旧服务器、迁移网站或停止/重启网站 Nginx。'
-  ui_note '仅当确认 CloudPanel 中网站=0、数据库=0，且首次数据库凭据异常时，允许自动重启 MySQL 1 次完成初始化恢复。'
   say
   ui_prompt '确认开始一键初始化？[y/N]：'
   read -r answer || answer=''
