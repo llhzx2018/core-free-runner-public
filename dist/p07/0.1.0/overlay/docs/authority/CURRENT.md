@@ -3674,3 +3674,56 @@ automatic website Nginx stop/restart = NO
 automatic MySQL restart on existing CloudPanel workloads = NO
 fresh empty-server MySQL recovery = AT MOST ONCE
 ```
+
+
+## release54 · CloudPanel CLI 6.0.8 shebang root-cause closure
+
+Owner diagnostic on the Vultr target proved the installed CloudPanel CLI wrapper itself is malformed:
+
+```text
+/usr/bin/clpctl first line = #/bin/bash
+db:show:master-credentials:
+  rc=0
+  stdout=0
+  stderr=0
+db:show:master-password:
+  timeout
+```
+
+This matches the known CloudPanel CLI 6.0.8 wrapper defect where the first line is `#/bin/bash`
+instead of `#!/bin/bash`. release53's speculative MySQL restart recovery is therefore removed.
+
+release54 behavior:
+
+```text
+new-server initialization
+→ CloudPanel ready
+→ inspect the resolved clpctl executable
+→ ONLY when first line is exactly "#/bin/bash"
+→ cp -a backup under /var/lib/vf-server-ops/vendor-backups/
+→ rewrite only the first line to "#!/bin/bash"
+→ bash -n verification
+→ atomic replacement
+→ canonical System Care resource-apply.sh
+→ official CloudPanel credential lookup
+→ mandatory MySQL SELECT 1
+→ normal Apply / Verify / Rollback
+```
+
+The repair is intentionally narrow:
+- no generic clpctl rewrite;
+- no password output or persistence;
+- no MySQL restart;
+- no Nginx restart;
+- no DNS change;
+- no website/database deletion;
+- if the first line is anything other than the exact known bad value, the file is left untouched.
+
+Identities:
+
+```text
+Source Build       0.1.0-release54
+System Care tuning 0.1.0-rc31
+```
+
+release53 is superseded for Owner Product validation.
