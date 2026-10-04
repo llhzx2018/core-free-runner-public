@@ -3566,3 +3566,49 @@ SOURCE delete = NO
 Production migration = NO
 automatic website Nginx stop/restart = NO
 ```
+
+
+## release52 · CloudPanel credential execution-context fallback
+
+release51 Owner real-use still ended at `MYSQL_MASTER_CREDENTIAL_PARSE_FAILED`, so the issue is not
+only the known malformed shebang case.
+
+CloudPanel's current documentation shows `db:show:master-credentials` returning a two-column
+`Name / Value` table with `Host / User Name / Password / Port`. The existing parser already
+accepts that structure. release52 therefore hardens only command execution semantics:
+
+```text
+official command
+  clpctl db:show:master-credentials
+      ↓
+primary invocation
+      ↓ if no usable structured credentials
+Bash login-shell invocation of the same official command
+      ↓
+parse complete credential structure even if wrapper exit code is non-zero
+      ↓
+mandatory real MySQL SELECT 1 validation
+      ↓
+Apply / Verify / Rollback
+```
+
+A non-zero clpctl exit code never authorizes a write by itself. Parsed credentials must still pass
+the existing live MySQL connection validation before any tuning mutation can proceed.
+
+No raw command output, password, token, or secret is shown or persisted.
+
+Identities:
+
+```text
+Source Build       0.1.0-release52
+System Care tuning 0.1.0-rc29
+```
+
+Safety boundaries unchanged:
+
+```text
+DNS write = NO
+SOURCE delete = NO
+Production migration = NO
+automatic website Nginx stop/restart = NO
+```
