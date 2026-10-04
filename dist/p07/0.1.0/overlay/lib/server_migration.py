@@ -230,6 +230,8 @@ def detect_cloud_hint(text: str) -> str:
         return "msa"
     if "hetzner" in value:
         return "hetzner"
+    if "vultr" in value:
+        return "vultr"
     if "oracle" in value:
         return "oci"
     return ""
