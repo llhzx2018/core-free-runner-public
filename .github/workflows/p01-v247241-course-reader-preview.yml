@@ -1,0 +1,213 @@
+name: P01 V2.47.241 Owner Preview
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/p01-v247241-course-reader-preview.yml"
+      - "preview-requests/P01-v247241-course-reader.json"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: p01-v247241-owner-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Checkout preview control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Bind exact request
+        id: request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          REQUEST=preview-requests/P01-v247241-course-reader.json
+          test -f "$REQUEST"
+          test "$(jq -r '.project_id' "$REQUEST")" = "P01"
+          test "$(jq -r '.version' "$REQUEST")" = "2.47.241"
+          test "$(jq -r '.target_sha' "$REQUEST")" = "49dd1e83b238c99c33d3b7145d0f5f9fc10e7d02"
+          test "$(jq -r '.data_policy' "$REQUEST")" = "SYNTHETIC_ONLY"
+          test "$(jq -r '.production_write' "$REQUEST")" = "false"
+          test "$(jq -r '.formal_release' "$REQUEST")" = "false"
+          test "$(jq -r '.distribution_write' "$REQUEST")" = "false"
+          echo "target_sha=49dd1e83b238c99c33d3b7145d0f5f9fc10e7d02" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd sqlite3 curl >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx zip
+          php -m | grep -Fx gd
+
+      - name: Checkout exact P01 candidate
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          TARGET_SHA: ${{ steps.request.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" product
+          git -C product fetch -q origin "$TARGET_SHA"
+          git -C product checkout -q --detach "$TARGET_SHA"
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < product/VERSION)" = "2.47.241"
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = "2.47.241"
+
+      - name: Install clean candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:8080 -t product/src >/tmp/p01-php.log 2>&1 &
+          echo $! >/tmp/p01-php.pid
+          for i in {1..30}; do
+            if curl -fsS -c /tmp/p01.cookies http://127.0.0.1:8080/setup.php -o /tmp/setup.html; then break; fi
+            sleep 1
+          done
+          CSRF="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' /tmp/setup.html | head -n1)"
+          test -n "$CSRF"
+          curl -fsS -L -b /tmp/p01.cookies -c /tmp/p01.cookies             --data-urlencode "setup_csrf=$CSRF"             --data-urlencode "site_title=VF Start V2.47.241 Course Preview"             --data-urlencode "admin_password=VFPreview241-Owner"             --data-urlencode "admin_password_confirm=VFPreview241-Owner"             http://127.0.0.1:8080/setup.php -o /tmp/setup-result.html
+          test -f product/src/app/.runtime.php
+          grep -q "VF Start" /tmp/setup-result.html
+          echo P01_PREVIEW_CLEAN_INSTALL=PASS
+
+      - name: Seed synthetic Course and Markdown package
+        id: seed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-course-preview-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=getenv('GITHUB_WORKSPACE').'/product/src';
+          require_once $root.'/app/bootstrap.php';
+          require_once $root.'/app/Repository.php';
+          require_once $root.'/app/SurfaceRepository.php';
+          require_once $root.'/app/CoursePackageStore.php';
+
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $surface=new VfSurfaceRepository($db);
+          $saved=$repo->saveLink(null,[
+              'surface'=>'books',
+              'title'=>'一个人做出海网站 · Preview 课程',
+              'url'=>'https://github.com/example/vf-course-preview',
+              'description'=>'V2.47.241 Markdown Course Reader 合成预览课程，只用于 Owner Preview。',
+              'tags'=>['出海','课程','Preview'],
+              'resource_kind'=>'实战课程',
+              'is_private'=>0,
+              'is_pending'=>0,
+              'is_favorite'=>0,
+          ],'manual');
+          $id=(int)$saved['id'];
+          if($id<=0)throw new RuntimeException('preview course id invalid');
+          $surface->upsertProfile($id,['surface'=>'books','resource_kind'=>'实战课程']);
+
+          $tmp=sys_get_temp_dir().'/vf-course-preview-'.$id.'.zip';
+          $zip=new ZipArchive();
+          if($zip->open($tmp,ZipArchive::CREATE|ZipArchive::OVERWRITE)!==true)throw new RuntimeException('preview zip open failed');
+          $png=base64_decode('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAALUlEQVR4nGMU2bKKgZaAiaamj1owasGoBaMWjFowasGoBaMWjFowasGoBVQEABQDAbIMPY7GAAAAAElFTkSuQmCC',true);
+          if(!is_string($png))throw new RuntimeException('preview png decode failed');
+          $zip->addFromString('course-preview-main/01-手册介绍.md',"# 手册介绍\n\n这是 **V2.47.241** 内部 Markdown Reader 的预览课程。\n\n> 目标：直接在 VF Start 内学习，不跳 GitHub。\n\n- 文件夹 = 章节组\n- Markdown = 课时\n- 数字前缀 = 顺序\n\n[进入国内个人支付方案](02-起步阶段/01-国内个人支付方案.md)\n");
+          $zip->addFromString('course-preview-main/02-起步阶段/01-国内个人支付方案.md',"# 国内个人支付方案\n\n## 核心原则\n\n1. 先验证支付链路\n2. 再扩大业务复杂度\n\n~~~text\n<script>alert('raw html must never run')</script>\n~~~\n\n| 方案 | 适合阶段 |\n| --- | --- |\n| A | 起步 |\n| B | 稳定后 |\n\n![示例图](../../assets/image-01.png)\n\n[下一课](02-国际数字产品个人支付方案.md)\n");
+          $zip->addFromString('course-preview-main/02-起步阶段/02-国际数字产品个人支付方案.md',"# 国际数字产品个人支付方案\n\n正文段落。\n\n[安全外链](https://example.com/)\n\n<script>alert('must be escaped')</script>\n");
+          $zip->addFromString('course-preview-main/03-公司注册方案/01-注册美国公司.md',"# 注册美国公司\n\n### 小节\n\n公司注册课程正文。\n");
+          $zip->addFromString('course-preview-main/03-公司注册方案/02-Mercury.md',"# Mercury\n\n###### 六级标题\n\n课程结尾。\n");
+          $zip->addFromString('course-preview-main/assets/image-01.png',$png);
+          $zip->close();
+
+          $index=VfCoursePackageStore::inspectArchive($tmp);
+          if((int)($index['page_count']??0)!==5)throw new RuntimeException('preview page count mismatch');
+          $hash=hash_file('sha256',$tmp);
+          if(!is_string($hash)||$hash==='')throw new RuntimeException('preview zip hash failed');
+          $rootDir=rtrim(VF_PRIVATE_ROOT,'/\\').'/resource-assets/course-packages';
+          if(!is_dir($rootDir)&&!mkdir($rootDir,0750,true)&&!is_dir($rootDir))throw new RuntimeException('preview course package dir failed');
+          vf_write_storage_guards($rootDir);
+          $file='course-'.$id.'-'.substr($hash,0,20).'.zip';
+          $target=$rootDir.'/'.$file;
+          if(!copy($tmp,$target))throw new RuntimeException('preview course package copy failed');
+          chmod($target,0640);
+          $now=gmdate('c');
+          $stmt=$db->prepare("INSERT INTO resource_asset_files(link_id,asset_kind,file_name,original_name,mime_type,byte_size,width,height,file_hash,created_at,updated_at)
+              VALUES(?,?,?,?,?, ?,NULL,NULL,?,?,?)
+              ON CONFLICT(link_id,asset_kind) DO UPDATE SET file_name=excluded.file_name,original_name=excluded.original_name,mime_type=excluded.mime_type,byte_size=excluded.byte_size,width=NULL,height=NULL,file_hash=excluded.file_hash,updated_at=excluded.updated_at");
+          $stmt->execute([$id,'course_package',$file,'course-preview.zip','application/zip',(int)filesize($target),$hash,$now,$now]);
+          @unlink($tmp);
+
+          echo "COURSE_ID=$id\n";
+          echo "P01_PREVIEW_COURSE_PACKAGE=PASS pages=".(int)$index['page_count']."\n";
+          PHP
+          php /tmp/p01-course-preview-seed.php | tee /tmp/seed.out
+          COURSE_ID="$(sed -n 's/^COURSE_ID=//p' /tmp/seed.out | head -n1)"
+          test -n "$COURSE_ID"
+          echo "course_id=$COURSE_ID" >> "$GITHUB_OUTPUT"
+          grep -q '^P01_PREVIEW_COURSE_PACKAGE=PASS pages=5$' /tmp/seed.out
+
+      - name: Verify local Course Reader
+        env:
+          COURSE_ID: ${{ steps.seed.outputs.course_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsS "http://127.0.0.1:8080/courses.php" -o /tmp/courses.html
+          curl -fsS "http://127.0.0.1:8080/courses.php?study=$COURSE_ID" -o /tmp/reader.html
+          grep -q "一个人做出海网站" /tmp/courses.html
+          grep -q "vf-course-reader" /tmp/reader.html
+          grep -q "手册介绍" /tmp/reader.html
+          grep -q "起步阶段" /tmp/reader.html
+          grep -q "公司注册方案" /tmp/reader.html
+          grep -q "&lt;script&gt;" /tmp/reader.html || true
+          echo P01_PREVIEW_LOCAL_READER=PASS
+
+      - name: Open temporary Owner-visible tunnel
+        id: tunnel
+        env:
+          COURSE_ID: ${{ steps.seed.outputs.course_id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -L --fail --retry 3             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64             -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8080 --no-autoupdate >/tmp/cloudflared.log 2>&1 &
+          echo $! >/tmp/cloudflared.pid
+          URL=""
+          for i in {1..60}; do
+            URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n1 || true)"
+            if [ -n "$URL" ]; then break; fi
+            sleep 1
+          done
+          if [ -z "$URL" ]; then cat /tmp/cloudflared.log; exit 1; fi
+          curl -fsS --retry 10 --retry-delay 2 "$URL/courses.php" >/tmp/public-courses.html
+          curl -fsS --retry 10 --retry-delay 2 "$URL/courses.php?study=$COURSE_ID" >/tmp/public-reader.html
+          grep -q "一个人做出海网站" /tmp/public-courses.html
+          grep -q "vf-course-reader" /tmp/public-reader.html
+          echo "preview_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "reader_url=$URL/courses.php?study=$COURSE_ID" >> "$GITHUB_OUTPUT"
+          echo "P01_OWNER_PREVIEW_RUNTIME=READY exact_sha=${{ steps.request.outputs.target_sha }}"
+          BODY="$(printf '%s\n\n%s\n%s\n%s\n%s\n%s\n%s'             'P01 V2.47.241 Course Reader exact-candidate Preview Runtime 已就绪。'             '- Exact SHA: ${{ steps.request.outputs.target_sha }}'             "- Courses: $URL/courses.php"             "- Reader: $URL/courses.php?study=$COURSE_ID"             '- Preview admin password: VFPreview241-Owner'             '- Data: synthetic only; no Production SQLite'             '- Formal Release / Distribution / Production writes: 0')"
+          GH_TOKEN="${{ github.token }}" gh pr comment "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+
+      - name: Hold preview for Owner review
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo P01_OWNER_PREVIEW_HOLD=START
+          for i in {1..300}; do
+            kill -0 "$(cat /tmp/p01-php.pid)" 2>/dev/null || { echo "PHP preview stopped" >&2; exit 1; }
+            kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null || { echo "Tunnel stopped" >&2; cat /tmp/cloudflared.log; exit 1; }
+            sleep 60
+          done
+          echo P01_OWNER_PREVIEW_HOLD=EXPIRED
