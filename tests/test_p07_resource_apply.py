@@ -221,7 +221,21 @@ max_connections = 40
              mock.patch.object(ra, "production_apply", return_value=result) as apply_mock:
             rc=ra.main(argv)
         self.assertEqual(rc,0)
-        apply_mock.assert_called_once_with("balanced",ra.APPLY_TOKEN,require_tty=False)
+        apply_mock.assert_called_once_with(
+            "balanced", ra.APPLY_TOKEN, require_tty=False, empty_server_init=False
+        )
+
+        empty_argv=[
+            "apply", "--mode", "balanced", "--confirm", ra.APPLY_TOKEN,
+            "--json", "--confirmed-noninteractive", "--empty-server-init",
+        ]
+        with mock.patch.dict(ra.os.environ, {"P07_RESOURCE_APPLY_CONFIRMED":"1"}, clear=False), \
+             mock.patch.object(ra, "production_apply", return_value=result) as apply_mock:
+            rc=ra.main(empty_argv)
+        self.assertEqual(rc,0)
+        apply_mock.assert_called_once_with(
+            "balanced", ra.APPLY_TOKEN, require_tty=False, empty_server_init=True
+        )
 
     def test_unused_php_is_suggestion_not_automatic_disable(self):
         with tempfile.TemporaryDirectory() as td:
