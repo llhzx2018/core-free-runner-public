@@ -54,5 +54,14 @@ module.exports=async(page,context,browser,url)=>{
  // Preset application is executed only here in isolated synthetic WordPress; guarded proof remains enforced.
  await page.locator('[data-vf-brand-advanced-group="preset"]').evaluate(n=>n.open=true);const preset=page.locator('form').filter({has:page.locator('[name="action"][value="vf_theme_site_preset_preflight"]')});await preset.locator('[name="mode"]').selectOption('safe');await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='preset-diff-ready'),preset.locator('button').click()]);await page.locator('.vf-brand-preset-confirm [name="confirm"]').fill('APPLY');await Promise.all([page.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='preset-applied'),page.locator('.vf-brand-preset-confirm button').click()]);check.preset_preflight_confirm_apply='PASS';
  await page.goto(url);await field('siteName').fill(original);await saved();
+ const nojs=await browser.newContext({javaScriptEnabled:false}),np=await nojs.newPage();
+ const login=async(p,user,password)=>{await p.goto(new URL('/wp-login.php',url).href);await p.locator('#user_login').fill(user);await p.locator('#user_pass').fill(password);await Promise.all([p.waitForURL(/wp-admin/),p.locator('#wp-submit').click()]);};
+ await login(np,'admin','Synthetic-Only-Update-54!');await np.goto(url);await np.locator('[data-vf-brand-input="tagline"]').fill('');await np.locator('[data-vf-brand-input="siteName"]').fill('无脚本原生保存');
+ await Promise.all([np.waitForURL(u=>u.searchParams.get('vf_theme_notice')==='brand-saved'),np.locator('noscript button[type="submit"]').click()]);await np.reload();assert.equal(await np.locator('[data-vf-brand-input="siteName"]').inputValue(),'无脚本原生保存');await nojs.close();check.no_javascript_native_save_reload='PASS';
+ const {execFileSync}=require('child_process');
+ execFileSync('docker',['exec','--user','www-data',process.env.WP,'php','/usr/local/bin/wp','user','create','brand-subscriber','brand-subscriber@example.invalid','--role=subscriber','--user_pass=Synthetic-brand-only-84!','--path=/var/www/html'],{stdio:'pipe'});
+ const limited=await browser.newContext(),lp=await limited.newPage();await login(lp,'brand-subscriber','Synthetic-brand-only-84!');
+ const denied=await limited.request.post(new URL('/wp-admin/admin-ajax.php',url).href,{form:{action:'vf_theme_brand_save',nonce:'synthetic-denied',revision:'synthetic-denied'}});assert.equal(denied.status(),403);assert.equal((await denied.json()).data.failureCode,'PERMISSION_DENIED');await limited.close();
+ await page.reload();assert.equal(await field('siteName').inputValue(),'无脚本原生保存');check.permission_denied_preserves_saved_state='PASS';await field('siteName').fill(original);await saved();
  fs.writeFileSync('proof/brand-functions.json',JSON.stringify({status:'PASS',checks:check},null,2));return check;
 };

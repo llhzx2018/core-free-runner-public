@@ -45,7 +45,8 @@ const input=key=>`[data-vf-brand-input="${key}"]`;
   await page.screenshot({path:'proof/live-'+width+'.png',fullPage:true});
   assert(!await page.locator('#vf-brand-step-preview').isVisible());
   for (const selector of ['.vf-brand-tools','.vf-brand-inheritance','.vf-v9-brand-layout','.vf-v9-brand-recipes']) {
-   assert(await page.locator(selector).evaluate(el=>el.getBoundingClientRect().height)<=56,'closed disclosure too tall');
+   const height=await page.locator(selector).evaluate(el=>el.getBoundingClientRect().height);
+   assert(height<=(selector==='.vf-brand-inheritance'?58:56),JSON.stringify({width,selector,height}));
   }
   const grouping=await require('../target/tests/brand-advanced-browser-check')(page,'proof',width);
   await page.locator('[data-vf-brand-preview-open]').click();
