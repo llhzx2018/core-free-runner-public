@@ -11,7 +11,13 @@ def original(p):return subprocess.check_output(['git','-C','target','show',os.en
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
 assert (root/'inc/runtime-constants.php').read_text()==original('src/inc/runtime-constants.php').replace("VF_THEME_VERSION', '"+os.environ['SOURCE_VERSION']+"'", "VF_THEME_VERSION', '"+version+"'")
 page='src/inc/admin/views/preview.php';new=pathlib.Path('target',page).read_text();old=original(page)
-assert new.split('?>\n<section class="vf-preview-v510"')[0]==old.split('?>\n<section class="vf-preview-v510"')[0],'preview state calculation changed'
+original_preamble=old.split('?>\n<section class="vf-preview-v510"')[0]
+new_preamble=new.split('?>\n<section class="vf-preview-v510"')[0]
+new_preamble=re.sub(r'\$preview_language_locales = \[\];.*?(?=\$signed_target_paths =)', '',new_preamble,flags=re.S)
+new_preamble=new_preamble.replace(', $preview_language_locales, $preview_site_locale','').replace("'locale'=>(string)($preview_language_locales[(string)$language] ?? $preview_site_locale)","'locale'=>(string)$language")
+new_preamble=re.sub(r'        \$preview_route_path = .*?\n        \$preview_route_scope = .*?\n', '',new_preamble)
+new_preamble=new_preamble.replace("            'route'=>'/' . ltrim($preview_route_scope, '/'),\n",'')
+assert new_preamble==original_preamble,'unrelated preview state calculation changed'
 from collections import Counter
 def fields(s):return Counter(re.findall(r'<(?:form|input|select|option|textarea)\b(?:<\?php[\s\S]*?\?>|[^<>])*>',s,re.S))
 assert fields(new)==fields(old),'submitted form fields/options changed'
