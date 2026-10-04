@@ -231,6 +231,20 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("legacy_env_file = app / \".env\"", text)
 
 
+    def test_resource_apply_uses_cloudpanel_native_crypto_first(self) -> None:
+        path = ROOT / "components/resource-tuning/lib/resource_apply.py"
+        if not path.is_file():
+            self.skipTest("source-only canonical tuning component is not shipped in runtime overlay")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("class_exists('\\\\App\\\\Service\\\\Crypto')", text)
+        self.assertIn("method_exists('\\\\App\\\\Service\\\\Crypto', 'decrypt')", text)
+        self.assertIn("\\App\\Service\\Crypto::decrypt($cipher)", text)
+        self.assertIn("\\Defuse\\Crypto\\Crypto::decryptWithPassword($cipher, $env['APP_SECRET'], false)", text)
+        native_index = text.index("\\App\\Service\\Crypto::decrypt($cipher)")
+        legacy_index = text.index("\\Defuse\\Crypto\\Crypto::decryptWithPassword($cipher, $env['APP_SECRET'], false)")
+        self.assertLess(native_index, legacy_index)
+
+
     def test_initialization_does_not_rewrite_cloudpanel_vendor_cli(self) -> None:
         init = (ROOT / "bin/vfops-init-ui").read_text(encoding="utf-8")
         self.assertNotIn("repair_cloudpanel_cli_shebang_for_init()", init)
