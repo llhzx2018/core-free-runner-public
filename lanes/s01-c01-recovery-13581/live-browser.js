@@ -12,7 +12,7 @@ const changed=name=>JSON.parse(cli(load+'$p=vf_theme_export_config()["payload"];
  const checks=[];
  for(const width of [1920,1440,1319,1024,768,390]){
   await page.setViewportSize({width,height:1000});await page.goto(url);await page.waitForFunction(()=>document.querySelector('[data-vf-recovery-page]')?.getAttribute('aria-busy')===null);
-  checks.push(await check(page,width));await page.screenshot({path:'proof/recovery-default-'+width+'.png',fullPage:true});
+  try{checks.push(await check(page,width));}catch(e){await page.screenshot({path:'proof/recovery-controls-failed-'+width+'.png',fullPage:true});throw e;}await page.screenshot({path:'proof/recovery-default-'+width+'.png',fullPage:true});
   const root=page.locator('[data-vf-recovery-page]');await root.locator('[data-vf-recovery-workflow-step=import]').click();await page.screenshot({path:'proof/recovery-import-empty-'+width+'.png',fullPage:true});
   await root.locator('[data-vf-recovery-workflow-step=restore]').click();await page.screenshot({path:'proof/recovery-restore-empty-'+width+'.png',fullPage:true});
  }
