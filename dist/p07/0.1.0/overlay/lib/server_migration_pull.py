@@ -341,6 +341,56 @@ def source_probe(source: dict[str, Any], domains: list[str]) -> dict[str, Any]:
         cleanup_probe_runtime(source, runtime)
 
 
+def refresh_external_assets_from_source(state: dict[str, Any]) -> int:
+    domains = [
+        str(site.get("domain"))
+        for site in state.get("sites", [])
+        if isinstance(site, dict) and site.get("domain")
+    ]
+    if not domains:
+        return 0
+    plan = source_probe(state["source"], domains)
+    expected_identity = str(state.get("source_server_identity") or "")
+    actual_identity = str(plan.get("source_server_identity") or "")
+    if expected_identity and actual_identity and actual_identity != expected_identity:
+        raise PullMigrationError("old-server identity changed during migration")
+
+    allowed_users = {
+        str(site.get("site_user"))
+        for site in state.get("sites", [])
+        if isinstance(site, dict) and site.get("site_user")
+    }
+    current = [
+        row for row in state.get("external_assets", [])
+        if isinstance(row, dict)
+    ]
+    seen = {
+        (str(row.get("path")), str(row.get("user")))
+        for row in current
+        if row.get("path") and row.get("user")
+    }
+    added = 0
+    for row in plan.get("external_assets", []):
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "")
+        user = str(row.get("user") or "")
+        if user not in allowed_users or not path.startswith(f"/home/{user}/"):
+            raise PullMigrationError("old-server external asset escaped selected site home")
+        key = (path, user)
+        if key in seen:
+            continue
+        current.append({"path": path, "user": user})
+        seen.add(key)
+        added += 1
+
+    state["external_assets"] = current
+    if added:
+        progress_note(f"发现 {added} 个此前漏记的站点外部 Runtime / Storage，已加入原迁移任务")
+        save_state(state)
+    return added
+
+
 def ensure_old_server_rsync(source: dict[str, Any]) -> dict[str, Any]:
     check = source_remote(source, "command -v rsync >/dev/null 2>&1", timeout=30, check=False)
     if check.returncode == 0:
@@ -1606,6 +1656,8 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     state.pop("last_error_class", None)
     save_state(state)
     try:
+        progress_note("首轮迁入 · 正在刷新旧服务器外部 Runtime / Storage 清单")
+        refresh_external_assets_from_source(state)
         total_sites = len(state["sites"])
         for index, site in enumerate(state["sites"], 1):
             if site.get("stage_status") == "PULLED_STAGED":
@@ -1653,6 +1705,8 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     state["cutover_started_at"] = now_utc()
     save_state(state)
     try:
+        progress_note("0/7 · 正在刷新旧服务器外部 Runtime / Storage 清单")
+        refresh_external_assets_from_source(state)
         progress_note("1/7 · 正在进入短维护窗口并保护旧服务器运行状态")
         if not state.get("source_runtime_frozen"):
             freeze_old_server(state)

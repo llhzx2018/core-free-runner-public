@@ -4288,3 +4288,46 @@ Owner real-use on release65 isolated final local verification to `press.kewaro.c
 ## release67 · PHP-FPM backend readiness repair
 
 Owner real-use on release66 proved the remaining failures are persistent local HTTP 503s after ten retries. The known failing sites are PHP sites, not Node/PM2. release67 makes the local verification backend-aware: after the first PHP 5xx/000, P07 checks the exact phpX.Y-fpm service and the target vhost FastCGI listener. If the service is inactive it starts only that PHP-FPM service; if the service is active but the site listener is missing it performs a safe PHP-FPM reload and rechecks the listener. It never restarts/stops Nginx. Persistent HTTP failure after a healthy PHP-FPM backend still fails closed and carries backend status in diagnostics. Existing migration ID remains resumable. Build 0.1.0-release67; System Care remains 0.1.0-rc35.
+
+
+## release68 · external Runtime / Storage discovery + existing-task refresh
+
+Owner real-use isolated the remaining press.kewaro.com 503 to an exact migration omission rather than Nginx/PHP-FPM:
+
+```text
+old index.php SHA == new index.php SHA
+old HTTP = 200
+new HTTP = 503
+new error = Runtime 或私人数据目录不存在
+
+bootstrap runtime_path:
+  /home/kewaro-press/htdocs/.press.kewaro.com-vfpress-runtime
+old server: EXISTS
+new server: MISSING
+existing migration external list: MISSING
+
+bootstrap storage_path:
+  /home/kewaro-press/htdocs/.press.kewaro.com-vfpress-data
+old server: EXISTS
+new server: EXISTS
+existing migration external list: MISSING
+```
+
+Root cause: external path discovery searched hidden `.vf*` / `.press*` assets under the site user's home, but not hidden sibling directories under `/home/<user>/htdocs` beside the public Web Root. SQLite scanning happened to recreate the data directory/app.db, while the runtime directory was never copied.
+
+release68:
+- discovers `.vf*` / `.press*` hidden sibling directories under the canonical htdocs parent;
+- refreshes external-asset inventory from the old server before prepare-resume and before final cutover;
+- merges only paths under the already-selected site user's `/home/<user>/`;
+- verifies old-server identity did not change;
+- preserves the existing migration ID and only adds missing external assets to it;
+- keeps existing rsync progress, SQLite consistency snapshot, rollback and manual-DNS gates.
+
+No new migration task is required for the Owner's current `pull-20261005T062015Z-04275579`.
+
+Identity:
+
+```text
+Source Build 0.1.0-release68
+System Care  0.1.0-rc35 (unchanged)
+```

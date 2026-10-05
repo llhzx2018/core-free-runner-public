@@ -109,8 +109,13 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 ".local/share/vf-seo",
             ):
                 (home / rel).mkdir(parents=True)
-            # htdocs hidden data is already in the normal site package and must not
-            # be reclassified as external home data.
+            # Private/runtime directories may live beside the site Web Root,
+            # under /home/<user>/htdocs, and are not included in the normal
+            # site rsync.
+            (site_root.parent / ".press.a.example.com-vfpress-runtime").mkdir()
+            (site_root.parent / ".press.a.example.com-vfpress-data").mkdir()
+            # Hidden data inside the actual Web Root is already in the normal
+            # site package and must not be reclassified as external data.
             (site_root / ".vfinside").mkdir()
 
             site = {
@@ -123,6 +128,8 @@ class ServerMigrationAutomationTests(unittest.TestCase):
             self.assertIn(".vfinfra-data", rendered)
             self.assertIn(".press.example-data", rendered)
             self.assertIn(".local/share/vf-seo", rendered)
+            self.assertIn(".press.a.example.com-vfpress-runtime", rendered)
+            self.assertIn(".press.a.example.com-vfpress-data", rendered)
             self.assertNotIn(".vfinside", rendered)
 
     def test_whole_home_sqlite_discovery_finds_external_and_site_databases(self) -> None:

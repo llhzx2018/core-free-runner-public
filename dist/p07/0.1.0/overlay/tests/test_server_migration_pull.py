@@ -233,6 +233,73 @@ class TargetPullContractTests(unittest.TestCase):
             self.assertTrue((target / "unexpected").is_file())
             transfer.assert_not_called()
 
+    def test_refresh_external_assets_merges_new_hidden_runtime_into_existing_task(self) -> None:
+        state = {
+            "source_server_identity": "sha256:old",
+            "source": {"host": "192.0.2.10"},
+            "sites": [{
+                "domain": "press.example.com",
+                "site_user": "press-user",
+            }],
+            "external_assets": [{
+                "path": "/home/press-user/.vf-token",
+                "user": "press-user",
+            }],
+        }
+        plan = {
+            "source_server_identity": "sha256:old",
+            "external_assets": [
+                {
+                    "path": "/home/press-user/.vf-token",
+                    "user": "press-user",
+                },
+                {
+                    "path": "/home/press-user/htdocs/.press.example.com-vfpress-runtime",
+                    "user": "press-user",
+                },
+                {
+                    "path": "/home/press-user/htdocs/.press.example.com-vfpress-data",
+                    "user": "press-user",
+                },
+            ],
+        }
+        with mock.patch.object(
+            pull, "source_probe", return_value=plan
+        ) as probe, mock.patch.object(
+            pull, "save_state"
+        ) as save:
+            added = pull.refresh_external_assets_from_source(state)
+
+        self.assertEqual(added, 2)
+        self.assertEqual(len(state["external_assets"]), 3)
+        self.assertIn(
+            "/home/press-user/htdocs/.press.example.com-vfpress-runtime",
+            {row["path"] for row in state["external_assets"]},
+        )
+        probe.assert_called_once_with(state["source"], ["press.example.com"])
+        save.assert_called_once_with(state)
+
+    def test_refresh_external_assets_rejects_changed_source_identity(self) -> None:
+        state = {
+            "source_server_identity": "sha256:old",
+            "source": {"host": "192.0.2.10"},
+            "sites": [{"domain": "press.example.com", "site_user": "press-user"}],
+            "external_assets": [],
+        }
+        with mock.patch.object(
+            pull,
+            "source_probe",
+            return_value={
+                "source_server_identity": "sha256:different",
+                "external_assets": [],
+            },
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "identity changed",
+            ):
+                pull.refresh_external_assets_from_source(state)
+
     def test_prepare_state_is_owned_by_current_new_server(self) -> None:
         source = {
             "host": "192.0.2.10",
@@ -512,6 +579,8 @@ class TargetPullContractTests(unittest.TestCase):
         }
         with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
             pull, "save_state"
+        ), mock.patch.object(
+            pull, "refresh_external_assets_from_source", return_value=0
         ), mock.patch.object(
             pull, "freeze_old_server"
         ), mock.patch.object(
