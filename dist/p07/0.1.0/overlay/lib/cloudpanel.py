@@ -101,6 +101,12 @@ def run(
         raise ValueError("CloudPanel command is required")
     command = [_scalar(clpctl, "clpctl"), *[_scalar(item, "argument") for item in args]]
     op = operation or args[0]
+    env = os.environ.copy()
+    # CloudPanel database import/export authorization resolves the caller from
+    # SUDO_USER. A direct root shell commonly has no SUDO_USER, which can make
+    # otherwise valid root CLI database operations fail without a useful payload.
+    if hasattr(os, "geteuid") and os.geteuid() == 0 and not env.get("SUDO_USER"):
+        env["SUDO_USER"] = "root"
     try:
         proc = subprocess.run(
             command,
@@ -108,7 +114,7 @@ def run(
             capture_output=True,
             check=False,
             timeout=timeout,
-            env=os.environ.copy(),
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CloudPanelError(op) from exc
