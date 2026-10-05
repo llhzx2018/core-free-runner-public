@@ -4283,3 +4283,8 @@ System Care  0.1.0-rc35 (unchanged)
 ## release66 · local readiness retry
 
 Owner real-use on release65 isolated final local verification to `press.kewaro.com` returning HTTP 503 immediately after runtime activation. release66 adds a bounded local readiness retry: 10 attempts, 3 seconds apart. 2xx/3xx/4xx remain reachable PASS; 5xx/000 are retried and remain FAIL if persistent. Progress reports domain and attempt number. The same migration ID remains resumable after rollback. Build: `0.1.0-release66`; System Care remains `0.1.0-rc35`.
+
+
+## release67 · PHP-FPM backend readiness repair
+
+Owner real-use on release66 proved the remaining failures are persistent local HTTP 503s after ten retries. The known failing sites are PHP sites, not Node/PM2. release67 makes the local verification backend-aware: after the first PHP 5xx/000, P07 checks the exact phpX.Y-fpm service and the target vhost FastCGI listener. If the service is inactive it starts only that PHP-FPM service; if the service is active but the site listener is missing it performs a safe PHP-FPM reload and rechecks the listener. It never restarts/stops Nginx. Persistent HTTP failure after a healthy PHP-FPM backend still fails closed and carries backend status in diagnostics. Existing migration ID remains resumable. Build 0.1.0-release67; System Care remains 0.1.0-rc35.
