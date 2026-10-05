@@ -4200,3 +4200,52 @@ Identity:
 Source Build 0.1.0-release63
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release64 · local cutover smoke semantics + same-task retry
+
+Owner real-use on release63 completed the resumed file/SQLite transfer and reached final local verification, then produced:
+
+```text
+new-server local verification failed: pass=13 fail=3
+```
+
+The pre-DNS local smoke used HTTPS root responses and required only 2xx/3xx. That is too strict for a reachability gate: a migrated site can intentionally return 401/403/404 at `/` while the vhost/runtime is correctly reachable. The old aggregation also hid which domains or inventory fields failed, and a successful automatic rollback moved the task into `CUTOVER_FAILED_ROLLED_BACK` without allowing the same migration ID to retry.
+
+release64 changes only this bounded cutover verification/resume behavior:
+
+```text
+local pre-DNS probe:
+  2xx/3xx/4xx + curl success -> reachable PASS
+  5xx / 000 / transport error -> FAIL
+
+inventory parity:
+  still fail-closed
+  domain + mismatch fields retained in target_smoke diagnostics
+
+successful cutover rollback:
+  same migration ID may re-enter final synchronization
+  explicit Owner confirmation is still required
+  no new migration task is created
+```
+
+Failure output now includes bounded domain/reason details instead of only pass/fail totals.
+
+Safety boundary remains unchanged:
+
+```text
+DNS automatic change          NO
+old server deletion           NO
+existing unrelated overwrite  NO
+automatic cutover without Owner confirmation NO
+Production Nginx stop/restart by release      NO
+secret output                 NO
+5xx accepted as healthy       NO
+```
+
+Identity:
+
+```text
+Source Build 0.1.0-release64
+System Care  0.1.0-rc35 (unchanged)
+```
