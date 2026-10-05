@@ -60,7 +60,7 @@ curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
 cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
 # Fresh disposable database and package installation, with no prior Theme settings.
-cli db reset --yes >/dev/null
+docker exec "$DB" mariadb -uroot -psyntheticroot -e 'DROP DATABASE wordpress; CREATE DATABASE wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;' >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic VF Fresh Install' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" rm -rf /var/www/html/wp-content/themes/vf-tools-theme
 docker cp "proof/$ASSET" "$WP:/tmp/current-theme.zip"
