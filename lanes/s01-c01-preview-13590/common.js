@@ -1,6 +1,6 @@
 'use strict';
 const {execFileSync}=require('child_process');
-const cli=php=>execFileSync('docker',['exec','--user','www-data','vf-v8-'+process.env.GITHUB_RUN_ID+'-wp','php','/usr/local/bin/wp','eval',php,'--path=/var/www/html'],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+const cli=php=>execFileSync('docker',['exec','-i','--user','www-data','vf-v8-'+process.env.GITHUB_RUN_ID+'-wp','php','/usr/local/bin/wp','eval-file','/dev/stdin','--path=/var/www/html'],{encoding:'utf8',stdio:['pipe','pipe','pipe'],input:'<?php\n'+php});
 const loadOld='vf_theme_bootstrap_require_many(["services/technical-seo-service.php"]);';
 const load='wp_set_current_user(1);vf_theme_bootstrap_require_many(require get_template_directory()+"/inc/bootstrap/manifests/admin-tabs/preview.php");'.replace('get_template_directory()+','get_template_directory().');
 const state=()=>JSON.parse(cli(load+'echo wp_json_encode(vf_theme_preview_workbench_latest());'));
