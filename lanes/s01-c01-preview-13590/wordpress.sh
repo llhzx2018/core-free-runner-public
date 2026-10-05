@@ -3,6 +3,7 @@ set -Eeuo pipefail
 NET="vf-v8-${GITHUB_RUN_ID}"; DB="$NET-db"; WP="$NET-wp"
 cleanup(){ docker rm -f "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; [[ -n "${MOCK_PID:-}" ]] && kill "$MOCK_PID" || true; }
 trap cleanup EXIT
+echo '127.0.0.1 vf-ui.test' | sudo tee -a /etc/hosts >/dev/null
 ASSET="vf-tools-theme_V${TARGET_VERSION}.zip"
 export MOCK_PORT=18881 MOCK_ASSET="$PWD/proof/$ASSET" MOCK_STATE="$PWD/mock-state.json" MOCK_LOG="$PWD/mock.log" MOCK_HOST=vf-update.test
 echo '{"mode":"normal"}' > "$MOCK_STATE"
@@ -18,12 +19,12 @@ python3 /tmp/v8-mock.py >/tmp/v8-mock-stdout 2>&1 & MOCK_PID=$!
 docker network create "$NET" >/dev/null
 docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
 for i in $(seq 1 60); do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1 && break; sleep 2; done
-docker run -d --name "$WP" --network "$NET" --add-host vf-update.test:host-gateway -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
-for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
+docker run -d --name "$WP" --network "$NET" --add-host vf-update.test:host-gateway --add-host vf-ui.test:host-gateway -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
+for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://vf-ui.test:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
 curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp";docker exec "$WP" chmod 0755 /usr/local/bin/wp
 cli(){ docker exec --user www-data -e TARGET_VERSION="$TARGET_VERSION" -e SOURCE_VERSION="$SOURCE_VERSION" "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic VF Update' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli core install --url=http://vf-ui.test:18880 --title='Synthetic VF Update' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 cli option update blogdescription 'Synthetic Runner tagline, preserved across native upgrade' >/dev/null
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set VF_WP_UPDATE_GITHUB_API_BASE http://vf-update.test:18881 >/dev/null
@@ -52,13 +53,13 @@ cli eval 'vf_theme_bootstrap_require_many(["theme-options-runtime.php","theme-op
 cli eval 'vf_theme_bootstrap_require_many(["services/renderer-config-service.php"]);if(vf_tools_theme_renderer_hash(vf_tools_theme_renderer_readback()["renderer"])!==get_option("vf_render_seed_fingerprint")){throw new Exception("renderer upgrade preservation failed");}' >/dev/null
 node lane/live-browser.js
 cli eval 'if(get_option("vf_private_update_credential_v1")!=="runner-private-token"||get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("browser action preservation failed");}' >/dev/null
-curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
+curl -fsS http://vf-ui.test:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
 cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
 # Fresh disposable database and package installation, with no prior Theme settings.
 docker exec "$DB" mariadb -uroot -psyntheticroot -e 'DROP DATABASE wordpress; CREATE DATABASE wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;' >/dev/null
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic VF Fresh Install' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli core install --url=http://vf-ui.test:18880 --title='Synthetic VF Fresh Install' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" rm -rf /var/www/html/wp-content/themes/vf-tools-theme
 docker cp "proof/$ASSET" "$WP:/tmp/current-theme.zip"
 cli theme install /tmp/current-theme.zip --activate >/dev/null
