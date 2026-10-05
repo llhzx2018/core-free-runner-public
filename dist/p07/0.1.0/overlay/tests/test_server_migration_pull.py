@@ -405,7 +405,58 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(0.1)
 
-    def test_target_smoke_rejects_persistent_502_after_bounded_retry(self) -> None:
+    def test_php_backend_starts_inactive_service_without_nginx_restart(self) -> None:
+        site = {
+            "domain": "example.com",
+            "runtime": {"type": "php", "version": "8.4"},
+        }
+        calls = [
+            subprocess.CompletedProcess([], 3, "inactive\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+        with mock.patch.object(
+            pull, "run_local", side_effect=calls
+        ) as run, mock.patch.object(
+            pull, "php_fpm_listener_for_domain", return_value=19011
+        ), mock.patch.object(
+            pull, "tcp_listener_ready", return_value=True
+        ):
+            result = pull.reconcile_php_fpm_backend(site)
+
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["action"], "STARTED")
+        self.assertEqual(result["listener_port"], 19011)
+        self.assertEqual(run.call_args_list[0].args[0], ["systemctl", "is-active", "php8.4-fpm"])
+        self.assertEqual(run.call_args_list[1].args[0], ["systemctl", "start", "php8.4-fpm"])
+        self.assertFalse(any("nginx" in " ".join(call.args[0]) for call in run.call_args_list))
+
+    def test_php_backend_reloads_active_pool_when_listener_missing(self) -> None:
+        site = {
+            "domain": "example.com",
+            "runtime": {"type": "php", "version": "8.3"},
+        }
+        calls = [
+            subprocess.CompletedProcess([], 0, "active\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]
+        with mock.patch.object(
+            pull, "run_local", side_effect=calls
+        ) as run, mock.patch.object(
+            pull, "php_fpm_listener_for_domain", return_value=18001
+        ), mock.patch.object(
+            pull, "tcp_listener_ready", side_effect=[False, True]
+        ), mock.patch.object(
+            pull.time, "sleep"
+        ) as sleep:
+            result = pull.reconcile_php_fpm_backend(site)
+
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["action"], "RELOADED")
+        self.assertEqual(result["listener_port"], 18001)
+        self.assertEqual(run.call_args_list[1].args[0], ["systemctl", "reload", "php8.3-fpm"])
+        sleep.assert_called_once_with(1.0)
+
+    def test_target_smoke_rejects_persistent_502_after_php_backend_is_ready(self) -> None:
         state = {
             "sites": [{
                 "domain": "example.com",
@@ -427,6 +478,14 @@ class TargetPullContractTests(unittest.TestCase):
             pull, "run_local",
             return_value=subprocess.CompletedProcess([], 0, "502", ""),
         ) as run, mock.patch.object(
+            pull, "reconcile_php_fpm_backend",
+            return_value={
+                "status": "READY",
+                "service": "php8.4-fpm",
+                "listener_port": 19011,
+                "action": "NONE",
+            },
+        ), mock.patch.object(
             pull.time, "sleep"
         ) as sleep:
             result = pull.target_smoke(state, attempts=3, delay=0.1)
@@ -436,6 +495,7 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(result["failures"][0]["reason"], "LOCAL_HTTP_PROBE")
         self.assertEqual(result["failures"][0]["http_code"], "502")
         self.assertEqual(result["failures"][0]["attempts"], 3)
+        self.assertEqual(result["failures"][0]["backend"]["status"], "READY")
         self.assertEqual(run.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 

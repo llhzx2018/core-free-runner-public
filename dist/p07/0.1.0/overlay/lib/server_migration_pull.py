@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import shlex
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1184,6 +1186,128 @@ def deactivate_target_runtime(state: dict[str, Any]) -> bool:
     return ok
 
 
+def php_fpm_listener_for_domain(domain: str) -> int | None:
+    if not domain or "/" in domain:
+        return None
+    directory = Path("/etc/nginx/sites-enabled")
+    if not directory.is_dir():
+        return None
+    for path in sorted(directory.glob("*.conf")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        names: list[str] = []
+        for match in re.finditer(r"(?m)^\s*server_name\s+([^;]+);", text):
+            names.extend(
+                item
+                for item in re.split(r"\s+", match.group(1).strip())
+                if item and item != "_"
+            )
+        if domain not in names:
+            continue
+        match = re.search(
+            r"fastcgi_pass\s+(?:127\.0\.0\.1|localhost):([0-9]+)",
+            text,
+            re.I,
+        )
+        if not match:
+            return None
+        port = int(match.group(1))
+        return port if 1 <= port <= 65535 else None
+    return None
+
+
+def tcp_listener_ready(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def reconcile_php_fpm_backend(site: dict[str, Any]) -> dict[str, Any]:
+    runtime = site.get("runtime") if isinstance(site.get("runtime"), dict) else {}
+    runtime_type = str(runtime.get("type", "")).lower().replace("-", "_")
+    if runtime_type != "php":
+        return {"status": "NOT_APPLICABLE"}
+
+    version = str(runtime.get("version", "")).strip()
+    parts = version.split(".")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return {"status": "FAIL", "reason": "PHP_VERSION_INVALID"}
+
+    domain = str(site.get("domain", ""))
+    service = f"php{version}-fpm"
+    active = run_local(
+        ["systemctl", "is-active", service],
+        timeout=20,
+        check=False,
+    )
+    if active.returncode != 0:
+        progress_note(
+            f"7/7 · {domain} PHP-FPM 未运行，正在启动 {service}"
+        )
+        started = run_local(
+            ["systemctl", "start", service],
+            timeout=60,
+            check=False,
+        )
+        if started.returncode != 0:
+            return {
+                "status": "FAIL",
+                "reason": "PHP_FPM_SERVICE_START_FAILED",
+                "service": service,
+            }
+
+    port = php_fpm_listener_for_domain(domain)
+    if port is None:
+        return {
+            "status": "FAIL",
+            "reason": "PHP_FPM_LISTENER_UNKNOWN",
+            "service": service,
+        }
+
+    if tcp_listener_ready(port):
+        return {
+            "status": "READY",
+            "service": service,
+            "listener_port": port,
+            "action": "STARTED" if active.returncode != 0 else "NONE",
+        }
+
+    progress_note(
+        f"7/7 · {domain} PHP-FPM 监听未就绪，正在安全 reload {service}"
+    )
+    reloaded = run_local(
+        ["systemctl", "reload", service],
+        timeout=60,
+        check=False,
+    )
+    if reloaded.returncode != 0:
+        return {
+            "status": "FAIL",
+            "reason": "PHP_FPM_RELOAD_FAILED",
+            "service": service,
+            "listener_port": port,
+        }
+
+    time.sleep(1.0)
+    if not tcp_listener_ready(port):
+        return {
+            "status": "FAIL",
+            "reason": "PHP_FPM_LISTENER_MISSING",
+            "service": service,
+            "listener_port": port,
+        }
+    return {
+        "status": "READY",
+        "service": service,
+        "listener_port": port,
+        "action": "RELOADED",
+    }
+
+
 def target_smoke(
     state: dict[str, Any],
     *,
@@ -1229,6 +1353,8 @@ def target_smoke(
         last_exit = 0
         ready = False
         used_attempts = 0
+        backend: dict[str, Any] = {"status": "NOT_CHECKED"}
+        backend_checked = False
         for probe_attempt in range(1, max_attempts + 1):
             used_attempts = probe_attempt
             progress_note(
@@ -1243,10 +1369,6 @@ def target_smoke(
             code = proc.stdout.strip()[-3:]
             last_code = code if code.isdigit() else "000"
             last_exit = int(proc.returncode)
-            # Pre-DNS local smoke proves vhost/runtime reachability, not
-            # application business semantics. 4xx is reachable. 5xx/000 can be
-            # transient immediately after PM2/Node runtime activation, so retry
-            # them for a bounded readiness window before failing closed.
             if (
                 proc.returncode == 0
                 and last_code.isdigit()
@@ -1254,6 +1376,19 @@ def target_smoke(
             ):
                 ready = True
                 break
+
+            runtime = (
+                source_site.get("runtime")
+                if isinstance(source_site.get("runtime"), dict)
+                else {}
+            )
+            runtime_type = str(runtime.get("type", "")).lower().replace("-", "_")
+            if not backend_checked and runtime_type == "php":
+                backend_checked = True
+                backend = reconcile_php_fpm_backend(source_site)
+                if backend.get("status") == "FAIL":
+                    break
+
             if probe_attempt < max_attempts:
                 progress_note(
                     f"7/7 · {domain} 暂未就绪（HTTP {last_code}），"
@@ -1265,13 +1400,28 @@ def target_smoke(
             passed += 1
         else:
             failed += 1
-            failures.append({
+            reason = (
+                str(backend.get("reason"))
+                if backend.get("status") == "FAIL"
+                else "LOCAL_HTTP_PROBE"
+            )
+            row: dict[str, Any] = {
                 "domain": domain,
-                "reason": "LOCAL_HTTP_PROBE",
+                "reason": reason,
                 "http_code": last_code,
                 "curl_exit": last_exit,
                 "attempts": used_attempts,
-            })
+            }
+            if backend.get("status") != "NOT_CHECKED":
+                row["backend"] = {
+                    key: value
+                    for key, value in backend.items()
+                    if key in {
+                        "status", "reason", "service",
+                        "listener_port", "action",
+                    }
+                }
+            failures.append(row)
     return {"pass": passed, "fail": failed, "failures": failures}
 
 
