@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'docs/authority/ACCEPTANCE_MATRIX.md', 'src/assets/css/admin/pages/seo/admin-page-seo.css', 'src/inc/runtime-constants.php', 'src/inc/services/technical-seo-service.php', 'VERSION', 'src/assets/js/admin/admin-seo.js', 'src/inc/admin/views/seo.php', 'src/theme.json', 'src/style.css'}
+allowed={'docs/authority/ACCEPTANCE_MATRIX.md', 'src/assets/css/admin/pages/seo/admin-page-seo.css', 'src/inc/runtime-constants.php', 'src/inc/services/technical-seo-service.php', 'VERSION', 'src/assets/js/admin/admin-seo.js', 'src/inc/admin/views/seo.php', 'src/theme.json', 'src/style.css', 'tests/seo-controls-browser-check.js'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
