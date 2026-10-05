@@ -1172,7 +1172,7 @@ def deactivate_target_runtime(state: dict[str, Any]) -> bool:
     return ok
 
 
-def target_smoke(state: dict[str, Any]) -> dict[str, int]:
+def target_smoke(state: dict[str, Any]) -> dict[str, Any]:
     manifest = inventory.build_manifest(Path("/"))
     site_map = {
         str(row.get("domain")): row
@@ -1180,11 +1180,13 @@ def target_smoke(state: dict[str, Any]) -> dict[str, int]:
         if isinstance(row, dict)
     }
     passed = failed = 0
+    failures: list[dict[str, Any]] = []
     for source_site in state["sites"]:
         domain = str(source_site["domain"])
         target_site = site_map.get(domain)
         if not target_site:
             failed += 1
+            failures.append({"domain": domain, "reason": "SITE_MISSING"})
             continue
         compare = cutover.compare_site(source_site, target_site, domain)
         compare["failures"] = [
@@ -1197,6 +1199,11 @@ def target_smoke(state: dict[str, Any]) -> dict[str, int]:
         ]
         if compare["failures"] or compare["unknowns"]:
             failed += 1
+            failures.append({
+                "domain": domain,
+                "reason": "INVENTORY_MISMATCH",
+                "fields": sorted(set(compare["failures"] + compare["unknowns"])),
+            })
             continue
         proc = run_local([
             "curl", "-kLsS", "--connect-timeout", "10", "--max-time", "30",
@@ -1205,15 +1212,20 @@ def target_smoke(state: dict[str, Any]) -> dict[str, int]:
             f"https://{domain}/",
         ], timeout=45, check=False)
         code = proc.stdout.strip()[-3:]
-        if proc.returncode == 0 and code.isdigit() and 200 <= int(code) < 400:
+        # Pre-DNS local smoke proves vhost/runtime reachability, not application
+        # business semantics. A deliberate 401/403/404 still proves that Nginx
+        # routed the request to the migrated site. 5xx/000 remain hard failures.
+        if proc.returncode == 0 and code.isdigit() and 200 <= int(code) < 500:
             passed += 1
         else:
             failed += 1
-    if failed:
-        raise PullMigrationError(
-            f"new-server local verification failed: pass={passed} fail={failed}"
-        )
-    return {"pass": passed, "fail": failed}
+            failures.append({
+                "domain": domain,
+                "reason": "LOCAL_HTTP_PROBE",
+                "http_code": code if code.isdigit() else "000",
+                "curl_exit": int(proc.returncode),
+            })
+    return {"pass": passed, "fail": failed, "failures": failures}
 
 
 def create_public_markers(state: dict[str, Any], token: str) -> list[tuple[str, Path]]:
@@ -1428,12 +1440,14 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
 
 def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     state = load_state(mid)
-    if state.get("status") not in {"PREPARED", "CUTOVER_RUNNING"}:
+    if state.get("status") not in {
+        "PREPARED", "CUTOVER_RUNNING", "CUTOVER_FAILED_ROLLED_BACK"
+    }:
         raise PullMigrationError("migration is not ready for final synchronization")
     if confirm != f"CUTOVER_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: CUTOVER_PULL:{mid}")
     state["status"] = "CUTOVER_RUNNING"
-    state["cutover_started_at"] = state.get("cutover_started_at") or now_utc()
+    state["cutover_started_at"] = now_utc()
     save_state(state)
     try:
         if not state.get("source_runtime_frozen"):
@@ -1450,6 +1464,27 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         )
         activate_target_runtime(state)
         state["target_smoke"] = target_smoke(state)
+        save_state(state)
+        if state["target_smoke"]["fail"]:
+            details = ", ".join(
+                f"{row.get('domain')}:{row.get('reason')}"
+                + (
+                    f":{row.get('http_code')}"
+                    if row.get("reason") == "LOCAL_HTTP_PROBE"
+                    else (
+                        ":" + "/".join(row.get("fields", []))
+                        if row.get("fields")
+                        else ""
+                    )
+                )
+                for row in state["target_smoke"].get("failures", [])
+            )
+            raise PullMigrationError(
+                "new-server local verification failed: "
+                f"pass={state['target_smoke']['pass']} "
+                f"fail={state['target_smoke']['fail']}"
+                + (f"; {details}" if details else "")
+            )
         state["status"] = "CUTOVER_PREP_READY"
         state["dns_manual_gate_required"] = True
         state["source_still_live"] = False
