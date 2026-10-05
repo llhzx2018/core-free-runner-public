@@ -11,16 +11,121 @@ SSH_PREFLIGHT_STATE="UNKNOWN"
 
 pause() { ui_pause_return; }
 
-run_migration_live() {
-  local tmp rc
+format_elapsed() {
+  local total="${1:-0}"
+  printf '%02d:%02d' "$((total / 60))" "$((total % 60))"
+}
+
+render_indeterminate_bar() {
+  local step="${1:-0}" width=24 block=5 pos i bar=''
+  pos="$((step % (width - block)))"
+  for ((i=0; i<width; i++)); do
+    if ((i >= pos && i < pos + block - 1)); then
+      bar+='='
+    elif ((i == pos + block - 1)); then
+      bar+='>'
+    else
+      bar+=' '
+    fi
+  done
+  printf '%s' "$bar"
+}
+
+migration_wait_label() {
+  local all=" $* "
+  case "$all" in
+    *" server-migrate cutover "*) printf '最终同步处理中' ;;
+    *" server-migrate resume "*) printf '继续迁入处理中' ;;
+    *" server-migrate prepare "*) printf '首轮迁入处理中' ;;
+    *" server-migrate finalize "*) printf '公网验证处理中' ;;
+    *" server-migrate plan "*) printf '正在读取迁移清单' ;;
+    *" server-migrate target-status "*) printf '正在检查新服务器状态' ;;
+    *" server-migrate status "*) printf '正在读取迁移状态' ;;
+    *) printf '迁移处理中' ;;
+  esac
+}
+
+WAIT_PAYLOAD=''
+MIGRATION_PAYLOAD=''
+
+run_quiet_with_progress() {
+  local label="$1"
+  shift
+  local tmp pid rc start now elapsed frame_index=0 bar
   tmp="$(mktemp)"
-  if VFOPS_MIGRATION_PROGRESS=1 "$CORE" "$@" >"$tmp"; then
-    rc=0
-  else
-    rc=$?
+  WAIT_PAYLOAD=''
+
+  "$@" >"$tmp" 2>&1 &
+  pid=$!
+  start="$(date +%s)"
+
+  if [[ -t 1 ]]; then
+    while kill -0 "$pid" 2>/dev/null; do
+      now="$(date +%s)"
+      elapsed="$((now - start))"
+      bar="$(render_indeterminate_bar "$frame_index")"
+      printf '\r\033[K[%s] %s · 已耗时 %s' "$bar" "$label" "$(format_elapsed "$elapsed")"
+      sleep 1
+      frame_index="$((frame_index + 1))"
+    done
+    printf '\r\033[K'
   fi
-  MIGRATION_PAYLOAD="$(cat "$tmp" 2>/dev/null || true)"
+
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  WAIT_PAYLOAD="$(cat "$tmp" 2>/dev/null || true)"
   rm -f "$tmp"
+  return "$rc"
+}
+
+run_migration_live() {
+  local tmp activity pid rc start now elapsed frame_index=0 bar
+  local last_size=0 current_size=0 quiet_ticks=0 label
+  tmp="$(mktemp)"
+  activity="$(mktemp)"
+  label="$(migration_wait_label "$@")"
+  MIGRATION_PAYLOAD=''
+
+  VFOPS_MIGRATION_PROGRESS=1 "$CORE" "$@" >"$tmp" 2> >(tee "$activity" >&2) &
+  pid=$!
+  start="$(date +%s)"
+
+  if [[ -t 1 ]]; then
+    while kill -0 "$pid" 2>/dev/null; do
+      current_size="$(wc -c <"$activity" 2>/dev/null || printf 0)"
+      if [[ "$current_size" == "$last_size" ]]; then
+        quiet_ticks="$((quiet_ticks + 1))"
+        if (( quiet_ticks >= 2 )); then
+          now="$(date +%s)"
+          elapsed="$((now - start))"
+          bar="$(render_indeterminate_bar "$frame_index")"
+          printf '\r\033[K[%s] %s · 已耗时 %s' "$bar" "$label" "$(format_elapsed "$elapsed")"
+          frame_index="$((frame_index + 1))"
+        fi
+      else
+        if (( quiet_ticks >= 2 )); then
+          printf '\r\033[K'
+        fi
+        last_size="$current_size"
+        quiet_ticks=0
+      fi
+      sleep 1
+    done
+    if (( quiet_ticks >= 2 )); then
+      printf '\r\033[K'
+    fi
+  else
+    ui_note "$label；文件传输阶段会继续输出 rsync 百分比 / 速度。"
+  fi
+
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  MIGRATION_PAYLOAD="$(cat "$tmp" 2>/dev/null || true)"
+  rm -f "$tmp" "$activity"
   return "$rc"
 }
 
@@ -108,10 +213,11 @@ ensure_migration_dependencies() {
 
 ensure_current_server_ready() {
   local payload status
-  if ! payload="$("$CORE" server-migrate target-status 2>/dev/null)"; then
+  if ! run_quiet_with_progress '正在检查新服务器状态' "$CORE" server-migrate target-status; then
     ui_bad '无法检查当前服务器。'
     return 1
   fi
+  payload="$WAIT_PAYLOAD"
   status="$(json_field "$payload" status 2>/dev/null || printf UNKNOWN)"
   if [[ "$status" == "CLOUDPANEL_READY" ]]; then
     ui_good '当前：这台新服务器（接收数据） · CloudPanel 已就绪 ✓'
@@ -273,12 +379,14 @@ prepare_and_continue() {
   [[ -n "$domain" ]] && args+=(--site "$domain")
 
   say; ui_flow '正在从旧服务器读取迁移清单...'
-  if ! payload="$("$CORE" server-migrate plan "${args[@]}" 2>&1)"; then
+  if ! run_quiet_with_progress '正在读取旧服务器迁移清单' "$CORE" server-migrate plan "${args[@]}"; then
+    payload="$WAIT_PAYLOAD"
     ui_bad '迁移预检未通过；没有迁移业务数据，也没有改 DNS。'
     printf '%s\n' "$payload" >&2
     pause
     return 0
   fi
+  payload="$WAIT_PAYLOAD"
   show_plan "$payload"
 
   printf '\n开始首轮迁入？[y/N]：'
@@ -309,11 +417,12 @@ prepare_and_continue() {
 continue_migration() {
   local mid="$1" payload status answer output
   while true; do
-    if ! payload="$("$CORE" server-migrate status --migration-id "$mid" 2>/dev/null)"; then
+    if ! run_quiet_with_progress '正在读取迁移状态' "$CORE" server-migrate status --migration-id "$mid"; then
       ui_bad "无法读取迁移状态：$mid"
       pause
       return 0
     fi
+    payload="$WAIT_PAYLOAD"
     status="$(json_field "$payload" status 2>/dev/null || printf UNKNOWN)"
     say
     ui_flow "迁移任务：$mid"
@@ -374,12 +483,14 @@ continue_migration() {
         printf '\n完成 DNS 切换后，输入 y 开始公网验证；暂未切换可直接返回。[y/N]：'
         read -r answer || return 0
         [[ "$answer" =~ ^[Yy]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid" 2>&1)"; then
+        if ! run_quiet_with_progress '正在进行公网验证' "$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid"; then
+          output="$WAIT_PAYLOAD"
           ui_bad '公网验证暂未通过。请检查 DNS / HTTPS，之后可从“继续未完成迁移”重试。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
+        output="$WAIT_PAYLOAD"
         ;;
       WAITING_DNS|PRODUCTION_VERIFY_FAILED)
         ui_attention '已进入 DNS / 公网验证阶段；不要执行运行环境回退。'
@@ -387,12 +498,14 @@ continue_migration() {
         printf '\n重试公网验证？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid" 2>&1)"; then
+        if ! run_quiet_with_progress '正在重试公网验证' "$CORE" server-migrate finalize --migration-id "$mid" --confirm "DNS_UPDATED:$mid"; then
+          output="$WAIT_PAYLOAD"
           ui_bad '公网验证仍未通过。'
           printf '%s\n' "$output" >&2
           pause
           return 0
         fi
+        output="$WAIT_PAYLOAD"
         ;;
       PRODUCTION_PASS)
         ui_good '服务器迁入正式验证通过 ✓'

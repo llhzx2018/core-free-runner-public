@@ -4249,3 +4249,32 @@ Identity:
 Source Build 0.1.0-release64
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release65 · migration long-wait progress visibility
+
+Owner real-use on release64 showed a remaining UX defect: after confirming final synchronization, the migration can spend meaningful time in quiet non-rsync work (source runtime freeze, database export/import/verification, SQLite snapshotting, runtime activation, local smoke, DNS/public verification) before the next rsync line appears. The terminal therefore looks frozen even though the migration is still working.
+
+release65 adds a single migration progress contract:
+
+```text
+file copy            -> exact rsync bytes / percentage / speed remains visible
+quiet long operation -> moving indeterminate progress bar + elapsed time
+cutover              -> explicit 1/7 .. 7/7 phase messages
+site loop            -> current site index / total / domain
+MySQL                -> export / transfer / import / verify phase
+SQLite               -> consistency snapshot phase
+rollback             -> target deactivation / source restoration phase
+plan / status / DNS  -> indeterminate progress + elapsed time when waiting
+```
+
+The generic progress bar only appears while the migration command has produced no fresh stderr activity, so it supplements rather than replaces rsync progress.
+
+This is observability/UI only. Migration state, data write order, confirmation gates and safety boundaries remain unchanged.
+
+Identity:
+
+```text
+Source Build 0.1.0-release65
+System Care  0.1.0-rc35 (unchanged)
+```

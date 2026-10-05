@@ -53,6 +53,11 @@ def now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def progress_note(message: str) -> None:
+    if os.environ.get("VFOPS_MIGRATION_PROGRESS") == "1":
+        print(f"迁移阶段：{message}", file=sys.stderr, flush=True)
+
+
 def run_local(
     args: list[str],
     *,
@@ -728,9 +733,13 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
         import_dump = work / f"{token}-import.sql.gz"
         target_dump = work / f"{token}-target.sql.gz"
         try:
+            phase_cn = "最终同步" if phase == "final" else "首轮迁入"
+            progress_note(f"{phase_cn} MySQL · 正在导出 {database}")
             source_export_database(state, database, remote_dump)
+            progress_note(f"{phase_cn} MySQL · 正在传输 {database}")
             pull_path(state["source"], remote_dump, source_dump)
             shutil.copy2(source_dump, import_dump)
+            progress_note(f"{phase_cn} MySQL · 正在导入 {database}")
             try:
                 result = legacy.target_create_database_local(
                     state["migration_id"],
@@ -753,6 +762,7 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
                 raise PullMigrationError(
                     f"new-server MySQL transaction failed: {database}"
                 ) from exc
+            progress_note(f"{phase_cn} MySQL · 正在校验 {database}")
             try:
                 cloudpanel.export_database(database, target_dump, clpctl="clpctl")
             except (cloudpanel.CloudPanelError, ValueError) as exc:
@@ -876,6 +886,8 @@ def sync_sqlite_assets(state: dict[str, Any], *, phase: str) -> int:
         token = hashlib.sha256(source_path.encode()).hexdigest()[:16]
         remote_snap = f"{remote_staging_root(state)}/sqlite-{token}.sqlite"
         local_snap = work / f"{token}.sqlite"
+        phase_cn = "最终同步" if phase == "final" else "首轮迁入"
+        progress_note(f"{phase_cn} SQLite · 正在生成一致性快照 {source_path}")
         proc = source_python(
             state["source"],
             state["source_runtime_path"],
@@ -1409,9 +1421,12 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     state.pop("last_error_class", None)
     save_state(state)
     try:
-        for site in state["sites"]:
+        total_sites = len(state["sites"])
+        for index, site in enumerate(state["sites"], 1):
             if site.get("stage_status") == "PULLED_STAGED":
+                progress_note(f"首轮迁入 {index}/{total_sites} · {site['domain']} 已完成，断点跳过")
                 continue
+            progress_note(f"首轮迁入 {index}/{total_sites} · 正在处理 {site['domain']}")
             create_target_site(mid, site)
             pull_site_files(state, site, final=False)
             site["mysql_prepare_count"] = sync_site_databases(
@@ -1419,10 +1434,13 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
             )
             site["stage_status"] = "PULLED_STAGED"
             save_state(state)
+        progress_note("首轮迁入 · 正在同步站点外部业务文件")
         state["external_paths_synced"] = sync_external_assets(state, final=False)
+        progress_note("首轮迁入 · 正在同步 SQLite 数据")
         state["sqlite_snapshot_count_prepare"] = sync_sqlite_assets(
             state, phase="prepare"
         )
+        progress_note("首轮迁入 · 正在准备 Cron / Node.js 运行资料")
         stage_runtime_assets(state)
         state["status"] = "PREPARED"
         state["source_still_live"] = True
@@ -1450,19 +1468,30 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     state["cutover_started_at"] = now_utc()
     save_state(state)
     try:
+        progress_note("1/7 · 正在进入短维护窗口并保护旧服务器运行状态")
         if not state.get("source_runtime_frozen"):
             freeze_old_server(state)
-        for site in state["sites"]:
+        else:
+            progress_note("1/7 · 旧服务器运行状态已保护，直接继续")
+        progress_note("2/7 · 正在最终增量同步网站文件")
+        total_sites = len(state["sites"])
+        for index, site in enumerate(state["sites"], 1):
+            progress_note(f"2/7 · 网站 {index}/{total_sites} · {site['domain']}")
             pull_site_files(state, site, final=True)
+        progress_note("3/7 · 正在同步站点外部业务文件")
         state["external_paths_synced_final"] = sync_external_assets(state, final=True)
+        progress_note("4/7 · 正在最终同步 MySQL 数据库")
         mysql_count = 0
         for site in state["sites"]:
             mysql_count += sync_site_databases(state, site, phase="final")
         state["mysql_final_count"] = mysql_count
+        progress_note("5/7 · 正在生成并同步 SQLite 一致性快照")
         state["sqlite_snapshot_count_final"] = sync_sqlite_assets(
             state, phase="final"
         )
+        progress_note("6/7 · 正在激活新服务器 Cron / Node.js 运行任务")
         activate_target_runtime(state)
+        progress_note("7/7 · 正在逐站执行新服务器本地验证")
         state["target_smoke"] = target_smoke(state)
         save_state(state)
         if state["target_smoke"]["fail"]:
@@ -1491,7 +1520,9 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         save_state(state)
         return state
     except Exception as exc:
+        progress_note("安全恢复 · 正在撤销新服务器临时运行任务")
         target_ok = deactivate_target_runtime(state)
+        progress_note("安全恢复 · 正在恢复旧服务器运行状态")
         source_ok = restore_old_server(state)
         state["status"] = (
             "CUTOVER_FAILED_ROLLED_BACK"
@@ -1519,12 +1550,14 @@ def finalize_migration(
         raise PullMigrationError("migration is not waiting for DNS/final verification")
     if confirm != f"DNS_UPDATED:{mid}":
         raise PullMigrationError(f"explicit confirmation required: DNS_UPDATED:{mid}")
+    progress_note("公网验证 1/2 · 正在确认 DNS 路由是否已到达新服务器")
     route = public_route_proof(state, attempts=attempts, delay=delay)
     state["public_route_proof"] = route
     if route["status"] != "PASS":
         state["status"] = "WAITING_DNS"
         save_state(state)
         return state
+    progress_note("公网验证 2/2 · 正在逐站检查 HTTPS 与正式访问状态")
     production = production_verify(state)
     state["production_verification"] = production
     if production["status"] != "PASS":

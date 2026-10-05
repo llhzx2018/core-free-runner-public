@@ -1,0 +1,659 @@
+name: Server Tools Release65 Distribution Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'installers/p07-system-care.sh'
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'packages/p07-system-care/0.1.0-rc35/**'
+      - '.github/workflows/p07-release65-distribution-gate.yml'
+      - '.github/workflows/p07-toolbox-smoke.yml'
+      - '.github/workflows/p07-system-care-smoke.yml'
+      - '.github/workflows/p07-beginner-menu-gate.yml'
+
+permissions:
+  contents: read
+
+# release65: preserve direct-root CloudPanel DB CLI caller context, split database import/config-remap failures, and stream rsync progress live without corrupting final JSON.
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Release65 identity
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          test "$(cat "$root/BUILD_ID")" = '0.1.0-release65'
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release65"' installers/p07-final.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release65"' installers/p07-toolbox.sh
+          grep -Fq 'RUNTIME_MANIFEST_BLOB="0d5729b7ef7c98401213b004d845ae2b50a6395a"' installers/p07-final.sh
+          grep -Fq 'EXPECTED_BLOB="20a469736f34549a150dff38729766bc39f842ae"' installers/p07.sh
+          grep -Fq 'SYSTEM_CARE_EXPECTED="0.1.0-rc35"' installers/p07-toolbox.sh
+          grep -Fq "VERSION='0.1.0-rc35'" installers/p07-system-care.sh
+          grep -Fq "MANIFEST_BLOB='a044d002141f2bcfd9e1fd0a972f6d43dafe8997'" installers/p07-system-care.sh
+
+      - name: Release65 exact-source modified files
+        run: |
+          set -Eeuo pipefail
+          source_commit='0deb30928f09848846a1f93ec84afdb3f4d9ec3a'
+          while read -r expected rel; do
+            actual="$(git hash-object "dist/p07/0.1.0/overlay/$rel")"
+            test "$actual" = "$expected" || { echo "EXACT_SOURCE_MISMATCH: $rel $actual != $expected" >&2; exit 1; }
+          done <<'FILES'
+          ccf96efe5d7d3fcc5a19b2352750ccac8aa1ddef BUILD_ID
+          23e22c3de3123130556a6f9de9c19fca8a51e2f0 bin/vfops-migrate-ui
+          804a702744b6dcd429776f34c24dfae6dc0b49be lib/server_migration_pull.py
+          5c88a7449526fcee8be77bc7a93b35e3a51ab737 tests/test_server_migration_pull.py
+          4e11705cb5b2aadf79d103c8af1e5ed36598099d tests/test_user_entry.py
+          7ba8ac7d7ee57f30a7660d916d3afadd70649b4e docs/authority/CURRENT.md
+          FILES
+          echo "P07_RELEASE65_SOURCE_COMMIT=$source_commit"
+
+      - name: Exact overlay and runtime manifests
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              seen=set()
+              for line in (root/name).read_text(encoding='utf-8').splitlines():
+                  if not line.strip(): continue
+                  expected, rel=line.split('  ',1)
+                  assert rel not in seen, (name, rel)
+                  seen.add(rel)
+                  path=root/rel
+                  assert path.is_file(), (name, rel)
+                  assert blob(path)==expected, (name, rel, blob(path), expected)
+          PY
+
+      - name: Beginner naming and grouped IA
+        run: |
+          set -Eeuo pipefail
+          ui='dist/p07/0.1.0/overlay/bin/vfops-init-ui'
+          migration='dist/p07/0.1.0/overlay/bin/vfops-migrate-ui'
+          user='dist/p07/0.1.0/overlay/bin/vfops-user'
+          toolbox='installers/p07-toolbox.sh'
+          systemcare='packages/p07-system-care/0.1.0-rc35/vf-system-care.sh'
+
+          grep -Fq '服务器工具箱' "$toolbox"
+          grep -Eq '网络代理节点.*V2Ray代理' "$toolbox"
+          grep -Eq '服务器性能检测.*VPS验机' "$toolbox"
+          grep -Eq '网站与数据.*网站/数据库/备份' "$toolbox"
+          grep -Eq '日常维护与安全.*系统更新/清理' "$toolbox"
+          grep -Eq '新服务器初始化.*更新/面板/优化' "$toolbox"
+          ! grep -Fq 'P07 · VF 服务器运维' "$toolbox"
+          grep -Fq 'run_server_init' "$toolbox"
+          grep -Fq 'ensure_system_care_current' "$toolbox"
+          grep -Fq 'P07_SYSTEM_CARE_ROOT=/opt/vf-system-care' "$toolbox"
+          grep -Fq "printf '请选择 [0-5]：'" "$toolbox"
+          grep -Fq 'exec bash "$INIT_UI"' "$user"
+          grep -Fq -- '--init' "$user"
+
+          grep -Fq '一键初始化服务器（推荐）' "$ui"
+          grep -Fq '请选择 [0-1]' "$ui"
+          ! grep -Fq "ui_menu_warn 2 '基础设置（时区 / Swap）'" "$ui"
+          ! grep -Fq "ui_menu_warn 3 'CloudPanel 状态 / 安装'" "$ui"
+          ! grep -Fq '请选择 [0-3]' "$ui"
+          ! grep -Fq '确认补齐缺少的基础设置？[y/N]' "$ui"
+          ! grep -Fq '确认安装 CloudPanel？[y/N]' "$ui"
+          grep -Fq '确认开始一键初始化？[y/N]' "$ui"
+          grep -Fq '1/5 基础设置' "$ui"
+          grep -Fq '2/5 系统更新' "$ui"
+          grep -Fq '3/5 CloudPanel' "$ui"
+          grep -Fq '4/5 性能配置' "$ui"
+          grep -Fq '5/5 最终检查' "$ui"
+          grep -Fq '首次空服务器会自动安装系统更新' "$ui"
+          grep -Fq 'CloudPanel 已安装的服务器只检查更新' "$ui"
+          grep -Fq '性能配置统一调用“日常维护”里的同一套正式调优；初始化不再维护第二套调优逻辑。' "$ui"
+          grep -Fq '本次初始化执行清单' "$ui"
+          grep -Fq 'resource_block_reason_cn' "$ui"
+          grep -Fq 'resource_result_complete' "$ui"
+          grep -Fq '当前 MySQL 配置结构与已校准模板不同' "$ui"
+          grep -Fq '当前资源方案不能安全自动写入' "$ui"
+          grep -Fq '资源方案已校准，但本机安全检查阻止了自动调整' "$ui"
+          grep -Fq '性能配置未闭环' "$ui"
+          grep -Fq '无法从 CloudPanel 读取本机数据库连接信息' "$ui"
+          grep -Fq 'CloudPanel 数据库连接信息读取超时' "$ui"
+          grep -Fq 'run_resource_apply_with_progress' "$ui"
+          grep -Fq '性能配置处理中 · 已耗时' "$ui"
+          grep -Fq '不读取数据库密码，不重启 MySQL / Nginx' "$ui"
+          grep -Fq '已读取到 CloudPanel 本机数据库连接信息，但本机连接验证失败' "$ui"
+          grep -Fq '安全检查返回了未识别的阻断条件，已停止自动调整' "$ui"
+          grep -Fq 'resource-profile.sh' "$ui"
+          grep -Fq 'resource-apply.sh' "$ui"
+          grep -Fq 'plan-json --mode balanced' "$ui"
+          grep -Fq 'apply-empty-server-confirmed-json' "$ui"
+          grep -Fq 'P07_RESOURCE_APPLY_CONFIRMED=1' "$ui"
+          ! grep -Fq 'lib/resource_profile.py' "$ui"
+          ! grep -Fq 'lib/resource_apply.py' "$ui"
+          grep -Fq '检测到已有网站运行配置' "$ui"
+          grep -Fq '初始化只给资源建议，不自动改现有站点参数' "$ui"
+          grep -Fq '空服务器安全检查未通过' "$ui"
+          ! grep -Fq '重新执行初始化检查（推荐）' "$ui"
+          ! grep -Fq '初始化 / 重新初始化服务器（推荐）' "$ui"
+          ! grep -Fq 'CloudPanel 尚未安装，确认现在安装？[y/N]' "$ui"
+          grep -Fq '服务器初始化完成' "$ui"
+          ! grep -Fq '输入 APPLY_BASELINE' "$ui"
+          ! grep -Fq '输入 INSTALL_CLOUDPANEL' "$ui"
+          grep -Fq '/^SwapTotal:/' "$ui"
+          grep -Fq 'CPU / 内存 / 磁盘配置只做提示，不作为禁止安装或迁移的条件。' "$ui"
+          pull='dist/p07/0.1.0/overlay/lib/server_migration_pull.py'
+          grep -Fq 'hardware_baseline_is_advisory' "$pull"
+          grep -Fq '["bin", "lib", "VERSION", "BUILD_ID"]' "$pull"
+          ! grep -Fq '["bin", "lib", "VERSION", "BUILD_ID", "VF_PROJECT.json"]' "$pull"
+          grep -Fq 'current-server migration runtime is incomplete' "$pull"
+          grep -Fq 'def cloudpanel_database_server_ready_local(' "$pull"
+          grep -Fq 'CURRENT_SERVER_CLOUDPANEL_DATABASE_SERVER_INCOMPLETE' "$pull"
+          grep -Fq 'CLOUDPANEL_INCOMPLETE_DATABASE_SERVER' "$pull"
+          grep -Fq 'CLOUDPANEL_ADMIN_REQUIRED' "$pull"
+          grep -Fq 'def cloudpanel_user_count_local(' "$pull"
+          grep -Fq 'cloudpanel_user_count_local() == 0' "$pull"
+          grep -Fq 'new-server CloudPanel database server metadata is missing; migration cannot resume safely' "$pull"
+          grep -Fq 'cloud_hint = local_cloud_hint()' "$pull"
+          migration_core='dist/p07/0.1.0/overlay/lib/server_migration.py'
+          grep -Fq 'if "vultr" in value:' "$migration_core"
+          grep -Fq 'return "vultr"' "$migration_core"
+          ! grep -Fq 'INSERT INTO database_server' "$pull"
+          grep -Fq 'CloudPanel 已安装；首次使用必须先创建管理员' "$ui"
+          grep -Fq '管理员密码只在当前服务器终端隐藏输入；不会发送给 ChatGPT，不写入 P07 日志。' "$ui"
+          grep -Fq 'read -r -s password' "$ui"
+          grep -Fq 'run_clpctl_root user:add' "$ui"
+          grep -Fq 'CloudPanel 首次管理员与本机数据库服务器初始化完成' "$ui"
+          grep -Fq 'CloudPanel 安装不完整：本机数据库服务器主记录缺失。' "$ui"
+          grep -Fq '这台机器不能作为迁移目标继续使用' "$ui"
+          grep -Fq '第一次连接旧服务器，需要输入旧服务器 root 密码一次' "$migration"
+          grep -Fq '密码只交给系统 ssh-copy-id；P07 不读取、不保存。' "$migration"
+          ! grep -Fq '现在为新服务器准备专用迁移密钥' "$migration"
+          grep -Fq 'VFOPS_MIGRATION_PROGRESS=1' "$migration"
+          grep -Fq 'run_migration_live' "$migration"
+          grep -Fq '实时显示已传输量 / 百分比 / 速度' "$migration"
+          grep -Fq -- '--info=progress2,stats2' "$pull"
+          grep -Fq 'stream_to_stderr=show_progress' "$pull"
+          grep -Fq 'def source_path_kind(' "$pull"
+          grep -Fq 'remote_spec = remote' "$pull"
+          grep -Fq 'target.rmdir()' "$pull"
+          grep -Fq 'new-server external target type conflict' "$pull"
+          grep -Fq 'old-server external path is not a regular file/directory' "$pull"
+          grep -Fq '200 <= int(code) < 500' "$pull"
+          grep -Fq '"reason": "LOCAL_HTTP_PROBE"' "$pull"
+          grep -Fq '"CUTOVER_FAILED_ROLLED_BACK"' "$pull"
+          grep -Fq '继续这个迁移任务重试最终同步？[y/N]' "$migration"
+          grep -Fq '可以继续使用同一个迁移任务重试；不会重新创建任务，也不会修改 DNS。' "$migration"
+          grep -Fq 'render_indeterminate_bar' "$migration"
+          grep -Fq 'run_quiet_with_progress' "$migration"
+          grep -Fq '最终同步处理中' "$migration"
+          grep -Fq '文件传输阶段会继续输出 rsync 百分比 / 速度' "$migration"
+          grep -Fq 'def progress_note(' "$pull"
+          grep -Fq '1/7 · 正在进入短维护窗口并保护旧服务器运行状态' "$pull"
+          grep -Fq '7/7 · 正在逐站执行新服务器本地验证' "$pull"
+          grep -Fq '安全恢复 · 正在恢复旧服务器运行状态' "$pull"
+          grep -Fq 'new-server MySQL import failed' "$pull"
+          grep -Fq 'new-server application DB config remap failed' "$pull"
+          cloudpanel='dist/p07/0.1.0/overlay/lib/cloudpanel.py'
+          grep -Fq 'env["SUDO_USER"] = "root"' "$cloudpanel"
+          grep -Fq 'MEMORY_BELOW_CLOUDPANEL_PUBLISHED_BASELINE' "$pull"
+          ! grep -Fq 'raise PullMigrationError("memory is below CloudPanel minimum")' "$pull"
+          grep -Fq 'show_bootstrap_blocker' "$ui"
+          grep -Fq '检测到这台服务器已经存在网站或数据库环境' "$ui"
+          grep -Fq '这不是低配限制' "$ui"
+          ! grep -Fq '当前服务器不满足自动安装 CloudPanel 的条件。' "$ui"
+          grep -Fq 'existing_environment' "$pull"
+          grep -Fq 'current server is not empty enough for automatic CloudPanel install: ' "$pull"
+          grep -Fq 'environment_advisories' "$pull"
+          grep -Fq 'STALE_CONFIG_DIR:' "$pull"
+          grep -Fq '检测到残留目录 /etc/apache2，但未发现 Apache 程序；只提示，不阻止安装。' "$ui"
+          grep -Fq '检测到残留目录 /etc/nginx，但未发现 Nginx 程序；只提示，不阻止安装。' "$ui"
+          grep -Fq '完整初始化：更新 / 时区 / Swap / CloudPanel / 性能配置' "$ui"
+          grep -Fq '一键初始化可以安全重复执行；已正确的项目会跳过，CloudPanel 已健康时不会重复安装。' "$ui"
+          grep -Fq 'DNS 未修改；旧服务器未删除；网站迁移未执行；网站 Nginx 未自动停止或重启。' "$ui"
+          grep -Fq 'render_indeterminate_bar' "$ui"
+          grep -Fq '1/3 安装前安全检查已通过' "$ui"
+          grep -Fq '2/3 [%s] 正在安装 CloudPanel · 已耗时 %s' "$ui"
+          grep -Fq '3/3 安装后检查通过' "$ui"
+          ! grep -Fq '新服务器第一次使用时在这里完成基础设置' "$ui"
+
+          grep -Fq '请返回一级菜单 → 5. 初始化服务器' "$migration"
+          grep -Fq '迁移流程本身不再负责安装或初始化服务器' "$migration"
+          ! grep -Fq 'BOOTSTRAP_LOCAL_CLOUDPANEL' "$migration"
+          grep -Fq '迁入整台旧服务器' "$migration"
+          grep -Fq '迁入一个网站' "$migration"
+          grep -Fq '旧服务器网站开关' "$migration"
+          grep -Fq '确认开启？[y/N]' "$migration"
+          grep -Fq '确认停止？[y/N]' "$migration"
+          ! grep -Fq 'ui_confirm_exact 开启' "$migration"
+          ! grep -Fq 'ui_confirm_exact 停止' "$migration"
+
+          grep -Fq "1 '服务器健康检查'" "$systemcare"
+          grep -Fq "4 '工具检查 / 修复'" "$systemcare"
+          grep -Fq "5 '最近操作'" "$systemcare"
+          ! grep -Fq '新服务器初始化' "$systemcare"
+          grep -Fq '初始化服务器已独立放在一级菜单 5' "$systemcare"
+
+          site='dist/p07/0.1.0/overlay/bin/vfops-cloudpanel-ui'
+          grep -Eq '面板账号与安全.*面板账户' "$user"
+          grep -Fq "管理已有网站" "$site"
+          grep -Fq "创建新网站" "$site"
+          grep -Fq "ui_menu_info 3 '数据库'" "$site"
+          grep -Fq "ui_menu_info 4 '网站证书（HTTPS）'" "$site"
+          grep -Fq "ui_menu_warn 5 '权限与缓存'" "$site"
+
+      - name: Ordinary surfaces hide project code and machine tokens
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          files=[
+              Path('dist/p07/0.1.0/overlay/bin/vfops-user'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-site-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-migrate-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-cloudpanel-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-auto-backup'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-init-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-diagnostics-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-selfcheck-ui'),
+              Path('dist/p07/0.1.0/overlay/bin/vfops-history-ui'),
+              Path('packages/p07-system-care/0.1.0-rc35/vf-system-care.sh'),
+              Path('packages/p07-system-care/0.1.0-rc35/resource-apply.sh'),
+          ]
+          text='\n'.join(p.read_text(encoding='utf-8') for p in files)
+          assert 'P07 ·' not in text
+          for token in ('输入 CUTOVER', '输入 DISABLE-AUTOBACKUP', '输入 APPLY_RESOURCE_PROFILE', '输入 ROLLBACK_RESOURCE_PROFILE', '输入“修复”继续'):
+              assert token not in text, token
+          PY
+
+      - name: System-care rc35 package integrity
+        run: |
+          set -Eeuo pipefail
+          root='packages/p07-system-care/0.1.0-rc35'
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('packages/p07-system-care/0.1.0-rc35')
+          def blob(path: Path) -> str:
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for line in (root/'MANIFEST.gitblob').read_text(encoding='utf-8').splitlines():
+              if not line.strip(): continue
+              expected, rel=line.split('  ',1)
+              path=root/rel
+              assert path.is_file(), rel
+              assert blob(path)==expected, (rel, blob(path), expected)
+          PY
+          bash -n "$root/vf-system-care.sh"
+
+      - name: Single-source resource tuning exact-byte gate
+        run: |
+          set -Eeuo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc35'
+          source_commit='363f90a1411bef5cf8c1d1d60dcf2aef4855cec8'
+          while read -r expected rel; do
+            actual="$(git hash-object "$pkg/$rel")"
+            test "$actual" = "$expected" || {
+              echo "SINGLE_SOURCE_MISMATCH: $rel $actual != $expected" >&2
+              exit 1
+            }
+          done <<'FILES'
+          db6dd9b1147ab9cdd1862b85f482ea03abcc6ad3 VERSION
+          35cc93944ab70a78ccd781724ebb6c634a2cb50f resource-apply.sh
+          05855adfc283f9ea80f1f6ad4c14734785a2e508 resource-profile.sh
+          fb3b8357828e9893fd9d7a1e5ef3aa7fc2b37a78 lib/common.sh
+          cfda374e1549c70e41560e51e4567b5727266fba lib/resource_apply.py
+          7bea2fb644917ca67d65bb49ea9c83112353e74c lib/resource_profile.py
+          a0e5bf76d77d7e7ad979b61ac57a4c524f8a8ae1 lib/resource_calibrations.py
+          FILES
+          grep -Fq 'plan-json)' "$pkg/resource-apply.sh"
+          grep -Fq 'apply-confirmed-json)' "$pkg/resource-apply.sh"
+          grep -Fq 'apply-empty-server-confirmed-json)' "$pkg/resource-apply.sh"
+          grep -Fq 'P07_RESOURCE_APPLY_CONFIRMED' "$pkg/resource-apply.sh"
+          grep -Fq -- '--empty-server-init' "$pkg/lib/resource_apply.py"
+          grep -Fq 'def _production_apply_empty_server(' "$pkg/lib/resource_apply.py"
+          grep -Fq 'SELECT COUNT(*) FROM site' "$pkg/lib/resource_apply.py"
+          grep -Fq 'SELECT COUNT(*) FROM "database"' "$pkg/lib/resource_apply.py"
+          grep -Fq '"mysql_credentials_used": False' "$pkg/lib/resource_apply.py"
+          grep -Fq '"mysql_restarted": False' "$pkg/lib/resource_apply.py"
+          grep -Fq -- '--confirmed-noninteractive' "$pkg/resource-apply.sh"
+          grep -Fq 'OWNER_CONFIRMATION_BRIDGE_REQUIRED' "$pkg/lib/resource_apply.py"
+          grep -Fq 'require_tty=not args.confirmed_noninteractive' "$pkg/lib/resource_apply.py"
+          grep -Fq 'MYSQL_READY_RETRY_ATTEMPTS = 13' "$pkg/lib/resource_apply.py"
+          grep -Fq 'MYSQL_READY_RETRY_DELAY_SECONDS = 5.0' "$pkg/lib/resource_apply.py"
+          grep -Fq 'def _mysql_client_once()' "$pkg/lib/resource_apply.py"
+          grep -Fq 'def _clpctl_command(action: str)' "$pkg/lib/resource_apply.py"
+          grep -Fq 'def _clpctl_commands(action: str)' "$pkg/lib/resource_apply.py"
+          grep -Fq '_clpctl_commands("db:show:master-credentials")' "$pkg/lib/resource_apply.py"
+          grep -Fq '_clpctl_commands("db:show:master-password")' "$pkg/lib/resource_apply.py"
+          grep -Fq 'bash, "-lc", shell_command' "$pkg/lib/resource_apply.py"
+          ui='dist/p07/0.1.0/overlay/bin/vfops-init-ui'
+          ! grep -Fq 'P07_FRESH_INIT_EMPTY_SERVER' "$pkg/lib/resource_apply.py"
+          ! grep -Fq 'restart_mysql_for_fresh_init_recovery' "$pkg/lib/resource_apply.py"
+          ! grep -Fq 'systemctl restart mysql' "$pkg/lib/resource_apply.py"
+          grep -Fq 'def _cloudpanel_stored_master_password()' "$pkg/lib/resource_apply.py"
+          grep -Fq 'current_env_file = app / "files/.env"' "$pkg/lib/resource_apply.py"
+          grep -Fq 'legacy_env_file = app / ".env"' "$pkg/lib/resource_apply.py"
+          grep -Fq "class_exists('\\\\App\\\\Service\\\\Crypto')" "$pkg/lib/resource_apply.py"
+          grep -Fq "\\App\\Service\\Crypto::decrypt(\$cipher)" "$pkg/lib/resource_apply.py"
+          grep -Fq "/home/clp/htdocs/app/files/.env" "$pkg/lib/resource_apply.py"
+          grep -Fq "/home/clp/htdocs/app/.env" "$pkg/lib/resource_apply.py"
+          grep -Fq "SELECT password FROM database_server LIMIT 1" "$pkg/lib/resource_apply.py"
+          grep -Fq 'Defuse\Crypto\Crypto::decryptWithPassword' "$pkg/lib/resource_apply.py"
+          grep -Fq 'stored_password = _cloudpanel_stored_master_password()' "$pkg/lib/resource_apply.py"
+          grep -Fq 'env["MYSQL_PWD"] = password' "$pkg/lib/resource_apply.py"
+          ! grep -Fq 'repair_cloudpanel_cli_shebang_for_init()' "$ui"
+          ! grep -Fq 'vendor-backups' "$ui"
+          ! grep -Fq 'systemctl restart mysql' "$ui"
+          ! grep -Fq 'systemctl restart nginx' "$ui"
+          ! grep -Fq 'lib/resource_apply.py' "$ui"
+          ! grep -Fq 'lib/resource_profile.py' "$ui"
+          grep -Fq 'resource-apply.sh" apply-empty-server-confirmed-json' "$ui"
+          grep -Fq 'P07_RESOURCE_APPLY_CONFIRMED=1 bash "$SYSTEM_CARE_ROOT/resource-apply.sh" apply-empty-server-confirmed-json' "$ui"
+          grep -Fq 'resource-apply.sh" plan-json --mode balanced' "$ui"
+          grep -Fq 'resource-profile.sh" json --mode balanced' "$ui"
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py').read_text(encoding='utf-8')
+          start=text.index('def _production_apply_empty_server(')
+          end=text.index('\ndef production_apply(', start)
+          empty=text[start:end]
+          for forbidden in ('_mysql_client(', '_set_mysql_globals(', '_reload_php('):
+              assert forbidden not in empty, forbidden
+          for required in ('_assert_empty_server_init(snapshot)', '_verify_mysql_persistent_plan(plan)', '_validate_mysql()', '_verify_services([])'):
+              assert required in empty, required
+          PY
+          echo "P07_RESOURCE_TUNING_SOURCE_COMMIT=$source_commit"
+          echo 'P07_RESOURCE_TUNING_SINGLE_SOURCE=PASS'
+
+      - name: CloudPanel master credential parser compatibility
+        run: |
+          set -Eeuo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc35'
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          samples=[
+              ("| Host | 127.0.0.1 |\n| User Name | root |\n| Password | p@ss:word! |\n| Port | 3306 |", ("root","p@ss:word!","127.0.0.1",3306)),
+              ("Host: localhost\nUsername: root\nPassword: secret value\nPort: 3307", ("root","secret value","localhost",3307)),
+              ("║ Host ║ 127.0.0.1 ║\n║ User ║ root ║\n║ Master Password ║ box-secret ║\n║ Port ║ 3306 ║", ("root","box-secret","127.0.0.1",3306)),
+              ("Connect Command | mysql -h127.0.0.1 -P3306 -uroot -p'secret value' |", ("root","secret value","127.0.0.1",3306)),
+              ("Connection Command: mysql --host=localhost --port=3308 --user=root --password='a:b c'", ("root","a:b c","localhost",3308)),
+              ("Copy this command:\nmysql -h'127.0.0.1' -P'3309' -u'root' -p'raw command secret'", ("root","raw command secret","127.0.0.1",3309)),
+          ]
+          for raw, expected in samples:
+              got=mod._parse_clp_credentials(raw)
+              assert got==expected, (got, expected)
+          print("P07_CLOUDPANEL_CREDENTIAL_PARSER=PASS")
+          PY
+          source='packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py'
+          grep -Fq 'def _clpctl_command(action: str)' "$source"
+          grep -Fq 'if "bash" in first_line.lower()' "$source"
+          grep -Fq 'db:show:master-credentials' "$source"
+          ! grep -Fq '"db:show:credentials"' "$source"
+          grep -Fq 'db:show:master-password' "$source"
+          grep -Fq 'MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT' "$source"
+          grep -Fq 'MYSQL_MASTER_CREDENTIAL_CONNECTION_FAILED' "$source"
+          grep -Fq 'def _run_clp_probe(cmd: Sequence[str], timeout: float = 45.0)' "$source"
+          grep -Fq '_clpctl_commands("db:show:master-password")' "$source"
+          grep -Fq 'def _parse_master_password_output(text: str)' "$source"
+          grep -Fq 'def _cloudpanel_stored_master_password()' "$source"
+          grep -Fq 'SELECT password FROM database_server LIMIT 1' "$source"
+          grep -Fq 'Defuse\Crypto\Crypto::decryptWithPassword' "$source"
+          grep -Fq 'stored_password = _cloudpanel_stored_master_password()' "$source"
+          grep -Fq 'plan-json)' packages/p07-system-care/0.1.0-rc35/resource-apply.sh
+          grep -Fq 'apply-confirmed-json)' packages/p07-system-care/0.1.0-rc35/resource-apply.sh
+          grep -Fq 'apply-empty-server-confirmed-json)' packages/p07-system-care/0.1.0-rc35/resource-apply.sh
+
+      - name: Fresh CloudPanel database readiness retry is bounded
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32_readiness", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          ready=(["mysql"], {"MYSQL_PWD":"ephemeral"})
+          calls={"n":0}
+          def transient_then_ready():
+              calls["n"] += 1
+              if calls["n"] == 1:
+                  raise mod.ApplyBlocked("MYSQL_MASTER_CREDENTIAL_PARSE_FAILED")
+              return ready
+          old_once, old_sleep = mod._mysql_client_once, mod.time.sleep
+          mod._mysql_client_once = transient_then_ready
+          mod.time.sleep = lambda seconds: None
+          try:
+              assert mod._mysql_client() == ready
+              assert calls["n"] == 2
+          finally:
+              mod._mysql_client_once, mod.time.sleep = old_once, old_sleep
+
+          calls={"n":0}
+          def timeout_now():
+              calls["n"] += 1
+              raise mod.ApplyBlocked("MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT")
+          old_once, old_sleep = mod._mysql_client_once, mod.time.sleep
+          mod._mysql_client_once = timeout_now
+          mod.time.sleep = lambda seconds: (_ for _ in ()).throw(AssertionError("timeout must not retry"))
+          try:
+              try:
+                  mod._mysql_client()
+              except mod.ApplyBlocked as exc:
+                  assert str(exc) == "MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT"
+              else:
+                  raise AssertionError("timeout did not fail closed")
+              assert calls["n"] == 1
+          finally:
+              mod._mysql_client_once, mod.time.sleep = old_once, old_sleep
+          print("P07_FRESH_CLOUDPANEL_DB_READINESS_RETRY=PASS")
+          PY
+
+      - name: CloudPanel CLI Bash wrapper compatibility
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          from unittest import mock
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32_wrapper", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          def which(name):
+              return {"clpctl":"/usr/bin/clpctl","bash":"/bin/bash"}.get(name)
+
+          with mock.patch.object(mod.shutil, "which", side_effect=which), \
+               mock.patch.object(mod.Path, "read_text", return_value="#/bin/bash\nprintf '%q'\n"):
+              assert mod._clpctl_command("db:show:master-credentials") == [
+                  "/bin/bash", "/usr/bin/clpctl", "db:show:master-credentials"
+              ]
+
+          with mock.patch.object(mod.shutil, "which", side_effect=which), \
+               mock.patch.object(mod.Path, "read_text", return_value="#!/usr/bin/env python3\n"):
+              assert mod._clpctl_command("db:show:master-credentials") == [
+                  "/usr/bin/clpctl", "db:show:master-credentials"
+              ]
+          print("P07_CLOUDPANEL_CLI_BASH_WRAPPER=PASS")
+          PY
+
+      - name: CloudPanel credential shell-context fallback
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import subprocess
+          from pathlib import Path
+          from unittest import mock
+
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32_fallback", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          def which(name):
+              return {"clpctl":"/usr/bin/clpctl","bash":"/bin/bash"}.get(name)
+
+          with mock.patch.object(mod.shutil, "which", side_effect=which), \
+               mock.patch.object(mod.Path, "read_text", return_value="#/bin/bash\n"):
+              cmds=mod._clpctl_commands("db:show:master-credentials")
+              assert cmds[0] == ["/bin/bash", "/usr/bin/clpctl", "db:show:master-credentials"]
+              assert cmds[1] == ["/bin/bash", "-lc", "/usr/bin/clpctl db:show:master-credentials"]
+
+          table=(
+              "+-----------+-----------+\n"
+              "| Name      | Value     |\n"
+              "+-----------+-----------+\n"
+              "| Host      | 127.0.0.1 |\n"
+              "| User Name | root      |\n"
+              "| Password  | secret    |\n"
+              "| Port      | 3306      |\n"
+              "+-----------+-----------+\n"
+          )
+          failed=subprocess.CompletedProcess(["first"], 1, stdout="", stderr="wrapper error")
+          usable=subprocess.CompletedProcess(["second"], 1, stdout=table, stderr="warning")
+          with mock.patch.object(
+              mod, "_clpctl_commands", return_value=[["first"],["second"]]
+          ), mock.patch.object(
+              mod, "_run_clp_probe", side_effect=[failed, usable]
+          ):
+              got=mod._try_clp_credentials()
+              assert got == ("root","secret","127.0.0.1",3306), got
+
+          print("P07_CLOUDPANEL_CREDENTIAL_SHELL_FALLBACK=PASS")
+          PY
+
+      - name: CloudPanel stored master credential fallback
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import subprocess
+          from pathlib import Path
+          from unittest import mock
+
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32_stored", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          empty=subprocess.CompletedProcess(["clpctl"],0,stdout="",stderr="")
+          with mock.patch.object(
+              mod, "_clpctl_commands", side_effect=lambda action: [[action]]
+          ), mock.patch.object(
+              mod, "_run_clp_probe", side_effect=[empty, empty]
+          ), mock.patch.object(
+              mod, "_cloudpanel_stored_master_password", return_value="stored-secret"
+          ):
+              assert mod._try_clp_credentials() == (
+                  "root","stored-secret","127.0.0.1",3306
+              )
+
+          print("P07_CLOUDPANEL_STORED_MASTER_CREDENTIAL=PASS")
+          PY
+
+      - name: CloudPanel credential probe timeout is fail-closed
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util
+          import subprocess
+          from pathlib import Path
+          path=Path("packages/p07-system-care/0.1.0-rc35/lib/resource_apply.py")
+          spec=importlib.util.spec_from_file_location("resource_apply_rc32_timeout", path)
+          mod=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          mod._clpctl_commands=lambda action: [[action]]
+
+          original=mod._run
+          calls=[]
+          def first_timeout_then_password(cmd, *, env=None, timeout=15.0, check=True):
+              calls.append(tuple(cmd))
+              if cmd[-1] == "db:show:master-credentials":
+                  raise subprocess.TimeoutExpired(cmd, timeout)
+              if cmd[-1] == "db:show:master-password":
+                  return subprocess.CompletedProcess(cmd, 0, stdout="Password: fallback-secret\n", stderr="")
+              raise AssertionError(cmd)
+          mod._run=first_timeout_then_password
+          try:
+              got=mod._try_clp_credentials()
+              assert got == ("root","fallback-secret","127.0.0.1",3306), got
+              assert not any("db:show:credentials" in x for call in calls for x in call)
+          finally:
+              mod._run=original
+
+          def always_timeout(cmd, *, env=None, timeout=15.0, check=True):
+              raise subprocess.TimeoutExpired(cmd, timeout)
+          mod._run=always_timeout
+          try:
+              try:
+                  mod._try_clp_credentials()
+              except mod.ApplyBlocked as exc:
+                  assert str(exc) == "MYSQL_MASTER_CREDENTIAL_LOOKUP_TIMEOUT", exc
+              else:
+                  raise AssertionError("timeout was not fail-closed")
+          finally:
+              mod._run=original
+          print("P07_CLOUDPANEL_AUTH_TIMEOUT=PASS")
+          PY
+
+      - name: Syntax and targeted tests
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          bash -n "$root/bin/vfops-user"
+          bash -n "$root/bin/vfops-migrate-ui"
+          bash -n "$root/bin/vfops-init-ui"
+          cd "$root"
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q             tests.test_menu3_modular             tests.test_cloudpanel_ui_complete             tests.test_release11_beginner_ia             tests.test_server_migration_pull             tests.test_p07_integration_manifest             tests.test_user_entry
+
+      - name: Isolated current-runtime install
+        run: |
+          set -Eeuo pipefail
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          export P07_PUBLIC_ROOT="file://$root"
+          export P07_INSTALL_DIR="$tmp/install"
+          export P07_PREVIOUS_DIR="$tmp/previous"
+          export P07_BIN_LINK="$tmp/vfops"
+          export P07_ALLOW_NONROOT=1
+          export P07_NO_EXEC=1
+          bash installers/p07-final.sh >"$tmp/install.log"
+          test "$("$tmp/vfops" --version)" = 'VF Server Ops 0.1.0'
+          test "$("$tmp/vfops" --build-id)" = '0.1.0-release65'
+          test -x "$tmp/install/bin/vfops-init-ui"
+
+      - name: Safety boundary
+        run: |
+          set -Eeuo pipefail
+          root='dist/p07/0.1.0/overlay'
+          ! grep -R -n -E 'systemctl[[:space:]]+(start|stop|restart)[[:space:]]+clp-nginx' "$root/bin" "$root/lib"
+          ! grep -R -n -F 'systemctl restart mysql' "$root/bin" "$root/lib"
+          grep -Fq 'DNS 不自动修改' "$root/bin/vfops-migrate-ui"
+          grep -Fq '旧服务器永不自动删除' "$root/bin/vfops-migrate-ui"
+
+      - name: Result
+        if: always()
+        run: |
+          echo 'SERVER_TOOLS_RELEASE65_DISTRIBUTION_GATE=COMPLETE'
+          echo 'PRODUCTION_WRITE=NOT_RUN'
+          echo 'SERVER_INITIALIZATION=NOT_RUN'

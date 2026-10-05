@@ -22,6 +22,19 @@ spec.loader.exec_module(pull)
 
 
 class TargetPullContractTests(unittest.TestCase):
+    def test_progress_note_is_opt_in_and_secret_free_channel(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with mock.patch.dict(pull.os.environ, {"VFOPS_MIGRATION_PROGRESS": "1"}, clear=False), redirect_stderr(buf):
+            pull.progress_note("2/7 · 网站 1/16 · example.com")
+        self.assertIn("迁移阶段：2/7 · 网站 1/16 · example.com", buf.getvalue())
+
+        silent = io.StringIO()
+        with mock.patch.dict(pull.os.environ, {"VFOPS_MIGRATION_PROGRESS": "0"}, clear=False), redirect_stderr(silent):
+            pull.progress_note("should-not-print")
+        self.assertEqual(silent.getvalue(), "")
+
     def test_cloudpanel_database_server_readiness_requires_active_default_record(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "db.sq3"
