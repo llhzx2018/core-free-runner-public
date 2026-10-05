@@ -869,13 +869,25 @@ def external_paths_for_site(site: dict[str, Any], home_root: Path = Path("/home"
     home = home_root / user
     if not home.is_dir():
         return []
+    site_root = Path(str(site.get("site_root", ""))).resolve(strict=False)
     candidates: list[Path] = []
     candidates.extend(sorted(home.glob(".vf*")))
     candidates.extend(sorted(home.glob(".press*")))
+    # Some products intentionally keep private/runtime data next to the public
+    # site directory but outside the Web Root, e.g.
+    # /home/<user>/htdocs/.press.example-vfpress-runtime. These are not part of
+    # the normal site rsync and must be treated as external business assets.
+    htdocs_parent = site_root.parent
+    try:
+        htdocs_parent.relative_to(home.resolve())
+    except ValueError:
+        htdocs_parent = Path("/__vfops_invalid__")
+    if htdocs_parent.is_dir():
+        candidates.extend(sorted(htdocs_parent.glob(".vf*")))
+        candidates.extend(sorted(htdocs_parent.glob(".press*")))
     share = home / ".local/share"
     if share.is_dir():
         candidates.extend(sorted(share.glob("vf-*")))
-    site_root = Path(str(site.get("site_root", ""))).resolve(strict=False)
     rows: list[str] = []
     for item in candidates:
         try:
