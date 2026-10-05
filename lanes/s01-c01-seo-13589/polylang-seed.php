@@ -1,7 +1,8 @@
 <?php
 require_once ABSPATH.'wp-admin/includes/template.php';
 if (!defined('POLYLANG_DIR') || !function_exists('PLL')) { throw new Exception('SYNTHETIC_SEED_POLYLANG_NOT_LOADED'); }
-require_once POLYLANG_DIR.'/admin/admin-model.php';
+// Use the installed plugin autoloader; current versions moved classes to src/.
+if (!class_exists('PLL_Admin_Model')) { throw new Exception('SYNTHETIC_SEED_ADMIN_MODEL_NOT_LOADED'); }
 $model = new PLL_Admin_Model(PLL()->options);
 foreach ([['en','en_US','English','us'],['zh','zh_CN','中文','cn'],['fr','fr_FR','Français','fr']] as $language) {
     if (!$model->get_language($language[0])) {
