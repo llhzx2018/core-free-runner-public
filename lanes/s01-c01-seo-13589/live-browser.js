@@ -1,9 +1,10 @@
 'use strict';
 const fs=require('fs'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),{chromium}=require('playwright'),{cli,load,state,setSettings,base,url,login,sample}=require('./common'),check=require('../target/tests/seo-controls-browser-check');
 (async()=>{
+ async function rootGrid(page,width){await page.locator('[data-vf-seo-form-shell] details').last().locator('summary').click();const grids=await page.locator('.vf-seo-consumer-grid,.vf-seo-owner-grid').evaluateAll(ns=>ns.map(n=>getComputedStyle(n).gridTemplateColumns.split(' ').length));assert(grids.every(n=>n===(width<=782?1:2)),'professional diagnostics must use compact columns');}
  const b=await chromium.launch(),c=await b.newContext(),p=await c.newPage(),errors=[],tests=[],checks=[];p.on('pageerror',e=>errors.push(e.message));p.on('dialog',d=>d.accept());const pass=n=>tests.push(n);
  await login(p);const screenshot=p.screenshot.bind(p);p.screenshot=async o=>{await p.evaluate(()=>scrollTo(0,0));return screenshot(o)};
- for(const width of [1920,1440,1319,1024,768,390]){await p.setViewportSize({width,height:1000});await p.goto(url);checks.push(await check(p,{width,out:path.resolve('proof')}));}
+ for(const width of [1920,1440,1319,1024,768,390]){await p.setViewportSize({width,height:1000});await p.goto(url);checks.push(await check(p,{width,out:path.resolve('proof')}));await rootGrid(p,width);}
  pass('all native controls / keyboard / disclosures / picker search / add / remove / discard at six widths');await p.setViewportSize({width:1440,height:1000});await p.goto(url);
  const root=p.locator('[data-vf-seo-form-shell]'),form=root.locator('[data-vf-seo-form]'),save=root.locator('[data-vf-seo-save]'),verify=root.locator('[data-vf-seo-verify]'),discard=root.locator('[data-vf-seo-discard]'),feedback=root.locator('[data-vf-seo-save-feedback]'),rev=form.locator('[name=revision]'),active=()=>root.locator('[data-vf-seo-route-row]:visible'),edit=k=>active().locator('[data-key='+k+']');
  const response=()=>p.waitForResponse(r=>r.url().includes('admin-ajax.php')&&r.request().method()==='POST'),idle=()=>p.waitForFunction(()=>document.querySelector('[data-vf-seo-form-shell]').getAttribute('aria-busy')!=='true');
