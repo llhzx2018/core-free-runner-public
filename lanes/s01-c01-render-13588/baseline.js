@@ -2,7 +2,7 @@
 const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright'),{setSettings,url,fixture,login,sample}=require('./common');
 (async()=>{const b=await chromium.launch(),c=await b.newContext({viewport:{width:1440,height:1000}}),p=await c.newPage();p.on('dialog',d=>d.accept());await login(p);await p.goto(url);
  await p.locator('[name="renderer[defaultMode]"]').selectOption('HYBRID');
- await p.route('**/admin-ajax.php',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({success:true,data:{ok:true}})}));
+ await p.route('**/admin-ajax.php',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({success:true,data:{ok:true,runtimeVerification:{ok:true,status:"PASS"}}})}));
  await p.locator('[data-vf-render-save]').click();await p.waitForFunction(()=>!document.querySelector('[data-vf-render-page]').classList.contains('is-dirty'));
  assert.equal(await p.locator('[data-vf-render-status]').getAttribute('data-status'),'pass');
  await p.unroute('**/admin-ajax.php');setSettings({defaultMode:'HYBRID',inputLayout:'STACKED',parameterLayout:'PROGRESSIVE_DISCLOSURE',progressPresentation:'STAGE_ONLY',lazyLoadRuntime:false});await p.goto(fixture);
