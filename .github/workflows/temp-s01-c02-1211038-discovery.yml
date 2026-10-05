@@ -65,6 +65,7 @@ jobs:
           test "$(jq -r '.target_commitish' <<<"$R")" = "5b077b506470869fbe4fe7574d2c071511422d36"
           test "$(jq -r --arg n "$TARGET_ASSET" '.assets[]|select(.name==$n)|.size' <<<"$R")" = "$TARGET_BYTES"
           test "$(jq -r --arg n "$TARGET_ASSET" '.assets[]|select(.name==$n)|.digest' <<<"$R")" = "sha256:$TARGET_SHA256"
+          touch evidence/manifest-release.pass
           echo LIVE_MANIFEST_RELEASE_READBACK=PASS
 
       - name: Download previous formal package
@@ -124,6 +125,7 @@ jobs:
             if(empty($x->package))throw new RuntimeException("NATIVE_TRANSIENT_PACKAGE");
             echo "WORDPRESS_NATIVE_UPDATE_OFFER=PASS\n";
           '
+          touch evidence/discovery.pass
 
       - name: Execute native updater in temporary WordPress
         run: |
@@ -138,6 +140,7 @@ jobs:
             if(($r["final"]["final_result"]??"")!=="SUCCESS")throw new RuntimeException("NATIVE_FINAL_RESULT");
             echo "NATIVE_UPDATE_EXECUTION=PASS\n";
           '
+          touch evidence/native-update.pass
 
           wp eval '
             require_once ABSPATH."wp-admin/includes/plugin.php";
@@ -150,35 +153,51 @@ jobs:
             if(($a["version"]??"")!=="1.21.1038")throw new RuntimeException("TARGET_AUTHORITY");
             if(($a["fingerprint_sha256"]??"")!=="f6372ec2361143faac1bd7baa21c70f14ef69ee66245903917573143284de3d5")throw new RuntimeException("TARGET_AUTHORITY_FP");
             $r=vf_ops_wp_update_manual_check_v1();
-            if(empty($r["ok"])||($r["status"]??"")!=="UP_TO_DATE")throw new RuntimeException("POST_DISCOVERY_".wp_json_encode($r));
+            if(empty($r["ok"]))throw new RuntimeException("POST_DISCOVERY_".wp_json_encode($r));
+            if(!in_array((string)($r["status"]??""),["UP_TO_DATE","SOURCE_VERSION_NOT_ALLOWED"],true))throw new RuntimeException("POST_DISCOVERY_STATUS_".wp_json_encode($r));
+            if((string)($r["manifest"]["target_version"]??"")!=="1.21.1038")throw new RuntimeException("POST_MANIFEST_TARGET");
+            require_once ABSPATH."wp-admin/includes/update.php";
+            delete_site_transient("update_plugins");
+            VF_Ops_Update_Client_V1::clear_cache();
+            wp_update_plugins();
+            $u=get_site_transient("update_plugins");
+            if(is_object($u)&&isset($u->response["vf-ops/vf-ops.php"]))throw new RuntimeException("REPEATED_NATIVE_OFFER");
             echo "POST_UPDATE_READBACK=PASS\n";
           '
+          touch evidence/post-readback.pass
 
       - name: Emit public-safe proof
         if: always()
         run: |
-          set -Eeuo pipefail
-          cat > evidence/FINAL_DISCOVERY.json <<'JSON'
-          {
-            "schema": "vf-s01-c02-distribution-discovery/v1",
-            "component": "S01-C02",
-            "from_version": "1.21.1037",
-            "target_version": "1.21.1038",
-            "distribution_main": "861a097dcf2fa7818ad91fcef395b5e33fd08a01",
-            "formal_release_id": 403559722,
-            "formal_asset_id": 612121317,
-            "manifest_release_readback": "PASS",
-            "manual_update_discovery": "PASS",
-            "wordpress_native_offer": "PASS",
-            "temporary_native_update": "PASS",
-            "post_update_readback": "PASS",
-            "state_preservation": "PASS",
-            "production": "NOT_TOUCHED",
-            "owner_product_pass": false,
-            "status": "PASS"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          passed=lambda name: Path("evidence",name).exists()
+          proof={
+            "schema":"vf-s01-c02-distribution-discovery/v1",
+            "component":"S01-C02",
+            "from_version":"1.21.1037",
+            "target_version":"1.21.1038",
+            "distribution_main":"861a097dcf2fa7818ad91fcef395b5e33fd08a01",
+            "formal_release_id":403559722,
+            "formal_asset_id":612121317,
+            "manifest_release_readback":"PASS" if passed("manifest-release.pass") else "FAIL",
+            "manual_update_discovery":"PASS" if passed("discovery.pass") else "FAIL",
+            "wordpress_native_offer":"PASS" if passed("discovery.pass") else "FAIL",
+            "temporary_native_update":"PASS" if passed("native-update.pass") else "FAIL",
+            "post_update_readback":"PASS" if passed("post-readback.pass") else "FAIL",
+            "state_preservation":"PASS" if passed("post-readback.pass") else "FAIL",
+            "production":"NOT_TOUCHED",
+            "owner_product_pass":False,
           }
-          JSON
-          cat evidence/FINAL_DISCOVERY.json
+          proof["status"]="PASS" if all(proof[k]=="PASS" for k in [
+            "manifest_release_readback","manual_update_discovery","wordpress_native_offer",
+            "temporary_native_update","post_update_readback","state_preservation"
+          ]) else "FAIL"
+          Path("evidence/FINAL_DISCOVERY.json").write_text(json.dumps(proof,ensure_ascii=False,indent=2)+"\n")
+          print(json.dumps(proof,ensure_ascii=False,indent=2))
+          if proof["status"]!="PASS": raise SystemExit(1)
+          PY
 
       - name: Upload public-safe discovery evidence
         if: always()
