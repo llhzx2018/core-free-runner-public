@@ -114,6 +114,24 @@ class TargetPullContractTests(unittest.TestCase):
         remote_index = args.index("root@192.0.2.10:/home/site/htdocs/example.com/")
         self.assertLess(remote_index, len(args) - 1)
 
+    def test_rsync_progress_streams_when_enabled(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "ssh": "ssh",
+        }
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            pull.os.environ, {"VFOPS_MIGRATION_PROGRESS": "1"}, clear=False
+        ), mock.patch.object(pull, "run_local") as run:
+            pull.pull_path(source, "/home/site/htdocs/example.com/", Path(td))
+        args = run.call_args.args[0]
+        self.assertIn("--info=progress2,stats2", args)
+        self.assertIn("--human-readable", args)
+        self.assertTrue(run.call_args.kwargs["stream_to_stderr"])
+
     def test_prepare_state_is_owned_by_current_new_server(self) -> None:
         source = {
             "host": "192.0.2.10",
@@ -720,6 +738,9 @@ class TargetPullUiContractTests(unittest.TestCase):
             "继续未完成迁移",
             "旧服务器 IP",
             "新服务器开始从旧服务器复制数据",
+            "实时显示已传输量 / 百分比 / 速度",
+            "VFOPS_MIGRATION_PROGRESS=1",
+            "run_migration_live",
             "唯一剩余人工步骤",
             "DNS 不自动修改",
             "旧服务器永不自动删除",
