@@ -1,0 +1,15 @@
+'use strict';
+const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright'),{setSettings,url,fixture,login,sample}=require('./common');
+(async()=>{const b=await chromium.launch(),c=await b.newContext({viewport:{width:1440,height:1000}}),p=await c.newPage();p.on('dialog',d=>d.accept());await login(p);await p.goto(url);
+ await p.locator('[name="renderer[defaultMode]"]').selectOption('HYBRID');
+ await p.route('**/admin-ajax.php',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({success:true,data:{ok:true}})}));
+ await p.locator('[data-vf-render-save]').click();await p.waitForFunction(()=>!document.querySelector('[data-vf-render-page]').classList.contains('is-dirty'));
+ assert.equal(await p.locator('[data-vf-render-status]').getAttribute('data-status'),'pass');
+ await p.unroute('**/admin-ajax.php');setSettings({defaultMode:'HYBRID',inputLayout:'STACKED',parameterLayout:'PROGRESSIVE_DISCLOSURE',progressPresentation:'STAGE_ONLY',lazyLoadRuntime:false});await p.goto(fixture);
+ assert.equal(await p.locator('[data-vf-v6-renderer=HYBRID]').count(),0,'baseline default mode unexpectedly works');
+ assert.equal(await p.locator('[data-vf-parameter-disclosure]').count(),0);
+ assert.equal(await p.locator('[data-vf-input-layout]').count(),0);
+ assert.equal(await p.locator('[data-vf-runtime-preload]').count(),0);
+ await p.screenshot({path:'proof/render-baseline-public-1440.png',fullPage:true});
+ setSettings({});const perf=[];await sample(p);await sample(p);for(let i=0;i<5;i++)perf.push(await sample(p));assert(perf.every(s=>s.optional===0&&!s.executed));
+ fs.writeFileSync('proof/baseline.json',JSON.stringify({status:'REPRODUCED',false_success_incomplete_readback:true,ignored_default_mode:true,ignored_input_layout:true,ignored_parameter_disclosure:true,ignored_eager_loading:true,performance:{width:1440,dataset:'two inputs / three parameters / one 37-byte optional script',warmups:2,samples:perf}},null,2));setSettings({});await b.close();console.log('BASELINE_REPRODUCED');})().catch(e=>{console.error(e);process.exit(1)});
