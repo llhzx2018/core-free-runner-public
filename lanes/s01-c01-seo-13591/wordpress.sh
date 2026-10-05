@@ -7,9 +7,10 @@ ASSET="vf-tools-theme_V${TARGET_VERSION}.zip"
 export MOCK_PORT=18881 MOCK_ASSET="$PWD/proof/$ASSET" MOCK_STATE="$PWD/mock-state.json" MOCK_LOG="$PWD/mock.log" MOCK_HOST=vf-update.test
 echo '{"mode":"normal"}' > "$MOCK_STATE"
 python3 - <<'PY'
-import pathlib,os
+import pathlib,os,re
 s=pathlib.Path('target/tests/wp-update/mock-github-server.py').read_text()
-s=s.replace('1.35.8',os.environ['SOURCE_VERSION']).replace('1.35.9',os.environ['TARGET_VERSION'])
+s=re.sub(r'1\.35\.(8|9)(?!\d)',lambda m:os.environ['SOURCE_VERSION'] if m.group(1)=='8' else os.environ['TARGET_VERSION'],s)
+assert os.environ['TARGET_VERSION'] in s and '1.35.910' not in s
 s=s.replace('VF_Tools_Theme_V'+os.environ['TARGET_VERSION']+'_UPDATE.zip','vf-tools-theme_V'+os.environ['TARGET_VERSION']+'.zip')
 s=s.replace("if not self.auth_ok(): return", "if not self.auth_ok(): return\n        if p.path=='/repos/llhzx2018/core-updates': self.send_json({'private':True}); return")
 pathlib.Path('/tmp/v8-mock.py').write_text(s)
