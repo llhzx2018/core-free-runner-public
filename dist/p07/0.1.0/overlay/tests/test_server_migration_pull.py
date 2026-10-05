@@ -331,6 +331,91 @@ class TargetPullContractTests(unittest.TestCase):
                 "PREPARE_SERVER_MIGRATION",
             )
 
+    def test_target_smoke_accepts_local_404_as_reachable(self) -> None:
+        state = {
+            "sites": [{
+                "domain": "example.com",
+                "domains": ["example.com"],
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": [],
+                "sqlite_paths": [],
+                "cron": {"entry_count": 0},
+                "pm2": {"processes": []},
+                "ssl": {"configured": True},
+            }]
+        }
+        target = json.loads(json.dumps(state["sites"][0]))
+        manifest = {"sites": [target]}
+        with mock.patch.object(
+            pull.inventory, "build_manifest", return_value=manifest
+        ), mock.patch.object(
+            pull, "run_local",
+            return_value=subprocess.CompletedProcess([], 0, "404", ""),
+        ):
+            result = pull.target_smoke(state)
+        self.assertEqual(result["pass"], 1)
+        self.assertEqual(result["fail"], 0)
+        self.assertEqual(result["failures"], [])
+
+    def test_target_smoke_rejects_local_502_with_domain_reason(self) -> None:
+        state = {
+            "sites": [{
+                "domain": "example.com",
+                "domains": ["example.com"],
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": [],
+                "sqlite_paths": [],
+                "cron": {"entry_count": 0},
+                "pm2": {"processes": []},
+                "ssl": {"configured": True},
+            }]
+        }
+        target = json.loads(json.dumps(state["sites"][0]))
+        manifest = {"sites": [target]}
+        with mock.patch.object(
+            pull.inventory, "build_manifest", return_value=manifest
+        ), mock.patch.object(
+            pull, "run_local",
+            return_value=subprocess.CompletedProcess([], 0, "502", ""),
+        ):
+            result = pull.target_smoke(state)
+        self.assertEqual(result["pass"], 0)
+        self.assertEqual(result["fail"], 1)
+        self.assertEqual(result["failures"][0]["domain"], "example.com")
+        self.assertEqual(result["failures"][0]["reason"], "LOCAL_HTTP_PROBE")
+        self.assertEqual(result["failures"][0]["http_code"], "502")
+
+    def test_cutover_can_retry_same_task_after_successful_rollback(self) -> None:
+        mid = "pull-20261005T000000Z-deadbeef"
+        state = {
+            "migration_id": mid,
+            "status": "CUTOVER_FAILED_ROLLED_BACK",
+            "source_runtime_frozen": False,
+            "sites": [],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "source": {},
+        }
+        with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
+            pull, "save_state"
+        ), mock.patch.object(
+            pull, "freeze_old_server"
+        ), mock.patch.object(
+            pull, "sync_external_assets", return_value=[]
+        ), mock.patch.object(
+            pull, "sync_site_databases", return_value=0
+        ), mock.patch.object(
+            pull, "sync_sqlite_assets", return_value=0
+        ), mock.patch.object(
+            pull, "activate_target_runtime"
+        ), mock.patch.object(
+            pull, "target_smoke", return_value={"pass": 0, "fail": 0, "failures": []}
+        ):
+            result = pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
+        self.assertEqual(result["status"], "CUTOVER_PREP_READY")
+
     def test_post_dns_waiting_state_denies_runtime_only_rollback(self) -> None:
         state = {
             "schema": pull.SCHEMA,
