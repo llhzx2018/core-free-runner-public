@@ -5,7 +5,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
  await p.route('**/admin-ajax.php',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({success:true,data:{ok:true,runtimeVerification:{ok:true,status:"PASS"}}})}));
  await p.locator('[data-vf-render-save]').click();await p.waitForFunction(()=>!document.querySelector('[data-vf-render-page]').classList.contains('is-dirty'));
  assert.equal(await p.locator('[data-vf-render-status]').getAttribute('data-status'),'pass');
- await p.unroute('**/admin-ajax.php');setSettings({defaultMode:'HYBRID',inputLayout:'STACKED',parameterLayout:'PROGRESSIVE_DISCLOSURE',progressPresentation:'STAGE_ONLY',lazyLoadRuntime:false});await p.goto(fixture);
+ await p.unroute('**/admin-ajax.php');setSettings({defaultMode:'HYBRID',inputLayout:'STACKED',parameterLayout:'PROGRESSIVE_DISCLOSURE',progressPresentation:'STAGE_ONLY',lazyLoadRuntime:false});await p.goto(fixture);assert.equal(await p.locator('[data-vf-synthetic-fixture]').count(),1,'synthetic fixture did not run');assert.equal(await p.locator('[data-vf-v6-product-page=STANDARD]').count(),1,'baseline fixture projection invalid');
  assert.equal(await p.locator('[data-vf-v6-renderer=HYBRID]').count(),0,'baseline default mode unexpectedly works');
  assert.equal(await p.locator('[data-vf-parameter-disclosure]').count(),0);
  assert.equal(await p.locator('[data-vf-input-layout]').count(),0);

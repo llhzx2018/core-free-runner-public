@@ -1,6 +1,6 @@
 <?php
 // Synthetic-only Runner MU fixture. Never part of the Theme package.
-add_action('template_redirect',function(){
+add_action('wp',function(){
  if(!isset($_GET['vf-render-fixture'])){return;}
  vf_theme_bootstrap_require_many(['services/renderer-config-service.php','services/runtime-descriptor-service.php','services/page-projection-consumer-service.php','services/runtime-asset-loader-service.php','services/provider-widget-host-service.php','services/product-renderer-service.php']);
  $asset='/wp-content/mu-plugins/vf-render-fixture.js';$hash=hash_file('sha256',ABSPATH.ltrim($asset,'/'));$mode=sanitize_text_field($_GET['mode']??'');
@@ -10,8 +10,8 @@ add_action('template_redirect',function(){
  if(isset($_GET['unsafe'])){$p['runtimeDescriptor']['assets'][0]['url']='https://outside.invalid/inject.js';}
  $GLOBALS['vf_tools_page_projection']=$p;
  add_filter('vf_tools_theme_provider_widget_renderers',function($renderers){$renderers['synthetic']=function($projection,$api){echo '<label>合成输入<input name="synthetic_input" type="text"></label><button type="button">合成操作</button><script>window.UNSAFE_WIDGET=true</script><img src="x" onerror="window.UNSAFE_WIDGET=true">';};return $renderers;});
- status_header(200);header('Cache-Control: no-store');echo '<!doctype html><html lang="zh-CN"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>合成工具测试</title>';
+ status_header(200);header('Cache-Control: no-store');echo '<!doctype html><html lang="zh-CN" data-vf-synthetic-fixture="1"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>合成工具测试</title>';
  echo '<link rel="stylesheet" href="'.esc_url(get_template_directory_uri().'/assets/css/public/v6-product-renderer.css').'">';
  echo '<style>body{font-family:Arial,sans-serif;margin:0;padding:16px;overflow-wrap:anywhere}main{max-width:1100px;margin:auto}input,textarea,select{box-sizing:border-box;max-width:100%}</style>';
  wp_head();echo '</head><body><div>';vf_tools_theme_render_product_page([]);echo '</div>';wp_footer();echo '</body></html>';exit;
-},-99);
+},PHP_INT_MIN);
