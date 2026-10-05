@@ -4152,3 +4152,51 @@ Identity:
 Source Build 0.1.0-release62
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release63 · external asset file/directory rsync type-safe resume
+
+Owner real-use on release62 proved live rsync progress is visible, then exposed a different prepare-stage defect after the already-staged site/database work resumed.
+
+A hidden external asset matched by the existing `.vf*` discovery rule was a regular file. The target-pull external sync path incorrectly pre-created every external asset as a directory and then forced a trailing slash on the old-server rsync source. rsync therefore tried to `change_dir` into a regular file and returned code 23.
+
+release63 makes external-path semantics explicit and remains compatible with the already-created PREPARE_FAILED migration state:
+
+```text
+old-server external path -> probe as FILE or DIRECTORY
+DIRECTORY -> keep directory/content rsync semantics
+FILE      -> exact-file rsync semantics, no trailing slash
+release62 empty wrong-type placeholder -> remove only if empty
+non-empty wrong-type target            -> fail closed, never delete it
+symlink / other / missing source type  -> fail closed
+```
+
+The generic pull primitive no longer infers old-server source type from whether the current local target happens to be a directory. Callers now own the trailing-slash semantics.
+
+This specifically preserves resumability:
+
+```text
+existing migration id          PRESERVED
+already PULLED_STAGED sites    SKIPPED
+completed multi-GB data        NOT intentionally recopied
+new migration task             NOT required
+```
+
+Safety boundary remains unchanged:
+
+```text
+DNS automatic change       NO
+old server deletion        NO
+Production cutover         NO during prepare/resume
+existing unrelated overwrite NO
+non-empty conflict deletion NO
+Production Nginx stop/restart NO
+database secrets displayed NO
+```
+
+Identity:
+
+```text
+Source Build 0.1.0-release63
+System Care  0.1.0-rc35 (unchanged)
+```
