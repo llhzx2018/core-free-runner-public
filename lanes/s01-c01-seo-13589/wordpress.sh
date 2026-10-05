@@ -52,6 +52,11 @@ cli eval 'vf_theme_bootstrap_require_many(["theme-options-runtime.php","theme-op
 cli eval 'vf_theme_bootstrap_require_many(["services/renderer-config-service.php"]);if(vf_tools_theme_renderer_hash(vf_tools_theme_renderer_readback()["renderer"])!==get_option("vf_render_seed_fingerprint")){throw new Exception("renderer upgrade preservation failed");}' >/dev/null
 node lane/live-browser.js
 node lane/public-output.js
+cli plugin install polylang --activate >/dev/null
+docker cp lane/polylang-seed.php "$WP:/tmp/polylang-seed.php"
+cli eval-file /tmp/polylang-seed.php >/dev/null
+node lane/paired-output.js
+cli plugin deactivate polylang >/dev/null
 cli eval 'if(get_option("vf_private_update_credential_v1")!=="runner-private-token"||get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("browser action preservation failed");}' >/dev/null
 curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
@@ -74,7 +79,8 @@ public=json.loads((p/'public-output.json').read_text());assert public['status']=
 recovery=json.loads((p/'recovery-data.json').read_text());assert recovery['status']=='PASS' and all(v=='PASS' for v in recovery['checks'].values())
 assert json.loads((p/'clean-install.json').read_text())['status']=='PASS'
 assert json.loads((p/'performance.json').read_text())['status']=='PASS'
-m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',seo_native_cases=6,public_width_cases=6,function_cases=len(live['tests']),public_function_cases=len(public['tests']),seo_controls='PASS',seo_draft_preservation='PASS',seo_persistence='PASS',seo_csrf='PASS',seo_revision_conflict='PASS',seo_invalid_contract='PASS',seo_keyboard='PASS',seo_alignment='PASS',seo_disclosures='PASS',seo_network_failure='PASS',seo_busy_lock='PASS',seo_native_post='PASS',seo_true_blocked_state='PASS',actual_seo_consumers='PASS',complete_save_readback='PASS',bounded_performance='PASS',recovery_data='PASS',recovery_checks=len(recovery['checks']),clean_install='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
+paired=json.loads((p/'paired-output.json').read_text());assert paired['status']=='PASS' and len(paired['tests'])==6
+m.update(json.loads((p/'runtime.json').read_text()));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',seo_native_cases=6,public_width_cases=6,function_cases=len(live['tests']),public_function_cases=len(public['tests'])+len(paired['tests']),polylang_actual_pairing='PASS',seo_controls='PASS',seo_draft_preservation='PASS',seo_persistence='PASS',seo_csrf='PASS',seo_revision_conflict='PASS',seo_invalid_contract='PASS',seo_keyboard='PASS',seo_alignment='PASS',seo_disclosures='PASS',seo_network_failure='PASS',seo_busy_lock='PASS',seo_native_post='PASS',seo_true_blocked_state='PASS',actual_seo_consumers='PASS',complete_save_readback='PASS',bounded_performance='PASS',recovery_data='PASS',recovery_checks=len(recovery['checks']),clean_install='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
 PYPROOF
 echo EXACT_CANDIDATE_GATE=PASS

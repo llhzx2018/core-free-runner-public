@@ -5,12 +5,12 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'src/inc/admin/views/seo.php', 'VERSION', 'src/inc/runtime-constants.php', 'src/assets/js/admin/admin-seo.js', 'docs/authority/ACCEPTANCE_MATRIX.md', 'src/assets/css/admin/pages/seo/admin-page-seo.css', 'src/style.css', 'src/inc/services/technical-seo-service.php', 'tests/seo-workflow-v4-contract.php'}
+allowed={'src/inc/runtime-constants.php', 'src/inc/admin/views/seo.php', 'src/inc/services/url/public-url-seo-edge-robots.php', 'src/assets/css/admin/pages/seo/admin-page-seo.css', 'src/style.css', 'src/inc/seo-parts/seo-endpoints.php', 'tests/seo-workflow-v4-contract.php', 'src/inc/services/hreflang-service.php', 'docs/authority/ACCEPTANCE_MATRIX.md', 'src/inc/services/technical-seo-service.php', 'VERSION', 'src/assets/js/admin/admin-seo.js', 'src/inc/services/seo-head-service.php'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
 assert (root/'inc/runtime-constants.php').read_text()==original('src/inc/runtime-constants.php').replace("VF_THEME_VERSION', '"+os.environ['SOURCE_VERSION']+"'", "VF_THEME_VERSION', '"+version+"'")
-for p in ['src/inc/admin/admin-seo-actions.php','src/inc/admin/controllers/seo.php','src/inc/bootstrap/manifests/admin-tabs/seo.php','src/inc/admin/admin-controller.php','src/assets/js/admin/admin-navigation.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css','src/inc/admin/views/render.php','src/assets/js/admin/admin-render.js','src/inc/services/renderer-config-service.php','src/inc/services/product-renderer-service.php','src/inc/services/seo-head-service.php','src/inc/services/url-resolver-service.php','src/inc/seo-parts/seo-endpoints.php']:
+for p in ['src/inc/admin/admin-seo-actions.php','src/inc/admin/controllers/seo.php','src/inc/bootstrap/manifests/admin-tabs/seo.php','src/inc/admin/admin-controller.php','src/assets/js/admin/admin-navigation.js','src/assets/css/admin/pages/navigation/admin-page-navigation-v8.css','src/inc/admin/views/render.php','src/assets/js/admin/admin-render.js','src/inc/services/renderer-config-service.php','src/inc/services/product-renderer-service.php','src/inc/services/url-resolver-service.php']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' changed outside scope'
 for p in ['src/inc/admin/admin-shell.php','src/inc/admin/admin-s01-uiux-polish.php']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' frozen content changed'
