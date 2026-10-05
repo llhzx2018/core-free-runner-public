@@ -4095,3 +4095,60 @@ Identity:
 Source Build 0.1.0-release61
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release62 · migration DB import root-context + live rsync progress
+
+Owner real-use on release61 produced a precise target-side state for the first migrated database:
+
+```text
+Build                0.1.0-release61
+migration state      PREPARE_FAILED
+domain               ilovem3u8.kewaro.com
+database             kewaro-ilovem3u8
+target DB marker     YES
+CloudPanel DB row    YES
+wp-config.php        YES
+```
+
+P07 writes the private target database marker only after `clpctl db:add` succeeds and before `db:import`. Therefore database creation is proven complete; the previously combined "import/config remap" error hid the remaining failure stage.
+
+CloudPanel's CLI database import/export authorization resolves the calling system user through `SUDO_USER`. A direct root shell may legitimately have no `SUDO_USER`. release62 normalizes that root execution context in the centralized CloudPanel adapter by setting an in-memory child-process environment value `SUDO_USER=root` only when the P07 process is already effective UID 0 and no SUDO_USER is present. No password/token is added or persisted.
+
+Database errors are now separated:
+
+```text
+db:add failure                -> target database creation/recreation failure
+db:import failure             -> new-server MySQL import failed
+application config remap      -> new-server application DB config remap failed
+verification export/fingerprint remains its own existing gate
+```
+
+Migration transfer progress is also no longer hidden by JSON capture:
+
+```text
+UI sets VFOPS_MIGRATION_PROGRESS=1 for prepare/resume/cutover
+rsync uses --info=progress2,stats2 --human-readable
+progress stdout/stderr is streamed live to the terminal via stderr
+final machine JSON remains isolated on stdout for the UI parser
+```
+
+Owner can therefore see transferred bytes, percentage and throughput during multi-GB site copies while resumable migration state and machine-readable results remain intact.
+
+Safety boundary remains unchanged:
+
+```text
+DNS automatic change       NO
+old server deletion        NO
+Production cutover         NO during prepare/resume
+existing target overwrite  NO
+database secrets displayed NO
+migration state preserved  YES
+```
+
+Identity:
+
+```text
+Source Build 0.1.0-release62
+System Care  0.1.0-rc35 (unchanged)
+```
