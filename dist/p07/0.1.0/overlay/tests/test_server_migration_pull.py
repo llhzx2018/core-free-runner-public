@@ -132,6 +132,94 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertIn("--human-readable", args)
         self.assertTrue(run.call_args.kwargs["stream_to_stderr"])
 
+    def test_rsync_file_source_does_not_gain_trailing_slash_from_local_directory(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "ssh": "ssh",
+        }
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+            pull, "run_local"
+        ) as run:
+            target = Path(td)
+            pull.pull_path(source, "/home/site/.vf-file-marker", target)
+            args = run.call_args.args[0]
+        self.assertIn("root@192.0.2.10:/home/site/.vf-file-marker", args)
+        self.assertNotIn("root@192.0.2.10:/home/site/.vf-file-marker/", args)
+
+    def test_external_file_resume_removes_only_empty_release62_placeholder(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "ssh": "ssh",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / ".vf-file-marker"
+            target.mkdir()
+            state = {
+                "source": source,
+                "external_assets": [{"path": str(target), "user": "site"}],
+            }
+            with mock.patch.object(
+                pull, "ensure_local_parent"
+            ), mock.patch.object(
+                pull, "source_path_kind", return_value="FILE"
+            ), mock.patch.object(
+                pull, "pull_path"
+            ) as transfer:
+                result = pull.sync_external_assets(state, final=False)
+
+            self.assertFalse(target.exists())
+            self.assertEqual(result, [str(target)])
+            self.assertEqual(state["external_assets"][0]["kind"], "FILE")
+            transfer.assert_called_once_with(
+                source,
+                str(target),
+                target,
+                user="site",
+                delete=False,
+            )
+
+    def test_external_file_resume_refuses_nonempty_directory_conflict(self) -> None:
+        source = {
+            "host": "192.0.2.10",
+            "ip": "192.0.2.10",
+            "ssh_user": "root",
+            "ssh_port": 22,
+            "identity_file": None,
+            "ssh": "ssh",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / ".vf-file-marker"
+            target.mkdir()
+            (target / "unexpected").write_text("keep", encoding="utf-8")
+            state = {
+                "source": source,
+                "external_assets": [{"path": str(target), "user": "site"}],
+            }
+            with mock.patch.object(
+                pull, "ensure_local_parent"
+            ), mock.patch.object(
+                pull, "source_path_kind", return_value="FILE"
+            ), mock.patch.object(
+                pull, "pull_path"
+            ) as transfer:
+                with self.assertRaisesRegex(
+                    pull.PullMigrationError,
+                    "external target type conflict",
+                ):
+                    pull.sync_external_assets(state, final=False)
+
+            self.assertTrue(target.is_dir())
+            self.assertTrue((target / "unexpected").is_file())
+            transfer.assert_not_called()
+
     def test_prepare_state_is_owned_by_current_new_server(self) -> None:
         source = {
             "host": "192.0.2.10",
