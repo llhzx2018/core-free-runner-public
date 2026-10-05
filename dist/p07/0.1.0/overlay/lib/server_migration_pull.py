@@ -209,14 +209,37 @@ def pull_path(
     for item in excludes:
         args.extend(["--exclude", item])
     remote = f"{source['ssh_user']}@{source['host']}:{remote_path}"
-    if remote_path.endswith("/"):
-        remote_spec = remote
-    else:
-        remote_spec = remote + ("/" if local_path.is_dir() else "")
+    # Caller owns the source-path semantics: a trailing slash means directory
+    # contents, while a path without one means the exact remote object. Never
+    # infer remote type from the current local target; a previous failed run may
+    # have left an empty directory where the source is actually a file.
+    remote_spec = remote
     args.extend(["-e", ssh_rsync_command(source), remote_spec, str(local_path)])
     if show_progress:
         print(f"迁移进度：{remote_path} → {local_path}", file=sys.stderr, flush=True)
     run_local(args, timeout=3600, stream_to_stderr=show_progress)
+
+
+def source_path_kind(source: dict[str, Any], remote_path: str) -> str:
+    if not remote_path.startswith("/"):
+        raise PullMigrationError("old-server path is not absolute")
+    quoted = shlex.quote(remote_path)
+    command = (
+        f"if [ -L {quoted} ]; then printf 'SYMLINK'; "
+        f"elif [ -d {quoted} ]; then printf 'DIRECTORY'; "
+        f"elif [ -f {quoted} ]; then printf 'FILE'; "
+        f"elif [ -e {quoted} ]; then printf 'OTHER'; "
+        "else printf 'MISSING'; fi"
+    )
+    proc = source_remote(source, command, timeout=30, check=False)
+    if proc.returncode != 0:
+        raise PullMigrationError("old-server external path type check failed")
+    kind = proc.stdout.strip()
+    if kind not in {"DIRECTORY", "FILE"}:
+        raise PullMigrationError(
+            f"old-server external path is not a regular file/directory: {remote_path}"
+        )
+    return kind
 
 
 def push_control_file(
@@ -786,17 +809,56 @@ def sync_external_assets(state: dict[str, Any], *, final: bool) -> list[str]:
         user = str(row["user"])
         target = Path(source_path)
         ensure_local_parent(target.parent, user)
-        if not target.exists():
-            target.mkdir(parents=True, exist_ok=True)
-            _, uid, gid = local_user_group(user)
-            os.chown(target, uid, gid)
-        pull_path(
-            state["source"],
-            source_path.rstrip("/") + "/",
-            target,
-            user=user,
-            delete=final,
-        )
+
+        kind = str(row.get("kind") or "")
+        if kind not in {"DIRECTORY", "FILE"}:
+            kind = source_path_kind(state["source"], source_path)
+            row["kind"] = kind
+
+        if target.is_symlink():
+            raise PullMigrationError(
+                f"new-server external target is a symlink: {source_path}"
+            )
+
+        if kind == "DIRECTORY":
+            if target.exists() and not target.is_dir():
+                raise PullMigrationError(
+                    f"new-server external target type conflict: {source_path}"
+                )
+            if not target.exists():
+                target.mkdir(parents=True, exist_ok=True)
+                _, uid, gid = local_user_group(user)
+                os.chown(target, uid, gid)
+            pull_path(
+                state["source"],
+                source_path.rstrip("/") + "/",
+                target,
+                user=user,
+                delete=final,
+            )
+        else:
+            # release62 could create an empty directory before discovering that
+            # the source external asset was actually a file. Remove only that
+            # empty placeholder; any non-empty directory fails closed.
+            if target.is_dir():
+                try:
+                    target.rmdir()
+                except OSError as exc:
+                    raise PullMigrationError(
+                        f"new-server external target type conflict: {source_path}"
+                    ) from exc
+            elif target.exists() and not target.is_file():
+                raise PullMigrationError(
+                    f"new-server external target type conflict: {source_path}"
+                )
+            pull_path(
+                state["source"],
+                source_path,
+                target,
+                user=user,
+                delete=False,
+            )
+
         synced.append(source_path)
     return sorted(set(synced))
 
