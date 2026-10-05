@@ -371,7 +371,41 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(result["fail"], 0)
         self.assertEqual(result["failures"], [])
 
-    def test_target_smoke_rejects_local_502_with_domain_reason(self) -> None:
+    def test_target_smoke_retries_transient_503_until_ready(self) -> None:
+        state = {
+            "sites": [{
+                "domain": "example.com",
+                "domains": ["example.com"],
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "node", "version": "22"},
+                "mysql_databases": [],
+                "sqlite_paths": [],
+                "cron": {"entry_count": 0},
+                "pm2": {"processes": [{"name": "web"}]},
+                "ssl": {"configured": True},
+            }]
+        }
+        target = json.loads(json.dumps(state["sites"][0]))
+        manifest = {"sites": [target]}
+        responses = [
+            subprocess.CompletedProcess([], 0, "503", ""),
+            subprocess.CompletedProcess([], 0, "200", ""),
+        ]
+        with mock.patch.object(
+            pull.inventory, "build_manifest", return_value=manifest
+        ), mock.patch.object(
+            pull, "run_local", side_effect=responses
+        ) as run, mock.patch.object(
+            pull.time, "sleep"
+        ) as sleep:
+            result = pull.target_smoke(state, attempts=4, delay=0.1)
+        self.assertEqual(result["pass"], 1)
+        self.assertEqual(result["fail"], 0)
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
+    def test_target_smoke_rejects_persistent_502_after_bounded_retry(self) -> None:
         state = {
             "sites": [{
                 "domain": "example.com",
@@ -392,13 +426,18 @@ class TargetPullContractTests(unittest.TestCase):
         ), mock.patch.object(
             pull, "run_local",
             return_value=subprocess.CompletedProcess([], 0, "502", ""),
-        ):
-            result = pull.target_smoke(state)
+        ) as run, mock.patch.object(
+            pull.time, "sleep"
+        ) as sleep:
+            result = pull.target_smoke(state, attempts=3, delay=0.1)
         self.assertEqual(result["pass"], 0)
         self.assertEqual(result["fail"], 1)
         self.assertEqual(result["failures"][0]["domain"], "example.com")
         self.assertEqual(result["failures"][0]["reason"], "LOCAL_HTTP_PROBE")
         self.assertEqual(result["failures"][0]["http_code"], "502")
+        self.assertEqual(result["failures"][0]["attempts"], 3)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_cutover_can_retry_same_task_after_successful_rollback(self) -> None:
         mid = "pull-20261005T000000Z-deadbeef"
