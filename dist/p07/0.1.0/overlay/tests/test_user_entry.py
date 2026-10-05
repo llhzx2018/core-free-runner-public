@@ -198,6 +198,16 @@ esac
             "#!/usr/bin/env bash\ncase \"$*\" in *P07_SSH_READY*) printf P07_SSH_READY; exit 0;; *) exit 0;; esac\n",
         )
 
+    def test_migration_waiting_operations_have_visible_progress_contract(self) -> None:
+        ui = (REPO_ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        self.assertIn("render_indeterminate_bar", ui)
+        self.assertIn("run_quiet_with_progress", ui)
+        self.assertIn("run_migration_live", ui)
+        self.assertIn("最终同步处理中", ui)
+        self.assertIn("正在读取旧服务器迁移清单", ui)
+        self.assertIn("正在进行公网验证", ui)
+        self.assertIn("文件传输阶段会继续输出 rsync 百分比 / 速度", ui)
+
     def test_symlink_entry_resolves_real_root_and_version(self) -> None:
         install_bin = self.tmp / "usr" / "local" / "bin"
         install_bin.mkdir(parents=True)
