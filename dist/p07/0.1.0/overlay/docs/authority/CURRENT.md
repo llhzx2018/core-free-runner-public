@@ -4278,3 +4278,8 @@ Identity:
 Source Build 0.1.0-release65
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release66 · local readiness retry
+
+Owner real-use on release65 isolated final local verification to `press.kewaro.com` returning HTTP 503 immediately after runtime activation. release66 adds a bounded local readiness retry: 10 attempts, 3 seconds apart. 2xx/3xx/4xx remain reachable PASS; 5xx/000 are retried and remain FAIL if persistent. Progress reports domain and attempt number. The same migration ID remains resumable after rollback. Build: `0.1.0-release66`; System Care remains `0.1.0-rc35`.

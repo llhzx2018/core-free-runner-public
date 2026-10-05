@@ -1184,7 +1184,12 @@ def deactivate_target_runtime(state: dict[str, Any]) -> bool:
     return ok
 
 
-def target_smoke(state: dict[str, Any]) -> dict[str, Any]:
+def target_smoke(
+    state: dict[str, Any],
+    *,
+    attempts: int = 10,
+    delay: float = 3.0,
+) -> dict[str, Any]:
     manifest = inventory.build_manifest(Path("/"))
     site_map = {
         str(row.get("domain")): row
@@ -1193,6 +1198,8 @@ def target_smoke(state: dict[str, Any]) -> dict[str, Any]:
     }
     passed = failed = 0
     failures: list[dict[str, Any]] = []
+    max_attempts = max(1, int(attempts))
+    retry_delay = max(0.0, float(delay))
     for source_site in state["sites"]:
         domain = str(source_site["domain"])
         target_site = site_map.get(domain)
@@ -1217,25 +1224,53 @@ def target_smoke(state: dict[str, Any]) -> dict[str, Any]:
                 "fields": sorted(set(compare["failures"] + compare["unknowns"])),
             })
             continue
-        proc = run_local([
-            "curl", "-kLsS", "--connect-timeout", "10", "--max-time", "30",
-            "--resolve", f"{domain}:443:127.0.0.1",
-            "-o", "/dev/null", "-w", "%{http_code}",
-            f"https://{domain}/",
-        ], timeout=45, check=False)
-        code = proc.stdout.strip()[-3:]
-        # Pre-DNS local smoke proves vhost/runtime reachability, not application
-        # business semantics. A deliberate 401/403/404 still proves that Nginx
-        # routed the request to the migrated site. 5xx/000 remain hard failures.
-        if proc.returncode == 0 and code.isdigit() and 200 <= int(code) < 500:
+
+        last_code = "000"
+        last_exit = 0
+        ready = False
+        used_attempts = 0
+        for probe_attempt in range(1, max_attempts + 1):
+            used_attempts = probe_attempt
+            progress_note(
+                f"7/7 · 本地验证 {domain} · 第 {probe_attempt}/{max_attempts} 次"
+            )
+            proc = run_local([
+                "curl", "-kLsS", "--connect-timeout", "10", "--max-time", "30",
+                "--resolve", f"{domain}:443:127.0.0.1",
+                "-o", "/dev/null", "-w", "%{http_code}",
+                f"https://{domain}/",
+            ], timeout=45, check=False)
+            code = proc.stdout.strip()[-3:]
+            last_code = code if code.isdigit() else "000"
+            last_exit = int(proc.returncode)
+            # Pre-DNS local smoke proves vhost/runtime reachability, not
+            # application business semantics. 4xx is reachable. 5xx/000 can be
+            # transient immediately after PM2/Node runtime activation, so retry
+            # them for a bounded readiness window before failing closed.
+            if (
+                proc.returncode == 0
+                and last_code.isdigit()
+                and 200 <= int(last_code) < 500
+            ):
+                ready = True
+                break
+            if probe_attempt < max_attempts:
+                progress_note(
+                    f"7/7 · {domain} 暂未就绪（HTTP {last_code}），"
+                    f"{retry_delay:g} 秒后重试"
+                )
+                time.sleep(retry_delay)
+
+        if ready:
             passed += 1
         else:
             failed += 1
             failures.append({
                 "domain": domain,
                 "reason": "LOCAL_HTTP_PROBE",
-                "http_code": code if code.isdigit() else "000",
-                "curl_exit": int(proc.returncode),
+                "http_code": last_code,
+                "curl_exit": last_exit,
+                "attempts": used_attempts,
             })
     return {"pass": passed, "fail": failed, "failures": failures}
 
@@ -1499,6 +1534,11 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
                 f"{row.get('domain')}:{row.get('reason')}"
                 + (
                     f":{row.get('http_code')}"
+                    + (
+                        f":attempts={row.get('attempts')}"
+                        if row.get("attempts")
+                        else ""
+                    )
                     if row.get("reason") == "LOCAL_HTTP_PROBE"
                     else (
                         ":" + "/".join(row.get("fields", []))
