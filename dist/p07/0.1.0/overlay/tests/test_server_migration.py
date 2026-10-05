@@ -576,6 +576,30 @@ class ServerMigrationAutomationTests(unittest.TestCase):
             self.assertNotIn("old_user", rewritten)
             self.assertNotIn("old-pass", rewritten)
 
+    def test_database_import_and_config_failures_are_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            state_root = base / "state"
+            site_root = base / "site"
+            site_root.mkdir()
+            config = site_root / "wp-config.php"
+            config.write_text(
+                "<?php\ndefine('DB_NAME','old');\ndefine('DB_USER','old');\ndefine('DB_PASSWORD','old');\n",
+                encoding="utf-8",
+            )
+            dump = base / "db.sql.gz"
+            dump.write_bytes(b"synthetic")
+            with mock.patch.object(engine, "STATE_ROOT", state_root), \
+                 mock.patch.object(engine.cloudpanel, "add_database"), \
+                 mock.patch.object(
+                     engine.cloudpanel, "import_database",
+                     side_effect=engine.cloudpanel.CloudPanelError("db_import", 1)
+                 ):
+                with self.assertRaisesRegex(engine.ServerMigrationError, "target database import failed"):
+                    engine.target_create_database_local(
+                        "server-test", "a.example.com", site_root, "adb", 1, dump
+                    )
+
     def test_full_server_multi_database_app_config_remap_fails_closed(self) -> None:
         site = {
             "domain": "multi.example.com",

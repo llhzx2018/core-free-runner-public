@@ -11,6 +11,19 @@ SSH_PREFLIGHT_STATE="UNKNOWN"
 
 pause() { ui_pause_return; }
 
+run_migration_live() {
+  local tmp rc
+  tmp="$(mktemp)"
+  if VFOPS_MIGRATION_PROGRESS=1 "$CORE" "$@" >"$tmp"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  MIGRATION_PAYLOAD="$(cat "$tmp" 2>/dev/null || true)"
+  rm -f "$tmp"
+  return "$rc"
+}
+
 validate_ip() {
   python3 - "$1" <<'PY' >/dev/null 2>&1
 import ipaddress,sys
@@ -273,12 +286,15 @@ prepare_and_continue() {
   [[ "$answer" =~ ^[Yy]$ ]] || return 0
 
   ui_flow '新服务器开始从旧服务器复制数据...'
-  if ! payload="$("$CORE" server-migrate prepare "${args[@]}" --confirm PREPARE_PULL_MIGRATION 2>&1)"; then
+  ui_note '下面会实时显示已传输量 / 百分比 / 速度；不同网站会分段显示。'
+  if ! run_migration_live server-migrate prepare "${args[@]}" --confirm PREPARE_PULL_MIGRATION; then
+    payload="$MIGRATION_PAYLOAD"
     ui_bad '首轮迁入未完整结束；目标端状态已保留，可从“继续未完成迁移”续跑。'
-    printf '%s\n' "$payload" >&2
+    [[ -n "$payload" ]] && printf '%s\n' "$payload" >&2
     pause
     return 0
   fi
+  payload="$MIGRATION_PAYLOAD"
   mid="$(json_field "$payload" migration_id 2>/dev/null || true)"
   [[ -n "$mid" ]] || {
     ui_bad '迁移已执行，但没有读到迁移任务编号。请从“继续未完成迁移”进入。'
@@ -309,12 +325,15 @@ continue_migration() {
         printf '继续首轮迁入？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate resume --migration-id "$mid" 2>&1)"; then
+        ui_note '继续时会实时显示文件同步进度。'
+        if ! run_migration_live server-migrate resume --migration-id "$mid"; then
+          output="$MIGRATION_PAYLOAD"
           ui_bad '继续迁入仍未完成；状态已保留。'
-          printf '%s\n' "$output" >&2
+          [[ -n "$output" ]] && printf '%s\n' "$output" >&2
           pause
           return 0
         fi
+        output="$MIGRATION_PAYLOAD"
         ui_good '首轮迁入完成 ✓'
         ;;
       PREPARED)
@@ -323,12 +342,15 @@ continue_migration() {
         ui_safety_tier migration '会短暂停止旧服务器运行环境并执行最终增量。'
         ui_prompt '确认进入最终同步？[y/N]：'; read -r answer || return 0
         [[ "$answer" =~ ^[Yy]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid" 2>&1)"; then
+        ui_note '最终增量同步会实时显示 rsync 进度。'
+        if ! run_migration_live server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid"; then
+          output="$MIGRATION_PAYLOAD"
           ui_bad '最终同步未完成；已执行安全恢复流程，请以上方状态为准。'
-          printf '%s\n' "$output" >&2
+          [[ -n "$output" ]] && printf '%s\n' "$output" >&2
           pause
           return 0
         fi
+        output="$MIGRATION_PAYLOAD"
         ui_good '最终增量同步与新服务器本地验证完成 ✓'
         ;;
       CUTOVER_RUNNING)
@@ -336,12 +358,14 @@ continue_migration() {
         printf '继续最终同步？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
-        if ! output="$("$CORE" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid" 2>&1)"; then
+        if ! run_migration_live server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid"; then
+          output="$MIGRATION_PAYLOAD"
           ui_bad '最终同步仍未完成。'
-          printf '%s\n' "$output" >&2
+          [[ -n "$output" ]] && printf '%s\n' "$output" >&2
           pause
           return 0
         fi
+        output="$MIGRATION_PAYLOAD"
         ;;
       CUTOVER_PREP_READY)
         ui_good '新服务器本地验证通过 ✓'

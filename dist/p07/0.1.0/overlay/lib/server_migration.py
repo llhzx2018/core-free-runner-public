@@ -1684,18 +1684,26 @@ def target_create_database_local(
         created_now = True
 
     try:
-        cloudpanel.import_database(database, dump, clpctl="clpctl")
-        mode, config_path = app_config.rewrite_application_database_config(
-            site_root,
-            domain,
-            domain,
-            database,
-            username,
-            password,
-        )
-        owner = site_root.stat()
-        if config_path is not None:
-            os.chown(config_path, owner.st_uid, owner.st_gid, follow_symlinks=False)
+        try:
+            cloudpanel.import_database(database, dump, clpctl="clpctl")
+        except (cloudpanel.CloudPanelError, ValueError) as exc:
+            raise ServerMigrationError("target database import failed") from exc
+
+        try:
+            mode, config_path = app_config.rewrite_application_database_config(
+                site_root,
+                domain,
+                domain,
+                database,
+                username,
+                password,
+            )
+            owner = site_root.stat()
+            if config_path is not None:
+                os.chown(config_path, owner.st_uid, owner.st_gid, follow_symlinks=False)
+        except (app_config.AppConfigError, OSError) as exc:
+            raise ServerMigrationError("target application database config remap failed") from exc
+
         return {
             "status": "DATABASE_IMPORTED",
             "database": database,
@@ -1706,11 +1714,9 @@ def target_create_database_local(
             "resumed": not created_now,
             "secrets_emitted": False,
         }
-    except (cloudpanel.CloudPanelError, ValueError, app_config.AppConfigError, OSError) as exc:
+    finally:
         # Keep a marked database for safe resume when import/config failed. It is
         # transaction-owned and can be retried without guessing or deleting unrelated data.
-        raise ServerMigrationError("target database import/config-remap failed") from exc
-    finally:
         dump.unlink(missing_ok=True)
 
 
