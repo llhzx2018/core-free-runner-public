@@ -13,6 +13,7 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -57,15 +58,20 @@ def run_local(
     *,
     timeout: int = 3600,
     check: bool = True,
+    stream_to_stderr: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(
-            args,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout,
-        )
+        kwargs: dict[str, Any] = {
+            "text": True,
+            "check": False,
+            "timeout": timeout,
+        }
+        if stream_to_stderr:
+            kwargs["stdout"] = sys.stderr
+            kwargs["stderr"] = sys.stderr
+        else:
+            kwargs["capture_output"] = True
+        proc = subprocess.run(args, **kwargs)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PullMigrationError(f"local command unavailable: {args[0]}") from exc
     if check and proc.returncode != 0:
@@ -190,7 +196,11 @@ def pull_path(
 ) -> None:
     if not remote_path.startswith("/"):
         raise PullMigrationError("old-server path is not absolute")
-    args = ["rsync", "-aH", "--partial", "--protect-args", "--info=stats2"]
+    show_progress = os.environ.get("VFOPS_MIGRATION_PROGRESS") == "1"
+    info = "--info=progress2,stats2" if show_progress else "--info=stats2"
+    args = ["rsync", "-aH", "--partial", "--protect-args", info]
+    if show_progress:
+        args.append("--human-readable")
     if delete:
         args.append("--delete-delay")
     if user:
@@ -204,7 +214,9 @@ def pull_path(
     else:
         remote_spec = remote + ("/" if local_path.is_dir() else "")
     args.extend(["-e", ssh_rsync_command(source), remote_spec, str(local_path)])
-    run_local(args, timeout=3600)
+    if show_progress:
+        print(f"迁移进度：{remote_path} → {local_path}", file=sys.stderr, flush=True)
+    run_local(args, timeout=3600, stream_to_stderr=show_progress)
 
 
 def push_control_file(
@@ -706,8 +718,17 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
                     import_dump,
                 )
             except legacy.ServerMigrationError as exc:
+                detail = str(exc)
+                if "target database import failed" in detail:
+                    raise PullMigrationError(
+                        f"new-server MySQL import failed: {database}"
+                    ) from exc
+                if "target application database config remap failed" in detail:
+                    raise PullMigrationError(
+                        f"new-server application DB config remap failed: {database}"
+                    ) from exc
                 raise PullMigrationError(
-                    f"new-server MySQL import/config remap failed: {database}"
+                    f"new-server MySQL transaction failed: {database}"
                 ) from exc
             try:
                 cloudpanel.export_database(database, target_dump, clpctl="clpctl")
