@@ -49,5 +49,5 @@ docker cp lane/diagnostic.php "$WP:/tmp/preview-diagnostic.php"
 cli eval-file /tmp/preview-diagnostic.php > proof/preview/engine-diagnostic.json
 python3 - <<'PYFINAL'
 import pathlib,json
-p=pathlib.Path('proof');d=json.loads((p/'preview/engine-diagnostic.json').read_text());assert len(d['runs'])>=6 and all('issues' in r for r in d['runs']);r={**json.loads((p/'identity.json').read_text()),'status':'PASS','meaning':'DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ENGINE_PASS','production':'NOT_EXECUTED','runs':[{'mode':r['mode'],'verdict':r['status'],'issues':len(r['issues'])} for r in d['runs']]};(p/'FINAL_EVIDENCE.json').write_text(json.dumps(r,indent=2));print(json.dumps(r))
+p=pathlib.Path('proof');d=json.loads((p/'preview/engine-diagnostic.json').read_text());assert len(d['runs'])>=6 and all('issues' in r for r in d['runs']);r={**json.loads((p/'identity.json').read_text()),'status':'PASS','meaning':'DIAGNOSTIC_CAPTURE_COMPLETE_NOT_ENGINE_PASS','production':'NOT_EXECUTED','runs':[{'mode':r['mode'],'verdict':r['status'],'issues':len(r['issues'])} for r in d['runs']]};(p/'preview-diagnostic-final.json').write_text(json.dumps(r,indent=2));print(json.dumps(r))
 PYFINAL

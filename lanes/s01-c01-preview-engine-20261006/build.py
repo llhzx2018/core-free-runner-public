@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only','1546e7d50095e493a225e17339baa613b4f50486','HEAD'],text=True).splitlines()
-assert set(changed)=={'VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/admin/admin-preview.js','src/assets/js/modules/browser-behavior-probe.js'},changed
+assert set(changed)=={'VERSION','src/style.css','src/theme.json','src/inc/runtime-constants.php','src/assets/js/admin/admin-preview.js','src/assets/js/modules/browser-behavior-probe.js'},changed
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
