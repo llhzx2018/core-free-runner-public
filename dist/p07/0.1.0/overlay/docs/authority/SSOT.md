@@ -395,9 +395,13 @@ Policy files may not contain password/token/private-key/OAuth-style fields.
 
 Retention：
 
+- automatic backup onboarding defaults to **1 verified local generation per site**；
+- an existing config with an explicit `local_keep_last` value is preserved on upgrade; release install does not silently rewrite retention；
+- local automatic pruning is allowed only after the same site's current Google + B2 uploads both PASS；
 - only `automatic` packages may be auto-delete candidates；
 - `manual / pre_migration / pre_upgrade` protected；
 - legacy/no-kind protected；
+- Google / B2 remote copies are not deleted by the local one-generation policy；
 - plan read-only；
 - apply requires policy authorization + exact `DELETE_AUTOMATIC_BACKUPS` + fresh verify；
 - corrupt/unverifiable package is not auto-deleted。

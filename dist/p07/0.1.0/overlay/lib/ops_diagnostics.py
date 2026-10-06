@@ -7,9 +7,9 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 BACKUP_DIR=Path(os.environ.get("VFOPS_BACKUP_DIR","/var/backups/vf-server-ops"))
 
-def run(cmd:list[str])->tuple[int,str]:
+def run(cmd:list[str],timeout:float=5)->tuple[int,str]:
     try:
-        p=subprocess.run(cmd,text=True,capture_output=True,timeout=5,check=False)
+        p=subprocess.run(cmd,text=True,capture_output=True,timeout=timeout,check=False)
         return p.returncode,(p.stdout or p.stderr).strip()
     except (OSError,subprocess.TimeoutExpired):
         return 127,""
@@ -90,17 +90,99 @@ def mem_info()->dict[str,int]:
         pass
     return out
 
-def latest_backup_age_hours()->float|None:
-    newest=None
-    if BACKUP_DIR.is_dir():
-        for p in BACKUP_DIR.glob("*/verification.json"):
-            try:
-                if '"PASS"' not in p.read_text(encoding="utf-8",errors="ignore"): continue
-                newest=max(newest or 0,p.stat().st_mtime)
-            except OSError:
-                continue
-    if not newest: return None
-    return max(0,(datetime.now(timezone.utc).timestamp()-newest)/3600)
+def current_site_domains()->list[str]|None:
+    core=ROOT/"bin/vfops"
+    if not core.is_file():
+        return None
+    rc,out=run([str(core),"inventory","--compact"],timeout=15)
+    if rc!=0 or not out:
+        return None
+    try:
+        payload=json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    sites=payload.get("sites") if isinstance(payload,dict) else None
+    if not isinstance(sites,list):
+        return None
+    domains={
+        row.get("domain")
+        for row in sites
+        if isinstance(row,dict) and isinstance(row.get("domain"),str) and row.get("domain")
+    }
+    return sorted(domains)
+
+def _backup_timestamp(package:Path)->float|None:
+    manifest_path=package/"manifest.json"
+    try:
+        manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
+        created=str(manifest.get("created_at",""))
+        if created:
+            parsed=datetime.fromisoformat(created.replace("Z","+00:00"))
+            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc).timestamp()
+    except (OSError,json.JSONDecodeError,ValueError,TypeError):
+        pass
+    try:
+        return (package/"verification.json").stat().st_mtime
+    except OSError:
+        return None
+
+def verified_backup_sites(backup_dir:Path=BACKUP_DIR)->dict[str,float]|None:
+    newest:dict[str,float]={}
+    if not backup_dir.exists():
+        return newest
+    if not backup_dir.is_dir():
+        return None
+    try:
+        packages=list(backup_dir.iterdir())
+    except OSError:
+        return None
+    for package in packages:
+        if not package.is_dir() or package.is_symlink():
+            continue
+        try:
+            verification=json.loads((package/"verification.json").read_text(encoding="utf-8"))
+            manifest=json.loads((package/"manifest.json").read_text(encoding="utf-8"))
+        except (OSError,json.JSONDecodeError):
+            continue
+        if not isinstance(verification,dict) or verification.get("status")!="PASS":
+            continue
+        site=manifest.get("site") if isinstance(manifest,dict) else None
+        domain=site.get("domain") if isinstance(site,dict) else None
+        if not isinstance(domain,str) or not domain:
+            continue
+        stamp=_backup_timestamp(package)
+        if stamp is None:
+            continue
+        newest[domain]=max(newest.get(domain,0),stamp)
+    return newest
+
+def local_backup_health(
+    expected_sites:list[str]|None=None,
+    backup_dir:Path=BACKUP_DIR,
+    now:datetime|None=None,
+)->tuple[str,str]:
+    if expected_sites is None:
+        expected_sites=current_site_domains()
+    if expected_sites is None:
+        return "WARN","无法读取当前网站列表，不能判断本地备份覆盖率"
+    expected=sorted(set(expected_sites))
+    if not expected:
+        return "OK","当前没有网站，无需本地网站备份"
+    verified=verified_backup_sites(backup_dir)
+    if verified is None:
+        return "WARN","本地备份目录不可读，不能判断覆盖率"
+    covered=[domain for domain in expected if domain in verified]
+    missing=[domain for domain in expected if domain not in verified]
+    if missing:
+        suffix="、".join(missing[:4])
+        if len(missing)>4:
+            suffix+=f" 等 {len(missing)} 个"
+        return "WARN",f"{len(covered)}/{len(expected)} 已验证 · 缺少：{suffix}"
+    current=(now or datetime.now(timezone.utc)).timestamp()
+    oldest=max(max(0,(current-verified[domain])/3600) for domain in expected)
+    if oldest>72:
+        return "WARN",f"{len(expected)}/{len(expected)} 已验证 · 最旧约 {round(oldest)} 小时前"
+    return "OK",f"{len(expected)}/{len(expected)} 已验证 · 最旧约 {round(oldest,1)} 小时前"
 
 def collect()->dict:
     rows=[]
@@ -119,10 +201,7 @@ def collect()->dict:
     add("memory","内存","WARN" if mpct>=90 else "OK",f"内存已使用约 {mpct}%")
     stotal=mi.get("SwapTotal",0); sfree=mi.get("SwapFree",0); spct=round((1-sfree/stotal)*100) if stotal else 0
     add("swap","Swap","WARN" if stotal and spct>=80 else "OK","未配置 Swap" if not stotal else f"Swap 已使用约 {spct}%")
-    age=latest_backup_age_hours()
-    if age is None: add("backup","最近备份","WARN","未发现已验证的本地备份")
-    elif age>72: add("backup","最近备份","WARN",f"最近已验证备份约 {round(age)} 小时前")
-    else: add("backup","最近备份","OK",f"最近已验证备份约 {round(age,1)} 小时前")
+    st,detail=local_backup_health(); add("backup","本地备份",st,detail)
     verdict="ERROR" if any(x["status"]=="ERROR" for x in rows) else "WARN" if any(x["status"]=="WARN" for x in rows) else "OK"
     return {"schema":"p07.ops-diagnostics.v1","verdict":verdict,"checks":rows}
 
