@@ -5,6 +5,7 @@ import argparse
 import datetime as dt
 import grp
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -341,55 +342,241 @@ def source_probe(source: dict[str, Any], domains: list[str]) -> dict[str, Any]:
         cleanup_probe_runtime(source, runtime)
 
 
-def refresh_external_assets_from_source(state: dict[str, Any]) -> int:
-    domains = [
+def _selected_domains(state: dict[str, Any]) -> list[str]:
+    return [
         str(site.get("domain"))
         for site in state.get("sites", [])
         if isinstance(site, dict) and site.get("domain")
     ]
+
+
+def _allowed_site_users(state: dict[str, Any]) -> set[str]:
+    return {
+        str(site.get("site_user"))
+        for site in state.get("sites", [])
+        if isinstance(site, dict) and site.get("site_user")
+    }
+
+
+def _site_structure_fingerprint(site: dict[str, Any]) -> dict[str, Any]:
+    runtime = site.get("runtime") if isinstance(site.get("runtime"), dict) else {}
+    raw_dbs = site.get("mysql_databases")
+    databases = sorted(str(item) for item in raw_dbs) if isinstance(raw_dbs, list) else raw_dbs
+    return {
+        "domain": str(site.get("domain") or ""),
+        "site_user": str(site.get("site_user") or ""),
+        "site_root": str(site.get("site_root") or ""),
+        "document_root": str(site.get("document_root") or ""),
+        "runtime": {
+            "type": runtime.get("type"),
+            "version": runtime.get("version"),
+            "app_port": runtime.get("app_port"),
+        },
+        "mysql_databases": databases,
+    }
+
+
+def refresh_migration_assets_from_source(state: dict[str, Any]) -> dict[str, Any]:
+    domains = _selected_domains(state)
     if not domains:
-        return 0
+        return {
+            "external_added": 0,
+            "external_added_paths": [],
+            "sqlite_added": 0,
+            "sqlite_added_paths": [],
+            "runtime_assets_changed": False,
+        }
+
     plan = source_probe(state["source"], domains)
     expected_identity = str(state.get("source_server_identity") or "")
     actual_identity = str(plan.get("source_server_identity") or "")
     if expected_identity and actual_identity and actual_identity != expected_identity:
         raise PullMigrationError("old-server identity changed during migration")
 
-    allowed_users = {
-        str(site.get("site_user"))
-        for site in state.get("sites", [])
-        if isinstance(site, dict) and site.get("site_user")
+    fresh_sites = {
+        str(row.get("domain")): row
+        for row in plan.get("sites", [])
+        if isinstance(row, dict) and row.get("domain")
     }
-    current = [
+    drifted: list[str] = []
+    for site in state.get("sites", []):
+        if not isinstance(site, dict):
+            continue
+        domain = str(site.get("domain") or "")
+        fresh = fresh_sites.get(domain)
+        if not fresh or _site_structure_fingerprint(site) != _site_structure_fingerprint(fresh):
+            drifted.append(domain or "UNKNOWN")
+    if drifted:
+        raise PullMigrationError(
+            "old-server selected site structure changed during migration: "
+            + ",".join(sorted(set(drifted)))
+        )
+
+    allowed_users = _allowed_site_users(state)
+
+    current_external = [
         row for row in state.get("external_assets", [])
         if isinstance(row, dict)
     ]
-    seen = {
-        (str(row.get("path")), str(row.get("user")))
-        for row in current
+    external_seen = {
+        (str(row.get("path")), str(row.get("user"))): row
+        for row in current_external
         if row.get("path") and row.get("user")
     }
-    added = 0
+    external_added_paths: list[str] = []
+    metadata_changed = False
     for row in plan.get("external_assets", []):
         if not isinstance(row, dict):
             continue
         path = str(row.get("path") or "")
         user = str(row.get("user") or "")
+        reason = str(row.get("reason") or "DISCOVERED_EXTERNAL")
         if user not in allowed_users or not path.startswith(f"/home/{user}/"):
             raise PullMigrationError("old-server external asset escaped selected site home")
         key = (path, user)
-        if key in seen:
+        existing = external_seen.get(key)
+        if existing is not None:
+            if not existing.get("reason"):
+                existing["reason"] = reason
+                metadata_changed = True
             continue
-        current.append({"path": path, "user": user})
-        seen.add(key)
-        added += 1
+        item = {"path": path, "user": user, "reason": reason}
+        current_external.append(item)
+        external_seen[key] = item
+        external_added_paths.append(path)
+    state["external_assets"] = current_external
 
-    state["external_assets"] = current
-    if added:
-        progress_note(f"发现 {added} 个此前漏记的站点外部 Runtime / Storage，已加入原迁移任务")
+    current_sqlite = [
+        row for row in state.get("sqlite_assets", [])
+        if isinstance(row, dict)
+    ]
+    sqlite_seen = {
+        (str(row.get("path")), str(row.get("user"))): row
+        for row in current_sqlite
+        if row.get("path") and row.get("user")
+    }
+    sqlite_added_paths: list[str] = []
+    for row in plan.get("sqlite_assets", []):
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "")
+        user = str(row.get("user") or "")
+        if user not in allowed_users or not path.startswith(f"/home/{user}/"):
+            raise PullMigrationError("old-server SQLite asset escaped selected site home")
+        key = (path, user)
+        if key in sqlite_seen:
+            continue
+        item = {
+            "path": path,
+            "user": user,
+            "mode": int(row.get("mode") or 0o600),
+        }
+        current_sqlite.append(item)
+        sqlite_seen[key] = item
+        sqlite_added_paths.append(path)
+    state["sqlite_assets"] = current_sqlite
+
+    fresh_runtime = (
+        plan.get("runtime_assets")
+        if isinstance(plan.get("runtime_assets"), dict)
+        else {}
+    )
+    runtime_assets_changed = (
+        json.dumps(fresh_runtime, ensure_ascii=False, sort_keys=True)
+        != json.dumps(state.get("runtime_assets") or {}, ensure_ascii=False, sort_keys=True)
+    )
+    if runtime_assets_changed:
+        state["runtime_assets"] = fresh_runtime
+
+    listeners = plan.get("source_external_listeners", [])
+    if listeners != state.get("source_external_listeners", []):
+        state["source_external_listeners"] = listeners
+        metadata_changed = True
+
+    result = {
+        "external_added": len(external_added_paths),
+        "external_added_paths": external_added_paths,
+        "sqlite_added": len(sqlite_added_paths),
+        "sqlite_added_paths": sqlite_added_paths,
+        "runtime_assets_changed": runtime_assets_changed,
+    }
+    if external_added_paths:
+        progress_note(
+            f"发现 {len(external_added_paths)} 个此前漏记的站点外部 Runtime / Storage，已加入原迁移任务"
+        )
+    if sqlite_added_paths:
+        progress_note(
+            f"发现 {len(sqlite_added_paths)} 个此前漏记的 SQLite 数据文件，已加入原迁移任务"
+        )
+    if runtime_assets_changed:
+        progress_note("检测到 Cron / PM2 运行资料变化，已刷新待迁移运行资料")
+
+    if (
+        external_added_paths
+        or sqlite_added_paths
+        or runtime_assets_changed
+        or metadata_changed
+    ):
         save_state(state)
-    return added
+    return result
 
+
+def refresh_external_assets_from_source(state: dict[str, Any]) -> int:
+    """Compatibility wrapper for older callers/tests."""
+    return int(refresh_migration_assets_from_source(state)["external_added"])
+
+
+def _http_status_family(code: str) -> str:
+    if not code.isdigit():
+        return "UNAVAILABLE"
+    value = int(code)
+    if 200 <= value < 400:
+        return "SUCCESS_OR_REDIRECT"
+    if 400 <= value < 500:
+        return "CLIENT_ERROR"
+    return "UNAVAILABLE"
+
+
+def capture_source_http_baseline(
+    source: dict[str, Any],
+    sites: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    address = ipaddress.ip_address(str(source["ip"]))
+    resolve_ip = f"[{address}]" if address.version == 6 else str(address)
+    rows: dict[str, dict[str, Any]] = {}
+    for site in sites:
+        domain = str(site.get("domain") or "")
+        if not domain:
+            continue
+        proc = run_local([
+            "curl", "-kSs", "--connect-timeout", "10", "--max-time", "30",
+            "--resolve", f"{domain}:443:{resolve_ip}",
+            "-o", "/dev/null", "-w", "%{http_code}",
+            f"https://{domain}/",
+        ], timeout=45, check=False)
+        code = proc.stdout.strip()[-3:]
+        code = code if code.isdigit() else "000"
+        family = _http_status_family(code)
+        rows[domain] = {
+            "status": "PASS" if proc.returncode == 0 and family != "UNAVAILABLE" else "FAIL",
+            "http_code": code,
+            "family": family,
+            "curl_exit": int(proc.returncode),
+        }
+    return rows
+
+
+def ensure_source_http_baseline(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    current = state.get("source_http_baseline")
+    if isinstance(current, dict) and current:
+        return current
+    if state.get("source_runtime_frozen"):
+        return current if isinstance(current, dict) else {}
+    baseline = capture_source_http_baseline(state["source"], state["sites"])
+    state["source_http_baseline"] = baseline
+    state["source_http_baseline_required"] = True
+    save_state(state)
+    return baseline
 
 def ensure_old_server_rsync(source: dict[str, Any]) -> dict[str, Any]:
     check = source_remote(source, "command -v rsync >/dev/null 2>&1", timeout=30, check=False)
@@ -862,12 +1049,19 @@ def ensure_local_parent(path: Path, user: str) -> None:
     os.chmod(path, 0o750)
 
 
-def sync_external_assets(state: dict[str, Any], *, final: bool) -> list[str]:
+def sync_external_assets(
+    state: dict[str, Any],
+    *,
+    final: bool,
+    only_paths: set[str] | None = None,
+) -> list[str]:
     synced: list[str] = []
     for row in state.get("external_assets", []):
         if not isinstance(row, dict):
             continue
         source_path = str(row["path"])
+        if only_paths is not None and source_path not in only_paths:
+            continue
         user = str(row["user"])
         target = Path(source_path)
         ensure_local_parent(target.parent, user)
@@ -925,7 +1119,12 @@ def sync_external_assets(state: dict[str, Any], *, final: bool) -> list[str]:
     return sorted(set(synced))
 
 
-def sync_sqlite_assets(state: dict[str, Any], *, phase: str) -> int:
+def sync_sqlite_assets(
+    state: dict[str, Any],
+    *,
+    phase: str,
+    only_paths: set[str] | None = None,
+) -> int:
     count = 0
     work = state_dir(state["migration_id"]) / "sqlite" / phase
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -933,6 +1132,8 @@ def sync_sqlite_assets(state: dict[str, Any], *, phase: str) -> int:
         if not isinstance(row, dict):
             continue
         source_path = str(row["path"])
+        if only_paths is not None and source_path not in only_paths:
+            continue
         user = str(row["user"])
         mode = int(row.get("mode") or 0o600)
         token = hashlib.sha256(source_path.encode()).hexdigest()[:16]
@@ -988,6 +1189,146 @@ def sync_sqlite_assets(state: dict[str, Any], *, phase: str) -> int:
             )
             local_snap.unlink(missing_ok=True)
     return count
+
+
+
+def _sqlite_quick_check_local(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return bool(row and row[0] == "ok")
+
+
+def pre_cutover_reconcile(
+    state: dict[str, Any],
+    *,
+    home_root: Path = Path("/home"),
+) -> dict[str, Any]:
+    failures: list[str] = []
+    home_prefix = str(home_root.resolve()) + os.sep
+    checked = {
+        "sites": 0,
+        "external_assets": 0,
+        "sqlite_assets": 0,
+        "mysql_databases": 0,
+        "runtime_assets": 0,
+        "source_http_baselines": 0,
+    }
+
+    for site in state.get("sites", []):
+        if not isinstance(site, dict):
+            continue
+        domain = str(site.get("domain") or "UNKNOWN")
+        checked["sites"] += 1
+        if site.get("stage_status") != "PULLED_STAGED":
+            failures.append(f"SITE_NOT_STAGED:{domain}")
+        document_root = str(site.get("document_root") or site.get("site_root") or "")
+        document_path = Path(document_root)
+        try:
+            document_real = str(document_path.resolve(strict=False))
+        except OSError:
+            document_real = ""
+        if (
+            not document_real.startswith(home_prefix)
+            or not document_path.is_dir()
+        ):
+            failures.append(f"SITE_DOCUMENT_ROOT_MISSING:{domain}")
+
+        raw_dbs = site.get("mysql_databases")
+        if isinstance(raw_dbs, list):
+            verification = [
+                row for row in site.get("mysql_verification", [])
+                if isinstance(row, dict)
+            ]
+            for database in raw_dbs:
+                checked["mysql_databases"] += 1
+                db = str(database)
+                if not any(
+                    row.get("database") == db
+                    and row.get("phase") == "prepare"
+                    and row.get("status") == "PASS"
+                    for row in verification
+                ):
+                    failures.append(f"MYSQL_PREPARE_NOT_VERIFIED:{domain}:{db}")
+        else:
+            failures.append(f"MYSQL_INVENTORY_INVALID:{domain}")
+
+    for row in state.get("external_assets", []):
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "")
+        if not path:
+            continue
+        checked["external_assets"] += 1
+        kind = str(row.get("kind") or "")
+        if kind not in {"DIRECTORY", "FILE"}:
+            kind = source_path_kind(state["source"], path)
+            row["kind"] = kind
+        target = Path(path)
+        if kind == "DIRECTORY" and not target.is_dir():
+            failures.append(f"EXTERNAL_DIRECTORY_MISSING:{path}")
+        elif kind == "FILE" and not target.is_file():
+            failures.append(f"EXTERNAL_FILE_MISSING:{path}")
+
+    for row in state.get("sqlite_assets", []):
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "")
+        if not path:
+            continue
+        checked["sqlite_assets"] += 1
+        if not _sqlite_quick_check_local(Path(path)):
+            failures.append(f"SQLITE_NOT_VERIFIED:{path}")
+
+    runtime_assets = state.get("runtime_assets")
+    if not isinstance(runtime_assets, dict):
+        runtime_assets = {}
+    runtime_pairs = (
+        ("system_cron", "pending_system_cron"),
+        ("user_cron", "pending_user_cron"),
+        ("pm2", "pending_pm2"),
+    )
+    for source_key, pending_key in runtime_pairs:
+        expected = runtime_assets.get(source_key, [])
+        pending = state.get(pending_key, [])
+        expected_count = len(expected) if isinstance(expected, list) else 0
+        pending_count = len(pending) if isinstance(pending, list) else 0
+        checked["runtime_assets"] += expected_count
+        if expected_count != pending_count:
+            failures.append(
+                f"RUNTIME_STAGE_COUNT_MISMATCH:{source_key}:{expected_count}:{pending_count}"
+            )
+
+    baseline = state.get("source_http_baseline")
+    baseline_required = bool(state.get("source_http_baseline_required"))
+    if isinstance(baseline, dict):
+        for site in state.get("sites", []):
+            if not isinstance(site, dict):
+                continue
+            domain = str(site.get("domain") or "")
+            if not domain:
+                continue
+            checked["source_http_baselines"] += 1
+            row = baseline.get(domain)
+            if baseline_required and (
+                not isinstance(row, dict) or row.get("status") != "PASS"
+            ):
+                failures.append(f"SOURCE_HTTP_BASELINE_UNAVAILABLE:{domain}")
+    elif baseline_required:
+        failures.append("SOURCE_HTTP_BASELINE_MISSING")
+
+    return {
+        "status": "PASS" if not failures else "FAIL",
+        "checked": checked,
+        "failures": failures,
+    }
 
 
 def stage_runtime_assets(state: dict[str, Any]) -> None:
@@ -1358,6 +1699,17 @@ def reconcile_php_fpm_backend(site: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def http_baseline_compatible(source_code: str, target_code: str) -> bool:
+    source_family = _http_status_family(source_code)
+    target_family = _http_status_family(target_code)
+    if source_family == "SUCCESS_OR_REDIRECT":
+        return target_family == "SUCCESS_OR_REDIRECT"
+    if source_family == "CLIENT_ERROR":
+        return target_family == "CLIENT_ERROR" and source_code == target_code
+    return False
+
+
 def target_smoke(
     state: dict[str, Any],
     *,
@@ -1405,13 +1757,14 @@ def target_smoke(
         used_attempts = 0
         backend: dict[str, Any] = {"status": "NOT_CHECKED"}
         backend_checked = False
+        baseline_failure: dict[str, Any] | None = None
         for probe_attempt in range(1, max_attempts + 1):
             used_attempts = probe_attempt
             progress_note(
                 f"7/7 · 本地验证 {domain} · 第 {probe_attempt}/{max_attempts} 次"
             )
             proc = run_local([
-                "curl", "-kLsS", "--connect-timeout", "10", "--max-time", "30",
+                "curl", "-kSs", "--connect-timeout", "10", "--max-time", "30",
                 "--resolve", f"{domain}:443:127.0.0.1",
                 "-o", "/dev/null", "-w", "%{http_code}",
                 f"https://{domain}/",
@@ -1424,6 +1777,29 @@ def target_smoke(
                 and last_code.isdigit()
                 and 200 <= int(last_code) < 500
             ):
+                baseline_map = (
+                    state.get("source_http_baseline")
+                    if isinstance(state.get("source_http_baseline"), dict)
+                    else {}
+                )
+                baseline_row = baseline_map.get(domain)
+                if (
+                    isinstance(baseline_row, dict)
+                    and baseline_row.get("status") == "PASS"
+                    and not http_baseline_compatible(
+                        str(baseline_row.get("http_code") or "000"),
+                        last_code,
+                    )
+                ):
+                    baseline_failure = {
+                        "source_http_code": str(
+                            baseline_row.get("http_code") or "000"
+                        ),
+                        "source_http_family": str(
+                            baseline_row.get("family") or "UNKNOWN"
+                        ),
+                    }
+                    break
                 ready = True
                 break
 
@@ -1451,9 +1827,13 @@ def target_smoke(
         else:
             failed += 1
             reason = (
-                str(backend.get("reason"))
-                if backend.get("status") == "FAIL"
-                else "LOCAL_HTTP_PROBE"
+                "HTTP_BASELINE_REGRESSION"
+                if baseline_failure is not None
+                else (
+                    str(backend.get("reason"))
+                    if backend.get("status") == "FAIL"
+                    else "LOCAL_HTTP_PROBE"
+                )
             )
             row: dict[str, Any] = {
                 "domain": domain,
@@ -1462,6 +1842,8 @@ def target_smoke(
                 "curl_exit": last_exit,
                 "attempts": used_attempts,
             }
+            if baseline_failure is not None:
+                row["source_http_baseline"] = baseline_failure
             if backend.get("status") != "NOT_CHECKED":
                 row["backend"] = {
                     key: value
@@ -1531,10 +1913,15 @@ def public_route_proof(
 def production_verify(state: dict[str, Any]) -> dict[str, Any]:
     failed: list[str] = []
     sites: list[dict[str, Any]] = []
+    baseline_map = (
+        state.get("source_http_baseline")
+        if isinstance(state.get("source_http_baseline"), dict)
+        else {}
+    )
     for site in state["sites"]:
         domain = str(site["domain"])
         proc = run_local([
-            "curl", "-LsS", "--connect-timeout", "10", "--max-time", "30",
+            "curl", "-sS", "--connect-timeout", "10", "--max-time", "30",
             "-o", "/dev/null", "-w", "%{http_code}|%{ssl_verify_result}|%{remote_ip}",
             f"https://{domain}/",
         ], timeout=45, check=False)
@@ -1542,15 +1929,26 @@ def production_verify(state: dict[str, Any]) -> dict[str, Any]:
         code = parts[0] if parts else "000"
         tls = parts[1] if len(parts) > 1 else "999"
         remote_ip = parts[2] if len(parts) > 2 else ""
+        baseline_row = baseline_map.get(domain)
+        if isinstance(baseline_row, dict) and baseline_row.get("status") == "PASS":
+            behavior_ok = http_baseline_compatible(
+                str(baseline_row.get("http_code") or "000"),
+                code,
+            )
+            source_code = str(baseline_row.get("http_code") or "000")
+        else:
+            behavior_ok = code.isdigit() and 200 <= int(code) < 400
+            source_code = None
         ok = (
             proc.returncode == 0
-            and code.isdigit()
-            and 200 <= int(code) < 400
+            and behavior_ok
             and tls == "0"
         )
         sites.append({
             "domain": domain,
             "http_code": code,
+            "source_http_code": source_code,
+            "baseline_compatible": behavior_ok,
             "tls_verify": tls,
             "remote_ip": remote_ip,
             "status": "PASS" if ok else "FAIL",
@@ -1656,8 +2054,10 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     state.pop("last_error_class", None)
     save_state(state)
     try:
-        progress_note("首轮迁入 · 正在刷新旧服务器外部 Runtime / Storage 清单")
-        refresh_external_assets_from_source(state)
+        progress_note("首轮迁入 · 正在刷新旧服务器完整资产清单")
+        state["asset_refresh_prepare"] = refresh_migration_assets_from_source(state)
+        progress_note("首轮迁入 · 正在记录旧服务器 HTTP 基线")
+        ensure_source_http_baseline(state)
         total_sites = len(state["sites"])
         for index, site in enumerate(state["sites"], 1):
             if site.get("stage_status") == "PULLED_STAGED":
@@ -1679,6 +2079,14 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         )
         progress_note("首轮迁入 · 正在准备 Cron / Node.js 运行资料")
         stage_runtime_assets(state)
+        progress_note("首轮迁入 · 正在执行切换前完整性对账")
+        state["pre_cutover_reconciliation"] = pre_cutover_reconcile(state)
+        if state["pre_cutover_reconciliation"]["status"] != "PASS":
+            details = ",".join(state["pre_cutover_reconciliation"]["failures"][:12])
+            raise PullMigrationError(
+                "pre-cutover completeness reconciliation failed"
+                + (f": {details}" if details else "")
+            )
         state["status"] = "PREPARED"
         state["source_still_live"] = True
         state["dns_manual_gate_required"] = True
@@ -1701,12 +2109,86 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         raise PullMigrationError("migration is not ready for final synchronization")
     if confirm != f"CUTOVER_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: CUTOVER_PULL:{mid}")
+
+    # Run all completeness work while the old server is still serving traffic.
+    # This keeps missing assets out of the maintenance window and ensures we do
+    # not freeze SOURCE until TARGET has a complete prepared copy.
+    if not state.get("source_runtime_frozen"):
+        try:
+            progress_note("0/7 · 正在刷新旧服务器完整资产清单")
+            refresh = refresh_migration_assets_from_source(state)
+            state["asset_refresh_cutover"] = refresh
+            progress_note("0/7 · 正在确认旧服务器 HTTP 基线")
+            ensure_source_http_baseline(state)
+
+            external_added = set(refresh.get("external_added_paths") or [])
+            if external_added:
+                progress_note(
+                    f"0/7 · 正在补拉 {len(external_added)} 个新增外部 Runtime / Storage"
+                )
+                sync_external_assets(
+                    state,
+                    final=False,
+                    only_paths=external_added,
+                )
+
+            sqlite_added = set(refresh.get("sqlite_added_paths") or [])
+            if sqlite_added:
+                progress_note(
+                    f"0/7 · 正在补拉 {len(sqlite_added)} 个新增 SQLite 数据文件"
+                )
+                sync_sqlite_assets(
+                    state,
+                    phase="prepare-refresh",
+                    only_paths=sqlite_added,
+                )
+
+            if refresh.get("runtime_assets_changed"):
+                progress_note("0/7 · 正在重新准备变化后的 Cron / PM2 运行资料")
+                stage_runtime_assets(state)
+
+            progress_note("0/7 · 正在执行切换前完整性对账")
+            state["pre_cutover_reconciliation"] = pre_cutover_reconcile(state)
+            save_state(state)
+            if state["pre_cutover_reconciliation"]["status"] != "PASS":
+                details = ",".join(
+                    state["pre_cutover_reconciliation"]["failures"][:12]
+                )
+                raise PullMigrationError(
+                    "pre-cutover completeness reconciliation failed"
+                    + (f": {details}" if details else "")
+                )
+        except Exception as exc:
+            state["last_error_class"] = exc.__class__.__name__
+            save_state(state)
+            if isinstance(exc, PullMigrationError):
+                raise
+            raise PullMigrationError("pre-cutover reconciliation failed") from exc
+    elif (
+        state.get("pre_cutover_reconciliation", {}).get("status")
+        != "PASS"
+    ):
+        state["pre_cutover_reconciliation"] = pre_cutover_reconcile(state)
+        save_state(state)
+        if state["pre_cutover_reconciliation"]["status"] != "PASS":
+            # An interrupted CUTOVER_RUNNING task already has SOURCE frozen.
+            # Restore it before returning a reconciliation failure.
+            restore_old_server(state)
+            state["status"] = "CUTOVER_FAILED_ROLLED_BACK"
+            save_state(state)
+            details = ",".join(
+                state["pre_cutover_reconciliation"]["failures"][:12]
+            )
+            raise PullMigrationError(
+                "pre-cutover completeness reconciliation failed"
+                + (f": {details}" if details else "")
+            )
+
     state["status"] = "CUTOVER_RUNNING"
     state["cutover_started_at"] = now_utc()
+    state.pop("last_error_class", None)
     save_state(state)
     try:
-        progress_note("0/7 · 正在刷新旧服务器外部 Runtime / Storage 清单")
-        refresh_external_assets_from_source(state)
         progress_note("1/7 · 正在进入短维护窗口并保护旧服务器运行状态")
         if not state.get("source_runtime_frozen"):
             freeze_old_server(state)
@@ -1743,7 +2225,10 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
                         if row.get("attempts")
                         else ""
                     )
-                    if row.get("reason") == "LOCAL_HTTP_PROBE"
+                    if row.get("reason") in {
+                        "LOCAL_HTTP_PROBE",
+                        "HTTP_BASELINE_REGRESSION",
+                    }
                     else (
                         ":" + "/".join(row.get("fields", []))
                         if row.get("fields")
@@ -1778,7 +2263,6 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         if isinstance(exc, PullMigrationError):
             raise
         raise PullMigrationError("target-pull final synchronization failed") from exc
-
 
 def finalize_migration(
     mid: str,
@@ -1854,6 +2338,10 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "mysql_final_count": state.get("mysql_final_count"),
         "sqlite_snapshot_count_prepare": state.get("sqlite_snapshot_count_prepare"),
         "sqlite_snapshot_count_final": state.get("sqlite_snapshot_count_final"),
+        "pre_cutover_reconciliation": state.get(
+            "pre_cutover_reconciliation"
+        ),
+        "source_http_baseline": state.get("source_http_baseline"),
         "target_smoke": state.get("target_smoke"),
         "public_route_proof": state.get("public_route_proof"),
         "production_verification": state.get("production_verification"),
@@ -2139,10 +2627,14 @@ def source_plan_local(domains: list[str]) -> dict[str, Any]:
     external_assets: list[dict[str, str]] = []
     for site in sites:
         user = str(site["site_user"])
-        paths = legacy.external_paths_for_site(site)
-        site["external_paths"] = paths
-        for path in paths:
-            row = {"path": path, "user": user}
+        assets = legacy.external_assets_for_site(site)
+        site["external_paths"] = [row["path"] for row in assets]
+        for asset in assets:
+            row = {
+                "path": str(asset["path"]),
+                "user": user,
+                "reason": str(asset.get("reason") or "DISCOVERED_EXTERNAL"),
+            }
             if row not in external_assets:
                 external_assets.append(row)
 

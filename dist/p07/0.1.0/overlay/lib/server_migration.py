@@ -862,50 +862,77 @@ def plan_payload(target: dict[str, Any], domains: list[str]) -> dict[str, Any]:
     }
 
 
-def external_paths_for_site(site: dict[str, Any], home_root: Path = Path("/home")) -> list[str]:
+def external_assets_for_site(
+    site: dict[str, Any],
+    home_root: Path = Path("/home"),
+) -> list[dict[str, str]]:
+    """Discover business data outside the site's normal Web Root.
+
+    Keep the discovery policy in one place so new migration paths do not grow
+    their own ad-hoc .vf/.press rules.  Each row records why it was included;
+    consumers that only need paths can use external_paths_for_site().
+    """
     user = str(site.get("site_user", ""))
     if not user or "/" in user:
         return []
     home = home_root / user
     if not home.is_dir():
         return []
+
+    home_real = home.resolve()
     site_root = Path(str(site.get("site_root", ""))).resolve(strict=False)
-    candidates: list[Path] = []
-    candidates.extend(sorted(home.glob(".vf*")))
-    candidates.extend(sorted(home.glob(".press*")))
-    # Some products intentionally keep private/runtime data next to the public
-    # site directory but outside the Web Root, e.g.
-    # /home/<user>/htdocs/.press.example-vfpress-runtime. These are not part of
-    # the normal site rsync and must be treated as external business assets.
+    roots: list[tuple[str, Path, tuple[str, ...]]] = [
+        ("SITE_USER_HOME", home, (".vf*", ".press*")),
+    ]
+
+    # Products may keep private/runtime data beside the public site directory,
+    # e.g. /home/<user>/htdocs/.press.example-vfpress-runtime.
     htdocs_parent = site_root.parent
     try:
-        htdocs_parent.relative_to(home.resolve())
+        htdocs_parent.relative_to(home_real)
     except ValueError:
-        htdocs_parent = Path("/__vfops_invalid__")
-    if htdocs_parent.is_dir():
-        candidates.extend(sorted(htdocs_parent.glob(".vf*")))
-        candidates.extend(sorted(htdocs_parent.glob(".press*")))
+        pass
+    else:
+        roots.append(("WEBROOT_SIBLING", htdocs_parent, (".vf*", ".press*")))
+
     share = home / ".local/share"
     if share.is_dir():
-        candidates.extend(sorted(share.glob("vf-*")))
-    rows: list[str] = []
-    for item in candidates:
-        try:
-            resolved = item.resolve(strict=False)
-        except OSError:
+        roots.append(("LOCAL_SHARE", share, ("vf-*",)))
+
+    discovered: dict[str, dict[str, str]] = {}
+    for reason, root, patterns in roots:
+        if not root.is_dir():
             continue
-        if not item.exists() or item.is_symlink():
-            continue
-        if site_root == resolved or site_root in resolved.parents:
-            continue
-        try:
-            resolved.relative_to(home.resolve())
-        except ValueError:
-            continue
-        value = str(resolved)
-        if value not in rows:
-            rows.append(value)
-    return rows
+        for pattern in patterns:
+            for item in sorted(root.glob(pattern)):
+                try:
+                    resolved = item.resolve(strict=False)
+                except OSError:
+                    continue
+                if not item.exists() or item.is_symlink():
+                    continue
+                if site_root == resolved or site_root in resolved.parents:
+                    continue
+                try:
+                    resolved.relative_to(home_real)
+                except ValueError:
+                    continue
+                value = str(resolved)
+                discovered.setdefault(value, {
+                    "path": value,
+                    "reason": reason,
+                })
+    return [discovered[key] for key in sorted(discovered)]
+
+
+def external_paths_for_site(
+    site: dict[str, Any],
+    home_root: Path = Path("/home"),
+) -> list[str]:
+    return [
+        row["path"]
+        for row in external_assets_for_site(site, home_root)
+    ]
 
 
 def sqlite_paths_for_sites(
