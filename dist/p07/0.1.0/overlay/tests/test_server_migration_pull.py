@@ -248,20 +248,30 @@ class TargetPullContractTests(unittest.TestCase):
         }
         plan = {
             "source_server_identity": "sha256:old",
+            "sites": [{
+                "domain": "press.example.com",
+                "site_user": "press-user",
+            }],
             "external_assets": [
                 {
                     "path": "/home/press-user/.vf-token",
                     "user": "press-user",
+                    "reason": "SITE_USER_HOME",
                 },
                 {
                     "path": "/home/press-user/htdocs/.press.example.com-vfpress-runtime",
                     "user": "press-user",
+                    "reason": "WEBROOT_SIBLING",
                 },
                 {
                     "path": "/home/press-user/htdocs/.press.example.com-vfpress-data",
                     "user": "press-user",
+                    "reason": "WEBROOT_SIBLING",
                 },
             ],
+            "sqlite_assets": [],
+            "runtime_assets": {},
+            "source_external_listeners": [],
         }
         with mock.patch.object(
             pull, "source_probe", return_value=plan
@@ -276,8 +286,112 @@ class TargetPullContractTests(unittest.TestCase):
             "/home/press-user/htdocs/.press.example.com-vfpress-runtime",
             {row["path"] for row in state["external_assets"]},
         )
+        runtime_row = next(
+            row for row in state["external_assets"]
+            if row["path"].endswith("-vfpress-runtime")
+        )
+        self.assertEqual(runtime_row["reason"], "WEBROOT_SIBLING")
         probe.assert_called_once_with(state["source"], ["press.example.com"])
         save.assert_called_once_with(state)
+
+    def test_refresh_migration_assets_adds_sqlite_and_runtime_changes(self) -> None:
+        state = {
+            "source_server_identity": "sha256:old",
+            "source": {"host": "192.0.2.10"},
+            "sites": [{
+                "domain": "press.example.com",
+                "site_user": "press-user",
+            }],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "runtime_assets": {
+                "system_cron": [],
+                "user_cron": [],
+                "pm2": [],
+            },
+            "source_external_listeners": [],
+        }
+        plan = {
+            "source_server_identity": "sha256:old",
+            "sites": [{
+                "domain": "press.example.com",
+                "site_user": "press-user",
+            }],
+            "external_assets": [],
+            "sqlite_assets": [{
+                "path": "/home/press-user/htdocs/.press.example-data/app.db",
+                "user": "press-user",
+                "mode": 0o600,
+            }],
+            "runtime_assets": {
+                "system_cron": [],
+                "user_cron": [{
+                    "path": "/var/spool/cron/crontabs/press-user",
+                    "user": "press-user",
+                }],
+                "pm2": [],
+            },
+            "source_external_listeners": [{"protocol": "tcp", "port": 8080}],
+        }
+
+        with mock.patch.object(
+            pull, "source_probe", return_value=plan
+        ), mock.patch.object(
+            pull, "save_state"
+        ) as save:
+            result = pull.refresh_migration_assets_from_source(state)
+
+        self.assertEqual(result["external_added"], 0)
+        self.assertEqual(result["sqlite_added"], 1)
+        self.assertTrue(result["runtime_assets_changed"])
+        self.assertEqual(
+            state["sqlite_assets"][0]["path"],
+            "/home/press-user/htdocs/.press.example-data/app.db",
+        )
+        self.assertEqual(len(state["runtime_assets"]["user_cron"]), 1)
+        self.assertEqual(
+            state["source_external_listeners"],
+            [{"protocol": "tcp", "port": 8080}],
+        )
+        save.assert_called_once_with(state)
+
+    def test_refresh_migration_assets_blocks_selected_site_structure_drift(self) -> None:
+        state = {
+            "source_server_identity": "sha256:old",
+            "source": {"host": "192.0.2.10"},
+            "sites": [{
+                "domain": "example.com",
+                "site_user": "site",
+                "site_root": "/home/site/htdocs/example.com",
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": ["old_db"],
+            }],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "runtime_assets": {},
+        }
+        plan = {
+            "source_server_identity": "sha256:old",
+            "sites": [{
+                "domain": "example.com",
+                "site_user": "site",
+                "site_root": "/home/site/htdocs/example.com",
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": ["new_db"],
+            }],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "runtime_assets": {},
+        }
+
+        with mock.patch.object(pull, "source_probe", return_value=plan):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "structure changed",
+            ):
+                pull.refresh_migration_assets_from_source(state)
 
     def test_refresh_external_assets_rejects_changed_source_identity(self) -> None:
         state = {
@@ -438,6 +552,84 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(result["fail"], 0)
         self.assertEqual(result["failures"], [])
 
+    def test_target_smoke_rejects_404_when_source_baseline_was_200(self) -> None:
+        state = {
+            "source_http_baseline": {
+                "example.com": {
+                    "status": "PASS",
+                    "http_code": "200",
+                    "family": "SUCCESS_OR_REDIRECT",
+                    "curl_exit": 0,
+                }
+            },
+            "sites": [{
+                "domain": "example.com",
+                "domains": ["example.com"],
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": [],
+                "sqlite_paths": [],
+                "cron": {"entry_count": 0},
+                "pm2": {"processes": []},
+                "ssl": {"configured": True},
+            }],
+        }
+        target = json.loads(json.dumps(state["sites"][0]))
+        manifest = {"sites": [target]}
+        with mock.patch.object(
+            pull.inventory, "build_manifest", return_value=manifest
+        ), mock.patch.object(
+            pull, "run_local",
+            return_value=subprocess.CompletedProcess([], 0, "404", ""),
+        ):
+            result = pull.target_smoke(state, attempts=1, delay=0)
+
+        self.assertEqual(result["pass"], 0)
+        self.assertEqual(result["fail"], 1)
+        self.assertEqual(
+            result["failures"][0]["reason"],
+            "HTTP_BASELINE_REGRESSION",
+        )
+        self.assertEqual(
+            result["failures"][0]["source_http_baseline"]["source_http_code"],
+            "200",
+        )
+
+    def test_target_smoke_accepts_matching_404_source_baseline(self) -> None:
+        state = {
+            "source_http_baseline": {
+                "example.com": {
+                    "status": "PASS",
+                    "http_code": "404",
+                    "family": "CLIENT_ERROR",
+                    "curl_exit": 0,
+                }
+            },
+            "sites": [{
+                "domain": "example.com",
+                "domains": ["example.com"],
+                "document_root": "/home/site/htdocs/example.com",
+                "runtime": {"type": "php", "version": "8.4"},
+                "mysql_databases": [],
+                "sqlite_paths": [],
+                "cron": {"entry_count": 0},
+                "pm2": {"processes": []},
+                "ssl": {"configured": True},
+            }],
+        }
+        target = json.loads(json.dumps(state["sites"][0]))
+        manifest = {"sites": [target]}
+        with mock.patch.object(
+            pull.inventory, "build_manifest", return_value=manifest
+        ), mock.patch.object(
+            pull, "run_local",
+            return_value=subprocess.CompletedProcess([], 0, "404", ""),
+        ):
+            result = pull.target_smoke(state, attempts=1, delay=0)
+
+        self.assertEqual(result["pass"], 1)
+        self.assertEqual(result["fail"], 0)
+
     def test_target_smoke_retries_transient_503_until_ready(self) -> None:
         state = {
             "sites": [{
@@ -566,6 +758,155 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_pre_cutover_reconcile_catches_missing_external_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            site_root = root / "site"
+            site_root.mkdir()
+            missing_runtime = root / ".press.example-runtime"
+            state = {
+                "source": {"host": "192.0.2.10"},
+                "sites": [{
+                    "domain": "example.com",
+                    "document_root": str(site_root),
+                    "stage_status": "PULLED_STAGED",
+                    "mysql_databases": [],
+                }],
+                "external_assets": [{
+                    "path": str(missing_runtime),
+                    "user": "site",
+                    "kind": "DIRECTORY",
+                }],
+                "sqlite_assets": [],
+                "runtime_assets": {
+                    "system_cron": [],
+                    "user_cron": [],
+                    "pm2": [],
+                },
+                "pending_system_cron": [],
+                "pending_user_cron": [],
+                "pending_pm2": [],
+                "source_http_baseline_required": True,
+                "source_http_baseline": {
+                    "example.com": {
+                        "status": "PASS",
+                        "http_code": "200",
+                        "family": "SUCCESS_OR_REDIRECT",
+                    }
+                },
+            }
+
+            result = pull.pre_cutover_reconcile(state)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn(
+            f"EXTERNAL_DIRECTORY_MISSING:{missing_runtime}",
+            result["failures"],
+        )
+
+    def test_pre_cutover_reconcile_passes_verified_sqlite_and_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            site_root = root / "site"
+            site_root.mkdir()
+            runtime = root / ".press.example-runtime"
+            runtime.mkdir()
+            sqlite_path = root / "app.db"
+            conn = sqlite3.connect(sqlite_path)
+            conn.execute("CREATE TABLE x(id INTEGER)")
+            conn.commit()
+            conn.close()
+            state = {
+                "source": {"host": "192.0.2.10"},
+                "sites": [{
+                    "domain": "example.com",
+                    "document_root": str(site_root),
+                    "stage_status": "PULLED_STAGED",
+                    "mysql_databases": [],
+                }],
+                "external_assets": [{
+                    "path": str(runtime),
+                    "user": "site",
+                    "kind": "DIRECTORY",
+                }],
+                "sqlite_assets": [{
+                    "path": str(sqlite_path),
+                    "user": "site",
+                    "mode": 0o600,
+                }],
+                "runtime_assets": {
+                    "system_cron": [],
+                    "user_cron": [],
+                    "pm2": [],
+                },
+                "pending_system_cron": [],
+                "pending_user_cron": [],
+                "pending_pm2": [],
+                "source_http_baseline_required": True,
+                "source_http_baseline": {
+                    "example.com": {
+                        "status": "PASS",
+                        "http_code": "200",
+                        "family": "SUCCESS_OR_REDIRECT",
+                    }
+                },
+            }
+
+            result = pull.pre_cutover_reconcile(state, home_root=root)
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(result["checked"]["external_assets"], 1)
+        self.assertEqual(result["checked"]["sqlite_assets"], 1)
+
+    def test_cutover_reconciliation_failure_does_not_freeze_source(self) -> None:
+        mid = "pull-20261005T000000Z-preflight"
+        state = {
+            "migration_id": mid,
+            "status": "PREPARED",
+            "source_runtime_frozen": False,
+            "sites": [],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "runtime_assets": {},
+            "source": {},
+        }
+        with mock.patch.object(
+            pull, "load_state", return_value=state
+        ), mock.patch.object(
+            pull, "save_state"
+        ), mock.patch.object(
+            pull,
+            "refresh_migration_assets_from_source",
+            return_value={
+                "external_added": 0,
+                "external_added_paths": [],
+                "sqlite_added": 0,
+                "sqlite_added_paths": [],
+                "runtime_assets_changed": False,
+            },
+        ), mock.patch.object(
+            pull, "ensure_source_http_baseline", return_value={}
+        ), mock.patch.object(
+            pull,
+            "pre_cutover_reconcile",
+            return_value={
+                "status": "FAIL",
+                "checked": {},
+                "failures": ["EXTERNAL_DIRECTORY_MISSING:/home/site/runtime"],
+            },
+        ), mock.patch.object(
+            pull, "freeze_old_server"
+        ) as freeze:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "pre-cutover completeness reconciliation failed",
+            ):
+                pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
+
+        freeze.assert_not_called()
+        self.assertEqual(state["status"], "PREPARED")
+
     def test_cutover_can_retry_same_task_after_successful_rollback(self) -> None:
         mid = "pull-20261005T000000Z-deadbeef"
         state = {
@@ -580,7 +921,21 @@ class TargetPullContractTests(unittest.TestCase):
         with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
             pull, "save_state"
         ), mock.patch.object(
-            pull, "refresh_external_assets_from_source", return_value=0
+            pull,
+            "refresh_migration_assets_from_source",
+            return_value={
+                "external_added": 0,
+                "external_added_paths": [],
+                "sqlite_added": 0,
+                "sqlite_added_paths": [],
+                "runtime_assets_changed": False,
+            },
+        ), mock.patch.object(
+            pull, "ensure_source_http_baseline", return_value={}
+        ), mock.patch.object(
+            pull,
+            "pre_cutover_reconcile",
+            return_value={"status": "PASS", "checked": {}, "failures": []},
         ), mock.patch.object(
             pull, "freeze_old_server"
         ), mock.patch.object(
@@ -596,6 +951,42 @@ class TargetPullContractTests(unittest.TestCase):
         ):
             result = pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
         self.assertEqual(result["status"], "CUTOVER_PREP_READY")
+
+    def test_production_verify_rejects_404_when_source_was_200(self) -> None:
+        state = {
+            "source": {"host": "192.0.2.10"},
+            "source_http_baseline": {
+                "example.com": {
+                    "status": "PASS",
+                    "http_code": "200",
+                    "family": "SUCCESS_OR_REDIRECT",
+                }
+            },
+            "sites": [{"domain": "example.com"}],
+        }
+        with mock.patch.object(
+            pull,
+            "run_local",
+            return_value=subprocess.CompletedProcess(
+                [], 0, "404|0|203.0.113.20", ""
+            ),
+        ), mock.patch.object(
+            pull,
+            "source_remote",
+            return_value=subprocess.CompletedProcess([], 3, "", ""),
+        ):
+            result = pull.production_verify(state)
+
+        self.assertEqual(result["status"], "FAIL")
+        self.assertIn("example.com", result["failures"])
+        self.assertFalse(result["sites"][0]["baseline_compatible"])
+        self.assertEqual(result["sites"][0]["source_http_code"], "200")
+
+    def test_http_baseline_treats_200_to_301_as_compatible(self) -> None:
+        self.assertTrue(pull.http_baseline_compatible("200", "301"))
+        self.assertFalse(pull.http_baseline_compatible("200", "404"))
+        self.assertTrue(pull.http_baseline_compatible("404", "404"))
+        self.assertFalse(pull.http_baseline_compatible("403", "404"))
 
     def test_post_dns_waiting_state_denies_runtime_only_rollback(self) -> None:
         state = {
