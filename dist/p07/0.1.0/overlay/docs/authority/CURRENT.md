@@ -4331,3 +4331,66 @@ Identity:
 Source Build 0.1.0-release68
 System Care  0.1.0-rc35 (unchanged)
 ```
+
+
+## release69 candidate · migration hardening consolidation
+
+release68 achieved a genuine Owner real 16-site Production migration PASS. release69 is a **post-PASS hardening candidate**, not a new Production migration and not evidence of another Owner real run.
+
+The hardening consolidates the field fixes instead of continuing ad-hoc patches:
+
+```text
+A. one external-asset discovery authority
+   external_assets_for_site()
+   -> SITE_USER_HOME
+   -> WEBROOT_SIBLING
+   -> LOCAL_SHARE
+   -> discovery reason retained in migration state
+
+B. live source-plan refresh before PREPARED / CUTOVER
+   -> external assets
+   -> SQLite paths
+   -> Cron / PM2 runtime assets
+   -> source external listeners
+   -> selected-site structural drift fails closed
+   -> source server identity drift fails closed
+
+C. pre-cutover completeness reconciliation
+   -> all selected sites staged
+   -> target document roots present
+   -> prepare-phase MySQL verification present
+   -> every external FILE/DIRECTORY exists with correct type
+   -> every SQLite target passes quick_check
+   -> Cron / PM2 staged counts match source plan
+   -> source HTTP baseline exists when required
+
+D. completeness gate runs before SOURCE maintenance
+   -> newly discovered external / SQLite data is backfilled while SOURCE remains live
+   -> reconciliation failure does not freeze SOURCE
+   -> short maintenance window starts only after reconciliation PASS
+
+E. source HTTP behavior baseline
+   -> capture SOURCE vhost response before cutover
+   -> source 2xx/3xx requires target 2xx/3xx
+   -> source 4xx requires the same target 4xx
+   -> source 200 -> target 404 is a hard regression
+   -> local and public Production verification both enforce the baseline
+```
+
+Backward compatibility:
+
+- existing migration state without a captured HTTP baseline keeps legacy verification behavior;
+- `refresh_external_assets_from_source()` remains as a compatibility wrapper;
+- no DNS automation, old-server deletion, existing unrelated overwrite, or secret output is added.
+- stale pre-release PRs #134, #125 and #115 were closed as superseded by later main behavior/docs; none were merged into release69.
+
+Real closure evidence for the release68 migration:
+`docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md`.
+
+Identity:
+
+```text
+Candidate Source Build 0.1.0-release69
+System Care            0.1.0-rc35 (unchanged)
+Owner Real release69   NOT_RUN
+```
