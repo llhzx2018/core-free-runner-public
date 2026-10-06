@@ -10,10 +10,10 @@ BASE_URL="${PUBLIC_ROOT}/dist/p07/0.1.0-rc2"
 BASE_PACKAGE="P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
 BASE_SHA256="de28a5e9dada500357be725e78e9e5cbacd51d26f1ec9bbb55ff92d21d49ada5"
 RUNTIME_URL="${PUBLIC_ROOT}/dist/p07/0.1.0/overlay"
-RUNTIME_MANIFEST_BLOB="208de7d2f1dea849ececa4204525fbcceb10c655"
+RUNTIME_MANIFEST_BLOB="222f56d7254a9b38444f645b542ddb9452ca6050"
 
 EXPECTED_VERSION="VF Server Ops 0.1.0"
-EXPECTED_BUILD_ID="0.1.0-release74"
+EXPECTED_BUILD_ID="0.1.0-release75"
 
 say() { printf '\n[服务器工具箱] %s\n' "$*"; }
 fail() { printf '\n[服务器工具箱] 错误：%s\n' "$*" >&2; exit 1; }
