@@ -25,7 +25,7 @@ class AutoBackupTests(unittest.TestCase):
             "local_backup_dir": str(root / "backups"),
             "storage_config": str(root / "storage.json"),
             "remote_targets": ["google", "b2"],
-            "local_keep_last": 7,
+            "local_keep_last": 1,
             "manual_backups_protected": True,
         }), encoding="utf-8")
         return cfg
@@ -104,6 +104,22 @@ class AutoBackupTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
 
+    def test_missing_local_retention_defaults_to_one_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); cfg = self._write_config(root)
+            payload = json.loads(cfg.read_text())
+            payload.pop("local_keep_last")
+            cfg.write_text(json.dumps(payload))
+            self.assertEqual(auto_backup.validate_config(cfg)["local_keep_last"], 1)
+
+    def test_explicit_legacy_retention_is_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); cfg = self._write_config(root)
+            payload = json.loads(cfg.read_text())
+            payload["local_keep_last"] = 7
+            cfg.write_text(json.dumps(payload))
+            self.assertEqual(auto_backup.validate_config(cfg)["local_keep_last"], 7)
+
     def test_config_requires_google_plus_b2(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); cfg = self._write_config(root)
@@ -170,7 +186,7 @@ class AutoBackupTests(unittest.TestCase):
                  mock.patch.object(auto_backup.storage_engine, "push", side_effect=push), \
                  mock.patch.object(auto_backup, "prune_local", return_value=["old"]) as prune:
                 result = self._run(root, cfg)
-            self.assertEqual(result["status"], "PASS"); self.assertEqual(calls, ["google", "b2"]); prune.assert_called_once()
+            self.assertEqual(result["status"], "PASS"); self.assertEqual(calls, ["google", "b2"]); prune.assert_called_once_with(root / "backups", "example.com", 1)
 
     def test_one_remote_failure_keeps_local_and_skips_prune(self):
         with tempfile.TemporaryDirectory() as td:
@@ -249,7 +265,7 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("状态：远程已就绪 · 待首次验证", output)
             self.assertIn("Google 实时：正常 ✓", output)
             self.assertIn("B2 实时：正常 ✓", output)
-            self.assertIn("启用 / 更新自动备份", output)
+            self.assertIn("开启 / 修改自动备份", output)
             self.assertIn("不会修改定时任务（Cron）", output)
 
     def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
@@ -295,7 +311,7 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("Google：通过", output)
             self.assertIn("B2：失败", output)
             self.assertIn("双副本：失败", output)
-            self.assertIn("立即完整备份一次", output)
+            self.assertIn("立即备份全部网站", output)
 
             busy = dict(failed)
             busy["last_run"] = {
@@ -304,7 +320,7 @@ class AutoBackupTests(unittest.TestCase):
             }
             output = self._run_status_menu(root, busy, live)
             self.assertIn("服务器忙，已让路", output)
-            self.assertIn("P07 已安全让路", output)
+            self.assertIn("自动备份已安全让路", output)
             self.assertIn("无需修复", output)
 
 
