@@ -64,7 +64,7 @@ class SiteOverviewAlignmentTests(unittest.TestCase):
             stub.chmod(0o755)
 
             proc = subprocess.run(
-                [str(root / "bin/vfops-site-ui"), "overview"],
+                ["bash", str(root / "bin/vfops-site-ui"), "overview"],
                 input="\n",
                 text=True,
                 capture_output=True,
