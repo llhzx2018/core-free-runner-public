@@ -122,8 +122,10 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 "site_user": "alice",
                 "site_root": str(site_root),
             }
+            assets = engine.external_assets_for_site(site, home_root)
             result = engine.external_paths_for_site(site, home_root)
             rendered = "\n".join(result)
+            reasons = {row["path"]: row["reason"] for row in assets}
             self.assertIn(".vfasset-data-abc", rendered)
             self.assertIn(".vfinfra-data", rendered)
             self.assertIn(".press.example-data", rendered)
@@ -131,6 +133,18 @@ class ServerMigrationAutomationTests(unittest.TestCase):
             self.assertIn(".press.a.example.com-vfpress-runtime", rendered)
             self.assertIn(".press.a.example.com-vfpress-data", rendered)
             self.assertNotIn(".vfinside", rendered)
+            self.assertEqual(
+                reasons[str(home / ".press.example-data")],
+                "SITE_USER_HOME",
+            )
+            self.assertEqual(
+                reasons[str(site_root.parent / ".press.a.example.com-vfpress-runtime")],
+                "WEBROOT_SIBLING",
+            )
+            self.assertEqual(
+                reasons[str(home / ".local/share/vf-seo")],
+                "LOCAL_SHARE",
+            )
 
     def test_whole_home_sqlite_discovery_finds_external_and_site_databases(self) -> None:
         with tempfile.TemporaryDirectory() as td:
