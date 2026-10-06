@@ -25,6 +25,18 @@ curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-
 # Expose the same real Apache origin inside the container for WordPress loopback HTTP.
 docker exec "$WP" sh -c 'echo "Listen 18880" >> /etc/apache2/ports.conf; sed -i "s/<VirtualHost \*:80>/<VirtualHost *:80 *:18880>/" /etc/apache2/sites-enabled/000-default.conf; apachectl graceful' >/dev/null
 docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp";docker exec "$WP" chmod 0755 /usr/local/bin/wp
+# WP-CLI db reset/export require client executables, absent in this image.
+# Install only inside the disposable native WordPress container.
+docker exec "$WP" bash -c '
+set -Eeuo pipefail
+apt-get update -qq
+apt-get install -y --no-install-recommends mariadb-client >/dev/null
+if ! command -v mysql >/dev/null; then ln -s "$(command -v mariadb)" /usr/local/bin/mysql; fi
+if ! command -v mysqldump >/dev/null; then ln -s "$(command -v mariadb-dump)" /usr/local/bin/mysqldump; fi
+mysql --version
+mysqldump --version
+'
+
 cli(){ docker exec --user www-data -e TARGET_VERSION="$TARGET_VERSION" -e SOURCE_VERSION="$SOURCE_VERSION" "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic VF Update' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 cli option update blogdescription 'Synthetic Runner tagline, preserved across native upgrade' >/dev/null
@@ -85,7 +97,7 @@ PYPROOF
 python3 - <<'PYREADBACK'
 import json,pathlib
 p=pathlib.Path('proof')
-names=['identity.json','upgrade.json','runtime.json','live-browser.json','preview-workflow.json','preview-state.json','browser-probe-version.json','recovery-data.json','clean-install.json','FINAL_EVIDENCE.json']
+names=['lane-identity-audit.json','identity.json','upgrade.json','runtime.json','live-browser.json','preview-workflow.json','preview-state.json','browser-probe-version.json','recovery-data.json','clean-install.json','FINAL_EVIDENCE.json']
 print('VF_PROOF_READBACK_BEGIN')
 print(json.dumps({n:json.loads((p/n).read_text()) for n in names}))
 print('VF_PROOF_READBACK_END')

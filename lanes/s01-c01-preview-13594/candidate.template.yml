@@ -21,6 +21,13 @@ jobs:
         with:
           persist-credentials: false
           path: runner
+      - name: Target-owned lane identity preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/candidate.template.yml --output /tmp/preview-candidate-rendered.yml >/dev/null
+          cmp /tmp/preview-candidate-rendered.yml runner/.github/workflows/{{LANE_ID}}-candidate.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}-candidate.yml > proof/lane-identity-audit.json
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: ${{ env.TARGET_REPO }}
@@ -41,6 +48,8 @@ jobs:
           php target/tests/renderer-revision-bootstrap-contract.php
           node --check target/tests/preview-controls-browser-check.js
           node --check target/tests/preview-workflow-browser-check.js
+          node --check target/tests/browser-probe-version-browser-check.js
+          node --check target/src/assets/js/modules/browser-behavior-probe.js
           node --check target/src/assets/js/admin/admin-preview.js
           python3 lane/build.py
       - name: Previous exact release recovery baseline
@@ -63,6 +72,7 @@ jobs:
       - name: Real WordPress upgrade recovery and browser proof
         run: bash lane/wordpress.sh
       - name: Public-safe evidence only
+        id: proof_artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -72,6 +82,43 @@ jobs:
             proof/*.png
           if-no-files-found: error
           retention-days: 30
+
+      - name: Read back actual uploaded evidence ZIP
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROOF_ARTIFACT_ID: ${{ steps.proof_artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROOF_ARTIFACT_ID" > /tmp/public-proof-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROOF_ARTIFACT_ID/zip" > /tmp/public-proof-readback.zip
+          python3 - <<'PYVERIFY'
+          import json,hashlib,zipfile,pathlib,os,stat
+          meta=json.loads(pathlib.Path('/tmp/public-proof-meta.json').read_text())
+          data=pathlib.Path('/tmp/public-proof-readback.zip').read_bytes()
+          digest='sha256:'+hashlib.sha256(data).hexdigest()
+          assert meta['id']==int(os.environ['PROOF_ARTIFACT_ID'])
+          assert meta['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID'])
+          assert meta['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert meta['size_in_bytes']==len(data) and meta['digest']==digest
+          assert meta['expired'] is False
+          with zipfile.ZipFile('/tmp/public-proof-readback.zip') as z:
+              assert z.testzip() is None
+              names=z.namelist()
+              assert names and len(names)==len(set(names))
+              for info in z.infolist():
+                  p=pathlib.PurePosixPath(info.filename)
+                  assert not p.is_absolute() and '..' not in p.parts and '\\' not in info.filename
+                  assert not stat.S_ISLNK(info.external_attr>>16)
+                  assert p.suffix in ['.json','.png']
+                  if p.suffix=='.json': json.loads(z.read(info))
+              final=json.loads(z.read('FINAL_EVIDENCE.json'))
+              assert final['status']=='PASS' and final['source_sha']==os.environ['TARGET_SHA'] and final['source_tree']==os.environ['TARGET_TREE']
+          receipt={'status':'PASS','artifact_id':meta['id'],'run_id':int(os.environ['GITHUB_RUN_ID']),'runner_sha':os.environ['GITHUB_SHA'],'source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'bytes':len(data),'digest':digest,'file_count':len(names),'crc':'PASS','safe_paths':'PASS','json_parse':'PASS'}
+          print('VF_ARTIFACT_RECEIPT_BEGIN')
+          print(json.dumps(receipt))
+          print('VF_ARTIFACT_RECEIPT_END')
+          PYVERIFY
       - name: Private workspace cleanup
         if: always()
         run: rm -rf target previous proof/*.zip /tmp/v8-mock.py /tmp/navigation-candidate.css /tmp/navigation-baseline.log
