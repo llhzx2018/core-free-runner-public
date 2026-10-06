@@ -5,7 +5,7 @@ assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],sha],text=True).splitlines()
-allowed={'VERSION','src/style.css','src/theme.json','src/inc/runtime-constants.php','src/assets/js/admin/admin-preview.js','src/inc/services/preview-workbench-service.php','tests/preview-workflow-browser-check.js','tests/preview-state-wordpress-check.php','docs/authority/ACCEPTANCE_MATRIX.md'}
+allowed={'VERSION','src/style.css','src/theme.json','src/inc/runtime-constants.php','src/assets/js/admin/admin-preview.js','src/inc/services/preview-workbench-service.php','tests/preview-workflow-browser-check.js','tests/preview-state-wordpress-check.php','tests/browser-probe-version-browser-check.js','src/assets/js/modules/browser-behavior-probe.js','docs/authority/ACCEPTANCE_MATRIX.md'}
 assert set(changed)==allowed,changed
 def original(p):return subprocess.check_output(['git','-C','target','show',os.environ['BASE_SHA']+':'+p],text=True)
 assert (root/'style.css').read_text()==original('src/style.css').replace('Version: '+os.environ['SOURCE_VERSION'],'Version: '+version)
@@ -13,6 +13,7 @@ assert (root/'theme.json').read_text()==original('src/theme.json').replace('"vfT
 assert (root/'inc/runtime-constants.php').read_text()==original('src/inc/runtime-constants.php').replace(os.environ['SOURCE_VERSION'],version).replace('SEO_RESPONSIVE_CLOSURE','PREVIEW_FUNCTIONAL_RECHECK')
 for p in ['src/inc/admin/views/preview.php','src/assets/css/admin/pages/preview/admin-page-preview.css','src/inc/admin/admin-preview-actions.php','src/inc/admin/controllers/preview.php','src/inc/services/signed-preview-service.php','src/inc/services/acceptance-state-service.php','src/inc/bootstrap/manifests/admin-tabs/preview.php','src/inc/admin/admin-shell.php','src/inc/admin/admin-s01-uiux-polish.php','src/assets/css/admin/admin-s01-shell-header-final-r12.css','src/assets/js/admin/admin-console.js','src/inc/services/live-integration-acceptance-service.php']:
  assert pathlib.Path('target',p).read_text()==original(p),p+' frozen or out of scope'
+assert (root/'assets/js/modules/browser-behavior-probe.js').read_text().rstrip()==original('src/assets/js/modules/browser-behavior-probe.js').replace('/^VF_ToolSite_V/', '/^VF_(?:Tools_Theme|ToolSite)_V/').rstrip()
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
