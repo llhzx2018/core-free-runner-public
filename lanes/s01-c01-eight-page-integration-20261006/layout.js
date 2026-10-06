@@ -1,6 +1,8 @@
 const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright');
 const origin='http://127.0.0.1:18880',url=origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout';
 const rootSel='[data-vf-layout-page]', titleSel='[name="layout[activeModuleSettings][tool_grid][title]"]',saveSel='[data-vf-layout-save]';
+const {execFileSync}=require('child_process');
+const rawHash=()=>execFileSync('docker',['exec','--user','www-data',process.env.WP,'php','/usr/local/bin/wp','eval','echo hash("sha256",serialize(get_option("vf_theme_layout")));','--path=/var/www/html'],{encoding:'utf8'}).trim();
 const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool','blog_index','article_detail','guide_index','guide_detail','problem_index','problem_detail','faq_page','glossary_index','glossary_detail','archive_list','search','html_sitemap','not_found','legal'];
 (async()=>{
  const browser=await chromium.launch({headless:true,args:['--no-sandbox']}),context=await browser.newContext({viewport:{width:1319,height:1000}}),page=await context.newPage(),errors=[];
@@ -56,6 +58,13 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
   const tabs=await page.locator('.vf-layout-function-master__item[role="tab"]').all();for(const tab of tabs){if(await tab.isVisible()){await tab.click();await editVisible();}}await editVisible();
   const moduleKeys=await page.locator('[data-vf-layout-list] li').evaluateAll(ns=>ns.map(n=>n.dataset.module));for(const moduleKey of moduleKeys){await openModules();const button=page.locator('[data-vf-layout-list] li[data-module="'+moduleKey+'"] [data-vf-layout-edit-module]');await button.click();await editVisible();const close=page.locator('[data-vf-layout-module-editor-close]');if(await close.isVisible())await close.click();}
   for(const sectionKey of ['display','reading']){if(await openSection(sectionKey)){const details=await page.locator('[data-vf-layout-section="'+sectionKey+'"] details').all();for(const detail of details){if(await detail.locator(':scope>summary').isVisible()&&!await detail.evaluate(n=>n.open))await detail.locator(':scope>summary').click();}await editVisible();}}
+  const incompatible=[];for(const toc of await page.locator('[data-vf-layout-form] select[name]').all()){
+   const name=await toc.getAttribute('name');if(!name.endsWith('[tocPosition]')||await toc.inputValue()!=='sidebar')continue;
+   const sidebar=page.locator('[name="'+name.replace('[tocPosition]','[sidebarMode]')+'"]');if(await sidebar.count()&&await sidebar.inputValue()==='off')incompatible.push({toc,name});
+  }
+  if(incompatible.length){const before=rawHash();const rejected=await send();assert(!rejected.success&&rejected.data.failureCode==='VALIDATION_FAILED');assert.equal(rawHash(),before);functional.incompatible_reading_combination_rejected_without_write='PASS';
+   for(const {toc,name}of incompatible){const valid=await toc.locator('option').evaluateAll(ns=>ns.find(n=>!n.disabled&&n.value!=='sidebar')?.value);assert(valid!==undefined);await toc.selectOption(valid);expected.set(name,{type:'value',value:valid});}
+  }
   assert(visited.size>0,key+' has no editable controls');
   const invalid=await page.locator('[data-vf-layout-form]').evaluate(n=>[...n.querySelectorAll(':invalid')].map(el=>({name:el.name,value:el.value})));assert.deepEqual(invalid,[],key+' generated invalid dataset');const result=await saved();assert.equal(result.data.contextVerification.context,key);assert.equal(result.data.roundtripEvidence.contextCount,20);await page.reload();
   for(const [name,entry]of expected){const values=await page.locator('[data-vf-layout-form] input,[data-vf-layout-form] select,[data-vf-layout-form] textarea').evaluateAll((ns,arg)=>ns.filter(n=>n.name===arg.name&&n.type!=='hidden').map(n=>arg.type==='checkbox'?n.checked:n.value),{name,type:entry.type});assert(values.length&&values.every(v=>String(v)===String(entry.value)),JSON.stringify({key,name,expected:entry.value,values}));}

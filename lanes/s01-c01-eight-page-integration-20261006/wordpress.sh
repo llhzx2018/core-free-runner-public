@@ -13,6 +13,7 @@ curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-
 docker exec "$WP" sh -c 'echo "Listen 18880" >> /etc/apache2/ports.conf;sed -i "s/<VirtualHost \*:80>/<VirtualHost *:80 *:18880>/" /etc/apache2/sites-enabled/000-default.conf;apachectl graceful' >/dev/null
 docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp";docker exec "$WP" chmod 0755 /usr/local/bin/wp
 cli(){ docker exec --user www-data -e TARGET_VERSION="$TARGET_VERSION" "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
+cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic Theme Integration' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker cp "proof/vf-tools-theme_V${TARGET_VERSION}.zip" "$WP:/tmp/theme.zip"
 cli theme install /tmp/theme.zip --activate >/dev/null
@@ -34,6 +35,13 @@ run_check(){
 }
 run_check overview || true
 seed
+cli eval 'require_once get_template_directory()."/inc/options/options-inheritance.php";$r=vf_theme_temporary_visual_override_save(["label"=>"Synthetic inactive visual","enabled"=>false,"startsAt"=>time()-60,"expiresAt"=>time()+86400,"tokens"=>["brand"=>"#2563eb"]]);if(empty($r["ok"]))throw new Exception("temporary fixture failed");' >/dev/null
+python3 - <<'PYMEDIA'
+import base64,pathlib
+pathlib.Path('/tmp/brand-logo.png').write_bytes(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg=='))
+PYMEDIA
+docker cp /tmp/brand-logo.png "$WP:/tmp/brand-logo.png"
+cli media import /tmp/brand-logo.png --title='Synthetic Logo' --porcelain >/dev/null
 run_check brand || true
 run_check layout || true
 run_check navigation || true
@@ -51,9 +59,12 @@ cli plugin deactivate polylang >/dev/null
 cp -a checks/seo/proof/. proof/seo/
 seed
 run_check preview || true
+seed
+docker cp lane/readback-diagnostic.php "$WP:/tmp/readback-diagnostic.php"
+cli eval-file /tmp/readback-diagnostic.php > proof/readback-diagnostic.json
 run_check recovery || true
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
-cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
+if cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json;then echo "RECOVERY_DATA_EXIT=0";else echo "RECOVERY_DATA_EXIT=1";fi
 seed
 run_check integration || true
 python3 - <<'PY'
