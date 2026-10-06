@@ -35,6 +35,117 @@ class TargetPullContractTests(unittest.TestCase):
             pull.progress_note("should-not-print")
         self.assertEqual(silent.getvalue(), "")
 
+    def test_structured_progress_event_keeps_phase_and_item_counts(self) -> None:
+        event = pull.migration_progress_event(
+            "2/7 · 网站 3/16 · press.example.test"
+        )
+        self.assertEqual(
+            event["schema"],
+            "vf-server-ops.migration-progress.v1",
+        )
+        self.assertEqual(event["kind"], "MIGRATION_PROGRESS")
+        self.assertEqual(event["phase_step"], 2)
+        self.assertEqual(event["phase_total"], 7)
+        self.assertEqual(event["item_current"], 3)
+        self.assertEqual(event["item_total"], 16)
+        self.assertEqual(event["scope"], "SITE_FILES")
+        self.assertEqual(
+            event["message"],
+            "2/7 · 网站 3/16 · press.example.test",
+        )
+
+    def test_progress_note_jsonl_is_opt_in_and_default_text_stays_compatible(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+
+        structured = io.StringIO()
+        with mock.patch.dict(
+            pull.os.environ,
+            {
+                "VFOPS_MIGRATION_PROGRESS": "1",
+                "VFOPS_MIGRATION_PROGRESS_FORMAT": "jsonl",
+            },
+            clear=False,
+        ), redirect_stderr(structured):
+            pull.progress_note("5/7 · 正在生成并同步 SQLite 一致性快照")
+
+        event = json.loads(structured.getvalue())
+        self.assertEqual(event["phase_step"], 5)
+        self.assertEqual(event["phase_total"], 7)
+        self.assertEqual(event["scope"], "SQLITE")
+        self.assertEqual(
+            event["message"],
+            "5/7 · 正在生成并同步 SQLite 一致性快照",
+        )
+
+        text_output = io.StringIO()
+        with mock.patch.dict(
+            pull.os.environ,
+            {
+                "VFOPS_MIGRATION_PROGRESS": "1",
+                "VFOPS_MIGRATION_PROGRESS_FORMAT": "text",
+            },
+            clear=False,
+        ), redirect_stderr(text_output):
+            pull.progress_note("5/7 · 正在生成并同步 SQLite 一致性快照")
+
+        self.assertEqual(
+            text_output.getvalue(),
+            "迁移阶段：5/7 · 正在生成并同步 SQLite 一致性快照\n",
+        )
+
+    def test_migration_state_transition_guard_accepts_existing_runtime_paths(self) -> None:
+        state = {"status": "PREPARE_FAILED"}
+        pull.transition_migration_status(state, "PREPARING")
+        pull.transition_migration_status(state, "PREPARED")
+        pull.transition_migration_status(state, "CUTOVER_RUNNING")
+        pull.transition_migration_status(state, "CUTOVER_PREP_READY")
+        pull.transition_migration_status(state, "WAITING_DNS")
+        pull.transition_migration_status(state, "PRODUCTION_PASS")
+        self.assertEqual(state["status"], "PRODUCTION_PASS")
+
+    def test_migration_state_transition_guard_rejects_skip_and_terminal_reopen(self) -> None:
+        state = {"status": "PREPARED"}
+        with self.assertRaisesRegex(
+            pull.PullMigrationError,
+            "invalid migration status transition: PREPARED -> PRODUCTION_PASS",
+        ):
+            pull.transition_migration_status(state, "PRODUCTION_PASS")
+        self.assertEqual(state["status"], "PREPARED")
+
+        terminal = {"status": "PRODUCTION_PASS"}
+        with self.assertRaisesRegex(
+            pull.PullMigrationError,
+            "invalid migration status transition: PRODUCTION_PASS -> CUTOVER_RUNNING",
+        ):
+            pull.transition_migration_status(terminal, "CUTOVER_RUNNING")
+        self.assertEqual(terminal["status"], "PRODUCTION_PASS")
+
+    def test_migration_state_transition_guard_preserves_failure_recovery_paths(self) -> None:
+        prepared = {"status": "PREPARED"}
+        pull.transition_migration_status(prepared, "PREPARE_FAILED")
+        self.assertEqual(prepared["status"], "PREPARE_FAILED")
+
+        cutover_ready = {"status": "CUTOVER_PREP_READY"}
+        pull.transition_migration_status(
+            cutover_ready,
+            "CUTOVER_FAILED_ROLLED_BACK",
+        )
+        self.assertEqual(
+            cutover_ready["status"],
+            "CUTOVER_FAILED_ROLLED_BACK",
+        )
+
+        cutover_ready_partial = {"status": "CUTOVER_PREP_READY"}
+        pull.transition_migration_status(
+            cutover_ready_partial,
+            "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+        )
+        self.assertEqual(
+            cutover_ready_partial["status"],
+            "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+        )
+
     def test_cloudpanel_database_server_readiness_requires_active_default_record(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "db.sq3"
@@ -293,6 +404,198 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertEqual(runtime_row["reason"], "WEBROOT_SIBLING")
         probe.assert_called_once_with(state["source"], ["press.example.com"])
         save.assert_called_once_with(state)
+
+    def test_release68_press_field_regression_fixture_closes_original_gap(self) -> None:
+        fixture = json.loads(
+            (
+                ROOT
+                / "tests"
+                / "fixtures"
+                / "release68_press_webroot_sibling_regression.json"
+            ).read_text(encoding="utf-8")
+        )
+        site_meta = fixture["site"]
+        user = site_meta["site_user"]
+        domain = site_meta["domain"]
+        canonical_site_root = f"/home/{user}/htdocs/{domain}"
+        canonical_site = {
+            **site_meta,
+            "site_root": canonical_site_root,
+            "document_root": canonical_site_root,
+        }
+        canonical_external = [
+            {
+                "path": f"/home/{user}/htdocs/{row['name']}",
+                "user": user,
+                "reason": row["reason"],
+            }
+            for row in fixture["hidden_siblings"]
+        ]
+        sqlite_meta = fixture["sqlite"]
+        canonical_sqlite = (
+            f"/home/{user}/htdocs/{sqlite_meta['parent']}/{sqlite_meta['name']}"
+        )
+        state = {
+            "source_server_identity": fixture["source_identity"],
+            "source": {"host": "192.0.2.10"},
+            "sites": [dict(canonical_site)],
+            "external_assets": [],
+            "sqlite_assets": [],
+            "runtime_assets": {
+                "system_cron": [],
+                "user_cron": [],
+                "pm2": [],
+            },
+            "source_external_listeners": [],
+        }
+        plan = {
+            "source_server_identity": fixture["source_identity"],
+            "sites": [dict(canonical_site)],
+            "external_assets": canonical_external,
+            "sqlite_assets": [{
+                "path": canonical_sqlite,
+                "user": user,
+                "mode": sqlite_meta["mode"],
+            }],
+            "runtime_assets": {
+                "system_cron": [],
+                "user_cron": [],
+                "pm2": [],
+            },
+            "source_external_listeners": [],
+        }
+
+        with mock.patch.object(
+            pull, "source_probe", return_value=plan
+        ), mock.patch.object(
+            pull, "save_state"
+        ):
+            refreshed = pull.refresh_migration_assets_from_source(state)
+
+        self.assertEqual(refreshed["external_added"], 2)
+        self.assertEqual(refreshed["sqlite_added"], 1)
+        self.assertEqual(
+            {row["reason"] for row in state["external_assets"]},
+            {"WEBROOT_SIBLING"},
+        )
+        self.assertIn(
+            f"/home/{user}/htdocs/{fixture['hidden_siblings'][0]['name']}",
+            refreshed["external_added_paths"],
+        )
+        self.assertIn(canonical_sqlite, refreshed["sqlite_added_paths"])
+
+        with tempfile.TemporaryDirectory() as td:
+            home_root = Path(td) / "home"
+            home = home_root / user
+            site_root = home / "htdocs" / domain
+            site_root.mkdir(parents=True)
+
+            local_assets = {}
+            for row in fixture["hidden_siblings"]:
+                path = site_root.parent / row["name"]
+                path.mkdir()
+                local_assets[row["name"]] = path
+
+            sqlite_path = (
+                site_root.parent / sqlite_meta["parent"] / sqlite_meta["name"]
+            )
+            conn = sqlite3.connect(sqlite_path)
+            conn.execute("CREATE TABLE regression_fixture(id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+
+            discovered = pull.legacy.external_assets_for_site(
+                {
+                    **site_meta,
+                    "site_root": str(site_root),
+                    "document_root": str(site_root),
+                },
+                home_root,
+            )
+            discovered_reasons = {
+                Path(row["path"]).name: row["reason"]
+                for row in discovered
+            }
+            for row in fixture["hidden_siblings"]:
+                self.assertEqual(
+                    discovered_reasons[row["name"]],
+                    row["reason"],
+                )
+
+            runtime_name = fixture["hidden_siblings"][0]["name"]
+            runtime_path = local_assets[runtime_name]
+            runtime_path.rmdir()
+
+            reconcile_state = {
+                "source": {"host": "192.0.2.10"},
+                "sites": [{
+                    **site_meta,
+                    "site_root": str(site_root),
+                    "document_root": str(site_root),
+                    "stage_status": "PULLED_STAGED",
+                }],
+                "external_assets": [
+                    {
+                        "path": str(local_assets[row["name"]]),
+                        "user": user,
+                        "reason": row["reason"],
+                        "kind": row["kind"],
+                    }
+                    for row in fixture["hidden_siblings"]
+                ],
+                "sqlite_assets": [{
+                    "path": str(sqlite_path),
+                    "user": user,
+                    "mode": sqlite_meta["mode"],
+                }],
+                "runtime_assets": {
+                    "system_cron": [],
+                    "user_cron": [],
+                    "pm2": [],
+                },
+                "pending_system_cron": [],
+                "pending_user_cron": [],
+                "pending_pm2": [],
+                "source_http_baseline_required": True,
+                "source_http_baseline": {
+                    domain: {
+                        "status": "PASS",
+                        "http_code": fixture["http"]["source"],
+                        "family": "SUCCESS_OR_REDIRECT",
+                    }
+                },
+            }
+
+            missing = pull.pre_cutover_reconcile(
+                reconcile_state,
+                home_root=home_root,
+            )
+            self.assertEqual(missing["status"], "FAIL")
+            self.assertIn(
+                f"EXTERNAL_DIRECTORY_MISSING:{runtime_path}",
+                missing["failures"],
+            )
+
+            runtime_path.mkdir()
+            complete = pull.pre_cutover_reconcile(
+                reconcile_state,
+                home_root=home_root,
+            )
+            self.assertEqual(complete["status"], "PASS")
+            self.assertEqual(complete["failures"], [])
+
+        self.assertFalse(
+            pull.http_baseline_compatible(
+                fixture["http"]["source"],
+                fixture["http"]["bad_target"],
+            )
+        )
+        self.assertTrue(
+            pull.http_baseline_compatible(
+                fixture["http"]["source"],
+                fixture["http"]["good_target"],
+            )
+        )
 
     def test_refresh_migration_assets_adds_sqlite_and_runtime_changes(self) -> None:
         state = {
@@ -1001,6 +1304,80 @@ class TargetPullContractTests(unittest.TestCase):
                     f"ROLLBACK_PULL:{state['migration_id']}",
                 )
 
+    def test_post_migration_audit_verifies_closure_but_keeps_old_server(self) -> None:
+        state = {
+            "status": "PRODUCTION_PASS",
+            "public_route_proof": {"status": "PASS"},
+            "production_verification": {"status": "PASS"},
+            "source_retained_for_recovery": True,
+            "source_delete_allowed": False,
+            "dns_changed_by_p07": False,
+            "source_runtime_frozen": True,
+            "source_helper_retained_for_recovery": True,
+            "production_passed_at": "2026-10-05T00:00:00+00:00",
+        }
+
+        result = pull.post_migration_audit(state)
+
+        self.assertEqual(result["status"], "PRODUCTION_CLOSURE_VERIFIED")
+        self.assertEqual(result["old_server_disposition"], "RETAIN_RECOVERY_COPY")
+        self.assertEqual(result["retirement_readiness"], "NOT_AUTHORIZED")
+        self.assertTrue(result["owner_retirement_gate_required"])
+        self.assertFalse(result["old_server_delete_allowed"])
+        self.assertEqual(result["source_runtime_state"], "FROZEN")
+        self.assertEqual(result["closure_blockers"], [])
+        self.assertIn(
+            "OWNER_RETIREMENT_GATE_REQUIRED",
+            result["retirement_blockers"],
+        )
+        self.assertIn(
+            "SOURCE_HELPER_RETAINED_FOR_RECOVERY",
+            result["retirement_blockers"],
+        )
+        self.assertFalse(result["writes_performed"])
+
+    def test_post_migration_audit_fails_closed_on_conflicting_state(self) -> None:
+        state = {
+            "status": "PRODUCTION_PASS",
+            "public_route_proof": {"status": "FAIL"},
+            "production_verification": {"status": "PASS"},
+            "source_retained_for_recovery": True,
+            "source_delete_allowed": True,
+            "dns_changed_by_p07": True,
+            "existing_target_overwrite_allowed": True,
+            "secrets_emitted": True,
+            "source_runtime_frozen": False,
+        }
+
+        result = pull.post_migration_audit(state)
+
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertEqual(result["old_server_disposition"], "RETAIN_RECOVERY_COPY")
+        self.assertEqual(result["retirement_readiness"], "NOT_AUTHORIZED")
+        self.assertFalse(result["old_server_delete_allowed"])
+        self.assertEqual(result["source_runtime_state"], "LIVE")
+        self.assertIn("PUBLIC_ROUTE_NOT_VERIFIED", result["closure_blockers"])
+        self.assertIn(
+            "SOURCE_DELETE_POLICY_VIOLATION",
+            result["closure_blockers"],
+        )
+        self.assertIn(
+            "DNS_MUTATION_POLICY_VIOLATION",
+            result["closure_blockers"],
+        )
+        self.assertIn(
+            "TARGET_OVERWRITE_POLICY_VIOLATION",
+            result["closure_blockers"],
+        )
+        self.assertIn(
+            "SECRET_OUTPUT_POLICY_VIOLATION",
+            result["closure_blockers"],
+        )
+        self.assertIn(
+            "SOURCE_RUNTIME_NOT_FROZEN",
+            result["closure_blockers"],
+        )
+
     def test_summary_never_exposes_identity_path_or_secrets(self) -> None:
         state = {
             "schema": pull.SCHEMA,
@@ -1021,6 +1398,46 @@ class TargetPullContractTests(unittest.TestCase):
         self.assertFalse(result["source_delete_allowed"])
         self.assertFalse(result["dns_changed_by_p07"])
         self.assertFalse(result["existing_target_overwrite_allowed"])
+        self.assertEqual(result["post_audit"]["status"], "INCOMPLETE")
+        self.assertFalse(result["post_audit"]["old_server_delete_allowed"])
+
+    def test_summary_does_not_mask_safety_policy_violations(self) -> None:
+        state = {
+            "schema": pull.SCHEMA,
+            "migration_id": "pull-20261006T000000Z-conflict",
+            "status": "PRODUCTION_PASS",
+            "direction": "TARGET_PULL",
+            "current_server_role": "RECEIVER",
+            "source": {"ip": "192.0.2.10"},
+            "sites": [],
+            "source_delete_allowed": True,
+            "dns_changed_by_p07": True,
+            "existing_target_overwrite_allowed": True,
+            "secrets_emitted": True,
+        }
+
+        result = pull.summary(state)
+
+        self.assertTrue(result["source_delete_allowed"])
+        self.assertTrue(result["dns_changed_by_p07"])
+        self.assertTrue(result["existing_target_overwrite_allowed"])
+        self.assertTrue(result["secrets_emitted"])
+        self.assertIn(
+            "SOURCE_DELETE_POLICY_VIOLATION",
+            result["post_audit"]["closure_blockers"],
+        )
+        self.assertIn(
+            "DNS_MUTATION_POLICY_VIOLATION",
+            result["post_audit"]["closure_blockers"],
+        )
+        self.assertIn(
+            "TARGET_OVERWRITE_POLICY_VIOLATION",
+            result["post_audit"]["closure_blockers"],
+        )
+        self.assertIn(
+            "SECRET_OUTPUT_POLICY_VIOLATION",
+            result["post_audit"]["closure_blockers"],
+        )
 
     def test_source_nginx_status_distinguishes_site_from_cloudpanel_control_plane(self) -> None:
         source = {
