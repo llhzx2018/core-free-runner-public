@@ -1,0 +1,71 @@
+name: S01-C01 exact channel isolated regression
+on:
+  push:
+    branches: [task/{{LANE_ID}}-check]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Exact spec identity
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/channel.template.yml --output /tmp/channel-check.yml >/dev/null
+          cmp /tmp/channel-check.yml runner/.github/workflows/{{LANE_ID}}-check.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}-check.yml > proof/identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: '{{REPOSITORY}}'
+          ref: '{{TARGET_SHA}}'
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Unchanged native CI and exact manifest
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '{{TARGET_SHA}}'
+          test "$(git rev-parse HEAD^{tree})" = '{{TARGET_TREE}}'
+          test "$(git diff --name-only '{{BASE_SHA}}' HEAD)" = projects/S01-C01.json
+          test "$(cat VERSION)" = '{{TARGET_VERSION}}'
+          git diff --exit-code '{{BASE_SHA}}' HEAD -- .github/workflows/update-core-ci.yml update-core/php scripts/check_manifest_contract.py schemas
+          python3 scripts/check_manifest_contract.py
+          php -v
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l
+          php update-core/php/tests/run.php
+          python3 - <<'PY'
+          import pathlib,json
+          m=json.loads(pathlib.Path('projects/S01-C01.json').read_text())
+          assert m['target_version']=='{{COMPONENT_TARGET_VERSION}}' and m['asset_sha256']=='{{COMPONENT_ASSET_SHA256}}' and m['asset_bytes']=={{COMPONENT_ASSET_BYTES}}
+          assert m['from_versions'][-1]=='{{COMPONENT_SOURCE_VERSION}}' and len(m['from_versions'])==len(set(m['from_versions']))=={{COMPONENT_SOURCE_COUNT}}
+          assert m['backup_required'] and m['rollback_supported'] and m['schema_from']==m['schema_to']=='N/A'
+          print('VF_CHANNEL_NATIVE_BEGIN')
+          r={'status':'PASS','repository':'{{REPOSITORY}}','source_sha':'{{TARGET_SHA}}','source_tree':'{{TARGET_TREE}}','native_ci_unmodified':'PASS','manifest_contract':'PASS','php_syntax':'PASS','update_core_regression':'PASS','scope_one_manifest':'PASS','production':'NOT_EXECUTED'}
+          pathlib.Path('../proof/channel.json').write_text(json.dumps(r,indent=2));print(json.dumps(r))
+          print('VF_CHANNEL_NATIVE_END')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-channel-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Cleanup transient target
+        if: always()
+        run: rm -rf target
+
+
