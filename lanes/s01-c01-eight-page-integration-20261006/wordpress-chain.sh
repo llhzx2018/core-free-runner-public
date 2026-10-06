@@ -32,6 +32,8 @@ run_check(){
  mkdir -p "proof/$key";cp -a "checks/$key/proof/." "proof/$key/"
  echo "CHECK_END=$key code=$code";printf "%s %s\n" "$key" "$code" >> proof/check-exit-codes.txt;return "$code"
 }
+docker cp lane/readback-diagnostic.php "$WP:/tmp/readback-diagnostic.php"
+cli eval-file /tmp/readback-diagnostic.php > proof/readback-diagnostic.json
 run_check integration
 python3 - <<'PYFINAL'
 import json,pathlib,os
