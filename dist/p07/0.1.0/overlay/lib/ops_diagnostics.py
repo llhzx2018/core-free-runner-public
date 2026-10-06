@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, json, os, shutil, subprocess
+import argparse, json, os, re, shutil, socket, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +22,64 @@ def service_any(names:list[str])->tuple[str,str]:
         if rc==0 and out=="active":
             return "OK",f"{name} 正常"
     return "WARN","未检测到活动服务："+" / ".join(names)
+
+def tcp_listener_ready(port:int)->bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
+            return True
+    except (OSError, ValueError):
+        return False
+
+def unix_listener_ready(path:Path)->bool:
+    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+    try:
+        sock.settimeout(1.0)
+        sock.connect(str(path))
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        sock.close()
+
+def php_fpm_backends(config_dir:Path=Path("/etc/nginx/sites-enabled"))->list[tuple[str,str]]:
+    backends:set[tuple[str,str]]=set()
+    if not config_dir.is_dir():
+        return []
+    for path in sorted(config_dir.glob("*.conf")):
+        try:
+            text=path.read_text(encoding="utf-8",errors="ignore")
+        except OSError:
+            continue
+        for match in re.finditer(r"fastcgi_pass\s+([^;]+);",text,re.I):
+            target=match.group(1).strip()
+            tcp=re.fullmatch(r"(?:127\.0\.0\.1|localhost):([0-9]+)",target,re.I)
+            if tcp:
+                port=int(tcp.group(1))
+                if 1 <= port <= 65535:
+                    backends.add(("tcp",str(port)))
+                continue
+            unix=re.fullmatch(r"unix:(/\S+)",target,re.I)
+            if unix:
+                backends.add(("unix",unix.group(1)))
+    return sorted(backends)
+
+def php_fpm_health(config_dir:Path=Path("/etc/nginx/sites-enabled"))->tuple[str,str]:
+    backends=php_fpm_backends(config_dir)
+    if not backends:
+        return "OK","未发现需要 PHP-FPM 的 FastCGI 后端"
+    failed:list[str]=[]
+    for kind,target in backends:
+        if kind=="tcp":
+            ready=tcp_listener_ready(int(target))
+            label=f"127.0.0.1:{target}"
+        else:
+            ready=unix_listener_ready(Path(target))
+            label=target
+        if not ready:
+            failed.append(label)
+    if failed:
+        return "WARN",f"{len(failed)}/{len(backends)} 个 FastCGI 后端未就绪："+"、".join(failed[:4])
+    return "OK",f"已验证 {len(backends)} 个 FastCGI 后端"
 
 def mem_info()->dict[str,int]:
     out={}
@@ -54,8 +112,7 @@ def collect()->dict:
     add("cloudpanel","CloudPanel","OK" if cp else "WARN","已检测" if cp else "未检测到 CloudPanel")
     for key,label,names in (("nginx","Nginx",["nginx"]),("mysql","MySQL",["mysql","mysqld","percona-server"])):
         st,detail=service_any(names); add(key,label,st,detail)
-    php=Path("/run/php").is_dir() and bool(list(Path("/run/php").glob("php*-fpm.sock")))
-    add("php","PHP-FPM","OK" if php else "WARN","发现活动 socket" if php else "未发现 PHP-FPM socket")
+    st,detail=php_fpm_health(); add("php","PHP-FPM",st,detail)
     usage=shutil.disk_usage("/"); pct=round(usage.used/usage.total*100) if usage.total else 0
     add("disk","磁盘","ERROR" if pct>=95 else "WARN" if pct>=85 else "OK",f"根分区已使用 {pct}%")
     mi=mem_info(); total=mi.get("MemTotal",0); avail=mi.get("MemAvailable",0); mpct=round((1-avail/total)*100) if total else 0
