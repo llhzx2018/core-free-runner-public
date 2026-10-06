@@ -1,0 +1,9 @@
+'use strict';
+const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright'),{url,base,login}=require('./common'),check=require('../target/tests/admin-header-responsive-check');
+(async()=>{
+ const browser=await chromium.launch(),context=await browser.newContext(),p=await context.newPage(),errors=[],cases=[],boundaries=[];
+ p.on('pageerror',e=>errors.push(e.message));p.on('dialog',d=>d.accept());await login(p);
+ for(const width of [1920,1440,1319,1261,1260,1180,1024,961,960,768,390]){await p.setViewportSize({width,height:1000});await p.goto(url);boundaries.push(await check(p,{width}));await p.goto(url);await p.screenshot({path:'proof/header-seo-'+width+'.png',fullPage:true});if(width===1024){await p.locator('[data-vf-component-mobile-nav] > summary').click();await p.locator('.vf-theme-mobile-maintenance > summary').click();await p.screenshot({path:'proof/header-seo-open-1024.png',fullPage:true});}}
+ for(const tab of ['overview','brand','layout','navigation','render','seo','preview','recovery'])for(const width of [1440,1024,390]){await p.setViewportSize({width,height:1000});const target=base+'/wp-admin/themes.php?page=vf-theme-modules&tab='+tab;await p.goto(target);const r=await check(p,{width});r.page=tab;cases.push(r);await p.goto(target);await p.locator('.vf-v6-shell-header').screenshot({path:'proof/header-'+tab+'-'+width+'.png'});}
+ assert.equal(errors.length,0,JSON.stringify(errors));fs.writeFileSync('proof/header-browser.json',JSON.stringify({status:'PASS',scope:'same canonical shared header; other page functions not claimed',pages:8,page_width_cases:cases.length,boundary_cases:boundaries.length,cases,boundaries,errors},null,2));await browser.close();console.log('HEADER_NAVIGATION=PASS pages=8 page-width-cases='+cases.length+' boundary-cases='+boundaries.length);
+})().catch(e=>{console.error(e);process.exit(1)});
