@@ -2,7 +2,7 @@
 const fs=require('fs'),assert=require('assert/strict'),crypto=require('crypto'),{execFileSync}=require('child_process'),{chromium}=require('playwright');
 const base='http://127.0.0.1:18880',url=t=>base+'/wp-admin/themes.php?page=vf-theme-modules&tab='+t;
 const load='wp_set_current_user(1);vf_theme_bootstrap_require_many(require get_template_directory()."/inc/bootstrap/manifests/admin-tabs/recovery.php");';
-const cli=s=>execFileSync('docker',['exec','--user','www-data',process.env.WP,'php','/usr/local/bin/wp','eval',s,'--path=/var/www/html'],{encoding:'utf8',stdio:['ignore','pipe','pipe']});
+const cli=s=>execFileSync('docker',['exec','--user','www-data',process.env.WP,'php','/usr/local/bin/wp','eval',s,'--path=/var/www/html'],{encoding:'utf8',maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});
 const state=()=>JSON.parse(cli(load+'echo wp_json_encode(["stores"=>vf_theme_recovery_current_stores(),"revision"=>vf_theme_recovery_hash(vf_theme_recovery_current_stores()),"settings"=>vf_theme_recovery_readback()["settings"],"points"=>vf_theme_revision_store(),"consumers"=>vf_theme_recovery_runtime_verification()]);'));
 const foreign=()=>cli('echo hash("sha256",serialize([get_option("vf_ops_preservation_sentinel"),get_option("vf_m3u8_preservation_sentinel"),get_option("vf_private_update_credential_v1"),get_option("vf_rank_meta_fixture"),get_option("vf_translation_fixture"),get_theme_mod("vf_v8_preservation_sentinel"),get_post(get_page_by_path("integration-page")->ID)->post_content]));').trim();
 const cases=[],observed=[];let active;
