@@ -1,9 +1,8 @@
 'use strict';
 const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright'),{execFileSync}=require('child_process');
-const probeUrl=route=>execFileSync('docker',['exec','--user','www-data','vf-v8-'+process.env.GITHUB_RUN_ID+'-wp','php','/usr/local/bin/wp','eval','wp_set_current_user(1);vf_theme_bootstrap_require_many(["enqueue.php"]);echo vf_toolsite_browser_probe_url(home_url('+JSON.stringify(route)+'));','--path=/var/www/html'],{encoding:'utf8'}).trim();
 (async()=>{const browser=await chromium.launch({headless:true}),context=await browser.newContext(),page=await context.newPage(),base='http://127.0.0.1:18880';
 await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await Promise.all([page.waitForURL(/wp-admin/),page.locator('#wp-submit').click()]);
-await page.goto(probeUrl('/tool-notes/m3u8-player/'));await page.waitForFunction(()=>typeof vfToolSiteRunBrowserProbe==='function');
+await page.goto(base+'/wp-admin/themes.php?page=vf-theme-modules&tab=preview');const probeNonce=await page.evaluate(()=>VFThemePreview.probeNonce);assert(probeNonce);const probeUrl=route=>base+route+'?vf_probe=1&vf_probe_nonce='+encodeURIComponent(probeNonce);await page.goto(probeUrl('/tool-notes/m3u8-player/'));await page.waitForFunction(()=>typeof vfToolSiteRunBrowserProbe==='function');
 const css=await page.evaluate(()=>{
  const run=()=>vfToolSiteRunBrowserProbe().checks['production-public-css-bundle-present'];
  const baseline=run(),styles=[...document.querySelectorAll('link[data-vf-runtime-css="stable"]')].map(n=>({id:n.id,path:new URL(n.href).pathname}));
