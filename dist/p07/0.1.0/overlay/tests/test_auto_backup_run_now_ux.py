@@ -36,7 +36,7 @@ class AutoBackupRunNowUxContractTests(unittest.TestCase):
         self.assertIn("B2：", self.body)
         self.assertIn("双副本：", self.body)
         self.assertIn("先选择“1. 设置 / 检查异地备份”", self.body)
-        self.assertIn("再选择“3. 立即完整备份一次”", self.body)
+        self.assertIn("再选择“3. 立即备份全部网站”", self.body)
 
     def test_failure_preserves_successful_copies_and_safety_boundary(self):
         self.assertIn("已成功的本地备份 / 远程副本会保留", self.body)
@@ -57,9 +57,14 @@ class AutoBackupRunNowUxContractTests(unittest.TestCase):
     def test_unexpected_engine_rc_is_fail_closed_without_raw_payload_echo(self):
         self.assertIn("自动备份执行失败，未取得可读结果", self.body)
         self.assertIn("不会把这次执行标记为成功", self.body)
-        self.assertIn("查看自动备份状态", self.body)
+        self.assertIn("查看备份状态", self.body)
         self.assertIn("设置 / 检查异地备份", self.body)
         self.assertNotIn('printf \'%s\\n\' "$output"', self.body)
+
+    def test_first_run_uses_one_local_generation(self):
+        self.assertIn("--keep-last 1", self.text)
+        self.assertNotIn("--keep-last 7", self.text)
+        self.assertIn("远端副本不随本地 1 代策略自动删除", self.text)
 
     def test_first_run_refreshes_current_cloudpanel_site_set_before_scheduler(self):
         self.assertIn("config_enabled_for_verification", self.body)
