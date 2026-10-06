@@ -29,19 +29,19 @@ run_check(){
  echo "CHECK_BEGIN=$key"
  if (cd "checks/$key" && node "$TASK_ROOT/lane/$key.js");then code=0;else code=$?;fi
  mkdir -p "proof/$key";cp -a "checks/$key/proof/." "proof/$key/"
- echo "CHECK_END=$key code=$code";return "$code"
+ echo "CHECK_END=$key code=$code";printf "%s %s\n" "$key" "$code" >> proof/check-exit-codes.txt;return "$code"
 }
-run_check overview
+run_check overview || true
 seed
-run_check brand
-run_check layout
-run_check navigation
+run_check brand || true
+run_check layout || true
+run_check navigation || true
 mkdir -p checks/render/proof;ln -sfn ../../lane checks/render/lane
 (cd checks/render && node "$TASK_ROOT/lane/same-source-reference.js" render)
-run_check render
+run_check render || true
 mkdir -p checks/seo/proof;ln -sfn ../../lane checks/seo/lane
 (cd checks/seo && node "$TASK_ROOT/lane/same-source-reference.js" seo)
-run_check seo
+run_check seo || true
 (cd checks/seo && node "$TASK_ROOT/lane/seo-public-output.js")
 cli plugin install polylang --activate >/dev/null
 docker cp lane/polylang-seed.php "$WP:/tmp/polylang-seed.php";cli eval-file /tmp/polylang-seed.php >/dev/null
@@ -49,12 +49,12 @@ docker cp lane/polylang-seed.php "$WP:/tmp/polylang-seed.php";cli eval-file /tmp
 cli plugin deactivate polylang >/dev/null
 cp -a checks/seo/proof/. proof/seo/
 seed
-run_check preview
-run_check recovery
+run_check preview || true
+run_check recovery || true
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
 cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
 seed
-run_check integration
+run_check integration || true
 python3 - <<'PY'
 import json,pathlib,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text());pages={}
