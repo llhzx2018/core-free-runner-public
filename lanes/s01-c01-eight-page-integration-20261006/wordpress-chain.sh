@@ -84,6 +84,8 @@ run_check(){
  mkdir -p "proof/$key";cp -a "checks/$key/proof/." "proof/$key/"
  echo "CHECK_END=$key code=$code";printf "%s %s\n" "$key" "$code" >> proof/check-exit-codes.txt;return "$code"
 }
+run_check layout
+seed
 docker cp lane/readback-diagnostic.php "$WP:/tmp/readback-diagnostic.php"
 cli eval-file /tmp/readback-diagnostic.php > proof/readback-diagnostic.json
 run_check integration
@@ -101,6 +103,7 @@ curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 python3 - <<'PYFINAL'
 import json,pathlib,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text());chain=json.loads((p/'integration/integration.json').read_text());assert chain['status']=='PASS'
+layout=json.loads((p/'layout/live-browser.json').read_text());assert layout['status']=='PASS' and len(layout['checks'])==6 and len(layout['contexts'])==20
 baseline=json.loads((p/'baseline-navigation.json').read_text());assert baseline['outcome']=='BASELINE_DEFECT_REPRODUCED' and baseline['actual_original_state_restored']
 data=json.loads((p/'recovery-data.json').read_text());assert data['status']=='PASS' and all(x=='PASS' for x in data['checks'].values())
 assert json.loads((p/'clean-install.json').read_text())['status']=='PASS'
