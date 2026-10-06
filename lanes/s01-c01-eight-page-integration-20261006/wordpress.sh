@@ -21,6 +21,7 @@ docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/vf-render-fixture.php"
 docker cp lane/vf-render-fixture.js "$WP:/var/www/html/wp-content/mu-plugins/vf-render-fixture.js"
 docker cp lane/vf-render-module.js "$WP:/var/www/html/wp-content/mu-plugins/vf-render-module.js"
+docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/mu-plugins
 docker cp lane/seed.php "$WP:/tmp/integration-seed.php"
 seed(){ cli eval-file /tmp/integration-seed.php > proof/seed.json; }
 seed
