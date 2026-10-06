@@ -9,7 +9,7 @@ $raw_id=url_to_postid($legal['url']);
 $assert($raw_id>0 && !is_post_publicly_viewable($raw_id),'synthetic legal draft not reproduced');
 $assert($legal['postId']===0,'nonpublic slug ID still owns public-route expectations');
 $legal_expected=vf_theme_seo_inspector_expected($legal);$legal_fetch=vf_theme_seo_inspector_fetch($legal['url']);
-$assert($legal_expected['canonical']===vf_theme_seo_inspector_normalize_url($legal_fetch['actual']['canonical']??''),'legal canonical still disagrees with actual public head');
+$assert(($legal_fetch['actual']['canonical']??[])===[$legal_expected['canonical']],'legal canonical still disagrees with actual public head');
 $assert(!$hreflang_issues(vf_theme_seo_inspector_compare($legal,$legal_expected,$legal_fetch)),'legal language head still incorrectly rejected');
 $original_status=get_post_status($raw_id);
 wp_update_post(['ID'=>$raw_id,'post_status'=>'publish']);
