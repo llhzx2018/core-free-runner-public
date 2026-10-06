@@ -14,9 +14,10 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
   const baseline=run(),saved=header.getAttribute('style');header.style.setProperty('background','#000','important');const black=run();restore(header,saved);
   const body=document.body,root=document.documentElement,bs=body.getAttribute('style'),rs=root.getAttribute('style');
   header.style.setProperty('background','transparent','important');body.style.setProperty('background','#000','important');root.style.setProperty('background','#000','important');const transparentBlack=run();restore(header,saved);restore(body,bs);restore(root,rs);
-  const ns=nav.getAttribute('style');nav.style.setProperty('background','#ff00ff','important');const arbitrary=run();restore(nav,ns);
+  const ns=nav.getAttribute('style');nav.style.setProperty('transition','none','important');nav.style.setProperty('background','#ff00ff','important');const arbitrary=run();restore(nav,ns);
   return {baseline,black,transparentBlack,arbitrary};
  });
+ fs.mkdirSync('proof',{recursive:true});fs.writeFileSync('proof/surface-injection.json',JSON.stringify(surface,null,2));
  assert.equal(surface.baseline.header.status,'PASS');assert.equal(surface.baseline.active.status,'PASS');assert.equal(surface.black.header.status,'FAIL');assert.equal(surface.transparentBlack.header.status,'FAIL');assert.equal(surface.arbitrary.active.status,'FAIL');
  const labels=[],layout=[];
  const selectors=['.vf-theme-system-query-chips>span','.vf-support-faq-list','.vf-directory-card-meta','.vf-reading-related-card','.vf-reading-entry>a','.vf-theme-empty-grid .vf-family-card','.vf-theme-sitemap-directory'];
