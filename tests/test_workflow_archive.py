@@ -75,7 +75,8 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertEqual(MODULE._git_tree_sha(root, MODULE.V14_BATCH), MODULE.V14_BATCH_TREE_SHA)
         active = {path.name for path in (root / ".github/workflows").glob("*.yml")}
         self.assertTrue(active.isdisjoint({path.name for path in archived}))
-        self.assertIn("p07-server-ops-rc3-r2-onboarding.yml", active)
+        self.assertIn("p07-distribution-gate.yml", active)
+        self.assertNotIn("p07-server-ops-rc3-r2-onboarding.yml", active)
 
     def test_v15_p07_slot2_batch_is_tree_locked_and_inactive(self):
         root = Path(__file__).resolve().parents[1]
@@ -86,7 +87,8 @@ class WorkflowArchiveTests(unittest.TestCase):
         self.assertTrue(active.isdisjoint({path.name for path in archived}))
         self.assertIn("p07-toolbox-smoke.yml", active)
         self.assertIn("p07-network-node-installer-smoke.yml", active)
-        self.assertIn("p07-server-ops-rc3-r2-onboarding.yml", active)
+        self.assertIn("p07-distribution-gate.yml", active)
+        self.assertNotIn("p07-server-ops-rc3-r2-onboarding.yml", active)
 
     def test_v16_p07_network_node_old_exact_source_gates_are_inactive(self):
         root = Path(__file__).resolve().parents[1]
