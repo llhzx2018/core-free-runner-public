@@ -1,0 +1,175 @@
+name: S01-C02 1.21.1034 Distribution discovery
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  distribution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      database:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: vf_refine
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf-fixture-db
+        ports: ["3306:3306"]
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      TARGET_VERSION: 1.21.1034
+      TARGET_SHA: 50cf699fc34232bda87fffdfffebe68115175f8b
+      TARGET_TREE: 5134c8c707b2d6762c710d487dc92722b1b39866
+      BASE_VERSION: 1.21.1033
+      BASE_ASSET_SHA256: 8dac96743dadd8a4c49550b730dd0b8e53a2447848de73263b675ae94d3286ff
+      EXPECTED_BYTES: 3504174
+      EXPECTED_SHA256: 9882eb5df7e34e2c3fae9529e063061071f165c9198cb2916b1c8f3dea36e571
+      EXPECTED_RUNTIME_FILES: 986
+      EXPECTED_RUNTIME_FP: 7fd10a73161d159d5116f3c1aacd9ffd0c5a4f5ff3eee94bd6ee0fe2fb9a8756
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lane identity preflight
+        run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec lane/spec.json --input .github/workflows/temp-s01-refine-1034-distribution.yml
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 50cf699fc34232bda87fffdfffebe68115175f8b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: updates
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, zip, sodium
+
+      - name: Exact official channel and published artifact
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence remote previous
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < target/VERSION)" = "$TARGET_VERSION"
+
+          python3 updates/scripts/check_manifest_contract.py > evidence/manifest-contract.json
+          jq -e '.status=="PASS"' evidence/manifest-contract.json >/dev/null
+
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/llhzx2018/core-updates/contents/projects/S01-C02.json?ref=main" > channel.json
+          jq -e --arg t "$TARGET_VERSION" --arg b "$BASE_VERSION" --arg sha "$EXPECTED_SHA256" --arg fp "$EXPECTED_RUNTIME_FP" --argjson bytes "$EXPECTED_BYTES" --argjson files "$EXPECTED_RUNTIME_FILES" '
+            .enabled==true and
+            .target_version==$t and
+            (.from_versions|index($b))!=null and
+            .release_tag==("v"+$t) and
+            .asset_name==("vf-tools-ops_V"+$t+".zip") and
+            .asset_bytes==$bytes and
+            .asset_sha256==$sha and
+            .runtime_files==$files and
+            .runtime_fingerprint==$fp
+          ' channel.json >/dev/null
+
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$TARGET_VERSION.zip" --dir remote
+          cp "remote/vf-tools-ops_V$TARGET_VERSION.zip" candidate.zip
+          test "$(stat -c %s candidate.zip)" = "$EXPECTED_BYTES"
+          test "$(sha256sum candidate.zip | cut -d' ' -f1)" = "$EXPECTED_SHA256"
+
+          python3 target/.github/release/build-ops-package.py --source target --output rebuilt.zip > package.json
+          cmp candidate.zip rebuilt.zip
+          test "$(jq -r '.asset_bytes' package.json)" = "$EXPECTED_BYTES"
+          test "$(jq -r '.asset_sha256' package.json)" = "$EXPECTED_SHA256"
+          test "$(jq -r '.runtime_files' package.json)" = "$EXPECTED_RUNTIME_FILES"
+          test "$(jq -r '.runtime_fingerprint' package.json)" = "$EXPECTED_RUNTIME_FP"
+
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > release.json
+          jq -e --arg tag "v$TARGET_VERSION" --arg target "$TARGET_SHA" --arg name "vf-tools-ops_V$TARGET_VERSION.zip" --arg digest "sha256:$EXPECTED_SHA256" --argjson bytes "$EXPECTED_BYTES" '
+            .tag_name==$tag and
+            .target_commitish==$target and
+            .draft==false and .prerelease==false and
+            any(.assets[]; .name==$name and .size==$bytes and .digest==$digest)
+          ' release.json >/dev/null
+
+          gh release download "v$BASE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-ops_V$BASE_VERSION.zip" --dir previous
+          cp "previous/vf-tools-ops_V$BASE_VERSION.zip" baseline.zip
+          test "$(sha256sum baseline.zip | cut -d' ' -f1)" = "$BASE_ASSET_SHA256"
+          echo OFFICIAL_MANIFEST_EXACT_RELEASE_CHANNEL=PASS
+
+      - name: Browser dependencies
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/refine-node && cd /tmp/refine-node
+          npm init -y >/dev/null
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+
+      - name: Real GitHub discovery and published native upgrade rollback
+        env:
+          NODE_PATH: /tmp/refine-node/node_modules
+        run: bash lane/refine-distribution-native.sh
+
+      - name: Final distribution proof
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          m=json.loads(Path('channel.json').read_text())
+          p=json.loads(Path('package.json').read_text())
+          r=json.loads(Path('release.json').read_text())
+          proof={
+            'schema':'vf-s01-refine-distribution-proof/v1',
+            'status':'PASS',
+            'source_repository':'llhzx2018/vf-tools-ops',
+            'source_sha':os.environ['TARGET_SHA'],
+            'source_tree':os.environ['TARGET_TREE'],
+            'version':os.environ['TARGET_VERSION'],
+            'base_version':os.environ['BASE_VERSION'],
+            'manifest':{
+              'target_version':m['target_version'],
+              'release_tag':m['release_tag'],
+              'asset_name':m['asset_name'],
+              'asset_bytes':m['asset_bytes'],
+              'asset_sha256':m['asset_sha256'],
+              'runtime_files':m['runtime_files'],
+              'runtime_fingerprint':m['runtime_fingerprint']
+            },
+            'release_id':r['id'],
+            'package':p,
+            'real_private_github_discovery':'PASS',
+            'published_native_upgrade':'PASS',
+            'published_native_rollback':'PASS',
+            'native_wordpress_interaction':'PASS',
+            'run_id':os.environ['GITHUB_RUN_ID'],
+            'owner_product_pass':False,
+            'production':'NOT_TOUCHED'
+          }
+          Path('evidence/DISTRIBUTION_EVIDENCE.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(proof,ensure_ascii=False))
+          PY
+
+      - name: Public-safe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-1034-distribution
+          path: |
+            evidence/manifest-contract.json
+            evidence/native-browser.json
+            evidence/DISTRIBUTION_EVIDENCE.json
+            package.json
+          retention-days: 30
