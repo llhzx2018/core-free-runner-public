@@ -19,16 +19,7 @@ docker network create "$NET" >/dev/null
 docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
 for i in $(seq 1 60); do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1 && break; sleep 2; done
 docker run -d --name "$WP" --network "$NET" --add-host vf-update.test:host-gateway -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
-for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
-cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
-# Reset only this run's disposable synthetic database, then reinstall exact ZIP.
-cli db reset --yes >/dev/null
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic clean Preview' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
-cli theme delete vf-tools-theme >/dev/null
-docker cp "proof/$ASSET" "$WP:/var/www/html/candidate.zip"
-cli theme install /var/www/html/candidate.zip --activate >/dev/null
-node lane/clean-install.js
-curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
+for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
 curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 # Expose the same real Apache origin inside the container for WordPress loopback HTTP.
 docker exec "$WP" sh -c 'echo "Listen 18880" >> /etc/apache2/ports.conf; sed -i "s/<VirtualHost \*:80>/<VirtualHost *:80 *:18880>/" /etc/apache2/sites-enabled/000-default.conf; apachectl graceful' >/dev/null
@@ -63,18 +54,30 @@ cli eval 'vf_theme_bootstrap_require_many(["services/renderer-config-service.php
 cli eval 'vf_theme_bootstrap_require_many(require get_template_directory()."/inc/bootstrap/manifests/admin-tabs/seo.php");if(vf_theme_seo_payload_hash(theme_seo_readback()["seo"])!==get_option("vf_seo_seed_fingerprint")){throw new Exception("SEO upgrade preservation failed");}' >/dev/null
 node lane/live-browser.js
 cli eval 'if(get_option("vf_private_update_credential_v1")!=="runner-private-token"||get_theme_mod("vf_v8_preservation_sentinel")!=="keep-me"){throw new Exception("browser action preservation failed");}' >/dev/null
+docker cp target/tests/preview-state-wordpress-check.php "$WP:/tmp/preview-state-check.php"
+cli eval-file /tmp/preview-state-check.php > proof/preview-state.json
+docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data-check.php"
+cli eval-file /tmp/recovery-data-check.php > proof/recovery-data.json
+# Only this run's disposable synthetic DB is reset for clean ZIP installation.
+cli db reset --yes >/dev/null
+cli core install --url=http://127.0.0.1:18880 --title='Synthetic clean Preview' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli theme delete vf-tools-theme >/dev/null
+docker cp "proof/$ASSET" "$WP:/var/www/html/candidate.zip"
+cli theme install /var/www/html/candidate.zip --activate >/dev/null
+node lane/clean-install.js
 curl -fsS http://127.0.0.1:18880/ >/tmp/v8-home.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/v8-home.html
 python3 - <<'PYPROOF'
 import json,pathlib,os
 p=pathlib.Path('proof');m=json.loads((p/'identity.json').read_text());live=json.loads((p/'live-browser.json').read_text())
 workflow=json.loads((p/'preview-workflow.json').read_text());assert workflow['status']=='PASS' and len(workflow['cases'])>=13
+state=json.loads((p/'preview-state.json').read_text());assert state['status']=='PASS' and len(state['checks'])>=17
 assert live['status']=='PASS' and len(live['checks'])==6 and all(c['status']=='PASS' for c in live['checks'])
 assert all(c.get('expanded_options')=='PASS' and c.get('history')=='PASS' for c in live['checks'])
 assert all(live[k]=='PASS' for k in ['actual_job','page_matrix','view_mode','download','csrf','guest','revision_conflict','network_failure','busy_lock','pause_resume_stop','signed_preview','profile_revision','revoke'])
 recovery=json.loads((p/'recovery-data.json').read_text());assert recovery['status']=='PASS'
 assert json.loads((p/'clean-install.json').read_text())['status']=='PASS'
-m.update(json.loads((p/'runtime.json').read_text()));m.update(recovery_data='PASS',recovery_checks=len(recovery['checks']),clean_install='PASS');m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',preview_native_cases=6,preview_expanded_options='PASS',preview_history='PASS',preview_controls='PASS',preview_form_preservation='PASS',preview_keyboard='PASS',preview_alignment='PASS',preview_tabs='PASS',preview_picker='PASS',preview_actual_job='PASS',preview_page_matrix='PASS',preview_view_mode='PASS',preview_download='PASS',preview_csrf='PASS',preview_revision_conflict='PASS',preview_network_failure='PASS',preview_busy_lock='PASS',preview_pause_resume_stop='PASS',preview_signed_preview='PASS',preview_profile_revision='PASS',preview_revoke='PASS',preview_workflow='PASS',workflow_cases=len(workflow['cases']),six_modes='PASS',terminal_state='PASS',scope_restoration='PASS',matrix_selected_preview='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
+m.update(json.loads((p/'runtime.json').read_text()));m.update(recovery_data='PASS',recovery_checks=len(recovery['checks']),clean_install='PASS',state_cases=len(state['checks']));m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',preview_native_cases=6,preview_expanded_options='PASS',preview_history='PASS',preview_controls='PASS',preview_form_preservation='PASS',preview_keyboard='PASS',preview_alignment='PASS',preview_tabs='PASS',preview_picker='PASS',preview_actual_job='PASS',preview_page_matrix='PASS',preview_view_mode='PASS',preview_download='PASS',preview_csrf='PASS',preview_revision_conflict='PASS',preview_network_failure='PASS',preview_busy_lock='PASS',preview_pause_resume_stop='PASS',preview_signed_preview='PASS',preview_profile_revision='PASS',preview_revoke='PASS',preview_workflow='PASS',workflow_cases=len(workflow['cases']),six_modes='PASS',terminal_state='PASS',scope_restoration='PASS',matrix_selected_preview='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
 PYPROOF
 echo EXACT_CANDIDATE_GATE=PASS
