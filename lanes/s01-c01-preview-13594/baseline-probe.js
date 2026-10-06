@@ -1,0 +1,27 @@
+'use strict';
+const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright');
+const base='http://127.0.0.1:18880',url=base+'/wp-admin/themes.php?page=vf-theme-modules&tab=preview';
+let page;
+(async()=>{
+ const browser=await chromium.launch({headless:true}),context=await browser.newContext({timezoneId:'Asia/Shanghai'});page=await context.newPage();
+ await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await Promise.all([page.waitForURL(/wp-admin/),page.locator('#wp-submit').click()]);
+ await page.goto(url);const root=page.locator('[data-vf-preview-page]'),run=root.locator('[data-vf-preview-run]');
+ const result={source:process.env.TARGET_SHA,version:process.env.TARGET_VERSION,environment:'REAL_ISOLATED_WORDPRESS',production:'NOT_EXECUTED'};
+ await root.locator('[data-vf-preview-mode]').selectOption('sample');await run.click();await page.waitForFunction(()=>document.querySelector('[data-vf-preview-page]').getAttribute('aria-busy')==='false',{}, {timeout:240000});
+ assert(await root.locator('[data-vf-preview-download]').isVisible());await root.locator('[data-vf-preview-workflow-step="preview"]').click();
+ const original=await root.locator('[data-vf-preview-frame]').getAttribute('src');
+ await root.locator('[data-vf-preview-workflow-step="scope"]').click();await root.locator('[data-vf-preview-target-open]').click();const choices=root.locator('[data-vf-preview-target-choice]:not(.is-current)');await choices.first().click();await root.locator('[data-vf-preview-workflow-step="preview"]').click();
+ const changedTarget=await root.locator('[data-vf-preview-open-page]').getAttribute('href'),unchanged=await root.locator('[data-vf-preview-frame]').getAttribute('src');
+ result.target_change={old_frame: new URL(original,base).pathname,selected:new URL(changedTarget,base).pathname,actual_frame:new URL(unchanged,base).pathname,stale:original===unchanged&&new URL(changedTarget,base).pathname!==new URL(unchanged,base).pathname};
+ await page.screenshot({path:'proof/preview-baseline-stale-target.png',fullPage:true});
+ await root.locator('[data-vf-preview-workflow-step="scope"]').click();const lang=root.locator('[data-vf-preview-language]');const other=await lang.locator('option').evaluateAll((ns,current)=>ns.find(n=>n.value!==current)?.value,await lang.inputValue());assert(other);await lang.selectOption(other);await root.locator('[data-vf-preview-workflow-step="preview"]').click();
+ result.language_change={selected:new URL(await root.locator('[data-vf-preview-open-page]').getAttribute('href'),base).pathname,actual_frame:new URL(await root.locator('[data-vf-preview-frame]').getAttribute('src'),base).pathname,stale:original===await root.locator('[data-vf-preview-frame]').getAttribute('src')};
+ await page.goto(url);await root.locator('[data-vf-preview-mode]').selectOption('sample');
+ let release;const gate=new Promise(r=>release=r);let reached;const pending=new Promise(r=>reached=r);
+ await page.route('**/admin-ajax.php',async route=>{if(new URLSearchParams(route.request().postData()).get('phase')==='workbench_browser'){reached();await gate;}await route.continue().catch(()=>{});});
+ await run.click();await pending;const sampled=await root.locator('[data-vf-preview-selected-width]').innerText();await root.locator('[data-vf-preview-pause]').click();release();await root.locator('[data-vf-preview-resume]:visible').waitFor();
+ result.pause_width={preferred:1440,sampled,restored:await root.locator('[data-vf-preview-selected-width]').innerText(),lost_preference:(await root.locator('[data-vf-preview-selected-width]').innerText())!=='1440px'};
+ await page.screenshot({path:'proof/preview-baseline-paused-width.png',fullPage:true});await page.unroute('**/admin-ajax.php');await root.locator('[data-vf-preview-stop]').click();await page.waitForFunction(()=>document.querySelector('[data-vf-preview-page]').getAttribute('aria-busy')==='false');
+ result.reproduced=result.target_change.stale&&result.language_change.stale&&result.pause_width.lost_preference;
+ fs.writeFileSync('proof/baseline-defects.json',JSON.stringify(result,null,2));assert(result.reproduced,JSON.stringify(result));console.log('BASELINE_DEFECTS_REPRODUCED');await browser.close();
+})().catch(async e=>{if(page)await page.screenshot({path:'proof/baseline-failure.png',fullPage:true}).catch(()=>{});fs.writeFileSync('proof/baseline-failure.json',JSON.stringify({message:e.message}));console.error(e);process.exit(1)});
