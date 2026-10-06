@@ -341,6 +341,40 @@ CloudPanel DB compatibility：
 - both paths atomically remap single-DB WordPress / supported dotenv application config without secret output；
 - multi-DB ambiguous automatic remap fails closed。
 
+
+### 10.2 Current target-owned pull migration authority · release68 real closure / release69 hardening
+
+The ordinary full-server migration route is now the **target-owned pull** engine in `server_migration_pull.py`: the Owner starts P07 on the NEW server, supplies the OLD-server endpoint, and the NEW server pulls business data from OLD. The legacy push engine remains an internal compatibility library and is not the ordinary full-server route.
+
+Current real evidence:
+
+```text
+migration_id   pull-20261005T062015Z-04275579
+old_server     24.199.108.229
+new_server     45.76.171.57
+sites          16
+closure_build  0.1.0-release68
+local_verify   16/16 PASS
+DNS            Owner manual
+public_verify  PRODUCTION_PASS
+old_server     RETAINED_FOR_RECOVERY
+```
+
+Canonical evidence: `docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md`.
+
+The release69 hardening candidate adds these fail-closed contracts for future migrations:
+
+- one central external-asset discovery authority records both path and discovery reason across Site User Home, Web-Root siblings and `.local/share`;
+- before `PREPARED` and again before the maintenance window, P07 refreshes the live OLD-server plan and blocks on source identity or selected-site structural drift;
+- newly discovered external Runtime/Storage or SQLite assets are backfilled while OLD still serves traffic;
+- pre-cutover reconciliation proves staged sites, target document roots, prepare-phase MySQL verification, external path type/existence, SQLite `quick_check`, staged Cron/PM2 counts, and required source HTTP baseline;
+- a reconciliation failure occurs **before** SOURCE freeze whenever SOURCE is still live;
+- HTTP verification compares NEW behavior against the recorded OLD-server baseline: OLD 2xx/3xx requires NEW 2xx/3xx, and an OLD 4xx requires the same NEW 4xx. OLD 200 → NEW 404 is a hard regression;
+- local and public Production verification share the same baseline rule;
+- DNS mutation remains Owner-only and OLD-server deletion remains denied.
+
+release69 is a hardening candidate until its Machine/Distribution gates pass. It does not rerun the already-completed release68 Production migration and does not change the old-server Recovery Copy.
+
 ## 11. Destructive Guard
 
 A16 real negative gate proves：
@@ -424,13 +458,16 @@ Private GitHub-hosted Actions for the one-time Runner PR remained `steps=[] / ru
 
 ```text
 V1_REAL_PREPRODUCTION_CLOSURE = PASS
-TECHNICAL_CUTOVER_READY       = PASS
-OWNER_CUTOVER                 = NOT_EXECUTED
-FORMAL_RELEASE                = NOT_RELEASED
-PRODUCTION                    = NOT_PRODUCTION
+FULL_SERVER_TARGET_PULL_REAL  = PASS (release68 · 16 sites)
+OWNER_DNS_CUTOVER             = MANUAL_PASS for recorded release68 migration
+PRODUCTION_VERIFY             = PASS for recorded release68 migration
+SOURCE_RECOVERY_COPY          = RETAINED
+SOURCE_DECOMMISSION_SAFE      = NOT_PROVEN
+OLD_SERVER_DELETE_ALLOWED     = NO
+RELEASE69_OWNER_REAL          = NOT_RUN
 ```
 
-No main promotion / Tag / Release / Production restore / DNS cutover / old-server deletion is authorized by Real Gate closure alone.
+The recorded release68 full-server migration has completed its Owner-manual DNS cutover and Production verification. This evidence does not authorize unrelated restore paths, a blanket P07 User Acceptance PASS, old-server decommission, or old-server deletion.
 
 ## 17. Next Engineering Phase
 
