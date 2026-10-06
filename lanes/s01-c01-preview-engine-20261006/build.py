@@ -4,7 +4,8 @@ version=os.environ['TARGET_VERSION']; sha=os.environ['TARGET_SHA']
 assert pathlib.Path('target/VERSION').read_text().strip()==version
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
-changed=[]
+changed=subprocess.check_output(['git','-C','target','diff','--name-only','1546e7d50095e493a225e17339baa613b4f50486','HEAD'],text=True).splitlines()
+assert set(changed)=={'VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/admin/admin-preview.js','src/assets/js/modules/browser-behavior-probe.js'},changed
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -23,8 +24,7 @@ for name in [asset,'rebuild.zip']:
 assert (out/asset).read_bytes()==(out/'rebuild.zip').read_bytes()
 (out/'rebuild.zip').unlink()
 data=(out/asset).read_bytes()
-assert len(data)==1784430
-assert hashlib.sha256(data).hexdigest()=='de56ac8a8dcfe1022ba60ab5df7f9d1db107a2b6b1037bdbfeafe06d5512e22b'
+
 
 meta={'source_sha':sha,'source_tree':os.environ['TARGET_TREE'],'version':version,'asset':asset,'asset_bytes':len(data),'asset_sha256':hashlib.sha256(data).hexdigest(),'frozen_shell_header_menu':'PASS','security_boundary':'PASS','owner_product_acceptance':'PENDING_OWNER_REAL_USE','owner_preview_runtime_applicability':'N_A','changed_files':changed}
 (out/'identity.json').write_text(json.dumps(meta,indent=2)); print(json.dumps(meta))

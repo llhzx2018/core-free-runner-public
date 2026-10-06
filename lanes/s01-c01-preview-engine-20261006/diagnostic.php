@@ -21,4 +21,10 @@ foreach($ids as $id){
  $r['foundation']=$select((array)($a['rawEvidence']['foundation']??[]),['issues','catalog']);
  $out['runs'][]=$safe($r);
 }
+$request=['url'=>home_url('/tools/'),'route'=>'tools','language'=>'en','targetType'=>'route','sameOrigin'=>true];
+$out['hreflangTrace']['beforeAvailable']=function_exists('vf_theme_get_hreflang_map');
+$out['hreflangTrace']['beforeExpected']=vf_theme_seo_inspector_expected($request)['hreflang'];
+vf_theme_bootstrap_require_many(['services/hreflang-service.php']);
+$out['hreflangTrace']['afterAvailable']=function_exists('vf_theme_get_hreflang_map');
+$out['hreflangTrace']['afterExpected']=vf_theme_seo_inspector_expected($request)['hreflang'];
 echo wp_json_encode($out,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);

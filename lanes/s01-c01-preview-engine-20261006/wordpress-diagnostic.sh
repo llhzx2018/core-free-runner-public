@@ -33,6 +33,7 @@ run_check(){
  mkdir -p "proof/$key";cp -a "checks/$key/proof/." "proof/$key/"
  echo "CHECK_END=$key code=$code";printf "%s %s\n" "$key" "$code" >> proof/check-exit-codes.txt;return "$code"
 }
+node lane/diagnostic-regression.js
 run_check preview
 python3 - <<'PYIDS'
 import json,pathlib
