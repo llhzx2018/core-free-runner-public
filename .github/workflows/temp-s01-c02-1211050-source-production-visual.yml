@@ -1,0 +1,200 @@
+name: S01-C02 1.21.1050 source production visual candidate
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      database:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: vf_source_1050
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf-fixture-db
+        ports: ["3306:3306"]
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 66792996a706bc2fe44171aab85000904f44157e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 8b757e078f7827e84618d5cc971369d44efd89d9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: baseline
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, zip, sodium, mbstring
+
+      - name: Exact source and structural contracts
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence
+          test "$(git -C target rev-parse HEAD)" = "66792996a706bc2fe44171aab85000904f44157e"
+          test "$(git -C target rev-parse HEAD^{tree})" = "fe680fa67ab3a9707a206941b8993ed6a46b4e69"
+          test "$(cat target/VERSION)" = "1.21.1050"
+          test "$(cat baseline/VERSION)" = "1.21.1049"
+          grep -F "Version: 1.21.1050" target/vf-ops.php >/dev/null
+          php target/tests/s01-c02-1211050-source-production-visual-contract.php
+          php target/tests/s01-c02-121934-shell-header-visual-lock-r45-contract.php
+          find target -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/php-lint.txt
+          echo SOURCE_CONTRACTS=PASS
+          echo PHP_83_SYNTAX=PASS
+
+      - name: Production-cascade browser proof
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/source-node
+          cd /tmp/source-node
+          npm init -y >/dev/null
+          npm install --no-save playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+          export NODE_PATH=/tmp/source-node/node_modules
+          cd "$GITHUB_WORKSPACE"
+          node target/tests/s01-c02-1211050-source-production-browser-proof.js > evidence/source-browser.json
+          cat evidence/source-browser.json
+          jq -e '.pass==true and (.failures|length)==0' evidence/source-browser.json
+
+      - name: Build baseline and candidate packages
+        run: |
+          set -Eeuo pipefail
+          python3 baseline/.github/release/build-ops-package.py --source baseline --output "$RUNNER_TEMP/vf-tools-ops_V1.21.1049.zip" > baseline-package.json
+          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/vf-tools-ops_V1.21.1050.zip" > package.json
+          cp "$RUNNER_TEMP/vf-tools-ops_V1.21.1049.zip" baseline.zip
+          cp "$RUNNER_TEMP/vf-tools-ops_V1.21.1050.zip" candidate.zip
+          python3 - <<'PY'
+          import json,zipfile
+          from pathlib import Path
+          for name in ['baseline.zip','candidate.zip']:
+              with zipfile.ZipFile(name) as z:
+                  assert z.testzip() is None,name
+                  assert all(n.startswith('vf-ops/') and '..' not in n.split('/') for n in z.namelist()),name
+          p=json.loads(Path('package.json').read_text())
+          Path('evidence/package.json').write_text(json.dumps({
+              'asset_name':p.get('asset_name',''),
+              'asset_bytes':p.get('asset_bytes',0),
+              'asset_sha256':p.get('asset_sha256',''),
+              'runtime_files':p.get('runtime_files',0),
+              'runtime_fingerprint':p.get('runtime_fingerprint','')
+          },indent=2)+'\n')
+          print('PACKAGE_CRC_PATH=PASS')
+          PY
+
+      - name: WordPress MariaDB visual authority and functional regression
+        run: |
+          set -Eeuo pipefail
+          TASK_ROOT="$RUNNER_TEMP/s01-source-1050"
+          WP="$TASK_ROOT/wordpress"
+          mkdir -p "$WP"
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$TASK_ROOT/wp"
+          chmod +x "$TASK_ROOT/wp"
+          wp(){ php "$TASK_ROOT/wp" --path="$WP" "$@"; }
+
+          wp core download --version=7.0.2 --force >/dev/null
+          wp config create --dbname=vf_source_1050 --dbuser=vf --dbpass=vf-fixture-db --dbhost=127.0.0.1:3306 --skip-check >/dev/null
+          wp core install --url=http://127.0.0.1:18155 --title='Source Candidate 1050' --admin_user=admin --admin_password='Fixture-Source-1050!' --admin_email=fixture@example.invalid --skip-email >/dev/null
+
+          wp plugin install "$GITHUB_WORKSPACE/baseline.zip" --activate >/dev/null
+          wp option update vf_ops_source_candidate_sentinel preserve >/dev/null
+          wp eval 'if(VF_OPS_VERSION!=="1.21.1049")throw new RuntimeException("BASE_VERSION");echo "BASELINE_RUNTIME=PASS\n";'
+
+          wp plugin install "$GITHUB_WORKSPACE/candidate.zip" --force >/dev/null
+          wp eval 'if(VF_OPS_VERSION!=="1.21.1050")throw new RuntimeException("TARGET_VERSION");if(get_option("vf_ops_source_candidate_sentinel")!=="preserve")throw new RuntimeException("STATE_CHANGED");echo "CANDIDATE_INSTALL_READBACK=PASS\n";'
+
+          export VISUAL_TEST="$GITHUB_WORKSPACE/target/tests/s01-c02-1211050-source-production-visual-wp.php"
+          wp eval 'require getenv("VISUAL_TEST");' > evidence/source-visual-wp.json
+          cat evidence/source-visual-wp.json
+          jq -e '.status=="PASS"
+            and .effective_route=="acceptance_source"
+            and .runtime_profile=="acceptance_source"
+            and .source_authority_queued=="PASS"
+            and .overview_authority_excluded=="PASS"
+            and .page_frame_css=="PASS"
+            and .page_frame_js=="PASS"
+            and .source_css_url=="PASS"' evidence/source-visual-wp.json
+
+          export FUNCTION_TEST="$GITHUB_WORKSPACE/target/tests/s01-c02-1211049-source-wp-integration.php"
+          wp eval 'require getenv("FUNCTION_TEST");' > evidence/source-functional-wp.json
+          cat evidence/source-functional-wp.json
+          jq -e '.status=="PASS"
+            and .ordinary_open_write_free=="PASS"
+            and .stale_leaf_suppression=="PASS"
+            and .historical_evidence_preserved=="PASS"
+            and .corrupt_snapshot_hidden=="PASS"
+            and .revision_conflict=="PASS"
+            and .mutation_lock=="PASS"
+            and .reset_state_guard=="PASS"
+            and .reset_readback=="PASS"
+            and .batch_gate_fail_closed=="PASS"' evidence/source-functional-wp.json
+
+          wp plugin install "$GITHUB_WORKSPACE/baseline.zip" --force >/dev/null
+          wp eval 'if(VF_OPS_VERSION!=="1.21.1049")throw new RuntimeException("ROLLBACK_VERSION");if(get_option("vf_ops_source_candidate_sentinel")!=="preserve")throw new RuntimeException("ROLLBACK_STATE");echo "ROLLBACK=PASS\n";'
+
+      - name: Write public-safe evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          def read_json(path):
+              p=Path(path)
+              if not p.exists() or p.stat().st_size<2:return {}
+              try:return json.loads(p.read_text())
+              except Exception:return {}
+          b=read_json('evidence/source-browser.json')
+          v=read_json('evidence/source-visual-wp.json')
+          f=read_json('evidence/source-functional-wp.json')
+          p=read_json('evidence/package.json')
+          proof={
+              'schema':'vf-s01-source-production-visual-proof/v1',
+              'source_repository':'llhzx2018/vf-tools-ops',
+              'source_sha':'66792996a706bc2fe44171aab85000904f44157e',
+              'source_tree':'fe680fa67ab3a9707a206941b8993ed6a46b4e69',
+              'version':'1.21.1050','base_version':'1.21.1049',
+              'package_sha256':p.get('asset_sha256',''),
+              'asset_bytes':p.get('asset_bytes',0),
+              'runtime_files':p.get('runtime_files',0),
+              'runtime_fingerprint':p.get('runtime_fingerprint',''),
+              'browser_production_cascade':'PASS' if b.get('pass') is True and not b.get('failures') else 'NOT_PROVEN',
+              'wp_visual_authority':'PASS' if v.get('status')=='PASS' else 'NOT_PROVEN',
+              'wp_functional_regression':'PASS' if f.get('status')=='PASS' else 'NOT_PROVEN',
+              'production':'NOT_TOUCHED','owner_product_pass':False
+          }
+          proof['status']='PASS' if all(proof[k]=='PASS' for k in ['browser_production_cascade','wp_visual_authority','wp_functional_regression']) else 'FAIL'
+          Path('evidence/FINAL_EVIDENCE.json').write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(proof,ensure_ascii=False))
+          if proof['status']!='PASS': raise SystemExit(1)
+          PY
+
+      - name: Upload public-safe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s01-c02-1211050-source-production-visual-evidence
+          path: |
+            evidence/source-browser.json
+            evidence/source-visual-wp.json
+            evidence/source-functional-wp.json
+            evidence/package.json
+            evidence/FINAL_EVIDENCE.json
+          if-no-files-found: warn
+          retention-days: 30
