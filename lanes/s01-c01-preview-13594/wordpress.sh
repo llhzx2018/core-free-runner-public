@@ -9,7 +9,8 @@ echo '{"mode":"normal"}' > "$MOCK_STATE"
 python3 - <<'PY'
 import pathlib,os
 s=pathlib.Path('target/tests/wp-update/mock-github-server.py').read_text()
-s=s.replace('1.35.8',os.environ['SOURCE_VERSION']).replace('1.35.9',os.environ['TARGET_VERSION'])
+s=s.replace('1.35.8','__VF_SOURCE_VERSION__').replace('1.35.9','__VF_TARGET_VERSION__')
+s=s.replace('__VF_SOURCE_VERSION__',os.environ['SOURCE_VERSION']).replace('__VF_TARGET_VERSION__',os.environ['TARGET_VERSION'])
 s=s.replace('VF_Tools_Theme_V'+os.environ['TARGET_VERSION']+'_UPDATE.zip','vf-tools-theme_V'+os.environ['TARGET_VERSION']+'.zip')
 s=s.replace("if not self.auth_ok(): return", "if not self.auth_ok(): return\n        if p.path=='/repos/llhzx2018/core-updates': self.send_json({'private':True}); return")
 pathlib.Path('/tmp/v8-mock.py').write_text(s)
