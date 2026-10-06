@@ -51,5 +51,14 @@ let page;
  const badRevoke=await context.request.post(base+'/wp-admin/admin-post.php',{form:{action:'vf_theme_preview_revoke_all',_wpnonce:'invalid'}});assert.equal(badRevoke.status(),403,'revoke accepted bad nonce');assert.equal((await anon.request.get(oldLink)).status(),200,'bad nonce revoked the valid token');
  await root.locator('[data-vf-preview-workflow-step="preview"]').click();await root.locator('.vf-preview-v510__link-options summary').click();await Promise.all([page.waitForURL(/vf_theme_notice=preview-links-revoked/),root.locator('.vf-preview-revoke-form button').click()]);const revoked=await anon.request.get(oldLink);assert(revoked.status()>=400,'revocation did not invalidate previous signature');await anon.close();
  assert.equal(errors.length,0,JSON.stringify(errors));
- fs.writeFileSync('proof/live-browser.json',JSON.stringify({status:'PASS',wordpress_integration:'REAL_ISOLATED_WORDPRESS',checks,actual_job:'PASS',page_matrix:'PASS',view_mode:'PASS',download:'PASS',busy_lock:'PASS',pause_resume_stop:'PASS',network_failure:'PASS',revision_conflict:'PASS',csrf:'PASS',guest:'PASS',signed_preview:'PASS',profile_revision:'PASS',revoke:'PASS',workflow:workflow.status,workflow_cases:workflow.cases.length,errors},null,2));await browser.close();
+ fs.writeFileSync('proof/live-browser.json',JSON.stringify({status:'PASS',wordpress_integration:'REAL_ISOLATED_WORDPRESS',checks,actual_job:'PASS',page_matrix:'PASS',view_mode:'PASS',download:'PASS',busy_lock:'PASS',pause_resume_stop:'PASS',network_failure:'PASS',revision_conflict:'PASS',csrf:'PASS',guest:'PASS',signed_preview:'PASS',profile_revision:'PASS',revoke:'PASS',workflow:workflow.status,workflow_cases:workflow.cases.length,errors},null,2));
+ for(const width of [1440,390]) {
+  await page.setViewportSize({width,height:960});
+  await page.goto(url);await page.waitForLoadState('networkidle');
+  const bytes=await page.screenshot({type:'jpeg',quality:55,fullPage:true});
+  console.log('VF_VISUAL_'+width+'_BEGIN');
+  const encoded=bytes.toString('base64');for(let offset=0;offset<encoded.length;offset+=4096)console.log(encoded.slice(offset,offset+4096));
+  console.log('VF_VISUAL_'+width+'_END');
+ }
+ await browser.close();
 })().catch(async e=>{if(page)await page.screenshot({path:'proof/preview-failure.png',fullPage:true}).catch(()=>{});fs.writeFileSync('proof/failure.json',JSON.stringify({status:'FAIL',message:e.message}));if(fs.existsSync('proof/preview-workflow-progress.json'))console.error('VF_TRACE_BEGIN\n'+fs.readFileSync('proof/preview-workflow-progress.json','utf8')+'\nVF_TRACE_END');console.error(e);process.exit(1)});

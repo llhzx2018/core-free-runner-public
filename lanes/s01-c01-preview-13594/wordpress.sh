@@ -82,4 +82,12 @@ assert json.loads((p/'clean-install.json').read_text())['status']=='PASS'
 m.update(json.loads((p/'runtime.json').read_text()));m.update(recovery_data='PASS',recovery_checks=len(recovery['checks']),clean_install='PASS',state_cases=len(state['checks']),probe_version='PASS');m.update(status='PASS',upgrade='PASS',source_rollback='PASS',wordpress_browser='PASS',preview_native_cases=6,preview_expanded_options='PASS',preview_history='PASS',preview_controls='PASS',preview_form_preservation='PASS',preview_keyboard='PASS',preview_alignment='PASS',preview_tabs='PASS',preview_picker='PASS',preview_actual_job='PASS',preview_page_matrix='PASS',preview_view_mode='PASS',preview_download='PASS',preview_csrf='PASS',preview_revision_conflict='PASS',preview_network_failure='PASS',preview_busy_lock='PASS',preview_pause_resume_stop='PASS',preview_signed_preview='PASS',preview_profile_revision='PASS',preview_revoke='PASS',preview_workflow='PASS',workflow_cases=len(workflow['cases']),six_modes='PASS',terminal_state='PASS',scope_restoration='PASS',matrix_selected_preview='PASS',owner_real_use='POST_PRODUCTION_REQUIRED',owner_preview_runtime='N_A',production='NOT_EXECUTED',candidate_run=os.environ['GITHUB_RUN_ID'])
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
 PYPROOF
+python3 - <<'PYREADBACK'
+import json,pathlib
+p=pathlib.Path('proof')
+names=['identity.json','upgrade.json','runtime.json','live-browser.json','preview-workflow.json','preview-state.json','browser-probe-version.json','recovery-data.json','clean-install.json','FINAL_EVIDENCE.json']
+print('VF_PROOF_READBACK_BEGIN')
+print(json.dumps({n:json.loads((p/n).read_text()) for n in names}))
+print('VF_PROOF_READBACK_END')
+PYREADBACK
 echo EXACT_CANDIDATE_GATE=PASS
