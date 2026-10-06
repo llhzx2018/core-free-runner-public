@@ -31,6 +31,7 @@ BUSY_PROCESS_RE = re.compile(
     re.I,
 )
 REMOTE_TARGETS = ["google", "b2"]
+DEFAULT_LOCAL_KEEP_LAST = 1
 DEFAULT_CONFIG = Path("/etc/vf-server-ops/auto-backup.json")
 DEFAULT_CRON = Path("/etc/cron.d/vf-server-ops-auto-backup")
 DEFAULT_LOCK = Path("/run/lock/vf-server-ops-auto-backup.lock")
@@ -98,7 +99,7 @@ def validate_config(path: Path) -> dict[str, Any]:
         raise AutoBackupError("daily_at must be HH:MM")
     if payload.get("remote_targets") != REMOTE_TARGETS:
         raise AutoBackupError("remote_targets must be exactly ['google', 'b2'] for RC3 dual-copy mode")
-    keep_last = payload.get("local_keep_last", 7)
+    keep_last = payload.get("local_keep_last", DEFAULT_LOCAL_KEEP_LAST)
     if not isinstance(keep_last, int) or isinstance(keep_last, bool) or not 1 <= keep_last <= 100:
         raise AutoBackupError("local_keep_last must be an integer in 1..100")
     enabled = payload.get("enabled", True)
@@ -438,7 +439,7 @@ def status(config_path: Path, cron_file: Path, state_file: Path = DEFAULT_STATE)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="P07 guarded automatic Google + B2 backup"); sub = parser.add_subparsers(dest="command", required=True)
-    cfg = sub.add_parser("configure"); cfg.add_argument("--config", default=str(DEFAULT_CONFIG)); cfg.add_argument("--site", action="append", required=True); cfg.add_argument("--daily-at", default="03:30"); cfg.add_argument("--storage-config", default="/etc/vf-server-ops/storage.json"); cfg.add_argument("--backup-dir", default="/var/backups/vf-server-ops"); cfg.add_argument("--keep-last", type=int, default=7)
+    cfg = sub.add_parser("configure"); cfg.add_argument("--config", default=str(DEFAULT_CONFIG)); cfg.add_argument("--site", action="append", required=True); cfg.add_argument("--daily-at", default="03:30"); cfg.add_argument("--storage-config", default="/etc/vf-server-ops/storage.json"); cfg.add_argument("--backup-dir", default="/var/backups/vf-server-ops"); cfg.add_argument("--keep-last", type=int, default=DEFAULT_LOCAL_KEEP_LAST)
     run = sub.add_parser("run"); run.add_argument("--config", default=str(DEFAULT_CONFIG)); run.add_argument("--clpctl", default=os.environ.get("VFOPS_CLPCTL", "clpctl")); run.add_argument("--rclone", default=os.environ.get("VFOPS_RCLONE", "rclone")); run.add_argument("--lock-file", default=str(DEFAULT_LOCK)); run.add_argument("--state-file", default=str(DEFAULT_STATE))
     stat = sub.add_parser("status"); stat.add_argument("--config", default=str(DEFAULT_CONFIG)); stat.add_argument("--cron-file", default=str(DEFAULT_CRON)); stat.add_argument("--state-file", default=str(DEFAULT_STATE))
     sched = sub.add_parser("schedule-check"); sched.add_argument("--daily-at", required=True); sched.add_argument("--cron-file", action="append")
