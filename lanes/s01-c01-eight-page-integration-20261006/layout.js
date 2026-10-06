@@ -63,7 +63,7 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
    const sidebar=page.locator('[name="'+name.replace('[tocPosition]','[sidebarMode]')+'"]');if(await sidebar.count()&&await sidebar.inputValue()==='off')incompatible.push({toc,name});
   }
   if(incompatible.length){const before=rawHash();const rejected=await send();assert(!rejected.success&&rejected.data.failureCode==='VALIDATION_FAILED');assert.equal(rawHash(),before);functional.incompatible_reading_combination_rejected_without_write='PASS';
-   for(const {toc,name}of incompatible){const valid=await toc.locator('option').evaluateAll(ns=>ns.find(n=>!n.disabled&&n.value!=='sidebar')?.value);assert(valid!==undefined);await toc.selectOption(valid);expected.set(name,{type:'value',value:valid});}
+   for(const {toc,name}of incompatible){await openSection('functions');const panelId=await toc.evaluate(n=>n.closest('[role="tabpanel"]')?.id);if(panelId)await page.locator('[role="tab"][aria-controls="'+panelId+'"]').click();const valid=await toc.locator('option').evaluateAll(ns=>ns.find(n=>!n.disabled&&n.value!=='sidebar')?.value);assert(valid!==undefined);await toc.selectOption(valid);expected.set(name,{type:'value',value:valid});}
   }
   assert(visited.size>0,key+' has no editable controls');
   const invalid=await page.locator('[data-vf-layout-form]').evaluate(n=>[...n.querySelectorAll(':invalid')].map(el=>({name:el.name,value:el.value})));assert.deepEqual(invalid,[],key+' generated invalid dataset');const result=await saved();assert.equal(result.data.contextVerification.context,key);assert.equal(result.data.roundtripEvidence.contextCount,20);await page.reload();
@@ -92,4 +92,3 @@ const contexts=['home','basic_page','about_page','contact_page','tool_hub','tool
  await go('search');await openModules();assert(await page.locator('[data-vf-layout-reset]').isDisabled());assert.equal(await page.locator('[data-vf-layout-list] li[draggable="true"]').count(),0);functional.locked_system_structure='PASS';
  assert.deepEqual(errors,[]);const proof={status:'PASS',checks,contexts:contextChecks,functional,errors};fs.writeFileSync('proof/live-browser.json',JSON.stringify(proof,null,2));await browser.close();
 })().catch(async error=>{fs.writeFileSync('proof/failure.json',JSON.stringify({status:'FAIL',message:String(error),version:process.env.TARGET_VERSION},null,2));if(global.proofPage)await global.proofPage.screenshot({path:'proof/layout-failure.png',fullPage:true}).catch(()=>{});console.error(error);process.exit(1);});
-
