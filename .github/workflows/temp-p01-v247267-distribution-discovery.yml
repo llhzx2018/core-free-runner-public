@@ -1,0 +1,119 @@
+name: TEMP P01 V2.47.267 Distribution Discovery Proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-v247267-distribution-discovery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'proof(P01): V2.47.267 distribution discovery')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      EXPECTED_SOURCE: 2.47.266
+      EXPECTED_TARGET: 2.47.267
+      EXPECTED_RELEASE_ID: '404424803'
+      EXPECTED_PRODUCT_IDENTITY: ec20bffbc9074f85acedc836134132467347905c
+      EXPECTED_ASSET: VF_Start_V2.47.267_UPDATE.zip
+      EXPECTED_ASSET_BYTES: '2348080'
+      EXPECTED_ASSET_SHA256: b2552c422b0fa49eadb38d9ffcf3ac056613f85f9c68f46e601cb8cf274ebd56
+    steps:
+      - name: Checkout proof control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-curl jq >/dev/null
+          php -m | grep -Fx curl
+
+      - name: Execute installed-source updater discovery against live channel
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch "v$EXPECTED_SOURCE"             "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" source
+          test "$(tr -d '\r\n ' < source/VERSION)" = "$EXPECTED_SOURCE"
+          test "$(tr -d '\r\n ' < source/src/VERSION.txt)" = "$EXPECTED_SOURCE"
+
+          READ_TOKEN="$READ_TOKEN" php -d display_errors=1 -r '
+            require "source/src/app/CoreUpdates/UpdateCore.php";
+            require "source/src/app/CoreUpdates/GitHubClient.php";
+            $token = (string)getenv("READ_TOKEN");
+            $client = new \CoreUpdates\GitHubClient($token, "p01-v247267-discovery-proof");
+            $manifest = $client->fetchProjectManifest("llhzx2018/core-updates", "P01.json", "main");
+            $expected = [
+              "current_version" => "2.47.266",
+              "target_version" => "2.47.267",
+              "update_type" => "ATOMIC",
+              "schema_from" => "2026090401",
+              "schema_to" => "2026090401",
+              "repository" => "llhzx2018/vf-start",
+              "release_tag" => "v2.47.267",
+              "release_id" => 404424803,
+              "product_identity" => "ec20bffbc9074f85acedc836134132467347905c",
+              "asset_name" => "VF_Start_V2.47.267_UPDATE.zip",
+              "asset_bytes" => 2348080,
+              "asset_sha256" => "b2552c422b0fa49eadb38d9ffcf3ac056613f85f9c68f46e601cb8cf274ebd56",
+              "backup_required" => true,
+              "rollback_supported" => true,
+              "released_at" => "2026-10-06T07:18:23Z",
+              "minimum_php" => "8.0.0",
+            ];
+            foreach ($expected as $k => $v) {
+              if (!array_key_exists($k, $manifest) || $manifest[$k] !== $v) {
+                fwrite(STDERR, "MANIFEST_MISMATCH:$k\n");
+                exit(10);
+              }
+            }
+            if (($manifest["from_versions"] ?? null) !== ["2.47.266"]) {
+              fwrite(STDERR, "MANIFEST_MISMATCH:from_versions\n");
+              exit(11);
+            }
+            $core = new \CoreUpdates\UpdateCore("P01", "APP");
+            $result = $core->check("2.47.266", "2026090401", $manifest);
+            if (($result["status"] ?? "") !== "AVAILABLE"
+                || ($result["target_version"] ?? "") !== "2.47.267"
+                || ($result["from_version"] ?? "") !== "2.47.266") {
+              fwrite(STDERR, "UPDATER_DISCOVERY_FAIL:" . json_encode($result, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES) . "\n");
+              exit(12);
+            }
+            echo "P01_UPDATER_DISCOVERY=PASS\n";
+            echo "P01_UPDATER_STATUS=AVAILABLE\n";
+            echo "P01_UPDATER_TARGET=2.47.267\n";
+          '
+
+      - name: Remote release and asset identity readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$PRODUCT_REPO/releases/tags/v$EXPECTED_TARGET" > /tmp/p01-release.json
+          jq -e --argjson id "$EXPECTED_RELEASE_ID" --arg tag "v$EXPECTED_TARGET"             '.id == $id and .tag_name == $tag and .draft == false and .prerelease == false'             /tmp/p01-release.json >/dev/null
+          TAG_SHA="$(gh api "repos/$PRODUCT_REPO/git/ref/tags/v$EXPECTED_TARGET" --jq '.object.sha')"
+          test "$TAG_SHA" = "$EXPECTED_PRODUCT_IDENTITY"
+          jq -e --arg n "$EXPECTED_ASSET" --argjson s "$EXPECTED_ASSET_BYTES" --arg d "sha256:$EXPECTED_ASSET_SHA256"             '.assets[] | select(.name == $n) | (.size == $s and .digest == $d)'             /tmp/p01-release.json >/dev/null
+          rm -rf /tmp/p01-discovery-asset && mkdir -p /tmp/p01-discovery-asset
+          gh release download "v$EXPECTED_TARGET" -R "$PRODUCT_REPO" -D /tmp/p01-discovery-asset -p "$EXPECTED_ASSET"
+          test "$(stat -c %s "/tmp/p01-discovery-asset/$EXPECTED_ASSET")" = "$EXPECTED_ASSET_BYTES"
+          test "$(sha256sum "/tmp/p01-discovery-asset/$EXPECTED_ASSET" | awk '{print $1}')" = "$EXPECTED_ASSET_SHA256"
+          echo P01_RELEASE_IDENTITY_READBACK=PASS
+          echo P01_ASSET_REMOTE_READBACK=PASS
+          echo PRODUCTION_WRITE=NO
+          echo P01_V247267_DISTRIBUTION_DISCOVERY=PASS
