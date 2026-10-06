@@ -56,9 +56,121 @@ def now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+PROGRESS_EVENT_SCHEMA = "vf-server-ops.migration-progress.v1"
+
+MIGRATION_STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
+    "PREPARING": frozenset({"PREPARING", "PREPARED", "PREPARE_FAILED"}),
+    "PREPARE_FAILED": frozenset({"PREPARING"}),
+    "PREPARED": frozenset({
+        "PREPARE_FAILED",
+        "CUTOVER_RUNNING",
+        "ROLLED_BACK",
+        "ROLLBACK_PARTIAL",
+    }),
+    "CUTOVER_RUNNING": frozenset({
+        "CUTOVER_RUNNING",
+        "CUTOVER_PREP_READY",
+        "CUTOVER_FAILED_ROLLED_BACK",
+        "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+        "ROLLED_BACK",
+        "ROLLBACK_PARTIAL",
+    }),
+    "CUTOVER_FAILED_ROLLED_BACK": frozenset({"CUTOVER_RUNNING"}),
+    "CUTOVER_FAILED_ROLLBACK_PARTIAL": frozenset({
+        "ROLLED_BACK",
+        "ROLLBACK_PARTIAL",
+    }),
+    "CUTOVER_PREP_READY": frozenset({
+        "WAITING_DNS",
+        "PRODUCTION_VERIFY_FAILED",
+        "PRODUCTION_PASS",
+        "CUTOVER_FAILED_ROLLED_BACK",
+        "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+        "ROLLED_BACK",
+        "ROLLBACK_PARTIAL",
+    }),
+    "WAITING_DNS": frozenset({
+        "WAITING_DNS",
+        "PRODUCTION_VERIFY_FAILED",
+        "PRODUCTION_PASS",
+    }),
+    "PRODUCTION_VERIFY_FAILED": frozenset({
+        "WAITING_DNS",
+        "PRODUCTION_VERIFY_FAILED",
+        "PRODUCTION_PASS",
+    }),
+    "PRODUCTION_PASS": frozenset(),
+    "ROLLED_BACK": frozenset(),
+    "ROLLBACK_PARTIAL": frozenset(),
+}
+
+
+def transition_migration_status(state: dict[str, Any], new_status: str) -> None:
+    current = str(state.get("status", ""))
+    allowed = MIGRATION_STATUS_TRANSITIONS.get(current)
+    if allowed is None or new_status not in allowed:
+        raise PullMigrationError(
+            "invalid migration status transition: "
+            f"{current or 'UNKNOWN'} -> {new_status}"
+        )
+    state["status"] = new_status
+
+
+def migration_progress_event(message: str) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "schema": PROGRESS_EVENT_SCHEMA,
+        "kind": "MIGRATION_PROGRESS",
+        "message": str(message),
+    }
+
+    phase_match = re.match(
+        r"^(?P<step>\d+)/(?P<total>\d+)\s*·\s*(?P<detail>.*)$",
+        str(message),
+    )
+    detail = str(message)
+    if phase_match:
+        event["phase_step"] = int(phase_match.group("step"))
+        event["phase_total"] = int(phase_match.group("total"))
+        detail = phase_match.group("detail")
+
+    item_match = re.search(
+        r"(?:网站\s+)?(?P<current>\d+)/(?P<total>\d+)",
+        detail,
+    )
+    if item_match:
+        event["item_current"] = int(item_match.group("current"))
+        event["item_total"] = int(item_match.group("total"))
+
+    if "MySQL" in detail:
+        event["scope"] = "MYSQL"
+    elif "SQLite" in detail:
+        event["scope"] = "SQLITE"
+    elif "HTTP" in detail or "本地验证" in detail or "公网验证" in detail:
+        event["scope"] = "HTTP_VERIFY"
+    elif "Runtime" in detail or "Storage" in detail or "外部业务文件" in detail:
+        event["scope"] = "EXTERNAL_ASSET"
+    elif "Cron" in detail or "PM2" in detail or "Node.js" in detail:
+        event["scope"] = "RUNTIME"
+    elif "网站" in detail:
+        event["scope"] = "SITE_FILES"
+    else:
+        event["scope"] = "MIGRATION"
+
+    return event
+
+
 def progress_note(message: str) -> None:
-    if os.environ.get("VFOPS_MIGRATION_PROGRESS") == "1":
-        print(f"迁移阶段：{message}", file=sys.stderr, flush=True)
+    if os.environ.get("VFOPS_MIGRATION_PROGRESS") != "1":
+        return
+    event = migration_progress_event(message)
+    if os.environ.get("VFOPS_MIGRATION_PROGRESS_FORMAT") == "jsonl":
+        print(
+            json.dumps(event, ensure_ascii=False, separators=(",", ":")),
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    print(f"迁移阶段：{message}", file=sys.stderr, flush=True)
 
 
 def run_local(
@@ -2050,7 +2162,7 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         raise PullMigrationError(
             "new-server CloudPanel database server metadata is missing; migration cannot resume safely"
         )
-    state["status"] = "PREPARING"
+    transition_migration_status(state, "PREPARING")
     state.pop("last_error_class", None)
     save_state(state)
     try:
@@ -2087,13 +2199,13 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
                 "pre-cutover completeness reconciliation failed"
                 + (f": {details}" if details else "")
             )
-        state["status"] = "PREPARED"
+        transition_migration_status(state, "PREPARED")
         state["source_still_live"] = True
         state["dns_manual_gate_required"] = True
         save_state(state)
         return state
     except Exception as exc:
-        state["status"] = "PREPARE_FAILED"
+        transition_migration_status(state, "PREPARE_FAILED")
         state["last_error_class"] = exc.__class__.__name__
         save_state(state)
         if isinstance(exc, PullMigrationError):
@@ -2174,7 +2286,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
             # An interrupted CUTOVER_RUNNING task already has SOURCE frozen.
             # Restore it before returning a reconciliation failure.
             restore_old_server(state)
-            state["status"] = "CUTOVER_FAILED_ROLLED_BACK"
+            transition_migration_status(state, "CUTOVER_FAILED_ROLLED_BACK")
             save_state(state)
             details = ",".join(
                 state["pre_cutover_reconciliation"]["failures"][:12]
@@ -2184,7 +2296,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
                 + (f": {details}" if details else "")
             )
 
-    state["status"] = "CUTOVER_RUNNING"
+    transition_migration_status(state, "CUTOVER_RUNNING")
     state["cutover_started_at"] = now_utc()
     state.pop("last_error_class", None)
     save_state(state)
@@ -2243,7 +2355,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
                 f"fail={state['target_smoke']['fail']}"
                 + (f"; {details}" if details else "")
             )
-        state["status"] = "CUTOVER_PREP_READY"
+        transition_migration_status(state, "CUTOVER_PREP_READY")
         state["dns_manual_gate_required"] = True
         state["source_still_live"] = False
         save_state(state)
@@ -2253,10 +2365,13 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         target_ok = deactivate_target_runtime(state)
         progress_note("安全恢复 · 正在恢复旧服务器运行状态")
         source_ok = restore_old_server(state)
-        state["status"] = (
-            "CUTOVER_FAILED_ROLLED_BACK"
-            if target_ok and source_ok
-            else "CUTOVER_FAILED_ROLLBACK_PARTIAL"
+        transition_migration_status(
+            state,
+            (
+                "CUTOVER_FAILED_ROLLED_BACK"
+                if target_ok and source_ok
+                else "CUTOVER_FAILED_ROLLBACK_PARTIAL"
+            ),
         )
         state["last_error_class"] = exc.__class__.__name__
         save_state(state)
@@ -2282,17 +2397,17 @@ def finalize_migration(
     route = public_route_proof(state, attempts=attempts, delay=delay)
     state["public_route_proof"] = route
     if route["status"] != "PASS":
-        state["status"] = "WAITING_DNS"
+        transition_migration_status(state, "WAITING_DNS")
         save_state(state)
         return state
     progress_note("公网验证 2/2 · 正在逐站检查 HTTPS 与正式访问状态")
     production = production_verify(state)
     state["production_verification"] = production
     if production["status"] != "PASS":
-        state["status"] = "PRODUCTION_VERIFY_FAILED"
+        transition_migration_status(state, "PRODUCTION_VERIFY_FAILED")
         save_state(state)
         raise PullMigrationError("public production verification failed")
-    state["status"] = "PRODUCTION_PASS"
+    transition_migration_status(state, "PRODUCTION_PASS")
     state["production_passed_at"] = now_utc()
     state["source_retained_for_recovery"] = True
     state["source_delete_allowed"] = False
@@ -2317,13 +2432,96 @@ def rollback_migration(mid: str, confirm: str) -> dict[str, Any]:
         raise PullMigrationError(f"explicit confirmation required: ROLLBACK_PULL:{mid}")
     target_ok = deactivate_target_runtime(state)
     source_ok = restore_old_server(state)
-    state["status"] = "ROLLED_BACK" if target_ok and source_ok else "ROLLBACK_PARTIAL"
+    transition_migration_status(
+        state,
+        "ROLLED_BACK" if target_ok and source_ok else "ROLLBACK_PARTIAL",
+    )
     state["source_delete_allowed"] = False
     state["dns_changed_by_p07"] = False
     save_state(state)
     if not (target_ok and source_ok):
         raise PullMigrationError("rollback is partial and needs operator attention")
     return state
+
+
+def post_migration_audit(state: dict[str, Any]) -> dict[str, Any]:
+    checks = {
+        "production_pass": state.get("status") == "PRODUCTION_PASS",
+        "public_route_proof_pass": (
+            isinstance(state.get("public_route_proof"), dict)
+            and state["public_route_proof"].get("status") == "PASS"
+        ),
+        "production_verification_pass": (
+            isinstance(state.get("production_verification"), dict)
+            and state["production_verification"].get("status") == "PASS"
+        ),
+        "source_recovery_copy_retained": bool(
+            state.get("source_retained_for_recovery")
+        ),
+        "source_delete_denied": not bool(
+            state.get("source_delete_allowed", False)
+        ),
+        "dns_not_changed_by_p07": not bool(
+            state.get("dns_changed_by_p07", False)
+        ),
+        "existing_target_overwrite_denied": not bool(
+            state.get("existing_target_overwrite_allowed", False)
+        ),
+        "secrets_not_emitted": not bool(
+            state.get("secrets_emitted", False)
+        ),
+        "source_runtime_frozen_for_recovery": (
+            state.get("source_runtime_frozen") is True
+        ),
+    }
+    blocker_tokens = {
+        "production_pass": "MIGRATION_NOT_PRODUCTION_PASS",
+        "public_route_proof_pass": "PUBLIC_ROUTE_NOT_VERIFIED",
+        "production_verification_pass": "PRODUCTION_VERIFY_NOT_PASS",
+        "source_recovery_copy_retained": "SOURCE_RECOVERY_COPY_NOT_RETAINED",
+        "source_delete_denied": "SOURCE_DELETE_POLICY_VIOLATION",
+        "dns_not_changed_by_p07": "DNS_MUTATION_POLICY_VIOLATION",
+        "existing_target_overwrite_denied": "TARGET_OVERWRITE_POLICY_VIOLATION",
+        "secrets_not_emitted": "SECRET_OUTPUT_POLICY_VIOLATION",
+        "source_runtime_frozen_for_recovery": "SOURCE_RUNTIME_NOT_FROZEN",
+    }
+    closure_blockers = [
+        blocker_tokens[key]
+        for key, passed in checks.items()
+        if not passed
+    ]
+    retirement_blockers = ["OWNER_RETIREMENT_GATE_REQUIRED"]
+    if state.get("source_helper_retained_for_recovery"):
+        retirement_blockers.append("SOURCE_HELPER_RETAINED_FOR_RECOVERY")
+
+    return {
+        "status": (
+            "PRODUCTION_CLOSURE_VERIFIED"
+            if not closure_blockers
+            else "INCOMPLETE"
+        ),
+        "old_server_disposition": "RETAIN_RECOVERY_COPY",
+        "retirement_readiness": "NOT_AUTHORIZED",
+        "owner_retirement_gate_required": True,
+        "old_server_delete_allowed": False,
+        "source_runtime_state": (
+            "FROZEN"
+            if state.get("source_runtime_frozen") is True
+            else (
+                "LIVE"
+                if state.get("source_runtime_frozen") is False
+                else "UNKNOWN"
+            )
+        ),
+        "source_helper_retained_for_recovery": bool(
+            state.get("source_helper_retained_for_recovery")
+        ),
+        "production_passed_at": state.get("production_passed_at"),
+        "checks": checks,
+        "closure_blockers": closure_blockers,
+        "retirement_blockers": retirement_blockers,
+        "writes_performed": False,
+    }
 
 
 def summary(state: dict[str, Any]) -> dict[str, Any]:
@@ -2345,6 +2543,7 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "target_smoke": state.get("target_smoke"),
         "public_route_proof": state.get("public_route_proof"),
         "production_verification": state.get("production_verification"),
+        "post_audit": post_migration_audit(state),
         "dns_manual_gate_required": state.get("dns_manual_gate_required", False),
         "source_retained_for_recovery": state.get(
             "source_retained_for_recovery", False
@@ -2352,10 +2551,12 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "old_server_external_listeners": state.get(
             "source_external_listeners", []
         ),
-        "source_delete_allowed": False,
-        "dns_changed_by_p07": False,
-        "existing_target_overwrite_allowed": False,
-        "secrets_emitted": False,
+        "source_delete_allowed": bool(state.get("source_delete_allowed", False)),
+        "dns_changed_by_p07": bool(state.get("dns_changed_by_p07", False)),
+        "existing_target_overwrite_allowed": bool(
+            state.get("existing_target_overwrite_allowed", False)
+        ),
+        "secrets_emitted": bool(state.get("secrets_emitted", False)),
     }
 
 
