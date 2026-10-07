@@ -72,7 +72,7 @@ class StorageOnboardingUXTests(unittest.TestCase):
         self.assertNotIn("--client-secret", self.oauth)
 
     def test_existing_source_import_and_safety_routes_remain(self) -> None:
-        self.assertIn("从已有 P07 服务器导入", self.setup)
+        self.assertIn("从仍在线的旧 P07 服务器导入", self.setup)
         self.assertIn("import_from_source", self.setup)
         self.assertIn("DNS：未修改", self.setup)
         self.assertIn("源服务器：保留", self.setup)

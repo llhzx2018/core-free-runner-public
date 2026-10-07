@@ -13,10 +13,10 @@ class Release11BeginnerIaTests(unittest.TestCase):
             "网站与数据概况",
             "备份与恢复",
             "服务器迁移",
-            "网站创建与维护",
-            "面板账号与安全",
         ):
             self.assertIn(label, text)
+        self.assertNotIn("4. 网站创建与维护", text)
+        self.assertNotIn("5. 面板账号与安全", text)
         self.assertIn("backup_menu()", text)
         self.assertIn("立即备份一个网站", text)
         self.assertIn("从备份恢复网站", text)

@@ -1823,8 +1823,6 @@ class TargetPullUiContractTests(unittest.TestCase):
         for marker in (
             "完整初始化：更新 / 时区 / Swap / CloudPanel / 性能配置",
             "一键初始化可以安全重复执行；已正确的项目会跳过，CloudPanel 已健康时不会重复安装。",
-            "一键初始化服务器（推荐）",
-            "请选择 [0-1]",
             "一键初始化服务器",
             "确认开始一键初始化？[y/N]",
             "基础设置 → 系统更新 → CloudPanel → 性能配置 → 最终检查",
@@ -1856,6 +1854,9 @@ class TargetPullUiContractTests(unittest.TestCase):
             "CLOUDPANEL_ADMIN_REQUIRED",
         ):
             self.assertIn(marker, text)
+        self.assertNotIn("一键初始化服务器（推荐）", text)
+        self.assertNotIn("请选择 [0-1]", text)
+        self.assertIn("\npreflight\nrun_initialization\n", text)
         self.assertNotIn("ui_menu_warn 2 '基础设置（时区 / Swap）'", text)
         self.assertNotIn("ui_menu_warn 3 'CloudPanel 状态 / 安装'", text)
         self.assertNotIn("请选择 [0-3]", text)
