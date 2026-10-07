@@ -13,7 +13,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
    await page.goto(url(path));await page.evaluate(()=>document.fonts.ready);await page.waitForFunction(()=>typeof vfToolSiteRunBrowserProbe==='function');
    const result=await page.evaluate(()=>{
     const visible=n=>{const r=n.getBoundingClientRect(),s=getComputedStyle(n);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&!n.hidden;};
-    const targets=[...document.querySelectorAll('.vf-directory-filter-group button,.vf-glossary-letter-index button,.vf-directory-reset,.vf-support-hero-actions a')].filter(visible).map(n=>{
+    const targets=[...document.querySelectorAll('.vf-directory-filter-group button,.vf-directory-filter-select select,.vf-glossary-letter-index button,.vf-directory-reset,.vf-support-hero-actions a')].filter(visible).map(n=>{
      const r=n.getBoundingClientRect(),s=getComputedStyle(n),rules=[];
      const walk=rs=>{for(const rule of rs){if(rule.selectorText){try{if(n.matches(rule.selectorText)&&/min-height|min-width|height:|width:/.test(rule.style.cssText))rules.push(rule.cssText.slice(0,420));}catch{}}else if(rule.cssRules)walk(rule.cssRules);}};
      if(r.height<43.99||r.width<43.99)for(const sheet of document.styleSheets){try{walk(sheet.cssRules);}catch{}}
@@ -32,6 +32,13 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
      const reset=page.locator('[data-vf-directory-reset]').first();await reset.waitFor({state:'visible'});const size=await reset.boundingBox();assert(size.width>=43.99&&size.height>=43.99);await reset.click();
      await page.waitForFunction(()=>!new URL(location.href).searchParams.has('vf_filter')&&document.querySelector('.vf-directory-filter-group button[data-vf-directory-filter-button="all"]')?.getAttribute('aria-pressed')==='true');
      actions.push({width,path,category:value,keyboard:'PASS',reset:'PASS'});save();
+    }else{
+     const select=page.locator('.vf-directory-filter-select select').first();assert(await select.isVisible(),'mobile filter select missing');
+     const value=await select.locator('option:not([value="all"])').first().getAttribute('value');await select.selectOption(value);
+     await page.waitForURL(u=>u.searchParams.get('vf_filter')===value);await page.waitForLoadState('load');assert.equal(await select.inputValue(),value);
+     const reset=page.locator('[data-vf-directory-reset]').first();await reset.waitFor({state:'visible'});const size=await reset.boundingBox();assert(size.width>=43.99&&size.height>=43.99);await reset.click();
+     await page.waitForURL(u=>!u.searchParams.has('vf_filter'));await page.waitForLoadState('load');assert.equal(await select.inputValue(),'all');
+     actions.push({width,path,category:value,select:'PASS',reset:'PASS'});save();
     }
     await page.goto(url(path));
     if(path==='/glossary/'){
