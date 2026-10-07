@@ -45,7 +45,8 @@ class OpsConsoleR9Tests(unittest.TestCase):
     def test_selfcheck_and_init_are_guarded(self):
         selfcheck=(ROOT/"bin/vfops-selfcheck-ui").read_text(encoding="utf-8")
         init=(ROOT/"bin/vfops-init-ui").read_text(encoding="utf-8")
-        self.assertIn("ui_confirm_exact '修复'",selfcheck)
+        self.assertIn("现在重新安装工具运行文件？[y/N]",selfcheck)
+        self.assertNotIn("ui_menu_info 1 '重新检查'",selfcheck)
         self.assertIn("APPLY_BASELINE",init)
         self.assertIn("INSTALL_CLOUDPANEL",init)
         self.assertIn("DNS、生产切流、旧服务器删除均不属于初始化自动步骤",init)
