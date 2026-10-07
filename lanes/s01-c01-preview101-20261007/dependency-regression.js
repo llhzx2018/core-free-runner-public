@@ -11,9 +11,19 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
   if(route==='/m3u8-player/'){
    assert.equal(head.container.status,'PASS');assert(head.toolControls.length>0,'actual Provider controls absent');
    const contrast=await page.evaluate(()=>{const nodes=[...document.querySelectorAll('.vf-container-tool')],saved=nodes.map(n=>n.className);nodes.forEach(n=>n.classList.remove('vf-container-tool'));const bad=vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'];nodes.forEach((n,i)=>n.className=saved[i]);const restored=vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'];return {container_count:nodes.length,bad,restored};});assert.equal(contrast.bad.status,'FAIL');assert.equal(contrast.restored.status,'PASS');routes[routes.length-1].contrast=contrast;
+   const stage=page.locator('.vf-theme-tool-shortcode > .vf-container-tool'),input=stage.locator('input[type="url"]').first();
+   await input.fill('https://example.invalid/isolated-owned-input.m3u8');
+   await stage.getByRole('button',{name:'Clear',exact:true}).click();assert.equal(await input.inputValue(),'','Provider clear did not reset URL input');
+   await stage.getByRole('button',{name:'Pro',exact:true}).click();
+   const advanced=stage.getByRole('button',{name:'Expand professional options',exact:true});if(await advanced.isVisible())await advanced.click();
+   const select=stage.locator('select:visible').first();assert(await select.isVisible(),'real Provider dropdown unavailable');
+   const values=await select.locator('option').evaluateAll(ns=>ns.map(n=>n.value));assert(values.length>=2);await select.selectOption(values[1]);assert.equal(await select.inputValue(),values[1]);
+   await stage.getByRole('button',{name:'Simple',exact:true}).click();
+   routes[routes.length-1].interactions={url_input:'PASS',clear:'PASS',pro_mode:'PASS',dropdown:'PASS',simple_mode:'PASS',external_media_requests:'NOT_EXECUTED'};
+
   }
  }
- for(const width of [1440,768,390]){await page.setViewportSize({width,height:1000});await page.goto(base+'/m3u8-player/');await page.evaluate(()=>document.fonts.ready);assert(await page.locator('.vf-container-tool').isVisible());const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+4);assert(!overflow);await page.screenshot({path:'proof/provider-player-'+width+'.png',fullPage:true});}
+ for(const width of [1440,768,390]){await page.setViewportSize({width,height:1000});await page.goto(base+'/m3u8-player/');await page.evaluate(()=>document.fonts.ready);assert(await page.locator('.vf-theme-tool-shortcode > .vf-container-tool').isVisible());const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+4);assert(!overflow);await page.screenshot({path:'proof/provider-player-'+width+'.png',fullPage:true});}
  await page.goto(url);const root=page.locator('[data-vf-preview-page]');await root.locator('[data-vf-preview-mode]').selectOption('live_roundtrip');await root.locator('[data-vf-preview-run]').click();await page.waitForFunction(()=>document.querySelector('[data-vf-preview-page]').getAttribute('aria-busy')==='false',{},{timeout:480000});
  const [download]=await Promise.all([page.waitForEvent('download'),root.locator('[data-vf-preview-download]').click()]);const artifact=JSON.parse(fs.readFileSync(await download.path(),'utf8'));assert.equal(artifact.mode,'live_roundtrip');
  // Keep the engine's real verdict and every remaining issue; availability
