@@ -51,7 +51,11 @@ class Release11BeginnerIaTests(unittest.TestCase):
             text = (ROOT / relative).read_text(encoding="utf-8")
             self.assertIn('replace("\\\\033", chr(27))', text, relative)
         diagnostics = (ROOT / "bin" / "vfops-diagnostics-ui").read_text(encoding="utf-8")
-        self.assertIn('colors={"OK":"","WARN":"","ERROR":""}', diagnostics)
+        self.assertIn('print("结论        "', diagnostics)
+        self.assertIn('工具箱', diagnostics)
+        self.assertIn('网站服务', diagnostics)
+        self.assertIn('服务器资源', diagnostics)
+        self.assertIn('本地备份', diagnostics)
         self.assertIn('reset=""', diagnostics)
 
 
