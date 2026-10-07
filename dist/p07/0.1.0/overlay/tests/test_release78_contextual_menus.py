@@ -17,7 +17,9 @@ class ContextualBackupMenuTests(unittest.TestCase):
             "first_pass=0",
             "cron_ready=0",
             "下一步：先完成 Google + B2 异地备份设置；完成前不显示备份执行和定时开关。",
-            "首次验证：立即备份全部网站",
+            "首次验证：先备份一个网站",
+            "继续验证：备份全部网站",
+            "smoke_backup_pass_recorded",
             "通过后才显示自动备份开关。",
             "开启自动备份",
             "修改自动备份",
@@ -26,6 +28,8 @@ class ContextualBackupMenuTests(unittest.TestCase):
             self.assertIn(marker, self.auto)
         self.assertIn('[[ "$cron_ready" -eq 1 ]] && disable_auto', self.auto)
         self.assertIn('[[ "$first_pass" -eq 1 ]] && enable_or_update', self.auto)
+        self.assertIn('run_now smoke', self.auto)
+        self.assertIn('run_now full', self.auto)
 
     def test_remote_storage_menu_changes_with_setup_state(self) -> None:
         for marker in (
