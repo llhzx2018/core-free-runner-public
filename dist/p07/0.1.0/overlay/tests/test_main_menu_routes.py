@@ -13,13 +13,11 @@ class MainMenuRouteContractTests(unittest.TestCase):
         cls.site = (ROOT / "bin" / "vfops-site-ui").read_text(encoding="utf-8")
         cls.common = (ROOT / "lib" / "cloudpanel_ui_common.sh").read_text(encoding="utf-8")
 
-    def test_five_top_level_routes_and_backup_group_are_wired(self) -> None:
+    def test_three_top_level_routes_and_backup_group_are_wired(self) -> None:
         expected = (
             '1) run_module "$SITE_UI" overview ;;',
             '2) backup_menu ;;',
             '3) run_module "$MIGRATE_UI" ;;',
-            '4) run_module "$CLOUDPANEL_UI" site ;;',
-            '5) run_module "$CLOUDPANEL_UI" admin ;;',
         )
         for route in expected:
             self.assertIn(route, self.user)
@@ -29,6 +27,8 @@ class MainMenuRouteContractTests(unittest.TestCase):
             '3) run_module "$AUTO_UI" ;;',
         ):
             self.assertIn(route, self.user)
+        self.assertNotIn('run_module "$CLOUDPANEL_UI" site', self.user)
+        self.assertNotIn('run_module "$CLOUDPANEL_UI" admin', self.user)
         self.assertNotIn('8) run_module "$DIAG_UI" ;;', self.user)
         self.assertNotIn('11) run_module "$INIT_UI" ;;', self.user)
 
