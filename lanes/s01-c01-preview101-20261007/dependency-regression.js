@@ -34,6 +34,6 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
  const providerIssues=artifact.issues.filter(n=>n.path===base+'/m3u8-player/' && ((n.category==='structure' && n.current==='实际 2 个') || (n.category==='uaui' && n.problem.includes('小触控目标'))));
  const themeIssues=artifact.issues.filter(n=>!providerIssues.includes(n));
  const result={status:themeIssues.length===0?'PASS':'FAIL',meaning:'BOUNDED_THEME_AND_ACTUAL_DEPENDENCY_PROOF_PROVIDER_DEFECTS_PRESERVED_NOT_OWNER_PRODUCT_PASS',provider_issues:providerIssues,theme_issues:themeIssues,head_contract:'UNPAIRED_PUBLISHED_OBJECTS_EMIT_NO_HREFLANG',headProof,routes,runId:artifact.runId,engine_status:artifact.status,issue_count:artifact.issues.length,issues:artifact.issues,focused_issues:focused,rows:artifact.rows.length,production:'NOT_EXECUTED'};
- fs.writeFileSync('proof/dependency-regression.json',JSON.stringify(result,null,2));assert.equal(themeIssues.length,0,'Theme-owned or unclassified issues remain with dependencies installed');
+ fs.writeFileSync('proof/dependency-regression.json',JSON.stringify(result,null,2));console.log('VF_DEPENDENCY_RESULT_BEGIN');console.log(JSON.stringify({status:result.status,issue_count:result.issue_count,theme_issues:result.theme_issues,provider_issues:result.provider_issues}));console.log('VF_DEPENDENCY_RESULT_END');assert.equal(themeIssues.length,0,'Theme-owned or unclassified issues remain with dependencies installed');
  await browser.close();
 })().catch(e=>{console.error(e);process.exit(1)});

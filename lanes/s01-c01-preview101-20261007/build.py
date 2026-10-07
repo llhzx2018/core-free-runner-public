@@ -6,7 +6,10 @@ assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only','-z','04deddb177a338a7a154dd5065aee3319764b288','HEAD'],text=True).split('\0')
 changed=[f for f in changed if f and not f.startswith('evidence/')]
-assert set(changed)==set(['VERSION','src/style.css','src/theme.json','src/inc/runtime-constants.php','src/inc/services/url/public-url-output-guard-bridge.php','src/assets/js/modules/browser-behavior-probe.js','src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css','src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css']),changed
+assert set(changed)==set(['VERSION','src/style.css','src/theme.json','src/inc/runtime-constants.php','src/inc/services/url/public-url-output-guard-bridge.php','src/assets/js/modules/browser-behavior-probe.js','src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css','src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css','src/assets/css/public/vf-theme-public-runtime.css']),changed
+bundle=(root/'assets/css/public/vf-theme-public-runtime.css').read_text()
+for rel in ['assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css','assets/css/public/pages/families/public-family-03-content-list-operations-closure.css']:
+ assert bundle.count((root/rel).read_text())==1, 'active bundle/source mismatch: '+rel
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
