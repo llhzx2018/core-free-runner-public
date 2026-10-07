@@ -72,4 +72,6 @@ cli plugin install /tmp/provider.zip --activate > proof/provider-install.txt
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = 1.25.57
 docker cp lane/dependency-seed.php "$WP:/tmp/dependency-seed.php"
 cli eval-file /tmp/dependency-seed.php > proof/dependency-seed.json
+docker cp lane/dependency-head-proof.php "$WP:/tmp/dependency-head-proof.php"
+cli eval-file /tmp/dependency-head-proof.php > proof/dependency-head-proof.json
 node lane/dependency-regression.js
