@@ -11,6 +11,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
   if(route==='/m3u8-player/'){
    assert.equal(head.container.status,'PASS');assert(head.toolControls.length>0,'actual Provider controls absent');
    const contrast=await page.evaluate(()=>{const nodes=[...document.querySelectorAll('.vf-container-tool')],saved=nodes.map(n=>n.className);nodes.forEach(n=>n.classList.remove('vf-container-tool'));const bad=vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'];nodes.forEach((n,i)=>n.className=saved[i]);const restored=vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'];return {container_count:nodes.length,bad,restored};});assert.equal(contrast.bad.status,'FAIL');assert.equal(contrast.restored.status,'PASS');routes[routes.length-1].contrast=contrast;
+   const ownershipContrast=await page.evaluate(()=>{const shell=document.querySelector('.vf-theme-tool-shortcode'),n=document.createElement('input');shell.appendChild(n);const bad=vfToolSiteRunBrowserProbe().checks['theme-tool-shell-has-no-runtime-controls'];n.remove();const restored=vfToolSiteRunBrowserProbe().checks['theme-tool-shell-has-no-runtime-controls'];return {bad,restored};});assert.equal(ownershipContrast.bad.status,'FAIL');assert.equal(ownershipContrast.restored.status,'PASS');routes[routes.length-1].ownershipContrast=ownershipContrast;
    const stage=page.locator('.vf-theme-tool-shortcode > .vf-container-tool'),input=stage.locator('input[type="url"]').first();
    await input.fill('https://example.invalid/isolated-owned-input.m3u8');
    await stage.getByRole('button',{name:'Clear',exact:true}).click();assert.equal(await input.inputValue(),'','Provider clear did not reset URL input');
@@ -28,8 +29,11 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
  const [download]=await Promise.all([page.waitForEvent('download'),root.locator('[data-vf-preview-download]').click()]);const artifact=JSON.parse(fs.readFileSync(await download.path(),'utf8'));assert.equal(artifact.mode,'live_roundtrip');
  // Keep the engine's real verdict and every remaining issue; availability
  // checks below are bounded to the actual dependency/content setup above.
+ fs.writeFileSync('proof/dependency-engine-full.json',JSON.stringify(artifact,null,2));
  const focused=artifact.issues.filter(n=>routes.some(r=>(n.path||'').split('?')[0]===base+r.route));
- const result={status:'PASS',meaning:'ACTUAL_PROVIDER_AND_PUBLISHED_CONTENT_ROUTE_PROOF_NOT_OWNER_PRODUCT_PASS',head_contract:'UNPAIRED_PUBLISHED_OBJECTS_EMIT_NO_HREFLANG',headProof,routes,runId:artifact.runId,engine_status:artifact.status,issue_count:artifact.issues.length,issues:artifact.issues,focused_issues:focused,rows:artifact.rows.length,production:'NOT_EXECUTED'};
- fs.writeFileSync('proof/dependency-regression.json',JSON.stringify(result,null,2));assert.equal(focused.length,0,'route/head/tool failures remain with dependencies installed');
+ const providerIssues=artifact.issues.filter(n=>n.path===base+'/m3u8-player/' && ((n.category==='structure' && n.current==='实际 2 个') || (n.category==='uaui' && n.problem.includes('小触控目标'))));
+ const themeIssues=artifact.issues.filter(n=>!providerIssues.includes(n));
+ const result={status:themeIssues.length===0?'PASS':'FAIL',meaning:'BOUNDED_THEME_AND_ACTUAL_DEPENDENCY_PROOF_PROVIDER_DEFECTS_PRESERVED_NOT_OWNER_PRODUCT_PASS',provider_issues:providerIssues,theme_issues:themeIssues,head_contract:'UNPAIRED_PUBLISHED_OBJECTS_EMIT_NO_HREFLANG',headProof,routes,runId:artifact.runId,engine_status:artifact.status,issue_count:artifact.issues.length,issues:artifact.issues,focused_issues:focused,rows:artifact.rows.length,production:'NOT_EXECUTED'};
+ fs.writeFileSync('proof/dependency-regression.json',JSON.stringify(result,null,2));assert.equal(themeIssues.length,0,'Theme-owned or unclassified issues remain with dependencies installed');
  await browser.close();
 })().catch(e=>{console.error(e);process.exit(1)});
