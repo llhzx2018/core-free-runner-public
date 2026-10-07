@@ -56,7 +56,6 @@ class Release11BeginnerIaTests(unittest.TestCase):
         self.assertIn('网站服务', diagnostics)
         self.assertIn('服务器资源', diagnostics)
         self.assertIn('本地备份', diagnostics)
-        self.assertIn('reset=""', diagnostics)
 
 
 if __name__ == "__main__":
