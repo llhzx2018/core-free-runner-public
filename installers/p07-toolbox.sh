@@ -18,7 +18,7 @@ VPS_AUDIT_SHA256="32a47dc8f7a284dc533ddb7bcb6742ad985703cf38be72f0a7ba4e0d50c340
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release77"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release78"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
