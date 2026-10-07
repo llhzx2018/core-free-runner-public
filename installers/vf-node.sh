@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc10'
+VERSION='0.1.0-rc11'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='06e6a344da755cada5312b1df9882564ca997e69af21abc581605883f3223bd5'
+MANIFEST_SHA256='2eb9adb4e798183a2f9fcebc2a9d04734d5c9d069f1d9e122d0ad9bc8b4f8fe7'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 
