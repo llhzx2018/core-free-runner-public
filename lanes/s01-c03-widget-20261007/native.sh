@@ -50,13 +50,16 @@ VF_PHASE=upgrade cli eval-file /tmp/widget-native-phase.php > proof/native-upgra
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$TARGET_VERSION"
 VF_PHASE=candidate cli eval-file /tmp/widget-native-phase.php > proof/native-candidate.json
 VF_PHASE=candidate node lane/widget-regression.js > /tmp/candidate-browser.txt 2>&1 || { tail -c 12000 /tmp/candidate-browser.txt;exit 1; }
+cat /tmp/candidate-browser.txt
 cp -a proof/. checks/candidate/proof/
 VF_PHASE=restore cli eval-file /tmp/widget-native-phase.php > proof/native-source-recovery.json
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$SOURCE_VERSION"
 VF_PHASE=rollback cli eval-file /tmp/widget-native-phase.php > proof/native-rollback.json
+VF_PHASE=rollback node lane/widget-regression.js > /tmp/rollback-browser.txt 2>&1 || { tail -c 12000 /tmp/rollback-browser.txt;exit 1; }
 VF_PHASE=reapply cli eval-file /tmp/widget-native-phase.php > proof/native-reapply.json
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$TARGET_VERSION"
 VF_PHASE=candidate cli eval-file /tmp/widget-native-phase.php > proof/native-reapply-readback.json
+VF_PHASE=reapply node lane/widget-regression.js > /tmp/reapply-browser.txt 2>&1 || { tail -c 12000 /tmp/reapply-browser.txt;exit 1; }
 # Same real C03-candidate WP instance: canonical eight Theme pages and their
 # sixteen actual saves/front-end/recovery interactions, without resetting DB.
 mkdir -p checks/integration/proof;ln -sfn ../../lane checks/integration/lane
@@ -74,12 +77,14 @@ cli plugin install /tmp/candidate.zip --activate >/dev/null
 seed
 cli eval-file /tmp/dependency-seed.php > proof/clean-seed.json
 cli eval 'require_once ABSPATH."wp-admin/includes/plugin.php";$s=VF_M3U8_Runtime_Authority_V1::stored();if(VF_TOOL_M3U8_VERSION!==getenv("CANDIDATE_VERSION")||!is_plugin_active("vf-tool-m3u8/vf-tool-m3u8.php")||$s["file_count"]!==567||is_wp_error(VF_M3U8_Runtime_Authority_V1::verify(getenv("CANDIDATE_VERSION"),WP_PLUGIN_DIR."/vf-tool-m3u8"))){throw new Exception("clean install failed");}echo wp_json_encode(["status"=>"PASS","version"=>VF_TOOL_M3U8_VERSION,"runtime"=>$s,"provider_state"=>VF_M3U8_Update_State_V1::snapshot()]);' > proof/clean-install.json
+cli eval-file /tmp/dependency-head-proof.php > proof/dependency-head-proof.json
+VF_PHASE=clean node lane/widget-regression.js > /tmp/clean-browser.txt 2>&1 || { tail -c 12000 /tmp/clean-browser.txt;exit 1; }
 curl -fsS http://127.0.0.1:18880/m3u8-player/ > /tmp/clean-tool.html
 ! grep -Ei 'Fatal error|critical error|Parse error' /tmp/clean-tool.html
 python3 - <<'PYFINAL'
 import pathlib,json,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text());base=json.loads(pathlib.Path('checks/baseline/proof/widget-result.json').read_text());candidate=json.loads(pathlib.Path('checks/candidate/proof/widget-result.json').read_text());assert base['issue_count']==4 and candidate['issue_count']==0
-for name in ['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','clean-install']:
+for name in ['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','clean-install','widget-quick-rollback','widget-quick-reapply','widget-quick-clean']:
  assert json.loads((p/(name+'.json')).read_text())['status']=='PASS',name
 for name in ['native-candidate','native-reapply-readback','clean-install']:
  r=json.loads((p/(name+'.json')).read_text())['runtime'];assert r['fingerprint_sha256']==identity['runtime_fingerprint'] and r['file_count']==567 and r['version']==os.environ['TARGET_VERSION'],name
