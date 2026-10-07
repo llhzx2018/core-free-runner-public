@@ -1,0 +1,93 @@
+name: S01-C01 exact channel isolated regression
+on:
+  push:
+    branches: [task/s01-c01-preview101-channel-20261007-check]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TARGET_REPO: 'llhzx2018/core-updates'
+      TARGET_VERSION: '1.3.0'
+      TARGET_SHA: '7dfd6500901bc8a42a1c5d45640912800dd92a69'
+      TARGET_TREE: 'e9ffcf16a62a4d0a393cae8ef92c70e9263c5d44'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Exact spec identity
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c01-preview101-channel-20261007/spec.json --template runner/lanes/s01-c01-preview101-channel-20261007/channel.template.yml --output /tmp/channel-check.yml >/dev/null
+          cmp /tmp/channel-check.yml runner/.github/workflows/s01-c01-preview101-channel-20261007-check.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c01-preview101-channel-20261007/spec.json --input runner/.github/workflows/s01-c01-preview101-channel-20261007-check.yml > proof/identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: 'llhzx2018/core-updates'
+          ref: '7dfd6500901bc8a42a1c5d45640912800dd92a69'
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Unchanged native CI and exact manifest
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = '7dfd6500901bc8a42a1c5d45640912800dd92a69'
+          test "$(git rev-parse HEAD^{tree})" = 'e9ffcf16a62a4d0a393cae8ef92c70e9263c5d44'
+          test "$(git diff --name-only '316f9134f2a465780c55205b9a899d7bf40e804b' HEAD)" = projects/S01-C01.json
+          test "$(cat VERSION)" = '1.3.0'
+          git diff --exit-code '316f9134f2a465780c55205b9a899d7bf40e804b' HEAD -- .github/workflows/update-core-ci.yml update-core/php scripts/check_manifest_contract.py schemas
+          python3 scripts/check_manifest_contract.py
+          php -v
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l
+          php update-core/php/tests/run.php
+          python3 - <<'PY'
+          import pathlib,json
+          m=json.loads(pathlib.Path('projects/S01-C01.json').read_text())
+          assert m['target_version']=='1.35.101' and m['asset_sha256']=='{{COMPONENT_ASSET_SHA256}}' and m['asset_bytes']==1787614
+          assert m['from_versions'][-1]=='1.35.100' and len(m['from_versions'])==len(set(m['from_versions']))==93
+          assert m['backup_required'] and m['rollback_supported'] and m['schema_from']==m['schema_to']=='N/A'
+          assert m['release_tag']=='v1.35.101' and m['asset_name']=='vf-tools-theme_V1.35.101.zip' and m['runtime_files']==467 and m['runtime_fingerprint']=='9a9845db548fa154d634b7159d9589232bca9044a2d7409bb1ce0bc894f38553'
+          print('VF_CHANNEL_NATIVE_BEGIN')
+          r={'status':'PASS','repository':'llhzx2018/core-updates','source_sha':'7dfd6500901bc8a42a1c5d45640912800dd92a69','source_tree':'e9ffcf16a62a4d0a393cae8ef92c70e9263c5d44','native_ci_unmodified':'PASS','manifest_contract':'PASS','php_syntax':'PASS','update_core_regression':'PASS','scope_one_manifest':'PASS','production':'NOT_EXECUTED'}
+          pathlib.Path('../proof/channel.json').write_text(json.dumps(r,indent=2));print(json.dumps(r))
+          print('VF_CHANNEL_NATIVE_END')
+          PY
+      - id: channel_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-channel-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Read back actual channel artifact ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.channel_artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/channel-artifact-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/channel-artifact.zip
+          python3 - <<'PYREAD'
+          import os,json,pathlib,hashlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/channel-artifact-meta.json').read_text()); b=pathlib.Path('/tmp/channel-artifact.zip').read_bytes(); d='sha256:'+hashlib.sha256(b).hexdigest()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and not m['expired'] and m['size_in_bytes']==len(b) and m['digest']==d
+          assert m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          with zipfile.ZipFile('/tmp/channel-artifact.zip') as z:
+              assert z.testzip() is None and set(z.namelist())=={'channel.json','identity-audit.json'}
+              for n in z.namelist(): assert json.loads(z.read(n))==json.loads(pathlib.Path('proof',n).read_text())
+              c=json.loads(z.read('channel.json')); a=json.loads(z.read('identity-audit.json'))
+              assert c['status']==a['status']=='PASS' and c['source_sha']==a['target_sha']=='7dfd6500901bc8a42a1c5d45640912800dd92a69' and c['source_tree']=='e9ffcf16a62a4d0a393cae8ef92c70e9263c5d44'
+          print('VF_CHANNEL_ARTIFACT_BEGIN')
+          print(json.dumps({'status':'PASS','id':m['id'],'run_id':int(os.environ['GITHUB_RUN_ID']),'runner_sha':os.environ['GITHUB_SHA'],'bytes':len(b),'digest':d,'crc':'PASS','json_readback':'PASS','source_sha':'7dfd6500901bc8a42a1c5d45640912800dd92a69','source_tree':'e9ffcf16a62a4d0a393cae8ef92c70e9263c5d44'}))
+          print('VF_CHANNEL_ARTIFACT_END')
+          PYREAD
+      - name: Cleanup transient target
+        if: always()
+        run: rm -rf target
