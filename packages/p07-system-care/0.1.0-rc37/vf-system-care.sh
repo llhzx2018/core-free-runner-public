@@ -63,24 +63,24 @@ show_header() {
     NORMAL) printf '网站安全    %b正常%b\n' "$C_GREEN" "$C_RESET" ;;
     ATTENTION)
       if [[ "$events" =~ ^[0-9]+$ ]] && (( events > 0 )); then
-        printf '网站安全    %b需查看%b · %s 条异常 · 按 5 查看\n' "$C_YELLOW" "$C_RESET" "$events"
+        printf '网站安全    %b需查看%b · %s 条异常 · 按 6 查看\n' "$C_YELLOW" "$C_RESET" "$events"
       else
-        printf '网站安全    %b需查看%b · 按 5 查看\n' "$C_YELLOW" "$C_RESET"
+        printf '网站安全    %b需查看%b · 按 6 查看\n' "$C_YELLOW" "$C_RESET"
       fi
       ;;
-    FAILED) printf '网站安全    %b检查失败%b · 按 5 查看原因\n' "$C_RED" "$C_RESET" ;;
-    NOT_ENABLED) printf '网站安全    未开启 · 按 5 查看\n' ;;
-    *) printf '网站安全    %b未检查%b · 按 5 查看\n' "$C_GRAY" "$C_RESET" ;;
+    FAILED) printf '网站安全    %b检查失败%b · 按 6 查看原因\n' "$C_RED" "$C_RESET" ;;
+    NOT_ENABLED) printf '网站安全    未开启 · 按 6 查看\n' ;;
+    *) printf '网站安全    %b未检查%b · 按 6 查看\n' "$C_GRAY" "$C_RESET" ;;
   esac
 
   case "$scheduler" in
     systemd|cron) printf '自动检查    %b已开启%b\n' "$C_GREEN" "$C_RESET" ;;
-    broken) printf '自动检查    %b异常%b · 按 5 查看\n' "$C_RED" "$C_RESET" ;;
+    broken) printf '自动检查    %b异常%b · 按 6 查看\n' "$C_RED" "$C_RESET" ;;
     none)
       if [[ "$evidence" == NOT_ENABLED ]]; then
         printf '自动检查    未开启\n'
       else
-        printf '自动检查    未开启 · 按 5 查看\n'
+        printf '自动检查    未开启 · 按 6 查看\n'
       fi
       ;;
     *) printf '自动检查    %b未检查%b\n' "$C_GRAY" "$C_RESET" ;;
