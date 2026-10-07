@@ -7,7 +7,7 @@ VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc11"
+VF_NODE_EXPECTED="0.1.0-rc12"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 VPS_AUDIT_PUBLIC="V2.2.3"
@@ -49,7 +49,7 @@ show_menu() {
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray代理${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
-  say "  ${C_GREEN}4.${C_RESET} 日常维护与安全      ${C_GRAY}系统更新/清理${C_RESET}"
+  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
   say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}更新/面板/优化${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
@@ -348,7 +348,7 @@ case "${1:-}" in
 1. 网络代理节点          V2Ray代理   ${VF_NODE_PUBLIC}
 2. 服务器性能检测        VPS验机     ${VPS_AUDIT_PUBLIC}
 3. 网站与数据            网站/数据库/备份  ${VF_SERVER_OPS_PUBLIC}
-4. 日常维护与安全        系统更新/清理      ${SYSTEM_CARE_PUBLIC}
+4. 服务器维护与安全      更新/清理/安全    ${SYSTEM_CARE_PUBLIC}
 5. 新服务器初始化        更新/面板/优化    ${VF_SERVER_OPS_PUBLIC}
 
 说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
