@@ -6,7 +6,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
  await page.goto(url);const nonce=await page.evaluate(()=>VFThemePreview.probeNonce);const routes=[],headProof=JSON.parse(fs.readFileSync('proof/dependency-head-proof.json','utf8'));assert.equal(headProof.rows.length,4);for(const r of headProof.rows){assert.equal(r.http,200);assert.equal(new URL(r.resolved_url).pathname,r.route);assert.equal(r.issues.length,0,JSON.stringify(r.issues));}
  for(const route of ['/m3u8-player/','/guides/how-to-check-if-m3u8-is-encrypted/','/problems/m3u8-403-forbidden-fix/','/tool-notes/m3u8-player/']){
   const response=await page.goto(base+route+'?vf_probe=1&vf_probe_nonce='+encodeURIComponent(nonce));await page.waitForFunction(()=>typeof vfToolSiteRunBrowserProbe==='function');
-  const head=await page.evaluate(()=>({path:location.pathname,error404:document.body.classList.contains('error404'),title:document.title,canonical:[...document.querySelectorAll('link[rel="canonical"]')].map(n=>n.href),robots:[...document.querySelectorAll('meta[name="robots"]')].map(n=>n.content),hreflang:[...document.querySelectorAll('link[rel="alternate"][hreflang]')].map(n=>({lang:n.hreflang,url:n.href})),container:vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'],toolControls:[...document.querySelectorAll('.vf-container-tool input,.vf-container-tool button,.vf-container-tool select')].map(n=>({tag:n.tagName,type:n.type,id:n.id,text:(n.textContent||'').trim().slice(0,80)}))}));
+  const head=await page.evaluate(()=>({path:location.pathname,error404:document.body.classList.contains('error404'),title:document.title,canonical:[...document.querySelectorAll('link[rel="canonical"]')].map(n=>n.href),robots:[...document.querySelectorAll('meta[name="robots"]')].map(n=>n.content),hreflang:[...document.querySelectorAll('link[rel="alternate"][hreflang]')].map(n=>({lang:n.hreflang,url:n.href})),container:vfToolSiteRunBrowserProbe().checks['m3u8-tool-container-width-contract'],toolControls:[...document.querySelectorAll('.vf-container-tool input,.vf-container-tool button,.vf-container-tool select')].map(n=>({tag:n.tagName,type:n.type,id:n.id,role:n.getAttribute('role'),label:n.getAttribute('aria-label'),text:(n.textContent||'').trim().slice(0,80)}))}));
   routes.push({route,http:response.status(),...head});fs.writeFileSync('proof/dependency-routes-progress.json',JSON.stringify(routes,null,2));assert.equal(response.status(),200,route);assert(!head.error404);assert.equal(head.canonical.length,1,route);assert.equal(new URL(head.canonical[0]).pathname,route);assert(head.title);assert(!head.robots.join(',').includes('noindex'));const expected=Object.fromEntries(Object.entries(headProof.rows.find(n=>n.route===route).expected.hreflang));assert.deepEqual(Object.fromEntries(head.hreflang.map(n=>[n.lang,n.url])),expected);
   if(route==='/m3u8-player/'){
    assert.equal(head.container.status,'PASS');assert(head.toolControls.length>0,'actual Provider controls absent');
@@ -14,11 +14,11 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
    const stage=page.locator('.vf-theme-tool-shortcode > .vf-container-tool'),input=stage.locator('input[type="url"]').first();
    await input.fill('https://example.invalid/isolated-owned-input.m3u8');
    await stage.getByRole('button',{name:'Clear',exact:true}).click();assert.equal(await input.inputValue(),'','Provider clear did not reset URL input');
-   await stage.getByRole('button',{name:'Pro',exact:true}).click();
+   await stage.locator('button').filter({hasText:/^Pro$/}).click();
    const advanced=stage.getByRole('button',{name:'Expand professional options',exact:true});if(await advanced.isVisible())await advanced.click();
    const select=stage.locator('select:visible').first();assert(await select.isVisible(),'real Provider dropdown unavailable');
    const values=await select.locator('option').evaluateAll(ns=>ns.map(n=>n.value));assert(values.length>=2);await select.selectOption(values[1]);assert.equal(await select.inputValue(),values[1]);
-   await stage.getByRole('button',{name:'Simple',exact:true}).click();
+   await stage.locator('button').filter({hasText:/^Simple$/}).click();
    routes[routes.length-1].interactions={url_input:'PASS',clear:'PASS',pro_mode:'PASS',dropdown:'PASS',simple_mode:'PASS',external_media_requests:'NOT_EXECUTED'};
 
   }
