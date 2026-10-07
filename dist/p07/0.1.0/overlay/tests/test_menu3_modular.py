@@ -24,24 +24,22 @@ class Menu3ModularTests(unittest.TestCase):
             "1. 网站与数据概况",
             "2. 备份与恢复",
             "3. 服务器迁移",
-            "4. 网站创建与维护",
-            "5. 面板账号与安全",
             "网站状态",
             "网站数据",
             "整机/单站",
-            "网站/数据库",
-            "面板账户",
         ):
             self.assertIn(text, proc.stdout)
+        self.assertNotIn("4. 网站创建与维护", proc.stdout)
+        self.assertNotIn("5. 面板账号与安全", proc.stdout)
+        self.assertIn("网站/数据库/面板日常管理请使用 CloudPanel", proc.stdout)
 
     def test_top_level_routes_to_separate_modules(self) -> None:
         text = (ROOT / "bin/vfops-user").read_text(encoding="utf-8")
         self.assertIn("vfops-site-ui", text)
         self.assertIn("vfops-migrate-ui", text)
         self.assertIn("vfops-auto-backup", text)
-        self.assertIn("vfops-cloudpanel-ui", text)
-        self.assertIn('run_module "$CLOUDPANEL_UI" site', text)
-        self.assertIn('run_module "$CLOUDPANEL_UI" admin', text)
+        self.assertNotIn('run_module "$CLOUDPANEL_UI" site', text)
+        self.assertNotIn('run_module "$CLOUDPANEL_UI" admin', text)
         self.assertIn("backup_menu()", text)
         self.assertIn("立即备份一个网站", text)
         self.assertIn("从备份恢复网站", text)
@@ -164,7 +162,9 @@ class Menu3ModularTests(unittest.TestCase):
             "旧服务器网站开关",
             "开启这台服务器全部网站",
             "停止这台服务器全部网站",
-            "仅在旧服务器上使用；直接操作当前机器，不需要输入 IP",
+            "old_server_switch_needed",
+            "source-recovery",
+            "只有真的被迁移流程冻结过，才显示恢复开关",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("目标服务器 IP", text)
@@ -377,8 +377,9 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn('exec bash "$INIT_UI"', user)
         self.assertIn("--init", user)
         self.assertIn("初始化服务器", init)
-        self.assertIn("一键初始化服务器（推荐）", init)
-        self.assertIn("请选择 [0-1]", init)
+        self.assertNotIn("一键初始化服务器（推荐）", init)
+        self.assertNotIn("请选择 [0-1]", init)
+        self.assertIn("preflight\nrun_initialization", init)
         self.assertNotIn("ui_menu_warn 2 '基础设置（时区 / Swap）'", init)
         self.assertNotIn("ui_menu_warn 3 'CloudPanel 状态 / 安装'", init)
         self.assertNotIn("请选择 [0-3]", init)
