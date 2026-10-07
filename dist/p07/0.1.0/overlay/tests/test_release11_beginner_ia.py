@@ -28,7 +28,7 @@ class Release11BeginnerIaTests(unittest.TestCase):
         text = (ROOT / "bin" / "vfops-selfcheck-ui").read_text(encoding="utf-8")
         self.assertNotIn("docs/authority/P07_INTEGRATION_MANIFEST.json", text)
         self.assertIn("重新安装工具运行文件", text)
-        self.assertIn("确认重新安装工具运行文件？[y/N]", text)
+        self.assertIn("现在重新安装工具运行文件？[y/N]", text)
         self.assertNotIn("输入“修复”继续", text)
         self.assertNotIn("输入 REPAIR", text)
 
