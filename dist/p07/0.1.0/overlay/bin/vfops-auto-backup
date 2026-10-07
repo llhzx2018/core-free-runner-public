@@ -53,21 +53,43 @@ PY
 }
 
 first_backup_pass_recorded() {
+  local sites_raw
+  sites_raw="$(inventory_sites 2>/dev/null || true)"
+  [[ -n "$sites_raw" ]] || return 1
+  first_verification_passed "$sites_raw"
+}
+
+smoke_backup_pass_recorded() {
   [[ -f "$CONFIG" ]] || return 1
-  local output rc
+  local output rc expected_sites
+  expected_sites="$(inventory_sites 2>/dev/null || true)"
+  [[ -n "$expected_sites" ]] || return 1
   set +e
   output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
   rc=$?
   set -e
   [[ $rc -eq 0 || $rc -eq 12 ]] || return 1
-  python3 - "$output" <<'PY' >/dev/null 2>&1
+  python3 - "$output" "$expected_sites" <<'PY' >/dev/null 2>&1
 import json,sys
 try:
     p=json.loads(sys.argv[1])
 except Exception:
     raise SystemExit(1)
+expected={x.strip() for x in sys.argv[2].splitlines() if x.strip()}
 last=p.get("last_run") if isinstance(p,dict) and isinstance(p.get("last_run"),dict) else None
-raise SystemExit(0 if last and last.get("status")=="PASS" else 1)
+if not expected or not last or last.get("status")!="PASS":
+    raise SystemExit(1)
+rows=last.get("sites",[]) if isinstance(last.get("sites"),list) else []
+verified=set()
+for row in rows:
+    if not isinstance(row,dict) or not isinstance(row.get("domain"),str) or not row.get("domain"):
+        raise SystemExit(1)
+    if any(row.get(k)!="PASS" for k in ("local_backup","google","b2","dual_remote")):
+        raise SystemExit(1)
+    verified.add(row["domain"])
+if not verified or not verified.issubset(expected):
+    raise SystemExit(1)
+raise SystemExit(0 if verified != expected else 1)
 PY
 }
 
@@ -173,6 +195,36 @@ for row in rows:
     verified.add(row['domain'])
 raise SystemExit(0 if verified == expected else 1)
 PY
+}
+
+prepare_smoke_run_config() {
+  storage_preflight || return 1
+  local sites_raw count choice selected
+  sites_raw="$(inventory_sites)" || return 1
+  [[ -n "$sites_raw" ]] || { printf '没有发现可备份的网站。\n' >&2; return 1; }
+  mapfile -t _p07_sites <<<"$sites_raw"
+  count="${#_p07_sites[@]}"
+  ui_title '首次异地备份验证'
+  ui_note '先选一个较小的网站验证 Google + B2 整条链路；通过后再验证全部网站。'
+  say
+  local i=1
+  for selected in "${_p07_sites[@]}"; do
+    printf '  %s. %s\n' "$i" "$selected"
+    i=$((i+1))
+  done
+  ui_menu_back 0 '返回'
+  ui_prompt "请选择 [0-${count}]："
+  read -r choice || return 1
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  [[ "$choice" == 0 ]] && return 1
+  (( choice >= 1 && choice <= count )) || return 1
+  selected="${_p07_sites[$((choice-1))]}"
+  if ! python3 "$ENGINE" configure --config "$CONFIG" --site "$selected" --daily-at '03:30' --storage-config "$STORAGE_CONFIG" --backup-dir "$BACKUP_DIR" --keep-last 1 >/dev/null; then
+    printf '%b\n' "${C_RED}首次小范围验证配置创建失败；没有安装定时任务。${C_RESET}" >&2
+    return 1
+  fi
+  ui_good "首次验证网站：$selected ✓"
+  ui_note '定时任务仍未开启；本次只验证一个网站的本地 + Google + B2 链路。'
 }
 
 prepare_first_run_config() {
@@ -363,11 +415,11 @@ elif not base.get('cron_installed',False):
     elif last and last.get('status')=='PASS':
         action='首次真实备份已通过；定时仍未开启。选择“2. 开启 / 修改自动备份”时 系统会再次核对当前网站集合。'
     elif last and last.get('status')=='FAIL':
-        action='首次验证没有通过，定时仍未开启；按失败项修复后再次选择“3. 立即备份全部网站”。'
+        action='首次验证没有通过，定时仍未开启；按失败项修复后再次选择“3. 继续验证”。'
     elif last and last.get('status')=='SKIPPED_BUSY':
-        action='首次验证遇到服务器忙，定时仍未开启；稍后再次选择“3. 立即备份全部网站”。'
+        action='首次验证遇到服务器忙，定时仍未开启；稍后再次选择“3. 继续验证”。'
     else:
-        action='远程已就绪，定时尚未开启；先选择“3. 立即备份全部网站”，通过后再选择“2. 开启 / 修改自动备份”。'
+        action='远程已就绪，定时尚未开启；先选择“3. 首次验证”，通过后再选择“2. 开启 / 修改自动备份”。'
 elif not live_ok:
     action='选择“1. 设置 / 检查异地备份”修复实时远程状态；修复后可选择“3. 立即备份全部网站”验证。'
 elif last and last.get('status')=='FAIL':
@@ -443,9 +495,9 @@ enable_or_update() {
   printf '执行时间：每天 %s\n' "$daily_at"
   printf '运行时若发现备份/恢复/迁移/远程上传正忙，会自动让路，不抢资源。\n'
   ui_note '不会修改 DNS，不会删除网站，不会删除手工/迁移备份。'; say
-  printf '1. 确认启用 / 更新\n0. 取消\n\n请选择 [0-1]：'
+  ui_prompt '确认启用 / 更新自动备份？[y/N]：'
   read -r choice || return 0
-  [[ "$choice" == '1' ]] || { printf '已取消。\n'; pause_menu; return 0; }
+  [[ "$choice" =~ ^[Yy]$ ]] || { printf '已取消。\n'; pause_menu; return 0; }
 
   local args=()
   while IFS= read -r site; do [[ -n "$site" ]] && args+=(--site "$site"); done <<<"$sites_raw"
@@ -471,20 +523,21 @@ enable_or_update() {
 }
 
 run_now() {
+  local verify_mode="${1:-full}"
   require_root || { pause_menu; return 0; }
 
   local schedule_active=0
   if p07_cron_owned; then schedule_active=1; fi
 
   if [[ $schedule_active -eq 0 ]]; then
-    if [[ ! -f "$CONFIG" ]]; then
-      printf '\n尚未启用定时备份。系统会先建立“首次验证配置”，不会安装定时任务（Cron）。\n'
-      if ! prepare_first_run_config; then
+    if [[ "$verify_mode" == "smoke" ]]; then
+      printf '\n先做一个网站的小范围真实验证，不会安装定时任务（Cron）。\n'
+      if ! prepare_smoke_run_config; then
         pause_menu
         return 0
       fi
-    elif config_enabled_for_verification; then
-      printf '\n定时尚未开启。系统会重新读取当前网站并刷新首次验证配置，不会安装定时任务（Cron）。\n'
+    else
+      printf '\n正在准备当前全部网站的完整验证配置，不会安装定时任务（Cron）。\n'
       if ! prepare_first_run_config; then
         pause_menu
         return 0
@@ -492,7 +545,11 @@ run_now() {
     fi
   fi
 
-  printf '\n正在执行一次完整备份。\n'
+  if [[ "$verify_mode" == "smoke" ]]; then
+    printf '\n正在执行首次小范围备份验证。\n'
+  else
+    printf '\n正在执行一次完整备份。\n'
+  fi
   printf '若检测到备份/恢复/迁移/远程上传正忙，本次会自动让路。\n'
   [[ $schedule_active -eq 0 ]] && printf '定时任务：当前未开启；本次仅做真实验证。\n'
   local output rc
@@ -524,7 +581,7 @@ PY
     return 0
   fi
 
-  C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_RED="$C_RED" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$output" "$schedule_active" <<'PY'
+  C_CYAN="$C_CYAN" C_GREEN="$C_GREEN" C_YELLOW="$C_YELLOW" C_RED="$C_RED" C_GRAY="$C_GRAY" C_RESET="$C_RESET" python3 - "$output" "$schedule_active" "$verify_mode" <<'PY'
 import json,os,sys
 def color(name): return os.environ.get(name,"").replace("\\033", chr(27))
 cyan=color("C_CYAN"); green=color("C_GREEN"); yellow=color("C_YELLOW"); red=color("C_RED"); gray=color("C_GRAY"); reset=color("C_RESET")
@@ -546,6 +603,7 @@ def display_token(token):
     }.get(str(token), str(token))
 p=json.loads(sys.argv[1])
 schedule_active=sys.argv[2]=='1'
+verify_mode=sys.argv[3] if len(sys.argv)>3 else 'full'
 status=p.get('status','UNKNOWN')
 rows=[row for row in p.get('sites',[]) if isinstance(row,dict)] if isinstance(p.get('sites'),list) else []
 
@@ -556,7 +614,7 @@ if status=='SKIPPED_BUSY':
     if schedule_active:
         print('下一步：无需修复；稍后再选择“3. 立即备份全部网站”，或等待下一次计划任务。')
     else:
-        print('下一步：定时仍未开启；稍后再次选择“3. 立即备份全部网站”完成首次验证。')
+        print('下一步：定时仍未开启；稍后再次选择“3. 继续验证”完成首次验证。')
     print(paint('安全边界：DNS 未修改；源服务器保留；没有删除任何备份。',gray))
     raise SystemExit
 
@@ -574,6 +632,8 @@ print(f"最终：{paint(display_token(status),token_color(status))}")
 if status=='PASS':
     if schedule_active:
         action='本次本地 + 两处异地备份（Google + B2）已完成；定时保护保持启用，无需操作。'
+    elif verify_mode=='smoke':
+        action='这个网站的本地 + Google + B2 链路已验证通过。下一步：再次选择“3”，完成当前全部网站验证；通过后才开放自动备份。'
     else:
         action='当前全部网站本地 + 两处异地备份（Google + B2）真实验证已通过；定时备份仍未开启。下一步：选择“2. 开启 / 修改自动备份”。'
 elif status=='DISABLED':
@@ -632,9 +692,11 @@ while true; do
   header
   storage_ready=0
   first_pass=0
+  smoke_pass=0
   cron_ready=0
   [[ -f "$STORAGE_CONFIG" ]] && storage_ready=1
   first_backup_pass_recorded && first_pass=1 || true
+  smoke_backup_pass_recorded && smoke_pass=1 || true
   p07_cron_owned && cron_ready=1 || true
 
   ui_menu_warn 1 '设置 / 检查异地备份'
@@ -645,11 +707,17 @@ while true; do
     ui_note '下一步：先完成 Google + B2 异地备份设置；完成前不显示备份执行和定时开关。'
     ui_prompt '请选择 [0/1/4]：'
   elif [[ "$first_pass" -eq 0 ]]; then
-    ui_menu_good 3 '首次验证：立即备份全部网站'
+    if [[ "$smoke_pass" -eq 1 ]]; then
+      ui_menu_good 3 '继续验证：备份全部网站'
+      ui_note '     一个网站的 Google + B2 链路已通过；现在再验证完整网站集合'
+    else
+      ui_menu_good 3 '首次验证：先备份一个网站'
+      ui_note '     先用一个网站验证 Google + B2，避免第一次就跑全站'
+    fi
     ui_menu_info 4 '查看备份状态'
     ui_menu_back 0 '返回'
     say
-    ui_note '下一步：先完成一次当前全部网站真实双远程备份；通过后才显示自动备份开关。'
+    ui_note '全部网站真实双远程备份通过后，才显示自动备份开关。'
     ui_prompt '请选择 [0/1/3/4]：'
   else
     if [[ "$cron_ready" -eq 1 ]]; then
@@ -675,7 +743,13 @@ while true; do
       [[ "$first_pass" -eq 1 ]] && enable_or_update || { ui_attention '请先完成首次真实备份验证。'; pause_menu; }
       ;;
     3)
-      [[ "$storage_ready" -eq 1 ]] && run_now || { ui_attention '请先设置异地备份。'; pause_menu; }
+      if [[ "$storage_ready" -ne 1 ]]; then
+        ui_attention '请先设置异地备份。'; pause_menu
+      elif [[ "$first_pass" -eq 0 && "$smoke_pass" -eq 0 ]]; then
+        run_now smoke
+      else
+        run_now full
+      fi
       ;;
     4) show_status ;;
     5)
