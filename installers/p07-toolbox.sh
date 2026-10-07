@@ -10,11 +10,11 @@ VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc11"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.2.2"
-VPS_AUDIT_EXPECTED="V2.2.2"
-VPS_AUDIT_BUILD_EXPECTED="2.2.2-rc2-chinese-first"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/29f737e68d1464fb209565acd9b77e297c1bb81b/experiments/p07-vps-audit-v22-r2.sh"
-VPS_AUDIT_SHA256="1104724afc221ea8100841ab66f6814936d6673aa63700cacc359e7906ce7f36"
+VPS_AUDIT_PUBLIC="V2.2.3"
+VPS_AUDIT_EXPECTED="V2.2.3"
+VPS_AUDIT_BUILD_EXPECTED="2.2.3-rc1-output-clean"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/a7db965972039232f5fd0d5bf0043509079ba157/experiments/p07-vps-audit-v223-r1.sh"
+VPS_AUDIT_SHA256="32a47dc8f7a284dc533ddb7bcb6742ad985703cf38be72f0a7ba4e0d50c34065"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -44,7 +44,7 @@ show_header() {
 
 show_menu() {
   show_header
-  say "${C_GREEN}功能状态：5 项均可用${C_RESET}"
+  say "${C_GREEN}功能：5 项${C_RESET}"
   say
   say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray代理${C_RESET}"
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
