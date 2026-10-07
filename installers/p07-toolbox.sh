@@ -7,7 +7,7 @@ VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc10"
+VF_NODE_EXPECTED="0.1.0-rc11"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
 VPS_AUDIT_PUBLIC="V2.2.2"
@@ -22,7 +22,7 @@ VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release76"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc35"
+SYSTEM_CARE_EXPECTED="0.1.0-rc36"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
