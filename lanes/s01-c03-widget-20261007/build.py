@@ -3,7 +3,7 @@ p=pathlib.Path('proof');p.mkdir(exist_ok=True);root=pathlib.Path('target/src')
 assert subprocess.check_output(['git','-C','target','rev-parse','HEAD'],text=True).strip()==os.environ['TARGET_SHA']
 assert subprocess.check_output(['git','-C','target','rev-parse','HEAD^{tree}'],text=True).strip()==os.environ['TARGET_TREE']
 assert pathlib.Path('target/VERSION').read_text().strip()==os.environ['TARGET_VERSION']
-paths=sorted(x for x in root.rglob('*') if x.is_file() and x.name not in ['README.md','PACKAGE_PROFILE.json'])
+paths=sorted((x for x in root.rglob('*') if x.is_file() and x.name not in ['README.md','PACKAGE_PROFILE.json']),key=lambda x:x.relative_to(root).as_posix())
 assert len(paths)==567,len(paths)
 fp=hashlib.sha256()
 for x in paths:
