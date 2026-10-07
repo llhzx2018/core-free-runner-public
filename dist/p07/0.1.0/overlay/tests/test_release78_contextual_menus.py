@@ -20,7 +20,7 @@ class ContextualBackupMenuTests(unittest.TestCase):
             "首次验证：先备份一个网站",
             "继续验证：备份全部网站",
             "smoke_backup_pass_recorded",
-            "通过后才显示自动备份开关。",
+            "全部网站真实双远程备份通过后，才显示自动备份开关。",
             "开启自动备份",
             "修改自动备份",
             "关闭自动备份",
