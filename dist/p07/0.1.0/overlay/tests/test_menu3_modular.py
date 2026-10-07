@@ -22,10 +22,14 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         for text in (
             "1. 网站与数据概况",
-            "2. 备份与恢复",
-            "3. 服务器迁移",
+            "2. 立即备份一个网站",
+            "3. 从备份恢复网站",
+            "4. 自动备份与异地备份",
+            "5. 服务器迁移",
             "网站状态",
-            "网站数据",
+            "手动备份",
+            "安全恢复",
+            "Google/B2",
             "整机/单站",
         ):
             self.assertIn(text, proc.stdout)
@@ -40,10 +44,11 @@ class Menu3ModularTests(unittest.TestCase):
         self.assertIn("vfops-auto-backup", text)
         self.assertNotIn('run_module "$CLOUDPANEL_UI" site', text)
         self.assertNotIn('run_module "$CLOUDPANEL_UI" admin', text)
-        self.assertIn("backup_menu()", text)
-        self.assertIn("立即备份一个网站", text)
-        self.assertIn("从备份恢复网站", text)
-        self.assertIn("自动备份与异地备份", text)
+        self.assertNotIn("backup_menu()", text)
+        self.assertIn('2) run_module "$SITE_UI" backup ;;', text)
+        self.assertIn('3) run_module "$SITE_UI" restore ;;', text)
+        self.assertIn('4) run_module "$AUTO_UI" ;;', text)
+        self.assertIn('5) run_module "$MIGRATE_UI" ;;', text)
         self.assertNotIn('8) run_module "$DIAG_UI"', text)
         self.assertNotIn('10) run_module "$SELFCHECK_UI"', text)
         self.assertIn("--advanced", text)
