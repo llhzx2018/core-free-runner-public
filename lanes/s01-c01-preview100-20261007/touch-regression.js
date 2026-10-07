@@ -19,7 +19,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
      if(r.height<43.99||r.width<43.99)for(const sheet of document.styleSheets){try{walk(sheet.cssRules);}catch{}}
      return {text:n.textContent.trim(),class:n.className,parent:n.parentNode.className,ancestor:n.closest('[class*="vf-theme-post-list"]')?.className,width:r.width,height:r.height,minHeight:s.minHeight,minWidth:s.minWidth,rules:rules.slice(-12)};
     });
-    return {targets,probe:vfToolSiteRunBrowserProbe().checks['responsive-touch-targets'],overflow:Math.max(document.body.scrollWidth,document.documentElement.scrollWidth)>innerWidth+1};
+    const critical=[...document.querySelectorAll('a.vf-data-btn,.vf-menu-toggle,.vf-mobile-nav-close,.vf-directory-filter-group button,.vf-theme-system-search-box button,.vf-production-footer-col .vf-footer-link,.vf-footer-section-toggle,.vf-footer-partner-link,.vf-footer-legal a,.vf-footer-back-to-top')].filter(visible).map(n=>({tag:n.tagName,text:n.textContent.trim(),cls:n.className,parent:n.parentNode.className,width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height,minHeight:getComputedStyle(n).minHeight}));return {targets,critical,probe:vfToolSiteRunBrowserProbe().checks['responsive-touch-targets'],overflow:Math.max(document.body.scrollWidth,document.documentElement.scrollWidth)>innerWidth+1};
    });
    rows.push({width,path,...result});save();assert(result.targets.length>0,`missing controls ${path}`);assert(!result.overflow,`overflow ${path} ${width}`);
    for(const n of result.targets)assert(n.width>=43.99&&n.height>=43.99,`undersized ${path} ${width}: ${n.text} ${n.width}x${n.height}`);

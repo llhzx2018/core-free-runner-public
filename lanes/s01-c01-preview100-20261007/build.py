@@ -6,7 +6,7 @@ assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only','-z','ab2a7d3f4dd3fd65764c12096ae256651a7ac64d','HEAD'],text=True).split('\0')
 changed=[f for f in changed if f and not f.startswith('evidence/')]
-assert set(changed)==set(['VERSION', 'src/style.css', 'src/theme.json', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css', 'src/assets/css/public/pages/families/public-family-06-company-legal-basic-operations-closure.css', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/assets/js/main.js']),changed
+assert set(changed)==set(['VERSION', 'src/style.css', 'src/theme.json', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css', 'src/assets/css/public/pages/families/public-family-06-company-legal-basic-operations-closure.css', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/assets/js/main.js', 'src/assets/css/public/public-layer-06-responsive-overrides.css']),changed
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
