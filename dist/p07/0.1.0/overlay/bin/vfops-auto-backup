@@ -52,6 +52,25 @@ raise SystemExit(0 if isinstance(p,dict) and p.get('enabled') is True else 1)
 PY
 }
 
+first_backup_pass_recorded() {
+  [[ -f "$CONFIG" ]] || return 1
+  local output rc
+  set +e
+  output="$(python3 "$ENGINE" status --config "$CONFIG" --cron-file "$CRON_FILE" --state-file "$STATE_FILE" 2>/dev/null)"
+  rc=$?
+  set -e
+  [[ $rc -eq 0 || $rc -eq 12 ]] || return 1
+  python3 - "$output" <<'PY' >/dev/null 2>&1
+import json,sys
+try:
+    p=json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+last=p.get("last_run") if isinstance(p,dict) and isinstance(p.get("last_run"),dict) else None
+raise SystemExit(0 if last and last.get("status")=="PASS" else 1)
+PY
+}
+
 storage_preflight() {
   if [[ ! -f "$STORAGE_CONFIG" ]]; then
     printf '%b\n' "${C_YELLOW}异地备份存储尚未设置。${C_RESET}" >&2
@@ -611,24 +630,58 @@ disable_auto() {
 
 while true; do
   header
+  storage_ready=0
+  first_pass=0
+  cron_ready=0
+  [[ -f "$STORAGE_CONFIG" ]] && storage_ready=1
+  first_backup_pass_recorded && first_pass=1 || true
+  p07_cron_owned && cron_ready=1 || true
+
   ui_menu_warn 1 '设置 / 检查异地备份'
-  ui_menu_warn 2 '开启 / 修改自动备份'
-  ui_menu_good 3 '立即备份全部网站'
-  ui_menu_info 4 '查看备份状态'
-  ui_menu_danger 5 '关闭自动备份'
-  ui_menu_back 0 '返回'
-  say
-  ui_note '绿色=执行/验证 · 黄色=配置 · 红色=关闭写操作'
-  say
-  ui_prompt '请选择 [0-5]：'
+  if [[ "$storage_ready" -eq 0 ]]; then
+    ui_menu_info 4 '查看备份状态'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '下一步：先完成 Google + B2 异地备份设置；完成前不显示备份执行和定时开关。'
+    ui_prompt '请选择 [0/1/4]：'
+  elif [[ "$first_pass" -eq 0 ]]; then
+    ui_menu_good 3 '首次验证：立即备份全部网站'
+    ui_menu_info 4 '查看备份状态'
+    ui_menu_back 0 '返回'
+    say
+    ui_note '下一步：先完成一次当前全部网站真实双远程备份；通过后才显示自动备份开关。'
+    ui_prompt '请选择 [0/1/3/4]：'
+  else
+    if [[ "$cron_ready" -eq 1 ]]; then
+      ui_menu_warn 2 '修改自动备份'
+    else
+      ui_menu_warn 2 '开启自动备份'
+    fi
+    ui_menu_good 3 '立即备份全部网站'
+    ui_menu_info 4 '查看备份状态'
+    if [[ "$cron_ready" -eq 1 ]]; then
+      ui_menu_danger 5 '关闭自动备份'
+    fi
+    ui_menu_back 0 '返回'
+    say
+    ui_note '首次真实双远程备份已通过；开启/修改时仍会重新核对当前网站集合。'
+    ui_prompt '请选择 [0-5]：'
+  fi
+
   read -r choice || exit 0
   case "$choice" in
     1) setup_storage ;;
-    2) enable_or_update ;;
-    3) run_now ;;
+    2)
+      [[ "$first_pass" -eq 1 ]] && enable_or_update || { ui_attention '请先完成首次真实备份验证。'; pause_menu; }
+      ;;
+    3)
+      [[ "$storage_ready" -eq 1 ]] && run_now || { ui_attention '请先设置异地备份。'; pause_menu; }
+      ;;
     4) show_status ;;
-    5) disable_auto ;;
+    5)
+      [[ "$cron_ready" -eq 1 ]] && disable_auto || { ui_attention '当前自动备份没有开启。'; pause_menu; }
+      ;;
     0) exit 0 ;;
-    *) ui_warn '请输入 0-5。'; pause_menu ;;
+    *) ui_warn '请输入当前页面显示的数字。'; pause_menu ;;
   esac
 done
