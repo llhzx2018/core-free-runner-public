@@ -1,0 +1,67 @@
+name: S01-C01 failed proof exact readback
+on:
+  push:
+    branches: [task/s01-c01-preview101-20261007-readback]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-theme'
+      TARGET_VERSION: '1.35.101'
+      TARGET_SHA: 'cf6f25d2dcaf4b2d3a1ebeda9c2a718bc9021254'
+      TARGET_TREE: '292b625432c988e7f90b4e61198ed24535085c4b'
+      CANDIDATE_RUN: '37589542083'
+      ARTIFACT_ID: '11468202057'
+      ARTIFACT_DIGEST: 'sha256:07d48a7341eadcd1d6698fdf7327d1c42da9e65cb1c317629d2053b2cc0e5888'
+      ARTIFACT_BYTES: '16561767'
+      CANDIDATE_RUNNER_SHA: 'bfca6684e80768024b55b1c89b4559032c8526fb'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exact target identity audit
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py render --spec lanes/s01-c01-preview101-20261007-readback/spec.json --template lanes/s01-c01-preview101-20261007-readback/readback.template.yml --output /tmp/readback.yml >/dev/null
+          cmp /tmp/readback.yml .github/workflows/s01-c01-preview101-20261007-readback.yml
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec lanes/s01-c01-preview101-20261007-readback/spec.json --input .github/workflows/s01-c01-preview101-20261007-readback.yml
+      - name: Verify actual uploaded archive and selected failure facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/core-free-runner-public/actions/artifacts/$ARTIFACT_ID > /tmp/meta.json
+          gh api repos/llhzx2018/core-free-runner-public/actions/artifacts/$ARTIFACT_ID/zip > /tmp/proof.zip
+          python3 - <<'PY'
+          import pathlib,json,os,hashlib,zipfile,stat
+          meta=json.loads(pathlib.Path('/tmp/meta.json').read_text());data=pathlib.Path('/tmp/proof.zip').read_bytes()
+          assert meta['id']==int(os.environ['ARTIFACT_ID']) and meta['workflow_run']['id']==int(os.environ['CANDIDATE_RUN']) and meta['workflow_run']['head_sha']==os.environ['CANDIDATE_RUNNER_SHA']
+          assert not meta['expired'] and meta['digest']==os.environ['ARTIFACT_DIGEST']=='sha256:'+hashlib.sha256(data).hexdigest()
+          assert meta['size_in_bytes']==len(data)==int(os.environ['ARTIFACT_BYTES'])
+          with zipfile.ZipFile('/tmp/proof.zip') as z:
+              assert z.testzip() is None and len(z.namelist())==len(set(z.namelist()))
+              for i in z.infolist():
+                  p=pathlib.PurePosixPath(i.filename)
+                  assert not p.is_absolute() and '..' not in p.parts and not stat.S_ISLNK(i.external_attr>>16)
+                  if p.suffix=='.json':json.loads(z.read(i))
+              identity=json.loads(z.read('proof/identity.json'))
+              assert identity['source_sha']==os.environ['TARGET_SHA'] and identity['source_tree']==os.environ['TARGET_TREE']
+              d=json.loads(z.read('proof/dependency-regression.json'))
+              full=json.loads(z.read('proof/dependency-engine-full.json'))
+              print('VF_FAILURE_READBACK_BEGIN')
+              print(json.dumps({'archive_verified':'PASS','artifact_id':meta['id'],'identity':identity,'status':d['status'],'theme_issues':d['theme_issues'],'provider_issues':d['provider_issues'],'rows':d['rows'],'full_keys':list(full)},ensure_ascii=False))
+              print('VF_FAILURE_READBACK_END')
+              def walk(v,path=''):
+                  if isinstance(v,dict):
+                      for k,val in v.items():
+                          if k=='overflowRootDiagnostics' and val:
+                              print('VF_GEOMETRY '+json.dumps({'path':path,'value':val},ensure_ascii=False))
+                          walk(val,path+'/'+k)
+                  elif isinstance(v,list):
+                      for i,val in enumerate(v):walk(val,path+'/'+str(i))
+              walk(full)
+          PY
