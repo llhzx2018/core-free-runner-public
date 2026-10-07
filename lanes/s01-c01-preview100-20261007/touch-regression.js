@@ -28,7 +28,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
     const category=page.locator('.vf-directory-filter-group button[data-vf-directory-filter-button]:not([data-vf-directory-filter-button="all"])').first();
     if(await category.isVisible()){
      const value=await category.getAttribute('data-vf-directory-filter-button');await category.focus();await category.press('Enter');
-     await page.waitForFunction(v=>new URL(location.href).searchParams.get('vf_filter')===v||document.querySelector('.vf-directory-filter-group button[data-vf-directory-filter-button="'+v+'"]')?.getAttribute('aria-pressed')==='true',value);
+     await page.waitForURL(u=>u.searchParams.get('vf_filter')===value);await page.waitForLoadState('load');assert.equal(await page.locator('.vf-directory-filter-group button[data-vf-directory-filter-button="'+value+'"]').getAttribute('aria-pressed'),'true');
      const reset=page.locator('[data-vf-directory-reset]').first();await reset.waitFor({state:'visible'});const size=await reset.boundingBox();assert(size.width>=43.99&&size.height>=43.99);await reset.click();
      await page.waitForFunction(()=>!new URL(location.href).searchParams.has('vf_filter')&&document.querySelector('.vf-directory-filter-group button[data-vf-directory-filter-button="all"]')?.getAttribute('aria-pressed')==='true');
      actions.push({width,path,category:value,keyboard:'PASS',reset:'PASS'});save();
@@ -36,7 +36,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
     await page.goto(url(path));
     if(path==='/glossary/'){
      const letter=page.locator('.vf-glossary-letter-index button:not([data-vf-directory-filter-button="all"])').first();assert(await letter.isVisible());const value=await letter.getAttribute('data-vf-directory-filter-button');await letter.click();
-     await page.waitForFunction(v=>new URL(location.href).searchParams.get('vf_letter')===v||document.querySelector('.vf-glossary-letter-index button[data-vf-directory-filter-button="'+v+'"]')?.getAttribute('aria-pressed')==='true',value);
+     await page.waitForURL(u=>u.searchParams.get('vf_letter')===value);await page.waitForLoadState('load');assert.equal(await page.locator('.vf-glossary-letter-index button[data-vf-directory-filter-button="'+value+'"]').getAttribute('aria-pressed'),'true');
      actions.push({width,path,letter:value,click:'PASS'});save();
     }
    }
@@ -44,5 +44,20 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
   }
  }
  assert.equal(rows.length,30);assert(actions.some(x=>x.letter));
+ const directoryStates=[],fixturePage=await context.newPage();
+ for(const populated of [false,true]){
+  const items=populated?'<article data-vf-directory-item data-vf-directory-category="start" data-vf-directory-letter="a" data-vf-directory-search="Alpha"></article><article data-vf-directory-item data-vf-directory-category="inspect" data-vf-directory-letter="b" data-vf-directory-search="Beta"></article>':'';
+  await fixturePage.setContent('<html lang="en"><body><section data-vf-directory-filter data-vf-directory-context="guide_index"><input data-vf-directory-query><div><button data-vf-directory-filter-button="all" aria-pressed="true" class="is-active">All</button><button data-vf-directory-filter-button="start" aria-pressed="false">Start</button></div><button data-vf-directory-filter-dimension="letter" data-vf-directory-filter-button="all" aria-pressed="true" class="is-active">All letters</button><button data-vf-directory-filter-dimension="letter" data-vf-directory-filter-button="a" aria-pressed="false">A</button><select data-vf-directory-filter-select="category"><option value="all">All</option><option value="start">Start</option></select><button data-vf-directory-reset hidden>Reset</button><span data-vf-directory-count></span><span data-vf-directory-active-summary></span><div data-vf-directory-empty hidden>Empty</div>'+items+'</section></body></html>');
+  await fixturePage.addScriptTag({content:fs.readFileSync('target/src/assets/js/main.js','utf8')});await fixturePage.evaluate(()=>document.dispatchEvent(new Event('DOMContentLoaded')));
+  const root=fixturePage.locator('[data-vf-directory-filter]'),start=root.locator('button[data-vf-directory-filter-button="start"]'),reset=root.locator('[data-vf-directory-reset]'),query=root.locator('[data-vf-directory-query]');
+  assert.equal(await root.getAttribute('data-vf-directory-matched'),populated?'2':'0');
+  await start.focus();await start.press('Enter');assert.equal(await start.getAttribute('aria-pressed'),'true');assert.equal(await root.getAttribute('data-vf-directory-matched'),populated?'1':'0');assert(await reset.isVisible());
+  await reset.click();assert.equal(await start.getAttribute('aria-pressed'),'false');assert.equal(await reset.isVisible(),false);
+  await root.locator('select').selectOption('start');assert.equal(await start.getAttribute('aria-pressed'),'true');await reset.click();
+  await root.locator('button[data-vf-directory-filter-button="a"]').click();assert.equal(await root.getAttribute('data-vf-directory-matched'),populated?'1':'0');await reset.click();
+  await query.fill('Beta');assert.equal(await root.getAttribute('data-vf-directory-matched'),populated?'1':'0');assert(await reset.isVisible());await query.press('Escape');assert.equal(await query.inputValue(),'');assert.equal(await root.getAttribute('data-vf-directory-matched'),populated?'2':'0');assert.equal(await reset.isVisible(),false);
+  directoryStates.push({populated,keyboard_category:'PASS',select:'PASS',letter:'PASS',reset:'PASS',search_escape:'PASS',matched_count:'PASS'});
+ }
+ fs.writeFileSync('proof/directory-state-regression.json',JSON.stringify({status:'PASS',cases:directoryStates},null,2));
  fs.writeFileSync('proof/touch-regression.json',JSON.stringify({status:'PASS',rows,actions,production:'NOT_EXECUTED',owner_acceptance:'NOT_CLAIMED'},null,2));await browser.close();
 })().catch(e=>{console.error(e);process.exit(1)});
