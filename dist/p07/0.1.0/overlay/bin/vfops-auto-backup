@@ -294,26 +294,11 @@ cyan=color("C_CYAN"); green=color("C_GREEN"); yellow=color("C_YELLOW"); red=colo
 def paint(text,color): return f"{color}{text}{reset}" if color else text
 def token_color(token):
     t=str(token)
-    if t in {'PASS','OK','ENABLED','VERIFIED_NO_SCHEDULE'} or '正常' in t or '已启用' in t or '已通过' in t:
+    if t in {'PASS','OK','ENABLED'} or '正常' in t or '已验证' in t or '已通过' in t:
         return green
-    if t in {'FAIL','UNAVAILABLE','CHECK_FAILED','LIVE_ATTENTION'} or '失败' in t or '不可用' in t or '异常' in t:
+    if t in {'FAIL','UNAVAILABLE','CHECK_FAILED'} or '失败' in t or '不可用' in t or '异常' in t or '需要处理' in t:
         return red
     return yellow
-
-def display_token(token):
-    return {
-        'PASS':'通过',
-        'FAIL':'失败',
-        'UNKNOWN':'未知',
-        'READY':'已就绪',
-        'NOT_READY':'未就绪',
-        'ENABLED':'已启用',
-        'DISABLED':'已关闭',
-        'RUNNING':'执行中',
-        'SKIPPED_BUSY':'服务器忙，已让路',
-        'CONFIGURED':'已配置',
-        'NOT_CONFIGURED':'未配置',
-    }.get(str(token), str(token))
 
 base=json.loads(sys.argv[1])
 try:
@@ -327,6 +312,7 @@ except ValueError:
 
 status=base.get('status','UNKNOWN')
 last=base.get('last_run') if isinstance(base.get('last_run'),dict) else None
+sites=base.get('sites',[]) if isinstance(base.get('sites'),list) else []
 
 def provider_health(provider):
     if status == 'NOT_CONFIGURED':
@@ -334,107 +320,97 @@ def provider_health(provider):
     if remote_rc != 0 or not isinstance(live,dict):
         return 'CHECK_FAILED'
     accounts=live.get('accounts',[]) if isinstance(live.get('accounts'),list) else []
-    provider_accounts=[a for a in accounts if isinstance(a,dict) and a.get('provider')==provider and a.get('enabled') is True]
-    if not provider_accounts:
+    rows=[a for a in accounts if isinstance(a,dict) and a.get('provider')==provider and a.get('enabled') is True]
+    if not rows:
         return 'MISSING'
-    return 'OK' if any(a.get('health')=='OK' for a in provider_accounts) else 'UNAVAILABLE'
+    return 'OK' if any(a.get('health')=='OK' for a in rows) else 'UNAVAILABLE'
 
 google=provider_health('google')
 b2=provider_health('b2')
 live_ok=(google=='OK' and b2=='OK')
-effective=status
-if status=='ENABLED' and not live_ok:
-    effective='LIVE_ATTENTION'
-elif status=='ATTENTION' and base.get('enabled',False) and not base.get('cron_installed',False) and base.get('storage_state')=='CONFIGURED' and live_ok:
-    effective='VERIFIED_NO_SCHEDULE' if last and last.get('status')=='PASS' else 'READY_NO_SCHEDULE'
+rows=last.get('sites',[]) if last and isinstance(last.get('sites'),list) else []
+verified=set()
+failed=[]
+for row in rows:
+    if not isinstance(row,dict):
+        continue
+    domain=str(row.get('domain') or '')
+    if not domain:
+        continue
+    if all(row.get(k)=='PASS' for k in ('local_backup','google','b2','dual_remote')):
+        verified.add(domain)
+    else:
+        bad=[]
+        if row.get('local_backup')!='PASS': bad.append('本地')
+        if row.get('google')!='PASS': bad.append('Google')
+        if row.get('b2')!='PASS': bad.append('B2')
+        failed.append((domain,'/'.join(bad) or '未通过'))
+expected={str(x) for x in sites if x}
+full_verified=bool(expected) and bool(last) and last.get('status')=='PASS' and verified==expected
+smoke_verified=bool(verified) and bool(last) and last.get('status')=='PASS' and verified < expected
 
-cn={
-    'ENABLED':'已启用',
-    'DISABLED':'已关闭',
-    'NOT_CONFIGURED':'未配置',
-    'ATTENTION':'需关注',
-    'LIVE_ATTENTION':'需关注（实时远程异常）',
-    'READY_NO_SCHEDULE':'远程已就绪 · 待首次验证',
-    'VERIFIED_NO_SCHEDULE':'首次验证已通过 · 定时未开启',
-}.get(effective,effective)
-health_cn={
-    'OK':'正常 ✓',
-    'UNAVAILABLE':'不可用',
-    'MISSING':'未配置',
-    'CHECK_FAILED':'检查失败',
-    'NOT_CONFIGURED':'未配置',
-}
+if status=='NOT_CONFIGURED':
+    conclusion='尚未设置'
+elif base.get('cron_installed') and live_ok and (not last or last.get('status') in {'PASS','SKIPPED_BUSY'}):
+    conclusion='自动备份正常'
+elif not live_ok and status!='NOT_CONFIGURED':
+    conclusion='异地备份需要处理'
+elif full_verified and not base.get('cron_installed'):
+    conclusion='全部网站已验证 · 自动备份未开启'
+elif smoke_verified and not base.get('cron_installed'):
+    conclusion='单站验证已通过 · 还需验证全部网站'
+elif not base.get('cron_installed'):
+    conclusion='异地备份已准备 · 等待首次验证'
+else:
+    conclusion='需要查看最近执行结果'
+
+health_cn={'OK':'正常 ✓','UNAVAILABLE':'不可用','MISSING':'未配置','CHECK_FAILED':'检查失败','NOT_CONFIGURED':'未配置'}
+last_cn={'PASS':'通过','FAIL':'失败','RUNNING':'执行中','SKIPPED_BUSY':'服务器忙，已让路','DISABLED':'已关闭'}
 
 print()
 print(paint('自动备份状态',cyan))
 print(paint('----------------------------------------',gray))
-print(f"状态：{paint(cn,token_color(effective))}")
-if status != 'NOT_CONFIGURED':
-    if base.get('cron_installed'):
-        print(f"时间：每天 {base.get('daily_at','UNKNOWN')}")
-    else:
-        print('定时：未开启')
-    sites=base.get('sites',[]) if isinstance(base.get('sites'),list) else []
-    print(f"网站：{len(sites)} 个")
-    print('异地备份：Google Drive + Backblaze B2')
-    print(f"Google 实时：{paint(health_cn.get(google,google),token_color(google))}")
-    print(f"B2 实时：{paint(health_cn.get(b2,b2),token_color(b2))}")
-    print(f"本地自动备份保留：最近 {base.get('local_keep_last','?')} 份 / 网站")
-    print(f"定时任务（Cron）：{'已安装（由工具管理）' if base.get('cron_installed') else '未安装'}")
-    print(f"配置结构：{display_token(base.get('storage_state','UNKNOWN'))}")
-
+print(f"结论        {paint(conclusion,token_color(conclusion))}")
+print(f"自动备份    {'已开启' if base.get('cron_installed') else '未开启'}")
+print(f"网站        {len(sites)} 个")
+print(f"Google      {paint(health_cn.get(google,google),token_color(google))}")
+print(f"B2          {paint(health_cn.get(b2,b2),token_color(b2))}")
+print(f"本地保留    最近 {base.get('local_keep_last','?')} 份 / 网站")
+if base.get('cron_installed'):
+    print(f"执行时间    每天 {base.get('daily_at','UNKNOWN')}")
 if last:
-    result=last.get('status','UNKNOWN')
-    cn_result={'PASS':'通过','FAIL':'失败','RUNNING':'执行中','SKIPPED_BUSY':'服务器忙，已让路','DISABLED':'已关闭'}.get(result,result)
-    print(f"上次执行：{paint(cn_result,token_color(result))}")
-    print(f"更新时间：{last.get('updated_at','UNKNOWN')}")
-    rows=last.get('sites',[]) if isinstance(last.get('sites'),list) else []
-    detail_rows=[row for row in rows if isinstance(row,dict)]
-    if detail_rows:
-        print('上次各网站：')
-        for row in detail_rows:
-            print(f"  {row.get('domain','UNKNOWN')}")
-            local=row.get('local_backup','UNKNOWN'); g=row.get('google','UNKNOWN'); b=row.get('b2','UNKNOWN'); dual=row.get('dual_remote','UNKNOWN')
-            print(f"    本地：{paint(display_token(local),token_color(local))}")
-            print(f"    Google：{paint(display_token(g),token_color(g))}")
-            print(f"    B2：{paint(display_token(b),token_color(b))}")
-            print(f"    双副本：{paint(display_token(dual),token_color(dual))}")
-    if result=='SKIPPED_BUSY':
-        print('说明：上次检测到服务器正在执行备份 / 恢复 / 迁移 / 远程存储任务，自动备份已安全让路。')
+    result=str(last.get('status','UNKNOWN'))
+    print(f"上次执行    {paint(last_cn.get(result,result),token_color(result))}")
+    if failed:
+        print('需处理网站')
+        for domain,bad in failed[:5]:
+            print(f"  - {domain} · {bad}")
+        if len(failed)>5:
+            print(f"  - 另外 {len(failed)-5} 个网站")
 
 if status=='NOT_CONFIGURED':
-    action='先选择“1. 设置 / 检查异地备份”，然后选择“3. 立即备份全部网站”完成首次验证；通过后再选择“2. 开启 / 修改自动备份”。'
-elif not base.get('enabled',False):
-    if not live_ok:
-        action='自动备份已关闭；如要重新启用，先选择“1. 设置 / 检查异地备份”确认远程，再选择“2. 开启 / 修改自动备份”。'
-    else:
-        action='如需恢复定时保护，选择“2. 开启 / 修改自动备份”。'
-elif not base.get('cron_installed',False):
-    if not live_ok:
-        action='定时尚未开启；先选择“1. 设置 / 检查异地备份”修复远程，再选择“3. 立即备份全部网站”验证。'
-    elif last and last.get('status')=='PASS':
-        action='首次真实备份已通过；定时仍未开启。选择“2. 开启 / 修改自动备份”时 系统会再次核对当前网站集合。'
-    elif last and last.get('status')=='FAIL':
-        action='首次验证没有通过，定时仍未开启；按失败项修复后再次选择“3. 继续验证”。'
-    elif last and last.get('status')=='SKIPPED_BUSY':
-        action='首次验证遇到服务器忙，定时仍未开启；稍后再次选择“3. 继续验证”。'
-    else:
-        action='远程已就绪，定时尚未开启；先选择“3. 首次验证”，通过后再选择“2. 开启 / 修改自动备份”。'
+    action='选择“1. 设置 / 检查异地备份”；设置完成后先验证一个网站。'
 elif not live_ok:
-    action='选择“1. 设置 / 检查异地备份”修复实时远程状态；修复后可选择“3. 立即备份全部网站”验证。'
-elif last and last.get('status')=='FAIL':
-    action='远程当前正常，但上次备份失败；选择“3. 立即备份全部网站”重新验证。'
-elif last and last.get('status')=='SKIPPED_BUSY':
-    action='无需修复；稍后选择“3. 立即备份全部网站”，或等待下一次计划任务自动重试。'
-elif last and last.get('status')=='RUNNING':
-    action='当前可能仍在执行备份；稍后再查看状态，不要重复启动。'
-elif last is None:
-    action='当前定时已启用但还没有执行记录；可选择“3. 立即备份全部网站”完成首次验证。'
+    action='选择“1. 设置 / 检查异地备份”修复 Google / B2；修复后再继续验证或备份。'
+elif base.get('cron_installed'):
+    if last and last.get('status')=='FAIL':
+        action='选择“3. 立即备份全部网站”重试；失败副本不会触发本地自动清理。'
+    elif last and last.get('status')=='SKIPPED_BUSY':
+        action='无需修复；服务器空闲后再手工备份，或等待下一次自动执行。'
+    elif last and last.get('status')=='RUNNING':
+        action='当前可能仍在执行；稍后再查看，不要重复启动。'
+    else:
+        action='当前无需操作。'
+elif full_verified:
+    action='选择“2. 开启自动备份”。'
+elif smoke_verified:
+    action='选择“3. 继续验证：备份全部网站”。'
 else:
-    action='当前无需操作；继续保留定时备份即可。'
+    action='选择“3. 首次验证：先备份一个网站”。'
 
-print(paint(f"下一步：{action}", yellow if effective not in {'ENABLED','VERIFIED_NO_SCHEDULE'} else green))
-print(paint('安全边界：DNS 未修改；状态检查不会删除源服务器、备份，也不会修改定时任务（Cron）。',gray))
+print()
+print(paint(f"下一步      {action}",green if action=='当前无需操作。' else yellow))
+print(paint('说明        状态检查不会修改 DNS、删除网站或删除已有备份。',gray))
 PY
   pause_menu
 }
