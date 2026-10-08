@@ -10,11 +10,11 @@ VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc12"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.2.4"
-VPS_AUDIT_EXPECTED="V2.2.4"
-VPS_AUDIT_BUILD_EXPECTED="2.2.4-rc1-simple-output"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/8fc19153a1b17728ee1a0202121172d820093a61/experiments/p07-vps-audit-v224-r1.sh"
-VPS_AUDIT_SHA256="5c2f56c00a7f4948bda597c8f500e588a581ddfa9723d9c2749f1df0d03afde2"
+VPS_AUDIT_PUBLIC="V2.2.5"
+VPS_AUDIT_EXPECTED="V2.2.5"
+VPS_AUDIT_BUILD_EXPECTED="2.2.5-rc1-bounded-quick"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/3d05e25adca486085362782c26758014b8f04bcf/experiments/p07-vps-audit-v225-r1.sh"
+VPS_AUDIT_SHA256="3748b3b5b85527c57f23ff563bb926f96d0ac002a326a53f3459ff77d365048a"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -32,7 +32,7 @@ fi
 
 say() { printf '%b\n' "$*"; }
 pause_menu() { [[ -t 0 ]] || return 0; printf '\n按 Enter 返回主菜单...'; read -r _ || true; }
-screen_clear() { if [[ -t 1 ]]; then printf '\033[H\033[2J'; fi; }
+screen_clear() { if [[ -t 0 || -t 1 ]]; then printf '\033[2J\033[H'; fi; }
 
 show_header() {
   screen_clear
@@ -307,7 +307,7 @@ main_menu() {
         run_vps_audit
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || say "${C_YELLOW}⚠ 服务器性能检测模块返回退出码 ${rc}。${C_RESET}"
+        [[ $rc -eq 0 ]] || say "${C_YELLOW}本次检测未完整结束（机器繁忙、超时或证据不足）；请稍后再试，没有修改服务器配置。${C_RESET}"
         pause_menu
         ;;
       3)
