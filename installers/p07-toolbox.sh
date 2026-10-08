@@ -7,22 +7,22 @@ VERSION="V0.1.0"
 BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc12"
+VF_NODE_EXPECTED="0.1.0-rc13"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.2.4"
-VPS_AUDIT_EXPECTED="V2.2.4"
-VPS_AUDIT_BUILD_EXPECTED="2.2.4-rc1-simple-output"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/8fc19153a1b17728ee1a0202121172d820093a61/experiments/p07-vps-audit-v224-r1.sh"
-VPS_AUDIT_SHA256="5c2f56c00a7f4948bda597c8f500e588a581ddfa9723d9c2749f1df0d03afde2"
+VPS_AUDIT_PUBLIC="V2.2.5"
+VPS_AUDIT_EXPECTED="V2.2.5"
+VPS_AUDIT_BUILD_EXPECTED="2.2.5-rc1-owner-summary"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/132ee3dbfda18dd1c0be08dec2ceed00406c7058/experiments/p07-vps-audit-v225-r1.sh"
+VPS_AUDIT_SHA256="2b39a2ac445c88868494f9e0e83df2d3b7df1035b4ec0a2ea4e7dbde87cfb7df"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release82"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release83"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc40"
+SYSTEM_CARE_EXPECTED="0.1.0-rc41"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
