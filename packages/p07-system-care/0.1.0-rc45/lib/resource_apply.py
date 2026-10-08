@@ -1215,9 +1215,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             else:
                 print("性能配置调整")
-                print("结果         已应用并验证")
+                no_change = result.get("state") == "UNCHANGED_VERIFIED"
+                print("结果         " + ("当前配置合适，无需修改" if no_change else "已应用并验证"))
                 print(f"配置方案编号 {result.get('profile_id') or '-'}")
-                print(f"回滚备份     {result.get('backup_dir') or '-'}")
+                if result.get("backup_dir"):
+                    print(f"回滚备份     {result['backup_dir']}")
             return 0
         if args.action == "rollback":
             result = rollback(Path(args.state_dir), args.confirm)
