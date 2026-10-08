@@ -1,12 +1,14 @@
 import os,json,pathlib
 p=pathlib.Path('proof')
-files=['identity.json','provider-actual.json','provider-baseline.json','provider-rollback.json','provider-reapply.json','upgrade-rollback.json','clean-install.json','live-browser.json','public-output.json','paired-output.json','directory-browser.json','performance.json','envelope-contract.json','flat-contract.json','null-contract.json','heading-contract.json']
+files=['identity.json','provider-actual.json','provider-baseline.json','provider-rollback.json','provider-reapply.json','upgrade-rollback.json','clean-install.json','live-browser.json','public-output.json','paired-output.json','directory-browser.json','performance.json','envelope-contract.json','flat-contract.json','null-contract.json','heading-contract.json','directory-contract.json']
 d={name:json.loads((p/name).read_text()) for name in files}
 assert all(v['status']=='PASS' for k,v in d.items() if k not in ['provider-baseline.json','provider-rollback.json'])
 assert d['provider-baseline.json']['status']==d['provider-rollback.json']['status']=='REPRODUCED'
 assert d['provider-actual.json']['registry_count']==11 and d['provider-actual.json']['language_pages']==22
 assert len(d['live-browser.json']['tests'])==60
-assert len(d['directory-browser.json']['rows'])==6
+assert len(d['directory-browser.json']['rows'])==6 and len(d['directory-browser.json']['cases'])==16
+assert d['clean-install.json']['setup_revisit']=='LOCKED_ALREADY_INSTALLED'
+assert d['upgrade-rollback.json']['repeat_install']=='PASS'
 for name in ['public-output.json','paired-output.json']:assert d[name]['status']=='PASS'
 runtime=json.loads((p/'installed-runtime.json').read_text())
 assert runtime['file_count']==d['identity.json']['runtime_files'] and runtime['fingerprint_sha256']==d['identity.json']['runtime_fingerprint']

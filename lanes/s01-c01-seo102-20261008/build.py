@@ -6,7 +6,7 @@ assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only','-z','fe74223d6ff644d709c89cb5e123754b0b61bf32','HEAD'],text=True).split('\0')
 changed=[f for f in changed if f and not f.startswith('evidence/')]
-assert set(changed)==set(["VERSION","CHANGELOG.md","src/style.css","src/inc/runtime-constants.php","src/inc/modules/module-content-matrix.php","src/inc/services/tool-seo-technical-service.php","src/inc/services/technical-seo-service.php","tests/provider-seo-envelope-contract.php","tests/content-matrix-heading-contract.php","docs/authority/ACCEPTANCE_MATRIX.md"]),changed
+assert set(changed)==set(["VERSION","CHANGELOG.md","src/style.css","src/inc/runtime-constants.php","src/inc/modules/module-content-matrix.php","src/inc/services/tool-seo-technical-service.php","src/inc/services/technical-seo-service.php","tests/provider-seo-envelope-contract.php","tests/content-matrix-heading-contract.php","docs/authority/ACCEPTANCE_MATRIX.md","src/inc/modules/module-directory-ui.php","src/inc/modules/module-tool-grid.php","src/assets/js/main.js","tests/directory-request-state-contract.php"]),changed
 bundle=(root/'assets/css/public/vf-theme-public-runtime.css').read_text()
 for rel in ['assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css','assets/css/public/pages/families/public-family-03-content-list-operations-closure.css']:
  assert bundle.count((root/rel).read_text())==1, 'active bundle/source mismatch: '+rel

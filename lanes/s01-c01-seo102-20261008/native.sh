@@ -38,8 +38,11 @@ cli eval 'foreach(["vf_theme_seo","vf_theme_layout","vf_theme_brand","vf_theme_n
 cli theme install /tmp/candidate.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 cli eval-file /tmp/actual-provider.php > proof/provider-reapply.json
+cli eval 'foreach(["vf_theme_seo","vf_theme_layout","vf_theme_brand","vf_theme_navigation","vf_tool_m3u8_tool_product_config"] as $k)$s[$k]=get_option($k);if(hash("sha256",serialize($s))!==get_option("round5_preservation")||get_theme_mod("round5_preservation")!=="synthetic-keep")throw new Exception("reapply lost canonical state");' >/dev/null
+cli theme install /tmp/candidate.zip --force >/dev/null
+cli eval 'foreach(["vf_theme_seo","vf_theme_layout","vf_theme_brand","vf_theme_navigation","vf_tool_m3u8_tool_product_config"] as $k)$s[$k]=get_option($k);if(hash("sha256",serialize($s))!==get_option("round5_preservation")||get_theme_mod("round5_preservation")!=="synthetic-keep")throw new Exception("reapply lost canonical state");' >/dev/null
 cli eval 'echo wp_json_encode(VF_Theme_Runtime_Authority_V1::snapshot(get_template_directory()));' > proof/installed-runtime.json
-cli eval 'echo wp_json_encode(["status"=>"PASS","from"=>getenv("SOURCE_VERSION"),"to"=>getenv("TARGET_VERSION"),"upgrade"=>"PASS","rollback"=>"PASS","reapply"=>"PASS","canonical_data_preservation"=>"PASS"]);' > proof/upgrade-rollback.json
+cli eval 'echo wp_json_encode(["status"=>"PASS","from"=>getenv("SOURCE_VERSION"),"to"=>getenv("TARGET_VERSION"),"upgrade"=>"PASS","rollback"=>"PASS","reapply"=>"PASS","canonical_data_preservation"=>"PASS","repeat_install"=>"PASS"]);' > proof/upgrade-rollback.json
 docker cp lane/seed.php "$WP:/tmp/integration-seed.php"
 cli eval-file /tmp/integration-seed.php > proof/seed.json
 node lane/same-source-reference.js seo
