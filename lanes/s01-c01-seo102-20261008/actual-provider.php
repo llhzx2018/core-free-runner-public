@@ -1,0 +1,10 @@
+<?php
+vf_theme_bootstrap_require_many(['services/seo-owner-service.php','services/tool-seo-technical-service.php','services/technical-seo-service.php']);
+$r=vf_theme_tool_seo_registry();$rows=[];$baseline=getenv('VF_EXPECT_BASELINE_BUG')==='1';
+if($baseline){if(isset($r['m3u8-player']))throw new Exception('baseline consumer unexpectedly repaired');echo wp_json_encode(['status'=>'REPRODUCED','registry_keys'=>array_keys($r),'real_slug_missing'=>true]);return;}
+if(count($r)!==11 || ($r['m3u8-player']['tool_id']??'')!=='player')throw new Exception('actual Provider registry mapping failed');
+foreach($r as $route=>$row){foreach(vf_theme_tool_seo_languages($route,$row) as $language){$state=vf_theme_tool_seo_state($route,$language);$api=vf_tool_m3u8_get_tool_semantic($row['tool_id'],$language);$accept=vf_tool_m3u8_get_tool_acceptance_summary($row['tool_id']);if($state['name']!==($api['data']['name']??'') || $state['name']==='')throw new Exception('actual semantic mismatch: '.$route.' '.$language);if($state['acceptance_pass']!==!empty($accept['data']['acceptance_pass']))throw new Exception('actual acceptance mismatch');if(in_array('not_registered',$state['exclusion_reasons'],true))throw new Exception('registered tool lost');$rows[]=['route'=>$route,'tool_id'=>$row['tool_id'],'language'=>$language,'semantic_read'=>'PASS','acceptance_pass'=>$state['acceptance_pass'],'eligible'=>$state['sitemap_eligible'],'excluded'=>$state['exclusion_reasons'],'provider_excluded'=>$state['provider_exclusion_reasons']];}}
+if(count($rows)!==22)throw new Exception('actual 11-tool bilingual denominator');
+$summary=vf_theme_tool_sitemap_exclusion_summary();if(empty($summary['counts']['REAL_BROWSER_ACCEPTANCE_MISSING']))throw new Exception('missing evidence not explained');
+if(str_contains(vf_theme_tool_sitemap_xml(),'<loc>'))throw new Exception('unverified actual tools were promoted');
+echo wp_json_encode(['status'=>'PASS','provider_version'=>VF_TOOL_M3U8_VERSION,'registry_count'=>count($r),'language_pages'=>count($rows),'rows'=>$rows,'summary'=>$summary,'scope'=>'ACTUAL_PROVIDER_READONLY_NO_ACCEPTANCE_SEED','real_provider_acceptance'=>'NOT_PROVEN']);
