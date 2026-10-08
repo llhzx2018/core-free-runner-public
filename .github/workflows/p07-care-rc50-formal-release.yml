@@ -1,0 +1,90 @@
+name: P07 rc50 Formal Release and Remote Readback
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/p07-system-care/0.1.0-rc50/**'
+      - 'installers/p07-system-care.sh'
+      - '.github/workflows/p07-care-rc50-formal-release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p07-rc50-formal-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: p07-v0.1.0-release84-care-rc50-wp-status-fail-closed
+      RELEASE_REPO: llhzx2018/core-free-runner-public
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Exact merged source and immutable distribution preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo 'P07_RELEASE_TOKEN_MISSING'; exit 78; }
+          test "$GITHUB_REPOSITORY" = "$RELEASE_REPO"
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          remote_main="$(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq '.object.sha')"
+          test "$remote_main" = "$GITHUB_SHA"
+          pkg='packages/p07-system-care/0.1.0-rc50'
+          test "$(cat "$pkg/VERSION")" = '0.1.0-rc50'
+          test "$(git hash-object "$pkg/MANIFEST.gitblob")" = 'ac2fb497b0b9b63884068d45d2f9a168bb186c71'
+          (cd "$pkg" && while read -r sha name; do test "$(git hash-object "$name")" = "$sha"; done < MANIFEST.gitblob)
+          grep -Fq 'SYSTEM_CARE_EXPECTED="0.1.0-rc50"' installers/p07-toolbox.sh
+          grep -Fq "VERSION='0.1.0-rc50'" installers/p07-system-care.sh
+          grep -Fq "MANIFEST_BLOB='ac2fb497b0b9b63884068d45d2f9a168bb186c71'" installers/p07-system-care.sh
+          bash -n "$pkg/intrusion-evidence.sh" installers/p07-system-care.sh installers/p07-toolbox.sh
+          python3 -m unittest discover -s tests -p 'test_p07_wp_owner_baseline_rc50.py' -q
+          python3 -m unittest discover -s tests -p 'test_p07_wp_owner_triage_rc48.py' -q
+          echo 'P07_RC50_MERGED_EXACT_SOURCE=PASS'
+
+      - name: Formal Release through registered VF release credential
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! gh release view "$RELEASE_TAG" -R "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" -R "$RELEASE_REPO" --target "$GITHUB_SHA" \
+              --title 'P07 · rc50 WordPress 历史状态异常时禁止更新参考状态' \
+              --notes 'rc49 已独立正式发布且保持不可变。新增 fail-closed 检查：WordPress 状态不可读、扫描失败、监测未开启或历史记录数量异常时，禁止更新可信参考状态。保留已有 23 条历史变化需输入精确数量后再单独 Y/N 确认的机制；正常无异常仍须显式确认。23 条仅为历史累计，不代表已经入侵；完整证据、调度、核心安全限制保留。所有隔离回归与相关 CI 已通过，未进行生产服务器写入。OWNER 实机验收仍为 NOT_RUN。'
+          fi
+          tag_sha="$(gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$tag_sha" = "$GITHUB_SHA" || { echo 'P07_RC50_TAG_IDENTITY_MISMATCH'; exit 81; }
+          release_data="$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG")"
+          test "$(jq -r '.tag_name' <<< "$release_data")" = "$RELEASE_TAG"
+          test "$(jq -r '.target_commitish' <<< "$release_data")" = "$GITHUB_SHA"
+          test "$(jq -r '.draft' <<< "$release_data")" = false
+          test "$(jq -r '.prerelease' <<< "$release_data")" = false
+          echo 'P07_RC50_FORMAL_RELEASE_REMOTE_READBACK=PASS'
+
+      - name: Published public distribution and raw-byte readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          manifest_url="https://raw.githubusercontent.com/$RELEASE_REPO/$GITHUB_SHA/packages/p07-system-care/0.1.0-rc50/MANIFEST.gitblob"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 "$manifest_url" -o /tmp/p07-rc50-manifest
+          test "$(git hash-object /tmp/p07-rc50-manifest)" = 'ac2fb497b0b9b63884068d45d2f9a168bb186c71'
+          url="https://raw.githubusercontent.com/$RELEASE_REPO/main/installers/p07-system-care.sh"
+          good=0
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL --proto '=https' --tlsv1.2 "$url" -o /tmp/p07-public-installer &&
+              grep -Fq "VERSION='0.1.0-rc50'" /tmp/p07-public-installer &&
+              grep -Fq "MANIFEST_BLOB='ac2fb497b0b9b63884068d45d2f9a168bb186c71'" /tmp/p07-public-installer; then
+              good=1
+              break
+            fi
+            sleep 3
+          done
+          test "$good" = 1 || { echo P07_RC50_PUBLIC_INSTALLER_NOT_CURRENT; exit 85; }
+          echo 'P07_RC50_PUBLIC_DISTRIBUTION_REMOTE_READBACK=PASS'
