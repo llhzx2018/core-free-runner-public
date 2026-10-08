@@ -405,12 +405,11 @@ prepare_and_continue() {
   payload="$MIGRATION_PAYLOAD"
   mid="$(json_field "$payload" migration_id 2>/dev/null || true)"
   [[ -n "$mid" ]] || {
-    ui_bad '迁移已执行，但没有读到迁移任务编号。请从“继续未完成迁移”进入。'
+    ui_bad '迁移状态记录没有完整生成。请返回后从“继续未完成迁移”重试。'
     pause
     return 0
   }
   ui_good '首轮迁入完成 ✓'
-  say "迁移任务编号：${C_MAGENTA}$mid${C_RESET}"
   continue_migration "$mid"
 }
 
@@ -418,14 +417,14 @@ continue_migration() {
   local mid="$1" payload status answer output
   while true; do
     if ! run_quiet_with_progress '正在读取迁移状态' "$CORE" server-migrate status --migration-id "$mid"; then
-      ui_bad "无法读取迁移状态：$mid"
+      ui_bad '暂时无法读取迁移状态；任务记录已保留，可以稍后重试。'
       pause
       return 0
     fi
     payload="$WAIT_PAYLOAD"
     status="$(json_field "$payload" status 2>/dev/null || printf UNKNOWN)"
     say
-    ui_flow "迁移任务：$mid"
+    ui_flow '迁移任务状态'
     printf '状态：'; migration_status_color "$status"; printf '\n'
 
     case "$status" in
@@ -690,8 +689,9 @@ for p in Path(sys.argv[1]).glob("*/state.json"):
     if d.get("schema")!="vf-server-ops.server-migration.target-pull.v1":
         continue
     rows.append((d.get("updated_at",""),d.get("migration_id",p.parent.name),d.get("status","UNKNOWN"),(d.get("source") or {}).get("ip","")))
-for _,mid,status,ip in sorted(rows,reverse=True):
-    print(f"{mid}\t{status}\t{ip}")
+for updated,mid,status,ip in sorted(rows,reverse=True):
+    shown=updated.replace("T"," ")[:19] if updated else "-"
+    print(f"{mid}\t{status}\t{ip}\t{shown}")
 PY
 )
   count="${#rows[@]}"
@@ -699,8 +699,90 @@ PY
   ui_title '迁移任务'; ui_rule
   i=1
   for row in "${rows[@]}"; do
-    IFS=$'\t' read -r mid status ip <<<"$row"
-    printf '  %s. %s · ' "$i" "$mid"; migration_status_color "$status"; printf ' · 旧服务器 %s\n' "$ip"
+    IFS=  ui_menu_back 0 '返回'
+  ui_prompt "请选择 [0-${count}]："
+  read -r choice || return 0
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 0
+  [[ "$choice" == 0 ]] && return 0
+  (( choice>=1 && choice<=count )) || return 0
+  IFS=$'\t' read -r mid _ _ <<<"${rows[$((choice-1))]}"
+  continue_migration "$mid"
+}
+
+old_server_switch_needed() {
+  local root="${VFOPS_SOURCE_RECOVERY_ROOT:-/var/lib/vf-server-ops/source-recovery}"
+  [[ -d "$root" ]] || return 1
+  python3 - "$root" <<'PY' >/dev/null 2>&1
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+for path in root.glob("*/state.json"):
+    try:
+        state=json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    status=str(state.get("status",""))
+    if status in {"SOURCE_FREEZE_RUNNING","SOURCE_FROZEN"} or state.get("source_nginx_frozen") is True:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+migration_menu() {
+  local choice show_old_switch=0 prompt_range='0-3'
+  while true; do
+    old_server_switch_needed && show_old_switch=1 || show_old_switch=0
+    [[ "$show_old_switch" -eq 1 ]] && prompt_range='0-4' || prompt_range='0-3'
+    ui_page '服务器迁移' '新服务器主动从旧服务器复制数据'
+    ui_rule
+    say "当前：${C_GREEN}这台新服务器（接收数据）${C_RESET}"
+    ui_note '普通迁移只在新服务器操作；旧服务器只有真的被迁移流程冻结过，才显示恢复开关。'
+    say
+    ui_menu_flow 1 '迁入整台旧服务器'
+    ui_note '     自动盘点旧服务器全部 CloudPanel 网站并迁入'
+    say
+    ui_menu_flow 2 '迁入一个网站'
+    ui_note '     只迁入指定网站'
+    say
+    ui_menu_flow 3 '继续未完成迁移'
+    ui_note '     断点续跑 / DNS 生效验证 / 查看最终状态'
+    if [[ "$show_old_switch" -eq 1 ]]; then
+      say
+      ui_menu_info 4 '旧服务器网站开关'
+      ui_note '     仅在旧服务器存在迁移冻结状态时显示，用于恢复或人工检查网站运行状态'
+    fi
+    say
+    ui_menu_back 0 '返回'
+    say
+    ui_note '安全边界：DNS 只人工切换 · 旧服务器永不自动删除 · 新服务器已有资源不覆盖'
+    ui_prompt "请选择 [${prompt_range}]："
+    read -r choice || return 0
+    case "$choice" in
+      1)
+        ensure_migration_dependencies || { pause; continue; }
+        ensure_current_server_ready || { pause; continue; }
+        whole_server_in
+        ;;
+      2)
+        ensure_migration_dependencies || { pause; continue; }
+        ensure_current_server_ready || { pause; continue; }
+        single_site_in
+        ;;
+      3)
+        ensure_migration_dependencies || { pause; continue; }
+        ensure_current_server_ready || { pause; continue; }
+        select_existing_migration
+        ;;
+      4) [[ "$show_old_switch" -eq 1 ]] && old_server_nginx_control || ui_warn '当前没有需要恢复的旧服务器冻结状态。' ;;
+      0) return 0 ;;
+      *) ui_warn "无效选择。请输入 ${prompt_range}。" ;;
+    esac
+  done
+}
+
+migration_menu
+\t' read -r mid status ip updated <<<"$row"
+    printf '  %s. 旧服务器 %s · ' "$i" "$ip"; migration_status_color "$status"; printf ' · %s\n' "$updated"
     i=$((i+1))
   done
   ui_menu_back 0 '返回'
