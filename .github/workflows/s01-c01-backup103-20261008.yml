@@ -1,0 +1,111 @@
+name: S01-C01 current Theme backup and recovery verification
+on:
+  push:
+    branches: [task/s01-c01-backup103-20261008]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-theme'
+      TARGET_VERSION: '1.35.103'
+      TARGET_SHA: 'b39ea2fe7639037e0a778241c37d5ca374a4e835'
+      TARGET_TREE: '1f41ece0d843ed2055a92df0ffa0078f6b15557f'
+      FORMAL_SHA: 'e7b30bfd6f097beed20838ab0a14c56dd78a433e'
+      ASSET_BYTES: '1789544'
+      ASSET_SHA256: 'e1d5fedd4c99e7b979c3972c57f344b45431bf88637c3b54066c4a12a8fd966e'
+      RUNTIME_FINGERPRINT: 'f259cdd524220cf004406f5a52f5a5bf4f3ef6fa23d447cb8ab079db65d9a640'
+      PROVIDER_VERSION: '1.25.59'
+      PROVIDER_BYTES: '3543556'
+      PROVIDER_SHA256: 'c041bb5aa24d780e8b80b49e5d4a92d5a10a2fa2f54f3cd7b432768d5e1f08ae'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Target owned single spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof provider
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c01-backup103-20261008/spec.json --template runner/lanes/s01-c01-backup103-20261008/verify.template.yml --output /tmp/backup-rendered.yml >/dev/null
+          cmp /tmp/backup-rendered.yml runner/.github/workflows/s01-c01-backup103-20261008.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c01-backup103-20261008/spec.json --input runner/.github/workflows/s01-c01-backup103-20261008.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Verify private exact source and canonical formal packages
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(git -C target rev-parse HEAD:src)" = "$(git -C target rev-parse $FORMAL_SHA:src)"
+          test "$(gh api repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION --jq .object.sha)" = "$FORMAL_SHA"
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$TARGET_VERSION.zip" --output provider/theme.zip
+          gh release download "v$PROVIDER_VERSION" --repo llhzx2018/vf-tools-m3u8 --pattern "vf-tools-m3u8_V$PROVIDER_VERSION.zip" --output provider/provider.zip
+          python3 - <<'PY'
+          import os,pathlib,hashlib,zipfile
+          for file,prefix in [('theme.zip','ASSET'),('provider.zip','PROVIDER')]:
+              p=pathlib.Path('provider')/file;b=p.read_bytes()
+              assert len(b)==int(os.environ[prefix+'_BYTES']) and hashlib.sha256(b).hexdigest()==os.environ[prefix+'_SHA256']
+              with zipfile.ZipFile(p) as z:assert z.testzip() is None
+          PY
+          php -l target/src/inc/admin/admin-recovery-v510-actions.php
+          php -l target/src/inc/services/recovery-service.php
+          php target/tests/recovery-workflow-v4-contract.php
+          php target/tests/recovery-human-language-closure-contract.php
+          node --check target/src/assets/js/admin/admin-recovery-v510.js
+      - name: Execute disposable WordPress and real browser workflows
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c01-backup103-20261008 lane
+          npm install --prefix . playwright@1.58.2 --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          bash lane/native.sh
+      - name: Public safe exact proof
+        if: always()
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-backup103-${{ github.run_id }}
+          path: |
+            proof/*.json
+            proof/*.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Actual proof archive reverse readback
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/backup-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup-proof.zip
+          python3 - <<'PY'
+          import json,pathlib,os,hashlib,zipfile,stat
+          m=json.loads(pathlib.Path('/tmp/backup-meta.json').read_text());b=pathlib.Path('/tmp/backup-proof.zip').read_bytes()
+          assert not m['expired'] and m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert m['size_in_bytes']==len(b) and m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/backup-proof.zip') as z:
+              assert z.testzip() is None
+              for e in z.infolist():
+                  p=pathlib.PurePosixPath(e.filename);assert not p.is_absolute() and '..' not in p.parts and not stat.S_ISLNK(e.external_attr>>16) and p.suffix in ['.json','.png']
+                  if p.suffix=='.json':json.loads(z.read(e))
+              actual=json.loads(z.read('FINAL_EVIDENCE.json'));assert actual==json.loads(pathlib.Path('proof/FINAL_EVIDENCE.json').read_text()) and actual['status']=='PASS'
+              count=len(z.namelist())
+          print('VF_BACKUP_RECEIPT_BEGIN');print(json.dumps(actual));print('VF_BACKUP_RECEIPT_END')
+          print('VF_BACKUP_ARTIFACT_BEGIN');print(json.dumps({'status':'PASS','id':m['id'],'run_id':int(os.environ['GITHUB_RUN_ID']),'bytes':len(b),'digest':m['digest'],'files':count,'crc':'PASS','safe_paths_json_readback':'PASS'}));print('VF_BACKUP_ARTIFACT_END')
+          PY
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target provider
