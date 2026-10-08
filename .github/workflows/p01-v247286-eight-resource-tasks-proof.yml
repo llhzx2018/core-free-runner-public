@@ -1,0 +1,118 @@
+name: P01 V247286 eight independent resource tasks proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247286-eight-resource-tasks-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 9a0a9e188f87387553ee071f3c991b41a19842d4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,simplexml,mbstring
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.285
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: stable
+      - name: Focused checks
+        run: |
+          set -eu
+          php -l src/app/AdminShell.php
+          php -l src/health.php
+          php -l src/all-resources.php
+          php tests/unit/admin_all_resources_route_v247285_contract.php
+          php tests/unit/admin_eight_resource_tasks_v247286_contract.php
+          echo P01_RESOURCE_IA_FOCUSED=PASS
+      - name: Full canonical regression
+        run: |
+          bash tests/canonical_release_regression.sh . stable --require-zero-debt
+          echo P01_RESOURCE_IA_CANONICAL=PASS
+      - name: Source lint and security boundary inventory
+        run: |
+          set -eu
+          find src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          find src -name '*.js' -type f -print0 | xargs -0 -n1 node --check >/dev/null
+          php src/cli/verify.php | grep -Fx VERIFY_PASS=YES
+          echo P01_RESOURCE_IA_LINT_SEED=PASS
+      - name: Isolated install, admin routing and CSRF smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f src/setup.php
+          cp -a src /tmp/vf-p01-ia-runtime
+          cd /tmp/vf-p01-ia-runtime
+          php -S 127.0.0.1:18491 -t . >/tmp/p01-ia-http.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf /tmp/vf-p01-ia-runtime /tmp/vf-p01-ia-*.html /tmp/p01-ia.cookies' EXIT
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-ia.cookies -b /tmp/p01-ia.cookies http://127.0.0.1:18491/setup.php -o /tmp/vf-p01-ia-setup.html; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          t=open('/tmp/vf-p01-ia-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',t)
+          assert m,'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-ia.cookies -b /tmp/p01-ia.cookies -X POST http://127.0.0.1:18491/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=Isolated P01 IA' \
+            --data-urlencode 'admin_password=IsolatedTestOnly2026!' \
+            --data-urlencode 'admin_password_confirm=IsolatedTestOnly2026!' -o /tmp/vf-p01-ia-installed.html
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          echo 'PHASE=anonymous-health'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18491/health.php)" = 302
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18491/recycle-bin.php)" = 302
+          echo 'PHASE=anonymous-ok'
+          curl -fsS -c /tmp/p01-ia.cookies -b /tmp/p01-ia.cookies \
+            -H 'Content-Type: application/json' \
+            -d '{"password":"IsolatedTestOnly2026!"}' \
+            'http://127.0.0.1:18491/api.php?action=login' | grep -Fq '"ok":true'
+          echo 'PHASE=login-ok'
+          for p in health duplicates icons recycle-bin; do
+            curl -fsS -c /tmp/p01-ia.cookies -b /tmp/p01-ia.cookies "http://127.0.0.1:18491/$p.php" -o "/tmp/vf-p01-ia-$p.html"
+            ! grep -Fq 'vf-resource-maintenance-tabs' "/tmp/vf-p01-ia-$p.html"
+          done
+          echo 'PHASE=pages-and-tabs-ok'
+          for p in health duplicates icons recycle-bin; do
+            grep -Fq "data-vf-path=\"$p.php\"" "/tmp/vf-p01-ia-$p.html"
+          done
+          grep -Fq 'href="recycle-bin.php"' /tmp/vf-p01-ia-health.html
+          grep -Fq 'data-vf-path="duplicates.php"' /tmp/vf-p01-ia-health.html
+          grep -Fq 'data-vf-path="icons.php"' /tmp/vf-p01-ia-health.html
+          ! grep -Fq 'vf-maintenance-related' /tmp/vf-p01-ia-health.html
+          grep -Fq 'data-start="all"' /tmp/vf-p01-ia-health.html
+          echo 'PHASE=links-ok'
+          csrf_status=$(curl -sS -b /tmp/p01-ia.cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18491/api.php?action=link_health_job_stop')
+          echo "CSRF_STATUS=$csrf_status"
+          test "$csrf_status" = 419
+          echo P01_RESOURCE_IA_ISOLATED_HTTP_CSRF=PASS
+          echo PHASE=all-resources-route
+          for domain in '' start channels watch topics books projects; do
+            if [ -z "$domain" ]; then url="http://127.0.0.1:18491/all-resources.php"; else url="http://127.0.0.1:18491/all-resources.php?surface=$domain"; fi
+            code=$(curl -sS -L -b /tmp/p01-ia.cookies -c /tmp/p01-ia.cookies -o /tmp/vf-p01-ia-all.html -w '%{http_code}' "$url")
+            test "$code" = 200
+            grep -Fq '<h1>全部资源</h1>' /tmp/vf-p01-ia-all.html
+            grep -Fq 'aria-label="资源域筛选"' /tmp/vf-p01-ia-all.html
+            if [ -n "$domain" ]; then
+              grep -Fq "href=\"all-resources.php?advanced=1&amp;surface=$domain\"" /tmp/vf-p01-ia-all.html
+            fi
+          done
+          curl -fsS -b /tmp/p01-ia.cookies 'http://127.0.0.1:18491/surface-manager.php?advanced=1&surface=start' | grep -Fq '<h1>全部资源</h1>'
+          curl -fsS -b /tmp/p01-ia.cookies 'http://127.0.0.1:18491/surface-manager.php' | grep -Fq '<h1>待整理</h1>'
+          echo P01_V247285_ALL_RESOURCE_TABS_HTTP=PASS
