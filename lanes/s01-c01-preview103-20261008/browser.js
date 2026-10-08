@@ -64,6 +64,18 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
   output('preview-artifact-preservation.json',{status:'PASS',run_id:artifact.runId,hash:artifact.hash,actual_verdict:artifact.status,manual_preview_preserves_download:true});
   await root.locator('[data-vf-preview-workflow-step="preview"]').click();
   await require('../target/tests/preview-workflow-browser-check.js')(page,{url,out:'proof',previousArtifact:artifact,cli});
+  const persisted=JSON.parse(await root.locator('[data-vf-preview-latest]').textContent());
+  output('preview-diagnostic-issues.json',{status:'RECORDED_NOT_PRODUCT_PASS',actual_verdict:persisted.artifact?.status,issues:(persisted.artifact?.issues||[]).map(i=>({level:i.level,category:i.category,problem:i.problem,fixHint:i.fixHint}))});
+  const resultWidths=[];
+  for(const width of [1440,1280,1024,768,390,360]){
+   await page.setViewportSize({width,height:1000});await page.goto(url);await root.locator('[data-vf-preview-workflow-step="results"]').click();
+   const geometry=await root.evaluate(n=>({right:n.getBoundingClientRect().right,scroll:document.documentElement.scrollWidth,viewport:innerWidth}));
+   assert(geometry.right<=width+2&&geometry.scroll<=width+2,'real persisted results overflow '+width);
+   assert(await root.locator('[data-vf-preview-verdict-title]').isVisible());
+   await page.screenshot({path:'proof/preview-real-results-'+width+'.png',fullPage:true});resultWidths.push({width,geometry});
+  }
+  output('preview-result-widths.json',{status:'PASS',environment:'REAL_PERSISTED_ARTIFACT',widths:resultWidths});
+  await page.setViewportSize({width:1440,height:1000});
   await page.goto(url);await root.locator('[data-vf-preview-workflow-step="preview"]').click();
   const signed=await root.locator('[data-vf-preview-open-page]').getAttribute('href');
   const response=await page.request.get(new URL(signed,url).toString());assert.equal(response.status(),200);
