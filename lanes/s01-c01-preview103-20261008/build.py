@@ -1,0 +1,38 @@
+import os, pathlib, zipfile, hashlib, json, re, subprocess
+root=pathlib.Path('target/src'); out=pathlib.Path('proof'); out.mkdir(exist_ok=True)
+version=os.environ['TARGET_VERSION']; sha=os.environ['TARGET_SHA']
+assert pathlib.Path('target/VERSION').read_text().strip()==version
+theme_meta=json.loads((root/'theme.json').read_text())
+assert theme_meta['settings']['custom']['vfThemeVersion']==version
+assert version in theme_meta['settings']['custom']['vfPackageSyncRound']
+assert 'Version: '+version in (root/'style.css').read_text()
+assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
+changed=subprocess.check_output(['git','-C','target','diff','--name-only','-z',os.environ['BASE_SHA'],'HEAD'],text=True).split('\0')
+changed=[f for f in changed if f and not f.startswith('evidence/')]
+assert set(changed)==set(['VERSION','CHANGELOG.md','src/style.css','src/inc/runtime-constants.php','src/theme.json','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','tests/preview-independent-browser-check.js','tests/preview-state-wordpress-check.php','docs/authority/ACCEPTANCE_MATRIX.md']),changed
+asset='vf-tools-theme_V'+version+'.zip'
+for name in [asset,'rebuild.zip']:
+ with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+  for p in sorted(root.rglob('*')):
+   if not p.is_file(): continue
+   rel=p.relative_to(root).as_posix()
+   assert not p.is_symlink()
+   if rel.lower() in ['readme.md','changelog.md']: continue
+   assert not re.search(r'(^|/)(?:\.git|\.github|tests?|docs?|evidence|private|tmp|temp|cache|logs?)(/|$)',rel,re.I),rel
+   assert not re.search(r'\.(?:sql|sqlite3?|db|log|zip|tar|gz|bak|tmp)$',rel,re.I),rel
+   assert pathlib.Path(rel).name not in ['.env','wp-config.php']
+   data=p.read_bytes()
+   assert not re.search(rb'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}',data),rel
+   info=zipfile.ZipInfo('vf-tools-theme/'+rel,(1980,1,1,0,0,0)); info.create_system=3; info.external_attr=(0o100644)<<16
+   z.writestr(info,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+assert (out/asset).read_bytes()==(out/'rebuild.zip').read_bytes()
+(out/'rebuild.zip').unlink()
+data=(out/asset).read_bytes()
+
+
+runtime=json.loads(subprocess.check_output(['php','-r',"define('ABSPATH', true); require 'target/src/inc/update/class-vf-theme-runtime-authority-v1.php'; echo json_encode(VF_Theme_Runtime_Authority_V1::snapshot('target/src'));"],text=True))
+meta={'status':'PASS','runtime_files':runtime['file_count'],'runtime_fingerprint':runtime['fingerprint_sha256'],'source_sha':sha,'source_tree':os.environ['TARGET_TREE'],'version':version,'asset':asset,'asset_bytes':len(data),'asset_sha256':hashlib.sha256(data).hexdigest(),'frozen_shell_header_menu':'PASS','security_boundary':'SOURCE_PACKAGE_SECRET_SCAN_PASS','owner_product_acceptance':'PENDING_OWNER_REAL_USE','owner_preview_runtime_applicability':'N_A','changed_files':changed}
+(out/'identity.json').write_text(json.dumps(meta,indent=2)); print(json.dumps(meta))
+
+
+
