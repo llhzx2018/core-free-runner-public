@@ -4,7 +4,7 @@ set -Eeuo pipefail
 VERSION='0.1.0-rc13'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='0f2ab36cf0dd5452cd72d78ac92a0531517566ea1451a5760567f9e440028dc5'
+MANIFEST_SHA256='133520e5f30fcba95b9aa8d91738d14c92df92295d24ffdbd6cfc57016e20663'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 
