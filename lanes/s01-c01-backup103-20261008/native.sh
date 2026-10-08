@@ -30,7 +30,7 @@ cli eval 'echo wp_json_encode(VF_Theme_Runtime_Authority_V1::snapshot(get_templa
 cli eval 'echo wp_json_encode(["status"=>"PASS","wordpress"=>get_bloginfo("version"),"theme"=>wp_get_theme()->get("Version"),"provider"=>VF_TOOL_M3U8_VERSION]);' > proof/installed-versions.json
 python3 - <<'PY'
 import json,pathlib,os
-r=json.loads(pathlib.Path('proof/installed-runtime.json').read_text());assert r['runtime_files']==467 and r['runtime_fingerprint']==os.environ['RUNTIME_FINGERPRINT']
+r=json.loads(pathlib.Path('proof/installed-runtime.json').read_text());assert r['file_count']==467 and r['fingerprint_sha256']==os.environ['RUNTIME_FINGERPRINT']
 PY
 node lane/browser.js
 docker cp target/tests/recovery-data-wordpress-check.php "$WP:/tmp/recovery-data.php"
