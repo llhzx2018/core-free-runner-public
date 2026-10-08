@@ -1,0 +1,87 @@
+name: S01-C01 103 canonical channel CI recovery
+on:
+  push:
+    branches: [task/s01-c01-preview103-20261008-channel]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TARGET_REPO: 'llhzx2018/core-updates'
+      TARGET_VERSION: '1.35.103'
+      TARGET_SHA: '31e4f61618e08964a6e7066ca64bbb953cd85ed5'
+      TARGET_TREE: '24f5f39c37d6b8de5e23b5b550104422f564de74'
+      EXPECTED_ASSET_BYTES: '1789544'
+      EXPECTED_ASSET_SHA256: 'e1d5fedd4c99e7b979c3972c57f344b45431bf88637c3b54066c4a12a8fd966e'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Single spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c01-preview103-20261008/channel-spec.json --template runner/lanes/s01-c01-preview103-20261008/channel.template.yml --output /tmp/channel.yml >/dev/null
+          cmp /tmp/channel.yml runner/.github/workflows/s01-c01-preview103-20261008-channel.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c01-preview103-20261008/channel-spec.json --input runner/.github/workflows/s01-c01-preview103-20261008-channel.yml > proof/channel-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Execute canonical private-repository CI unchanged
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          cd target
+          python3 scripts/check_manifest_contract.py
+          php -v
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l
+          php update-core/php/tests/run.php
+          cd ..
+          python3 - <<'PY'
+          import os,json,pathlib
+          m=json.loads(pathlib.Path('target/projects/S01-C01.json').read_text())
+          assert m['target_version']==os.environ['TARGET_VERSION'] and m['asset_bytes']==int(os.environ['EXPECTED_ASSET_BYTES']) and m['asset_sha256']==os.environ['EXPECTED_ASSET_SHA256']
+          r={'status':'PASS','repository':os.environ['TARGET_REPO'],'source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'component':'S01-C01','target_version':m['target_version'],'manifest_contract':'PASS','php_syntax':'PASS','canonical_update_core_tests':'PASS','production':'NOT_EXECUTED'}
+          pathlib.Path('proof/CHANNEL_TEST_RECEIPT.json').write_text(json.dumps(r,indent=2))
+          print('VF_CHANNEL_TEST_BEGIN'); print(json.dumps(r)); print('VF_CHANNEL_TEST_END')
+          PY
+      - name: Public-safe receipt
+        id: proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-channel103-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Actual uploaded receipt readback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/channel-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/channel-proof.zip
+          python3 - <<'PY'
+          import os,json,pathlib,hashlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/channel-meta.json').read_text());b=pathlib.Path('/tmp/channel-proof.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert not m['expired'] and m['size_in_bytes']==len(b) and m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/channel-proof.zip') as z:
+              assert z.testzip() is None and set(z.namelist())=={'CHANNEL_TEST_RECEIPT.json','channel-identity-audit.json'}
+              assert json.loads(z.read('CHANNEL_TEST_RECEIPT.json'))==json.loads(pathlib.Path('proof/CHANNEL_TEST_RECEIPT.json').read_text())
+          print('VF_CHANNEL_ARTIFACT_BEGIN');print(json.dumps({'status':'PASS','artifact_id':m['id'],'bytes':len(b),'digest':m['digest'],'crc':'PASS'}));print('VF_CHANNEL_ARTIFACT_END')
+          PY
+      - name: Private checkout cleanup
+        if: always()
+        run: rm -rf target /tmp/original-ci-annotations.json
