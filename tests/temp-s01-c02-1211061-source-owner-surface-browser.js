@@ -77,6 +77,7 @@ async function init(browser,width){
  await page.waitForFunction(()=>document.querySelector('[data-vf-source-page]').dataset.jobStatus==='COMPLETED',{timeout:12000});
  assert.equal(state.processed,6);
  assert.equal(state.progress,100);
+ await page.waitForFunction(()=>window.__softRefreshes===1,{timeout:5000});
  assert.equal(await page.evaluate(()=>window.__softRefreshes),1);
  assert.equal(await page.locator('[data-job-count]').innerText(),'6 / 6');
  console.log('PASS desktop completed+outdated -> start -> pause -> resume -> 6/6 -> readback');
