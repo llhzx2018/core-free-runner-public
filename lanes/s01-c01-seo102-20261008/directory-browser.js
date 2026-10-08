@@ -26,6 +26,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
  await checkCount(1,'category navigation preserves current typed keyword');
  await p.reload();await wait();await checkCount(1,'reload preserves category and keyword');
  await Promise.all([p.waitForURL(u=>!u.searchParams.has('vf_filter')&&!u.searchParams.has('vf_q')),p.locator('[data-vf-directory-reset]').click()]);await wait();await checkCount(9,'clear restores full pool');
+ await p.setViewportSize({width:390,height:1000});assert(await p.locator('[data-vf-directory-filter-select]').isVisible());
  await Promise.all([p.waitForURL(u=>u.searchParams.get('vf_filter')==='manage'),p.locator('[data-vf-directory-filter-select]').selectOption('manage')]);await wait();await checkCount(3,'native select changes persisted category');
  await query().fill('no-match-synthetic');await checkCount(0,'empty state has zero cards');assert(await p.locator('[data-vf-directory-empty]').isVisible());
  await Promise.all([p.waitForURL(u=>!u.searchParams.has('vf_filter')&&!u.searchParams.has('vf_q')),p.locator('[data-vf-directory-reset]').click()]);await wait();await checkCount(9,'empty state clears and recovers');
