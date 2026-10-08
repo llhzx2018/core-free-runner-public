@@ -57,12 +57,12 @@ cli eval 'require_once ABSPATH."wp-admin/includes/plugin.php";if(!is_plugin_acti
 python3 - <<'PYFINAL'
 import pathlib,json,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text())
-for name in ['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','clean-install','repeat-activation','overview-browser','overview-unit','overview-quick-baseline','overview-quick-rollback','overview-quick-reapply','overview-quick-clean']:
+for name in ['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','clean-install','repeat-activation','overview-browser','overview-unit','diagnostic-unit','overview-quick-baseline','overview-quick-rollback','overview-quick-reapply','overview-quick-clean']:
  assert json.loads((p/(name+'.json')).read_text())['status']=='PASS',name
 for name in ['native-candidate','native-reapply-readback','clean-install']:
  r=json.loads((p/(name+'.json')).read_text())['runtime'];assert r['fingerprint_sha256']==identity['runtime_fingerprint'] and r['file_count']==567 and r['version']==os.environ['TARGET_VERSION'],name
 browser=json.loads((p/'overview-browser.json').read_text());unit=json.loads((p/'overview-unit.json').read_text())
-r={**identity,'status':'PASS','native_upgrade':'PASS','source_state_recovery':'PASS','native_reapply':'PASS','clean_install':'PASS','corrupt_asset_guard':'PASS','overview_browser_cases':len(browser['cases']),'overview_unit_cases':len(unit['cases']),'meaning':'BOUNDED_PROVIDER_OVERVIEW_STATE_AND_UI','production':'NOT_EXECUTED','owner_acceptance':'NOT_CLAIMED','run_id':os.environ['GITHUB_RUN_ID']}
+r={**identity,'status':'PASS','native_upgrade':'PASS','source_state_recovery':'PASS','native_reapply':'PASS','clean_install':'PASS','corrupt_asset_guard':'PASS','overview_browser_cases':len(browser['cases']),'overview_unit_cases':len(unit['cases']),'diagnostic_unit_cases':len(json.loads((p/'diagnostic-unit.json').read_text())['cases']),'meaning':'BOUNDED_PROVIDER_OVERVIEW_STATE_AND_UI','production':'NOT_EXECUTED','owner_acceptance':'NOT_CLAIMED','run_id':os.environ['GITHUB_RUN_ID']}
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(r,indent=2));print('VF_CHAIN_FINAL_BEGIN');print(json.dumps(r));print('VF_CHAIN_FINAL_END')
 PYFINAL
 
