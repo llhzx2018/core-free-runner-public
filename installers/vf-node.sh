@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc12'
+VERSION='0.1.0-rc13'
 PACKAGE_PATH="packages/p07-network-node/${VERSION}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/${PACKAGE_PATH}"
-MANIFEST_SHA256='ab4825303cc1d9931a360bf67c442a040aed17c78dfba85dcac273b81eb405e6'
+MANIFEST_SHA256='1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f'
 TARGET='/opt/vf-network-node'
 ENTRY='/usr/local/bin/vf-node'
 
@@ -68,7 +68,7 @@ install_runtime_files() {
   fi
 
   local files=(
-    VERSION SOURCE_IDENTITY vf-node.sh install.sh status.sh share.sh backup.sh uninstall.sh
+    VERSION SOURCE_IDENTITY vf-node.sh install.sh status.sh share.sh uninstall.sh
     lib/common.sh lib/core-pin.env lib/patch_upstream_core.py
   )
   for f in "${files[@]}"; do
@@ -86,9 +86,9 @@ install_runtime_files() {
     return 12
   fi
 
-  cp -a "$tmp/pkg/VERSION" "$tmp/pkg/SOURCE_IDENTITY" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/backup.sh" "$tmp/pkg/uninstall.sh" "$stage/"
+  cp -a "$tmp/pkg/VERSION" "$tmp/pkg/SOURCE_IDENTITY" "$tmp/pkg/vf-node.sh" "$tmp/pkg/install.sh" "$tmp/pkg/status.sh" "$tmp/pkg/share.sh" "$tmp/pkg/uninstall.sh" "$stage/"
   cp -a "$tmp/pkg/lib/common.sh" "$tmp/pkg/lib/core-pin.env" "$tmp/pkg/lib/patch_upstream_core.py" "$stage/lib/"
-  chmod 0755 "$stage/vf-node.sh" "$stage/install.sh" "$stage/status.sh" "$stage/share.sh" "$stage/backup.sh" "$stage/uninstall.sh" "$stage/lib/patch_upstream_core.py"
+  chmod 0755 "$stage/vf-node.sh" "$stage/install.sh" "$stage/status.sh" "$stage/share.sh" "$stage/uninstall.sh" "$stage/lib/patch_upstream_core.py"
   chmod 0644 "$stage/VERSION" "$stage/SOURCE_IDENTITY" "$stage/lib/common.sh" "$stage/lib/core-pin.env"
 
   if [[ -d "$TARGET" ]]; then
@@ -139,11 +139,10 @@ P07 · 网络节点
   install      安装 / 修复节点
   status       查看节点状态
   url|share    显示分享链接
-  backup       备份节点配置
   uninstall    卸载节点
 EOF
     ;;
-  install|status|url|share|backup|uninstall)
+  install|status|url|share|uninstall)
     cmd="$1"
     ensure_manager
     exec "$ENTRY" "$cmd"
