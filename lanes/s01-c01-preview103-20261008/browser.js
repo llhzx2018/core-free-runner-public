@@ -39,6 +39,8 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
   for(const width of [1440,1280,1024,768,390,360]){
    await page.setViewportSize({width,height:1000});await page.goto(url);const a=await controls(page,{width,out:'proof'});
    await page.goto(url);const b=await independent(page,{width,out:'proof'});rows.push({width,controls:a,independent:b});
+   output('preview-controls-progress.json',{status:'RUNNING',completed_widths:rows.map(r=>r.width),rows});
+   console.log('REAL_PREVIEW_WIDTH_COMPLETE '+width);
   }
   assert.equal(canonical(),before,'manual preview mutated Theme canonical state');
   output('preview-controls.json',{status:'PASS',environment:'REAL_ISOLATED_WORDPRESS',rows,canonical_state_preserved:true,production:'NOT_EXECUTED'});
@@ -62,6 +64,25 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
   output('preview-artifact-preservation.json',{status:'PASS',run_id:artifact.runId,hash:artifact.hash,actual_verdict:artifact.status,manual_preview_preserves_download:true});
   await root.locator('[data-vf-preview-workflow-step="preview"]').click();
   await require('../target/tests/preview-workflow-browser-check.js')(page,{url,out:'proof',previousArtifact:artifact,cli});
+  await page.goto(url);await root.locator('[data-vf-preview-workflow-step="preview"]').click();
+  const signed=await root.locator('[data-vf-preview-open-page]').getAttribute('href');
+  const response=await page.request.get(new URL(signed,url).toString());assert.equal(response.status(),200);
+  assert.match(response.headers()['x-robots-tag'],/noindex/);assert.match(response.headers()['cache-control'],/no-store/);
+  const token=new URL(signed,url).searchParams.get('vf_tools_preview');assert(token);
+  const cfg=await page.evaluate(()=>({ajaxUrl:VFThemePreview.ajaxUrl,nonce:VFThemePreview.nonce,revision:document.querySelector('[data-vf-preview-page]').dataset.revision}));
+  const rejected=await page.request.post(cfg.ajaxUrl,{form:{action:'vf_theme_preview_run',phase:'workbench_start',mode:'quick',revision:cfg.revision,nonce:'invalid'}});
+  assert.equal(rejected.status(),403);assert.equal((await rejected.json()).data.failureCode,'NONCE_INVALID');
+  const malformed=await page.request.post(cfg.ajaxUrl,{form:{action:'vf_theme_preview_run',phase:'workbench_browser',runId:'invalid',controlEpoch:'0',browserEvidence:'{bad',nonce:cfg.nonce,revision:cfg.revision}});
+  assert.equal(malformed.status(),400);assert.equal((await malformed.json()).data.failureCode,'VALIDATION_FAILED');
+  const [popup]=await Promise.all([page.waitForEvent('popup'),root.locator('[data-vf-preview-open-page]').click()]);
+  await popup.waitForLoadState('domcontentloaded');assert.equal(new URL(popup.url()).pathname,new URL(signed,url).pathname);await popup.close();
+  const revoke=root.locator('.vf-preview-revoke-form');
+  const details=revoke.locator('xpath=ancestor::details[1]');if(await details.count()&&await details.getAttribute('open')===null)await details.locator(':scope > summary').click();
+  await Promise.all([page.waitForURL(/vf_theme_notice=preview-links-revoked/),revoke.locator('button').click()]);
+  const verification=JSON.parse(cli('vf_theme_bootstrap_require_many(require get_template_directory()."/inc/bootstrap/manifests/admin-tabs/preview.php");echo wp_json_encode(vf_tools_theme_preview_verify_token('+JSON.stringify(token)+'));'));
+  assert.equal(verification.ok,false);assert.equal(verification.failureCode,'TOKEN_REVOKED');
+  assert.equal((await page.request.get(new URL(signed,url).toString())).status(),403);
+  output('preview-security.json',{status:'PASS',signed_preview_private_noindex:true,invalid_nonce:'REJECTED',malformed_json:'REJECTED',new_tab:'PASS',revoke_native_form:'PASS',old_token:'TOKEN_REVOKED',old_link_http:403,production:'NOT_EXECUTED'});
   output('preview-browser-errors.json',{status:errors.length?'FAIL':'PASS',errors});assert.deepEqual(errors,[]);
  }catch(error){output('preview-browser-failure.json',{status:'FAIL',message:error.message,stack:error.stack,errors});await page.screenshot({path:'proof/preview-browser-failure.png',fullPage:true}).catch(()=>{});throw error;}
  finally{await browser.close();}
