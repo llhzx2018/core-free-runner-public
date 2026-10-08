@@ -608,7 +608,7 @@ def compact_evidence_report(scan: dict, events: list[dict]) -> str:
     else:
         lines.append("")
         for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            safe_name = name.replace("\\r", " ").replace("\\n", " ")[:65]
+            safe_name = name.replace("\r", " ").replace("\n", " ")[:65]
             lines.append(f"{safe_name}   {count} 条")
         lines.append("变更类型   " + "、".join(
             f"{kind} {count}" for kind, count in types.most_common(3)
@@ -617,7 +617,7 @@ def compact_evidence_report(scan: dict, events: list[dict]) -> str:
     lines.append("文件变化不等于已确认入侵；更新插件或核心也可能触发。")
     lines.append("关联请求仅是线索，不能据此认定变更原因。")
     lines.append("核实文件和更新来源前，不要更新参考状态。")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def command_report(args: argparse.Namespace) -> int:
