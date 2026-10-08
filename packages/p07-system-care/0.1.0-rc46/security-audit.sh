@@ -17,8 +17,8 @@ if [[ -n "$sshd_bin" ]]; then
     port="$(awk '$1=="port" {print $2; exit}' <<<"$effective")"; port="${port:-未知}"
     root="$(awk '$1=="permitrootlogin" {print $2; exit}' <<<"$effective")"; root="${root:-UNKNOWN}"
     pass="$(awk '$1=="passwordauthentication" {print $2; exit}' <<<"$effective")"; pass="${pass:-UNKNOWN}"
-    [[ "$root" == yes ]] && risk_count=$((risk_count+1))
-    [[ "$pass" == yes ]] && risk_count=$((risk_count+1))
+    if [[ "$root" == yes ]]; then risk_count=$((risk_count+1)); fi
+    if [[ "$pass" == yes ]]; then risk_count=$((risk_count+1)); fi
   fi
 fi
 
