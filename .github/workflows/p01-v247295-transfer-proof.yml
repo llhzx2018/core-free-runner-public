@@ -1,0 +1,117 @@
+name: P01 V247295 transfer preview freshness and export proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247295-transfer-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 2833017d0d6f7675127d77a85d564b98e575bdc9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.294
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring
+          coverage: none
+      - name: Source lint + auto-vs-human PDO SQLite check
+        run: |
+          set -Eeuo pipefail
+          find src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          find src -name '*.js' -type f -print0 | xargs -0 -n1 node --check >/dev/null
+          php tests/unit/admin_transfer_r16_contract.php
+          php tests/unit/admin_transfer_page7_polish_contract.php
+          php tests/unit/transfer_preview_race_v247295_contract.php
+          node tests/browser/transfer_preview_race_v247295_smoke.cjs
+          echo P01_V247295_PHP_JS_SOURCE=PASS
+      - name: Canonical exact source regression
+        run: |
+          set -Eeuo pipefail
+          bash tests/canonical_release_regression.sh . stable --require-zero-debt
+          echo P01_V247295_CANONICAL=PASS
+      - name: Isolated installed transfer functional and CSRF proof
+        run: |
+          set -Eeuo pipefail
+          cp -a src /tmp/p01-295
+          cd /tmp/p01-295
+          php -S 127.0.0.1:18595 -t . >/tmp/p01-295-http.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf /tmp/p01-295 /tmp/p01-295-cookies /tmp/p01-295-setup.html /tmp/p01-295-transfer.html /tmp/p01-295-export.csv' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-295-cookies -b /tmp/p01-295-cookies http://127.0.0.1:18595/setup.php -o /tmp/p01-295-setup.html; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-295-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-295-cookies -b /tmp/p01-295-cookies -X POST http://127.0.0.1:18595/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=Isolated P01 Transfer' \
+            --data-urlencode 'admin_password=IsolatedVf2026!' \
+            --data-urlencode 'admin_password_confirm=IsolatedVf2026!' >/dev/null
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18595/transfer.php)" = 302
+          curl -fsS -c /tmp/p01-295-cookies -b /tmp/p01-295-cookies \
+            -H 'Content-Type: application/json' -d '{"password":"IsolatedVf2026!"}' \
+            'http://127.0.0.1:18595/api.php?action=login' | grep -Fq '"ok":true'
+          curl -fsS -c /tmp/p01-295-cookies -b /tmp/p01-295-cookies http://127.0.0.1:18595/transfer.php -o /tmp/p01-295-transfer.html
+          grep -Fq '<h1>导入导出</h1>' /tmp/p01-295-transfer.html
+          grep -Fq '导入资源数据' /tmp/p01-295-transfer.html
+          grep -Fq '导出数据' /tmp/p01-295-transfer.html
+          test "$(curl -sS -b /tmp/p01-295-cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18595/api.php?action=transfer_apply')" = 419
+          test "$(curl -sS -b /tmp/p01-295-cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18595/api.php?action=transfer_preview')" = 419
+          curl -fsS -b /tmp/p01-295-cookies 'http://127.0.0.1:18595/api.php?action=transfer_export&format=csv&scope=all' -o /tmp/p01-295-export.csv
+          grep -Fq 'category_path' /tmp/p01-295-export.csv
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/app/bootstrap.php';
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $transfer=new VfDataTransfer($db);
+          $cat=$repo->createCategory(['name'=>'Transfer proof','is_private'=>1]);
+          $link=$repo->saveLink(null,['category_id'=>$cat,'surface'=>'start','title'=>'Transfer Existing','url'=>'https://example.com/transfer-existing','is_private'=>1,'is_pending'=>0]);
+          $csv=$transfer->exportCsv('private');
+          if(!str_contains($csv,'Transfer Existing')||!str_contains($csv,'https://example.com/transfer-existing'))throw new RuntimeException('Private CSV real export missing');
+          $public=$transfer->exportCsv('public');
+          if(str_contains($public,'Transfer Existing'))throw new RuntimeException('Private URL leaked to public export');
+          $html=$transfer->exportBookmarksHtml('private');
+          if(!str_contains($html,'Transfer Existing'))throw new RuntimeException('Private bookmark export missing');
+          $parsed=$transfer->parseCsv($csv,1);
+          $preview=$transfer->previewParsed($parsed);
+          if((int)$preview['links']<1||(int)$preview['duplicates']<1)throw new RuntimeException('Preview duplicates wrong');
+          $import="category_path,title,url,private\nProof New,New Link,https://example.com/transfer-new,1\n";
+          $new=$transfer->parseCsv($import,1);
+          $before=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn();
+          $valid=$transfer->previewParsed($new);
+          $afterPreview=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn();
+          if((int)$valid['links']!==1||(int)$valid['invalid']!==0||$before!==$afterPreview)throw new RuntimeException('Preview must be read-only');
+          $result=$transfer->applyParsed($new,'skip');
+          if((int)$result['createdLinks']!==1||empty($result['backup']))throw new RuntimeException('Apply failed to create link and recovery point');
+          $after=(int)$db->query("SELECT COUNT(*) FROM links WHERE lifecycle_state='active'")->fetchColumn();
+          if($after!==$before+1)throw new RuntimeException('Atomic import count mismatch');
+          $second=$transfer->applyParsed($new,'skip');
+          if((int)$second['skippedLinks']!==1||(int)$second['createdLinks']!==0)throw new RuntimeException('Duplicate skip policy failed');
+          echo "P01_V247295_NATIVE_SQLITE_TRANSFER=PASS\n";
+          PHP
+          echo P01_V247295_ISOLATED_HTTP_CSRF_EXPORT=PASS
