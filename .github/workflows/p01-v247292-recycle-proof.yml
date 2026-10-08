@@ -1,0 +1,118 @@
+name: P01 V247292 recycle page-local bulk selection proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247292-recycle-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 399b064a70126bf063d6739f8fd76dd184c13b91
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.291
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring
+          coverage: none
+      - name: Source lint + auto-vs-human PDO SQLite check
+        run: |
+          set -Eeuo pipefail
+          find src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          find src -name '*.js' -type f -print0 | xargs -0 -n1 node --check >/dev/null
+          php tests/unit/recycle_bin_deleted_archive_clarity_v247289_contract.php
+          php tests/unit/recycle_bin_restore_target_v247290_contract.php
+          php tests/unit/recycle_bin_safe_selection_v247292_contract.php
+          node tests/browser/recycle_bin_v247292_smoke.cjs
+          echo P01_V247292_PHP_JS_SOURCE=PASS
+      - name: Canonical exact source regression
+        run: |
+          set -Eeuo pipefail
+          bash tests/canonical_release_regression.sh . stable --require-zero-debt
+          echo P01_V247292_CANONICAL=PASS
+      - name: Isolated installed recycle bin smoke
+        run: |
+          set -Eeuo pipefail
+          cp -a src /tmp/p01-292
+          cd /tmp/p01-292
+          php -S 127.0.0.1:18592 -t . >/tmp/p01-292-http.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf /tmp/p01-292 /tmp/p01-292-cookies /tmp/p01-292-setup.html /tmp/p01-292-health.html' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-292-cookies -b /tmp/p01-292-cookies http://127.0.0.1:18592/setup.php -o /tmp/p01-292-setup.html; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-292-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-292-cookies -b /tmp/p01-292-cookies -X POST http://127.0.0.1:18592/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=Isolated P01 Availability' \
+            --data-urlencode 'admin_password=IsolatedVf2026!' \
+            --data-urlencode 'admin_password_confirm=IsolatedVf2026!' >/dev/null
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18592/recycle-bin.php)" = 302
+          curl -fsS -c /tmp/p01-292-cookies -b /tmp/p01-292-cookies \
+            -H 'Content-Type: application/json' -d '{"password":"IsolatedVf2026!"}' \
+            'http://127.0.0.1:18592/api.php?action=login' | grep -Fq '"ok":true'
+          curl -fsS -c /tmp/p01-292-cookies -b /tmp/p01-292-cookies http://127.0.0.1:18592/recycle-bin.php -o /tmp/p01-292-health.html
+          grep -Fq '<h1>回收站</h1>' /tmp/p01-292-health.html
+          grep -Fq '选择要恢复的记录' /tmp/p01-292-health.html
+          grep -Fq '已删除与历史归档' /tmp/p01-292-health.html
+          test "$(curl -sS -b /tmp/p01-292-cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18592/api.php?action=link_restore')" = 419
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/app/bootstrap.php';
+          $db=vf_db();
+          $repo=new VfRepository($db);
+          $safety=new VfDataSafety($db);
+          $old=$repo->createCategory(['name'=>'Lost original for restore test','is_private'=>1]);
+          $dest=$repo->createCategory(['name'=>'Active target for restore test','is_private'=>1]);
+          $created=$repo->saveLink(null,['surface'=>'start','category_id'=>$old,'title'=>'Missing Category Restore Proof','url'=>'https://example.com/recycle-restore-proof','is_private'=>1,'is_pending'=>0]);
+          $id=(int)$created['id'];
+          $safety->trashLink($id);
+          $safety->trashCategory($old,false);
+          $blocked=false;
+          try{$safety->restoreLink($id);}catch(Throwable $e){$blocked=true;}
+          if(!$blocked)throw new RuntimeException('Missing original category should not silently restore a URL');
+          $safety->restoreLink($id,$dest);
+          $q=$db->prepare('SELECT category_id,lifecycle_state FROM links WHERE id=?');$q->execute([$id]);$row=$q->fetch(PDO::FETCH_ASSOC);$q->closeCursor();
+          if(!$row||(int)$row['category_id']!==$dest||$row['lifecycle_state']!=='active')throw new RuntimeException('URL destination restore failed');
+          $parent=$repo->createCategory(['name'=>'Lost parent restore proof','is_private'=>1]);
+          $child=$repo->createCategory(['name'=>'Child restore proof','parent_id'=>$parent,'is_private'=>1]);
+          $safety->trashCategory($child,false);
+          $safety->trashCategory($parent,false);
+          $blocked=false;
+          try{$safety->restoreCategory($child);}catch(Throwable $e){$blocked=true;}
+          if(!$blocked)throw new RuntimeException('Missing original parent should not be silently accepted');
+          $safety->restoreCategory($child,$dest);
+          $q=$db->prepare('SELECT parent_id,lifecycle_state FROM categories WHERE id=?');$q->execute([$child]);$row=$q->fetch(PDO::FETCH_ASSOC);$q->closeCursor();
+          if(!$row||(int)$row['parent_id']!==$dest||$row['lifecycle_state']!=='active')throw new RuntimeException('Category new-parent restore failed');
+          $empty=$repo->createCategory(['name'=>'Empty restore proof','is_private'=>1]);
+          $safety->trashCategory($empty,false);
+          $safety->restoreCategory($empty);
+          $q=$db->prepare('SELECT lifecycle_state FROM categories WHERE id=?');$q->execute([$empty]);
+          if($q->fetchColumn()!=='active')throw new RuntimeException('Zero-link category restore failed');
+          echo "P01_V247292_NATIVE_SQLITE_TARGET_RESTORE=PASS\n";
+          PHP
+          echo P01_V247292_ISOLATED_HTTP_CSRF=PASS
