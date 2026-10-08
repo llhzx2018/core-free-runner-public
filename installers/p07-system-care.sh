@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc43'
+VERSION='0.1.0-rc44'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 SOURCE_REF="${P07_SYSTEM_CARE_SOURCE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${SOURCE_REF}/${PACKAGE_PATH}"
-MANIFEST_BLOB='b298fc798f53ac8370d1a61a2e2c6442a06f8a53'
-BEGINNER_UI_BLOB='59321bf17c9590f2b9f0925e85b360e1eb5de66d'
+MANIFEST_BLOB='933fdd4b849b219ee3d7ff0ff9dd601d3782200a'
+BEGINNER_UI_BLOB='baa684e32c3240542c1e71f6ed37250490ccb677'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 
@@ -49,7 +49,7 @@ installed_version() {
 }
 
 manager_ready() {
-  [[ -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -x "$TARGET/intrusion-evidence-entry.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_discovery.py" && -x "$TARGET/resource-profile.sh" && -f "$TARGET/lib/resource_profile.py" && -f "$TARGET/lib/resource_calibrations.py" && -x "$TARGET/resource-apply.sh" && -f "$TARGET/lib/resource_apply.py" ]] || return 1
+  [[ -f "$TARGET/lib/resource_brief.py" && -x "$ENTRY" && -x "$TARGET/vf-system-care.sh" && -x "$TARGET/status.sh" && -x "$TARGET/intrusion-evidence.sh" && -x "$TARGET/intrusion-evidence-entry.sh" && -f "$TARGET/lib/intrusion_evidence.py" && -f "$TARGET/lib/intrusion_scan.py" && -f "$TARGET/lib/intrusion_discovery.py" && -x "$TARGET/resource-profile.sh" && -f "$TARGET/lib/resource_profile.py" && -f "$TARGET/lib/resource_calibrations.py" && -x "$TARGET/resource-apply.sh" && -f "$TARGET/lib/resource_apply.py" ]] || return 1
   [[ "$(installed_version)" == "$VERSION" ]] || return 1
   [[ "$(git_blob_sha1 "$TARGET/vf-system-care.sh" 2>/dev/null || true)" == "$BEGINNER_UI_BLOB" ]] || return 1
   NO_COLOR=1 bash "$TARGET/status.sh" quick >/dev/null 2>&1
@@ -99,7 +99,7 @@ install_runtime() {
 
   cp -a "$tmp/pkg/." "$stage/"
   chmod 0755 "$stage/vf-system-care.sh" "$stage/status.sh" "$stage/audit.sh" "$stage/updates.sh" "$stage/cleanup.sh" "$stage/memory.sh" "$stage/services.sh" "$stage/security-audit.sh" "$stage/intrusion-evidence.sh" "$stage/intrusion-evidence-entry.sh" "$stage/resource-profile.sh" "$stage/resource-apply.sh"
-  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py" "$stage/lib/intrusion_discovery.py" "$stage/lib/resource_profile.py" "$stage/lib/resource_calibrations.py" "$stage/lib/resource_apply.py"
+  chmod 0644 "$stage/VERSION" "$stage/lib/common.sh" "$stage/lib/intrusion_evidence.py" "$stage/lib/intrusion_logs.py" "$stage/lib/intrusion_scan.py" "$stage/lib/intrusion_state.py" "$stage/lib/intrusion_discovery.py" "$stage/lib/resource_brief.py" "$stage/lib/resource_profile.py" "$stage/lib/resource_calibrations.py" "$stage/lib/resource_apply.py"
 
   if [[ -d "$TARGET" ]]; then
     rm -rf "${TARGET}.previous"
