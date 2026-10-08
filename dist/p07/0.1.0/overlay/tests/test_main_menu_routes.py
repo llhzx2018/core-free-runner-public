@@ -16,17 +16,14 @@ class MainMenuRouteContractTests(unittest.TestCase):
     def test_three_top_level_routes_and_backup_group_are_wired(self) -> None:
         expected = (
             '1) run_module "$SITE_UI" overview ;;',
-            '2) backup_menu ;;',
-            '3) run_module "$MIGRATE_UI" ;;',
+            '2) run_module "$SITE_UI" backup ;;',
+            '3) run_module "$SITE_UI" restore ;;',
+            '4) run_module "$AUTO_UI" ;;',
+            '5) run_module "$MIGRATE_UI" ;;',
         )
         for route in expected:
             self.assertIn(route, self.user)
-        for route in (
-            '1) run_module "$SITE_UI" backup ;;',
-            '2) run_module "$SITE_UI" restore ;;',
-            '3) run_module "$AUTO_UI" ;;',
-        ):
-            self.assertIn(route, self.user)
+        self.assertNotIn("backup_menu()", self.user)
         self.assertNotIn('run_module "$CLOUDPANEL_UI" site', self.user)
         self.assertNotIn('run_module "$CLOUDPANEL_UI" admin', self.user)
         self.assertNotIn('8) run_module "$DIAG_UI" ;;', self.user)
@@ -46,7 +43,7 @@ class MainMenuRouteContractTests(unittest.TestCase):
     def test_restore_empty_state_waits_for_owner_to_read_it(self) -> None:
         self.assertIn("没有发现本地备份。", self.site)
         self.assertIn("发现了本地备份，但当前完整性复检未通过", self.site)
-        self.assertIn("返回后进入“备份与恢复”，选择“立即备份一个网站”。", self.site)
+        self.assertIn("返回“网站与数据”，选择“立即备份一个网站”。", self.site)
         self.assertIn("ui_empty_state '恢复网站'", self.site)
 
     def test_backup_empty_site_state_waits_before_main_menu_redraw(self) -> None:

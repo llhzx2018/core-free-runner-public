@@ -71,6 +71,12 @@ class StorageOnboardingUXTests(unittest.TestCase):
         self.assertIn("client_secret = sys.stdin.readline()", self.oauth)
         self.assertNotIn("--client-secret", self.oauth)
 
+    def test_start_setup_does_not_open_another_numeric_start_menu(self) -> None:
+        self.assertIn("确认现在开始设置？[y/N]", self.setup)
+        self.assertNotIn("已准备好，开始一键初始化", self.setup)
+        self.assertNotIn("请选择 [0-2]：", self.setup[self.setup.find("fresh_initialize()"):self.setup.find("prepare_source_key()")])
+        self.assertIn("现在自动准备？[y/N]", self.setup)
+
     def test_existing_source_import_and_safety_routes_remain(self) -> None:
         self.assertIn("从仍在线的旧 P07 服务器导入", self.setup)
         self.assertIn("import_from_source", self.setup)
