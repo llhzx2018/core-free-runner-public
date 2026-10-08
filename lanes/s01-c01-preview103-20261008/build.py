@@ -2,11 +2,14 @@ import os, pathlib, zipfile, hashlib, json, re, subprocess
 root=pathlib.Path('target/src'); out=pathlib.Path('proof'); out.mkdir(exist_ok=True)
 version=os.environ['TARGET_VERSION']; sha=os.environ['TARGET_SHA']
 assert pathlib.Path('target/VERSION').read_text().strip()==version
+theme_meta=json.loads((root/'theme.json').read_text())
+assert theme_meta['settings']['custom']['vfThemeVersion']==version
+assert version in theme_meta['settings']['custom']['vfPackageSyncRound']
 assert 'Version: '+version in (root/'style.css').read_text()
 assert "VF_THEME_VERSION', '"+version+"'" in (root/'inc/runtime-constants.php').read_text()
 changed=subprocess.check_output(['git','-C','target','diff','--name-only','-z',os.environ['BASE_SHA'],'HEAD'],text=True).split('\0')
 changed=[f for f in changed if f and not f.startswith('evidence/')]
-assert set(changed)==set(['VERSION','CHANGELOG.md','src/style.css','src/inc/runtime-constants.php','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','tests/preview-independent-browser-check.js','docs/authority/ACCEPTANCE_MATRIX.md']),changed
+assert set(changed)==set(['VERSION','CHANGELOG.md','src/style.css','src/inc/runtime-constants.php','src/theme.json','src/inc/admin/views/preview.php','src/assets/js/admin/admin-preview.js','tests/preview-independent-browser-check.js','tests/preview-state-wordpress-check.php','docs/authority/ACCEPTANCE_MATRIX.md']),changed
 asset='vf-tools-theme_V'+version+'.zip'
 for name in [asset,'rebuild.zip']:
  with zipfile.ZipFile(out/name,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:

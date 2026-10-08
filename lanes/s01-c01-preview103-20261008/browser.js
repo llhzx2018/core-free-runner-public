@@ -27,6 +27,9 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
    output('preview-baseline.json',{status:'REPRODUCED',version:process.env.SOURCE_VERSION,independent_preview_action:'MISSING',iframe:'EMPTY_UNTIL_ACCEPTANCE_TASK',performance:performanceRow,production:'NOT_EXECUTED'});
    await page.screenshot({path:'proof/preview-baseline.png',fullPage:true});return;
   }
+  const component=JSON.parse(cli('vf_theme_bootstrap_require_many(require get_template_directory()."/inc/bootstrap/manifests/admin-tabs/preview.php");echo wp_json_encode(vf_theme_component_acceptance_component_gate());'));
+  const versionCheck=component.checks.find(c=>c.id==='version');assert(versionCheck?.ok,'real component version gate failed');
+  output('preview-component.json',{status:'PASS',version_gate:versionCheck});
   const reference=JSON.parse(fs.readFileSync('proof/preview-baseline.json','utf8')).performance;
   assert(performanceRow.requests<=reference.requests+1,'extra initial background work');
   assert(performanceRow.nodes<=reference.nodes+5,'unexpected DOM growth');
@@ -64,8 +67,8 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
   output('preview-artifact-preservation.json',{status:'PASS',run_id:artifact.runId,hash:artifact.hash,actual_verdict:artifact.status,manual_preview_preserves_download:true});
   await root.locator('[data-vf-preview-workflow-step="preview"]').click();
   await require('../target/tests/preview-workflow-browser-check.js')(page,{url,out:'proof',previousArtifact:artifact,cli});
-  const persisted=JSON.parse(await root.locator('[data-vf-preview-latest]').textContent());
-  output('preview-diagnostic-issues.json',{status:'RECORDED_NOT_PRODUCT_PASS',actual_verdict:persisted.artifact?.status,issues:(persisted.artifact?.issues||[]).map(i=>({level:i.level,category:i.category,problem:i.problem,fixHint:i.fixHint}))});
+  const saved=JSON.parse(await root.locator('[data-vf-preview-latest]').textContent());const persisted=saved.artifact||saved;
+  output('preview-diagnostic-issues.json',{status:'RECORDED_NOT_PRODUCT_PASS',actual_verdict:persisted.status,issues:(persisted.issues||[]).map(i=>({level:i.level,category:i.category,problem:i.problem,fixHint:i.fixHint}))});
   const resultWidths=[];
   for(const width of [1440,1280,1024,768,390,360]){
    await page.setViewportSize({width,height:1000});await page.goto(url);await root.locator('[data-vf-preview-workflow-step="results"]').click();

@@ -1,6 +1,6 @@
 import os,json,pathlib
 p=pathlib.Path('proof')
-names=['identity.json','preview-baseline.json','preview-controls.json','preview-workflow.json','preview-artifact-preservation.json','preview-browser-errors.json','preview-state-wordpress.json','preview-security.json','preview-result-widths.json','upgrade-rollback.json','clean-install.json','installed-versions.json','performance.json']
+names=['identity.json','preview-baseline.json','preview-controls.json','preview-workflow.json','preview-artifact-preservation.json','preview-browser-errors.json','preview-state-wordpress.json','preview-security.json','preview-result-widths.json','preview-component.json','upgrade-rollback.json','clean-install.json','installed-versions.json','performance.json']
 d={name:json.loads((p/name).read_text()) for name in names}
 assert d['preview-baseline.json']['status']=='REPRODUCED'
 assert all(v['status']=='PASS' for name,v in d.items() if name!='preview-baseline.json')
