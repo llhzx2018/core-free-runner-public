@@ -10,11 +10,11 @@ VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc12"
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 
-VPS_AUDIT_PUBLIC="V2.2.6"
-VPS_AUDIT_EXPECTED="V2.2.6"
-VPS_AUDIT_BUILD_EXPECTED="2.2.6-rc1-full-bounded"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/affb2b86acda5104dfec67dd75870021fbfa458b/experiments/p07-vps-audit-v226-r1.sh"
-VPS_AUDIT_SHA256="f40a1ac0ee22087fcc200ae63afd75960dd7c8b8d6775babb90d52f8c365824d"
+VPS_AUDIT_PUBLIC="V2.2.7"
+VPS_AUDIT_EXPECTED="V2.2.7"
+VPS_AUDIT_BUILD_EXPECTED="2.2.7-rc1-full-native-stream"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/f58f4527f0276eee80f67ff41734f5a4fad01802/experiments/p07-vps-audit-v227-r1.sh"
+VPS_AUDIT_SHA256="07ed44258743aae4446ec94c07bb75cfe9ef53a6c9045ece6cdc4cbf3e8fe807"
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -92,18 +92,6 @@ sha256_file() {
   fi
 }
 
-render_vps_audit_output() {
-  sed -u \
-    -e "s/服务器性能检测 2\.0/服务器性能检测 ${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.0\.0-rc3-zh/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.1\.0-rc7-field/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.0-rc1-value-verdict/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.1-rc1-reference-lines/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.2-rc1-semantic-color/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.3-rc1-output-clean/${VPS_AUDIT_PUBLIC}/g"
-}
-
 run_vps_audit() {
   screen_clear
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
@@ -147,14 +135,8 @@ run_vps_audit() {
   fi
 
   set +e
-  if [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-    printf -v cmd 'bash %q' "$tmp"
-    script -qec "$cmd" /dev/null | render_vps_audit_output
-    rc=${PIPESTATUS[0]}
-  else
-    bash "$tmp" | render_vps_audit_output
-    rc=${PIPESTATUS[0]}
-  fi
+  bash "$tmp"
+  rc=$?
   set -e
   rm -f "$tmp"
   return "$rc"
