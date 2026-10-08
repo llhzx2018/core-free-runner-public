@@ -147,14 +147,8 @@ run_vps_audit() {
   fi
 
   set +e
-  if [[ -t 1 ]] && command -v script >/dev/null 2>&1; then
-    printf -v cmd 'bash %q' "$tmp"
-    script -qec "$cmd" /dev/null | render_vps_audit_output
-    rc=${PIPESTATUS[0]}
-  else
-    bash "$tmp" | render_vps_audit_output
-    rc=${PIPESTATUS[0]}
-  fi
+  bash "$tmp"
+  rc=$?
   set -e
   rm -f "$tmp"
   return "$rc"
