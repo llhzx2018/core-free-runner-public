@@ -607,9 +607,12 @@ def compact_evidence_report(scan: dict, events: list[dict]) -> str:
         lines.append("当前没有保存的文件变化事件。")
     else:
         lines.append("")
-        for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            safe_name = name.replace("\r", " ").replace("\n", " ")[:65]
+        sorted_sites = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        for name, count in sorted_sites[:5]:
+            safe_name = name.replace("\r", " ").replace("\n", " ")[:52]
             lines.append(f"{safe_name}   {count} 条")
+        if len(sorted_sites) > 5:
+            lines.append(f"其余 {len(sorted_sites) - 5} 个网站的记录保留在完整证据中")
         lines.append("变更类型   " + "、".join(
             f"{kind} {count}" for kind, count in types.most_common(3)
         ))
