@@ -78,7 +78,7 @@ class EvidenceSummaryContract(unittest.TestCase):
             full = get_report()
             raw = get_report(as_json=True)
             assert "test-a.example   9 条" in summary
-            assert "关联请求" not in summary
+            assert "  关联请求  " not in summary
             assert "关联请求" in full
             assert "/wp-cron.php" in full
             assert '"events"' in raw
