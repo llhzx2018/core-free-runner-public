@@ -1,0 +1,101 @@
+name: S01-C03 compatibility native distribution discovery
+on:
+  push:
+    branches: [task/s01-c03-diagnostics65-20261008-discovery]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.65'
+      TARGET_SHA: '87821bf6e8d1d394323cc5b3f8c8cf36f17f270b'
+      TARGET_TREE: 'c1c4e6be5c7a442ca4abf950b722267b793e70c7'
+      SOURCE_VERSION: '1.25.64'
+      CHANNEL_SHA: 'c1bd7b772ad2b6db0f988753e0ce31445e5ff3da'
+      EXPECTED_ASSET_BYTES: '3551859'
+      EXPECTED_ASSET_SHA256: 'c730c325ff7e8c052e21f0be820bae2f5974d0b54b4a44d1af641c0c6374e43b'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Single spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c03-diagnostics65-20261008/discovery-spec.json --template runner/lanes/s01-c03-diagnostics65-20261008/discovery.template.yml --output /tmp/discovery.yml >/dev/null
+          cmp /tmp/discovery.yml runner/.github/workflows/s01-c03-diagnostics65-20261008-discovery.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c03-diagnostics65-20261008/discovery-spec.json --input runner/.github/workflows/s01-c03-diagnostics65-20261008-discovery.yml > proof/discovery-identity-audit.json
+      - name: Native old M3U8 plugin discovers canonical current channel and downloads exact Asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          NET="vf-discovery-${GITHUB_RUN_ID}"; DB="$NET-db"; WP="$NET-wp"
+          cleanup(){ docker rm -fv "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; rm -rf /tmp/m3u8.zip /tmp/channel.json /tmp/wp-cli.phar; }
+          trap cleanup EXIT
+          gh api "repos/llhzx2018/core-updates/contents/projects/S01-C03.json?ref=$CHANNEL_SHA" -H 'Accept: application/vnd.github.raw+json' > /tmp/channel.json
+          python3 - <<'PY'
+          import os,json,pathlib
+          m=json.loads(pathlib.Path('/tmp/channel.json').read_text())
+          assert m['target_version']==os.environ['TARGET_VERSION'] and m['asset_bytes']==int(os.environ['EXPECTED_ASSET_BYTES']) and m['asset_sha256']==os.environ['EXPECTED_ASSET_SHA256']
+          PY
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-m3u8_V$SOURCE_VERSION.zip" --output /tmp/m3u8.zip
+          python3 - <<'PY'
+          import pathlib,hashlib,zipfile
+          p=pathlib.Path('/tmp/m3u8.zip')
+          assert p.stat().st_size==3549697 and hashlib.sha256(p.read_bytes()).hexdigest()=='94739a2785f5b8ef39a3c340c5fc5641941c75341edd89f206b08a4bf1b26067'
+          with zipfile.ZipFile(p) as z:assert z.testzip() is None
+          PY
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 60);do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1 && break;sleep 2;done
+          docker run -d --name "$WP" --network "$NET" -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 90);do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break;sleep 2;done
+          curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp /tmp/wp-cli.phar "$WP:/usr/local/bin/wp"
+          cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          cli config set DISABLE_WP_CRON true --raw >/dev/null
+          cli core install --url=http://127.0.0.1:18880 --title='Synthetic Update Discovery' --admin_user=admin --admin_password='Synthetic-Only-Discovery-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+          docker cp /tmp/m3u8.zip "$WP:/tmp/m3u8.zip"
+          cli plugin install /tmp/m3u8.zip --activate >/dev/null
+          docker cp /tmp/channel.json "$WP:/tmp/channel.json"
+          docker cp runner/lanes/s01-c03-diagnostics65-20261008/discovery.php "$WP:/tmp/discovery.php"
+          docker exec --user www-data -e VF_PRIVATE_READ_TOKEN -e SOURCE_VERSION -e TARGET_VERSION -e TARGET_SHA -e TARGET_TREE -e CHANNEL_SHA "$WP" php /usr/local/bin/wp eval-file /tmp/discovery.php --path=/var/www/html > proof/DISCOVERY_RECEIPT.json
+          python3 - <<'PY'
+          import json,pathlib,os
+          d=json.loads(pathlib.Path('proof/DISCOVERY_RECEIPT.json').read_text())
+          assert d['status']=='PASS' and d['native_discovery']=='UPDATE_AVAILABLE' and d['asset_sha256']==os.environ['EXPECTED_ASSET_SHA256']
+          print('VF_DISCOVERY_RECEIPT_BEGIN'); print(json.dumps(d)); print('VF_DISCOVERY_RECEIPT_END')
+          PY
+      - name: Public-safe discovery receipt
+        id: proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-discovery64-${{ github.run_id }}
+          path: proof/*.json
+          retention-days: 30
+          if-no-files-found: error
+      - name: Reverse read actual uploaded discovery receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.proof.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/discovery-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/discovery.zip
+          python3 - <<'PY'
+          import os,json,hashlib,pathlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/discovery-meta.json').read_text()); b=pathlib.Path('/tmp/discovery.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert not m['expired'] and m['size_in_bytes']==len(b) and m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/discovery.zip') as z:
+              assert z.testzip() is None and set(z.namelist())=={'DISCOVERY_RECEIPT.json','discovery-identity-audit.json'}
+              d=json.loads(z.read('DISCOVERY_RECEIPT.json')); assert d==json.loads(pathlib.Path('proof/DISCOVERY_RECEIPT.json').read_text())
+          print('VF_DISCOVERY_ARTIFACT_BEGIN'); print(json.dumps({'status':'PASS','artifact_id':m['id'],'bytes':len(b),'digest':m['digest'],'crc':'PASS'})); print('VF_DISCOVERY_ARTIFACT_END')
+          PY
