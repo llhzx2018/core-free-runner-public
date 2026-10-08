@@ -262,11 +262,11 @@ class AutoBackupTests(unittest.TestCase):
                 {"provider": "b2", "enabled": True, "health": "OK"},
             ]}
             output = self._run_status_menu(root, status, live, status_rc=12)
-            self.assertIn("状态：远程已就绪 · 待首次验证", output)
-            self.assertIn("Google 实时：正常 ✓", output)
-            self.assertIn("B2 实时：正常 ✓", output)
-            self.assertIn("开启 / 修改自动备份", output)
-            self.assertIn("不会修改定时任务（Cron）", output)
+            self.assertIn("结论        异地备份已准备 · 等待首次验证", output)
+            self.assertIn("Google      正常 ✓", output)
+            self.assertIn("B2          正常 ✓", output)
+            self.assertIn("首次验证：先备份一个网站", output)
+            self.assertIn("状态检查不会修改 DNS", output)
 
     def test_status_menu_live_remote_failure_is_actionable_attention_without_secret_echo(self):
         with tempfile.TemporaryDirectory() as td:
@@ -284,9 +284,9 @@ class AutoBackupTests(unittest.TestCase):
                 {"provider": "b2", "enabled": True, "health": "OK", b2_secret_key: "DO-NOT-PRINT"},
             ]}
             output = self._run_status_menu(root, status, live)
-            self.assertIn("状态：需关注（实时远程异常）", output)
-            self.assertIn("Google 实时：不可用", output)
-            self.assertIn("B2 实时：正常 ✓", output)
+            self.assertIn("结论        异地备份需要处理", output)
+            self.assertIn("Google      不可用", output)
+            self.assertIn("B2          正常 ✓", output)
             self.assertIn("设置 / 检查异地备份", output)
             self.assertNotIn("DO-NOT-PRINT", output)
 
@@ -307,11 +307,10 @@ class AutoBackupTests(unittest.TestCase):
                 },
             }
             output = self._run_status_menu(root, failed, live)
-            self.assertIn("上次各网站", output)
-            self.assertIn("Google：通过", output)
-            self.assertIn("B2：失败", output)
-            self.assertIn("双副本：失败", output)
+            self.assertIn("需处理网站", output)
+            self.assertIn("example.com · B2", output)
             self.assertIn("立即备份全部网站", output)
+            self.assertNotIn("上次各网站", output)
 
             busy = dict(failed)
             busy["last_run"] = {
@@ -320,7 +319,7 @@ class AutoBackupTests(unittest.TestCase):
             }
             output = self._run_status_menu(root, busy, live)
             self.assertIn("服务器忙，已让路", output)
-            self.assertIn("自动备份已安全让路", output)
+            self.assertIn("服务器忙，已让路", output)
             self.assertIn("无需修复", output)
 
 
