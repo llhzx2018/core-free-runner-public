@@ -1,0 +1,108 @@
+name: S01-C03 diagnostics performance exact formal release
+on:
+  push:
+    branches: [task/s01-c03-diagnostics-performance-20261008-release]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.65'
+      TARGET_SHA: '87821bf6e8d1d394323cc5b3f8c8cf36f17f270b'
+      TARGET_TREE: 'c1c4e6be5c7a442ca4abf950b722267b793e70c7'
+      SOURCE_VERSION: '1.25.64'
+      CANDIDATE_RUN: '37790262740'
+      CANDIDATE_RUNNER_SHA: '7ad6fe3e84617131b496ede323413d26a0605511'
+      CANDIDATE_ARTIFACT_ID: '11555972967'
+      PROMOTED_MAIN_SHA: '5fb3670b212f388d2b9f3c8da81d139e433b74a4'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c03-diagnostics-performance-20261008-release/spec.json --template runner/lanes/s01-c03-diagnostics-performance-20261008-release/release.template.yml --output /tmp/rendered-release.yml >/dev/null
+          cmp /tmp/rendered-release.yml runner/.github/workflows/s01-c03-diagnostics-performance-20261008-release.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c03-diagnostics-performance-20261008-release/spec.json --input runner/.github/workflows/s01-c03-diagnostics-performance-20261008-release.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Actual candidate archive reverse verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir candidate
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > /tmp/candidate-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > /tmp/candidate-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > /tmp/candidate-proof.zip
+          python3 runner/lanes/s01-c03-diagnostics-performance-20261008-release/reverse.py
+      - name: Exact promoted source and deterministic rebuild
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-diagnostics-performance-20261008-release lane
+          test "$(gh api repos/$TARGET_REPO/git/ref/heads/main --jq '.object.sha')" = "$PROMOTED_MAIN_SHA"
+          test "$(gh api repos/$TARGET_REPO/git/commits/$PROMOTED_MAIN_SHA --jq '.tree.sha')" = "$TARGET_TREE"
+          php target/tests/provider-dashboard-visible-ui-contract.php
+          php target/tests/unit/provider-overview-state-contract.php > proof/overview-unit.json
+          php target/tests/unit/provider-diagnostic-self-check-contract.php > proof/diagnostic-unit.json
+          php target/tests/unit/provider-compatibility-contract.php > proof/compatibility-unit.json
+          php target/tests/unit/package-physical-locator-contract.php
+          python3 lane/build.py
+          python3 - <<'PY'
+          import json,pathlib
+          a=json.loads(pathlib.Path('proof/identity.json').read_text());b=json.loads(pathlib.Path('candidate/proof/identity.json').read_text());assert a==b,(a,b)
+          PY
+      - name: Publish authorized exact tag and formal asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$TARGET_REPO/git/refs/tags" > /tmp/tags.json
+          gh api "repos/$TARGET_REPO/releases?per_page=100" > /tmp/releases.json
+          python3 - <<'PY'
+          import pathlib,json,os
+          tag='v'+os.environ['TARGET_VERSION']
+          assert not any(n['ref']=='refs/tags/'+tag for n in json.loads(pathlib.Path('/tmp/tags.json').read_text()))
+          assert not any(n['tag_name']==tag for n in json.loads(pathlib.Path('/tmp/releases.json').read_text()))
+          pathlib.Path('/tmp/release-notes.md').write_text('诊断与性能页现为两个独立模块，补齐技术详情闭合、初始状态、运行进度和保存反馈。基准要求真实解析器及1500分片结果，执行阶段可取消，保存阶段明确不可撤回；缺失或非法指标不得保存为通过。空或总体失败自检保持诊断警告。迁移核对保留真实FAIL与HOLD，不改迁移算法、标记、Schema、权限/nonce、Updater或冻结头部。隔离WordPress覆盖25项本页浏览器场景、18项性能证据、8项诊断单元及保留概览/兼容性回归；实际升级64至65、源和状态恢复64、重用65、干净安装和重复激活均验证。Source: '+os.environ['TARGET_SHA']+'; candidate run '+os.environ['CANDIDATE_RUN']+'. Production由用户手工升级，OWNER最终使用验收未声明通过。\n')
+          PY
+          gh api "repos/$TARGET_REPO/git/refs" -X POST -f ref="refs/tags/v$TARGET_VERSION" -f sha="$PROMOTED_MAIN_SHA" > proof/tag.json
+          gh release create "v$TARGET_VERSION" "proof/vf-tools-m3u8_V$TARGET_VERSION.zip" --repo "$TARGET_REPO" --verify-tag --title "VF Tools M3U8 V$TARGET_VERSION" --notes-file /tmp/release-notes.md
+      - name: Exact delivered asset remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir delivered
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > proof/release-meta.json
+          gh api "repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION" > /tmp/tag-readback.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-m3u8_V$TARGET_VERSION.zip" --dir delivered
+          python3 runner/lanes/s01-c03-diagnostics-performance-20261008-release/readback.py
+      - name: Safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-compatibility-release-${{ github.run_id }}
+          path: proof/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target candidate delivered proof/*.zip /tmp/candidate-proof.zip
+
