@@ -1,0 +1,87 @@
+name: P07 Care rc46 SSH security one-screen contract
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/p07-system-care/0.1.0-rc46/**'
+      - 'installers/p07-toolbox.sh'
+      - 'installers/p07-system-care.sh'
+      - '.github/workflows/p07-care-rc46-login-security-gate.yml'
+permissions:
+  contents: read
+jobs:
+  readonly-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Immutable code and one-screen routing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg='packages/p07-system-care/0.1.0-rc46'
+          test "$(cat "$pkg/VERSION")" = '0.1.0-rc46'
+          test "$(git hash-object "$pkg/MANIFEST.gitblob")" = 'c0b03b7fcbf7637273c2eb901412f051b26d397a'
+          (cd "$pkg" && while read -r sha name; do test "$(git hash-object "$name")" = "$sha"; done < MANIFEST.gitblob)
+          bash -n "$pkg/security-audit.sh" "$pkg/vf-system-care.sh"
+          grep -Fq '5) screen_clear; run_action_friendly security-audit.sh; pause_menu' "$pkg/vf-system-care.sh"
+          grep -Fq 'SYSTEM_CARE_EXPECTED="0.1.0-rc46"' installers/p07-toolbox.sh
+          grep -Fq 'VF_NODE_EXPECTED="0.1.0-rc13"' installers/p07-toolbox.sh
+          grep -Fq 'VPS_AUDIT_EXPECTED="V2.1.0"' installers/p07-toolbox.sh
+          grep -Fq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release84"' installers/p07-toolbox.sh
+          grep -Fq "VERSION='0.1.0-rc46'" installers/p07-system-care.sh
+          grep -Fq "MANIFEST_BLOB='c0b03b7fcbf7637273c2eb901412f051b26d397a'" installers/p07-system-care.sh
+          ! grep -Eq 'systemctl (restart|stop|disable)|sshd_config.*(>|sed)|ufw (enable|disable)|fail2ban-client (set|start|stop)' "$pkg/security-audit.sh"
+          ! grep -Fq '安全更新' "$pkg/security-audit.sh"
+          ! grep -Fq '网站面板' "$pkg/security-audit.sh"
+          echo P07_RC46_SHA_AND_ONE_SCREEN=PASS
+      - name: Mock SSH states without changing machine configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          testdir="$(mktemp -d -t p07-ssh-rc46.XXXXXX)"
+          trap 'rm -rf -- "$testdir"' EXIT
+          cat >"$testdir/sshd" <<'SH'
+          #!/usr/bin/env bash
+          [[ "${MOCK_BAD_CONFIG:-0}" == 1 ]] && exit 1
+          printf 'port 22\npermitrootlogin %s\npasswordauthentication %s\n' "${MOCK_ROOT:-yes}" "${MOCK_PASSWORD:-yes}"
+          SH
+          cat >"$testdir/systemctl" <<'SH'
+          #!/usr/bin/env bash
+          case "$*" in
+            'is-active --quiet ssh'|'is-active --quiet sshd')
+              [[ "${MOCK_STOPPED:-0}" == 0 ]] ;;
+            'is-active --quiet fail2ban') exit 0 ;;
+            *) exit 3 ;;
+          esac
+          SH
+          cat >"$testdir/ufw" <<'SH'
+          #!/usr/bin/env bash
+          echo 'Status: active'
+          SH
+          chmod 0755 "$testdir/sshd" "$testdir/systemctl" "$testdir/ufw"
+          src='packages/p07-system-care/0.1.0-rc46/security-audit.sh'
+          PATH="$testdir:$PATH" NO_COLOR=1 bash "$src" >"$testdir/two.txt"
+          grep -Fq '有 2 项登录配置建议' "$testdir/two.txt"
+          grep -Fq 'SSH 服务    服务运行中' "$testdir/two.txt"
+          grep -Fq '管理员登录  允许管理员直接登录' "$testdir/two.txt"
+          grep -Fq '密码认证    允许密码认证' "$testdir/two.txt"
+          grep -Fq '登录防护    已启用' "$testdir/two.txt"
+          PATH="$testdir:$PATH" MOCK_ROOT=prohibit-password MOCK_PASSWORD=no NO_COLOR=1 bash "$src" >"$testdir/secure.txt"
+          grep -Fq '未发现明显的登录配置风险' "$testdir/secure.txt"
+          ! grep -Fq '有 2 项' "$testdir/secure.txt"
+          PATH="$testdir:$PATH" MOCK_BAD_CONFIG=1 MOCK_STOPPED=1 NO_COLOR=1 bash "$src" >"$testdir/unknown.txt"
+          grep -Fq 'SSH 配置未能核实' "$testdir/unknown.txt"
+          grep -Fq 'SSH 服务    未确认运行' "$testdir/unknown.txt"
+          ! grep -Fq '远程登录    正常' "$testdir/unknown.txt"
+          PATH="$testdir:$PATH" P07_FORCE_COLOR=1 bash "$src" >"$testdir/ansi.txt"
+          python3 - "$testdir/ansi.txt" <<'PY'
+          import pathlib, sys
+          contents=pathlib.Path(sys.argv[1]).read_bytes()
+          assert b'\x1b[' in contents
+          assert contents.count(b'\n') <= 22, 'one-screen output too long'
+          print('P07_RC46_COLOR_AND_ONE_SCREEN=PASS')
+          PY
+          echo P07_RC46_READONLY_LOGIN_STATES=PASS
