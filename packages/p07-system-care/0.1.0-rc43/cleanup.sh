@@ -22,7 +22,7 @@ scan() {
   printf '系统运行日志 %s\n' "$(journal_usage)"
   printf '根分区       %s%%\n' "$(root_disk_pct)"
   say
-  ui_note '只清理系统缓存及旧日志；网站、数据库、证书和备份均不删除。'
+  ui_note '只清理系统缓存和旧日志；不会删除网站、数据库、证书或备份。'
 }
 
 clean_apt() {
