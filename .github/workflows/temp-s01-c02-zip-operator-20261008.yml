@@ -7,7 +7,17 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: ops_1071_upgrade
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: fixture-pass
+        ports: ["3306:3306"]
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=5s --health-timeout=5s --health-retries=30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -54,6 +64,37 @@ jobs:
           jq -e '.pass==true' evidence/zip-manual-resume.json
           jq -e '.pass==true' evidence/zip-upload.json
           jq -e '.pass==true' evidence/quality-native.json
+      - name: Build package and isolated WordPress install upgrade rollback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/vf-tools-ops_V1.21.1071.zip" | tee evidence/package.json
+          unzip -tq "$RUNNER_TEMP/vf-tools-ops_V1.21.1071.zip" >/dev/null
+          ROOT="$RUNNER_TEMP/ops-1071-wordpress"; mkdir -p "$ROOT" previous
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$ROOT/wp"
+          chmod +x "$ROOT/wp"
+          mysql -h127.0.0.1 -P3306 -uroot -pfixture-root -e 'CREATE DATABASE IF NOT EXISTS ops_1071_clean CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'
+          WP1="$ROOT/clean"; mkdir -p "$WP1"; wp1(){ php "$ROOT/wp" --path="$WP1" "$@"; }
+          wp1 core download --version=7.0.2 --force >/dev/null
+          wp1 config create --dbname=ops_1071_clean --dbuser=root --dbpass=fixture-root --dbhost=127.0.0.1:3306 --skip-check >/dev/null
+          wp1 core install --url=http://127.0.0.1:18201 --title='OPS 1071 clean' --admin_user=admin --admin_password=fixture-admin --admin_email=fixture@example.invalid --skip-email >/dev/null
+          wp1 plugin install "$RUNNER_TEMP/vf-tools-ops_V1.21.1071.zip" --activate >/dev/null
+          wp1 eval 'if(VF_OPS_VERSION!=="1.21.1071")throw new RuntimeException("CLEAN_INSTALL_WRONG_VERSION");'
+          gh release download v1.21.1070 --repo llhzx2018/vf-tools-ops --pattern vf-tools-ops_V1.21.1070.zip --dir previous --clobber
+          echo '9bc122a1923c5ebc0c7b59fcb355dbca22a0045942e8ee60b15d1c9ce69cbb65  previous/vf-tools-ops_V1.21.1070.zip' | sha256sum -c -
+          WP2="$ROOT/upgrade"; mkdir -p "$WP2"; wp2(){ php "$ROOT/wp" --path="$WP2" "$@"; }
+          wp2 core download --version=7.0.2 --force >/dev/null
+          wp2 config create --dbname=ops_1071_upgrade --dbuser=vf --dbpass=fixture-pass --dbhost=127.0.0.1:3306 --skip-check >/dev/null
+          wp2 core install --url=http://127.0.0.1:18202 --title='OPS 1071 upgrade' --admin_user=admin --admin_password=fixture-admin --admin_email=fixture@example.invalid --skip-email >/dev/null
+          wp2 plugin install "$GITHUB_WORKSPACE/previous/vf-tools-ops_V1.21.1070.zip" --activate >/dev/null
+          wp2 option update vf_ops_1071_sentinel preserved >/dev/null
+          wp2 eval 'if(VF_OPS_VERSION!=="1.21.1070")throw new RuntimeException("BASE_WRONG_VERSION");'
+          wp2 plugin install "$RUNNER_TEMP/vf-tools-ops_V1.21.1071.zip" --force >/dev/null
+          wp2 eval 'if(VF_OPS_VERSION!=="1.21.1071"||get_option("vf_ops_1071_sentinel")!=="preserved")throw new RuntimeException("UPGRADE_OR_DATA_LOSS");'
+          wp2 plugin install "$GITHUB_WORKSPACE/previous/vf-tools-ops_V1.21.1070.zip" --force >/dev/null
+          wp2 eval 'if(VF_OPS_VERSION!=="1.21.1070"||get_option("vf_ops_1071_sentinel")!=="preserved")throw new RuntimeException("ROLLBACK_OR_DATA_LOSS");'
+          echo INSTALL_UPGRADE_ROLLBACK=PASS | tee evidence/install-upgrade-rollback.txt
       - name: Seal exact-source evidence
         if: always()
         run: |
@@ -64,6 +105,8 @@ jobs:
           browser=['zip-manual-resume.json','zip-upload.json','quality-native.json']
           try: ok=all(json.loads((root/n).read_text())['pass'] is True for n in browser)
           except Exception: ok=False
+          install=(root/'install-upgrade-rollback.txt')
+          ok=ok and install.is_file() and 'INSTALL_UPGRADE_ROLLBACK=PASS' in install.read_text()
           gate=(root/'zip-gates.json')
           try: ok=ok and json.loads(gate.read_text())['pass'] is True
           except Exception: ok=False
