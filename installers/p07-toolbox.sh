@@ -92,18 +92,6 @@ sha256_file() {
   fi
 }
 
-render_vps_audit_output() {
-  sed -u \
-    -e "s/服务器性能检测 2\.0/服务器性能检测 ${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.0\.0-rc3-zh/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.0\.0-rc4-zh/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.1\.0-rc7-field/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.0-rc1-value-verdict/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.1-rc1-reference-lines/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.2-rc1-semantic-color/${VPS_AUDIT_PUBLIC}/g" \
-    -e "s/2\.2\.3-rc1-output-clean/${VPS_AUDIT_PUBLIC}/g"
-}
-
 run_vps_audit() {
   screen_clear
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
