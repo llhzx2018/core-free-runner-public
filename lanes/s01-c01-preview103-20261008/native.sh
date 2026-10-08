@@ -57,5 +57,5 @@ docker exec --user www-data "$NET-clean" php /usr/local/bin/wp theme install /tm
 test "$(docker exec --user www-data "$NET-clean" php /usr/local/bin/wp theme get vf-tools-theme --field=version --path=/var/www/html)" = "$TARGET_VERSION"
 curl -fsS http://127.0.0.1:18881/ >/tmp/clean-first.html
 grep -q "vf-theme-version.*$TARGET_VERSION" /tmp/clean-first.html
-cli eval 'echo wp_json_encode(["status"=>"PASS","clean_theme"=>getenv("TARGET_VERSION"),"native_install"=>true]);' > proof/clean-install.json
+node lane/clean-browser.js
 python3 lane/final.py

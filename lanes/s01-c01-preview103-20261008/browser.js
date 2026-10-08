@@ -12,13 +12,26 @@ async function login(page){await page.goto(base+'/wp-login.php');await page.loca
  const page=await context.newPage();let errors=[];page.on('pageerror',e=>errors.push(e.message));
  try{
   await login(page);await page.goto(url);await page.waitForFunction(()=>document.querySelector('[data-vf-preview-page]')?.dataset.scriptReady==='1');
+  const samples=[];
+  await page.waitForLoadState('networkidle');
+  for(let i=0;i<5;i++){
+   await page.goto(url);await page.waitForLoadState('networkidle');
+   samples.push(await page.evaluate(()=>({duration:performance.getEntriesByType('navigation')[0].duration,requests:performance.getEntriesByType('resource').length,nodes:document.querySelectorAll('*').length})));
+  }
+  const median=key=>samples.map(s=>s[key]).sort((a,b)=>a-b)[2];
+  const performanceRow={duration_ms:median('duration'),requests:median('requests'),nodes:median('nodes'),samples};
   if(process.argv[2]==='baseline'){
    await page.locator('[data-vf-preview-workflow-step="preview"]').click();
    assert.equal(await page.locator('[data-vf-preview-load]').count(),0);
    assert(await page.locator('[data-vf-preview-canvas]').isHidden());
-   output('preview-baseline.json',{status:'REPRODUCED',version:process.env.SOURCE_VERSION,independent_preview_action:'MISSING',iframe:'EMPTY_UNTIL_ACCEPTANCE_TASK',production:'NOT_EXECUTED'});
+   output('preview-baseline.json',{status:'REPRODUCED',version:process.env.SOURCE_VERSION,independent_preview_action:'MISSING',iframe:'EMPTY_UNTIL_ACCEPTANCE_TASK',performance:performanceRow,production:'NOT_EXECUTED'});
    await page.screenshot({path:'proof/preview-baseline.png',fullPage:true});return;
   }
+  const reference=JSON.parse(fs.readFileSync('proof/preview-baseline.json','utf8')).performance;
+  assert(performanceRow.requests<=reference.requests+1,'extra initial background work');
+  assert(performanceRow.nodes<=reference.nodes+5,'unexpected DOM growth');
+  assert(performanceRow.duration_ms<=Math.max(reference.duration_ms*1.5,reference.duration_ms+400),'significant initial-load regression');
+  output('performance.json',{status:'PASS',environment:'SAME_DISPOSABLE_WORDPRESS_AND_SEEDED_DATA',method:'one warmup and five warm navigation samples per version; medians',baseline:reference,current:performanceRow,initial_requests_added:performanceRow.requests-reference.requests,duration_delta_ms:performanceRow.duration_ms-reference.duration_ms});
   const controls=require('../target/tests/preview-controls-browser-check.js');
   const independent=require('../target/tests/preview-independent-browser-check.js');
   const canonical=()=>cli('global $wpdb;echo hash("sha256",serialize($wpdb->get_results("SELECT option_name,option_value FROM {$wpdb->options} WHERE option_name LIKE \'vf_theme_%\' OR option_name LIKE \'vf_tools_theme_%\' ORDER BY option_name",ARRAY_A)));');

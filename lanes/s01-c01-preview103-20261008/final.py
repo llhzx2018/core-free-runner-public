@@ -1,11 +1,12 @@
 import os,json,pathlib
 p=pathlib.Path('proof')
-names=['identity.json','preview-baseline.json','preview-controls.json','preview-workflow.json','preview-artifact-preservation.json','preview-browser-errors.json','preview-state-wordpress.json','upgrade-rollback.json','clean-install.json','installed-versions.json']
+names=['identity.json','preview-baseline.json','preview-controls.json','preview-workflow.json','preview-artifact-preservation.json','preview-browser-errors.json','preview-state-wordpress.json','upgrade-rollback.json','clean-install.json','installed-versions.json','performance.json']
 d={name:json.loads((p/name).read_text()) for name in names}
 assert d['preview-baseline.json']['status']=='REPRODUCED'
 assert all(v['status']=='PASS' for name,v in d.items() if name!='preview-baseline.json')
 assert len(d['preview-controls.json']['rows'])==6
 assert d['preview-controls.json']['canonical_state_preserved']
+assert d['clean-install.json']['setup_revisit']=='LOCKED_ALREADY_INSTALLED'
 assert d['preview-workflow.json']['roundtrip']['domain_count']==6
 assert d['preview-workflow.json']['roundtrip']['revision_restored'] and d['preview-workflow.json']['roundtrip']['journal_clean']
 r=json.loads((p/'installed-runtime.json').read_text())
