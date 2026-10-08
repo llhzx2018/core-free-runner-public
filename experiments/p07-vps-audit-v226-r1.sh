@@ -174,6 +174,9 @@ classify_values(){
     machine="不建议"
     keep="建议更换或先排查隐藏资源限制"
     bottlenecks="存在隐藏资源限制"
+  elif [[ "$cc" == 证据不足 || "$dc" == 证据不足 || "$sc" == 证据不足 ]]; then
+    machine="证据不足"
+    keep="当前证据不足，建议重新检测"
   elif [[ "$cc" == 很弱 || "$cc" == 偏弱 || "$dc" == 偏弱 || "$sc" == 异常偏高 ]]; then
     machine="偏弱"
     keep="有条件保留"
@@ -204,6 +207,8 @@ classify_values(){
 
   if [[ "$resource" == LIMITED ]]; then
     cloud="不建议"
+  elif [[ "$machine" == 证据不足 ]]; then
+    cloud="性能证据不完整，暂不判断"
   elif [[ "$ram_mib" =~ ^[0-9]+$ ]] && (( ram_mib < 1800 )); then
     if [[ "$cc" == 强 || "$cc" == 良好 ]]; then
       cloud="CPU/I/O 可以，但内存不足；不建议直接作为 CloudPanel 多站主机"
@@ -402,4 +407,10 @@ if (( rc != 0 )); then
 fi
 printf '\n[3/4] 服务器用途与综合判定……\n'
 print_value_verdict "$PLAIN"
+# Do not give a successful full-test verdict if synthetic/skipped base evidence was empty.
+if ! grep -Eq '^[[:space:]]*SHA256 单核[[:space:]]*:[[:space:]]*[0-9]' "$PLAIN" ||
+   ! grep -Eq '^[[:space:]]*4K 同步写 IOPS[[:space:]]*:[[:space:]]*[0-9]' "$PLAIN"; then
+  printf '基础 CPU 或 4K 磁盘数据不足，本次完整验机未通过证据门槛。\n' >&2
+  exit 12
+fi
 printf '\n[4/4] 完整验机结束，所有支持的测速、增强磁盘、回程项目均已执行或明确跳过。\n'
