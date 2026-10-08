@@ -358,18 +358,27 @@ printf 'SHA256 单核           : %s MB/s\n' "$cpu" >>"$PLAIN"
 [[ "$cpu" == 未知 ]] && printf 'CPU 测试没有取得有效结果。\n' || printf 'CPU 测试完成。\n'
 printf '\n[2/3] 磁盘 4K 同步写 · 最多 256 KiB · 最长 15 秒...\n'
 disk_dir="$(printenv P07_BENCH_DIR 2>/dev/null || printf '/var/tmp')"
-disk_result="$(timeout --signal=TERM --kill-after=2s 15s python3 - "$disk_dir" <<'PY'
+PROBE_FILE=''
+if [[ -d "$disk_dir" && -w "$disk_dir" ]]; then
+  PROBE_FILE="$(mktemp -p "$disk_dir" .p07-quick.XXXXXX 2>/dev/null || true)"
+fi
+trap '[[ -z "$PROBE_FILE" ]] || rm -f -- "$PROBE_FILE"; rm -rf -- "$TMP"' EXIT
+if [[ -z "$PROBE_FILE" ]]; then
+  printf '无法安全创建小型测试文件，磁盘项目跳过。\n'
+  disk_result='SKIP|临时文件不可用'; disk_rc=12
+else
+  disk_result="$(timeout --signal=TERM --kill-after=2s 15s python3 - "$PROBE_FILE" <<'PY'
 import os,sys,time,tempfile
-d=sys.argv[1]
+path=sys.argv[1]
 try:
-    v=os.statvfs(d)
+    v=os.statvfs(path)
     if v.f_bavail*v.f_frsize < 128*1024*1024:
         print("SKIP|磁盘空间不足");sys.exit(0)
     with open('/proc/meminfo',encoding='ascii') as f:
         mem=next((int(x.split()[1]) for x in f if x.startswith('MemAvailable:')),0)
     if mem < 256*1024:
         print("SKIP|可用内存不足");sys.exit(0)
-    fd,path=tempfile.mkstemp(prefix='.p07-quick-',dir=d)
+    fd=os.open(path,os.O_WRONLY|os.O_TRUNC)
     times=[]
     try:
         data=b'\0'*4096
@@ -381,7 +390,6 @@ try:
             if sum(times)>8000:break
     finally:
         os.close(fd)
-        os.unlink(path)
     if times:
         t=sorted(times)
         p95=t[max(0,min(len(t)-1,int(len(t)*0.95)-1))]
@@ -393,6 +401,9 @@ except (OSError,ValueError,StopIteration):
 PY
 )"
 disk_rc=$?
+fi
+[[ -z "$PROBE_FILE" ]] || rm -f -- "$PROBE_FILE"
+PROBE_FILE=''
 iops='未知';fsync='未知'
 if [[ "$disk_rc" -eq 0 && "$disk_result" == PASS\|* ]]; then
   IFS='|' read -r _ iops fsync <<<"$disk_result"
