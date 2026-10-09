@@ -37,6 +37,8 @@ VF_PHASE=negative cli eval-file /tmp/widget-native-phase.php > proof/native-corr
 VF_PHASE=upgrade cli eval-file /tmp/widget-native-phase.php > proof/native-upgrade.json
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$TARGET_VERSION"
 VF_PHASE=candidate cli eval-file /tmp/widget-native-phase.php > proof/native-candidate.json
+docker cp target/tests/unit/provider-runtime-wordpress-fixture.php "$WP:/tmp/runtime-fixture.php"
+node target/tests/unit/provider-runtime-wordpress-browser.js
 node target/tests/unit/provider-overview-wordpress-browser.js
 node target/tests/unit/provider-diagnostics-wordpress-browser.js
 git -C target show "99c507e72bec9e96b7db6e753ec1b51f73d01985:src/includes/v6-provider-post-migration-readonly.php" > /tmp/prior-readonly.php
@@ -46,8 +48,6 @@ cli eval-file /tmp/migration-readonly-fixture.php > proof/migration-readonly-nat
 node target/tests/unit/provider-compatibility-wordpress-browser.js
 docker cp target/tests/unit/provider-compatibility-wordpress-dependency.php "$WP:/tmp/compatibility-dependency.php"
 cli eval-file /tmp/compatibility-dependency.php > proof/compatibility-dependency-native.json
-docker cp target/tests/unit/provider-runtime-wordpress-fixture.php "$WP:/tmp/runtime-fixture.php"
-node target/tests/unit/provider-runtime-wordpress-browser.js
 git -C target show "284dfd9ab24af4b77c99014aca5fa05343e7f503:src/includes/v6-provider-operations-service.php" > /tmp/backup-prior-service.php
 docker cp /tmp/backup-prior-service.php "$WP:/tmp/backup-prior-service.php"
 docker cp target/tests/unit/provider-backup-wordpress-fixture.php "$WP:/tmp/backup-fixture.php"
