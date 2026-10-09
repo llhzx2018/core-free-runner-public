@@ -1,0 +1,131 @@
+name: S01-C03 Provider configuration backup exact formal release
+on:
+  push:
+    branches: [task/s01-c03-backup-20261009-release]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.69'
+      TARGET_SHA: '2e111cf65d0fd5e7fff30d0c2b75f1833c60e095'
+      TARGET_TREE: 'e9e367a878c926b38c73e148e97b516c1822d165'
+      SOURCE_VERSION: '1.25.68'
+      CANDIDATE_RUN: '37876524817'
+      CANDIDATE_RUNNER_SHA: '6093f87c54b905d2b5cdb2185bf4ba74affd51c8'
+      CANDIDATE_ARTIFACT_ID: '11592787102'
+      PROMOTED_MAIN_SHA: '864975fd3068469f2192b3bd9ccbbe7464cf7a3b'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c03-backup-20261009-release/spec.json --template runner/lanes/s01-c03-backup-20261009-release/release.template.yml --output /tmp/rendered-release.yml >/dev/null
+          cmp /tmp/rendered-release.yml runner/.github/workflows/s01-c03-backup-20261009-release.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c03-backup-20261009-release/spec.json --input runner/.github/workflows/s01-c03-backup-20261009-release.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Actual candidate archive reverse verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir candidate
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > /tmp/candidate-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > /tmp/candidate-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > /tmp/candidate-proof.zip
+          python3 runner/lanes/s01-c03-backup-20261009-release/reverse.py
+      - name: Exact promoted source and deterministic rebuild
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-backup-20261009-release lane
+          test "$(gh api repos/$TARGET_REPO/git/ref/heads/main --jq '.object.sha')" = "$PROMOTED_MAIN_SHA"
+          test "$(gh api repos/$TARGET_REPO/git/commits/$PROMOTED_MAIN_SHA --jq '.tree.sha')" = "$TARGET_TREE"
+          php target/tests/provider-dashboard-visible-ui-contract.php
+          php target/tests/unit/provider-overview-state-contract.php > proof/overview-unit.json
+          php target/tests/unit/provider-diagnostic-self-check-contract.php > proof/diagnostic-unit.json
+          php target/tests/unit/provider-compatibility-contract.php > proof/compatibility-unit.json
+          php target/tests/unit/package-physical-locator-contract.php
+          python3 lane/build.py
+          python3 - <<'PY'
+          import json,pathlib
+          a=json.loads(pathlib.Path('proof/identity.json').read_text());b=json.loads(pathlib.Path('candidate/proof/identity.json').read_text());assert a==b,(a,b)
+          PY
+      - name: Exact release authority and input evidence
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PYA'
+          import json,pathlib,os
+          a=json.loads(pathlib.Path('lane/release-applicability.json').read_text())
+          assert a['source']==a['source_sha']==os.environ['TARGET_SHA']
+          assert a['tree']==a['source_tree']==os.environ['TARGET_TREE']
+          assert a['version']==os.environ['TARGET_VERSION']
+          assert a['formal_release_input']=='PASS_PERSISTENT_OWNER_AUTHORIZATION_N_A_PREVIEW'
+          assert a['production']=='NOT_EXECUTED' and a['owner_acceptance']=='NOT_CLAIMED'
+          assert 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' in pathlib.Path('target/docs/authority/SSOT.md').read_text()
+          assert len(a['domains'])==13
+          for name,d in a['domains'].items():
+            assert d['applicability'] in ['REQUIRED','N_A'],name
+            if d['applicability']=='REQUIRED':
+              assert d['authority_loaded']=='YES_LIVE_THIS_TURN' and d['acceptance_mapped']=='YES' and d['exact_evidence_bound_to_candidate']=='YES',name
+              assert d['required_candidate_files'],name
+              for f in d['required_candidate_files']: assert json.loads(pathlib.Path('candidate/proof',f).read_text())['status']=='PASS',(name,f)
+          assert a['isolated_visual_review']=='PASS' and a['owner_real_use']=='POST_PRODUCTION_REQUIRED'
+          pathlib.Path('proof/release-input.json').write_text(json.dumps(a,ensure_ascii=False,indent=2))
+          PYA
+      - name: Publish authorized exact tag and formal asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$TARGET_REPO/git/refs/tags" > /tmp/tags.json
+          gh api "repos/$TARGET_REPO/releases?per_page=100" > /tmp/releases.json
+          python3 - <<'PY'
+          import pathlib,json,os
+          tag='v'+os.environ['TARGET_VERSION']
+          assert not any(n['ref']=='refs/tags/'+tag for n in json.loads(pathlib.Path('/tmp/tags.json').read_text()))
+          assert not any(n['tag_name']==tag for n in json.loads(pathlib.Path('/tmp/releases.json').read_text()))
+          pathlib.Path('/tmp/release-notes.md').write_text('整理 Provider 配置备份与恢复页：创建、校验、明确确认恢复为草稿；去除重复空状态，技术详情默认收起，恢复提示说明真实结果。修复带原指纹的内容篡改仍可能通过、兼容性保存失败误报成功、恢复检查忽略样例草稿。隔离 WordPress 原生创建/校验/恢复、权限/nonce/确认/无JS、已有草稿冲突、篡改与失败注入、六宽度截图，以及68→69原生升级/恢复68/重用69/干净安装通过。Source: '+os.environ['TARGET_SHA']+'; candidate run '+os.environ['CANDIDATE_RUN']+'. Production由用户手工升级，OWNER最终验收未声明。\n')
+          PY
+          gh api "repos/$TARGET_REPO/git/refs" -X POST -f ref="refs/tags/v$TARGET_VERSION" -f sha="$PROMOTED_MAIN_SHA" > proof/tag.json
+          gh release create "v$TARGET_VERSION" "proof/vf-tools-m3u8_V$TARGET_VERSION.zip" --repo "$TARGET_REPO" --verify-tag --title "VF Tools M3U8 V$TARGET_VERSION" --notes-file /tmp/release-notes.md
+      - name: Exact delivered asset remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir delivered
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > proof/release-meta.json
+          gh api "repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION" > /tmp/tag-readback.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-m3u8_V$TARGET_VERSION.zip" --dir delivered
+          python3 runner/lanes/s01-c03-backup-20261009-release/readback.py
+      - name: Safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-backup-release-${{ github.run_id }}
+          path: proof/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target candidate delivered proof/*.zip /tmp/candidate-proof.zip
+
+
