@@ -18,11 +18,11 @@ VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a95
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release84"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release85"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
-SYSTEM_CARE_EXPECTED="0.1.0-rc53"
+SYSTEM_CARE_EXPECTED="0.1.0-rc54"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
