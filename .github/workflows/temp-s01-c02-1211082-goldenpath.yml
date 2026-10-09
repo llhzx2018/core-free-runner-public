@@ -144,6 +144,26 @@ jobs:
           const data=await response.body();
           if(data.toString('binary',0,2)!=='PK')throw Error('Download is not ZIP');
           fs.writeFileSync(root+'/download.zip',data);
+          const signed=new URL(href,host);
+          const job=signed.searchParams.get('job');
+          if(!job)throw Error('Missing canonical candidate job identity');
+          fs.writeFileSync(root+'/candidate-job.txt',job);
+          const preflightUrl=new URL(signed.toString());
+          preflightUrl.searchParams.set('vf_ops_release_download_preflight','1');
+          const preflight=await page.context().request.get(preflightUrl.toString());
+          if(preflight.status()!==200)throw Error('Candidate HTTP preflight refused');
+          const contract=await preflight.json();
+          if(!contract.ok||!contract.contract?.ready||contract.contract.candidate_file_size!==data.length)throw Error('Preflight contract does not match received bytes');
+          const deniedUrl=new URL(signed.toString());
+          deniedUrl.searchParams.set('_wpnonce','wrong-nonce');
+          const denied=await page.context().request.get(deniedUrl.toString());
+          if(denied.status()!==403)throw Error('Bad nonce unexpectedly allowed candidate download');
+          const guest=await browser.newContext();
+          try {
+            const guestResult=await guest.request.get(signed.toString());
+            if(guestResult.status()!==403)throw Error('Unauthenticated user unexpectedly allowed candidate download');
+          } finally { await guest.close(); }
+          console.log('HTTP_DOWNLOAD_PREFLIGHT_AND_SECURITY_PASS',contract.contract.candidate_file_size);
           console.log('REAL_UI_CHAIN_PASS',data.length);
           }finally{
           console.log('ALL_ACTIONS',JSON.stringify(actions));
@@ -158,5 +178,18 @@ jobs:
           set -e
           wpqa eval '$s=get_option("vf_ops_o10_preflight_snapshot_v121399",[]);echo "ACTUAL_PREFLIGHT_STATUS=".($s["status"]??"MISSING")." P0=".($s["gateSummary"]["P0"]??"?")." P1=".($s["gateSummary"]["P1"]??"?").PHP_EOL;foreach((array)($s["blocking"]??[]) as $b){echo "ACTUAL_P0 ".($b["code"]??"")." ".($b["message"]??"").PHP_EOL;}'
           test "$BROWSER_STATUS" -eq 0
+          cat > "$QA_ROOT/server-candidate-check.php" <<'PHP'
+          <?php
+          require_once WP_PLUGIN_DIR.'/vf-ops/includes/release/class-release-async-job.php';
+          $jobId=trim((string)file_get_contents((string)($args[0]??'')));
+          $job=VF_Ops_Release_Async_Job::load($jobId);
+          $candidate=(string)($job['candidate_path']??'');
+          if(!$candidate||!is_file($candidate))throw new RuntimeException('Canonical candidate missing');
+          echo hash_file('sha256',$candidate)."\n";
+          PHP
+          SERVER_SHA="$(wpqa eval-file "$QA_ROOT/server-candidate-check.php" "$QA_ROOT/candidate-job.txt" | tail -1)"
+          CLIENT_SHA="$(sha256sum "$QA_ROOT/download.zip" | awk '{print $1}')"
+          if [ "$SERVER_SHA" != "$CLIENT_SHA" ]; then echo 'SERVER_DOWNLOAD_SHA_MISMATCH'; exit 1; fi
+          echo 'SERVER_TO_HTTP_ZIP_SHA256_IDENTICAL=PASS'
           unzip -tq "$QA_ROOT/download.zip"
           echo FULL_PUBLISH_UI_HTTP_E2E_PASS
