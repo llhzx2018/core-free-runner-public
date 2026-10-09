@@ -1,0 +1,131 @@
+name: S01-C03 capability contracts exact formal release
+on:
+  push:
+    branches: [task/s01-c03-capability-editor74-20261009-release]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.74'
+      TARGET_SHA: '575032160eedce51e2dc9f2ffa7b9395f76e273c'
+      TARGET_TREE: '32e202f99536a2e89005b5e5c6619537adcdbc8c'
+      SOURCE_VERSION: '1.25.73'
+      CANDIDATE_RUN: '37943987025'
+      CANDIDATE_RUNNER_SHA: '3034249c5b81637ea97ace6310d7a2536b14c842'
+      CANDIDATE_ARTIFACT_ID: '11622359760'
+      PROMOTED_MAIN_SHA: '53ce8b368835564d3f9305bc5a9985e556027d68'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c03-capability-editor74-20261009-release/spec.json --template runner/lanes/s01-c03-capability-editor74-20261009-release/release.template.yml --output /tmp/rendered-release.yml >/dev/null
+          cmp /tmp/rendered-release.yml runner/.github/workflows/s01-c03-capability-editor74-20261009-release.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c03-capability-editor74-20261009-release/spec.json --input runner/.github/workflows/s01-c03-capability-editor74-20261009-release.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Actual candidate archive reverse verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir candidate
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > /tmp/candidate-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > /tmp/candidate-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > /tmp/candidate-proof.zip
+          python3 runner/lanes/s01-c03-capability-editor74-20261009-release/reverse.py
+      - name: Exact promoted source and deterministic rebuild
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-capability-editor74-20261009-release lane
+          test "$(gh api repos/$TARGET_REPO/git/ref/heads/main --jq '.object.sha')" = "$PROMOTED_MAIN_SHA"
+          test "$(gh api repos/$TARGET_REPO/git/commits/$PROMOTED_MAIN_SHA --jq '.tree.sha')" = "$TARGET_TREE"
+          php target/tests/provider-dashboard-visible-ui-contract.php
+          php target/tests/unit/provider-overview-state-contract.php > proof/overview-unit.json
+          php target/tests/unit/provider-diagnostic-self-check-contract.php > proof/diagnostic-unit.json
+          php target/tests/unit/provider-compatibility-contract.php > proof/compatibility-unit.json
+          php target/tests/unit/package-physical-locator-contract.php
+          python3 lane/build.py
+          python3 - <<'PY'
+          import json,pathlib
+          a=json.loads(pathlib.Path('proof/identity.json').read_text());b=json.loads(pathlib.Path('candidate/proof/identity.json').read_text());assert a==b,(a,b)
+          PY
+      - name: Exact release authority and input evidence
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PYA'
+          import json,pathlib,os
+          a=json.loads(pathlib.Path('lane/release-applicability.json').read_text())
+          assert a['source']==a['source_sha']==os.environ['TARGET_SHA']
+          assert a['tree']==a['source_tree']==os.environ['TARGET_TREE']
+          assert a['version']==os.environ['TARGET_VERSION']
+          assert a['formal_release_input']=='PASS_PERSISTENT_OWNER_AUTHORIZATION_N_A_PREVIEW'
+          assert a['production']=='NOT_EXECUTED' and a['owner_acceptance']=='NOT_CLAIMED'
+          assert 'OWNER_PREVIEW_RUNTIME_APPLICABILITY = N_A' in pathlib.Path('target/docs/authority/SSOT.md').read_text()
+          assert len(a['domains'])==13
+          for name,d in a['domains'].items():
+            assert d['applicability'] in ['REQUIRED','N_A'],name
+            if d['applicability']=='REQUIRED':
+              assert d['authority_loaded']=='YES_LIVE_THIS_TURN' and d['acceptance_mapped']=='YES' and d['exact_evidence_bound_to_candidate']=='YES',name
+              assert d['required_candidate_files'],name
+              for f in d['required_candidate_files']: assert json.loads(pathlib.Path('candidate/proof',f).read_text())['status']=='PASS',(name,f)
+          assert a['isolated_visual_review']=='PASS' and a['owner_real_use']=='POST_PRODUCTION_REQUIRED'
+          pathlib.Path('proof/release-input.json').write_text(json.dumps(a,ensure_ascii=False,indent=2))
+          PYA
+      - name: Publish authorized exact tag and formal asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$TARGET_REPO/git/refs/tags" > /tmp/tags.json
+          gh api "repos/$TARGET_REPO/releases?per_page=100" > /tmp/releases.json
+          python3 - <<'PY'
+          import pathlib,json,os
+          tag='v'+os.environ['TARGET_VERSION']
+          assert not any(n['ref']=='refs/tags/'+tag for n in json.loads(pathlib.Path('/tmp/tags.json').read_text()))
+          assert not any(n['tag_name']==tag for n in json.loads(pathlib.Path('/tmp/releases.json').read_text()))
+          pathlib.Path('/tmp/release-notes.md').write_text('能力合同编辑页集中呈现当前状态与主操作，已封存合同、草稿编辑与停用独立呈现。完整配置、历史与原生写入合同保留。六宽度、独立展开、主操作位置稳定、鼠标/键盘/无JS及77项本页检查和相关回归通过；'+os.environ['SOURCE_VERSION']+'→'+os.environ['TARGET_VERSION']+'升级/恢复/重用/干净安装通过。Source: '+os.environ['TARGET_SHA']+'; candidate run '+os.environ['CANDIDATE_RUN']+'. Production由用户手工升级，OWNER最终验收未声明。\n')
+          PY
+          gh api "repos/$TARGET_REPO/git/refs" -X POST -f ref="refs/tags/v$TARGET_VERSION" -f sha="$PROMOTED_MAIN_SHA" > proof/tag.json
+          gh release create "v$TARGET_VERSION" "proof/vf-tools-m3u8_V$TARGET_VERSION.zip" --repo "$TARGET_REPO" --verify-tag --title "VF Tools M3U8 V$TARGET_VERSION" --notes-file /tmp/release-notes.md
+      - name: Exact delivered asset remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir delivered
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > proof/release-meta.json
+          gh api "repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION" > /tmp/tag-readback.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-m3u8_V$TARGET_VERSION.zip" --dir delivered
+          python3 runner/lanes/s01-c03-capability-editor74-20261009-release/readback.py
+      - name: Safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-capability-release-${{ github.run_id }}
+          path: proof/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target candidate delivered proof/*.zip /tmp/candidate-proof.zip
+
+
