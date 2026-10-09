@@ -1,0 +1,67 @@
+name: S01 C02 Ops 1082 isolated install upgrade rollback
+on:
+  push:
+    branches: [test/s01-c02-1211081-cf-candidate-download]
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: cfupgrade
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: fixture-pass
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,pdo_mysql,zip,curl,mbstring
+      - name: Fetch exact old Formal Release and exact new Candidate
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/s01-upgrade/old /tmp/s01-upgrade/new
+          curl -fsSL -H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/octet-stream' "https://api.github.com/repos/llhzx2018/vf-tools-ops/releases/assets/624235587" -o /tmp/s01-upgrade/old/vf-tools-ops_V1.21.1081.zip
+          echo '283ad9782cdc5a81af56bf7ff02535bef0342184c05fb66bc6e67133c2806857  /tmp/s01-upgrade/old/vf-tools-ops_V1.21.1081.zip' | sha256sum -c -
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/llhzx2018/core-free-runner-public/actions/artifacts/11602342726/zip" -o /tmp/s01-upgrade/candidate-artifact.zip
+          unzip -q /tmp/s01-upgrade/candidate-artifact.zip -d /tmp/s01-upgrade/new
+          echo '3551a6fe17d010d092f86e538cc2923520958309f34cc275a29456b02d74c572  /tmp/s01-upgrade/new/vf-tools-ops_V1.21.1082.zip' | sha256sum -c -
+          unzip -tq /tmp/s01-upgrade/new/vf-tools-ops_V1.21.1082.zip
+          echo 'EXACT_1081_AND_1082_ZIPS=PASS'
+      - name: Prove isolated clean install, update, data preservation, rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/s01-upgrade-test"
+          WP="$ROOT/site"
+          mkdir -p "$WP"
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$ROOT/wp"
+          wpqa(){ php "$ROOT/wp" --path="$WP" "$@"; }
+          wpqa core download --version=7.0.2 --force
+          wpqa config create --dbname=cfupgrade --dbuser=vf --dbpass=fixture-pass --dbhost=127.0.0.1 --skip-check
+          wpqa core install --url=https://fixture.invalid --title=UpgradeFixture --admin_user=admin --admin_password=fixture-admin --admin_email=qa@example.invalid --skip-email
+          wpqa plugin install /tmp/s01-upgrade/old/vf-tools-ops_V1.21.1081.zip --activate
+          test "$(wpqa plugin get vf-ops --field=version)" = 1.21.1081
+          test "$(wpqa plugin get vf-ops --field=status)" = active
+          wpqa option add vf_ops_release_upgrade_fixture_sentinel invariant-retained
+          echo 'PASS clean install and active old Formal Release'
+          wpqa plugin install /tmp/s01-upgrade/new/vf-tools-ops_V1.21.1082.zip --force --activate
+          test "$(wpqa plugin get vf-ops --field=version)" = 1.21.1082
+          test "$(wpqa plugin get vf-ops --field=status)" = active
+          test "$(wpqa option get vf_ops_release_upgrade_fixture_sentinel)" = invariant-retained
+          echo 'PASS atomic-style WordPress ZIP overwrite install, upgrade identity, preserved WP data'
+          wpqa plugin install /tmp/s01-upgrade/old/vf-tools-ops_V1.21.1081.zip --force --activate
+          test "$(wpqa plugin get vf-ops --field=version)" = 1.21.1081
+          test "$(wpqa plugin get vf-ops --field=status)" = active
+          test "$(wpqa option get vf_ops_release_upgrade_fixture_sentinel)" = invariant-retained
+          echo 'PASS rollback to prior Formal Release and retained WP data'
+          echo 'ISOLATED_1082_CLEAN_INSTALL_UPGRADE_ROLLBACK=PASS'
