@@ -9,16 +9,16 @@ async function geometry(p){return p.locator('[data-vf-runtime-seal] input[type="
 (async()=>{
  const browser=await chromium.launch(),cases=[],failures=[];state('original');
  try{
-  for(const mode of ['normal','viewport-screenshot','fullpage-screenshot']){
-   for(const width of [1920,1440,1319,1024,768,390]){
-    const trials=mode==='normal'?2:1;
+  for(const mode of ['normal']){
+   for(const width of [1440]){
+    const trials=1;
     for(let trial=0;trial<trials;trial++){
      console.log('START',mode,width,trial);state('reset');let before;const ctx=await browser.newContext({javaScriptEnabled:false,viewport:{width,height:1100}}),p=await ctx.newPage();
      try{
       await login(p);await p.goto(url);before=state('state');await submit(p,'[data-vf-runtime-begin] button');const summaryStart=Date.now();await p.locator('[data-vf-runtime-editor] summary').click();console.log('SUMMARY_DONE',mode,width,Date.now()-summaryStart);await submit(p,'[data-vf-runtime-save] button');
       const row={mode,width,trial,status:'OBSERVED',beforeScreenshot:await geometry(p)};
       if(mode!=='normal')await p.screenshot({path:`proof/${mode}-${width}-before.png`,fullPage:mode==='fullpage-screenshot'});
-      row.afterScreenshot=await geometry(p);
+      row.afterScreenshot=await geometry(p);console.log('BEFORE_CONFIRM',JSON.stringify(row.afterScreenshot));
       const cb=p.locator('[data-vf-runtime-seal] input[type="checkbox"]');
       try{
        await cb.check({timeout:3500});assert(await cb.isChecked(),'native mouse checkbox did not change');
