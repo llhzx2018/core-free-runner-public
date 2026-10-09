@@ -1,0 +1,210 @@
+name: S01 C02 1082 actual full Publish browser HTTP
+on:
+  push:
+    branches: [test/s01-c02-1082-cleanup-dialog-e2e-20261009]
+jobs:
+  full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: publish1082
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: fixture-pass
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ecce157a5ec0c85457f8d00204a42a8f3f509388
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,pdo_mysql,zip,curl,mbstring
+      - name: Install Chromium
+        run: |
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Real browser and actual WordPress API chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          QA_ROOT="$RUNNER_TEMP/fullpublish"; WP="$QA_ROOT/site"; mkdir -p "$WP"
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$QA_ROOT/wp"
+          wpqa(){ php "$QA_ROOT/wp" --path="$WP" "$@"; }
+          wpqa core download --version=7.0.2 --force
+          wpqa config create --dbname=publish1082 --dbuser=vf --dbpass=fixture-pass --dbhost=127.0.0.1 --skip-check
+          wpqa core install --url=http://127.0.0.1:8765 --title=Isolated --admin_user=admin --admin_password=fixture-admin --admin_email=qa@example.invalid --skip-email
+          mkdir -p "$WP/wp-content/plugins/vf-ops"
+          rsync -a --exclude='.git' --exclude='node_modules' ./ "$WP/wp-content/plugins/vf-ops/"
+          wpqa plugin activate vf-ops
+          wpqa option update siteurl http://127.0.0.1:8765
+          wpqa option update home http://127.0.0.1:8765
+          wpqa option get siteurl
+          wpqa option get home
+          cat > "$QA_ROOT/canonical-config.php" <<'PHP'
+          <?php
+          // Isolated GitHub Actions ephemeral WordPress fixture only. Never Production.
+          if (!defined('ABSPATH')) { exit(1); }
+          $base=WP_PLUGIN_DIR.'/vf-ops/includes/site-release/';
+          foreach (['contract.php','validation.php','audit.php','manifest.php','repository.php','service.php'] as $file) {
+              require_once $base.$file;
+          }
+          wp_set_current_user(1);
+          $before=vf_ops_site_release_readback_v121453();
+          $raw=vf_ops_site_release_defaults_v121453();
+          $raw['publicBaseUrl']='https://example.com';
+          $raw['inputMode']='zip';
+          $raw['requiredPaths']=['/','/tools/'];
+          $result=vf_ops_save_site_release_transaction($raw,(int)$before['revision'],'isolated-publish-goldenpath');
+          if (empty($result['ok'])) {
+              throw new RuntimeException('Isolated site-release save failed: '.wp_json_encode($result));
+          }
+          $after=vf_ops_site_release_readback_v121453();
+          if ((int)$after['revision']<=0 || !$after['configHash'] || $after['publicBaseUrl']!=='https://example.com') {
+              throw new RuntimeException('Isolated site-release readback mismatch');
+          }
+          echo "ISOLATED_CONFIG_CANONICAL_SAVE_READBACK=PASS\n";
+          PHP
+          wpqa eval-file "$QA_ROOT/canonical-config.php"
+          cat >"$QA_ROOT/fixture.php" <<'PHP'
+          <?php
+          $p=$argv[1].'/source.zip';$z=new ZipArchive();$z->open($p,ZipArchive::CREATE|ZipArchive::OVERWRITE);
+          $z->addFromString('index.html','<!doctype html><html><head><title>Fixture</title><link rel="canonical" href="https://fixture.invalid/"></head><body><h1>Fixture Home</h1><a href="/about/">About</a></body></html>');
+          $z->addFromString('about/index.html','<!doctype html><html><head><title>About</title></head><body><h1>About</h1></body></html>');
+          $z->addFromString('404.html','<!doctype html><html><head><meta name="robots" content="noindex"></head><body><h1>404</h1></body></html>');
+          $z->addFromString('robots.txt',"User-agent: *\nAllow: /\n");
+          $z->addFromString('sitemap.xml','<?xml version="1.0" encoding="UTF-8"?><urlset></urlset>');
+          $z->addFromString('VERSION.txt','fixture');
+          $z->addFromString('release-health.json','{"status":"NOT_VERIFIED","finalOnlinePass":"NO"}');
+          $z->addFromString('static-release-report.json','{"status":"NOT_VERIFIED","finalOnlinePass":"NO"}');
+          $z->close();echo filesize($p);
+          
+          PHP
+          php "$QA_ROOT/fixture.php" "$QA_ROOT"
+          php -S 127.0.0.1:8765 -t "$WP" >"$QA_ROOT/http.log" 2>&1 &
+          pid=$!;trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 15); do if curl -fsS -o /dev/null http://127.0.0.1:8765/wp-login.php; then break; fi; sleep 1; done
+          cat >"$QA_ROOT/browser.js" <<'JS'
+          const {chromium}=require('playwright');
+          const fs=require('fs');
+          const root=process.env.QA_ROOT,host='http://127.0.0.1:8765';
+          (async()=>{
+          const browser=await chromium.launch({headless:true});
+          const page=await browser.newPage({viewport:{width:1440,height:900},acceptDownloads:true});
+          let actions=[];
+          page.on('response',async response=>{
+          const req=response.request();if(!req.url().includes('admin-ajax.php'))return;
+          const body=req.postData()||'';
+          const action=new URLSearchParams(body).get('action')||((body.match(/name="action"\r?\n\r?\n([^\r\n]+)/)||[])[1])||'unknown';
+          let value;try{const data=await response.json();value={ok:data.success,code:data.data?.code,message:String(data.data?.message||'').slice(0,100),status:data.data?.status,hasJob:!!data.data?.job}}catch(e){value={json:false}};
+          actions.push({action,http:response.status(),value});
+          console.log('AJAX',JSON.stringify(actions[actions.length-1]));
+          });
+          try{
+          await page.goto(host+'/wp-login.php');
+          await page.locator('#user_login').fill('admin');
+          await page.locator('#user_pass').fill('fixture-admin');
+          await page.locator('#wp-submit').click();
+          await page.waitForTimeout(1200);console.log('AUTH_ROUTE',page.url());console.log('AUTH_BODY',(await page.locator('body').innerText()).slice(0,320));await page.waitForURL(/\/wp-admin\//,{timeout:9000});
+          console.log('LOGIN_PASS');
+          await page.goto(host+'/wp-admin/admin.php?page=vf-toolsite-publish&tab=release',{waitUntil:'domcontentloaded'});
+          await page.waitForTimeout(1000);
+          console.log('PUBLISH_URL',page.url());
+          if(await page.locator('[data-vf-zip-root]').count()!==1)throw Error('No publish root: '+(await page.locator('body').innerText()).slice(0,800));
+          console.log('PUBLISH_REAL_ADMIN_PASS',await page.evaluate(()=>!!window.vfOpsPublishZipRuntime));
+          const input=page.locator('[data-vf-release-file-input]');
+          await input.setInputFiles(root+'/source.zip');
+          const btn=page.locator('[data-vf-zip-upload-submit]');
+          if(!(await btn.isEnabled()))throw Error('upload submit disabled');
+          await btn.click();console.log('UI_ZIP_SUBMIT_PASS');
+          for(let i=0;i<55;i++){
+          await page.waitForTimeout(1700);
+          const status=await page.evaluate(()=>({upload:document.querySelector('[data-vf-zip-upload-message]')?.textContent?.slice(0,170)||'',job:document.querySelector('[data-vf-zip-job-status]')?.textContent||'',message:document.querySelector('[data-vf-zip-job-message]')?.textContent?.slice(0,170)||'',download:!!document.querySelector('a[href*="vf_ops_release_job_download"]')}));
+          if(i%5===0)console.log('STATE',i,JSON.stringify(status));
+          if(status.download||actions.some(x=>x.action==='vf_ops_publish_release_prepare_ajax_v121771'&&x.http>=400))break;
+          if(status.upload.includes('上传失败'))break;
+          }
+          for(const action of ['vf_ops_release_chunk_init','vf_ops_release_chunk_finish','vf_ops_publish_zip_job_token_v121709','vf_ops_release_job_run'])if(!actions.some(x=>x.action===action))throw Error('Missing actual server action '+action);
+          const prepared=actions.find(x=>x.action==='vf_ops_publish_release_prepare_ajax_v121771');
+          if(!prepared)throw Error('Source inspection failed to reach prepare');
+          if(prepared.http>=400)throw Error('Real candidate prepare blocked: '+JSON.stringify(prepared.value));
+          const link=page.locator('a:has-text("下载 Cloudflare 候选包")');
+          if(!(await link.count()))throw Error('No candidate download link after preparation');
+          const href=await link.first().getAttribute('href');
+          const response=await page.context().request.get(new URL(href,host).toString());
+          if(!response.ok())throw Error('Candidate HTTP download refused '+response.status());
+          const data=await response.body();
+          if(data.toString('binary',0,2)!=='PK')throw Error('Download is not ZIP');
+          fs.writeFileSync(root+'/download.zip',data);
+          const signed=new URL(href,host);
+          const job=signed.searchParams.get('job');
+          if(!job)throw Error('Missing canonical candidate job identity');
+          fs.writeFileSync(root+'/candidate-job.txt',job);
+          const preflightUrl=new URL(signed.toString());
+          preflightUrl.searchParams.set('vf_ops_release_download_preflight','1');
+          const preflight=await page.context().request.get(preflightUrl.toString());
+          if(preflight.status()!==200)throw Error('Candidate HTTP preflight refused');
+          const contract=await preflight.json();
+          if(!contract.ok||!contract.contract?.ready||contract.contract.candidate_file_size!==data.length)throw Error('Preflight contract does not match received bytes');
+          const deniedUrl=new URL(signed.toString());
+          deniedUrl.searchParams.set('_wpnonce','wrong-nonce');
+          const denied=await page.context().request.get(deniedUrl.toString());
+          if(denied.status()!==403)throw Error('Bad nonce unexpectedly allowed candidate download');
+          const guest=await browser.newContext();
+          try {
+            const guestResult=await guest.request.get(signed.toString());
+            if(guestResult.status()<400)throw Error('Unauthenticated user unexpectedly allowed candidate download');
+          } finally { await guest.close(); }
+          console.log('HTTP_DOWNLOAD_PREFLIGHT_AND_SECURITY_PASS',contract.contract.candidate_file_size);
+          const details=page.locator('#vf-v9-publish-evidence');
+          await details.locator('summary').click();
+          if(!(await details.evaluate(el=>el.open)))throw Error('Advanced panel did not expand');
+          const exportForm=details.locator('form:has(input[name="action"][value="vf_ops_publish_zip_export_v121423"])');
+          if(await exportForm.count()!==1)throw Error('Canonical JSON export form absent');
+          const downloadPromise=page.waitForEvent('download',{timeout:12000});
+          await exportForm.locator('button[type="submit"]').click();
+          const jsonDownload=await downloadPromise;
+          const report=JSON.parse(fs.readFileSync(await jsonDownload.path(),'utf8'));
+          if(report.schemaVersion!=='3.0'||!report.rawEvidence||!report.gatePolicy||report.finalOnlinePass!=='NO')throw Error('Full JSON report schema inaccurate');
+          if(!Array.isArray(report.rows)||!Array.isArray(report.domains))throw Error('Full JSON rows and domains missing');
+          console.log('REAL_FULL_JSON_EXPORT_PASS',report.rows.length,report.domains.length);
+          await details.locator('summary').click();
+          if(await details.evaluate(el=>el.open))throw Error('Advanced native collapse failed');
+          console.log('ADVANCED_DISCLOSURE_OPEN_CLOSE_PASS');
+          console.log('REAL_UI_CHAIN_PASS',data.length);
+          }finally{
+          console.log('ALL_ACTIONS',JSON.stringify(actions));
+          await page.screenshot({path:root+'/last-publish.png',fullPage:true}).catch(()=>{});
+          await browser.close();
+          }
+          })().catch(err=>{console.error('REAL_UI_CHAIN_FAIL',err.stack||err);process.exitCode=1});
+          JS
+          set +e
+          QA_ROOT="$QA_ROOT" NODE_PATH="$GITHUB_WORKSPACE/node_modules" node "$QA_ROOT/browser.js"
+          BROWSER_STATUS=$?
+          set -e
+          wpqa eval '$s=get_option("vf_ops_o10_preflight_snapshot_v121399",[]);echo "ACTUAL_PREFLIGHT_STATUS=".($s["status"]??"MISSING")." P0=".($s["gateSummary"]["P0"]??"?")." P1=".($s["gateSummary"]["P1"]??"?").PHP_EOL;foreach((array)($s["blocking"]??[]) as $b){echo "ACTUAL_P0 ".($b["code"]??"")." ".($b["message"]??"").PHP_EOL;}'
+          test "$BROWSER_STATUS" -eq 0
+          cat > "$QA_ROOT/server-candidate-check.php" <<'PHP'
+          <?php
+          require_once WP_PLUGIN_DIR.'/vf-ops/includes/release/class-release-async-job.php';
+          $jobId=trim((string)file_get_contents((string)($args[0]??'')));
+          $job=VF_Ops_Release_Async_Job::load($jobId);
+          $candidate=(string)($job['candidate_path']??'');
+          if(!$candidate||!is_file($candidate))throw new RuntimeException('Canonical candidate missing');
+          echo hash_file('sha256',$candidate)."\n";
+          PHP
+          SERVER_SHA="$(wpqa eval-file "$QA_ROOT/server-candidate-check.php" "$QA_ROOT/candidate-job.txt" | tail -1)"
+          CLIENT_SHA="$(sha256sum "$QA_ROOT/download.zip" | awk '{print $1}')"
+          if [ "$SERVER_SHA" != "$CLIENT_SHA" ]; then echo 'SERVER_DOWNLOAD_SHA_MISMATCH'; exit 1; fi
+          echo 'SERVER_TO_HTTP_ZIP_SHA256_IDENTICAL=PASS'
+          unzip -tq "$QA_ROOT/download.zip"
+          echo FULL_PUBLISH_UI_HTTP_E2E_PASS
