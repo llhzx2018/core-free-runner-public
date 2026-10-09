@@ -71,7 +71,7 @@ test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$SOURCE_VERSION"
 VF_PHASE=rollback cli eval-file /tmp/widget-native-phase.php > proof/native-rollback.json
 VF_PHASE=rollback node lane/quick.js
 VF_PHASE=reapply cli eval-file /tmp/widget-native-phase.php > proof/native-reapply.json
-VF_PHASE=candidate cli eval-file /tmp/widget-native-phase.php > proof/native-reapply-readback.json
+VF_PHASE=reapply-readback cli eval-file /tmp/widget-native-phase.php > proof/native-reapply-readback.json || { docker cp "$WP:/tmp/candidate-options.json" proof/reapply-original-option-hashes.json;docker cp "$WP:/tmp/reapply-before.json" proof/reapply-before.json;docker cp "$WP:/tmp/reapply-after.json" proof/reapply-after.json;exit 1; }
 VF_PHASE=reapply node lane/quick.js
 docker exec "$DB" mariadb -uroot -psyntheticroot -e "CREATE DATABASE wordpress_clean;GRANT ALL PRIVILEGES ON wordpress_clean.* TO 'wordpress'@'%';"
 cli config set DB_NAME wordpress_clean >/dev/null
