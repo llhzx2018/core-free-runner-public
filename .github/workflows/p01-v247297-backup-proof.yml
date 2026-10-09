@@ -1,0 +1,104 @@
+name: P01 V247297 backup file and schedule truth proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247297-backup-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: b4215c1d4eeb52956f6a67e0cde271121640fac7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.296
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: stable
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring
+          coverage: none
+      - name: Exact source lint + Backup status interaction
+        run: |
+          set -Eeuo pipefail
+          find src -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          find src -name '*.js' -type f -print0 | xargs -0 -n1 node --check >/dev/null
+          php tests/unit/admin_data_safety_page8_polish_contract.php
+          php tests/unit/admin_data_safety_r14_runtime_retention_contract.php
+          php tests/unit/backup_status_truth_v247296_contract.php
+          php tests/unit/backup_missing_alert_v247297_contract.php
+          node tests/browser/backup_status_truth_v247296_smoke.cjs
+          node tests/browser/backup_missing_alert_v247297_smoke.cjs
+          echo P01_V247297_BACKUP_SOURCE=PASS
+      - name: Canonical exact source zero-debt regression
+        run: |
+          set -Eeuo pipefail
+          bash tests/canonical_release_regression.sh . stable --require-zero-debt
+          echo P01_V247297_CANONICAL=PASS
+      - name: Isolated PHP8 SQLite backup presence and CSRF verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a src /tmp/p01-297
+          cd /tmp/p01-297
+          php -S 127.0.0.1:18597 -t . >/tmp/p01-297-http.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf /tmp/p01-297 /tmp/p01-297-cookies /tmp/p01-297-setup /tmp/p01-297-admin' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-297-cookies -b /tmp/p01-297-cookies http://127.0.0.1:18597/setup.php -o /tmp/p01-297-setup; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-297-setup',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-297-cookies -b /tmp/p01-297-cookies -X POST http://127.0.0.1:18597/setup.php             --data-urlencode "setup_csrf=$csrf"             --data-urlencode 'site_title=Isolated P01 Backup'             --data-urlencode 'admin_password=IsolatedVf2026!'             --data-urlencode 'admin_password_confirm=IsolatedVf2026!' >/dev/null
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18597/data-safety.php)" = 302
+          curl -fsS -c /tmp/p01-297-cookies -b /tmp/p01-297-cookies             -H 'Content-Type: application/json' -d '{"password":"IsolatedVf2026!"}'             'http://127.0.0.1:18597/api.php?action=login' | grep -Fq '"ok":true'
+          curl -fsS -c /tmp/p01-297-cookies -b /tmp/p01-297-cookies http://127.0.0.1:18597/data-safety.php -o /tmp/p01-297-admin
+          grep -Fq '<h1>备份与恢复</h1>' /tmp/p01-297-admin
+          test "$(curl -sS -b /tmp/p01-297-cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18597/api.php?action=backup_restore')" = 419
+          test "$(curl -sS -b /tmp/p01-297-cookies -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18597/api.php?action=backup_policy_save')" = 419
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/app/bootstrap.php';
+          $db=vf_db();
+          $b=new VfBackupManager($db);
+          $created=$b->create('Isolated file truth regression');
+          $key=$created['backup_key'];
+          $path=VF_BACKUP_DIR.'/'.$created['file_name'];
+          $found=array_values(array_filter($b->list(),static fn($r):bool=>$r['backup_key']===$key));
+          if(count($found)!==1||($found[0]['exists']??null)!==true)throw new RuntimeException('Existing backup must advertise exists=true');
+          $side=$path.'.simulated-unmounted';
+          if(!rename($path,$side))throw new RuntimeException('Unable to simulate missing backup file');
+          try{
+              $missing=array_values(array_filter($b->list(),static fn($r):bool=>$r['backup_key']===$key));
+              if(count($missing)!==1||($missing[0]['exists']??null)!==false||$missing[0]['validation_status']!=='valid')throw new RuntimeException('Missing-file truth must not be hidden by stale valid metadata');
+              try{$b->previewRestore($key);throw new RuntimeException('Missing file was incorrectly accepted for restore preview');}
+              catch(RuntimeException $e){if($e->getMessage()==='Missing file was incorrectly accepted for restore preview')throw $e;}
+          }finally{rename($side,$path);}
+          $checked=$b->verify($key);
+          if($checked['validation_status']!=='valid'||($checked['exists']??null)!==true)throw new RuntimeException('Restored isolated backup must verify');
+          $policy=$b->policy();
+          if(!array_key_exists('last_run_at',$policy)||!array_key_exists('next_run_at',$policy))throw new RuntimeException('Schedule enqueues must remain distinguishable');
+          echo "P01_V247297_NATIVE_SQLITE_FILE_TRUTH=PASS\n";
+          PHP
+          curl -fsS -b /tmp/p01-297-cookies 'http://127.0.0.1:18597/api.php?action=backup_list' | grep -Fq '"exists":true'
+          echo P01_V247297_ISOLATED_HTTP_CSRF=PASS
