@@ -1,0 +1,109 @@
+name: S01-C03 diagnostics performance exact formal release
+on:
+  push:
+    branches: [task/s01-c03-migration-readonly-20261009-release]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.67'
+      TARGET_SHA: 'af545b301bf9fc12f177dab95e51e0c12ef7e1ee'
+      TARGET_TREE: 'ea2f78b435b663fc83fde648f835d2f7e2c0972e'
+      SOURCE_VERSION: '1.25.66'
+      CANDIDATE_RUN: '37867563074'
+      CANDIDATE_RUNNER_SHA: '099b7780577c648e4ee039fa2692dd43f461082a'
+      CANDIDATE_ARTIFACT_ID: '11588749233'
+      PROMOTED_MAIN_SHA: '57fc664ca131cdd1c25be535719ebadcdc515f92'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c03-migration-readonly-20261009-release/spec.json --template runner/lanes/s01-c03-migration-readonly-20261009-release/release.template.yml --output /tmp/rendered-release.yml >/dev/null
+          cmp /tmp/rendered-release.yml runner/.github/workflows/s01-c03-migration-readonly-20261009-release.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c03-migration-readonly-20261009-release/spec.json --input runner/.github/workflows/s01-c03-migration-readonly-20261009-release.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Actual candidate archive reverse verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir candidate
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" > /tmp/candidate-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > /tmp/candidate-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > /tmp/candidate-proof.zip
+          python3 runner/lanes/s01-c03-migration-readonly-20261009-release/reverse.py
+      - name: Exact promoted source and deterministic rebuild
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-migration-readonly-20261009-release lane
+          test "$(gh api repos/$TARGET_REPO/git/ref/heads/main --jq '.object.sha')" = "$PROMOTED_MAIN_SHA"
+          test "$(gh api repos/$TARGET_REPO/git/commits/$PROMOTED_MAIN_SHA --jq '.tree.sha')" = "$TARGET_TREE"
+          php target/tests/provider-dashboard-visible-ui-contract.php
+          php target/tests/unit/provider-overview-state-contract.php > proof/overview-unit.json
+          php target/tests/unit/provider-diagnostic-self-check-contract.php > proof/diagnostic-unit.json
+          php target/tests/unit/provider-compatibility-contract.php > proof/compatibility-unit.json
+          php target/tests/unit/package-physical-locator-contract.php
+          python3 lane/build.py
+          python3 - <<'PY'
+          import json,pathlib
+          a=json.loads(pathlib.Path('proof/identity.json').read_text());b=json.loads(pathlib.Path('candidate/proof/identity.json').read_text());assert a==b,(a,b)
+          PY
+      - name: Publish authorized exact tag and formal asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$TARGET_REPO/git/refs/tags" > /tmp/tags.json
+          gh api "repos/$TARGET_REPO/releases?per_page=100" > /tmp/releases.json
+          python3 - <<'PY'
+          import pathlib,json,os
+          tag='v'+os.environ['TARGET_VERSION']
+          assert not any(n['ref']=='refs/tags/'+tag for n in json.loads(pathlib.Path('/tmp/tags.json').read_text()))
+          assert not any(n['tag_name']==tag for n in json.loads(pathlib.Path('/tmp/releases.json').read_text()))
+          pathlib.Path('/tmp/release-notes.md').write_text('修复迁移后正常新增运行记录导致数量及指纹误报：先校验保留旧来源，再按原ID核对迁移记录，后续本组件运行记录单列。原记录缺失/修改、来源变化、外部混入、回填ID、配置新增、证据异常和查询失败仍阻断；不重写基线、不改数据、不解除HOLD。隔离WordPress/MariaDB验证14表119原记录、11隔离数据及6次服务保存；16项迁移只读场景、28项诊断性能页面场景及原生66→67升级/恢复66/重用67/干净安装通过。Source: '+os.environ['TARGET_SHA']+'; candidate run '+os.environ['CANDIDATE_RUN']+'. Production由用户手工升级，线上迁移健康及OWNER最终验收未声明。\n')
+          PY
+          gh api "repos/$TARGET_REPO/git/refs" -X POST -f ref="refs/tags/v$TARGET_VERSION" -f sha="$PROMOTED_MAIN_SHA" > proof/tag.json
+          gh release create "v$TARGET_VERSION" "proof/vf-tools-m3u8_V$TARGET_VERSION.zip" --repo "$TARGET_REPO" --verify-tag --title "VF Tools M3U8 V$TARGET_VERSION" --notes-file /tmp/release-notes.md
+      - name: Exact delivered asset remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir delivered
+          gh api "repos/$TARGET_REPO/releases/tags/v$TARGET_VERSION" > proof/release-meta.json
+          gh api "repos/$TARGET_REPO/git/ref/tags/v$TARGET_VERSION" > /tmp/tag-readback.json
+          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-m3u8_V$TARGET_VERSION.zip" --dir delivered
+          python3 runner/lanes/s01-c03-migration-readonly-20261009-release/readback.py
+      - name: Safe release evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-compatibility-release-${{ github.run_id }}
+          path: proof/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target candidate delivered proof/*.zip /tmp/candidate-proof.zip
+
+
