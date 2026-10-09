@@ -1,0 +1,98 @@
+name: S01-C02 1080 isolated preflight POST and P0 P1 TTL gate
+on:
+  push:
+    branches: [test/s01-c02-1211080-preflight-backend-20261009]
+jobs:
+  wordpress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: preflight1080
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: fixture-pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - name: Checkout exact released source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: d9d9fa6ec9e6c1a3e6c36566119ec744123d5a01
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,pdo_mysql,zip,curl,mbstring
+      - name: Prepare isolated WordPress and plugin
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/preflight1080"; mkdir -p "$ROOT/site"
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$ROOT/wp"
+          WP="$ROOT/site"
+          wpqa(){ php "$ROOT/wp" --path="$WP" "$@"; }
+          wpqa core download --version=7.0.2 --force
+          wpqa config create --dbname=preflight1080 --dbuser=vf --dbpass=fixture-pass --dbhost=127.0.0.1 --skip-check
+          wpqa core install --url=https://fixture.invalid --title=Preflight-Isolated --admin_user=admin --admin_password=fixture-admin --admin_email=qa@example.invalid --skip-email
+          mkdir -p "$WP/wp-content/plugins/vf-ops"
+          rsync -a --exclude='.git' --exclude='node_modules' ./ "$WP/wp-content/plugins/vf-ops/"
+          wpqa plugin activate vf-ops
+          cat > "$ROOT/gate-qa.php" <<'PHP'
+          <?php
+          $mode=$args[0]??'';
+          $key='vf_ops_o10_preflight_snapshot_v121399';
+          function qa_assert($ok,$label){if(!$ok){throw new RuntimeException('FAIL: '.$label);}echo "PASS $label\n";}
+          if($mode==='before'){
+              qa_assert(!get_option($key,[]),'fresh instance has no saved snapshot');
+              $r=vf_ops_publish_preflight_candidate_gate_v121820([]);
+              qa_assert(($r['status']??'')==='FAIL','missing snapshot never passes candidate');
+              $before=get_option($key,[]);
+              vf_ops_publish_zip_model_v121423();
+              qa_assert(get_option($key,[])===$before,'ordinary GET model creates no snapshot');
+          }elseif($mode==='capture'){
+              wp_set_current_user(1);
+              $_REQUEST['_wpnonce']=wp_create_nonce('vf_ops_o10_preflight_capture_v121399');
+              vf_ops_publish_preflight_capture_v121422();
+          }elseif($mode==='after'){
+              $s=get_option($key,[]);
+              qa_assert(is_array($s)&&!empty($s['snapshotHash']),'explicit POST persists snapshot');
+              $h=$s['snapshotHash'];unset($s['snapshotHash']);
+              qa_assert(hash_equals($h,hash('sha256',(string)wp_json_encode($s))),'persisted hash verified');
+              qa_assert((int)($s['revision']??0)>=1,'persisted revision positive');
+              qa_assert((int)($s['gateSummary']['P0']??0)>0,'no batch retains true P0 fail-closed');
+              qa_assert(strtotime($s['expiresAtGmt'].' UTC')-strtotime($s['generatedAtGmt'].' UTC')===1800,'snapshot TTL unchanged 1800s');
+              $before=get_option($key,[]);
+              vf_ops_publish_zip_model_v121423();
+              qa_assert(get_option($key,[])===$before,'GET read does not change persisted snapshot');
+          }elseif($mode==='policy'){
+              $batch=['id'=>'fixture-locked','status'=>'locked','post_ids'=>[],'component_intent_ids'=>[],'change_types'=>[],'acceptance_paths'=>[]];
+              $s=['version'=>VF_OPS_VERSION,'generatedAtGmt'=>gmdate('Y-m-d H:i:s'),'expiresAtGmt'=>gmdate('Y-m-d H:i:s',time()+1800),'status'=>'PARTIAL','batch'=>['id'=>'fixture-locked'],'gateSummary'=>['P0'=>0,'P1'=>1],'batchIdentityHash'=>vf_ops_publish_preflight_batch_identity_v121708($batch),'snapshotHash'=>''];
+              $seal=function()use(&$s,$key){$payload=$s;unset($payload['snapshotHash']);$s['snapshotHash']=hash('sha256',(string)wp_json_encode($payload));update_option($key,$s,false);};
+              $seal();
+              $g=vf_ops_publish_preflight_candidate_gate_v121820($batch);
+              qa_assert(($g['status']??'')==='PASS'&&(int)$g['p1_count']===1,'fresh P1 only may proceed');
+              $s['status']='BLOCKED';$s['gateSummary']['P0']=1;$seal();
+              $g=vf_ops_publish_preflight_candidate_gate_v121820($batch);
+              qa_assert(($g['status']??'')==='FAIL','P0 never proceeds');
+              $s['status']='PARTIAL';$s['gateSummary']['P0']=0;$s['expiresAtGmt']=gmdate('Y-m-d H:i:s',time()-1);$seal();
+              $g=vf_ops_publish_preflight_candidate_gate_v121820($batch);
+              qa_assert(($g['status']??'')==='FAIL','expired saved snapshot never proceeds');
+              qa_assert(in_array('快照已超过 30 分钟有效期。',(array)($g['savedState']['reasons']??[]),true),'expiration has precise reason');
+              $s['expiresAtGmt']=gmdate('Y-m-d H:i:s',time()+1800);$seal();
+              $s['snapshotHash']='invalid';update_option($key,$s,false);
+              $g=vf_ops_publish_preflight_candidate_gate_v121820($batch);
+              qa_assert(($g['status']??'')==='FAIL','tampered persisted snapshot never proceeds');
+          }else{throw new RuntimeException('unknown test mode');}
+          PHP
+          wpqa eval-file "$ROOT/gate-qa.php" before
+          wpqa eval-file "$ROOT/gate-qa.php" capture
+          wpqa eval-file "$ROOT/gate-qa.php" after
+          wpqa eval-file "$ROOT/gate-qa.php" policy
+          echo 'ISOLATED_WORDPRESS_PREFLIGHT_POST_AND_GATES=PASS'
