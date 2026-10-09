@@ -36,7 +36,7 @@ if($phase==='negative'){
 if($phase==='upgrade'||$phase==='reapply'){
  if($phase==='reapply'){
   $state=VF_M3U8_Update_State_V1::snapshot();$payload=VF_M3U8_Update_State_V1::capture_payload();$hashes=[];foreach($payload['options'] as $k=>$v)$hashes[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/reapply-options.json',wp_json_encode($hashes));
-  $baseline=get_option('vf_runner_owned_before');file_put_contents('/tmp/reapply-before.json',wp_json_encode(['state'=>$state,'options_hashes'=>$hashes,'equivalent_original'=>VF_M3U8_Update_State_V1::equivalent($baseline,$state)]));
+  $baseline=get_option('vf_runner_owned_before');$original=json_decode(file_get_contents('/tmp/candidate-options.json'),true);$changed=[];foreach(array_unique(array_merge(array_keys($original),array_keys($hashes))) as $k)if(($original[$k]??null)!==($hashes[$k]??null))$changed[]=$k;gate($baseline['tables']===$state['tables'],'tables unchanged before reapply');gate(!$changed||$changed===['vf_m3u8_first_run_state'],'no unrelated option changed before reapply');update_option('vf_runner_reapply_owned_before',$state,false);file_put_contents('/tmp/reapply-before.json',wp_json_encode(['state'=>$state,'options_hashes'=>$hashes,'equivalent_original'=>VF_M3U8_Update_State_V1::equivalent($baseline,$state),'preexisting_option_changes'=>$changed,'first_run_metadata'=>array_intersect_key((array)get_option('vf_m3u8_first_run_state'),array_flip(['version','round','source','updatedAt','updatedBy','schemaVersion']))]));
  }
 
  VF_M3U8_Update_Source_V1::clear_cache();delete_site_transient('update_plugins');wp_update_plugins();
@@ -52,13 +52,13 @@ if($phase==='restore'){
 }
 $expected=$phase==='rollback'?getenv('SOURCE_VERSION'):getenv('CANDIDATE_VERSION');
 gate(VF_TOOL_M3U8_VERSION===$expected,'reload version');gate(is_plugin_active($plugin),'active after upgrade/recovery');
-$state=gate(VF_M3U8_Update_State_V1::snapshot(),'state after');$before=get_option('vf_runner_owned_before');
+$state=gate(VF_M3U8_Update_State_V1::snapshot(),'state after');$before=get_option($phase==='reapply-readback'?'vf_runner_reapply_owned_before':'vf_runner_owned_before');
 if($phase==='candidate'){ $p=VF_M3U8_Update_State_V1::capture_payload();$h=[];foreach($p['options'] as $k=>$v)$h[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/candidate-options.json',wp_json_encode($h)); }
 if($phase==='reapply-readback'){ $p=VF_M3U8_Update_State_V1::capture_payload();$h=[];foreach($p['options'] as $k=>$v)$h[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/reapply-after.json',wp_json_encode(['state'=>$state,'options_hashes'=>$h])); }
 if(!VF_M3U8_Update_State_V1::equivalent($before,$state)){echo wp_json_encode(['status'=>'FAIL','phase'=>$phase,'before'=>$before,'after'=>$state,'production'=>'NOT_EXECUTED']);throw new Exception('owned state unchanged');}
 gate(get_option('vf_runner_foreign_before')===foreign_snapshot(),'foreign state and cron unchanged');
 gate(VF_M3U8_Runtime_Authority_V1::verify($expected,$root),'installed exact runtime');
 $runtime=VF_M3U8_Runtime_Authority_V1::stored();
-echo wp_json_encode(['status'=>'PASS','phase'=>$phase,'version'=>$expected,'state'=>$state,'runtime'=>$runtime,'foreign'=>foreign_snapshot(),'active'=>true,'production'=>'NOT_EXECUTED']);
+echo wp_json_encode(['status'=>'PASS','phase'=>$phase,'version'=>$expected,'state'=>$state,'runtime'=>$runtime,'foreign'=>foreign_snapshot(),'active'=>true,'comparison'=>$phase==='reapply-readback'?'EXACT_STATE_IMMEDIATELY_BEFORE_REAPPLY':'EXACT_ORIGINAL_UPDATE_STATE','production'=>'NOT_EXECUTED']);
 
 
