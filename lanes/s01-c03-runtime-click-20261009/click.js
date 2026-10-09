@@ -5,17 +5,17 @@ const state=s=>JSON.parse(execFileSync('docker',['exec','--user','www-data','-e'
 const assert=(c,m)=>{if(!c)throw Error(m)};
 async function login(p){await p.goto(base+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await Promise.all([p.waitForURL(/wp-admin/),p.locator('#wp-submit').click()]);}
 async function submit(p,s){const started=Date.now();console.log('SUBMIT',s);await Promise.all([p.waitForNavigation({waitUntil:'load'}),p.locator(s).click()]);await p.locator('[data-vf-provider-runtime]').waitFor();console.log('SUBMIT_DONE',s,Date.now()-started);}
-async function geometry(p){return p.locator('[data-vf-runtime-seal] input[type="checkbox"]').evaluate(e=>{let r=e.getBoundingClientRect();return {rect:{x:r.x,y:r.y,width:r.width,height:r.height},scrollY,innerWidth,innerHeight,visualViewport:{width:visualViewport.width,height:visualViewport.height,offsetTop:visualViewport.offsetTop,pageTop:visualViewport.pageTop},body:document.body.getBoundingClientRect().toJSON(),hit:document.elementsFromPoint(r.x+r.width/2,r.y+r.height/2).slice(0,5).map(x=>({tag:x.tagName,cls:x.className})),checked:e.checked};});}
+async function geometry(p){return p.locator('[data-vf-runtime-seal] input[type="checkbox"]').evaluate(e=>{let r=e.getBoundingClientRect();return {rect:{x:r.x,y:r.y,width:r.width,height:r.height},scrollY,innerWidth,innerHeight,visualViewport:{width:visualViewport.width,height:visualViewport.height,offsetTop:visualViewport.offsetTop,pageTop:visualViewport.pageTop},body:document.body.getBoundingClientRect().toJSON(),hit:document.elementsFromPoint(r.x+r.width/2,r.y+r.height/2).slice(0,5).map(x=>({tag:x.tagName,cls:x.className})),checked:e.checked,animations:document.getAnimations().map(a=>({name:a.animationName||'',currentTime:a.currentTime,playState:a.playState,timing:a.effect.getComputedTiming(),target:a.effect.target?.tagName})),rootStyle:{opacity:getComputedStyle(document.documentElement).opacity,viewTransitionName:getComputedStyle(document.documentElement).viewTransitionName},fontsStatus:document.fonts.status};});}
 (async()=>{
  const browser=await chromium.launch(),cases=[],failures=[];state('original');
  try{
   for(const mode of ['normal','viewport-screenshot','fullpage-screenshot']){
-   for(const width of [1440]){
-    const trials=1;
+   for(const width of [1920,1440,1319,1024,768,390]){
+    const trials=mode==='normal'?2:1;
     for(let trial=0;trial<trials;trial++){
-     console.log('START',mode,width,trial);state('reset');const before=state('state');const ctx=await browser.newContext({javaScriptEnabled:false,viewport:{width,height:1100}}),p=await ctx.newPage();
+     console.log('START',mode,width,trial);state('reset');let before;const ctx=await browser.newContext({javaScriptEnabled:false,viewport:{width,height:1100}}),p=await ctx.newPage();
      try{
-      await login(p);await p.goto(url);await submit(p,'[data-vf-runtime-begin] button');await p.locator('[data-vf-runtime-editor] summary').click();await submit(p,'[data-vf-runtime-save] button');
+      await login(p);await p.goto(url);before=state('state');await submit(p,'[data-vf-runtime-begin] button');const summaryStart=Date.now();await p.locator('[data-vf-runtime-editor] summary').click();console.log('SUMMARY_DONE',mode,width,Date.now()-summaryStart);await submit(p,'[data-vf-runtime-save] button');
       const row={mode,width,trial,status:'OBSERVED',beforeScreenshot:await geometry(p)};
       if(mode!=='normal')await p.screenshot({path:`proof/${mode}-${width}-before.png`,fullPage:mode==='fullpage-screenshot'});
       row.afterScreenshot=await geometry(p);
@@ -24,8 +24,8 @@ async function geometry(p){return p.locator('[data-vf-runtime-seal] input[type="
        await cb.check({timeout:3500});assert(await cb.isChecked(),'native mouse checkbox did not change');
        await submit(p,'[data-vf-runtime-seal] button');const sealed=state('state');assert(sealed.current_version==='1.25.1'&&sealed.runtime_drafts===0&&sealed.foreign_hash===before.foreign_hash,'actual seal or foreign preservation');
        await p.reload();assert(state('state').all_hash===sealed.all_hash,'refresh changed native sealed state');row.status='PASS';row.native_seal='PASS';
-      }catch(e){row.status='FAIL';row.error=e.message.slice(0,2500);row.afterFailure=await geometry(p);failures.push(row);}
-      console.log('RESULT',mode,width,row.status,row.error||'');cases.push(row);fs.writeFileSync('proof/CLICK_PROGRESS.json',JSON.stringify({status:'OBSERVED',cases},null,2));
+      }catch(e){row.status='FAIL';row.error=e.message.slice(0,2500);row.afterFailure=await p.locator('[data-vf-runtime-seal] input[type="checkbox"]').count()?await geometry(p):{url:p.url(),state:state('state')};failures.push(row);}
+      console.log('RESULT',mode,width,trial,row.status,row.error||'');cases.push(row);fs.writeFileSync('proof/CLICK_PROGRESS.json',JSON.stringify({status:'OBSERVED',cases},null,2));
      }finally{await ctx.close();}
     }
    }
