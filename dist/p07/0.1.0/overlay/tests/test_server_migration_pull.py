@@ -22,6 +22,26 @@ spec.loader.exec_module(pull)
 
 
 class TargetPullContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Other migration tests exercise workflow invariants in a MariaDB target
+        # fixture; negative daemon/version cases are separately tested below.
+        patcher = mock.patch.object(
+            pull, "local_target_db_engine_version", return_value="MARIADB_10.11"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_wrong_target_engine_fails_without_inventory_mutation(self) -> None:
+        with mock.patch.object(pull, "cloudpanel_ready_local", return_value=True), \
+             mock.patch.object(pull, "cloudpanel_database_server_ready_local", return_value=True), \
+             mock.patch.object(pull, "local_target_db_engine_version", return_value="MYSQL_OR_PERCONA"), \
+             mock.patch.object(pull.inventory, "build_manifest") as inventory:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "NEW_SERVER_REQUIRES_MARIADB_10_11"
+            ):
+                pull.target_preflight_local({"sites": []})
+            inventory.assert_not_called()
+
     def test_progress_note_is_opt_in_and_secret_free_channel(self) -> None:
         import io
         from contextlib import redirect_stderr

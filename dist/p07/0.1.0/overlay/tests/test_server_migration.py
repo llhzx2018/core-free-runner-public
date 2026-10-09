@@ -323,7 +323,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
         self.assertIn(engine.CLOUDPANEL_INSTALLER_SHA256, script)
         self.assertIn("sha256sum -c", script)
         self.assertIn("CLOUD=do", script)
-        self.assertIn("DB_ENGINE=MYSQL_8.4", script)
+        self.assertIn("DB_ENGINE=MARIADB_10.11", script)
         self.assertNotIn("| bash", script)
         self.assertNotIn("| sudo", script)
 
@@ -355,7 +355,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
         self.assertEqual(result["architecture"], "x86_64")
         self.assertEqual(result["cores"], 1)
         self.assertEqual(result["cloud_hint"], "do")
-        self.assertEqual(result["db_engine"], "MYSQL_8.4")
+        self.assertEqual(result["db_engine"], "MARIADB_10.11")
 
     def test_bootstrap_preflight_rejects_low_memory_before_empty_server_guard(self) -> None:
         responses = [

@@ -723,6 +723,38 @@ def cloudpanel_ready_local() -> bool:
     )
 
 
+def local_target_db_engine_version() -> str:
+    """Check only daemon binary version, never read credentials or alter state."""
+    for executable_name in ("mariadbd", "mysqld"):
+        executable = shutil.which(executable_name)
+        if executable is None:
+            continue
+        try:
+            p = subprocess.run(
+                [executable, "--version"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        output = (p.stdout + " " + p.stderr).lower()
+        if p.returncode == 0 and "mariadb" in output:
+            if re.search(r"(?<![0-9])10\.11(?:\.[0-9]+)?(?![0-9])", output):
+                return "MARIADB_10.11"
+            return "MARIADB_OTHER"
+        if p.returncode == 0 and ("mysql" in output or "percona" in output):
+            return "MYSQL_OR_PERCONA"
+    return "UNKNOWN"
+
+
+def require_mariadb_1011_target() -> None:
+    if local_target_db_engine_version() != "MARIADB_10.11":
+        raise PullMigrationError(
+            "NEW_SERVER_REQUIRES_MARIADB_10_11: "
+            "新服务器必须使用 MariaDB 10.11，已停止迁移；"
+            "不会自动卸载或替换任何已有数据库"
+        )
+
+
 def cloudpanel_user_count_local(
     db: Path = Path("/home/clp/htdocs/app/data/db.sq3"),
 ) -> int | None:
@@ -788,6 +820,7 @@ def target_preflight_local(source_plan: dict[str, Any]) -> dict[str, Any]:
         raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_MISSING")
     if not cloudpanel_database_server_ready_local():
         raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_DATABASE_SERVER_INCOMPLETE")
+    require_mariadb_1011_target()
     required = ("clpctl", "rsync", "python3", "curl", "systemctl", "crontab", "runuser")
     missing = [name for name in required if shutil.which(name) is None]
     if missing:
@@ -2162,6 +2195,7 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         raise PullMigrationError(
             "new-server CloudPanel database server metadata is missing; migration cannot resume safely"
         )
+    require_mariadb_1011_target()
     transition_migration_status(state, "PREPARING")
     state.pop("last_error_class", None)
     save_state(state)
@@ -2221,6 +2255,8 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         raise PullMigrationError("migration is not ready for final synchronization")
     if confirm != f"CUTOVER_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: CUTOVER_PULL:{mid}")
+
+    require_mariadb_1011_target()
 
     # Run all completeness work while the old server is still serving traffic.
     # This keeps missing assets out of the maintenance window and ensures we do

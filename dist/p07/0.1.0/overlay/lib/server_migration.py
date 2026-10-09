@@ -43,7 +43,9 @@ SQLITE_HEADER = b"SQLite format 3\x00"
 # executes an unverified remote installer.
 CLOUDPANEL_INSTALLER_URL = "https://installer.cloudpanel.io/ce/v2/install.sh"
 CLOUDPANEL_INSTALLER_SHA256 = "8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476"
-CLOUDPANEL_BOOTSTRAP_DB_ENGINE = "MYSQL_8.4"
+# Owner policy: fresh CloudPanel installs use MariaDB 10.11; NEVER replace an existing engine.
+# CloudPanel official installer accepts DB_ENGINE=MARIADB_10.11.
+CLOUDPANEL_BOOTSTRAP_DB_ENGINE = "MARIADB_10.11"
 CLOUDPANEL_MIN_CORES = 1
 # MemTotal is lower than provider-advertised RAM because firmware/kernel reserve
 # some memory; accept a genuine 2 GB class VM without weakening the product floor.
