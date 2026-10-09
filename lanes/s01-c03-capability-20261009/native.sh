@@ -39,6 +39,17 @@ VF_PHASE=negative cli eval-file /tmp/widget-native-phase.php > proof/native-corr
 VF_PHASE=upgrade cli eval-file /tmp/widget-native-phase.php > proof/native-upgrade.json
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$TARGET_VERSION"
 VF_PHASE=candidate cli eval-file /tmp/widget-native-phase.php > proof/native-candidate.json
+if test "${VF_REAPPLY_DEBUG:-0}" = 1;then
+ VF_PHASE=restore cli eval-file /tmp/widget-native-phase.php > proof/debug-recovery.json
+ VF_PHASE=rollback cli eval-file /tmp/widget-native-phase.php > proof/debug-rollback.json
+ VF_PHASE=rollback node lane/quick.js
+ VF_PHASE=reapply cli eval-file /tmp/widget-native-phase.php > proof/debug-reapply.json
+ VF_PHASE=reapply-readback cli eval-file /tmp/widget-native-phase.php > proof/debug-after.json || true
+ docker cp "$WP:/tmp/candidate-options.json" proof/debug-original-option-hashes.json
+ docker cp "$WP:/tmp/reapply-before.json" proof/debug-before.json
+ docker cp "$WP:/tmp/reapply-after.json" proof/debug-current.json
+ exit 0
+fi
 docker cp target/tests/unit/provider-runtime-wordpress-fixture.php "$WP:/tmp/runtime-fixture.php"
 node target/tests/unit/provider-capability-wordpress-browser.js
 node target/tests/unit/provider-runtime-wordpress-browser.js

@@ -34,6 +34,11 @@ if($phase==='negative'){
  echo wp_json_encode(['status'=>'PASS','corrupt_asset_error'=>$r->get_error_code()]);return;
 }
 if($phase==='upgrade'||$phase==='reapply'){
+ if($phase==='reapply'){
+  $state=VF_M3U8_Update_State_V1::snapshot();$payload=VF_M3U8_Update_State_V1::capture_payload();$hashes=[];foreach($payload['options'] as $k=>$v)$hashes[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/reapply-options.json',wp_json_encode($hashes));
+  $baseline=get_option('vf_runner_owned_before');file_put_contents('/tmp/reapply-before.json',wp_json_encode(['state'=>$state,'options_hashes'=>$hashes,'equivalent_original'=>VF_M3U8_Update_State_V1::equivalent($baseline,$state)]));
+ }
+
  VF_M3U8_Update_Source_V1::clear_cache();delete_site_transient('update_plugins');wp_update_plugins();
  $t=get_site_transient('update_plugins');gate(($t->response[$plugin]->new_version??'')===getenv('CANDIDATE_VERSION'),'native update discovery');
  require_once ABSPATH.'wp-admin/includes/class-wp-upgrader.php';
@@ -48,7 +53,9 @@ if($phase==='restore'){
 $expected=$phase==='rollback'?getenv('SOURCE_VERSION'):getenv('CANDIDATE_VERSION');
 gate(VF_TOOL_M3U8_VERSION===$expected,'reload version');gate(is_plugin_active($plugin),'active after upgrade/recovery');
 $state=gate(VF_M3U8_Update_State_V1::snapshot(),'state after');$before=get_option('vf_runner_owned_before');
-gate(VF_M3U8_Update_State_V1::equivalent($before,$state),'owned state unchanged');
+if($phase==='candidate'){ $p=VF_M3U8_Update_State_V1::capture_payload();$h=[];foreach($p['options'] as $k=>$v)$h[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/candidate-options.json',wp_json_encode($h)); }
+if($phase==='reapply-readback'){ $p=VF_M3U8_Update_State_V1::capture_payload();$h=[];foreach($p['options'] as $k=>$v)$h[$k]=hash('sha256',serialize($v));file_put_contents('/tmp/reapply-after.json',wp_json_encode(['state'=>$state,'options_hashes'=>$h])); }
+if(!VF_M3U8_Update_State_V1::equivalent($before,$state)){echo wp_json_encode(['status'=>'FAIL','phase'=>$phase,'before'=>$before,'after'=>$state,'production'=>'NOT_EXECUTED']);throw new Exception('owned state unchanged');}
 gate(get_option('vf_runner_foreign_before')===foreign_snapshot(),'foreign state and cron unchanged');
 gate(VF_M3U8_Runtime_Authority_V1::verify($expected,$root),'installed exact runtime');
 $runtime=VF_M3U8_Runtime_Authority_V1::stored();
