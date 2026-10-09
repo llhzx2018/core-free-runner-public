@@ -1,0 +1,78 @@
+name: S01-C02 1082 Publish advanced export HTTP acceptance
+on:
+  push:
+    branches: [test/s01-c02-1082-advanced-actions-20261009]
+jobs:
+  advanced:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    services:
+      db:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: fixture-root
+          MARIADB_DATABASE: publishadvanced
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: fixture-pass
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ecce157a5ec0c85457f8d00204a42a8f3f509388
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,zip,curl,mbstring
+      - name: Run real HTTP JSON export and auth checks in isolated WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/adv"; WP="$ROOT/site"; mkdir -p "$WP"
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$ROOT/wp"
+          wpqa(){ php "$ROOT/wp" --path="$WP" "$@"; }
+          wpqa core download --version=7.0.2 --force
+          wpqa config create --dbname=publishadvanced --dbuser=vf --dbpass=fixture-pass --dbhost=127.0.0.1 --skip-check
+          wpqa core install --url=http://127.0.0.1:8765 --title=Isolated --admin_user=admin --admin_password=fixture-admin --admin_email=qa@example.invalid --skip-email
+          mkdir -p "$WP/wp-content/plugins/vf-ops"
+          rsync -a --exclude=.git --exclude=node_modules ./ "$WP/wp-content/plugins/vf-ops/"
+          wpqa plugin activate vf-ops
+          wpqa option update siteurl http://127.0.0.1:8765
+          wpqa option update home http://127.0.0.1:8765
+          wpqa post create --post_type=post --post_title=QA-Preserve-Content --post_status=publish --porcelain > "$ROOT/content-id"
+          php -S 127.0.0.1:8765 -t "$WP" > "$ROOT/http.log" 2>&1 &
+          pid=$!;trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for n in $(seq 1 15); do if curl -fsS -o /dev/null http://127.0.0.1:8765/wp-login.php; then break; fi; sleep 1; done
+          curl -fsS -c "$ROOT/cookies" -b "$ROOT/cookies" http://127.0.0.1:8765/wp-login.php -o "$ROOT/login.html"
+          curl -sSL -c "$ROOT/cookies" -b "$ROOT/cookies" --data-urlencode log=admin --data-urlencode pwd=fixture-admin -d wp-submit=Log+In http://127.0.0.1:8765/wp-login.php -o "$ROOT/home.html"
+          curl -fsS -b "$ROOT/cookies" 'http://127.0.0.1:8765/wp-admin/admin.php?page=vf-toolsite-publish&tab=release' -o "$ROOT/publish.html"
+          cat > "$ROOT/parse.php" <<'PHP'
+          <?php
+          $html=file_get_contents($argv[1]);
+          preg_match_all('~<form\b[^>]*>[\s\S]*?</form>~i',$html,$forms);
+          $found=false;
+          foreach($forms[0] as $form){
+            if(strpos($form,'vf_ops_publish_zip_export_v121423')===false)continue;
+            if(!preg_match('~name="_wpnonce"\s+value="([^"]+)"~',$form,$m))throw new RuntimeException('Export nonce absent');
+            file_put_contents($argv[2],$m[1]);$found=true;break;
+          }
+          if(!$found)throw new RuntimeException('Export form not found in actual PHP page');
+          echo "EXPORT_FORM_VISIBLE=PASS\n";
+          PHP
+          php "$ROOT/parse.php" "$ROOT/publish.html" "$ROOT/export-nonce"
+          nonce="$(cat "$ROOT/export-nonce")"
+          status="$(curl -sS -b "$ROOT/cookies" -o "$ROOT/report.json" -w '%{http_code}' -d 'action=vf_ops_publish_zip_export_v121423' --data-urlencode "_wpnonce=$nonce" http://127.0.0.1:8765/wp-admin/admin-post.php)"
+          test "$status" = 200
+          jq -e '.schemaVersion=="3.0" and .finalOnlinePass=="NO" and (.rows|type=="array") and (.rawEvidence|type=="object") and (.gatePolicy|type=="object")' "$ROOT/report.json"
+          echo 'REAL_HTTP_COMPLETE_JSON_EXPORT=PASS'
+          bad="$(curl -sS -b "$ROOT/cookies" -o /dev/null -w '%{http_code}' -d 'action=vf_ops_publish_zip_export_v121423' -d '_wpnonce=invalid' http://127.0.0.1:8765/wp-admin/admin-post.php)"
+          test "$bad" = 403
+          guest="$(curl -sS -o /dev/null -w '%{http_code}' -d 'action=vf_ops_publish_zip_export_v121423' http://127.0.0.1:8765/wp-admin/admin-post.php)"
+          test "$guest" -ge 400
+          echo 'EXPORT_NONCE_AND_GUEST_DENIED=PASS'
+          test "$(wpqa post get "$(cat "$ROOT/content-id")" --field=post_title)" = QA-Preserve-Content
+          echo 'WP_CONTENT_PRESERVED=PASS'
