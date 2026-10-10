@@ -62,6 +62,7 @@ names=['native-baseline','native-corrupt-negative','native-upgrade','native-cand
 checks={n:json.loads((p/(n+'.json')).read_text())['status'] for n in names}
 baseline=json.loads((p/'embed-baseline.json').read_text())['toolPath'];rollback=json.loads((p/'embed-rollback.json').read_text())['toolPath']
 reproduced=baseline.get('endpoint')!='1' and rollback.get('endpoint')!='1'
+assert json.loads((p/'embed-baseline.json').read_text())['status']=='OBSERVED' and json.loads((p/'embed-rollback.json').read_text())['status']=='OBSERVED'
 result={**identity,'status':'PASS' if all(x=='PASS' for x in checks.values()) and reproduced else 'FAIL','checks':checks,'old_version_failure_reproduced':reproduced,'production':'NOT_EXECUTED','owner_acceptance':'NOT_CLAIMED','run_id':os.environ['GITHUB_RUN_ID']}
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(result,indent=2));print(json.dumps(result));assert result['status']=='PASS'
 PY

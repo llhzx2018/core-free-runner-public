@@ -36,8 +36,8 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  try{await page.waitForFunction(()=>document.querySelector('iframe')?.contentDocument?.body?.dataset.vfPublicEmbed==='1',{},{timeout:15000});}catch(e){}
  const preview=await page.evaluate(()=>Array.from(document.querySelectorAll('iframe')).map(f=>({src:f.src,endpoint:f.contentDocument?.body?.dataset.vfPublicEmbed,video:f.contentDocument?.querySelector('video')?.readyState})));
  gate(preview.some(f=>f.endpoint==='1'),'generator iframe renders endpoint',preview);
- gate(messages.some(x=>x.owner==='vf-tool-m3u8'&&x.stage==='endpoint-ready'),'actual parent endpoint-ready handshake',messages);
  try{await page.waitForFunction(()=>document.querySelector('[data-vf-embed-generator]')?.getAttribute('data-vf-embed-preview-state')==='success',{},{timeout:15000});}catch(e){}
+ gate(messages.some(x=>x.owner==='vf-tool-m3u8'&&x.stage==='endpoint-ready'),'actual parent endpoint-ready handshake',messages.slice());
  gate(messages.some(x=>x.stage==='media-ready'&&x.readyState>=2),'actual preview media-ready handshake',messages);
  gate(await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-embed-preview-state')==='success','success waits for decoded media');
  await page.locator('[data-vf-embed-mode-button="pro"]').click();
@@ -56,7 +56,8 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  for(const path of ['/','/en/','/zh/','/m3u8-player/']){const u=new URL(endpoint);u.pathname=path;u.searchParams.set('locale',path==='/zh/'?'zh':'en');const r=await page.goto(u.href);const state=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,lang:document.documentElement.lang,controls:document.querySelector('video')?.controls}));gate(r.status()===200&&state.endpoint==='1','embed explicit route '+path,state);}
  const missing=new URL(endpoint);missing.searchParams.set('m',Buffer.from('javascript:alert(1)').toString('base64url'));await page.goto(missing.href);gate((await page.locator('[data-vf-embed-status]').getAttribute('data-state'))==='error','invalid source explicit error');
  if(phase==='clean'){
-  await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');gate((await page.locator('#wpadminbar').count())===1,'fresh installation final native login');
+  await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
+  const cookies=await context.cookies();const users=await page.goto(base+'/wp-admin/users.php');await page.locator('#wpbody-content').waitFor();gate(cookies.some(x=>x.name.startsWith('wordpress_logged_in_'))&&users.status()===200&&(await page.getByRole('heading',{name:'Users',exact:true}).count())===1,'fresh installation native authenticated admin access');
   await page.goto(base+'/wp-admin/install.php');gate((await page.locator('body').innerText()).includes('Already Installed'),'setup revisit safely locked');
  }
  const result={status:cases.every(x=>x.pass)?'PASS':'FAIL',phase,cases,source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE};fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify(result,null,2));console.log(JSON.stringify({phase,status:result.status,failed:cases.filter(x=>!x.pass)}));await browser.close();
