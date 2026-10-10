@@ -1,0 +1,151 @@
+name: S01-C01 tool workspace guidance 106
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      PROVIDER_VERSION: '{{PROVIDER_VERSION}}'
+      SOURCE_BYTES: '{{SOURCE_BYTES}}'
+      SOURCE_SHA256: '{{SOURCE_SHA256}}'
+      PROVIDER_BYTES: '{{PROVIDER_BYTES}}'
+      PROVIDER_SHA256: '{{PROVIDER_SHA256}}'
+      POLYLANG_VERSION: '{{POLYLANG_VERSION}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Single spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/candidate.template.yml --output /tmp/rendered.yml >/dev/null
+          cmp /tmp/rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: de5dee167a4afc05fbbfe65adbd63bbb1be9e0d4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: provider-source
+      - name: Exact identity and real Provider consumer contracts
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/{{LANE_ID}} lane
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(cat target/VERSION)" = "$TARGET_VERSION"
+          VF_PROVIDER_SOURCE_ROOT="$PWD/provider-source/src" php target/tests/public-directory-provider-contract.php > proof/provider-contract.json
+          php target/tests/directory-request-state-contract.php > proof/directory-contract.json
+          php target/tests/content-matrix-heading-contract.php > proof/heading-contract.json
+          php target/tests/tool-sitemap-policy-contract.php
+          php target/tests/provider-seo-envelope-contract.php
+          while IFS= read -r name; do if [[ "$name" == *.php ]]; then php -l "target/$name" >/dev/null; fi; done < <(git -C target diff --name-only "$BASE_SHA" HEAD)
+          node --check lane/browser.js
+          node --check lane/workspace.js
+          php -l lane/workspace-contract.php >/dev/null
+          bash -n lane/native.sh
+          python3 lane/build.py
+      - name: Verify unchanged formal baseline and Provider ZIPs
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir provider
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$SOURCE_VERSION.zip" --dir provider
+          gh release download "v$PROVIDER_VERSION" --repo llhzx2018/vf-tools-m3u8 --pattern "vf-tools-m3u8_V$PROVIDER_VERSION.zip" --dir provider
+          python3 - <<'PYIDENTITY'
+          import os,pathlib,hashlib,zipfile
+          for name,byteskey,hashkey in [('vf-tools-theme_V'+os.environ['SOURCE_VERSION']+'.zip','SOURCE_BYTES','SOURCE_SHA256'),('vf-tools-m3u8_V'+os.environ['PROVIDER_VERSION']+'.zip','PROVIDER_BYTES','PROVIDER_SHA256')]:
+              data=(pathlib.Path('provider')/name).read_bytes()
+              assert len(data)==int(os.environ[byteskey]) and hashlib.sha256(data).hexdigest()==os.environ[hashkey]
+              with zipfile.ZipFile(pathlib.Path('provider')/name) as z:assert z.testzip() is None
+          PYIDENTITY
+      - name: Browser dependencies
+        run: |
+          set -Eeuo pipefail
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 3 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Real WordPress directory tools and upgrade recovery
+        run: bash lane/native.sh
+      - name: Public-safe proof
+        id: proof_artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-workspace106-${{ github.run_id }}
+          path: |
+            proof/**/*.json
+            proof/**/*.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Read back actual uploaded evidence ZIP
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROOF_ARTIFACT_ID: ${{ steps.proof_artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROOF_ARTIFACT_ID" > /tmp/public-proof-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PROOF_ARTIFACT_ID/zip" > /tmp/public-proof-readback.zip
+          python3 - <<'PYVERIFY'
+          import json,hashlib,zipfile,pathlib,os,stat
+          meta=json.loads(pathlib.Path('/tmp/public-proof-meta.json').read_text())
+          data=pathlib.Path('/tmp/public-proof-readback.zip').read_bytes()
+          digest='sha256:'+hashlib.sha256(data).hexdigest()
+          assert meta['id']==int(os.environ['PROOF_ARTIFACT_ID'])
+          assert meta['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID'])
+          assert meta['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert meta['size_in_bytes']==len(data) and meta['digest']==digest
+          assert meta['expired'] is False
+          with zipfile.ZipFile('/tmp/public-proof-readback.zip') as z:
+              assert z.testzip() is None
+              names=z.namelist()
+              assert names and len(names)==len(set(names))
+              for info in z.infolist():
+                  p=pathlib.PurePosixPath(info.filename)
+                  assert not p.is_absolute() and '..' not in p.parts and '\\' not in info.filename
+                  assert not stat.S_ISLNK(info.external_attr>>16)
+                  assert p.suffix in ['.json','.png']
+                  if p.suffix=='.json': json.loads(z.read(info))
+              final=json.loads(z.read('FINAL_EVIDENCE.json'))
+              assert final['status']=='PASS' and final['source_sha']==os.environ['TARGET_SHA'] and final['source_tree']==os.environ['TARGET_TREE']
+          receipt={'status':'PASS','artifact_id':meta['id'],'run_id':int(os.environ['GITHUB_RUN_ID']),'runner_sha':os.environ['GITHUB_SHA'],'source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'bytes':len(data),'digest':digest,'file_count':len(names),'crc':'PASS','safe_paths':'PASS','json_parse':'PASS'}
+          print('VF_ARTIFACT_RECEIPT_BEGIN')
+          print(json.dumps(receipt))
+          print('VF_ARTIFACT_RECEIPT_END')
+          PYVERIFY
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target baseline provider provider-source /tmp/wp-cli.phar
