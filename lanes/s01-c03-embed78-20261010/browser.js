@@ -10,13 +10,19 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  const page=await context.newPage();
  const demo=base+'/wp-content/plugins/vf-tool-m3u8/public/media/player-demo/demo.m3u8';
  const endpoint=new URL(base+'/');endpoint.search=new URLSearchParams({vf_m3u8_embed:'1',mode:'embed',tool:'player',m:Buffer.from(demo).toString('base64url'),autoplay:'1',controls:'1',locale:'en'});
- const response=await page.goto(endpoint.href,{waitUntil:'networkidle'});
+ let response=await page.goto(endpoint.href,{waitUntil:'networkidle'});
+ const expectedVersion=['baseline','rollback'].includes(phase)?process.env.SOURCE_VERSION:process.env.TARGET_VERSION;
+ for(let attempt=0;attempt<12;attempt++){
+  if(await page.locator('body').getAttribute('data-vf-embed-endpoint-version')===expectedVersion)break;
+  await page.waitForTimeout(1000);response=await page.reload({waitUntil:'networkidle'});
+ }
+ gate(await page.locator('body').getAttribute('data-vf-embed-endpoint-version')===expectedVersion,'actual HTTP runtime version matches installed source '+phase);
  const direct=await page.evaluate(()=>({url:location.href,title:document.title,endpoint:document.body.dataset.vfPublicEmbed,version:document.body.dataset.vfEmbedEndpointVersion,status:document.querySelector('[data-vf-embed-status]')?.innerText,video:document.querySelector('video')?{readyState:document.querySelector('video').readyState,duration:document.querySelector('video').duration,currentTime:document.querySelector('video').currentTime,error:document.querySelector('video').error?.code}:null}));
  await page.screenshot({path:'proof/'+phase+'-direct.png'});
  fs.writeFileSync('proof/'+phase+'-direct.json',JSON.stringify({direct,status:response.status(),headers:response.headers()},null,2));
  if(['baseline','rollback'].includes(phase)){
   const u=new URL(endpoint);u.pathname='/m3u8-player/';await page.goto(u.href,{waitUntil:'networkidle'});const toolPath=await page.evaluate(()=>({url:location.href,title:document.title,endpoint:document.body.dataset.vfPublicEmbed}));
-  fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify({status:'OBSERVED',cases,direct,toolPath},null,2));await browser.close();return;
+  fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify({status:cases.every(x=>x.pass)?'OBSERVED':'FAIL',cases,direct,toolPath},null,2));await browser.close();return;
  }
  gate(direct.endpoint==='1'&&direct.version===process.env.TARGET_VERSION,'standalone endpoint owns explicit root request',direct);
  gate(response.headers()['x-robots-tag']==='noindex, nofollow','embed excluded from search indexing');
