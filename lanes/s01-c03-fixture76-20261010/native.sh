@@ -53,9 +53,9 @@ if test "${VF_REAPPLY_DEBUG:-0}" = 1;then
  exit 0
 fi
 docker cp target/tests/unit/provider-runtime-wordpress-fixture.php "$WP:/tmp/runtime-fixture.php"
+node target/tests/unit/provider-fixture-wordpress-browser.js
 node target/tests/unit/provider-capability-wordpress-browser.js
 node target/tests/unit/provider-pipeline-wordpress-browser.js
-node target/tests/unit/provider-fixture-wordpress-browser.js
 node target/tests/unit/provider-runtime-wordpress-browser.js
 node target/tests/unit/provider-overview-wordpress-browser.js
 node target/tests/unit/provider-diagnostics-wordpress-browser.js
