@@ -2,7 +2,7 @@
 const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playwright');
 const base='http://127.0.0.1:18880',phase=process.argv[2]||'candidate';
 (async()=>{const b=await chromium.launch(),p=await b.newPage({viewport:{width:1440,height:1000}});const errors=[];p.on('pageerror',e=>errors.push(e.message));
- async function inspect(){return p.evaluate(()=>{
+ async function inspect(){await p.waitForLoadState('networkidle');await p.waitForFunction(()=>document.documentElement.getAttribute('data-vf-navigation')==='ready'&&document.documentElement.getAttribute('data-vf-runtime-ready')==='stable');await p.evaluate(async()=>{await document.fonts.ready;await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))});return p.evaluate(()=>{
   const rgb=s=>{const a=s.match(/[\d.]+/g).map(Number);return a.slice(0,3)};
   const lum=a=>a.map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4}).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
   const f=document.querySelector('.vf-production-footer'),g=f.querySelector('.vf-production-footer-grid');
