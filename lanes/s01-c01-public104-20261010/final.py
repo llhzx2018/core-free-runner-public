@@ -1,6 +1,6 @@
 import os,json,pathlib
 p=pathlib.Path('proof')
-names=['identity.json','provider-actual.json','provider-reapply.json','directory-browser.json','upgrade-rollback.json','clean-install.json','installed-versions.json','provider-contract.json','directory-contract.json','heading-contract.json']
+names=['identity.json','provider-actual.json','provider-reapply.json','directory-browser.json','upgrade-rollback.json','clean-install.json','installed-versions.json','provider-contract.json','directory-contract.json','heading-contract.json','performance.json']
 d={name:json.loads((p/name).read_text()) for name in names}
 assert all(v['status']=='PASS' for v in d.values())
 assert json.loads((p/'provider-baseline.json').read_text())['status']=='REPRODUCED'
