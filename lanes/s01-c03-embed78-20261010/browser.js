@@ -1,0 +1,39 @@
+const {chromium}=require('playwright');
+const fs=require('fs');
+const phase=process.argv[2]||'candidate';
+const base='http://127.0.0.1:18880';
+const cases=[];
+function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
+(async()=>{
+ const browser=await chromium.launch({headless:true});
+ const context=await browser.newContext({viewport:{width:1440,height:1000},permissions:['clipboard-read','clipboard-write']});
+ const page=await context.newPage();
+ const demo=base+'/wp-content/plugins/vf-tool-m3u8/public/media/player-demo/demo.m3u8';
+ const endpoint=new URL(base+'/');endpoint.search=new URLSearchParams({vf_m3u8_embed:'1',mode:'embed',tool:'player',m:Buffer.from(demo).toString('base64url'),autoplay:'1',controls:'1',locale:'en'});
+ const response=await page.goto(endpoint.href,{waitUntil:'networkidle'});
+ const direct=await page.evaluate(()=>({url:location.href,title:document.title,endpoint:document.body.dataset.vfPublicEmbed,version:document.body.dataset.vfEmbedEndpointVersion,status:document.querySelector('[data-vf-embed-status]')?.innerText,video:document.querySelector('video')?{readyState:document.querySelector('video').readyState,duration:document.querySelector('video').duration,currentTime:document.querySelector('video').currentTime,error:document.querySelector('video').error?.code}:null}));
+ await page.screenshot({path:'proof/'+phase+'-direct.png'});
+ fs.writeFileSync('proof/'+phase+'-direct.json',JSON.stringify({direct,status:response.status(),headers:response.headers()},null,2));
+ if(['baseline','rollback'].includes(phase)){
+  fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify({status:'OBSERVED',cases,direct},null,2));await browser.close();return;
+ }
+ gate(direct.endpoint==='1'&&direct.version===process.env.TARGET_VERSION,'standalone endpoint owns explicit root request',direct);
+ gate(response.headers()['x-robots-tag']==='noindex, nofollow','embed excluded from search indexing');
+ try{await page.waitForFunction(()=>document.querySelector('video')?.readyState>=2,{},{timeout:15000});}catch(e){}
+ const media=await page.locator('video').evaluate(v=>({readyState:v.readyState,duration:v.duration,currentTime:v.currentTime,error:v.error?.code}));
+ gate(media.readyState>=2&&media.duration>0&&!media.error,'actual embedded demo media ready',media);
+ await page.goto(base+'/embed/',{waitUntil:'networkidle'});
+ const messages=[];await page.exposeFunction('recordEmbed',x=>messages.push(x));
+ await page.evaluate(()=>window.addEventListener('message',e=>{if(e.data?.type==='vf:m3u8:embed-player-ready')window.recordEmbed(e.data);}));
+ await page.getByRole('button',{name:'Run bundled example',exact:true}).click();
+ try{await page.waitForFunction(()=>document.querySelector('iframe')?.contentDocument?.body?.dataset.vfPublicEmbed==='1',{},{timeout:15000});}catch(e){}
+ const preview=await page.evaluate(()=>Array.from(document.querySelectorAll('iframe')).map(f=>({src:f.src,endpoint:f.contentDocument?.body?.dataset.vfPublicEmbed,video:f.contentDocument?.querySelector('video')?.readyState})));
+ gate(preview.some(f=>f.endpoint==='1'),'generator iframe renders endpoint',preview);
+ gate(messages.some(x=>x.owner==='vf-tool-m3u8'&&x.stage==='endpoint-ready'),'actual parent endpoint-ready handshake',messages);
+ await page.screenshot({path:'proof/'+phase+'-generator.png',fullPage:true});
+ for(const width of [1920,1440,1319,1024,768,390]){await page.setViewportSize({width,height:1000});const s=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));gate(s.scroll<=s.width+1,'embed no horizontal overflow '+width,s);await page.screenshot({path:'proof/'+phase+'-embed-'+width+'.png',fullPage:true});}
+ for(const path of ['/','/m3u8-player/','/embed/','/m3u8-browser-stream-test/','/m3u8-playlist-checker/','/m3u8-segment-viewer/','/m3u8-encryption-detector/','/m3u8-downloader/','/m3u8-to-mp4/','/iptv-manager/','/m3u8-test-links/','/m3u8-backup-restore/']){const r=await page.goto(base+path);const ordinary=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,h1:document.querySelector('h1')?.innerText}));gate(r.status()===200&&!ordinary.endpoint&&!!ordinary.h1,'normal route preserved '+path,{status:r.status(),...ordinary});}
+ for(const path of ['/','/en/','/zh/','/m3u8-player/']){const u=new URL(endpoint);u.pathname=path;u.searchParams.set('locale',path==='/zh/'?'zh':'en');const r=await page.goto(u.href);const state=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,lang:document.documentElement.lang,controls:document.querySelector('video')?.controls}));gate(r.status()===200&&state.endpoint==='1','embed explicit route '+path,state);}
+ const missing=new URL(endpoint);missing.searchParams.set('m',Buffer.from('javascript:alert(1)').toString('base64url'));await page.goto(missing.href);gate((await page.locator('[data-vf-embed-status]').getAttribute('data-state'))==='error','invalid source explicit error');
+ const result={status:cases.every(x=>x.pass)?'PASS':'FAIL',phase,cases,source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE};fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify(result,null,2));console.log(JSON.stringify({phase,status:result.status,failed:cases.filter(x=>!x.pass)}));await browser.close();
+})().catch(e=>{fs.writeFileSync('proof/embed-'+phase+'-error.json',JSON.stringify({status:'FAIL',error:String(e)}));console.error(e);process.exitCode=1;});
