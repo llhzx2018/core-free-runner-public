@@ -22,7 +22,6 @@ cli plugin install /tmp/provider.zip --activate >/dev/null
 cli plugin install polylang --version="$POLYLANG_VERSION" --activate >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
-cli eval 'echo wp_json_encode(["settings"=>vf_tool_m3u8_get_settings(),"engine"=>vf_tool_m3u8_engine_frontend_config()]);' > proof/engine-config.json
 node lane/browser.js baseline
 docker cp "proof/vf-tools-m3u8_V${TARGET_VERSION}.zip" "$WP:/tmp/candidate.zip"
 docker cp proof/synthetic-channel.json "$WP:/tmp/synthetic-channel.json"
