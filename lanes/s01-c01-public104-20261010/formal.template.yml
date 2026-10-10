@@ -1,0 +1,177 @@
+name: S01-C01 public directory 104 formal release
+on:
+  push:
+    branches: [task/s01-c01-public104-20261010-formal]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      CANDIDATE_RUN: '{{CANDIDATE_RUN}}'
+      CANDIDATE_SHA: '{{CANDIDATE_SHA}}'
+      CANDIDATE_RUNNER_SHA: '{{CANDIDATE_RUNNER_SHA}}'
+      CANDIDATE_ARTIFACT_ID: '{{CANDIDATE_ARTIFACT_ID}}'
+      CANDIDATE_ARTIFACT_DIGEST: '{{CANDIDATE_ARTIFACT_DIGEST}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Target-owned formal lane identity preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c01-public104-20261010/formal-spec.json --template runner/lanes/s01-c01-public104-20261010/formal.template.yml --output /tmp/preview-formal-rendered.yml >/dev/null
+          cmp /tmp/preview-formal-rendered.yml runner/.github/workflows/s01-c01-public104-20261010-formal.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c01-public104-20261010/formal-spec.json --input runner/.github/workflows/s01-c01-public104-20261010-formal.yml > proof/formal-lane-identity-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Reverse verify exact tested tree and rebuilt bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/$CANDIDATE_RUN --jq .conclusion)" = success
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/$CANDIDATE_RUN --jq .head_sha)" = "$CANDIDATE_RUNNER_SHA"
+          gh api "repos/llhzx2018/core-free-runner-public/actions/artifacts/$CANDIDATE_ARTIFACT_ID" > /tmp/tested-artifact-meta.json
+          gh api "repos/llhzx2018/core-free-runner-public/actions/artifacts/$CANDIDATE_ARTIFACT_ID/zip" > /tmp/tested-artifact.zip
+          python3 - <<'PYARTIFACT'
+          import os,json,pathlib,hashlib,zipfile,stat
+          meta=json.loads(pathlib.Path('/tmp/tested-artifact-meta.json').read_text())
+          data=pathlib.Path('/tmp/tested-artifact.zip').read_bytes()
+          assert meta['id']==int(os.environ['CANDIDATE_ARTIFACT_ID']) and meta['workflow_run']['id']==int(os.environ['CANDIDATE_RUN'])
+          assert meta['workflow_run']['head_sha']==os.environ['CANDIDATE_RUNNER_SHA'] and not meta['expired']
+          assert meta['digest']==os.environ['CANDIDATE_ARTIFACT_DIGEST']=='sha256:'+hashlib.sha256(data).hexdigest()
+          assert meta['size_in_bytes']==len(data)
+          with zipfile.ZipFile('/tmp/tested-artifact.zip') as z:
+              assert z.testzip() is None
+              names=z.namelist();assert len(names)==len(set(names))
+              for entry in z.infolist():
+                  p=pathlib.PurePosixPath(entry.filename)
+                  assert not p.is_absolute() and '..' not in p.parts and '\\' not in entry.filename and not stat.S_ISLNK(entry.external_attr>>16)
+                  assert p.suffix in ['.json','.png']
+                  if p.suffix=='.json':json.loads(z.read(entry))
+              z.extractall('tested')
+          PYARTIFACT
+          python3 - <<'PYGATE'
+          import json,pathlib,os
+          p=pathlib.Path('tested');d=json.loads((p/'FINAL_EVIDENCE.json').read_text())
+          assert d['status']=='PASS' and d['source_sha']==os.environ['CANDIDATE_SHA'] and d['source_tree']==os.environ['TARGET_TREE'] and d['version']==os.environ['TARGET_VERSION']
+          assert d['upgrade']==d['rollback']==d['reapply']==d['clean_install']=='PASS'
+          assert d['canonical_state_preserved'] is True and d['controls_widths']==6
+          assert d['security_boundary']=='SOURCE_PACKAGE_SECRET_SCAN_PASS' and d['frozen_shell_header_menu']=='PASS'
+          assert d['production']=='NOT_EXECUTED' and d['owner_real_use']=='PENDING_POST_MANUAL_UPGRADE'
+          for name in ['provider-actual.json','provider-reapply.json','directory-browser.json','provider-contract.json','directory-contract.json','heading-contract.json','clean-install.json','upgrade-rollback.json','performance.json']:
+              assert json.loads((p/name).read_text())['status']=='PASS',name
+          assert json.loads((p/'provider-baseline.json').read_text())['status']=='REPRODUCED'
+          assert json.loads((p/'clean-install.json').read_text())['setup_revisit']=='LOCKED_ALREADY_INSTALLED'
+          assert json.loads((p/'upgrade-rollback.json').read_text())['repeat_install']=='PASS'
+          gate=json.loads(pathlib.Path('runner/lanes/s01-c01-public104-20261010/release-authority.json').read_text())
+          assert gate['source_sha']==os.environ['CANDIDATE_SHA'] and gate['source_tree']==os.environ['TARGET_TREE']
+          assert gate['owner_preview_runtime_applicability']=='N_A' and gate['production_auto_apply'] is False
+          assert all(x['result'] in ['REQUIRED','N_A'] for x in gate['applicability'].values())
+          for domain,item in gate['applicability'].items():
+              if item['result']=='REQUIRED':
+                  assert item['authority_loaded'] and item['acceptance_mapped']
+                  for name in item['evidence']:
+                      v=json.loads((p/name).read_text())
+                      assert v.get('status','PASS')=='PASS',name
+          assert gate['authority_drift']['invalid_current_snapshot'] is False
+          print('SCOPED_RELEASE_REVERSE_PASS')
+          PYGATE
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          cp -a runner/lanes/s01-c01-public104-20261010 lane
+          python3 lane/build.py
+          python3 - <<'PY'
+          import json,pathlib
+          tested=json.loads(pathlib.Path('tested/FINAL_EVIDENCE.json').read_text()); built=json.loads(pathlib.Path('proof/identity.json').read_text())
+          for key in ['asset','asset_bytes','asset_sha256','source_tree','version']: assert tested[key]==built[key],key
+          PY
+      - name: Publish private formal Release and exact remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          ASSET="vf-tools-theme_V${TARGET_VERSION}.zip"; TAG="v$TARGET_VERSION"
+          cat > /tmp/release-notes.md <<EOF
+          前台工具目录修复：恢复下载器与 MP4 转换的实际运行时入口，兼容主题旧默认短代码，保留已注册自定义 renderer 和缺失插件隐藏门槛。
+          推荐按目标去重，隐藏仅刷新当前目录的行动按钮，替换目录模块开发文案。
+          Exact Candidate 真实隔离 WordPress 十一入口、筛选与搜索、六种宽度、下载和转换样例、103→104 升级/回滚/再应用/重复安装、清洁安装及登录已验证。
+          Candidate Run: $CANDIDATE_RUN。Shell/Header/Menu、站点配置、Provider 算法不变。
+          Production 仍由 OWNER 手工升级；未声明全产品或 OWNER 真实使用通过。
+          Exact source: $TARGET_SHA; tree: $TARGET_TREE。
+          EOF
+          if gh release view "$TAG" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            test "$(gh api repos/$TARGET_REPO/git/ref/tags/$TAG --jq .object.sha)" = "$TARGET_SHA"
+          else
+            gh release create "$TAG" "proof/$ASSET" --repo "$TARGET_REPO" --target "$TARGET_SHA" --title "VF Tools Theme V$TARGET_VERSION" --notes-file /tmp/release-notes.md
+          fi
+          gh api "repos/$TARGET_REPO/releases/tags/$TAG" > proof/remote-release.json
+          test "$(gh api repos/$TARGET_REPO/git/ref/tags/$TAG --jq .object.sha)" = "$TARGET_SHA"
+          mkdir readback
+          gh release download "$TAG" --repo "$TARGET_REPO" --pattern "$ASSET" --dir readback
+          cmp "proof/$ASSET" "readback/$ASSET"
+          python3 - <<'PY'
+          import json,pathlib,os
+          p=pathlib.Path('proof'); m=json.loads((p/'identity.json').read_text());r=json.loads((p/'remote-release.json').read_text());t=json.loads(pathlib.Path('tested/FINAL_EVIDENCE.json').read_text());assert not r['draft'] and not r['prerelease'];a=[a for a in r['assets'] if a['name']==m['asset']];assert len(a)==1 and a[0]['size']==m['asset_bytes'] and a[0]['digest']=='sha256:'+m['asset_sha256'];m.update(release_id=r['id'],asset_id=a[0]['id'],released_at=r['published_at'],runtime_files=t['runtime_files'],runtime_fingerprint=t['runtime_fingerprint'],candidate_run=os.environ['CANDIDATE_RUN'],upgrade_run=os.environ['CANDIDATE_RUN'],formal_release='PASS',remote_readback='PASS',distribution='NOT_EXECUTED',production='NOT_EXECUTED');(p/'RELEASE_RECEIPT.json').write_text(json.dumps(m,indent=2));print(json.dumps(m))
+          PY
+      - name: Public-safe receipt
+        id: receipt_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-formal-public104-${{ github.run_id }}
+          path: proof/RELEASE_RECEIPT.json
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Read back actual formal receipt ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECEIPT_ARTIFACT_ID: ${{ steps.receipt_artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECEIPT_ARTIFACT_ID" > /tmp/formal-receipt-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECEIPT_ARTIFACT_ID/zip" > /tmp/formal-receipt.zip
+          python3 - <<'PYRECEIPT'
+          import os,json,pathlib,hashlib,zipfile
+          meta=json.loads(pathlib.Path('/tmp/formal-receipt-meta.json').read_text())
+          data=pathlib.Path('/tmp/formal-receipt.zip').read_bytes()
+          digest='sha256:'+hashlib.sha256(data).hexdigest()
+          assert meta['id']==int(os.environ['RECEIPT_ARTIFACT_ID']) and meta['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID'])
+          assert meta['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert not meta['expired'] and meta['digest']==digest and meta['size_in_bytes']==len(data)
+          with zipfile.ZipFile('/tmp/formal-receipt.zip') as z:
+              assert z.testzip() is None and z.namelist()==['RELEASE_RECEIPT.json']
+              actual=json.loads(z.read('RELEASE_RECEIPT.json'))
+              expected=json.loads(pathlib.Path('proof/RELEASE_RECEIPT.json').read_text())
+              assert actual==expected and actual['source_sha']==os.environ['TARGET_SHA'] and actual['source_tree']==os.environ['TARGET_TREE'] and actual['formal_release']==actual['remote_readback']=='PASS'
+          print('VF_FORMAL_AUDIT_BEGIN')
+          print(pathlib.Path('proof/formal-lane-identity-audit.json').read_text())
+          print('VF_FORMAL_AUDIT_END')
+          print('VF_FORMAL_RECEIPT_BEGIN')
+          print(json.dumps(actual))
+          print('VF_FORMAL_RECEIPT_END')
+          print('VF_FORMAL_ARTIFACT_BEGIN')
+          print(json.dumps({'status':'PASS','id':meta['id'],'run_id':int(os.environ['GITHUB_RUN_ID']),'bytes':len(data),'digest':digest,'crc':'PASS','json_readback':'PASS'}))
+          print('VF_FORMAL_ARTIFACT_END')
+          PYRECEIPT
+      - name: Private workspace cleanup
+        if: always()
+        run: rm -rf target readback proof/*.zip
