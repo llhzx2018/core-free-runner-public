@@ -41,10 +41,24 @@ node lane/browser.js rollback
 VF_PHASE=reapply cli eval-file /tmp/native-phase.php > proof/native-reapply.json
 VF_PHASE=candidate cli eval-file /tmp/native-phase.php > proof/native-reapply-readback.json
 node lane/browser.js reapply
+docker exec "$DB" mariadb -uroot -psyntheticroot -e "CREATE DATABASE wordpress_clean;GRANT ALL PRIVILEGES ON wordpress_clean.* TO 'wordpress'@'%';"
+cli config set DB_NAME wordpress_clean >/dev/null
+cli core install --url=http://127.0.0.1:18880 --title='Synthetic Clean Embed' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli theme activate vf-tools-theme >/dev/null
+docker exec "$WP" rm -rf /var/www/html/wp-content/plugins/vf-tool-m3u8
+cli plugin install /tmp/candidate.zip --activate >/dev/null
+cli plugin activate polylang >/dev/null
+cli eval-file /tmp/seed.php >/dev/null
+cli rewrite structure '/%postname%/' --hard >/dev/null
+cli eval 'require_once ABSPATH."wp-admin/includes/plugin.php";$s=VF_M3U8_Runtime_Authority_V1::stored();if(VF_TOOL_M3U8_VERSION!==getenv("CANDIDATE_VERSION")||!is_plugin_active("vf-tool-m3u8/vf-tool-m3u8.php")||$s["file_count"]!==568||is_wp_error(VF_M3U8_Runtime_Authority_V1::verify(getenv("CANDIDATE_VERSION"),WP_PLUGIN_DIR."/vf-tool-m3u8")))throw new Exception("clean install failed");echo wp_json_encode(["status"=>"PASS","version"=>VF_TOOL_M3U8_VERSION,"runtime"=>$s,"state"=>VF_M3U8_Update_State_V1::snapshot()]);' > proof/clean-install.json
+node lane/browser.js clean
+docker cp proof/clean-install.json "$WP:/tmp/clean-before.json"
+cli plugin activate vf-tool-m3u8 >/dev/null
+cli eval 'if(!VF_M3U8_Update_State_V1::equivalent(json_decode(file_get_contents("/tmp/clean-before.json"),true)["state"],VF_M3U8_Update_State_V1::snapshot()))throw new Exception("repeat activation changed owned state");echo wp_json_encode(["status"=>"PASS"]);' > proof/repeat-activation.json
 python3 - <<'PY'
 import pathlib,json,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text())
-names=['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','embed-candidate','embed-reapply']
+names=['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','embed-candidate','embed-reapply','clean-install','repeat-activation','embed-clean']
 checks={n:json.loads((p/(n+'.json')).read_text())['status'] for n in names}
 baseline=json.loads((p/'embed-baseline.json').read_text())['toolPath'];rollback=json.loads((p/'embed-rollback.json').read_text())['toolPath']
 reproduced=baseline.get('endpoint')!='1' and rollback.get('endpoint')!='1'

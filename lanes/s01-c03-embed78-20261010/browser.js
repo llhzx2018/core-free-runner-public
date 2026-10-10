@@ -34,10 +34,24 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  try{await page.waitForFunction(()=>document.querySelector('[data-vf-embed-generator]')?.getAttribute('data-vf-embed-preview-state')==='success',{},{timeout:15000});}catch(e){}
  gate(messages.some(x=>x.stage==='media-ready'&&x.readyState>=2),'actual preview media-ready handshake',messages);
  gate(await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-embed-preview-state')==='success','success waits for decoded media');
+ await page.locator('[data-vf-embed-mode-button="pro"]').click();
+ await page.locator('[data-vf-embed-preset-button="fixed"]').click();
+ gate(await page.locator('[data-vf-embed-width]').inputValue()==='640'&&await page.locator('[data-vf-embed-height]').inputValue()==='360','fixed preset updates dimensions');
+ await page.locator('[data-vf-embed-autoplay]').selectOption('1');await page.locator('[data-vf-embed-controls]').selectOption('0');await page.locator('[data-vf-embed-loading]').selectOption('eager');
+ for(const format of ['iframe','responsive','video','hlsjs','link']){
+  await page.locator('[data-vf-embed-result-tab="'+format+'"]').click();await page.locator('[data-vf-embed-copy]').click();const code=await page.evaluate(()=>navigator.clipboard.readText());
+  gate(!!code&&({iframe:code.includes('<iframe')&&code.includes('width="640"')&&code.includes('autoplay=1')&&code.includes('controls=0')&&code.includes('loading="eager"'),responsive:code.includes('padding-top:56.25%'),video:code.includes('<video'),hlsjs:code.includes('Hls.isSupported'),link:code.includes('mode=watch')})[format],'actual clipboard output '+format,{length:code.length});
+ }
+ const downloadPromise=page.waitForEvent('download');await page.locator('[data-vf-embed-export]').click();const download=await downloadPromise;const exported=JSON.parse(fs.readFileSync(await download.path(),'utf8'));gate(exported.artifactType==='vf-m3u8-embed-package'&&exported.embed.width==='640'&&exported.embed.controls===false,'actual downloaded JSON preserves parameters');
+ await page.locator('[data-vf-embed-preset-button="responsive"]').click();
  await page.screenshot({path:'proof/'+phase+'-generator.png',fullPage:true});
  for(const width of [1920,1440,1319,1024,768,390]){await page.setViewportSize({width,height:1000});const s=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));gate(s.scroll<=s.width+1,'embed no horizontal overflow '+width,s);await page.screenshot({path:'proof/'+phase+'-embed-'+width+'.png',fullPage:true});}
  for(const path of ['/','/m3u8-player/','/embed/','/m3u8-browser-stream-test/','/m3u8-playlist-checker/','/m3u8-segment-viewer/','/m3u8-encryption-detector/','/m3u8-downloader/','/m3u8-to-mp4/','/iptv-manager/','/m3u8-test-links/','/m3u8-backup-restore/']){const r=await page.goto(base+path);const ordinary=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,h1:document.querySelector('h1')?.innerText}));gate(r.status()===200&&!ordinary.endpoint&&!!ordinary.h1,'normal route preserved '+path,{status:r.status(),...ordinary});}
  for(const path of ['/','/en/','/zh/','/m3u8-player/']){const u=new URL(endpoint);u.pathname=path;u.searchParams.set('locale',path==='/zh/'?'zh':'en');const r=await page.goto(u.href);const state=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,lang:document.documentElement.lang,controls:document.querySelector('video')?.controls}));gate(r.status()===200&&state.endpoint==='1','embed explicit route '+path,state);}
  const missing=new URL(endpoint);missing.searchParams.set('m',Buffer.from('javascript:alert(1)').toString('base64url'));await page.goto(missing.href);gate((await page.locator('[data-vf-embed-status]').getAttribute('data-state'))==='error','invalid source explicit error');
+ if(phase==='clean'){
+  await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');gate((await page.locator('#wpadminbar').count())===1,'fresh installation final native login');
+  await page.goto(base+'/wp-admin/install.php');gate((await page.locator('body').innerText()).includes('Already Installed'),'setup revisit safely locked');
+ }
  const result={status:cases.every(x=>x.pass)?'PASS':'FAIL',phase,cases,source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE};fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify(result,null,2));console.log(JSON.stringify({phase,status:result.status,failed:cases.filter(x=>!x.pass)}));await browser.close();
 })().catch(e=>{fs.writeFileSync('proof/embed-'+phase+'-error.json',JSON.stringify({status:'FAIL',error:String(e)}));console.error(e);process.exitCode=1;});
