@@ -49,7 +49,8 @@ $expected=$phase==='rollback'?getenv('SOURCE_VERSION'):getenv('CANDIDATE_VERSION
 gate(VF_TOOL_M3U8_VERSION===$expected,'reload version');gate(is_plugin_active($plugin),'active after upgrade/recovery');
 $state=gate(VF_M3U8_Update_State_V1::snapshot(),'state after');$before=get_option('vf_runner_owned_before');
 gate(VF_M3U8_Update_State_V1::equivalent($before,$state),'owned state unchanged');
-gate(get_option('vf_runner_foreign_before')===foreign_snapshot(),'foreign state and cron unchanged');
+$foreign_after=foreign_snapshot();$foreign_before=get_option('vf_runner_foreign_before');
+if($foreign_before!==$foreign_after){echo wp_json_encode(['status'=>'FAIL','phase'=>$phase,'changed'=>array_keys(array_diff_assoc($foreign_after,$foreign_before)),'before'=>$foreign_before,'after'=>$foreign_after]);throw new Exception('foreign state and cron unchanged');}
 gate(VF_M3U8_Runtime_Authority_V1::verify($expected,$root),'installed exact runtime');
 $runtime=VF_M3U8_Runtime_Authority_V1::stored();
 echo wp_json_encode(['status'=>'PASS','phase'=>$phase,'version'=>$expected,'state'=>$state,'runtime'=>$runtime,'foreign'=>foreign_snapshot(),'active'=>true,'production'=>'NOT_EXECUTED']);

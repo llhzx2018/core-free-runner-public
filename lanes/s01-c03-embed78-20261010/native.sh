@@ -23,6 +23,7 @@ cli plugin install polylang --version="$POLYLANG_VERSION" --activate >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
 node lane/browser.js baseline
+for route in '' en zh m3u8-player embed m3u8-browser-stream-test m3u8-playlist-checker m3u8-segment-viewer m3u8-encryption-detector m3u8-downloader m3u8-to-mp4 iptv-manager m3u8-test-links m3u8-backup-restore;do curl -fsSL "http://127.0.0.1:18880/$route/" >/dev/null;done
 docker cp "proof/vf-tools-m3u8_V${TARGET_VERSION}.zip" "$WP:/tmp/candidate.zip"
 docker cp proof/synthetic-channel.json "$WP:/tmp/synthetic-channel.json"
 docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
@@ -45,7 +46,7 @@ import pathlib,json,os
 p=pathlib.Path('proof');identity=json.loads((p/'identity.json').read_text())
 names=['native-baseline','native-corrupt-negative','native-upgrade','native-candidate','native-source-recovery','native-rollback','native-reapply','native-reapply-readback','embed-candidate','embed-reapply']
 checks={n:json.loads((p/(n+'.json')).read_text())['status'] for n in names}
-baseline=json.loads((p/'baseline-direct.json').read_text())['direct'];rollback=json.loads((p/'rollback-direct.json').read_text())['direct']
+baseline=json.loads((p/'embed-baseline.json').read_text())['toolPath'];rollback=json.loads((p/'embed-rollback.json').read_text())['toolPath']
 reproduced=baseline.get('endpoint')!='1' and rollback.get('endpoint')!='1'
 result={**identity,'status':'PASS' if all(x=='PASS' for x in checks.values()) and reproduced else 'FAIL','checks':checks,'old_version_failure_reproduced':reproduced,'production':'NOT_EXECUTED','owner_acceptance':'NOT_CLAIMED','run_id':os.environ['GITHUB_RUN_ID']}
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(result,indent=2));print(json.dumps(result));assert result['status']=='PASS'

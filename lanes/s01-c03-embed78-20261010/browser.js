@@ -15,7 +15,8 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  await page.screenshot({path:'proof/'+phase+'-direct.png'});
  fs.writeFileSync('proof/'+phase+'-direct.json',JSON.stringify({direct,status:response.status(),headers:response.headers()},null,2));
  if(['baseline','rollback'].includes(phase)){
-  fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify({status:'OBSERVED',cases,direct},null,2));await browser.close();return;
+  const u=new URL(endpoint);u.pathname='/m3u8-player/';await page.goto(u.href,{waitUntil:'networkidle'});const toolPath=await page.evaluate(()=>({url:location.href,title:document.title,endpoint:document.body.dataset.vfPublicEmbed}));
+  fs.writeFileSync('proof/embed-'+phase+'.json',JSON.stringify({status:'OBSERVED',cases,direct,toolPath},null,2));await browser.close();return;
  }
  gate(direct.endpoint==='1'&&direct.version===process.env.TARGET_VERSION,'standalone endpoint owns explicit root request',direct);
  gate(response.headers()['x-robots-tag']==='noindex, nofollow','embed excluded from search indexing');
@@ -30,6 +31,9 @@ function gate(ok,name,detail){cases.push({name,pass:!!ok,detail});}
  const preview=await page.evaluate(()=>Array.from(document.querySelectorAll('iframe')).map(f=>({src:f.src,endpoint:f.contentDocument?.body?.dataset.vfPublicEmbed,video:f.contentDocument?.querySelector('video')?.readyState})));
  gate(preview.some(f=>f.endpoint==='1'),'generator iframe renders endpoint',preview);
  gate(messages.some(x=>x.owner==='vf-tool-m3u8'&&x.stage==='endpoint-ready'),'actual parent endpoint-ready handshake',messages);
+ try{await page.waitForFunction(()=>document.querySelector('[data-vf-embed-generator]')?.getAttribute('data-vf-embed-preview-state')==='success',{},{timeout:15000});}catch(e){}
+ gate(messages.some(x=>x.stage==='media-ready'&&x.readyState>=2),'actual preview media-ready handshake',messages);
+ gate(await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-embed-preview-state')==='success','success waits for decoded media');
  await page.screenshot({path:'proof/'+phase+'-generator.png',fullPage:true});
  for(const width of [1920,1440,1319,1024,768,390]){await page.setViewportSize({width,height:1000});const s=await page.evaluate(()=>({width:innerWidth,scroll:document.documentElement.scrollWidth}));gate(s.scroll<=s.width+1,'embed no horizontal overflow '+width,s);await page.screenshot({path:'proof/'+phase+'-embed-'+width+'.png',fullPage:true});}
  for(const path of ['/','/m3u8-player/','/embed/','/m3u8-browser-stream-test/','/m3u8-playlist-checker/','/m3u8-segment-viewer/','/m3u8-encryption-detector/','/m3u8-downloader/','/m3u8-to-mp4/','/iptv-manager/','/m3u8-test-links/','/m3u8-backup-restore/']){const r=await page.goto(base+path);const ordinary=await page.evaluate(()=>({endpoint:document.body.dataset.vfPublicEmbed,h1:document.querySelector('h1')?.innerText}));gate(r.status()===200&&!ordinary.endpoint&&!!ordinary.h1,'normal route preserved '+path,{status:r.status(),...ordinary});}
