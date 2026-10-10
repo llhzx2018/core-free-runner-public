@@ -44,9 +44,10 @@ add_filter('query',function($sql)use($runtimeFailureFlags){
 },999);
 
 // Pipeline-only controlled failures. These hooks never ship in the plugin ZIP.
-$pipelineFailureFlags=[];foreach(['read','save','pointer','seal','archive','begin','steps','edges'] as $f)$pipelineFailureFlags[$f]=(bool)get_option('vf_runner_pipeline_fail-'.$f);
+$pipelineFailureFlags=[];foreach(['read','save','pointer','seal','archive','begin','steps','edges','empty'] as $f)$pipelineFailureFlags[$f]=(bool)get_option('vf_runner_pipeline_fail-'.$f);
 add_filter('query',function($sql)use($pipelineFailureFlags){
  $t=function_exists('vf_tools_m3u8_v6_table_names')?vf_tools_m3u8_v6_table_names():[];if(!$t)return $sql;
+ if($pipelineFailureFlags['empty']&&str_contains($sql,'FROM '.$t['pipelines'].' p LEFT JOIN'))return str_replace(' ORDER BY p.semantic_key ASC',' AND 1=0 ORDER BY p.semantic_key ASC',$sql);
  if($pipelineFailureFlags['read']&&str_contains($sql,'FROM '.$t['pipelines'].' p LEFT JOIN'))return 'SELECT * FROM vf_synthetic_missing_table';
  if($pipelineFailureFlags['save']&&str_starts_with($sql,'UPDATE '.$t['pipeline_revisions'].' SET definition='))return 'UPDATE vf_synthetic_missing_table SET id=1';
  if(($pipelineFailureFlags['pointer']||$pipelineFailureFlags['archive'])&&str_starts_with($sql,'UPDATE '.chr(96).$t['pipelines'].chr(96)))return 'UPDATE vf_synthetic_missing_table SET id=1';
