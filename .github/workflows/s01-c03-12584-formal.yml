@@ -1,0 +1,94 @@
+name: S01 C03 Playlist Checker 12584 Formal Release
+on:
+  push:
+    branches: [task/s01-c03-12584-formal-20261011]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_MAIN_SHA: 'f37b98b4a8aaa74216cb3ec98d9b40b2f6c94220'
+      QA_CANDIDATE_SHA: 'becacbd57f9f48bed2617af474f5a984196d567f'
+      QA_RUN: '38135637344'
+      QA_RUN_SHA: 'c5e935e510cc4c3822c39774d6df7437f6876221'
+      QA_ARTIFACT: '11701062359'
+      QA_DIGEST: 'sha256:a23023276dedcf2146a8c71591aff3214cff1d87a629411701a038281b74e9d9'
+    steps:
+      - name: Checkout public isolated release lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Checkout exact merged private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.PRODUCT_MAIN_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Checkout exact browser-tested candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.QA_CANDIDATE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+      - name: Verify exact one-shot lane syntax and source
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-12584 lane
+          bash -n lane/formal.sh
+          test "$(git -C target rev-parse HEAD)" = "$PRODUCT_MAIN_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$QA_CANDIDATE_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$(git -C candidate rev-parse HEAD^{tree})"
+      - name: Reverse-gate accepted browser proof and formally release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: bash lane/formal.sh
+      - name: Upload only public-safe formal receipt
+        if: success()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-m3u8-12584-formal-${{ github.run_id }}
+          path: |
+            proof/QA_REVERSE.json
+            proof/IDENTITY.json
+            proof/FINAL_FORMAL.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reverse-read public-safe receipt
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/s01-receipt-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/s01-receipt.zip
+          python3 - <<'PY'
+          import json,os,hashlib,zipfile,pathlib
+          m=json.loads(pathlib.Path('/tmp/s01-receipt-meta.json').read_text())
+          b=pathlib.Path('/tmp/s01-receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']) and m['workflow_run']['head_sha']
+          assert m['digest']=='sha256:'+hashlib.sha256(b).hexdigest() and m['size_in_bytes']==len(b)
+          with zipfile.ZipFile('/tmp/s01-receipt.zip') as z:
+           assert z.testzip() is None
+           names={'QA_REVERSE.json','IDENTITY.json','FINAL_FORMAL.json'}
+           assert set(z.namelist())==names
+           for n in names: assert json.loads(z.read(n))==json.loads((pathlib.Path('proof')/n).read_text())
+           assert json.loads(z.read('FINAL_FORMAL.json'))['status']=='PASS'
+          print('PUBLIC_RECEIPT_REVERSE_PASS',m['id'],m['digest'])
+          PY
+      - name: Remove private source and release asset
+        if: always()
+        run: rm -rf target candidate lane readback proof/*.zip /tmp/qa-evidence.zip /tmp/rebuild-12584.zip /tmp/m3-notes.md /tmp/qa-run.json /tmp/qa-meta.json
