@@ -4,7 +4,7 @@ if (!function_exists('pll_save_post_translations') || !class_exists('\\RankMath\
     throw new Exception('Polylang and official Rank Math redirections runtime required');
 }
 wp_set_current_user((int)get_user_by('login','admin')->ID);
-\\RankMath\\Installer::create_tables(['redirections']);
+\RankMath\Installer::create_tables(['redirections']);
 $en=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'EN redirect lab','post_name'=>'rank-en','post_content'=>'EN']);
 $official=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'ZH canonical redirect lab','post_name'=>'rank-zh','post_content'=>'ZH']);
 $duplicate=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_title'=>'ZH duplicate redirect lab','post_name'=>'rank-zh-2','post_content'=>'OLD']);
@@ -25,7 +25,7 @@ if ((int)($sourceMap['zh']??0)!==(int)$official || (int)($targetMap['en']??0)!==
 $oldUrl=get_permalink((int)$duplicate);
 $newUrl=get_permalink((int)$official);
 $sourcePath=(string)wp_parse_url($oldUrl,PHP_URL_PATH);
-$redirect=\\RankMath\\Redirections\\Redirection::from([
+$redirect=\RankMath\Redirections\Redirection::from([
     'sources'=>[['pattern'=>$sourcePath,'comparison'=>'exact','ignore'=>'']],
     'url_to'=>$newUrl,'header_code'=>'301','status'=>'active',
 ]);
