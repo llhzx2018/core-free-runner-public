@@ -45,12 +45,17 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   gate(data.length>40,'playlist actual '+format+' download',filename);
   if(format==='json')gate(!!JSON.parse(data),'playlist exported JSON parses');
  }
+ const handoffButton=pc.locator('[data-vf-playlist-action="segments-open"]');
+ gate(await handoffButton.isVisible(),'segment handoff actionable after successful media analysis');
+ const popupWait=context.waitForEvent('page',{timeout:4000}).catch(()=>null);
+ await handoffButton.click();
  const transfer=pc.locator('[data-vf-playlist-handoff-link]');
- gate((await transfer.count())>0,'playlist handoff anchor present');
  const href=await transfer.getAttribute('href');
- gate(!!href&&href!=='#'&&/^https?:\/\//.test(new URL(href,base).href),'playlist handoff target resolved');
- const other=await context.newPage();const dest=await other.goto(new URL(href,base).href,{waitUntil:'domcontentloaded'});
- gate(dest.status()===200,'playlist handoff target reachable');await other.close();
+ gate(!!href&&href!=='#','playlist actual handoff action resolves a concrete URL',href);
+ const transferResponse=await page.request.get(new URL(href,base).href);
+ gate(transferResponse.status()===200,'playlist handoff target reachable',transferResponse.status());
+ const popup=await popupWait;
+ if(popup){gate(new URL(popup.url()).pathname===new URL(href,base).pathname,'handoff popup route matches generated target');await popup.close();}
  await pc.locator('[data-vf-playlist-action="clear"]').click();
  gate((await pc.getAttribute('data-vf-playlist-has-result'))==='0','playlist clear invalidates old report');
  await pc.locator('[data-vf-playlist-file]').setInputFiles({name:'synthetic.m3u8',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from('#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3.0,\nsegment01.ts\n#EXT-X-ENDLIST\n')});
