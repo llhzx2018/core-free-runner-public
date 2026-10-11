@@ -9,6 +9,12 @@ $bindings = [];
 $routes = [];
 foreach ($registry as $toolId => $def) {
     $route = trim((string)($def['public_route'] ?? ''), '/');
+    // Consume the installed Theme's existing public route rather than inventing
+    // a second slug for the same canonical M3U8 segment viewer tool.
+    if ($toolId === 'segment-list-viewer' && function_exists('vf_toolsite_static_routes')) {
+        $realRoutes = vf_toolsite_static_routes();
+        if (isset($realRoutes['m3u8-segment-viewer'])) { $route = 'm3u8-segment-viewer'; }
+    }
     $shortcode = trim((string)($def['shortcode'] ?? ''));
     if ($route === '' || $shortcode === '') {
         throw new RuntimeException('MISSING_CANONICAL_TOOL_ROUTE_OR_SHORTCODE:' . $toolId);
