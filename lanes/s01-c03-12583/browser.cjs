@@ -13,7 +13,7 @@ async function waitResult(page){await page.waitForFunction(()=>{const r=document
   const root=page.locator('[data-vf-module="playlist-checker"]').first();
   gate(await root.count()===1,'playlist checker shortcode mounted once');
   await page.waitForFunction(()=>!!document.querySelector('[data-vf-module="playlist-checker"]')?.getAttribute('data-vf-playlist-checker-ready'),null,{timeout:15000});
-  gate((await root.getAttribute('data-vf-tool-version'))==='1.25.82','plugin version appears in actual UI');
+  gate((await root.getAttribute('data-vf-tool-version'))==='1.25.83','plugin version appears in actual UI');
   gate(await root.locator('[data-vf-playlist-action="analyze"]').count()===1,'analyze control present');
   await root.locator('[data-vf-playlist-action="analyze"]').click();
   gate((await root.getAttribute('data-vf-playlist-has-result'))!=='1','empty source does not fake a report');
@@ -21,7 +21,7 @@ async function waitResult(page){await page.waitForFunction(()=>{const r=document
   gate((await root.locator('[data-vf-playlist-type]').innerText()).trim().length>2,'sample master parsed');
   await root.locator('[data-vf-playlist-mode-switch="pro"]').click();
   gate((await root.getAttribute('data-vf-playlist-mode'))==='pro','professional mode switches');
-  const privateToken='PRIVATE_TEST_ONLY_12582';
+  const privateToken='PRIVATE_TEST_ONLY_12583';
   const signed='https://media.example/master.m3u8?auth='+privateToken;
   const manifest='#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-KEY:METHOD=AES-128,URI="https://media.example/key.bin?auth='+privateToken+'"\n#EXTINF:3,\nsegment.ts?token='+privateToken+'\n#EXT-X-ENDLIST';
   await root.locator('[data-vf-playlist-url]').fill(signed);
@@ -78,6 +78,6 @@ async function waitResult(page){await page.waitForFunction(()=>{const r=document
   gate(errors.length===0,'no runtime JavaScript errors',errors);
   fs.writeFileSync('proof/playlist-browser.json',JSON.stringify({status:'PASS',checks,mobile,production:'NOT_EXECUTED'},null,2));
   await page.screenshot({path:'proof/playlist-390.png',fullPage:true});
-  console.log('S01_PLAYLIST_12582_REAL_BROWSER_PASS',JSON.stringify({checks:checks.length,mobile}));
+  console.log('S01_PLAYLIST_12583_REAL_BROWSER_PASS',JSON.stringify({checks:checks.length,mobile}));
  }finally{await browser.close();}
-})().catch(e=>{console.error('S01_PLAYLIST_12582_REAL_BROWSER_FAIL',e.stack||String(e),JSON.stringify(checks).slice(-2100));process.exitCode=1});
+})().catch(e=>{console.error('S01_PLAYLIST_12583_REAL_BROWSER_FAIL',e.stack||String(e),JSON.stringify(checks).slice(-2100));process.exitCode=1});
