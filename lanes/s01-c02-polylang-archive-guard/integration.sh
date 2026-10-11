@@ -33,7 +33,7 @@ cli core install --url=http://127.0.0.1:18883 --title='S01 Synthetic Polylang Gu
  --admin_email=runner@example.invalid --skip-email >/dev/null
 cli plugin install polylang --activate >/dev/null
 cli plugin install seo-by-rank-math --activate >/dev/null
-cli eval 'update_option("rank_math_modules",array_values(array_unique(array_merge((array)get_option("rank_math_modules",[]),["redirections"])))); \\RankMath\\Installer::create_tables(["redirections"]);' >/dev/null
+cli eval 'update_option("rank_math_modules",array_values(array_unique(array_merge((array)get_option("rank_math_modules",[]),["redirections"])))); \RankMath\Installer::create_tables(["redirections"]);' >/dev/null
 # Isolated container-resolvable URL is required for a genuine HTTP 301 readback
 # from within WordPress; no Production hostname or account is ever accessed.
 cli option update home "http://$WP" >/dev/null
