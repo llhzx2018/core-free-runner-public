@@ -33,6 +33,10 @@ cli core install --url=http://127.0.0.1:18883 --title='S01 Synthetic Polylang Gu
  --admin_email=runner@example.invalid --skip-email >/dev/null
 cli plugin install polylang --activate >/dev/null
 cli plugin install seo-by-rank-math --activate >/dev/null
+# Rank Math Free officially permits onboarding to be skipped on isolated CI.
+# Without this, its registration guard does not create the module manager.
+cli option update rank_math_registration_skip 1 >/dev/null
+cli option update rank_math_is_configured 1 >/dev/null
 cli eval 'update_option("rank_math_modules",array_values(array_unique(array_merge((array)get_option("rank_math_modules",[]),["redirections"])))); \RankMath\Installer::create_tables(["redirections"]);' >/dev/null
 # Isolated container-resolvable URL is required for a genuine HTTP 301 readback
 # from within WordPress; no Production hostname or account is ever accessed.
