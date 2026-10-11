@@ -30,6 +30,8 @@ wp="$RUNNER_TEMP/s01-c02-published-native"
 mkdir -p "$wp"
 wp core download --path="$wp" --version=7.0.2 --force >/dev/null
 wp config create --path="$wp" --dbname=vf_ops_discovery --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check >/dev/null
+# Isolated WP-CLI has no interactive FTP credentials; use direct local FS writes.
+wp config set --path="$wp" FS_METHOD direct --type=constant >/dev/null
 wp core install --path="$wp" --url=http://127.0.0.1:18104 --title='Published Native Discovery' --admin_user=admin --admin_password='fixture-only-not-user' --admin_email=synthetic@example.invalid --skip-email >/dev/null
 wp plugin install "$old" --path="$wp" --activate >/dev/null
 wp eval --path="$wp" '$v=VF_OPS_VERSION;if($v!==getenv("SOURCE_VERSION"))exit(2);update_option("vf_ops_published_update_fixture",["sentinel"=>"retained"],false);echo "FORMAL_BASELINE_INSTALLED=PASS\n";' | tee "$out/wordpress-native.txt"
