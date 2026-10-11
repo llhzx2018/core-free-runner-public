@@ -13,15 +13,23 @@ foreach ($registry as $toolId => $def) {
     if ($route === '' || $shortcode === '') {
         throw new RuntimeException('MISSING_CANONICAL_TOOL_ROUTE_OR_SHORTCODE:' . $toolId);
     }
-    $id = wp_insert_post([
-        'post_type' => 'page',
-        'post_status' => 'publish',
-        'post_name' => $route,
-        'post_title' => 'Synthetic ' . (string)($def['label'] ?? $toolId),
-        'post_content' => '[' . $shortcode . ']',
-    ], true);
+    $existing = get_page_by_path($route, OBJECT, 'page');
+    if ($existing instanceof WP_Post && $existing->post_status === 'publish') {
+        $id = (int)$existing->ID;
+    } else {
+        $id = wp_insert_post([
+            'post_type' => 'page',
+            'post_status' => 'publish',
+            'post_name' => $route,
+            'post_title' => 'Synthetic ' . (string)($def['label'] ?? $toolId),
+            'post_content' => '[' . $shortcode . ']',
+        ], true);
+    }
     if (is_wp_error($id) || (int)$id <= 0) {
-        throw new RuntimeException('SYNTHETIC_PAGE_CREATE_FAILED:' . $toolId);
+        throw new RuntimeException('CANONICAL_PAGE_RESOLUTION_FAILED:' . $toolId);
+    }
+    if (get_post_field('post_name', (int)$id) !== $route) {
+        throw new RuntimeException('DUPLICATE_ROUTE_SUFFIX_REJECTED:' . $toolId);
     }
     pll_set_post_language((int)$id, 'en');
     $bindings[] = ['toolId' => $toolId, 'language' => 'en', 'pageId' => (int)$id];
