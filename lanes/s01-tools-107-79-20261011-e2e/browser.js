@@ -89,6 +89,7 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  gate(video.ready>=2 && video.width>0 && !video.error,'stream actual decoded video',video);
  await st.locator('[data-vf-browser-stream-mode-button="pro"]').click();
  gate((await st.getAttribute('data-vf-browser-stream-mode'))==='pro','stream professional mode');
+ await page.waitForTimeout(1700); // allow asynchronous mode/contract initialization to settle before native details gesture
  const details=st.locator('details[data-vf-browser-stream-pro-panel]').first();
  if(await details.count()){
   const before=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode'),summary:e.querySelector('summary')?.textContent?.trim().slice(0,80)}));
