@@ -39,6 +39,9 @@ cli eval 'update_option("rank_math_modules",array_values(array_unique(array_merg
 cli option update home "http://$WP" >/dev/null
 cli option update siteurl "http://$WP" >/dev/null
 cli rewrite structure '/%postname%/' >/dev/null
+cli rewrite flush --hard >/dev/null
+# Match actual public permalink through Apache/WordPress rather than a Docker 404.
+docker exec "$WP" sh -c 'test -f /var/www/html/.htaccess && grep -q RewriteEngine /var/www/html/.htaccess'
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/01-common.php "$WP:/tmp/01-common.php"
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/02-scan.php "$WP:/tmp/02-scan.php"
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/03-repair-helpers.php "$WP:/tmp/03-repair-helpers.php"
