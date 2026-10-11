@@ -53,6 +53,7 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  const href=await transfer.getAttribute('href');
  gate(!!href&&href!=='#','playlist actual handoff action resolves a concrete URL',href);
  const transferResponse=await page.request.get(new URL(href,base).href);
+ console.log('PUBLIC_SAFE_HANDOFF_ROUTE',JSON.stringify({href,target:new URL(href,base).pathname,status:transferResponse.status(),source:page.url()}));
  gate(transferResponse.status()===200,'playlist handoff target reachable',transferResponse.status());
  const popup=await popupWait;
  if(popup){await popup.waitForLoadState('domcontentloaded',{timeout:12000});gate(new URL(popup.url()).pathname===new URL(href,base).pathname,'handoff popup route matches generated target');await popup.close();}
