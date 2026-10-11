@@ -13,6 +13,7 @@ python3 "$product/.github/release/build-ops-package.py" --source "$product" --ou
 python3 - "$out/build.json" "$asset" <<'PY'
 import json,os,sys,hashlib,zipfile
 m=json.load(open(sys.argv[1]));b=open(sys.argv[2],"rb").read()
+print("PUBLIC_PACKAGE_METADATA", {k:m.get(k) for k in ("asset_sha256","asset_bytes","runtime_files","runtime_fingerprint","version","root_contract")}, "EXPECTED", {k:os.environ.get(k) for k in ("EXPECTED_SHA","EXPECTED_BYTES","EXPECTED_FILES","EXPECTED_FINGERPRINT","TARGET_VERSION")}, flush=True)
 assert m["asset_sha256"]==os.environ["EXPECTED_SHA"]==hashlib.sha256(b).hexdigest()
 assert m["asset_bytes"]==int(os.environ["EXPECTED_BYTES"])==len(b)
 assert m["runtime_files"]==int(os.environ["EXPECTED_FILES"])
