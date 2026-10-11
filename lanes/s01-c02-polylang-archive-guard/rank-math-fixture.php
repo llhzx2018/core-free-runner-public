@@ -1,6 +1,6 @@
 <?php
 // All content is disposable WordPress + MariaDB only; no Production endpoint.
-if (!function_exists('pll_save_post_translations') || !class_exists('\\RankMath\\Redirections\\Redirection')) {
+if (!function_exists('pll_save_post_translations') || !class_exists('\RankMath\Redirections\\Redirection')) {
     throw new Exception('Polylang and official Rank Math redirections runtime required');
 }
 wp_set_current_user((int)get_user_by('login','admin')->ID);
@@ -33,6 +33,14 @@ $recordId=$redirect->save();
 if (!is_numeric($recordId) || (int)$recordId<=0) {
     throw new Exception('Rank Math API failed saving redirection record');
 }
+$rankmathMatch=\RankMath\Redirections\\DB::match_redirections(trim($sourcePath,'/'));
+echo 'S01_RANKMATH_SETUP_READBACK '.wp_json_encode([
+    'moduleOption'=>get_option('rank_math_modules'),
+    'moduleActive'=>\RankMath\Helper::is_module_active('redirections'),
+    'sourcePath'=>$sourcePath,
+    'matchFound'=>is_array($rankmathMatch),
+    'recordFound'=>(bool)\RankMath\Redirections\\DB::get_redirection_by_id((int)$recordId)
+])."\\n";
 $host=(string)wp_parse_url($oldUrl,PHP_URL_HOST);
 add_filter('http_request_host_is_external',static function($external,$candidateHost) use ($host) {
     return $candidateHost===$host ? true : $external;
