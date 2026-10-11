@@ -41,10 +41,11 @@ cat /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_WORDPRESS_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_LINK_REHEARSAL_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_LINK_ROLLBACK_PASS /tmp/s01-pll-integration.log
+grep -q S01_C02_NO_301_NO_ARCHIVE_PASS /tmp/s01-pll-integration.log
 mkdir -p proof
 python3 - <<'PY'
 import json,os,pathlib
-p={'status':'PASS','scope':'live WordPress + MariaDB + official Polylang (free) translation membership','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','rehearsal':'real Polylang EN/ZH relink and rollback checked','limitations':'Polylang Pro shared-slug and redirect installation not tested'}
+p={'status':'PASS','scope':'live WordPress + MariaDB + official Polylang (free) translation membership','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','rehearsal':'Polylang relink rollback and failclosed non-301 archive checked','limitations':'Polylang Pro shared-slug and redirect installation not tested'}
 pathlib.Path('proof/WORDPRESS.json').write_text(json.dumps(p,indent=2))
 print('S01_C02_WORDPRESS_ISOLATED_PASS',json.dumps(p))
 PY
