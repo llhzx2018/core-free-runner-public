@@ -100,6 +100,17 @@ echo 'S01_C02_POLYLANG_LINK_REHEARSAL_PASS '.wp_json_encode([
     'correctedEnglish'=> (int)$en,'correctedChinese'=>(int)$official,
     'oldDuplicateUnlinked'=>true,'oldDuplicatePublished'=>true,'production'=>'NOT_EXECUTED'
 ])."\n";
+// Even if the three real Polylang members have been corrected, an old
+// caller lacking source ID is not allowed to skip the reciprocal map gate.
+$noSource=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
+    'id'=>(int)$duplicate,'same_language_conflict_id'=>(int)$official,
+]);
+if (($noSource['status']??'')!=='BLOCKED' || get_post_status((int)$duplicate)!=='publish') {
+    throw new Exception('Missing source ID bypassed the archive guard');
+}
+echo 'S01_C02_MISSING_SOURCE_GUARD_PASS '.wp_json_encode([
+    'missingSourceBlocked'=>true,'oldDuplicateStillPublished'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
 $preflight=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
     'id'=>(int)$duplicate, 'same_language_conflict_id'=>(int)$official,
     'source_post_id'=>(int)$en,
