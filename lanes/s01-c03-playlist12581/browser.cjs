@@ -70,7 +70,7 @@ async function waitResult(page){await page.waitForFunction(()=>{const r=document
   gate(mobile.touch>=44,'mobile primary action at least 44px',mobile);
   gate(mobile.scroll<=mobile.viewport+2,'390px viewport has no horizontal scrolling',mobile);
   await root.locator('[data-vf-playlist-mode-switch="pro"]').click();
-  await root.locator('[data-vf-playlist-tab="segments"]').click();
+  // The current professional layout has visible sections, not legacy tab buttons.
   const evidenceCells=await root.locator('[data-vf-playlist-pane="segments"] .vf-playlist-table tbody tr').first().locator('td').evaluateAll(cells=>cells.map(cell=>({label:cell.getAttribute('data-label'),before:getComputedStyle(cell,'::before').content,display:getComputedStyle(cell).display})));
   gate(evidenceCells.length===5&&evidenceCells.every(cell=>cell.label&&cell.before!=='none'&&cell.before!=='normal'&&cell.display==='grid'),'real 390px result cells show their meaning after hidden header',evidenceCells);
   gate((await root.locator('[data-vf-playlist-pane="segments"] .vf-playlist-table tbody tr').count())>0,'professional segment pane shows actual data');
