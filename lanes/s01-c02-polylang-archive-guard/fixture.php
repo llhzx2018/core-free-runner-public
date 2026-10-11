@@ -49,6 +49,22 @@ pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$official]);
 $corrected=pll_get_post_translations((int)$en);
 $officialLinks=pll_get_post_translations((int)$official);
 $duplicateLinks=pll_get_post_translations((int)$duplicate);
+echo 'S01_POLYLANG_NAIVE_LINK_READBACK '.wp_json_encode([
+    'english'=>$corrected, 'official'=>$officialLinks, 'oldDuplicate'=>$duplicateLinks
+])."\n";
+// Polylang may keep the former Chinese page in the original translation group
+// when the EN post is re-associated. Explicitly detach the old Chinese member,
+// then bind the intended pair. This is isolated rehearsal, not production code.
+if ((int)($duplicateLinks['en']??0)===(int)$en) {
+    pll_save_post_translations(['zh'=>(int)$duplicate]);
+    pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$official]);
+    $corrected=pll_get_post_translations((int)$en);
+    $officialLinks=pll_get_post_translations((int)$official);
+    $duplicateLinks=pll_get_post_translations((int)$duplicate);
+    echo 'S01_POLYLANG_DETACH_REBIND_READBACK '.wp_json_encode([
+        'english'=>$corrected, 'official'=>$officialLinks, 'oldDuplicate'=>$duplicateLinks
+    ])."\n";
+}
 if ((int)($corrected['zh']??0)!==(int)$official || (int)($officialLinks['en']??0)!==(int)$en) {
     throw new Exception('Synthetic corrected translation family has not converged');
 }
@@ -62,8 +78,18 @@ echo 'S01_C02_POLYLANG_LINK_REHEARSAL_PASS '.wp_json_encode([
     'correctedEnglish'=> (int)$en,'correctedChinese'=>(int)$official,
     'oldDuplicateUnlinked'=>true,'oldDuplicatePublished'=>true,'production'=>'NOT_EXECUTED'
 ])."\n";
+// Restore the snapshot with explicit displacement of the newly linked page.
+pll_save_post_translations(['zh'=>(int)$official]);
 pll_save_post_translations($before);
 $restored=pll_get_post_translations((int)$en);
+$oldRestored=pll_get_post_translations((int)$duplicate);
+$officialRestored=pll_get_post_translations((int)$official);
+echo 'S01_POLYLANG_ROLLBACK_READBACK '.wp_json_encode([
+    'english'=>$restored,'oldDuplicate'=>$oldRestored,'official'=>$officialRestored
+])."\n";
+if ((int)($officialRestored['en']??0)===(int)$en || (int)($oldRestored['en']??0)!==(int)$en) {
+    throw new Exception('Rollback left stray translations on noncanonical member');
+}
 if ((int)($restored['en']??0)!==(int)$en || (int)($restored['zh']??0)!==(int)$duplicate) {
     throw new Exception('Translation rollback did not restore original mapping');
 }
