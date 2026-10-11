@@ -33,13 +33,13 @@ $recordId=$redirect->save();
 if (!is_numeric($recordId) || (int)$recordId<=0) {
     throw new Exception('Rank Math API failed saving redirection record');
 }
-$rankmathMatch=\RankMath\Redirections\\DB::match_redirections(trim($sourcePath,'/'));
+$rankmathMatch=\RankMath\Redirections\DB::match_redirections(trim($sourcePath,'/'));
 echo 'S01_RANKMATH_SETUP_READBACK '.wp_json_encode([
     'moduleOption'=>get_option('rank_math_modules'),
     'moduleActive'=>\RankMath\Helper::is_module_active('redirections'),
     'sourcePath'=>$sourcePath,
     'matchFound'=>is_array($rankmathMatch),
-    'recordFound'=>(bool)\RankMath\Redirections\\DB::get_redirection_by_id((int)$recordId)
+    'recordFound'=>(bool)\RankMath\Redirections\DB::get_redirection_by_id((int)$recordId)
 ])."\\n";
 $host=(string)wp_parse_url($oldUrl,PHP_URL_HOST);
 add_filter('http_request_host_is_external',static function($external,$candidateHost) use ($host) {
