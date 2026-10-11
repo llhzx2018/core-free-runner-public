@@ -152,7 +152,7 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   await page.goto(base+path);await settle(page);
   gate((await page.locator('.vf-embed').count())===1,'new public Embed Page Mount renders actual provider '+path);
   gate((await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-tool-version'))===undefined || (await page.locator('[data-vf-embed-generator]').count())===1,'embed generator exists '+path);
-  gate((await page.locator('[data-vf-tool-runtime-stage]').count())>=0,'tool page shortcode container '+path);
+  gate((await page.locator('[data-vf-tool-runtime-stage]').count())>0,'tool page shortcode container '+path);
   const buttons=await page.getByRole('button',{name:'Run bundled example',exact:true}).count();
   gate(buttons===1,'new mount sample action available '+path,buttons);
   await page.getByRole('button',{name:'Run bundled example',exact:true}).click();
