@@ -3,7 +3,7 @@ set -Eeuo pipefail
 mkdir -p proof readback
 test "$(git -C target rev-parse HEAD)" = "$PRODUCT_MAIN_SHA"
 test "$(git -C candidate rev-parse HEAD)" = "$QA_CANDIDATE_SHA"
-TREE="$(git -C target rev-parse HEAD^{tree})"
+export TREE="$(git -C target rev-parse HEAD^{tree})"
 test "$TREE" = "$(git -C candidate rev-parse HEAD^{tree})"
 test "$(tr -d '[:space:]' < target/VERSION)" = "1.25.80"
 test "$(gh api repos/llhzx2018/vf-tools-m3u8/git/ref/heads/main --jq .object.sha)" = "$PRODUCT_MAIN_SHA"
