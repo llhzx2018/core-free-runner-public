@@ -92,7 +92,17 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  const details=st.locator('details[data-vf-browser-stream-pro-panel]').first();
  if(await details.count()){
   const before=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode'),summary:e.querySelector('summary')?.textContent?.trim().slice(0,80)}));
+  await details.evaluate(el=>{
+   window.__vfDetailTrace=[];
+   el.addEventListener('toggle',e=>window.__vfDetailTrace.push({stage:'toggle',open:el.open}),true);
+   el.querySelector('summary').addEventListener('click',e=>{
+    window.__vfDetailTrace.push({stage:'summary-capture',defaultPrevented:e.defaultPrevented});
+    setTimeout(()=>window.__vfDetailTrace.push({stage:'after-click',open:el.open,defaultPrevented:e.defaultPrevented}),0);
+   },true);
+  });
   await details.locator('summary').click();await page.waitForTimeout(150);
+  const events=await page.evaluate(()=>window.__vfDetailTrace||[]);
+  console.log('PUBLIC_SAFE_DETAILS_EVENTS',JSON.stringify(events));
   const after=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode')}));
   console.log('PUBLIC_SAFE_NATIVE_DETAILS',JSON.stringify({before,after}));
   gate(after.open!==before.open,'stream real native detail toggles',{before,after});
