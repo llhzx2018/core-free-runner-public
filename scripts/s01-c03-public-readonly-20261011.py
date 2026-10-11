@@ -11,6 +11,9 @@ ROUTES=[
  '/wp-json/wp/v2/pages?slug=m3u8-playlist-checker-2&per_page=10&_fields=id,slug,status,link,parent',
  '/wp-json/wp/v2/pages?slug=m3u8-playlist-checker&per_page=20&_fields=id,slug,status,link,parent',
  '/wp-json/wp/v2/pages/4348?_fields=id,slug,status,link,parent,content,modified',
+ '/wp-json/wp/v2/pages/1286?_fields=id,slug,lang,translations,link',
+ '/wp-json/wp/v2/pages/1124?_fields=id,slug,lang,translations,link',
+ '/wp-json/wp/v2/pages/4348?_fields=id,slug,lang,translations,link',
  '/sitemap_index.xml',
  '/page-sitemap.xml',
 ]
@@ -53,7 +56,7 @@ def probe(route):
      result['public_page_results']=[{k:x.get(k) for k in ('id','slug','status','link','parent')} for x in body if isinstance(x,dict)] if isinstance(body,list) else []
      if isinstance(body,dict):
       content=body.get('content',{}).get('rendered','') if isinstance(body.get('content'),dict) else ''
-      result['page_object']={k:body.get(k) for k in ('id','slug','status','link','parent','modified')}
+      result['page_object']={k:body.get(k) for k in ('id','slug','status','link','parent','modified','lang','translations') if k in body}
       result['content_summary']={'chars':len(content),'playlist_shortcode_or_mount':('vf_m3u8_playlist_checker' in content or 'data-vf-module="playlist-checker"' in content),'contains_media_tool':('playlist-checker' in content)}
     except Exception:result['json_parse']='not_public_json'
    elif route.endswith('.xml'):
