@@ -1,0 +1,98 @@
+name: S01 C03 M3U8 12584 Native WordPress Update Discovery
+on:
+  push:
+    branches: [task/s01-c03-12584-published-native-20261011]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    env:
+      CHANNEL_SHA: '88658cc21a9889bf2cf0af5bf23a9dd2f6a9ca15'
+      PRODUCT_SHA: 'f37b98b4a8aaa74216cb3ec98d9b40b2f6c94220'
+      PRODUCT_TREE: '54b4faab5a1539f8f334ebf03be95822ae3cbc7e'
+      PRODUCT_FP: '36bdee61dc45ccc213abaacd30f85138380ab04ab02e01973a5c92b3f0e6cfd0'
+      SOURCE_VERSION: '1.25.83'
+      TARGET_VERSION: '1.25.84'
+      ASSET_SHA: '54406bc99cec5bdfddace9e940ddd2303ebf020a3ce3532ac43375df118e21b4'
+    steps:
+      - name: Checkout public test scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Checkout exact distributed channel
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CHANNEL_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: channel
+      - name: Checkout formally released product main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Validate published channel and native WordPress install
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          cp -a runner/lanes/s01-c03-12584-native lane
+          bash -n lane/native.sh
+          php -l lane/discovery.php
+          bash lane/native.sh
+      - name: Upload public-safe native receipts
+        if: success()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c03-native12584-${{ github.run_id }}
+          path: |
+            proof/channel.json
+            proof/native.json
+            proof/installed.json
+            proof/FINAL_DISCOVERY.json
+            proof/post-current.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remote readback native receipts
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" >/tmp/native-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" >/tmp/native-archive.zip
+          python3 - <<'PY'
+          import pathlib,json,os,hashlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/native-meta.json').read_text())
+          blob=pathlib.Path('/tmp/native-archive.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID'])
+          assert m['digest']=='sha256:'+hashlib.sha256(blob).hexdigest() and m['size_in_bytes']==len(blob)
+          with zipfile.ZipFile('/tmp/native-archive.zip') as z:
+           assert z.testzip() is None
+           names={'channel.json','native.json','installed.json','FINAL_DISCOVERY.json','post-current.txt'}
+           assert set(z.namelist())==names
+           for n in names - {'post-current.txt'}:assert json.loads(z.read(n))==json.loads((pathlib.Path('proof')/n).read_text())
+           assert z.read('post-current.txt')==pathlib.Path('proof/post-current.txt').read_bytes()
+           assert json.loads(z.read('FINAL_DISCOVERY.json'))['status']=='PASS'
+           assert b'M3U8_INSTALLED_12584_ALREADY_CURRENT_NO_FALSE_BLOCK_PASS' in z.read('post-current.txt')
+           assert b'M3U8_POST_UPGRADE_OLD_HISTORY_NOT_REPLAYED=PASS' in z.read('post-current.txt')
+           assert b'M3U8_POST_UPGRADE_FRESH_CURRENT_HISTORY_PASS' in z.read('post-current.txt')
+          print('S01_C03_PUBLIC_NATIVE_READBACK_PASS',m['id'],m['digest'])
+          PY
+      - name: Destroy transient private source
+        if: always()
+        run: rm -rf channel product lane /tmp/source-12581.zip /tmp/target-12584.zip /tmp/channel-12584.json /tmp/s01-wp-cli.phar
