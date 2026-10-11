@@ -4,9 +4,10 @@
 if (!defined('ABSPATH') || !function_exists('pll_save_post_translations')) {
     throw new RuntimeException('Required WordPress + Polylang APIs are unavailable');
 }
+require_once ABSPATH.'wp-admin/includes/plugin.php';
 $proActive = is_plugin_active('polylang-pro/polylang.php');
-$proVersion = defined('POLYLANG_PRO_VERSION') ? (string)constant('POLYLANG_PRO_VERSION') :
-    (defined('PLL_PRO_VERSION') ? (string)constant('PLL_PRO_VERSION') : '');
+$installedPro = WP_PLUGIN_DIR.'/polylang-pro/polylang.php';
+$proVersion = file_exists($installedPro) ? (string)(get_plugin_data($installedPro, false, false)['Version']??'') : '';
 if (!$proActive || $proVersion === '') {
     throw new RuntimeException('Actual licensed Polylang Pro plugin is not active');
 }
