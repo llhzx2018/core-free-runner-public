@@ -51,9 +51,13 @@ import sys
 parts=sys.argv[1].split('.');parts[-1]=str(int(parts[-1])+1);print('.'.join(parts))
 PY
 )"
-sed -e "s/1\.21\.789/$TARGET_VERSION/g" -e "s/1\.21\.790/$fixture_version/g" \
-    -e 's/1\\\.21\\\.789/1\\.21\\.1094/g' \
+target_patch="$(printf %s "$TARGET_VERSION" | awk -F. '{print $NF}')"
+fixture_patch="$(printf %s "$fixture_version" | awk -F. '{print $NF}')"
+sed -e "s/789/$target_patch/g" -e "s/790/$fixture_patch/g" \
     "$repo/.github/wp-update/run.sh" > "$proof/run-native.sh"
+if grep -nE '1[.]21[.](789|790)|21\\\\[.]789|21\\\\[.]790' "$proof/run-native.sh"; then
+  echo "HISTORICAL_HARNESS_TARGET_IDENTITY_REMAINS" >&2; exit 12
+fi
 bash -n "$proof/run-native.sh"
 bash "$proof/run-native.sh" "$repo" "$proof/native"
 echo "stage=FORMAL_SOURCE_UPGRADE_ROLLBACK" >> "$proof/stage.txt"
