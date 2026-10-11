@@ -1,0 +1,104 @@
+name: S01-C01 Theme action attribute exact render candidate
+on:
+  push:
+    branches: [task/s01-c01-action107-20261011-candidate]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      BASE_SHA: '{{BASE_SHA}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Exact spec render and audit
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-c01-action107-20261011/spec.json --template runner/lanes/s01-c01-action107-20261011/candidate.template.yml --output /tmp/rendered.yml >/dev/null
+          cmp /tmp/rendered.yml runner/.github/workflows/s01-c01-action107-20261011-candidate.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c01-action107-20261011/spec.json --input runner/.github/workflows/s01-c01-action107-20261011-candidate.yml > proof/identity.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - name: Actual PHP render function regression against 106 and 107
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(tr -d '[:space:]' < target/VERSION)" = "$TARGET_VERSION"
+          php -l target/tests/public-markup-attribute-boundary-contract.php >/dev/null
+          php -l target/src/inc/routes/static-routes-seo.php >/dev/null
+          php -l target/src/inc/services/url/public-url-sitemap-output-guards.php >/dev/null
+          cp target/tests/public-markup-attribute-boundary-contract.php baseline/tests/public-markup-attribute-boundary-contract.php
+          if php baseline/tests/public-markup-attribute-boundary-contract.php > /tmp/baseline-result.txt 2>&1; then
+            echo 'FAIL: baseline unexpectedly passes'; exit 3
+          fi
+          grep -q 'domain metadata survives route normalization' /tmp/baseline-result.txt || { echo 'FAIL: baseline failure not expected regression'; exit 4; }
+          php target/tests/public-markup-attribute-boundary-contract.php > /tmp/candidate-result.json
+          python3 - <<'PY'
+          import json,os,pathlib
+          candidate=json.loads(pathlib.Path('/tmp/candidate-result.json').read_text())
+          assert candidate['status']=='PASS' and candidate['domain_actions']==6
+          assert candidate['valid_routes']=='PASS' and candidate['unknown_real_target']=='BLOCKED' and candidate['diagnostic_guard']=='PASS'
+          evidence={'status':'PASS','test':'actual_theme_render_functions','baseline_version':os.environ['SOURCE_VERSION'],'baseline_result':'EXPECTED_FAIL_DOMAIN_ACTION_LOST','target_version':os.environ['TARGET_VERSION'],'source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'candidate':candidate,'private_source_in_public_artifact':False}
+          pathlib.Path('proof/FINAL_EVIDENCE.json').write_text(json.dumps(evidence,sort_keys=True))
+          print('PUBLIC_SAFE_TEST_RESULT',json.dumps(evidence,sort_keys=True))
+          PY
+      - name: Public-safe evidence only
+        if: always()
+        id: proof_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c01-action107-proof-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Verify actual artifact after upload
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.proof_artifact.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/receipt.zip
+          python3 - <<'PY'
+          import hashlib,json,os,zipfile,pathlib
+          meta=json.loads(pathlib.Path('/tmp/meta.json').read_text())
+          data=pathlib.Path('/tmp/receipt.zip').read_bytes()
+          assert meta['id']==int(os.environ['ARTIFACT_ID'])
+          assert meta['size_in_bytes']==len(data) and meta['digest']=='sha256:'+hashlib.sha256(data).hexdigest()
+          with zipfile.ZipFile('/tmp/receipt.zip') as z:
+           assert z.testzip() is None
+           assert sorted(z.namelist())==['FINAL_EVIDENCE.json','identity.json']
+           final=json.loads(z.read('FINAL_EVIDENCE.json'))
+           assert final['status']=='PASS' and final['source_sha']==os.environ['TARGET_SHA']
+           assert json.loads(z.read('identity.json'))['status']=='PASS'
+          print('PUBLIC_ARTIFACT_RECEIPT',json.dumps({'status':'PASS','artifact_id':meta['id'],'run_id':os.environ['GITHUB_RUN_ID'],'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}))
+          PY
+      - name: Private source cleanup
+        if: always()
+        run: rm -rf target baseline /tmp/baseline-result.txt /tmp/candidate-result.json
