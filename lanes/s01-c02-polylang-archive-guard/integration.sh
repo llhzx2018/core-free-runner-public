@@ -32,6 +32,11 @@ cli core install --url=http://127.0.0.1:18883 --title='S01 Synthetic Polylang Gu
  --admin_user=admin --admin_password='S01-Synthetic-Guard-Only!' \
  --admin_email=runner@example.invalid --skip-email >/dev/null
 cli plugin install polylang --activate >/dev/null
+# Isolated container-resolvable URL is required for a genuine HTTP 301 readback
+# from within WordPress; no Production hostname or account is ever accessed.
+cli option update home "http://$WP" >/dev/null
+cli option update siteurl "http://$WP" >/dev/null
+cli rewrite structure '/%postname%/' >/dev/null
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/01-common.php "$WP:/tmp/01-common.php"
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/02-scan.php "$WP:/tmp/02-scan.php"
 docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/03-repair-helpers.php "$WP:/tmp/03-repair-helpers.php"
