@@ -93,8 +93,21 @@ $published_zh = wp_update_post([
     'ID' => (int)$embed_zh_id, 'post_status' => 'publish',
     'post_name' => 'm3u8-embed-generator',
 ], true);
-if (is_wp_error($published_zh) || get_post_field('post_name', (int)$embed_zh_id) !== 'm3u8-embed-generator') {
-    throw new RuntimeException('SYNTHETIC_EMBED_ZH_CANONICAL_SLUG_MISMATCH:' . get_post_field('post_name', (int)$embed_zh_id));
+if (is_wp_error($published_zh)) {
+    throw new RuntimeException('SYNTHETIC_EMBED_ZH_PUBLISH_FAILED');
+}
+// The isolated runner has Polylang Free; Production uses Polylang Pro, which
+// permits paired EN/ZH pages to share their translated slug. Mirror that
+// already-observed Production fixture state directly in the throwaway DB.
+// NEVER use this workaround on a real site or for product migration.
+if (get_post_field('post_name', (int)$embed_zh_id) !== 'm3u8-embed-generator') {
+    global $wpdb;
+    $changed = $wpdb->update($wpdb->posts, ['post_name' => 'm3u8-embed-generator'], ['ID' => (int)$embed_zh_id], ['%s'], ['%d']);
+    if ($changed !== 1) { throw new RuntimeException('SYNTHETIC_POLYLANG_PRO_SLUG_MIRROR_FAILED'); }
+    clean_post_cache((int)$embed_zh_id);
+}
+if (get_post_field('post_name', (int)$embed_zh_id) !== 'm3u8-embed-generator') {
+    throw new RuntimeException('SYNTHETIC_EMBED_ZH_CANONICAL_SLUG_MISMATCH');
 }
 echo wp_json_encode([
     'status' => 'PASS',
