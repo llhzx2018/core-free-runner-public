@@ -94,6 +94,14 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   const before=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode'),summary:e.querySelector('summary')?.textContent?.trim().slice(0,80)}));
   await details.evaluate(el=>{
    window.__vfDetailTrace=[];
+   const desc=Object.getOwnPropertyDescriptor(HTMLDetailsElement.prototype,'open');
+   if(desc?.get && desc?.set){
+    Object.defineProperty(el,'open',{configurable:true,get(){return desc.get.call(this)},set(value){
+     window.__vfDetailTrace.push({stage:'script-open-setter',value:String(value),stack:String(new Error().stack).split('\n').slice(1,5).join(' | ').slice(0,500)});
+     desc.set.call(this,value);
+    }});
+   }
+   new MutationObserver(records=>records.forEach(()=>window.__vfDetailTrace.push({stage:'attribute-open-change',open:el.open}))).observe(el,{attributes:true,attributeFilter:['open']});
    el.addEventListener('toggle',e=>window.__vfDetailTrace.push({stage:'toggle',open:el.open}),true);
    el.querySelector('summary').addEventListener('click',e=>{
     window.__vfDetailTrace.push({stage:'summary-capture',defaultPrevented:e.defaultPrevented});
