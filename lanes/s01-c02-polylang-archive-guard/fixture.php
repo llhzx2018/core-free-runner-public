@@ -78,6 +78,16 @@ echo 'S01_C02_POLYLANG_LINK_REHEARSAL_PASS '.wp_json_encode([
     'correctedEnglish'=> (int)$en,'correctedChinese'=>(int)$official,
     'oldDuplicateUnlinked'=>true,'oldDuplicatePublished'=>true,'production'=>'NOT_EXECUTED'
 ])."\n";
+$preflight=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
+    'id'=>(int)$duplicate, 'same_language_conflict_id'=>(int)$official,
+]);
+if (($preflight['status']??'')!=='BLOCKED' || get_post_status((int)$duplicate)!=='publish') {
+    throw new Exception('Unlinked page was archived without a verified live 301');
+}
+echo 'S01_C02_NO_301_NO_ARCHIVE_PASS '.wp_json_encode([
+    'status'=>$preflight['status'],'oldDuplicateStillPublished'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
+
 // Restore the snapshot with explicit displacement of the newly linked page.
 pll_save_post_translations(['zh'=>(int)$official]);
 pll_save_post_translations($before);
