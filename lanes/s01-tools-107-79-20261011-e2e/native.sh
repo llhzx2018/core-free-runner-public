@@ -25,7 +25,9 @@ cli plugin install polylang --version=3.8.10 --activate >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php"
 cli eval-file /tmp/seed.php >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
-cli eval 'update_option("s01_synthetic_cross_owner_keep",["owner"=>"keep","value"=>1707]);set_theme_mod("s01_synthetic_keep","retained");echo "OK";' >/dev/null
+docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php"
+cli eval-file /tmp/mount-seed.php > proof/mount-seed-${TARGET_VERSION}.json
+cli eval 'update_option("s01_synthetic_cross_owner_keep",["owner"=>"keep","value"=>1707]);set_theme_mod("s01_synthetic_keep","retained");update_option("s01_synthetic_mount_hash",hash("sha256",serialize(vf_m3u8_mounts_data(true))));echo "OK";' >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_SOURCE_VERSION"
 node lane/browser.js baseline
@@ -33,18 +35,18 @@ cli theme install /tmp/theme107.zip --force >/dev/null
 cli plugin install /tmp/m379.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_VERSION"
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707] || get_theme_mod("s01_synthetic_keep")!=="retained")throw new Exception("cross owner state lost");echo wp_json_encode(["status"=>"PASS","cross_owner_state"=>"retained","theme"=>wp_get_theme()->get("Version"),"provider"=>VF_TOOL_M3U8_VERSION]);' > proof/state-upgrade.json
+cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707] || get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("cross owner state lost");echo wp_json_encode(["status"=>"PASS","cross_owner_state"=>"retained","theme"=>wp_get_theme()->get("Version"),"provider"=>VF_TOOL_M3U8_VERSION]);' > proof/state-upgrade.json
 node lane/browser.js candidate
 TARGET_VERSION="$M3_VERSION" SOURCE_VERSION="$M3_SOURCE_VERSION" node lane/embed-browser.js candidate
 cli theme install /tmp/theme106.zip --force >/dev/null
 cli plugin install /tmp/m378.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_SOURCE_VERSION"
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained")throw new Exception("rollback state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-rollback.json
+cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("rollback state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-rollback.json
 node lane/browser.js rollback
 cli theme install /tmp/theme107.zip --force >/dev/null
 cli plugin install /tmp/m379.zip --force >/dev/null
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained")throw new Exception("reapply state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-reapply.json
+cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("reapply state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-reapply.json
 node lane/browser.js reapply
 docker exec "$DB" mariadb -uroot -psyntheticroot -e "CREATE DATABASE wordpress_clean;GRANT ALL PRIVILEGES ON wordpress_clean.* TO 'wordpress'@'%';"
 cli config set DB_NAME wordpress_clean >/dev/null
@@ -54,6 +56,8 @@ cli plugin install /tmp/m379.zip --activate --force >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
 cli eval-file /tmp/seed.php >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
+docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php"
+cli eval-file /tmp/mount-seed.php > proof/mount-seed-${TARGET_VERSION}.json
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_VERSION"
 node lane/browser.js clean
