@@ -11,6 +11,10 @@ $proVersion = file_exists($installedPro) ? (string)(get_plugin_data($installedPr
 if (!$proActive || $proVersion === '') {
     throw new RuntimeException('Actual licensed Polylang Pro plugin is not active');
 }
+// Require the version observed on Production, not a different free/older build.
+if ($proVersion !== '3.8.2') {
+    throw new RuntimeException('POLYLANG_PRO_VERSION_MISMATCH: expected 3.8.2, actual '.$proVersion);
+}
 wp_set_current_user((int)get_user_by('login', 'admin')->ID);
 if (!function_exists('vf_ops_multilingual_slug_cleaner_archive_relation_block_reason')) {
     require_once '/tmp/01-common.php';
