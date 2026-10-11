@@ -121,6 +121,54 @@ if (($preflight['status']??'')!=='BLOCKED' || get_post_status((int)$duplicate)!=
 echo 'S01_C02_NO_301_NO_ARCHIVE_PASS '.wp_json_encode([
     'status'=>$preflight['status'],'oldDuplicateStillPublished'=>true,'production'=>'NOT_EXECUTED'
 ])."\n";
+// Install a REAL public HTTP 301 handler inside this disposable WordPress
+// container, then let the actual Ops helper perform its own live GET.
+// This is a synthetic MU-plugin handler, NOT a claim of Rank Math / CF Pages.
+$oldUrl = get_permalink((int)$duplicate);
+$newUrl = get_permalink((int)$official);
+$isolatedHost = (string)wp_parse_url($oldUrl, PHP_URL_HOST);
+add_filter('http_request_host_is_external', static function($external,$candidateHost) use ($isolatedHost) {
+    return (string)$candidateHost === $isolatedHost ? true : $external;
+}, 10, 2);
+$redirectPlugin=<<<'PHP'
+<?php
+add_action('init', static function() {
+    $path=(string)parse_url((string)($_SERVER['REQUEST_URI']??''), PHP_URL_PATH);
+    if (!str_ends_with(rtrim($path, '/'), '/checker-zh-2')) { return; }
+    wp_redirect('S01_SYNTHETIC_TARGET_URL',301);
+    exit;
+}, 0);
+PHP;
+$redirectPlugin=str_replace('S01_SYNTHETIC_TARGET_URL',$newUrl,$redirectPlugin);
+if (!is_dir(WPMU_PLUGIN_DIR)) {wp_mkdir_p(WPMU_PLUGIN_DIR);}
+$redirectPluginPath=WPMU_PLUGIN_DIR.'/s01-isolated-playlist-301.php';
+if (file_put_contents($redirectPluginPath,$redirectPlugin)===false) {
+    throw new Exception('Unable to install disposable WordPress redirect fixture');
+}
+$httpProbe=wp_safe_remote_get($oldUrl,['redirection'=>0,'timeout'=>10,'sslverify'=>true]);
+if (is_wp_error($httpProbe)) {
+    throw new Exception('Actual isolated HTTP 301 probe failed: '.$httpProbe->get_error_message());
+}
+$code=(int)wp_remote_retrieve_response_code($httpProbe);
+$location=(string)wp_remote_retrieve_header($httpProbe,'location');
+if ($code!==301 || rtrim($location,'/')!==rtrim($newUrl,'/')) {
+    throw new Exception('Expected installed isolated 301 to official URL, got '.wp_json_encode(['code'=>$code,'location'=>$location,'expected'=>$newUrl]));
+}
+$canArchive=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
+    'id'=>(int)$duplicate,'same_language_conflict_id'=>(int)$official,'source_post_id'=>(int)$en
+]);
+if (($canArchive['status']??'')!=='PASS' || get_post_status((int)$duplicate)!=='draft') {
+    throw new Exception('Verified real 301 did not permit guarded isolated draft: '.wp_json_encode($canArchive));
+}
+echo 'S01_C02_REAL_HTTP_301_ARCHIVE_PASS '.wp_json_encode([
+    'httpStatus'=>$code,'toOfficial'=>true,'guardedDraft'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
+unlink($redirectPluginPath);
+wp_update_post(['ID'=>(int)$duplicate,'post_status'=>'publish']);
+if (get_post_status((int)$duplicate)!=='publish') {
+    throw new Exception('Synthetic duplicate status could not be restored');
+}
+
 
 // Restore the snapshot with explicit displacement of the newly linked page.
 pll_save_post_translations(['zh'=>(int)$official]);
