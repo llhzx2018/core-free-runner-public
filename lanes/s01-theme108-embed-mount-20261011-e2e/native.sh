@@ -25,6 +25,8 @@ cli plugin install polylang --version=3.8.10 --activate >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php"
 cli eval-file /tmp/seed.php >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
+docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
+docker cp lane/route-trace.php "$WP:/var/www/html/wp-content/mu-plugins/s01-route-trace.php"
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php"
 cli eval-file /tmp/mount-seed.php > proof/mount-seed-${TARGET_VERSION}.json
 cli eval 'update_option("s01_synthetic_cross_owner_keep",["owner"=>"keep","value"=>1707]);set_theme_mod("s01_synthetic_keep","retained");update_option("s01_synthetic_mount_hash",hash("sha256",serialize(vf_m3u8_mounts_data(true))));echo "OK";' >/dev/null
@@ -36,6 +38,10 @@ cli plugin install /tmp/m379.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_VERSION"
 cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707] || get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("cross owner state lost");echo wp_json_encode(["status"=>"PASS","cross_owner_state"=>"retained","theme"=>wp_get_theme()->get("Version"),"provider"=>VF_TOOL_M3U8_VERSION]);' > proof/state-upgrade.json
+# Probe the actual web request before long browser regressions; logs are
+# synthetic-only public-safe route metadata and must never include post content.
+curl -fsS --max-time 30 -o /tmp/s01-embed-page.html -w 'S01_EMBED_HTTP_STATUS=%{http_code}\n' "http://127.0.0.1:18880/m3u8-embed-generator/"
+docker logs "$WP" 2>&1 | grep 'S01_ROUTE_TRACE' | tail -12 || true
 node lane/browser.js candidate
 TARGET_VERSION="$M3_VERSION" SOURCE_VERSION="$M3_SOURCE_VERSION" node lane/embed-browser.js candidate
 cli theme install /tmp/theme106.zip --force >/dev/null
