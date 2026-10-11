@@ -89,8 +89,15 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  gate(video.ready>=2 && video.width>0 && !video.error,'stream actual decoded video',video);
  await st.locator('[data-vf-browser-stream-mode-button="pro"]').click();
  gate((await st.getAttribute('data-vf-browser-stream-mode'))==='pro','stream professional mode');
- const details=st.locator('details').first();
- if(await details.count()){const before=await details.getAttribute('open');await details.locator('summary').click();gate((await details.getAttribute('open'))!==before,'stream detail toggles');await details.locator('summary').click();}
+ const details=st.locator('details[data-vf-browser-stream-pro-panel]').first();
+ if(await details.count()){
+  const before=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode'),summary:e.querySelector('summary')?.textContent?.trim().slice(0,80)}));
+  await details.locator('summary').click();await page.waitForTimeout(150);
+  const after=await details.evaluate(e=>({open:e.open,hidden:e.hidden,mode:e.closest('[data-vf-module]')?.getAttribute('data-vf-browser-stream-mode')}));
+  console.log('PUBLIC_SAFE_NATIVE_DETAILS',JSON.stringify({before,after}));
+  gate(after.open!==before.open,'stream real native detail toggles',{before,after});
+  await details.locator('summary').click();
+ }
  await st.locator('[data-vf-browser-stream-copy]').click();await page.waitForTimeout(250);
  const streamCopied=await page.evaluate(()=>navigator.clipboard.readText());
  gate(streamCopied.length>30 && streamCopied!==copied,'stream actual clipboard updates',streamCopied.length);
