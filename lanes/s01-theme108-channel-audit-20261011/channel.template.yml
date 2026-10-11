@@ -1,0 +1,113 @@
+name: S01 Theme108 exact channel and M3U879 preservation gate
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      THEME_VERSION: '{{THEME_VERSION}}'
+      THEME_SHA256: '{{THEME_SHA256}}'
+      THEME_BYTES: '{{THEME_BYTES}}'
+      M3_VERSION: '{{M3_VERSION}}'
+      M3_SHA256: '{{M3_SHA256}}'
+      M3_BYTES: '{{M3_BYTES}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Exact spec render and audit
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/channel.template.yml --output /tmp/rendered-channel.yml >/dev/null
+          cmp /tmp/rendered-channel.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-identity.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact private CI plus both remote released assets
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(cat target/VERSION)" = "$TARGET_VERSION"
+          python3 - <<'PY'
+          import os,subprocess
+          actual=set(filter(None,subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],'HEAD'],text=True).splitlines()))
+          assert actual=={'projects/S01-C01.json'},actual
+          PY
+          (cd target && python3 scripts/check_manifest_contract.py >/tmp/manifest.log)
+          find target/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/syntax.log
+          php target/update-core/php/tests/run.php >/tmp/core-test.log
+          mkdir -p /tmp/channel-assets
+          for comp in theme m3; do
+            if [ "$comp" = theme ];then repo=llhzx2018/vf-tools-theme;version="$THEME_VERSION";asset="vf-tools-theme_V$version.zip"
+            else repo=llhzx2018/vf-tools-m3u8;version="$M3_VERSION";asset="vf-tools-m3u8_V$version.zip";fi
+            gh api "repos/$repo/releases/tags/v$version" > "/tmp/$comp-release.json"
+            gh release download "v$version" --repo "$repo" --pattern "$asset" --output "/tmp/channel-assets/$asset"
+          done
+          python3 - <<'PY'
+          import os,json,hashlib,pathlib,zipfile
+          p=pathlib.Path('target/projects');checks={}
+          for comp,cid,repo,ver,sz,dig in [
+           ('theme','S01-C01','llhzx2018/vf-tools-theme','THEME_VERSION','THEME_BYTES','THEME_SHA256'),
+           ('m3','S01-C03','llhzx2018/vf-tools-m3u8','M3_VERSION','M3_BYTES','M3_SHA256')]:
+           m=json.loads((p/(cid+'.json')).read_text());r=json.loads(pathlib.Path('/tmp/'+comp+'-release.json').read_text())
+           assert m['target_version']==os.environ[ver] and m['release_tag']=='v'+os.environ[ver] and m['asset_bytes']==int(os.environ[sz]) and m['asset_sha256']==os.environ[dig] and m['repository']==repo
+           assert m['runtime_files']==(467 if comp=='theme' else 568) and m['rollback_supported'] and m['backup_required']
+           assert ('1.35.107' if comp=='theme' else '1.25.78') in m['from_versions']
+           assert r['tag_name']==m['release_tag'] and not r['draft'] and not r['prerelease'] and len(r['assets'])==1
+           a=r['assets'][0];z=pathlib.Path('/tmp/channel-assets')/m['asset_name'];b=z.read_bytes()
+           assert a['name']==m['asset_name'] and a['size']==len(b)==int(os.environ[sz]) and a['digest']=='sha256:'+hashlib.sha256(b).hexdigest() and hashlib.sha256(b).hexdigest()==os.environ[dig]
+           with zipfile.ZipFile(z) as pkg:assert pkg.testzip() is None
+           checks[cid]={'version':m['target_version'],'asset_bytes':len(b),'asset_sha256':m['asset_sha256'],'release_id':r['id'],'manifest_contract':'PASS','asset_remote_readback':'PASS'}
+          pathlib.Path('proof/CHANNEL_TEST_RECEIPT.json').write_text(json.dumps({'status':'PASS','channel_source_sha':os.environ['TARGET_SHA'],'channel_tree':os.environ['TARGET_TREE'],'checks':checks,'canonical_php_tests':'PASS','php_lint':'PASS','production':'NOT_EXECUTED'},indent=2))
+          print('PUBLIC_SAFE_CHANNEL_TEST',json.dumps({'status':'PASS','components':list(checks),'canonical_php_tests':'PASS'}))
+          PY
+      - name: Safe proof only
+        if: always()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-channel-audit-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+      - name: Remote proof archive readback
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/receipt.zip
+          python3 - <<'PY'
+          import os,json,hashlib,pathlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/meta.json').read_text());b=pathlib.Path('/tmp/receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA'] and m['size_in_bytes']==len(b) and m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/receipt.zip') as z:
+           assert z.testzip() is None and set(z.namelist())=={'CHANNEL_TEST_RECEIPT.json','lane-identity.json'}
+           assert json.loads(z.read('CHANNEL_TEST_RECEIPT.json'))['status']=='PASS'
+          print('PUBLIC_CHANNEL_RECEIPT_READBACK',json.dumps({'status':'PASS','artifact_id':m['id'],'digest':m['digest'],'bytes':len(b)}))
+          PY
+      - name: Clean private checkout and downloads
+        if: always()
+        run: rm -rf target /tmp/channel-assets /tmp/theme-release.json /tmp/m3-release.json
