@@ -52,6 +52,17 @@ $duplicateLinks=pll_get_post_translations((int)$duplicate);
 echo 'S01_POLYLANG_NAIVE_LINK_READBACK '.wp_json_encode([
     'english'=>$corrected, 'official'=>$officialLinks, 'oldDuplicate'=>$duplicateLinks
 ])."\n";
+// The actual guard must reject a one-call reassignment while the former
+// Chinese page still has an incoming membership in the old translation group.
+$naiveGuard=vf_ops_multilingual_slug_cleaner_archive_relation_block_reason(
+    (int)$duplicate,(int)$official,'zh',(int)$en
+);
+if ($naiveGuard==='') {
+    throw new Exception('Naive reassignment unexpectedly allowed duplicate archive');
+}
+echo 'S01_C02_POLYLANG_NAIVE_RELATION_BLOCK_PASS '.wp_json_encode([
+    'blocked'=>true,'formerChineseProtected'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
 // Polylang may keep the former Chinese page in the original translation group
 // when the EN post is re-associated. Explicitly detach the old Chinese member,
 // then bind the intended pair. This is isolated rehearsal, not production code.
