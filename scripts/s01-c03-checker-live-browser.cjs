@@ -36,7 +36,7 @@ async function inspect(browser,slug,locale) {
  }
 
  await root.locator('[data-vf-playlist-action="clear"]').click();
- await root.locator('[data-vf-playlist-file]').setInputFiles({name:'local-example.m3u8',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from('#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXTINF:4,\\nlocal.ts\\n#EXT-X-ENDLIST\\n'.replaceAll('\\n','\n'))});
+ await root.locator('[data-vf-playlist-file]').setInputFiles({name:'local-example.m3u8',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from(['#EXTM3U','#EXT-X-TARGETDURATION:4','#EXTINF:4,','local.ts','#EXT-X-ENDLIST',''].join(String.fromCharCode(10)))});
  await page.waitForFunction(()=>document.querySelector('[data-vf-playlist-input]')?.value.includes('#EXTM3U'),null,{timeout:12000});
  await root.locator('[data-vf-playlist-action="analyze"]').click();
  await page.waitForFunction(()=>document.querySelector('[data-vf-module="playlist-checker"]')?._vfPlaylistResult?.summary?.segmentCount===1,null,{timeout:12000});
