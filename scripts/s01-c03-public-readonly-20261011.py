@@ -8,17 +8,25 @@ ROUTES=[
  '/m3u8-playlist-checker/',
  '/zh/m3u8-playlist-checker/',
  '/zh/m3u8-playlist-checker-2/',
- '/wp-json/wp/v2/pages?slug=m3u8-playlist-checker-2&per_page=10&_fields=id,slug,status,link',
+ '/wp-json/wp/v2/pages?slug=m3u8-playlist-checker-2&per_page=10&_fields=id,slug,status,link,parent',
+ '/wp-json/wp/v2/pages?slug=m3u8-playlist-checker&per_page=20&_fields=id,slug,status,link,parent',
+ '/wp-json/wp/v2/pages/4348?_fields=id,slug,status,link,parent,content,modified',
+ '/sitemap_index.xml',
+ '/page-sitemap.xml',
 ]
 class Doc(HTMLParser):
  def __init__(self):
   super().__init__()
-  self.canonical='';self.lang='';self.title='';self.h1='';self.in_title=False;self.in_h1=False;self.robots=''
+  self.canonical='';self.lang='';self.title='';self.h1='';self.in_title=False;self.in_h1=False;self.robots='';self.alternates=[];self.duplicate_links=0;self.links_to_official=0
  def handle_starttag(self,tag,attrs):
   a=dict(attrs)
   if tag=='html':self.lang=a.get('lang','')
   if tag=='link' and a.get('rel','').lower()=='canonical':self.canonical=a.get('href','')
   if tag=='meta' and a.get('name','').lower()=='robots':self.robots=a.get('content','')
+  if tag=='link' and a.get('rel','').lower()=='alternate' and a.get('hreflang'):
+   self.alternates.append({'hreflang':a.get('hreflang'),'href':a.get('href','')})
+  if tag=='a' and '/zh/m3u8-playlist-checker-2/' in a.get('href',''):self.duplicate_links+=1
+  if tag=='a' and '/zh/m3u8-playlist-checker/' in a.get('href',''):self.links_to_official+=1
   if tag=='title':self.in_title=True
   if tag=='h1':self.in_h1=True
  def handle_endtag(self,tag):
@@ -42,13 +50,20 @@ def probe(route):
    if route.startswith('/wp-json/'):
     try:
      body=json.loads(text)
-     result['public_page_results']=[{k:x.get(k) for k in ('id','slug','status','link')} for x in body if isinstance(x,dict)] if isinstance(body,list) else []
+     result['public_page_results']=[{k:x.get(k) for k in ('id','slug','status','link','parent')} for x in body if isinstance(x,dict)] if isinstance(body,list) else []
+     if isinstance(body,dict):
+      content=body.get('content',{}).get('rendered','') if isinstance(body.get('content'),dict) else ''
+      result['page_object']={k:body.get(k) for k in ('id','slug','status','link','parent','modified')}
+      result['content_summary']={'chars':len(content),'playlist_shortcode_or_mount':('vf_m3u8_playlist_checker' in content or 'data-vf-module="playlist-checker"' in content),'contains_media_tool':('playlist-checker' in content)}
     except Exception:result['json_parse']='not_public_json'
+   elif route.endswith('.xml'):
+    locs=re.findall(r'<loc>\s*([^<]+)\s*</loc>',text,re.I)
+    result['sitemap_summary']={'url_count':len(locs),'duplicate_route_count':sum('/zh/m3u8-playlist-checker-2/' in x for x in locs),'official_zh_count':sum('/zh/m3u8-playlist-checker/' in x for x in locs),'sub_sitemaps':[x for x in locs if x.endswith('.xml')][:20]}
    else:
     p=Doc()
     try:p.feed(text)
     except Exception:pass
-    result.update(html_lang=p.lang,canonical=p.canonical,robots=p.robots,title=html.unescape(p.title.strip())[:170],h1=html.unescape(p.h1.strip())[:170],playlist_mount_count=text.count('data-vf-module="playlist-checker"'),version_12582_present=('1.25.82' in text))
+    result.update(html_lang=p.lang,canonical=p.canonical,robots=p.robots,hreflang=p.alternates,duplicate_nav_links=p.duplicate_links,official_zh_nav_links=p.links_to_official,title=html.unescape(p.title.strip())[:170],h1=html.unescape(p.h1.strip())[:170],playlist_mount_count=text.count('data-vf-module="playlist-checker"'),version_12582_present=('1.25.82' in text))
  except Exception as e:
   result.update(error_class=type(e).__name__,error_message=str(e).split('(')[0][:180])
  return result
