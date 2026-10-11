@@ -48,7 +48,10 @@ docker cp target/includes/multilingual-slug-cleaner/service-actions-parts/03-rep
 docker cp runner/lanes/s01-c02-polylang-archive-guard/fixture.php "$WP:/tmp/fixture.php"
 cli eval-file /tmp/fixture.php > /tmp/s01-pll-integration.log
 docker cp runner/lanes/s01-c02-polylang-archive-guard/rank-math-fixture.php "$WP:/tmp/rank-math-fixture.php"
-cli eval-file /tmp/rank-math-fixture.php > /tmp/s01-rankmath.log
+if ! cli eval-file /tmp/rank-math-fixture.php > /tmp/s01-rankmath.log; then
+  cat /tmp/s01-rankmath.log
+  exit 1
+fi
 cat /tmp/s01-rankmath.log
 grep -q S01_C02_RANK_MATH_NATIVE_301_PASS /tmp/s01-rankmath.log
 grep -q S01_C02_RANK_MATH_ISOLATED_ROLLBACK_PASS /tmp/s01-rankmath.log
