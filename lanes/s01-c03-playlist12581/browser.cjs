@@ -59,11 +59,22 @@ async function waitResult(page){await page.waitForFunction(()=>{const r=document
   await page.waitForFunction(()=>String(document.querySelector('[data-vf-playlist-input]')?.value||'').includes('#EXTM3U'),null,{timeout:12000});
   await root.locator('[data-vf-playlist-action="analyze"]').click();await waitResult(page);
   gate((await root.getAttribute('data-vf-playlist-has-result'))==='1','uploaded manifest analyzes');
+  const desktopModes=await root.locator('[data-vf-playlist-mode-switch]').evaluateAll(buttons=>buttons.filter(b=>!b.hidden).map(b=>b.getBoundingClientRect().height));
+  gate(desktopModes.length>=2&&desktopModes.every(n=>n>=44),'desktop display-mode buttons have at least 44px touch height',desktopModes);
+  await page.setViewportSize({width:768,height:900});await page.waitForTimeout(120);
+  const tablet=await root.evaluate(()=>({scroll:document.documentElement.scrollWidth,viewport:innerWidth}));
+  gate(tablet.scroll<=tablet.viewport+2,'768px tablet has no horizontal overflow',tablet);
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(300);
   const mobile=await root.evaluate(el=>({font:parseFloat(getComputedStyle(el.querySelector('.vf-pc-shell')).fontSize),touch:el.querySelector('[data-vf-playlist-action="analyze"]').getBoundingClientRect().height,scroll:document.documentElement.scrollWidth,viewport:window.innerWidth}));
   gate(mobile.font>=15,'mobile tool content font at least 15px',mobile);
   gate(mobile.touch>=44,'mobile primary action at least 44px',mobile);
   gate(mobile.scroll<=mobile.viewport+2,'390px viewport has no horizontal scrolling',mobile);
+  await root.locator('[data-vf-playlist-mode-switch="pro"]').click();
+  await root.locator('[data-vf-playlist-tab="segments"]').click();
+  const evidenceCells=await root.locator('[data-vf-playlist-pane="segments"] .vf-playlist-table tbody tr').first().locator('td').evaluateAll(cells=>cells.map(cell=>({label:cell.getAttribute('data-label'),before:getComputedStyle(cell,'::before').content,display:getComputedStyle(cell).display})));
+  gate(evidenceCells.length===5&&evidenceCells.every(cell=>cell.label&&cell.before!=='none'&&cell.before!=='normal'&&cell.display==='grid'),'real 390px result cells show their meaning after hidden header',evidenceCells);
+  gate((await root.locator('[data-vf-playlist-pane="segments"] .vf-playlist-table tbody tr').count())>0,'professional segment pane shows actual data');
+
   gate(errors.length===0,'no runtime JavaScript errors',errors);
   fs.writeFileSync('proof/playlist-browser.json',JSON.stringify({status:'PASS',checks,mobile,production:'NOT_EXECUTED'},null,2));
   await page.screenshot({path:'proof/playlist-390.png',fullPage:true});
