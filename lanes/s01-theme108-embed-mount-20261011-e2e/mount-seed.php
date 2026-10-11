@@ -78,16 +78,23 @@ if (!$embed_en instanceof WP_Post) {
     $embed_en = get_post((int)$embed_en);
 }
 pll_set_post_language((int)$embed_en->ID, 'en');
+// Create translation as draft, assign Polylang ownership and pair both
+// pages BEFORE publishing; otherwise WordPress reserves a "-2" slug while the
+// new page still has no locale (unlike the real Production Page Mount).
 $embed_zh_id = wp_insert_post([
-    'post_type' => 'page', 'post_status' => 'publish',
+    'post_type' => 'page', 'post_status' => 'draft',
     'post_name' => 'm3u8-embed-generator', 'post_title' => 'Synthetic ZH Embed Generator',
     'post_content' => '[vf_m3u8_embed]',
 ], true);
 if (is_wp_error($embed_zh_id)) { throw new RuntimeException('SYNTHETIC_EMBED_ZH_CREATE_FAILED'); }
 pll_set_post_language((int)$embed_zh_id, 'zh');
 pll_save_post_translations(['en' => (int)$embed_en->ID, 'zh' => (int)$embed_zh_id]);
-if (get_post_field('post_name', (int)$embed_zh_id) !== 'm3u8-embed-generator') {
-    throw new RuntimeException('SYNTHETIC_EMBED_ZH_CANONICAL_SLUG_MISMATCH');
+$published_zh = wp_update_post([
+    'ID' => (int)$embed_zh_id, 'post_status' => 'publish',
+    'post_name' => 'm3u8-embed-generator',
+], true);
+if (is_wp_error($published_zh) || get_post_field('post_name', (int)$embed_zh_id) !== 'm3u8-embed-generator') {
+    throw new RuntimeException('SYNTHETIC_EMBED_ZH_CANONICAL_SLUG_MISMATCH:' . get_post_field('post_name', (int)$embed_zh_id));
 }
 echo wp_json_encode([
     'status' => 'PASS',
