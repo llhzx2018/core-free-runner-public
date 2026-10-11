@@ -50,10 +50,11 @@ grep -q S01_C02_POLYLANG_RECIPROCAL_RELATION_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_NAIVE_RELATION_BLOCK_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_NO_301_NO_ARCHIVE_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_MISSING_SOURCE_GUARD_PASS /tmp/s01-pll-integration.log
+grep -q S01_C02_REAL_HTTP_301_ARCHIVE_PASS /tmp/s01-pll-integration.log
 mkdir -p proof
 python3 - <<'PY'
 import json,os,pathlib
-p={'status':'PASS','scope':'live WordPress + MariaDB + official Polylang (free) translation membership','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','rehearsal':'Polylang relink rollback and failclosed non-301 archive checked','limitations':'Polylang Pro shared-slug and redirect installation not tested'}
+p={'status':'PASS','scope':'live WordPress + MariaDB + official Polylang (free) translation membership','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','rehearsal':'Polylang relink rollback and failclosed non-301 archive checked','limitations':'Polylang Pro and production Rank Math/CF redirects not tested; isolated MU HTTP 301 was verified'}
 pathlib.Path('proof/WORDPRESS.json').write_text(json.dumps(p,indent=2))
 print('S01_C02_WORDPRESS_ISOLATED_PASS',json.dumps(p))
 PY
