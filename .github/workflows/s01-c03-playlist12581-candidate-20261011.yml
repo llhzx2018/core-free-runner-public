@@ -1,0 +1,116 @@
+name: S01 C03 Playlist Checker 12581 Exact Candidate
+on:
+  push:
+    branches: [task/s01-c03-playlist12581-candidate-20261011]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    env:
+      PRODUCT_SHA: '9f18236a4d251715f37a89a9fe4dce7444c62378'
+    steps:
+      - name: Checkout exact private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Verify exact version, PHP and JS syntax and production bundle parity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '[:space:]' < candidate/VERSION)" = "1.25.81"
+          grep -Fq 'Version: 1.25.81' candidate/src/vf-tool-m3u8.php
+          php -l candidate/src/vf-tool-m3u8.php
+          php -l candidate/src/includes/renderers/raw-playlist-checker.php
+          node --check candidate/src/public/js/modules/playlist-checker.js
+          node --check candidate/src/public/dist/playlist-checker.js
+          node --check candidate/tests/playlist-checker-diagnostic-safety.node.cjs
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('candidate/src')
+          row=json.loads((root/'config/performance-bundles.php').read_text().splitlines()[2])['playlist-checker']
+          for kind,sources,dest in [('js','jsSources','script'),('css','cssSources','style')]:
+           rebuilt=chr(10).join((root/p).read_text() for p in row[sources])+chr(10)
+           assert rebuilt==(root/row[dest]).read_text(),kind+' production bundle stale'
+           print('S01_PLAYLIST_EXACT_PRODUCTION_BUNDLE_PASS',kind,len(rebuilt))
+          PY
+      - name: Node VM signed-origin and report safety regressions
+        run: node candidate/tests/playlist-checker-diagnostic-safety.node.cjs
+      - name: Checkout public isolated browser scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Prepare headless browser
+        run: |
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+      - name: Test actual isolated WordPress MariaDB and Chromium actions
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cp -a runner/lanes/s01-c03-playlist12581 lane
+          bash -n lane/native.sh
+          node --check lane/browser.cjs
+          bash lane/native.sh
+      - name: Write public-safe candidate identity
+        run: |
+          mkdir -p proof
+          python3 - <<'PY'
+          import json,os,pathlib,hashlib
+          p=pathlib.Path('candidate/src/public/js/modules/playlist-checker.js')
+          browser=json.loads(pathlib.Path('proof/playlist-browser.json').read_text())
+          assert browser['status']=='PASS' and all(c['pass'] for c in browser['checks'])
+          data={'status':'PASS','project':'S01-C03','version':'1.25.81','candidate_sha':os.environ['PRODUCT_SHA'],'js_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'browser_checks':len(browser['checks']),'production':'NOT_EXECUTED'}
+          pathlib.Path('proof/FINAL_CANDIDATE.json').write_text(json.dumps(data,indent=2))
+          print('S01_PLAYLIST_CANDIDATE_PASS',json.dumps(data))
+          PY
+      - name: Upload public-safe real browser evidence
+        if: success()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-playlist12581-${{ github.run_id }}
+          path: |
+            proof/playlist-browser.json
+            proof/wp-install.json
+            proof/wp-final.json
+            proof/FINAL_CANDIDATE.json
+            proof/playlist-390.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reverse-read uploaded evidence
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/receipt-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/receipt.zip
+          python3 - <<'PY'
+          import os,json,zipfile,hashlib,pathlib
+          m=json.loads(pathlib.Path('/tmp/receipt-meta.json').read_text())
+          a=pathlib.Path('/tmp/receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID'])
+          assert m['digest']=='sha256:'+hashlib.sha256(a).hexdigest() and m['size_in_bytes']==len(a)
+          with zipfile.ZipFile('/tmp/receipt.zip') as z:
+           assert z.testzip() is None
+           names={'playlist-browser.json','wp-install.json','wp-final.json','FINAL_CANDIDATE.json','playlist-390.png'}
+           assert set(z.namelist())==names
+           assert json.loads(z.read('FINAL_CANDIDATE.json'))['status']=='PASS'
+           assert json.loads(z.read('wp-final.json'))['status']=='PASS'
+          print('S01_PLAYLIST_PUBLIC_SAFE_ARTIFACT_READBACK_PASS',m['id'],m['digest'])
+          PY
+      - name: Destroy private checkout and package
+        if: always()
+        run: rm -rf candidate lane pkg /tmp/vf-m3u8-12581.zip /tmp/theme108.zip /tmp/s01-cli.phar
