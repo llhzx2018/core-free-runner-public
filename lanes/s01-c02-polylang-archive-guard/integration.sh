@@ -41,6 +41,7 @@ cat /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_WORDPRESS_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_LINK_REHEARSAL_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_LINK_ROLLBACK_PASS /tmp/s01-pll-integration.log
+grep -q S01_C02_POLYLANG_RECIPROCAL_RELATION_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_NO_301_NO_ARCHIVE_PASS /tmp/s01-pll-integration.log
 mkdir -p proof
 python3 - <<'PY'
