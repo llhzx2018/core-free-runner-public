@@ -71,6 +71,17 @@ if ((int)($corrected['zh']??0)!==(int)$official || (int)($officialLinks['en']??0
 if ((int)($duplicateLinks['en']??0)===(int)$en) {
     throw new Exception('Old duplicate is still linked to English');
 }
+// Archive guard must read the source and canonical target bidirectionally;
+// detached old post alone cannot justify making a published page unavailable.
+$verifiedGuard=vf_ops_multilingual_slug_cleaner_archive_relation_block_reason(
+    (int)$duplicate, (int)$official, 'zh', (int)$en
+);
+if ($verifiedGuard !== '') {
+    throw new Exception('Real reciprocal Polylang maps were rejected: '.$verifiedGuard);
+}
+echo 'S01_C02_POLYLANG_RECIPROCAL_RELATION_PASS '.wp_json_encode([
+    'sourceToOfficial'=>true,'officialToSource'=>true,'duplicateNoIncoming'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
 if (get_post_status((int)$duplicate)!=='publish' || get_post_status((int)$official)!=='publish') {
     throw new Exception('Translation-only rehearsal must not alter page statuses');
 }
@@ -80,6 +91,7 @@ echo 'S01_C02_POLYLANG_LINK_REHEARSAL_PASS '.wp_json_encode([
 ])."\n";
 $preflight=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
     'id'=>(int)$duplicate, 'same_language_conflict_id'=>(int)$official,
+    'source_post_id'=>(int)$en,
 ]);
 if (($preflight['status']??'')!=='BLOCKED' || get_post_status((int)$duplicate)!=='publish') {
     throw new Exception('Unlinked page was archived without a verified live 301');
