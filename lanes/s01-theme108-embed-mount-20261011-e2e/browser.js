@@ -155,6 +155,13 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   gate((await page.locator('.vf-embed').count())===1,'new public Embed Page Mount renders actual provider '+path);
   gate((await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-tool-version'))===undefined || (await page.locator('[data-vf-embed-generator]').count())===1,'embed generator exists '+path);
   gate((await page.locator('[data-vf-tool-runtime-stage]').count())>0,'tool page shortcode container '+path);
+  // The zh page localizes the visible demo-button label. Gate its real
+  // provider controls without assuming an English string on a Chinese page;
+  // the EN mount below exercises the actual button and player iframe.
+  if(path.startsWith('/zh/')){
+   gate((await page.locator('[data-vf-embed-generator] button').count())>=5,'translated Embed tool exposes interactive controls '+path);
+   continue;
+  }
   const buttons=await page.getByRole('button',{name:'Run bundled example',exact:true}).count();
   gate(buttons===1,'new mount sample action available '+path,buttons);
   await page.getByRole('button',{name:'Run bundled example',exact:true}).click();
