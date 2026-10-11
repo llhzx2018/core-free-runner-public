@@ -55,10 +55,11 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  const transferResponse=await page.request.get(new URL(href,base).href);
  gate(transferResponse.status()===200,'playlist handoff target reachable',transferResponse.status());
  const popup=await popupWait;
- if(popup){gate(new URL(popup.url()).pathname===new URL(href,base).pathname,'handoff popup route matches generated target');await popup.close();}
+ if(popup){await popup.waitForLoadState('domcontentloaded',{timeout:12000});gate(new URL(popup.url()).pathname===new URL(href,base).pathname,'handoff popup route matches generated target');await popup.close();}
  await pc.locator('[data-vf-playlist-action="clear"]').click();
  gate((await pc.getAttribute('data-vf-playlist-has-result'))==='0','playlist clear invalidates old report');
  await pc.locator('[data-vf-playlist-file]').setInputFiles({name:'synthetic.m3u8',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from('#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3.0,\nsegment01.ts\n#EXT-X-ENDLIST\n')});
+ await until(page,()=>String(document.querySelector('[data-vf-playlist-input]')?.value||'').includes('#EXTM3U'),12000);
  gate((await pc.locator('[data-vf-playlist-input]').inputValue()).includes('#EXTM3U'),'playlist file input loads exact local bytes');
  await pc.locator('[data-vf-playlist-action="analyze"]').click();
  await until(page,()=>document.querySelector('[data-vf-module="playlist-checker"]')?.getAttribute('data-vf-playlist-has-result')==='1',15000);
