@@ -42,7 +42,11 @@ if (count($readback['bindings']) !== count($bindings)) {
     throw new RuntimeException('MOUNT_READBACK_INCOMPLETE');
 }
 foreach (['player','segment-list-viewer','playlist-checker','browser-stream-test'] as $id) {
-    if (empty($routes[$id]) || vf_tool_m3u8_public_tool_url($id, 'en') !== $routes[$id]) {
+    $found = false;
+    foreach ($readback['bindings'] as $binding) {
+        if (($binding['toolId'] ?? '') === $id && ($binding['language'] ?? '') === 'en' && !empty($binding['pageId']) && get_permalink((int)$binding['pageId']) === $routes[$id]) { $found = true; break; }
+    }
+    if (empty($routes[$id]) || !$found) {
         throw new RuntimeException('MOUNT_URL_NOT_CANONICAL:' . $id);
     }
 }
