@@ -31,7 +31,14 @@ cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/
 cli core install --url=http://127.0.0.1:18883 --title='S01 Synthetic Polylang Guard' \
  --admin_user=admin --admin_password='S01-Synthetic-Guard-Only!' \
  --admin_email=runner@example.invalid --skip-email >/dev/null
-cli plugin install polylang --activate >/dev/null
+if [[ -n "${POLYLANG_PRO_ZIP_PATH:-}" ]]; then
+ test -f "$POLYLANG_PRO_ZIP_PATH"
+ docker cp "$POLYLANG_PRO_ZIP_PATH" "$WP:/tmp/s01-licensed-polylang-pro.zip"
+ cli plugin install /tmp/s01-licensed-polylang-pro.zip --activate >/dev/null
+ cli plugin is-active polylang-pro >/dev/null
+else
+ cli plugin install polylang --activate >/dev/null
+fi
 cli plugin install seo-by-rank-math --activate >/dev/null
 # Rank Math Free officially permits onboarding to be skipped on isolated CI.
 # Without this, its registration guard does not create the module manager.
@@ -59,6 +66,16 @@ fi
 cat /tmp/s01-rankmath.log
 grep -q S01_C02_RANK_MATH_NATIVE_301_PASS /tmp/s01-rankmath.log
 grep -q S01_C02_RANK_MATH_ISOLATED_ROLLBACK_PASS /tmp/s01-rankmath.log
+if [[ -n "${POLYLANG_PRO_ZIP_PATH:-}" ]]; then
+ docker cp runner/lanes/s01-c02-polylang-archive-guard/polylang-pro-fixture.php "$WP:/tmp/s01-pro-fixture.php"
+ cli eval-file /tmp/s01-pro-fixture.php > /tmp/s01-pro-acceptance.log
+ # Only public-safe named assertions, never bundle files or license material.
+ grep -q S01_C02_POLYLANG_PRO_SHARE_SLUGS_PASS /tmp/s01-pro-acceptance.log
+ grep -q S01_C02_POLYLANG_PRO_TRANSLATION_PASS /tmp/s01-pro-acceptance.log
+ grep -q S01_C02_POLYLANG_PRO_ROLLBACK_PASS /tmp/s01-pro-acceptance.log
+ grep -q S01_C02_POLYLANG_PRO_LICENSED_STAGING_PASS /tmp/s01-pro-acceptance.log
+ printf 'S01_C02_LICENSED_PRO_ACCEPTANCE_COMPLETE\n'
+fi
 cat /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_WORDPRESS_PASS /tmp/s01-pll-integration.log
 grep -q S01_C02_POLYLANG_LINK_REHEARSAL_PASS /tmp/s01-pll-integration.log
@@ -71,7 +88,8 @@ grep -q S01_C02_REAL_HTTP_301_ARCHIVE_PASS /tmp/s01-pll-integration.log
 mkdir -p proof
 python3 - <<'PY'
 import json,os,pathlib
-p={'status':'PASS','scope':'live WordPress + MariaDB + official Polylang (free) translation membership','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','rehearsal':'Polylang relink rollback and failclosed non-301 archive checked','limitations':'Polylang Pro license and Production Rank Math/CF configuration not tested; official free Rank Math engine verified in isolated environment'}
+licensed=bool(os.environ.get('POLYLANG_PRO_ZIP_PATH'))
+p={'status':'PASS','scope':'isolated WordPress + MariaDB + official Rank Math and Polylang runtime','candidate_sha':os.environ['PRODUCT_SHA'],'production':'NOT_EXECUTED','polylang_pro_gate':'PASS' if licensed else 'DEFERRED_LICENSED_PACKAGE_ABSENT','rehearsal':'reciprocal Polylang relink rollback, real Rank Math 301 and guarded archive','limitations':'Production redirect configuration and Production content mutation not tested'}
 pathlib.Path('proof/WORDPRESS.json').write_text(json.dumps(p,indent=2))
 print('S01_C02_WORDPRESS_ISOLATED_PASS',json.dumps(p))
 PY
