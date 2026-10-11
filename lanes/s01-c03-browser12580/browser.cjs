@@ -77,7 +77,7 @@ async function waitDone(page) {
     const visual = await root.evaluate(el => {
       const button = el.querySelector('[data-vf-browser-stream-check]');
       const bounds = el.getBoundingClientRect();
-      return { font: parseFloat(getComputedStyle(el).fontSize), buttonHeight: button.getBoundingClientRect().height, rootWidth: bounds.width, screen: window.innerWidth, scrollWidth: document.documentElement.scrollWidth };
+      return { font: parseFloat(getComputedStyle(el.querySelector('.vf-bst-shell')).fontSize), buttonHeight: button.getBoundingClientRect().height, rootWidth: bounds.width, screen: window.innerWidth, scrollWidth: document.documentElement.scrollWidth };
     });
     check(visual.font >= 15, 'mobile font readable >=15px', visual);
     check(visual.buttonHeight >= 44, 'touch target height >=44px', visual);
