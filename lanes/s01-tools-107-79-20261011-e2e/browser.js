@@ -32,7 +32,7 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  gate((await pc.locator('[data-vf-playlist-pane="json"]').count())===1,'playlist actual JSON pane mounted');
  gate((await pc.locator('[data-vf-playlist-pane="segments"]').count())===1,'playlist segment pane mounted');
  await pc.locator('[data-vf-playlist-action="sample-media"]').click();
- await until(page,()=>document.querySelector('[data-vf-module="playlist-checker"]')?.getAttribute('data-vf-playlist-has-result')==='1',30000);
+ await until(page,()=>{const r=document.querySelector('[data-vf-module="playlist-checker"]');return r?.getAttribute('data-vf-playlist-has-result')==='1'&&Number(r.querySelector('[data-vf-playlist-segments]')?.textContent)>0},30000);
  const seg=(await pc.locator('[data-vf-playlist-segments]').innerText()).trim();
  gate(Number(seg)>0,'media sample has real segments',seg);
  const pcCopy=pc.locator('[data-vf-playlist-action="copy-report"]');
