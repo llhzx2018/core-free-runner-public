@@ -150,6 +150,8 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
  // only a Theme shell while legacy /embed/ loaded the actual M3U8 provider.
  for(const path of ['/m3u8-embed-generator/','/zh/m3u8-embed-generator/']){
   await page.goto(base+path);await settle(page);
+  const embedRouteDiagnostic=await page.evaluate(()=>({url:location.pathname,title:document.title,h1:document.querySelector('h1')?.innerText??'',bodyClass:document.body.className,mainText:document.querySelector('main')?.innerText?.slice(0,240)??'',mainHTML:document.querySelector('main')?.outerHTML?.slice(0,900)??'',moduleStack:document.querySelector('[data-vf-theme-module-stack]')?.getAttribute('data-vf-theme-module-stack')??'',toolCount:document.querySelectorAll('.vf-embed').length}));
+  console.log('PUBLIC_SAFE_EMBED_ROUTE_DIAG',JSON.stringify(embedRouteDiagnostic));
   gate((await page.locator('.vf-embed').count())===1,'new public Embed Page Mount renders actual provider '+path);
   gate((await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-tool-version'))===undefined || (await page.locator('[data-vf-embed-generator]').count())===1,'embed generator exists '+path);
   gate((await page.locator('[data-vf-tool-runtime-stage]').count())>0,'tool page shortcode container '+path);
