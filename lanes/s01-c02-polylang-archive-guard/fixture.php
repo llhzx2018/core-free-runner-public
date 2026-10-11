@@ -39,3 +39,38 @@ if (($archive['status']??'')!=='BLOCKED' || get_post_status((int)$duplicate)!=='
 $after=pll_get_post_translations((int)$duplicate);
 if ($map!==$after) {throw new Exception('Translation membership changed unexpectedly');}
 echo 'S01_C02_POLYLANG_WORDPRESS_PASS '.wp_json_encode(['linkedMemberBlocked'=>true,'translationPreserved'=>true,'draftWrites'=>0,'production'=>'NOT_EXECUTED'])."\n";
+// Rehearse the proposed *content-owner* correction on synthetic pages only.
+// No source product code has been granted permission to run this against Production.
+$before=pll_get_post_translations((int)$en);
+if ((int)($before['en']??0)!==(int)$en || (int)($before['zh']??0)!==(int)$duplicate) {
+    throw new Exception('Initial link snapshot is not exact');
+}
+pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$official]);
+$corrected=pll_get_post_translations((int)$en);
+$officialLinks=pll_get_post_translations((int)$official);
+$duplicateLinks=pll_get_post_translations((int)$duplicate);
+if ((int)($corrected['zh']??0)!==(int)$official || (int)($officialLinks['en']??0)!==(int)$en) {
+    throw new Exception('Synthetic corrected translation family has not converged');
+}
+if ((int)($duplicateLinks['en']??0)===(int)$en) {
+    throw new Exception('Old duplicate is still linked to English');
+}
+if (get_post_status((int)$duplicate)!=='publish' || get_post_status((int)$official)!=='publish') {
+    throw new Exception('Translation-only rehearsal must not alter page statuses');
+}
+echo 'S01_C02_POLYLANG_LINK_REHEARSAL_PASS '.wp_json_encode([
+    'correctedEnglish'=> (int)$en,'correctedChinese'=>(int)$official,
+    'oldDuplicateUnlinked'=>true,'oldDuplicatePublished'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
+pll_save_post_translations($before);
+$restored=pll_get_post_translations((int)$en);
+if ((int)($restored['en']??0)!==(int)$en || (int)($restored['zh']??0)!==(int)$duplicate) {
+    throw new Exception('Translation rollback did not restore original mapping');
+}
+if (get_post_status((int)$duplicate)!=='publish') {
+    throw new Exception('Rollback unexpectedly changed old duplicate status');
+}
+echo 'S01_C02_POLYLANG_LINK_ROLLBACK_PASS '.wp_json_encode([
+    'originalFamilyRestored'=>true,'duplicateRetained'=>true,'production'=>'NOT_EXECUTED'
+])."\n";
+
