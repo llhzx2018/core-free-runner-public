@@ -59,6 +59,17 @@ if grep -nE '1[.]21[.](789|790)|21\\\\[.]789|21\\\\[.]790' "$proof/run-native.sh
   echo "HISTORICAL_HARNESS_TARGET_IDENTITY_REMAINS" >&2; exit 12
 fi
 bash -n "$proof/run-native.sh"
+# Diagnose the owned preservation gate without exposing synthetic secret values.
+python3 - "$proof/run-native.sh" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text()
+old='if(is_wp_error($v))exit(2);$after='
+new='''if(is_wp_error($v)){echo "PRESERVATION_GATE_ERROR=",$v->get_error_code(),"\\\\n";$afterState=VF_Ops_Update_Preservation_V1::snapshot();foreach(["options","secrets","cron","capabilities"] as $k){$b=(array)($before["preservation"][$k]??[]);$a=(array)($afterState[$k]??[]);if(($b["fingerprint"]??"")!==($a["fingerprint"]??"")){echo "PRESERVATION_DRIFT_AREA=",$k," COUNT=",(int)($b["count"]??0),"/",(int)($a["count"]??0),"\\\\n";if($k==="options"){$oldItems=(array)($b["items"]??[]);$newItems=(array)($a["items"]??[]);foreach(array_unique(array_merge(array_keys($oldItems),array_keys($newItems))) as $optionName){if(($oldItems[$optionName]??"")!==($newItems[$optionName]??""))echo "PRESERVATION_OPTION_NAME=",$optionName,"\\\\n";}}}}exit(2);}$after='''
+assert s.count(old)==1, 'exact preservation gate anchor changed'
+p.write_text(s.replace(old,new))
+PY
+bash -n "$proof/run-native.sh"
 bash "$proof/run-native.sh" "$repo" "$proof/native"
 echo "stage=FORMAL_SOURCE_UPGRADE_ROLLBACK" >> "$proof/stage.txt"
 : "$GH_TOKEN" "$MARIADB_ROOT_PASSWORD"
