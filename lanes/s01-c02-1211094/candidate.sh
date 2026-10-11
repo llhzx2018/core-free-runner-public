@@ -25,6 +25,7 @@ do node --check "$repo/$f"; done
 node "$repo/tests/s01-c02-1211094-media-confirm-native-regression.js" | tee "$proof/regression.txt"
 node "$repo/tests/s01-c02-1211094-seo-links-stale-error-regression.js" | tee -a "$proof/regression.txt"
 php "$repo/tests/s01-c02-1211094-keyword-map-export-current-filters.php" | tee -a "$proof/regression.txt"
+php "$repo/tests/s01-c02-1211094-upgrade-idempotent-bridge.php" | tee -a "$proof/regression.txt"
 echo "stage=PACKAGE" >> "$proof/stage.txt"
 candidate="$proof/vf-tools-ops_V$TARGET_VERSION.zip"
 python3 "$repo/.github/release/build-ops-package.py" --source "$repo" --output "$candidate" > "$proof/candidate.json"
