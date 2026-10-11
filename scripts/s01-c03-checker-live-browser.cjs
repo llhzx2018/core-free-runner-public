@@ -19,6 +19,12 @@ async function inspect(browser,slug,locale) {
  await root.locator('[data-vf-playlist-mode-switch="pro"]').click();
  await check(page,locale+' professional mode',await root.getAttribute('data-vf-playlist-mode')==='pro');
  await check(page,locale+' professional labeled cells',await root.locator('[data-vf-playlist-pane="variants"] td[data-label]').count()>=5);
+
+ const delivery=page.waitForEvent('download',{timeout:15000});
+ await root.locator('[data-vf-playlist-action="export-json"]').click();
+ const exportedFile=await delivery;
+ const report=JSON.parse(fs.readFileSync(await exportedFile.path(),'utf8'));
+ await check(page,locale+' actual JSON export',report.schemaVersion==='1.0.0' && !!report.type);
  await root.locator('[data-vf-playlist-action="sample-media"]').click();
  await page.waitForFunction(()=>document.querySelector('[data-vf-module="playlist-checker"]')?._vfPlaylistResult?.type==='media',null,{timeout:30000});
  await check(page,locale+' real media sample',Number(await root.locator('[data-vf-playlist-segments]').innerText())>0);
@@ -28,6 +34,13 @@ async function inspect(browser,slug,locale) {
    await check(page,locale+' '+width+'px no overflow',dims.scroll<=dims.viewport+2);
    await check(page,locale+' '+width+'px action >=44px',dims.button>=44);
  }
+
+ await root.locator('[data-vf-playlist-action="clear"]').click();
+ await root.locator('[data-vf-playlist-file]').setInputFiles({name:'local-example.m3u8',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from('#EXTM3U\\n#EXT-X-TARGETDURATION:4\\n#EXTINF:4,\\nlocal.ts\\n#EXT-X-ENDLIST\\n'.replaceAll('\\n','\n'))});
+ await page.waitForFunction(()=>document.querySelector('[data-vf-playlist-input]')?.value.includes('#EXTM3U'),null,{timeout:12000});
+ await root.locator('[data-vf-playlist-action="analyze"]').click();
+ await page.waitForFunction(()=>document.querySelector('[data-vf-module="playlist-checker"]')?._vfPlaylistResult?.summary?.segmentCount===1,null,{timeout:12000});
+ await check(page,locale+' actual local file import',await root.locator('[data-vf-playlist-segments]').innerText()==='1');
  await root.locator('[data-vf-playlist-action="clear"]').click();
  await check(page,locale+' clear resets result',await root.getAttribute('data-vf-playlist-has-result')!=='1');
  await check(page,locale+' no JS errors',errors.length===0);
