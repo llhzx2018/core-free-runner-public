@@ -1,0 +1,143 @@
+name: S01 C02 Licensed Polylang Pro Staging Gate
+on:
+  push:
+    branches: [task/s01-c02-polylang-archive-guard-20261011]
+    paths:
+      - .github/workflows/s01-c02-polylang-pro-licensed-20261011.yml
+      - lanes/s01-c02-polylang-archive-guard/**
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    outputs:
+      licensed_asset_ready: ${{ steps.license.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate licensed harness syntax without proprietary package
+        run: |
+          set -Eeuo pipefail
+          php -l lanes/s01-c02-polylang-archive-guard/polylang-pro-fixture.php
+          bash -n lanes/s01-c02-polylang-archive-guard/integration.sh
+      - name: Determine licensed test eligibility without disclosing credentials
+        id: license
+        env:
+          ASSET_REPO: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_REPO }}
+          ASSET_TAG: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_RELEASE_TAG }}
+          ASSET_NAME: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_ASSET_NAME }}
+          ASSET_SHA: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_SHA256 }}
+          PRIVATE_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "$ASSET_REPO" && -n "$ASSET_TAG" && -n "$ASSET_NAME" && -n "$ASSET_SHA" && -n "$PRIVATE_TOKEN" ]]; then
+            [[ "$ASSET_REPO" == llhzx2018/* ]]
+            [[ "$ASSET_NAME" == *.zip && "$ASSET_NAME" != */* ]]
+            [[ "$ASSET_SHA" =~ ^[a-fA-F0-9]{64}$ ]]
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+            echo 'S01_C02_PRO_GATE_LICENSED_ASSET_CONFIGURED'
+          else
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo 'S01_C02_PRO_GATE_DEFERRED_LICENSED_ASSET_ABSENT'
+          fi
+      - name: Store public-safe capability receipt
+        env:
+          READY: ${{ steps.license.outputs.ready }}
+        run: |
+          mkdir -p proof
+          python3 - <<'PY'
+          import json,os,pathlib
+          ready=os.environ.get('READY')=='true'
+          x={'scope':'S01-C02 licensed Polylang Pro isolated staging','status':'READY_TO_TEST' if ready else 'DEFERRED','reason':'WAITING_FOR_LICENSED_ASSET' if not ready else 'LICENSED_ASSET_CONFIGURED_NOT_YET_TESTED','production_mutated':False,'free_plugin_test_is_not_pro_proof':True}
+          pathlib.Path('proof/PRO_GATE.json').write_text(json.dumps(x,indent=2)+'\n')
+          print('S01_C02_PRO_GATE_RECEIPT',json.dumps(x))
+          PY
+      - name: Upload only public-safe Pro availability receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-polylang-pro-preflight-${{ github.run_id }}
+          path: proof/PRO_GATE.json
+          retention-days: 7
+          if-no-files-found: error
+  licensed_pro:
+    needs: preflight
+    if: needs.preflight.outputs.licensed_asset_ready == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PRODUCT_SHA: dfc985984d69b6990203f10cec6e9aecc218743b
+    steps:
+      - name: Checkout private candidate at exact SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Checkout public acceptance lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Retrieve owned licensed asset into disposable runner
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          ASSET_REPO: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_REPO }}
+          ASSET_TAG: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_RELEASE_TAG }}
+          ASSET_NAME: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_ASSET_NAME }}
+          ASSET_SHA: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_SHA256 }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$ASSET_REPO" == llhzx2018/* ]]
+          [[ "$ASSET_NAME" == *.zip && "$ASSET_NAME" != */* ]]
+          [[ "$ASSET_SHA" =~ ^[a-fA-F0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/s01-pro"
+          gh release download "$ASSET_TAG" -R "$ASSET_REPO" -p "$ASSET_NAME" -D "$RUNNER_TEMP/s01-pro"
+          PRO_ZIP_PATH="$RUNNER_TEMP/s01-pro/$ASSET_NAME"
+          export PRO_ZIP_PATH
+          python3 - <<'PY'
+          import hashlib,os,zipfile
+          path=os.environ['PRO_ZIP_PATH']
+          actual=hashlib.file_digest(open(path,'rb'),'sha256').hexdigest()
+          if actual.lower()!=os.environ['ASSET_SHA'].lower(): raise SystemExit('Licensed asset checksum mismatch')
+          with zipfile.ZipFile(path) as z:
+            names=z.namelist()
+            if not names or not any(n=='polylang-pro/polylang.php' for n in names):
+              raise SystemExit('Expected original licensed polylang-pro plugin archive')
+            for n in names:
+              if n.startswith('/') or '..' in n.split('/'):
+                raise SystemExit('Unsafe ZIP traversal detected')
+          print('S01_C02_PRO_OWNED_ARCHIVE_VALIDATED')
+          PY
+      - name: Execute real licensed Pro shared slug and rollback tests
+        env:
+          POLYLANG_PRO_ZIP_PATH: ${{ runner.temp }}/s01-pro/${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_ASSET_NAME }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$PRODUCT_SHA"
+          php -l runner/lanes/s01-c02-polylang-archive-guard/polylang-pro-fixture.php
+          bash runner/lanes/s01-c02-polylang-archive-guard/integration.sh
+          python3 - <<'PY'
+          import json,pathlib,os
+          receipt={'status':'PASS','gate':'LICENSED_POLYLANG_PRO_SHARED_SLUG','candidate_sha':os.environ['PRODUCT_SHA'],'production_mutated':False,'source':'REAL_LICENSED_PLUGIN_ON_ISOLATED_WORDPRESS'}
+          pathlib.Path('proof/PRO_STAGING.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print('S01_C02_POLYLANG_PRO_STAGING_PASS',json.dumps(receipt))
+          PY
+      - name: Upload evidence only; never license artifacts
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-licensed-pro-gate-${{ github.run_id }}
+          path: |
+            proof/PRO_STAGING.json
+            proof/WORDPRESS.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Wipe licensed files, caches and private source
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/s01-pro" target runner
