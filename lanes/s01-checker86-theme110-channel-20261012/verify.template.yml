@@ -1,0 +1,65 @@
+name: S01 exact core channel private CI registered fallback
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      M3_VERSION: '{{M3_VERSION}}'
+      THEME_VERSION: '{{THEME_VERSION}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Exact fallback spec audit
+        run: |
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/verify.template.yml --output /tmp/channel.yml
+          cmp /tmp/channel.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-audit.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Original CI commands on exact private source
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          cd target
+          python3 scripts/check_manifest_contract.py
+          php -v
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l
+          php update-core/php/tests/run.php
+          python3 - <<'PY'
+          import json,os,pathlib
+          m=json.loads(pathlib.Path('projects/S01-C03.json').read_text())
+          t=json.loads(pathlib.Path('projects/S01-C01.json').read_text())
+          assert m['target_version']==os.environ['M3_VERSION'] and t['target_version']==os.environ['THEME_VERSION']
+          assert '1.25.85' in m['from_versions'] and '1.35.109' in t['from_versions']
+          result={'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'commands':['manifest audit','php environment','all update-core PHP syntax','original regression suite'],'versions':{'m3u8':m['target_version'],'theme':t['target_version']},'private_native_ci':'BLOCKED_INFRA_PRIVATE_HOSTED; runner empty and steps=[]','production':'NOT_EXECUTED'}
+          pathlib.Path('../proof/FINAL_CHANNEL.json').write_text(json.dumps(result,indent=2))
+          print('PASS original exact source core CI commands')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: success()
+        with:
+          name: s01-checker-channel-proof-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+      - name: Remove transient private source
+        if: always()
+        run: rm -rf target
+
