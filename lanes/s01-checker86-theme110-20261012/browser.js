@@ -159,7 +159,9 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   gate((await zhpc.locator('[data-vf-playlist-decision-title]').innerText()).includes('Master 总列表'),'ZH decision title fully localized '+width);
   gate((await zhpc.locator('[data-vf-playlist-progress-title]').innerText()).includes('完成'),'ZH completion replaces processing label '+width);
   const related=page.locator('[data-vf-theme-module=\"related_tools\"]');
-  gate((await related.innerText()).includes('根据检查结果'),'ZH checker related tools guidance localized '+width);
+  const relatedText=await related.innerText();
+  console.log('PUBLIC_SAFE_ZH_RELATED',JSON.stringify({width,text:relatedText.slice(0,1100)}));
+  gate(relatedText.includes('根据检查结果'),'ZH checker related tools guidance localized '+width,relatedText.slice(0,300));
   await zhpc.locator('[data-vf-playlist-mode-switch="pro"]').click();
   gate(!(await zhpc.locator('[data-vf-playlist-pro]').innerText()).includes('playlist_checker.renderer.'),'ZH technical evidence readable '+width);
   gate(!(await zhpc.locator('[data-vf-playlist-pane=\"overview\"]').innerText()).match(/\b(?:yes|no)\b/),'ZH professional booleans localized '+width);
