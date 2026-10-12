@@ -104,6 +104,11 @@ wp eval --path="$wp2" 'do_action("admin_init");require_once ABSPATH."wp-admin/in
 # The fixture is created and deleted ONLY inside the Runner's temporary site.
 wp eval --path="$wp2" '
     do_action("admin_init");
+    // WP CLI eval is not the admin_post or recovery page request: bootstrap
+    // this exact owning service explicitly for the isolated SQL probe.
+    if (!function_exists("vf_ops_seed_residue_migration_state")) {
+        require_once WP_PLUGIN_DIR."/vf-ops/includes/migration/seed-residue-migration.php";
+    }
     if (!function_exists("vf_ops_seed_residue_migration_state")) { echo "SEED_SERVICE_ABSENT\n"; exit(8); }
     $before=vf_ops_seed_residue_migration_state();
     echo "SEED_BEFORE ",wp_json_encode(["status"=>$before["status"]??null,"count"=>$before["count"]??null,"complete"=>$before["scanComplete"]??null]),"\\n";
