@@ -58,7 +58,7 @@ docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
 docker cp runner/.github/testing/s01-c02-polylang-browser-host.php "$WP:/var/www/html/wp-content/mu-plugins/s01-browser-host.php"
 printf '127.0.0.1 %s\n' "$WP" | sudo tee -a /etc/hosts >/dev/null
 S01_BROWSER_BASE_URL="http://$WP" S01_BROWSER_NODE_MODULES="$RUNNER_TEMP/s01-browser/node_modules" \
- node runner/.github/testing/s01-c02-polylang-browser-http.cjs
+ timeout --signal=TERM --kill-after=5s 240s node runner/.github/testing/s01-c02-polylang-browser-http.cjs
 docker exec "$WP" rm -f /var/www/html/wp-content/mu-plugins/s01-browser-host.php
 cli plugin install /tmp/s01-baseline.zip --force --activate > /tmp/s01-rollback-install.log
 cli plugin is-active vf-ops >/dev/null

@@ -3,26 +3,34 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const {chromium}=require(path.join(process.env.S01_BROWSER_NODE_MODULES,'playwright'));
+let activeBrowser;
 (async()=>{
  const base=process.env.S01_BROWSER_BASE_URL;
  assert.ok(/^http:\/\/vf-s01-install-[0-9]+-wp$/.test(base),'Only disposable synthetic hostname allowed');
  const browser=await chromium.launch({headless:true});
+ activeBrowser=browser;
  const proof={status:'PASS',candidate_sha:process.env.PRODUCT_SHA,production_mutated:false,
   scope:'Isolated original component view and real-handler HTTP transport',
   host_is_fixture:true,current_product_route_ui_pass:false,polylang_pro_gate:'NOT_EXECUTED',
   widths:[],http_rejection_cases:0,formal_update_discovery_tested:false,release_ready:false};
  const admin=await browser.newContext({viewport:{width:1440,height:960}});
+ async function localOnly(context){
+  await context.route('**/*',route=>new URL(route.request().url()).hostname===new URL(base).hostname?route.continue():route.abort());
+ }
+ await localOnly(admin);
  const page=await admin.newPage();
  const errors=[];
  page.on('pageerror',e=>errors.push(e.message));
  async function login(p,user,password){
   await p.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+  assert.equal(new URL(p.url()).origin,base,'Synthetic credentials may only enter the isolated site');
   await p.locator('#user_login').fill(user);
   await p.locator('#user_pass').fill(password);
   await Promise.all([p.waitForURL(/\/wp-admin\//),p.locator('#wp-submit').click()]);
   assert.ok(await p.locator('#wpadminbar').count(),'Native authenticated WordPress session required');
  }
  await login(page,'admin','S01-Synthetic-Install-Only!');
+ errors.length=0;
  let adminNonce='';
  for(const width of [1440,768,390]){
   await page.setViewportSize({width,height:width===390?844:960});
@@ -77,21 +85,22 @@ const {chromium}=require(path.join(process.env.S01_BROWSER_NODE_MODULES,'playwri
   return f;
  }
  async function reject(context,payload,status){
-  const response=await context.request.post(endpoint,{form:form(payload)});
+  const response=await context.request.post(endpoint,{form:form(payload),maxRedirects:0});
   assert.equal(response.status(),200,'Fixture transport must execute authenticated real handler');
   const data=await response.json();
   assert.equal(data.status,status);assert.equal(data.sql_writes,0);
   assert.equal(data.page_write_queries,0);assert.equal(data.content_preserved,true);
   ++proof.http_rejection_cases;
  }
- const get=await admin.request.get(endpoint);
+ const get=await admin.request.get(endpoint,{maxRedirects:0});
  const getData=await get.json();
  assert.equal(getData.status,'NULL');assert.equal(getData.sql_writes,0);assert.equal(getData.content_preserved,true);
  ++proof.http_rejection_cases;
  const editor=await browser.newContext();
+ await localOnly(editor);
  const editorPage=await editor.newPage();
  await login(editorPage,'s01-synthetic-editor','S01-Synthetic-Editor-Only!');
- const nonceResponse=await editor.request.get(endpoint+'&phase=nonce');
+ const nonceResponse=await editor.request.get(endpoint+'&phase=nonce',{maxRedirects:0});
  const editorNonce=(await nonceResponse.json()).nonce;
  await reject(editor,{vf_ops_multilingual_slug_cleaner_action:'repair_all',_wpnonce:editorNonce,
   vf_ops_confirm_multilingual_write:'1'},'FAIL');
@@ -105,11 +114,12 @@ const {chromium}=require(path.join(process.env.S01_BROWSER_NODE_MODULES,'playwri
   await reject(admin,{vf_ops_multilingual_slug_cleaner_action:'repair_all',_wpnonce:adminNonce,
    vf_ops_confirm_multilingual_write:confirmation},'BLOCKED');
  const anonymous=await browser.newContext();
- const anonymousResponse=await anonymous.request.post(endpoint,{form:form({vf_ops_multilingual_slug_cleaner_action:'repair_all'})});
+ await localOnly(anonymous);
+ const anonymousResponse=await anonymous.request.post(endpoint,{form:form({vf_ops_multilingual_slug_cleaner_action:'repair_all'}),maxRedirects:0});
  assert.ok([400,401,403].includes(anonymousResponse.status()),'Native unauthenticated admin-post must be rejected');
  proof.anonymous_native_denied=true;
  const authorized=await admin.request.post(endpoint,{form:form({
-  vf_ops_multilingual_slug_cleaner_action:'repair_all',_wpnonce:adminNonce,vf_ops_confirm_multilingual_write:'1'})});
+  vf_ops_multilingual_slug_cleaner_action:'repair_all',_wpnonce:adminNonce,vf_ops_confirm_multilingual_write:'1'}),maxRedirects:0});
  const approvedData=await authorized.json();
  assert.equal(approvedData.status,'BLOCKED');
  assert.equal(approvedData.page_write_queries,0);
@@ -119,4 +129,8 @@ const {chromium}=require(path.join(process.env.S01_BROWSER_NODE_MODULES,'playwri
  await anonymous.close();await editor.close();await admin.close();await browser.close();
  fs.writeFileSync('proof/BROWSER_HTTP.json',JSON.stringify(proof,null,2)+'\n');
  console.log('S01_C02_COMPONENT_BROWSER_HTTP_PASS '+JSON.stringify(proof));
-})().catch(e=>{console.error('S01_C02_COMPONENT_BROWSER_HTTP_FAIL',e.message);process.exitCode=1;});
+})().catch(async e=>{
+ console.error('S01_C02_COMPONENT_BROWSER_HTTP_FAIL',e.message);
+ if(activeBrowser){try{await activeBrowser.close();}catch{}}
+ process.exitCode=1;
+});
