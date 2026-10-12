@@ -1,0 +1,133 @@
+name: P01 V247349 Isolated Backup Restore Roundtrip (No Release)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247349-isolated-backup-roundtrip.yml'
+permissions:
+  contents: read
+jobs:
+  backup-roundtrip:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact product main candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Prepare PHP and SQLite
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Install disposable site with mock administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.47.349'
+          mkdir -p /tmp/p01-v247349-preview
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/server.pid
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-preview-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-preview-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup CSRF not available'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Isolated Backup Proof' \
+            --data-urlencode 'admin_password=PreviewOnly-NotProduction!59' \
+            --data-urlencode 'admin_password_confirm=PreviewOnly-NotProduction!59' >/tmp/p01-preview-setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_PREVIEW_DISPOSABLE_INSTALL=PASS
+
+      - name: Execute actual BackupManager create and restore on synthetic database
+        shell: bash
+        env:
+          VF_ISOLATED_TEST_ONLY: '1'
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v247349-backup-roundtrip.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          if(getenv('VF_ISOLATED_TEST_ONLY')!=='1')throw new RuntimeException('TEST_ONLY required');
+          $workspace=(string)getenv('GITHUB_WORKSPACE');
+          $root=realpath($workspace.'/product/src');
+          if(!$root||!str_starts_with($root,$workspace.'/product/'))throw new RuntimeException('Invalid isolated source path');
+          require_once $root.'/app/bootstrap.php';
+          if(!vf_is_installed())throw new RuntimeException('Disposable VF runtime is not installed');
+          if(!str_starts_with(realpath(VF_PRIVATE_ROOT)?:'', $root.'/'))
+              throw new RuntimeException('Reject backup operation outside runner fixture root');
+          if(VF_VERSION!=='2.47.349')throw new RuntimeException('Wrong exact release source');
+          
+          $check=static function(bool $v,string $why):void{if(!$v)throw new RuntimeException($why);};
+          $db=vf_db();
+          $key='p01_backup_roundtrip_synthetic_only';
+          $update=$db->prepare("INSERT INTO settings(setting_key,setting_value,updated_at) VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,updated_at=excluded.updated_at");
+          $update->execute([$key,'SAFE_BEFORE_SNAPSHOT',gmdate('c')]);
+          $manager=new VfBackupManager($db);
+          $paths=[];$rows=[];
+          for($i=0;$i<10;$i++){
+              $row=$manager->create('P01 isolated automatic sample '.($i+1),'automatic',false);
+              $check(($row['validation_status']??'')==='valid','Creation must validate SQLite');
+              $check(($row['integrity_status']??'')==='ok','Creation must validate integrity');
+              $check((int)($row['foreign_key_errors']??-1)===0,'Creation must check FKs');
+              $path=VF_BACKUP_DIR.'/'.basename((string)$row['file_name']);
+              $check(is_file($path)&&!is_link($path),'Backup physical file present and regular');
+              $check(hash_equals((string)$row['sha256'],hash_file('sha256',$path)?:''),'Actual SHA mismatch');
+              $paths[]=$path;$rows[]=$row;
+              if($i===4){
+                  $first=$manager->previewAutomaticRetentionSafety();
+                  $check($first['counts']['last_verified_size_matched']===5,'Initial historical floor must be five');
+                  $check($first['last_verified_floor_observed']===false,'5/10 must remain WARNING');
+                  $check($first['execution_authorized']===false,'Never authorize cleanup at 5/10');
+                  echo "P01_BACKUP_REAL_5_OF_10_FLOOR_WARNING=PASS\n";
+              }
+          }
+          $second=$manager->previewAutomaticRetentionSafety();
+          $check($second['counts']['last_verified_size_matched']===10,'Ten independent real backups must count ten');
+          $check($second['last_verified_floor_observed']===true,'Real historical floor should reach ten');
+          $check($second['automatic_cleanup_performed']===false&&$second['execution_authorized']===false,'10/10 does not authorize cleanup');
+          $check($manager->policy()['automatic_cleanup_suspended']===true,'Cleanup permanently suspended');
+          $afterBaseline=VfCommonBaseline::enforceAutomaticBackupRetention($db);
+          $check(($afterBaseline['cleanup_suspended']??null)===true&&(int)($afterBaseline['deleted']??-1)===0,'Baseline must not clean');
+          foreach($paths as $path)$check(is_file($path),'No real isolated backup deleted');
+          echo "P01_BACKUP_REAL_10_OF_10_NO_CLEANUP=PASS\n";
+          $good=$rows[0];
+          $preview=$manager->previewRestore((string)$good['backup_key']);
+          $check(!empty($preview['backup']),'Restore preview did not find snapshot');
+          $update->execute([$key,'CHANGED_AFTER_SNAPSHOT',gmdate('c')]);
+          $check((string)$db->query("SELECT setting_value FROM settings WHERE setting_key='p01_backup_roundtrip_synthetic_only'")->fetchColumn()==='CHANGED_AFTER_SNAPSHOT','Fixture corruption setup failed');
+          $db=null;$update=null;$manager=null;
+          vf_close_db();
+          $out=VfBackupManager::performRestore((string)$good['backup_key']);
+          $check(($out['restored']??false)===true,'Actual isolated SQLite restore failed');
+          $check(($out['integrity']??'')==='ok'&&(int)($out['foreign_key_errors']??-1)===0,'Restored SQLite corrupt');
+          $db=vf_db();
+          $stmt=$db->prepare('SELECT setting_value FROM settings WHERE setting_key=?');
+          $stmt->execute([$key]);
+          $check((string)$stmt->fetchColumn()==='SAFE_BEFORE_SNAPSHOT','Restore did not recover original synthetic user setting');
+          $check((string)($out['pre_restore_backup']??'')!=='','Pre-restore rollback snapshot missing');
+          $pre=$db->prepare("SELECT COUNT(*) FROM backup_records WHERE backup_key=? AND is_protected=1");
+          $pre->execute([$out['pre_restore_backup']]);
+          $check((int)$pre->fetchColumn()===1,'Pre-restore protection metadata missing');
+          $check(!is_file(VF_PRIVATE_ROOT.'/core-restore-transaction.json'),'Restore journal not cleaned');
+          echo "P01_BACKUP_ACTUAL_ISOLATED_RESTORE_ROUNDTRIP=PASS\n";
+          echo "P01_BACKUP_PRODUCTION_NOT_TOUCHED=PASS\n";
+          PHP
+          php /tmp/p01-v247349-backup-roundtrip.php
+          echo P01_BACKUP_RESTORE_ROUNDTRIP_TEST_ONLY=PASS
