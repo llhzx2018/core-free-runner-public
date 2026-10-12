@@ -1,0 +1,268 @@
+name: P01 V247349 Interactive Owner Preview (Temporary / No Release)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247349-interactive-owner-preview.yml'
+permissions:
+  contents: read
+jobs:
+  preview-evidence:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - name: Checkout exact product main candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Prepare PHP and browser
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Install disposable site with mock administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.47.349'
+          mkdir -p /tmp/p01-v247349-preview
+          python3 -c 'import secrets; print("OwnerPreview!"+secrets.token_urlsafe(20))' >/tmp/p01-v247349-preview/login-password
+          chmod 600 /tmp/p01-v247349-preview/login-password
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/server.pid
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-preview-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-preview-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup CSRF not available'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Isolated Preview' \
+            --data-urlencode 'admin_password=$(cat /tmp/p01-v247349-preview/login-password)' \
+            --data-urlencode 'admin_password_confirm=$(cat /tmp/p01-v247349-preview/login-password)' >/tmp/p01-preview-setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_PREVIEW_DISPOSABLE_INSTALL=PASS
+      - name: Create four entirely fictional backup states
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-preview-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getenv('GITHUB_WORKSPACE').'/product/src/app/bootstrap.php';
+          $db=vf_db();
+          vf_prepare_private_dirs();
+          $dir=VF_BACKUP_DIR;
+          $safe=$dir.'/fixture-present-protected.sqlite';
+          $db->exec("VACUUM INTO '".str_replace("'","''",$safe)."'");
+          $alias=$dir.'/fixture-linked-protected.sqlite';
+          if(!symlink($safe,$alias))throw new RuntimeException('Fixture symlink failed');
+          $unprotected=$dir.'/fixture-present-unprotected.sqlite';
+          if(!copy($safe,$unprotected))throw new RuntimeException('Fixture copy failed');
+          $now=gmdate('c');
+          $add=$db->prepare('INSERT INTO backup_records(backup_key,file_name,reason,backup_type,source_version,byte_size,sha256,integrity_status,foreign_key_errors,validation_status,validation_error,object_summary,is_protected,created_at,verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+          $fixtures=[
+            ['fixture-present-unprotected','fixture-present-unprotected.sqlite',0,$unprotected],
+            ['fixture-present-protected','fixture-present-protected.sqlite',1,$safe],
+            ['fixture-linked-protected','fixture-linked-protected.sqlite',1,$alias],
+            ['fixture-missing-protected','fixture-missing-protected.sqlite',1,null],
+          ];
+          foreach($fixtures as [$key,$file,$protected,$path]){
+            $size=$path?filesize($path):8192;
+            $sha=$path?hash_file('sha256',$path):str_repeat('1',64);
+            $add->execute([$key,$file,'ISOLATED FAKE DATA','snapshot','2.47.349',
+              $size,$sha,'ok',0,'valid','','{"categories":1,"links":1}',
+              $protected,$now,$now]);
+          }
+          echo "P01_PREVIEW_ONLY_SYNTHETIC_BACKUPS=PASS\n";
+          PHP
+          php /tmp/p01-preview-seed.php
+          echo P01_PREVIEW_NO_PRODUCTION_ASSETS=PASS
+      - name: Install isolated browser harness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk >/dev/null
+          fc-cache -f >/dev/null
+          test -n "$(fc-match -f '%{family}' ':lang=zh-cn')"
+          python3 -m pip install --quiet --break-system-packages 'playwright==1.55.0'
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1; then
+            python3 -m playwright install chromium
+          fi
+      - name: Render current product page and prove safe actions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-preview-browser.py <<'PY'
+          import json, pathlib, shutil
+          from playwright.sync_api import sync_playwright
+          base='http://127.0.0.1:18541/'
+          out=pathlib.Path('/tmp/p01-v247349-preview')
+          out.mkdir(exist_ok=True)
+          with sync_playwright() as pw:
+              browser_path=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+              browser=pw.chromium.launch(executable_path=browser_path,headless=True,args=['--no-sandbox'])
+              context=browser.new_context(viewport={'width':1440,'height':1040},device_scale_factor=1)
+              response=context.request.post(base+'api.php?action=login',data={'password':pathlib.Path('/tmp/p01-v247349-preview/login-password').read_text().strip()})
+              assert response.ok and response.json().get('ok'), 'Disposable preview admin login failed'
+              page=context.new_page()
+              page.goto(base+'data-safety.php',wait_until='domcontentloaded')
+              page.locator('[data-protect="fixture-missing-protected"]').wait_for(state='attached',timeout=15000)
+              page.locator('details.vf-data-row-more').first.locator('summary').click()
+              states={}
+              for key in ['fixture-missing-protected','fixture-linked-protected','fixture-present-protected','fixture-present-unprotected']:
+                  button=page.locator('[data-protect="'+key+'"]')
+                  states[key]={'disabled':button.is_disabled(),'text':button.inner_text()}
+              assert states['fixture-missing-protected']['disabled'],states
+              assert states['fixture-linked-protected']['disabled'],states
+              assert not states['fixture-present-protected']['disabled'],states
+              assert not states['fixture-present-unprotected']['disabled'],states
+              page.screenshot(path=str(out/'V247349_BACKUP_PROTECTION_ISOLATED_PREVIEW.png'),full_page=True)
+              (out/'PREVIEW_STATUS.json').write_text(json.dumps({
+                  'product_version':'2.47.349','source_sha':'c7acc9757ae7eb29272ca9454b3cdac2fe35746a',
+                  'environment':'isolated runner disposable SQLite with synthetic records only',
+                  'safe_actions':states,'owner_preview_runtime':'NOT_PROVEN',
+                  'owner_real_use':'NOT_PROVEN','production':'NOT_TOUCHED'
+              },indent=2,ensure_ascii=False),encoding='utf-8')
+              browser.close()
+          print('P01_247349_REAL_BROWSER_ISOLATED_PREVIEW=PASS')
+          PY
+          python3 /tmp/p01-preview-browser.py
+      - name: Start ephemeral password-protected HTTPS preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-preview-basic-proxy.py <<'PY'
+          import base64, hmac, http.client, pathlib
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          secret=pathlib.Path('/tmp/p01-v247349-preview/login-password').read_text().strip()
+          expected='Basic '+base64.b64encode(('preview:'+secret).encode()).decode()
+          class Proxy(BaseHTTPRequestHandler):
+              def log_message(self,*args): pass
+              def do_GET(self): self.forward()
+              def do_POST(self): self.forward()
+              def do_HEAD(self): self.forward()
+              def do_OPTIONS(self): self.forward()
+              def forward(self):
+                  if not hmac.compare_digest(self.headers.get('Authorization',''),expected):
+                      self.send_response(401)
+                      self.send_header('WWW-Authenticate','Basic realm="VF Start isolated mock preview"')
+                      self.send_header('Cache-Control','no-store')
+                      self.end_headers()
+                      return
+                  length=int(self.headers.get('Content-Length','0'))
+                  payload=self.rfile.read(length) if length else None
+                  headers={k:v for k,v in self.headers.items()
+                           if k.lower() not in ('authorization','host','connection','accept-encoding',
+                           'transfer-encoding','content-length','x-forwarded-for','x-forwarded-proto')}
+                  headers['Host']='127.0.0.1:18541'
+                  headers['X-Forwarded-Proto']='https'
+                  try:
+                      c=http.client.HTTPConnection('127.0.0.1',18541,timeout=25)
+                      c.request(self.command,self.path,body=payload,headers=headers)
+                      response=c.getresponse()
+                      data=response.read()
+                      self.send_response(response.status)
+                      for k,v in response.getheaders():
+                          if k.lower() in ('connection','transfer-encoding','content-length','server','date'):
+                              continue
+                          self.send_header(k,v)
+                      self.send_header('Content-Length',str(len(data)))
+                      self.send_header('Cache-Control','no-store')
+                      self.end_headers()
+                      if self.command!='HEAD':self.wfile.write(data)
+                      c.close()
+                  except Exception:
+                      self.send_response(502)
+                      self.send_header('Content-Length','0')
+                      self.end_headers()
+          ThreadingHTTPServer(('127.0.0.1',18542),Proxy).serve_forever()
+          PY
+          nohup python3 /tmp/p01-preview-basic-proxy.py >/tmp/p01-preview-proxy.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/proxy.pid
+          for n in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18542/data-safety.php || true)
+            if [[ "$code" == "401" ]]; then break; fi
+            sleep 1
+          done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18542/data-safety.php)" = "401"
+          curl --fail --silent --show-error -L --user "preview:$(cat /tmp/p01-v247349-preview/login-password)" \
+            -o /tmp/p01-preview-auth-response.html http://127.0.0.1:18542/login.php
+          test -s /tmp/p01-preview-auth-response.html
+          curl --fail --silent --show-error --location \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            --output /tmp/p01-cloudflared
+          chmod 700 /tmp/p01-cloudflared
+          nohup /tmp/p01-cloudflared tunnel --url http://127.0.0.1:18542 --no-autoupdate \
+            >/tmp/p01-preview-cloudflared.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/tunnel.pid
+          url=''
+          for n in $(seq 1 90); do
+            url="$(grep -oE 'https://[a-z0-9-]+[.]trycloudflare[.]com' \
+              /tmp/p01-preview-cloudflared.log | head -1 || true)"
+            if [[ -n "$url" ]]; then break; fi
+            sleep 2
+          done
+          if [[ -z "$url" ]]; then
+            echo "PREVIEW_TUNNEL_START_FAILED"
+            tail -35 /tmp/p01-preview-cloudflared.log
+            exit 4
+          fi
+          echo "$url" >/tmp/p01-v247349-preview/preview-url
+          # Quick Tunnel is public HTTPS; locally require an ephemeral Basic-auth secret
+          # and then the disposable VF Start admin password. NO real user assets.
+          for n in $(seq 1 30); do
+            code="$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 15 "$url/login.php" || true)"
+            [[ "$code" == "401" ]] && break
+            sleep 2
+          done
+          test "$code" = "401"
+          curl -k --fail --silent --show-error --location --max-time 30 \
+            --user "preview:$(cat /tmp/p01-v247349-preview/login-password)" \
+            -o /tmp/p01-preview-remote-response.html "$url/login.php"
+          test -s /tmp/p01-preview-remote-response.html
+          echo "P01_OWNER_PREVIEW_HTTPS_BASIC_AUTH=PASS"
+          echo "::notice title=V2.47.349 Temporary Preview URL::$url/data-safety.php"
+          echo "::notice title=Temporary Basic Auth user::preview"
+          echo "::notice title=Temporary synthetic-site password::$(cat /tmp/p01-v247349-preview/login-password)"
+          echo "P01_OWNER_PREVIEW_INTERACTIVE_URL=$url/data-safety.php"
+          echo "P01_OWNER_PREVIEW_BASIC_USER=preview"
+          echo "P01_OWNER_PREVIEW_PASSWORD=$(cat /tmp/p01-v247349-preview/login-password)"
+      - name: Keep disposable preview live for Owner review
+        shell: bash
+        timeout-minutes: 70
+        run: |
+          set -Eeuo pipefail
+          echo "P01_OWNER_PREVIEW_TEMPORARY_RUNTIME=ACTIVE"
+          echo "P01_OWNER_PREVIEW_EXPIRES_AFTER=65_MINUTES"
+          for n in $(seq 1 390); do
+            kill -0 "$(cat /tmp/p01-v247349-preview/server.pid)"
+            kill -0 "$(cat /tmp/p01-v247349-preview/proxy.pid)"
+            kill -0 "$(cat /tmp/p01-v247349-preview/tunnel.pid)"
+            sleep 10
+          done
+          echo "P01_OWNER_PREVIEW_TEMPORARY_RUNTIME=EXPIRED"
+      - name: Preserve only sanitized screenshot and status
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: P01-V247349-Isolated-Preview-Evidence
+          path: |
+            /tmp/p01-v247349-preview/V247349_BACKUP_PROTECTION_ISOLATED_PREVIEW.png
+            /tmp/p01-v247349-preview/PREVIEW_STATUS.json
+          if-no-files-found: error
+          retention-days: 7
