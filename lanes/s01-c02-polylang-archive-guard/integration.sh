@@ -72,6 +72,7 @@ if [[ -n "${POLYLANG_PRO_ZIP_PATH:-}" ]]; then
  # Only public-safe named assertions, never bundle files or license material.
  grep -q S01_C02_POLYLANG_PRO_SHARE_SLUGS_PASS /tmp/s01-pro-acceptance.log
  grep -q S01_C02_POLYLANG_PRO_TRANSLATION_PASS /tmp/s01-pro-acceptance.log
+ grep -q S01_C02_POLYLANG_PRO_LINKED_ARCHIVE_BLOCK_PASS /tmp/s01-pro-acceptance.log
  grep -q S01_C02_POLYLANG_PRO_ROLLBACK_PASS /tmp/s01-pro-acceptance.log
  grep -q S01_C02_POLYLANG_PRO_LICENSED_STAGING_PASS /tmp/s01-pro-acceptance.log
  printf 'S01_C02_LICENSED_PRO_ACCEPTANCE_COMPLETE\n'
