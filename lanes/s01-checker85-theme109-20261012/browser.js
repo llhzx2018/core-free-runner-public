@@ -193,7 +193,8 @@ async function settle(page){await page.waitForLoadState('domcontentloaded');awai
   await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');
   await page.locator('#wp-submit').click();
   await page.waitForURL('**/wp-admin/**');
-  gate(await page.locator('#wpadminbar').count()===1,'clean install administrator login');
+  await page.goto(base+'/wp-admin/profile.php');
+  gate(await page.locator('form#your-profile').count()===1 && new URL(page.url()).pathname==='/wp-admin/profile.php','clean install authenticated administrator profile');
   await page.goto(base+'/wp-admin/install.php');
   gate((await page.locator('body').innerText()).includes('Already Installed'),'setup revisit is safely locked');
  }
