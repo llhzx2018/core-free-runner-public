@@ -59,6 +59,59 @@ if ($status!==301 || rtrim($location,'/')!==rtrim($newUrl,'/')) {
         'status'=>$status,'location'=>$location,'wanted'=>$newUrl,'record'=>$recordId
     ]));
 }
+// Reproduce changes during the REAL native Rank Math HTTP request. Count
+// only archive writes to the old page; fixture changes simulate another actor.
+$archiveWrites=0;
+$writeObserver=static function($postId) use ($duplicate,&$archiveWrites) {
+    if ((int)$postId===(int)$duplicate) { ++$archiveWrites; }
+};
+add_action('post_updated',$writeObserver,10,1);
+foreach (['translation_rebound','target_drafted_without_cache_invalidation','old_slug_without_cache_invalidation'] as $raceCase) {
+    $probeChanged=false;
+    $duringProbe=static function($response,$args,$url) use ($raceCase,$oldUrl,$en,$official,$duplicate,&$probeChanged) {
+        if ($url!==$oldUrl || $probeChanged || (int)wp_remote_retrieve_response_code($response)!==301) { return $response; }
+        $probeChanged=true;
+        if ($raceCase==='translation_rebound') {
+            pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$duplicate]);
+        } else {
+            // Bypass WP's cache cleanup to model another request/process.
+            global $wpdb;
+            $id=$raceCase==='target_drafted_without_cache_invalidation' ? (int)$official : (int)$duplicate;
+            $delta=$raceCase==='target_drafted_without_cache_invalidation' ? ['post_status'=>'draft'] : ['post_name'=>'rank-raced-old'];
+            if ($wpdb->update($wpdb->posts,$delta,['ID'=>$id])!==1) {
+                throw new Exception('Could not simulate isolated concurrent database change');
+            }
+        }
+        return $response;
+    };
+    add_filter('http_response',$duringProbe,10,3);
+    try {
+        $raced=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
+            'id'=>(int)$duplicate,'same_language_conflict_id'=>(int)$official,'source_post_id'=>(int)$en,
+        ]);
+    } finally {
+        remove_filter('http_response',$duringProbe,10);
+    }
+    if (!$probeChanged || ($raced['status']??'')!=='BLOCKED' || $archiveWrites!==0) {
+        throw new Exception('HTTP-window race was not blocked with zero archive writes: '.$raceCase);
+    }
+    // Restore fixture state and verify every affected member before next case.
+    global $wpdb;
+    $wpdb->update($wpdb->posts,['post_status'=>'publish','post_name'=>'rank-zh'],['ID'=>(int)$official]);
+    $wpdb->update($wpdb->posts,['post_status'=>'publish','post_name'=>'rank-zh-2'],['ID'=>(int)$duplicate]);
+    foreach ([$en,$official,$duplicate] as $id) { clean_post_cache((int)$id); }
+    pll_save_post_translations(['zh'=>(int)$duplicate]);
+    pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$official]);
+    if (get_post_status((int)$official)!=='publish' || get_post_status((int)$duplicate)!=='publish'
+        || get_permalink((int)$duplicate)!==$oldUrl || get_permalink((int)$official)!==$newUrl
+        || vf_ops_multilingual_slug_cleaner_archive_relation_block_reason((int)$duplicate,(int)$official,'zh',(int)$en)!=='') {
+        throw new Exception('HTTP-window race fixture rollback failed: '.$raceCase);
+    }
+    echo 'S01_C02_HTTP_PROBE_RACE_BLOCK_PASS '.wp_json_encode([
+        'scenario'=>$raceCase,'real_http_301'=>true,'archiveWrites'=>0,'rollback'=>true,'production'=>'NOT_EXECUTED',
+    ])."\n";
+}
+remove_action('post_updated',$writeObserver,10);
 $protected=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
     'id'=>(int)$duplicate,'same_language_conflict_id'=>(int)$official,'source_post_id'=>(int)$en,
 ]);
