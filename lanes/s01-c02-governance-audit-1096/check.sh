@@ -59,6 +59,7 @@ $r=vf_ops_run_plugin_dependency_audit((int)$c["revision"],(string)$c["configHash
 echo "AUDIT_STEP_RESULT=".wp_json_encode(["ok"=>$r["ok"]??false,"status"=>$r["status"]??"UNKNOWN","code"=>$r["code"]??"UNKNOWN","filesScanned"=>$r["filesScanned"]??0,"cursor"=>$r["cursor"]??0,"totalFiles"=>$r["totalFiles"]??0,"deletionAuthorized"=>$r["deletionAuthorized"]??false],JSON_UNESCAPED_SLASHES)."\\n";
 ')" 
   printf '%s\n' "$out" | tee -a proof/audit-steps.txt
+  if test "$step" = 1; then case "$out" in *'"code":"DEPENDENCY_SCAN_IN_PROGRESS"'*) echo 'OPS_GOVERNANCE_GENUINE_MULTI_BATCH_PASS' | tee proof/multibatch.txt;; *) echo 'OPS_GOVERNANCE_BATCH_NOT_SPLIT' >&2;exit 8;; esac; fi
   case "$out" in
     *'"code":"DEPENDENCY_AUDIT_COMPLETE"'*) break;;
     *'"code":"DEPENDENCY_SCAN_IN_PROGRESS"'*) continue;;
