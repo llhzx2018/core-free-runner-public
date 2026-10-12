@@ -21,7 +21,7 @@ for _ in $(seq 1 60); do
  if docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1;then break;fi
  sleep 2
 done
-docker run -d --name "$WP" --network "$NETWORK" -p 18884:80 \
+docker run -d --name "$WP" --network "$NETWORK" -p 127.0.0.1:18884:80 -p 127.0.0.1:80:80 \
  -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress \
  -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb \
  wordpress:7.1.2-php8.3-apache >/dev/null
@@ -52,6 +52,14 @@ cli eval-file /tmp/s01-install.php baseline > /tmp/s01-baseline-readback.log
 cli plugin install /tmp/s01-candidate.zip --force --activate > /tmp/s01-candidate-install.log
 cli plugin is-active vf-ops >/dev/null
 cli eval-file /tmp/s01-install.php candidate > /tmp/s01-candidate-readback.log
+# Test host exists only in this disposable WP filesystem.
+cli user update s01-synthetic-editor --user_pass='S01-Synthetic-Editor-Only!' >/dev/null
+docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
+docker cp runner/.github/testing/s01-c02-polylang-browser-host.php "$WP:/var/www/html/wp-content/mu-plugins/s01-browser-host.php"
+printf '127.0.0.1 %s\n' "$WP" | sudo tee -a /etc/hosts >/dev/null
+S01_BROWSER_BASE_URL="http://$WP" S01_BROWSER_NODE_MODULES="$RUNNER_TEMP/s01-browser/node_modules" \
+ node runner/.github/testing/s01-c02-polylang-browser-http.cjs
+docker exec "$WP" rm -f /var/www/html/wp-content/mu-plugins/s01-browser-host.php
 cli plugin install /tmp/s01-baseline.zip --force --activate > /tmp/s01-rollback-install.log
 cli plugin is-active vf-ops >/dev/null
 cli eval-file /tmp/s01-install.php rollback > /tmp/s01-rollback-readback.log
@@ -72,7 +80,7 @@ candidate=rows[1]
 if candidate.get('endpoint_rejection_cases')!=11 or candidate.get('rejected_endpoint_sql_writes')!=0:
     raise SystemExit('Incomplete actual endpoint security evidence')
 receipt={'status':'PASS','candidate_sha':os.environ['PRODUCT_SHA'],
-    'scope':'isolated native ZIP install, same-version replacement, baseline rollback and real endpoint rejection',
+    'scope':'isolated native ZIP install, version-identified replacement, baseline rollback and real endpoint rejection',
     'phases':rows,'production_mutated':False,'polylang_pro_gate':'NOT_EXECUTED',
     'formal_update_discovery_tested':False,'release_ready':False}
 pathlib.Path('proof/INSTALL_REPLACE_ROLLBACK.json').write_text(json.dumps(receipt,indent=2)+'\n')

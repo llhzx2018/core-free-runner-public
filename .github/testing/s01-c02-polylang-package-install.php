@@ -55,11 +55,12 @@ if (!in_array($phase,['baseline','candidate','rollback'],true)) {
     throw new RuntimeException('Unknown disposable package test phase');
 }
 require_once ABSPATH.'wp-admin/includes/plugin.php';
-if (!is_plugin_active('vf-ops/vf-ops.php') || !defined('VF_OPS_VERSION') || VF_OPS_VERSION!=='1.21.1096') {
+if (!is_plugin_active('vf-ops/vf-ops.php') || !defined('VF_OPS_VERSION')) {
     throw new RuntimeException('Exact full plugin is not active at expected test identity');
 }
 $contract=json_decode((string)file_get_contents('/tmp/s01-install-contract.json'),true,512,JSON_THROW_ON_ERROR);
 $expected=(array)$contract[$phase==='candidate'?'candidate':'baseline'];
+if (VF_OPS_VERSION!==(string)$expected['version']) { throw new RuntimeException('Installed package version differs from exact contract'); }
 $files=(array)$expected['files'];
 ksort($files,SORT_STRING);
 $runtimeHash=hash_init('sha256');
@@ -82,7 +83,7 @@ if (!is_array($control) || s01_install_content_snapshot($control['ids'])!==$cont
 }
 $summary=['phase'=>$phase,'runtime_files'=>count($files),'all_runtime_bytes_match'=>true,
     'synthetic_pages_preserved'=>3,'content_and_translation_preserved'=>true,'production'=>'NOT_EXECUTED',
-    'same_version_package_test'=>true,'formal_update_discovery_tested'=>false];
+    'same_version_package_test'=>$contract['candidate']['version']===$contract['baseline']['version'],'formal_update_discovery_tested'=>false];
 if ($phase==='candidate') {
     if (!function_exists('vf_ops_multilingual_slug_cleaner_handle_post')) {
         require_once $plugin.'/includes/multilingual-slug-cleaner/01-service-actions.php';
