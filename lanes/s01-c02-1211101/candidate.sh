@@ -106,17 +106,20 @@ wp eval --path="$wp2" '
     do_action("admin_init");
     if (!function_exists("vf_ops_seed_residue_migration_state")) { echo "SEED_SERVICE_ABSENT\n"; exit(8); }
     $before=vf_ops_seed_residue_migration_state();
+    echo "SEED_BEFORE ",wp_json_encode(["status"=>$before["status"]??null,"count"=>$before["count"]??null,"complete"=>$before["scanComplete"]??null]),"\\n";
     if (($before["status"]??"")!=="PASS" || ($before["count"]??-1)!==0 || empty($before["scanComplete"])) { echo "SEED_EMPTY_SCAN_FAIL\n"; exit(8); }
     $id=wp_insert_post(["post_type"=>"page","post_status"=>"draft","post_title"=>"Disposable signed migration probe"],true);
     if (is_wp_error($id)) exit(8);
     update_post_meta($id,"_vf_toolsite_seed_can_delete","yes");
     $found=vf_ops_seed_residue_migration_state();
+    echo "SEED_FOUND ",wp_json_encode(["status"=>$found["status"]??null,"count"=>$found["count"]??null,"ids"=>$found["ids"]??null,"complete"=>$found["scanComplete"]??null]),"\\n";
     if (($found["status"]??"")!=="ATTENTION" || ($found["count"]??-1)!==1 || !in_array((int)$id,(array)($found["ids"]??[]),true)) exit(8);
     wp_delete_post($id,true);
     $after=vf_ops_seed_residue_migration_state();
+    echo "SEED_AFTER ",wp_json_encode(["status"=>$after["status"]??null,"count"=>$after["count"]??null,"complete"=>$after["scanComplete"]??null]),"\\n";
     if (($after["status"]??"")!=="PASS" || ($after["count"]??-1)!==0 || empty($after["scanComplete"])) exit(8);
     echo "REAL_WP_MARIADB_SEED_SCANNER_ZERO_POSITIVE_ZERO=PASS\n";
-' --allow-root >> "$proof/formal-upgrade.txt"
+' --allow-root 2>&1 | tee -a "$proof/formal-upgrade.txt"
 wp plugin install "$old" --force --path="$wp2" --allow-root >/dev/null
 wp eval --path="$wp2" 'do_action("admin_init");require_once ABSPATH."wp-admin/includes/plugin.php";$p=get_plugin_data(WP_PLUGIN_DIR."/vf-ops/vf-ops.php",false,false);$s=get_option("vf_s01_release_fixture",[]);if(($p["Version"]??"")!==getenv("SOURCE_VERSION")||!is_plugin_active("vf-ops/vf-ops.php")||($s["preserve"]??"")!=="yes"||($s["sentinel"]??0)!==42)exit(3);echo "FORMAL_SOURCE_ROLLBACK_AND_PRESERVATION=PASS\n";' \
  --allow-root >> "$proof/formal-upgrade.txt"
