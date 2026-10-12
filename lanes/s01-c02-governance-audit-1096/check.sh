@@ -16,6 +16,24 @@ test "sha256:$(sha256sum /tmp/vf-ops-audit-official.zip | awk '{print $1}')" = "
 wp plugin install /tmp/vf-ops-audit-official.zip --activate >/dev/null
 wp eval 'if(VF_OPS_VERSION!=="1.21.1096")throw new RuntimeException("Wrong version"); do_action("admin_init");echo "OPS_GOVERNANCE_ISOLATED_VERSION_PASS\\n";' | tee proof/identity.txt
 wp eval '
+$c=ops_plugins_readback();$oldRev=(int)$c["revision"];$oldHash=(string)$c["configHash"];
+$raw=["allowedCombination"=>$c["allowedCombination"],"updatePolicy"=>$c["updatePolicy"],"auditRetentionDays"=>(int)$c["auditRetentionDays"]];
+$noChange=vf_ops_save_plugin_policy($raw,$oldRev,$oldHash);
+if(($noChange["code"]??"")!=="NO_CHANGES")throw new RuntimeException("No-op must not advance revision: ".($noChange["code"]??""));
+$bad=$raw;$bad["auditRetentionDays"]=1;
+$invalid=vf_ops_save_plugin_policy($bad,$oldRev,$oldHash);
+if(($invalid["code"]??"")!=="VALIDATION_FAILED")throw new RuntimeException("Bad form policy accepted: ".($invalid["code"]??""));
+$raw["auditRetentionDays"]=((int)$raw["auditRetentionDays"]===180?181:180);
+$saved=vf_ops_save_plugin_policy($raw,$oldRev,$oldHash);
+if(($saved["code"]??"")!=="POLICY_SAVED")throw new RuntimeException("Real policy commit not persisted: ".($saved["code"]??""));
+$new=ops_plugins_readback();
+if((int)$new["revision"]!==$oldRev+1 || $new["configHash"]===$oldHash)throw new RuntimeException("Policy readback identity did not change");
+$stale=vf_ops_save_plugin_policy($raw,$oldRev,$oldHash);
+if(($stale["code"]??"")!=="REVISION_CONFLICT")throw new RuntimeException("Stale policy commit not rejected");
+if(!vf_ops_plugins_config_integrity_v121488($new))throw new RuntimeException("Saved revision integrity failed");
+echo "OPS_GOVERNANCE_POLICY_NOOP_VALIDATION_COMMIT_AND_STALE_REFUSAL_PASS\\n";
+' | tee proof/policy.txt
+wp eval '
 if(!function_exists("vf_ops_refresh_plugin_inventory")||!function_exists("vf_ops_run_plugin_dependency_audit"))throw new RuntimeException("Native governance entry absent");
 $c=ops_plugins_readback();$rev=(int)($c["revision"]??0);$hash=(string)($c["configHash"]??"");
 if($rev<1||strlen($hash)!==64)throw new RuntimeException("Governance revision/hash invalid");
@@ -27,6 +45,13 @@ $e=(array)($in["evidence"]??[]);
 if(empty($e["inventoryHash"])||empty($e["rows"]))throw new RuntimeException("No verifiable inventory");
 echo "OPS_GOVERNANCE_INVENTORY_WRITE_PASS\\n";
 ' | tee proof/inventory.txt
+# Source traversal runs in the isolated WP installation only. Force a
+# real 3000+ file resumable scan; Production and the product repo are untouched.
+mkdir -p "$wpPath/wp-content/themes/vf-audit-synthetic"
+for file in $(seq -w 1 3400); do
+  printf '<?php /* isolated scanner coverage fixture %s */\\n' "$file" > "$wpPath/wp-content/themes/vf-audit-synthetic/fixture-$file.php"
+done
+echo 'OPS_GOVERNANCE_LARGE_SOURCE_FIXTURE=3400' | tee proof/scan-fixture.txt
 for step in $(seq 1 35); do
   out="$(wp eval '
 $c=ops_plugins_readback();
@@ -45,7 +70,7 @@ wp eval '
 $c=ops_plugins_readback();
 $a=vf_ops_plugins_dependency_audit_state_v121464();
 if(!vf_ops_plugins_dependency_verify_v121488($a,$c))throw new RuntimeException("Evidence readback invalid");
-if(empty($a["sourceScanComplete"])||empty($a["sourceTotalFiles"])||($a["filesScanned"]??-1)!==$a["sourceTotalFiles"])throw new RuntimeException("No complete source coverage");
+if(empty($a["sourceScanComplete"])||($a["sourceTotalFiles"]??0)<3400||($a["filesScanned"]??-1)!==$a["sourceTotalFiles"])throw new RuntimeException("No complete source coverage");
 $auth=vf_ops_plugins_deletion_authorization_state_v121465();
 if(!empty($auth["authorized"]))throw new RuntimeException("Never grant deletion during read-only audit");
 $r=vf_ops_run_plugin_dependency_audit((int)$c["revision"]+1,(string)$c["configHash"]);
