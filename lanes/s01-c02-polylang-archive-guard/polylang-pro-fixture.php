@@ -50,12 +50,39 @@ if ($enSlug!==$slug || $zhSlug!==$slug) {
     throw new RuntimeException('POLYLANG_PRO_SHARE_SLUGS_NOT_CONFIRMED: canonical language slugs differ');
 }
 echo 'S01_C02_POLYLANG_PRO_SHARE_SLUGS_PASS '.wp_json_encode(['sameSlug'=>true,'production'=>'NOT_EXECUTED'])."\n";
+// Snapshot every affected member, including the formerly independent ZH page.
+function s01_pro_complete_snapshot(array $ids): array {
+    $rows=[];
+    foreach ($ids as $id) {
+        clean_post_cache((int)$id);
+        $post=get_post((int)$id);
+        if (!$post instanceof WP_Post) { throw new RuntimeException('Pro fixture page disappeared'); }
+        $map=pll_get_post_translations((int)$id);ksort($map,SORT_STRING);
+        $rows[(int)$id]=[
+            'status'=>$post->post_status,'slug'=>$post->post_name,
+            'title'=>$post->post_title,'content'=>$post->post_content,
+            'language'=>pll_get_post_language((int)$id),'translations'=>$map,
+        ];
+    }
+    ksort($rows,SORT_NUMERIC);
+    return $rows;
+}
+$fixtureIds=[(int)$en,(int)$zh,(int)$old];
+$originalSnapshot=s01_pro_complete_snapshot($fixtureIds);
 $before=pll_get_post_translations((int)$en);
 if (!is_array($before) || (int)($before['zh']??0)!==(int)$old) {
     throw new RuntimeException('Failed to reproduce wrong translated duplicate');
 }
 $blocked=vf_ops_multilingual_slug_cleaner_archive_relation_block_reason((int)$old,(int)$zh,'zh',(int)$en);
 if ($blocked==='') {throw new RuntimeException('Linked old page should fail closed on real Pro');}
+$linkedArchive=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
+    'id'=>(int)$old,'source_post_id'=>(int)$en,'same_language_conflict_id'=>(int)$zh,
+]);
+if (($linkedArchive['status']??'')!=='BLOCKED'
+    || s01_pro_complete_snapshot($fixtureIds)!==$originalSnapshot) {
+    throw new RuntimeException('Actual Pro linked duplicate archive changed affected content or relations');
+}
+echo 'S01_C02_POLYLANG_PRO_LINKED_ARCHIVE_BLOCK_PASS '.wp_json_encode(['allThreePagesPreserved'=>true,'production'=>'NOT_EXECUTED'])."\n";
 pll_save_post_translations(['zh'=>(int)$old]);
 pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$zh]);
 $enMap=pll_get_post_translations((int)$en);
@@ -69,10 +96,12 @@ if ((int)($enMap['zh']??0)!==(int)$zh || (int)($zhMap['en']??0)!==(int)$en
 echo 'S01_C02_POLYLANG_PRO_TRANSLATION_PASS '.wp_json_encode(['reciprocal'=>true,'oldUnlinked'=>true,'production'=>'NOT_EXECUTED'])."\n";
 // Reversible mutation in disposable staging only. No archive occurs without
 // a real 301; this is verified elsewhere against official Rank Math engine.
+$correctedSnapshot=s01_pro_complete_snapshot($fixtureIds);
 $notRedirected=vf_ops_multilingual_slug_cleaner_archive_duplicate_conflict([
     'id'=>(int)$old,'source_post_id'=>(int)$en,'same_language_conflict_id'=>(int)$zh,
 ]);
-if (($notRedirected['status']??'')!=='BLOCKED' || get_post_status((int)$old)!=='publish') {
+if (($notRedirected['status']??'')!=='BLOCKED' || get_post_status((int)$old)!=='publish'
+    || s01_pro_complete_snapshot($fixtureIds)!==$correctedSnapshot) {
     throw new RuntimeException('Pro old URL was wrongly archived without a live 301');
 }
 pll_save_post_translations(['zh'=>(int)$zh]);
@@ -80,10 +109,11 @@ pll_save_post_translations(['en'=>(int)$en,'zh'=>(int)$old]);
 $restored=pll_get_post_translations((int)$en);
 if ((int)($restored['zh']??0)!==(int)$old
     || get_post_status((int)$old)!=='publish'
-    || get_post_status((int)$zh)!=='publish') {
+    || get_post_status((int)$zh)!=='publish'
+    || s01_pro_complete_snapshot($fixtureIds)!==$originalSnapshot) {
     throw new RuntimeException('Pro restoration failed');
 }
-echo 'S01_C02_POLYLANG_PRO_ROLLBACK_PASS '.wp_json_encode(['originalRelationRestored'=>true,'oldPublished'=>true,'production'=>'NOT_EXECUTED'])."\n";
+echo 'S01_C02_POLYLANG_PRO_ROLLBACK_PASS '.wp_json_encode(['originalRelationRestored'=>true,'allThreeRelationsAndContentRestored'=>true,'oldPublished'=>true,'production'=>'NOT_EXECUTED'])."\n";
 echo 'S01_C02_POLYLANG_PRO_LICENSED_STAGING_PASS '.wp_json_encode([
     'pluginVersion'=>$proVersion,'sharedSlug'=>true,'translationCorrection'=>true,
     'safetyNo301'=>true,'rollback'=>true,'production'=>'NOT_EXECUTED'
