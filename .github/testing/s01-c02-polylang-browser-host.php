@@ -52,9 +52,16 @@ add_action('admin_menu',static function() {
 });
 add_action('admin_enqueue_scripts',static function($hook) {
     if ($hook!=='tools_page_s01-language-guard-fixture') { return; }
-    foreach (['current/admin-current-maintenance.css','current/pages/content_languages.css'] as $index=>$path) {
-        wp_enqueue_style('s01-isolated-component-'.$index,
-            plugins_url('assets/css/'.$path,WP_PLUGIN_DIR.'/vf-ops/vf-ops.php'),[],null);
+    // Consume the source-owned current asset resolver, never invented test CSS.
+    if (!function_exists('vf_ops_admin_asset_files')) {
+        require_once WP_PLUGIN_DIR.'/vf-ops/includes/views/admin-style-helpers/admin-style-core.php';
+    }
+    $previous=[];
+    foreach (vf_ops_admin_asset_files('content_languages') as $index=>$file) {
+        $handle='s01-isolated-component-'.$index;
+        $relative=vf_ops_admin_asset_relative_url_path($file);
+        wp_enqueue_style($handle,plugins_url($relative,WP_PLUGIN_DIR.'/vf-ops/vf-ops.php'),$previous,null);
+        $previous=[$handle];
     }
 });
 add_action('admin_post_s01_language_guard_fixture',static function() {
