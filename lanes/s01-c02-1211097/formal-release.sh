@@ -71,7 +71,6 @@ PR #356 修复、PR #385 候选，WordPress 7.0.2/MariaDB 真实加密配置保�
 
 Production OWNER 手工升级。真实 GSC/IndexNow 密钥未被模拟为有效远程认证，连接第三方服务需站点管理员自身配置；隔离机器 PASS 不冒充 OWNER Product Real Use PASS。
 EOF
-EOF
 echo "stage=FORMAL_RELEASE" >> "$out/stage.txt"
 if [ -z "$GH_TOKEN" ]; then echo "BLOCKED_RELEASE_WRITE_CREDENTIAL" >&2; exit 21; fi
 if gh api "repos/llhzx2018/vf-tools-ops/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' > "$out/existing-tag.txt" 2>/dev/null; then
