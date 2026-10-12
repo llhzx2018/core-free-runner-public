@@ -1,0 +1,160 @@
+name: P01 V247349 Daily Scheduled Backup Lifecycle Proof (Test Only)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247349-daily-backup-queue-proof.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic-daily-backup:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact product main candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Prepare PHP and browser
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Install disposable site with mock administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.47.349'
+          mkdir -p /tmp/p01-v247349-preview
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/server.pid
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-preview-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-preview-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup CSRF not available'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Isolated Preview' \
+            --data-urlencode 'admin_password=PreviewOnly-NotProduction!59' \
+            --data-urlencode 'admin_password_confirm=PreviewOnly-NotProduction!59' >/tmp/p01-preview-setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_PREVIEW_DISPOSABLE_INSTALL=PASS
+
+      - name: Verify overdue daily schedule dedupe, actual backed data, and visible failures
+        shell: bash
+        env:
+          VF_ISOLATED_TEST_ONLY: '1'
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v247349-scheduled-proof.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          if(getenv('VF_ISOLATED_TEST_ONLY')!=='1')throw new RuntimeException('ISOLATED_ONLY guard not set');
+          $workspace=(string)getenv('GITHUB_WORKSPACE');
+          $root=realpath($workspace.'/product/src');
+          if($root===false||!str_starts_with($root,$workspace.'/product/'))
+              throw new RuntimeException('Not an isolated source');
+          require_once $root.'/app/bootstrap.php';
+          if(VF_VERSION!=='2.47.349'||!vf_is_installed())throw new RuntimeException('Wrong runtime');
+          if(!str_starts_with(realpath(VF_PRIVATE_ROOT)?:'', $root.'/'))
+              throw new RuntimeException('Unsafe/private directory; refuse to run');
+          $assert=static function(bool $ok,string $why):void {if(!$ok)throw new RuntimeException($why);};
+          $db=vf_db();
+          $db->exec("UPDATE job_schedules SET enabled=0 WHERE schedule_key<>'daily-backup'");
+          $db->exec("DELETE FROM background_jobs");
+          $db->exec("DELETE FROM backup_records");
+          $db->exec("UPDATE job_schedules SET enabled=1,interval_seconds=86400,last_run_at='',next_run_at='".
+            gmdate('c',time()-3*86400)."' WHERE schedule_key='daily-backup'");
+          $schedule=$db->query("SELECT * FROM job_schedules WHERE schedule_key='daily-backup'")->fetch(PDO::FETCH_ASSOC);
+          $assert(is_array($schedule)&&$schedule['job_type']==='backup','Daily schedule missing');
+          
+          $jobs=new VfJobManager($db);
+          $before=$db->query('SELECT COUNT(*) FROM backup_records')->fetchColumn();
+          $assert((int)$before===0,'Not a clean fixture');
+          $enqueued=$jobs->enqueueDueSchedules();
+          $assert($enqueued===1,'Overdue daily task should enqueue once');
+          $assert($jobs->enqueueDueSchedules()===0,'Rechecking unchanged due plan must not duplicate');
+          $queued=$db->query("SELECT COUNT(*) FROM background_jobs WHERE job_type='backup' AND state='queued'")->fetchColumn();
+          $assert((int)$queued===1,'No duplicate active queue items');
+          echo "P01_DAILY_SCHEDULE_OVERDUE_DEDUPED=PASS\n";
+          
+          $job=$jobs->workOnce('isolated-backup-due-test',2);
+          $assert(is_array($job)&&$job['job_type']==='backup'&&$job['state']==='completed',
+              'Scheduled backup must complete before it counts');
+          $assert((int)$job['success_count']===1,'Successful job must record success');
+          $scheduleAfter=$db->query("SELECT last_run_at,next_run_at FROM job_schedules WHERE schedule_key='daily-backup'")->fetch(PDO::FETCH_ASSOC);
+          $assert(is_array($scheduleAfter)&&$scheduleAfter['last_run_at']!==''&&strtotime($scheduleAfter['next_run_at'])>time(),'Next run must be in future');
+          $tz=new DateTimeZone('Asia/Shanghai');
+          $local=(new DateTimeImmutable($scheduleAfter['next_run_at']))->setTimezone($tz);
+          $minutes=(int)$local->format('H')*60+(int)$local->format('i');
+          $assert($minutes>=210&&$minutes<=230,'Backup must stay near local 03:30 + 20-minute jitter');
+          $mgr=new VfBackupManager($db);
+          $rows=$mgr->list();
+          $assert(count($rows)===1&&$rows[0]['backup_type']==='automatic',
+              'A scheduled completion must produce one real automatic record');
+          $assert($rows[0]['exists']===true&&$rows[0]['validation_status']==='valid'
+              &&$rows[0]['integrity_status']==='ok'&&(int)$rows[0]['foreign_key_errors']===0,
+              'Automatic snapshot must be real and validated');
+          $path=VF_BACKUP_DIR.'/'.basename($rows[0]['file_name']);
+          $assert(is_file($path)&&hash_equals($rows[0]['sha256'],hash_file('sha256',$path)?:''),
+              'Scheduled snapshot bytes must match registered SHA');
+          $assert($mgr->policy()['automatic_cleanup_suspended']===true,'No cleanup after scheduled backup');
+          $assert($jobs->workOnce('isolated-backup-idle',2)===null,
+              'No second backup before next daily due time');
+          $assert(count($mgr->list())===1,'No additional backup generated while idle');
+          echo "P01_DAILY_BACKUP_REAL_SNAPSHOT_AND_NEXT_DAY=PASS\n";
+          
+          $oldDate=gmdate('c',time()-60);
+          $db->prepare("UPDATE job_schedules SET next_run_at=? WHERE schedule_key='daily-backup'")->execute([$oldDate]);
+          $next=$jobs->workOnce('isolated-backup-second-day',2);
+          $assert(is_array($next)&&$next['state']==='completed','Second due interval not completed');
+          $rows=$mgr->list();
+          $assert(count($rows)===2,'Second due interval should add one new snapshot');
+          $files=array_map(static fn(array $r)=>$r['file_name'],$rows);
+          $assert(count(array_unique($files))===2,'Two backup snapshots must be physically distinct');
+          $assert($mgr->policy()['automatic_cleanup_suspended']===true,'Automatic cleanup must remain paused');
+          echo "P01_DAILY_BACKUP_TWO_INTERVALS_DISTINCT=PASS\n";
+          
+          $base=$rows[0];
+          $ghost='backup-synthetic-missing-only-'.bin2hex(random_bytes(4));
+          $sql=$db->prepare('INSERT INTO backup_records(backup_key,file_name,reason,backup_type,source_version,byte_size,sha256,integrity_status,foreign_key_errors,validation_status,validation_error,object_summary,is_protected,created_at,verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+          $sql->execute([$ghost,$ghost.'.sqlite','Synthetic missing test','automatic','2.47.349',
+           (int)$base['byte_size'],(string)$base['sha256'],'ok',0,'valid','',
+           json_encode($base['object_summary']),1,gmdate('c'),gmdate('c')]);
+          $verify=$jobs->enqueue('backup_verify','manual');
+          $check=$jobs->workOnce('isolated-backup-verify',2);
+          $assert(is_array($check)&&$check['job_type']==='backup_verify','Verification task missing');
+          $assert($check['state']==='failed','A scan with a missing backup must not be green');
+          $assert((int)$check['failure_count']>=1&&str_contains((string)$check['last_error'],'不通过'),
+           'Failed verification count/message must surface to Owner');
+          $ghostRow=$db->prepare('SELECT is_protected,validation_status FROM backup_records WHERE backup_key=?');
+          $ghostRow->execute([$ghost]);
+          $status=$ghostRow->fetch(PDO::FETCH_ASSOC);
+          $assert((int)$status['is_protected']===1&&$status['validation_status']==='invalid',
+           'Missing backup must remain protected and be marked invalid');
+          echo "P01_MISSING_BACKUP_VERIFY_FAILURE_VISIBLE=PASS\n";
+          
+          $retried=$jobs->retry((int)$check['id']);
+          $assert($retried['state']==='queued'&&(int)$retried['success_count']===0
+           &&(int)$retried['failure_count']===0&&(int)$retried['processed']===0,
+           'Retry must reset counters without suppressing source evidence');
+          $assert($mgr->policy()['automatic_cleanup_suspended']===true,'Cleanup still suspended');
+          echo "P01_BACKUP_FAILED_VERIFY_RETRY_RESETS=PASS\n";
+          echo "P01_PRODUCTION_UNTOUCHED_TEST_ONLY=PASS\n";
+          PHP
+          php /tmp/p01-v247349-scheduled-proof.php
