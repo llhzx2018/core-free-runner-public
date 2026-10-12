@@ -1,0 +1,79 @@
+name: S01 C02 Real WordPress Tools CSS
+on:
+  push:
+    branches: [task/s01-c02-1211106-real-wp-tools-css-20261012]
+permissions:
+  contents: read
+jobs:
+  real-admin-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: vf_tools_ui
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-root-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-root-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout public runner workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Checkout exact private Ops fix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 8a4f805403ce4c057f6af225bd73e5a8fa06ea83
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Prepare disposable real WordPress and MariaDB
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 8a4f805403ce4c057f6af225bd73e5a8fa06ea83
+          php -l product/includes/s01/tool-workbench.php
+          node --check product/tests/s01-c02-1211106-tools-live-wordpress-admin-browser.js
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          wp_dir="$RUNNER_TEMP/tools-wordpress"
+          mkdir -p "$wp_dir"
+          wp core download --path="$wp_dir" --version=7.0.2 --allow-root >/dev/null
+          wp config create --path="$wp_dir" --dbname=vf_tools_ui --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wp_dir" --url=http://127.0.0.1:18096 --title='Isolated VF Tools Browser Proof' --admin_user=admin --admin_password=synthetic-ci-admin-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          python3 product/.github/release/build-ops-package.py --source product --output "$RUNNER_TEMP/vf-ops-tools-candidate.zip" >/dev/null
+          wp plugin install "$RUNNER_TEMP/vf-ops-tools-candidate.zip" --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = "1.21.1105"
+          echo "wp_dir=$wp_dir" >> "$GITHUB_ENV"
+          echo "REAL_WORDPRESS_INSTALL_AND_ACTIVATION=PASS"
+      - name: Run real wp-admin Chromium including CSS HTTP response
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --no-package-lock playwright@1.56.1
+          npx playwright install --with-deps chromium
+          php -S 127.0.0.1:18096 -t "$wp_dir" > "$RUNNER_TEMP/tools-php-http.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" || true' EXIT
+          for i in $(seq 1 30); do if curl --fail -s -o /dev/null http://127.0.0.1:18096/wp-login.php; then break; fi; sleep 1; done
+          TOOLS_BASE_URL=http://127.0.0.1:18096 node tests/s01-c02-1211106-tools-live-wordpress-admin-browser.js
+          echo S01_C02_REAL_WORDPRESS_ADMIN_R17_CSS_PASS
+      - name: Upload synthetic screenshots and diagnostic only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-real-wp-tools-ui-${{ github.run_id }}
+          path: |
+            /tmp/s01-c02-tools-real-1440.png
+            /tmp/s01-c02-tools-real-390.png
+          if-no-files-found: warn
+          retention-days: 3
