@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      PRODUCT_SHA: '8b25a0fb78087d8b95f64d191a59444e3f5de1bd'
+      PRODUCT_SHA: '508d43a7d8718d1185ae460aff2ca4304d88a832'
     steps:
       - name: Checkout guarded private Ops candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -38,6 +38,34 @@ jobs:
           pathlib.Path('proof/FINAL.json').write_text(json.dumps(r,indent=2))
           print('S01_C02_DUPLICATE_GUARD_PASS',json.dumps(r))
           PY
+      - name: Check current-main updater regressions and deterministic package preparation
+        run: |
+          set -Eeuo pipefail
+          php target/tests/s01-c02-1211095-system-update-blocker-visibility.php
+          php target/tests/s01-c02-1211096-current-update-offer-order.php
+          mkdir -p "$RUNNER_TEMP/s01-build"
+          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/s01-build/first.zip" > "$RUNNER_TEMP/s01-build/first.json"
+          python3 target/.github/release/build-ops-package.py --source target --output "$RUNNER_TEMP/s01-build/second.zip" > "$RUNNER_TEMP/s01-build/second.json"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,zipfile
+          folder=pathlib.Path(os.environ['RUNNER_TEMP'])/'s01-build'
+          a=json.loads((folder/'first.json').read_text())
+          b=json.loads((folder/'second.json').read_text())
+          for key in ['version','asset_bytes','asset_sha256','runtime_files','runtime_fingerprint','root_contract','plugin_file']:
+              if a[key]!=b[key]: raise SystemExit('Package reproducibility failed: '+key)
+          if a['version']!='1.21.1096': raise SystemExit('Expected current-main identity; no new release version is assigned yet')
+          with zipfile.ZipFile(folder/'first.zip') as z:
+              names=z.namelist()
+              if any(n.startswith(('vf-ops/tests/','vf-ops/.github/','vf-ops/docs/')) for n in names):
+                  raise SystemExit('Non-runtime files leaked into package')
+              guard='includes/multilingual-slug-cleaner/service-actions-parts/03-repair-helpers.php'
+              if z.read('vf-ops/'+guard)!=(pathlib.Path('target')/guard).read_bytes():
+                  raise SystemExit('Packaged archive guard differs from exact candidate')
+          receipt={k:a[k] for k in ['version','asset_bytes','asset_sha256','runtime_files','runtime_fingerprint','root_contract','plugin_file']}
+          receipt.update(status='PASS',gate='BUILD_PREPARATION_ONLY',candidate_sha=os.environ['PRODUCT_SHA'],reproducible=True,release_ready=False,licensed_pro_gate='PENDING',production_mutated=False)
+          pathlib.Path('proof/BUILD_PREPARATION.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print('S01_C02_BUILD_PREPARATION_PASS',json.dumps(receipt))
+          PY
       - name: Checkout public integration lane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -59,8 +87,9 @@ jobs:
           path: |
             proof/FINAL.json
             proof/WORDPRESS.json
+            proof/BUILD_PREPARATION.json
           if-no-files-found: error
           retention-days: 7
       - name: Cleanup transient private source
         if: always()
-        run: rm -rf target runner
+        run: rm -rf target runner "$RUNNER_TEMP/s01-build"
