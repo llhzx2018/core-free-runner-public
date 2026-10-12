@@ -94,6 +94,55 @@ jobs:
           PHP
           php /tmp/p01-preview-seed.php
           echo P01_PREVIEW_NO_PRODUCTION_ASSETS=PASS
+      - name: Prepare synthetic weekly backup verification with early failures and healthy last batch
+        shell: bash
+        env:
+          VF_ISOLATED_TEST_ONLY: '1'
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-v247351-weekly-preview.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=realpath((string)getenv('GITHUB_WORKSPACE').'/product/src');
+          if(getenv('VF_ISOLATED_TEST_ONLY')!=='1'||$root===false)throw new RuntimeException('isolated only');
+          require_once $root.'/app/bootstrap.php';
+          if(VF_VERSION!=='2.47.351'||!str_starts_with(realpath(VF_PRIVATE_ROOT)?:'', $root.'/'))throw new RuntimeException('unsafe runtime');
+          $db=vf_db();
+          $manager=new VfBackupManager($db);
+          $insert=$db->prepare('INSERT INTO backup_records(backup_key,file_name,reason,backup_type,source_version,byte_size,sha256,integrity_status,foreign_key_errors,validation_status,validation_error,object_summary,is_protected,created_at,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+          for($i=0;$i<14;$i++){
+              $key='fixture-weekly-missing-'.str_pad((string)$i,2,'0',STR_PAD_LEFT);
+              $insert->execute([$key,$key.'.sqlite','ISOLATED WEEKLY AUDIT','automatic','2.47.351',1234,
+                  str_repeat('2',64),'ok',0,'valid','','{"links":1}',1,gmdate('c'),gmdate('c')]);
+          }
+          // Valid real SQLite is last: a healthy final batch must not hide old failures.
+          $safe=$manager->create('ISOLATED FINAL GOOD SNAPSHOT','automatic',true);
+          $schedule=$db->query("SELECT schedule_key FROM job_schedules WHERE owner='core' AND job_type='backup_verify' LIMIT 1")->fetchColumn();
+          if(!$schedule)throw new RuntimeException('scheduled backup verification unavailable');
+          $db->prepare('UPDATE job_schedules SET enabled=1,next_run_at=? WHERE schedule_key=?')->execute([gmdate('c',time()-60),$schedule]);
+          $jobs=new VfJobManager($db);
+          if($jobs->enqueueDueSchedules()<1)throw new RuntimeException('missing due enqueue');
+          $q=$db->prepare("SELECT id FROM background_jobs WHERE owner='core' AND job_type='backup_verify' AND idempotency_key LIKE ? ORDER BY id DESC LIMIT 1");
+          $q->execute(['schedule:'.$schedule.':%']);
+          $id=(int)$q->fetchColumn();
+          if($id<=0)throw new RuntimeException('missing scheduled audit job');
+          $last=null;$chunks=0;
+          do {
+              $last=$jobs->workSpecific($id,'p01-isolated-v247351-preview',4);
+              $chunks++;
+              if($chunks>12)throw new RuntimeException('audit stalled');
+          } while(($last['state']??'')==='queued');
+          if(($last['state']??'')!=='failed'||(int)$last['failure_count']<14
+            ||(int)$last['processed']<19||$chunks<5)
+            throw new RuntimeException('bounded audit falsely green, incomplete, or unbounded: '.json_encode($last));
+          if(!is_file(VF_BACKUP_DIR.'/'.basename($safe['file_name'])))
+            throw new RuntimeException('final good backup missing');
+          $protected=(int)$db->query("SELECT COUNT(*) FROM backup_records WHERE is_protected=1")->fetchColumn();
+          if($protected<17)throw new RuntimeException('protected history was altered');
+          echo 'P01_V247351_WEEKLY_BATCHED_AUDIT_FAILURE_VISIBLE=PASS'.PHP_EOL;
+          echo 'P01_V247351_WEEKLY_AUDIT_SIMULATION_PRODUCTION_NOT_TOUCHED=PASS'.PHP_EOL;
+          PHP
+          php /tmp/p01-v247351-weekly-preview.php
       - name: Install isolated browser harness
         shell: bash
         run: |
