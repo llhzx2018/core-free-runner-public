@@ -1,0 +1,214 @@
+name: S01 Checker86 Theme110 clipboard copy and WordPress lifecycle
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      M3_SHA: '{{M3_SHA}}'
+      M3_TREE: '{{M3_TREE}}'
+      M3_VERSION: '{{M3_VERSION}}'
+      M3_SOURCE_VERSION: '{{M3_SOURCE_VERSION}}'
+      M3_BASE_SHA: '{{M3_BASE_SHA}}'
+      THEME_BASE_BYTES: '{{THEME_BASE_BYTES}}'
+      THEME_BASE_SHA256: '{{THEME_BASE_SHA256}}'
+      M3_BASE_BYTES: '{{M3_BASE_BYTES}}'
+      M3_BASE_SHA256: '{{M3_BASE_SHA256}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target-owned spec preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/candidate.template.yml --output /tmp/rendered.yml >/dev/null
+          cmp /tmp/rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-identity.json
+          cp -a runner/lanes/{{LANE_ID}} lane
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: m3target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: task/s01-c01-footer105-20261010
+          persist-credentials: false
+          path: historic-footer
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: task/s01-c03-embed79-20261010-candidate
+          persist-credentials: false
+          path: historic-embed
+      - name: Actual source function tests and deterministic dual builds
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(git -C m3target rev-parse HEAD)" = "$M3_SHA"
+          test "$(git -C m3target rev-parse HEAD^{tree})" = "$M3_TREE"
+          test "$(tr -d '[:space:]' < target/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '[:space:]' < m3target/VERSION)" = "$M3_VERSION"
+          test -f lane/theme-build.py
+          cp historic-embed/lanes/s01-c03-embed79-20261010/browser.js lane/embed-browser.js
+          python3 - <<'PYEMBEDMOUNT'
+          from pathlib import Path
+          p=Path('lane/embed-browser.js')
+          src=p.read_text()
+          old="(await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-embed-share-base-url'))==='/m3u8-player/'"
+          new="new URL((await page.locator('[data-vf-embed-generator]').getAttribute('data-vf-embed-share-base-url')),base).pathname==='/m3u8-player/'"
+          assert src.count(old)==1,'historical embed contract changed'
+          p.write_text(src.replace(old,new))
+          PYEMBEDMOUNT
+          cp historic-embed/lanes/s01-c03-embed79-20261010/seed.php lane/seed.php
+          php -l target/tests/public-markup-attribute-boundary-contract.php >/dev/null
+          cp target/tests/public-markup-attribute-boundary-contract.php baseline/tests/public-markup-attribute-boundary-contract.php
+          php baseline/tests/public-markup-attribute-boundary-contract.php > proof/attribute-baseline.json
+          php target/tests/public-markup-attribute-boundary-contract.php > proof/attribute-php.json
+          php -l target/tests/embed-page-mount-hard-gate.php >/dev/null
+          php -l target/src/inc/theme-public-route-renderer.php >/dev/null
+          php target/tests/embed-page-mount-hard-gate.php > /tmp/embed-gate-php-proof.txt
+          grep -q '^PASS: existing Embed mount hard-gate' /tmp/embed-gate-php-proof.txt
+          php -l target/tests/embed-generator-public-mount-route.php >/dev/null
+          php target/tests/embed-generator-public-mount-route.php > /tmp/embed-alias-php-proof.txt
+          grep -q '^PASS: legacy/new/zh Embed routes' /tmp/embed-alias-php-proof.txt
+          python3 - <<'PYALIAS'
+          import json
+          from pathlib import Path
+          p=Path('/tmp/embed-alias-php-proof.txt').read_text()
+          assert p.startswith('PASS: legacy/new/zh Embed routes')
+          Path('proof/embed-alias-php.json').write_text(json.dumps({'status':'PASS','scope':'Theme actual PHP registry/context/shortcode','production':'NOT_EXECUTED'},indent=2))
+          PYALIAS
+          python3 - <<'PY'
+          import json
+          j=json.load(open('proof/attribute-php.json'))
+          assert j['status']=='PASS' and j['domain_actions']==6 and j['unknown_real_target']=='BLOCKED'
+          PY
+          node --check lane/browser.js
+          node --check lane/embed-browser.js
+          bash -n lane/native.sh
+          python3 lane/theme-build.py > /tmp/theme-build-meta.txt
+          mkdir -p m3run/lane
+          ln -s "$PWD/m3target" m3run/target
+          cp lane/base-channel.json m3run/lane/base-channel.json
+          (cd m3run && TARGET_SHA="$M3_SHA" TARGET_TREE="$M3_TREE" TARGET_VERSION="$M3_VERSION" SOURCE_VERSION="$M3_SOURCE_VERSION" python3 ../lane/m3-build.py) > /tmp/m3-build-meta.txt
+          cp "m3run/proof/vf-tools-m3u8_V$M3_VERSION.zip" proof/
+          cp m3run/proof/identity.json proof/m3-identity.json
+          python3 - <<'PY'
+          import json,os,pathlib
+          for p,version,sha in [('proof/identity.json','TARGET_VERSION','TARGET_SHA'),('m3run/proof/identity.json','M3_VERSION','M3_SHA')]:
+           j=json.loads(pathlib.Path(p).read_text())
+           assert j['status']=='PASS' and j['source_sha']==os.environ[sha] and j['version']==os.environ[version]
+          PY
+      - name: Checker presentation source regressions
+        run: |
+          set -Eeuo pipefail
+          php target/tests/playlist-checker-presentation-contract.php en > proof/presentation-en.json
+          php target/tests/playlist-checker-presentation-contract.php zh > proof/presentation-zh.json
+          php m3target/tests/playlist-checker-launchbar-contract.php en > proof/launchbar-en.json
+          php m3target/tests/playlist-checker-launchbar-contract.php zh > proof/launchbar-zh.json
+          node m3target/tests/playlist-checker-diagnostic-safety.node.cjs
+      - name: Formal baseline ZIP identity
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir provider
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$SOURCE_VERSION.zip" --dir provider
+          gh release download "v$M3_SOURCE_VERSION" --repo llhzx2018/vf-tools-m3u8 --pattern "vf-tools-m3u8_V$M3_SOURCE_VERSION.zip" --dir provider
+          python3 - <<'PY'
+          import hashlib,os,pathlib,zipfile
+          checks=[('vf-tools-theme_V'+os.environ['SOURCE_VERSION']+'.zip',int(os.environ['THEME_BASE_BYTES']),os.environ['THEME_BASE_SHA256']),('vf-tools-m3u8_V'+os.environ['M3_SOURCE_VERSION']+'.zip',int(os.environ['M3_BASE_BYTES']),os.environ['M3_BASE_SHA256'])]
+          for name,size,digest in checks:
+           data=(pathlib.Path('provider')/name).read_bytes()
+           assert len(data)==size and hashlib.sha256(data).hexdigest()==digest
+           with zipfile.ZipFile(pathlib.Path('provider')/name) as z: assert z.testzip() is None
+          PY
+      - name: Browser runtime
+        run: |
+          set -Eeuo pipefail
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 3 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Bilingual actual renderer and shipped bundle regression
+        run: node m3target/tests/playlist-checker-result-copy.browser.cjs > proof/result-copy-browser.json
+      - name: Real clipboard denial fallback export and retry regressions
+        run: node m3target/tests/playlist-checker-clipboard.browser.cjs > proof/clipboard-browser.json
+      - name: Live synthetic WordPress tool and lifecycle tests
+        run: bash lane/native.sh
+      - name: Public-safe evidence only
+        if: always()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-checker86-theme110-proof-${{ github.run_id }}
+          path: |
+            proof/*.json
+            proof/*.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Read back uploaded artifact identity
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/receipt-meta.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/receipt.zip
+          python3 - <<'PY'
+          import hashlib,zipfile,json,os,pathlib,stat
+          m=json.loads(pathlib.Path('/tmp/receipt-meta.json').read_text())
+          d=pathlib.Path('/tmp/receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert m['digest']=='sha256:'+hashlib.sha256(d).hexdigest() and m['size_in_bytes']==len(d)
+          with zipfile.ZipFile('/tmp/receipt.zip') as z:
+           assert z.testzip() is None
+           for f in z.infolist():
+            p=pathlib.PurePosixPath(f.filename)
+            assert not p.is_absolute() and '..' not in p.parts and not stat.S_ISLNK(f.external_attr>>16)
+            assert p.suffix in ('.json','.png')
+            if p.suffix=='.json': json.loads(z.read(f))
+           final=json.loads(z.read('FINAL_EVIDENCE.json'))
+           assert final['status']=='PASS' and final['theme_source_sha']==os.environ['TARGET_SHA'] and final['m3_source_sha']==os.environ['M3_SHA']
+          print('PUBLIC_ARTIFACT_RECEIPT',json.dumps({'status':'PASS','id':m['id'],'bytes':len(d),'digest':m['digest'],'run_id':os.environ['GITHUB_RUN_ID']}))
+          PY
+      - name: Private source cleanup
+        if: always()
+        run: rm -rf target baseline m3target m3run provider /tmp/baseline-test.txt /tmp/wp-cli-s01.phar
+
