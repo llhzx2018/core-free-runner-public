@@ -26,8 +26,12 @@ let activeBrowser;
   assert.equal(new URL(p.url()).origin,base,'Synthetic credentials may only enter the isolated site');
   await p.locator('#user_login').fill(user);
   await p.locator('#user_pass').fill(password);
-  await Promise.all([p.waitForURL(/\/wp-admin\//),p.locator('#wp-submit').click()]);
-  assert.ok(await p.locator('#wpadminbar').count(),'Native authenticated WordPress session required');
+  await Promise.all([p.waitForURL(url=>url.origin===base&&url.pathname.startsWith('/wp-admin/'),{waitUntil:'domcontentloaded'}),p.locator('#wp-submit').click()]);
+  const auth=await p.context().request.get(base+'/wp-admin/admin-post.php?action=s01_language_guard_fixture&phase=nonce',{maxRedirects:0});
+  assert.equal(auth.status(),200,'Native authenticated WordPress hook required');
+  const actor=await auth.json();
+  assert.equal(actor.actor_logged_in,true,'Native WordPress session must be authenticated');
+  assert.equal(actor.actor_can_manage_options,user==='admin','Native WordPress role capability must match fixture actor');
  }
  await login(page,'admin','S01-Synthetic-Install-Only!');
  errors.length=0;

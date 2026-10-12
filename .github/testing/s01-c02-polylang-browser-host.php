@@ -69,7 +69,8 @@ add_action('admin_post_s01_language_guard_fixture',static function() {
     // Envelope prevents unrelated product controllers from consuming the test
     // request before the real handler is invoked. It contains no mock guard.
     if ((string)($_GET['phase']??'')==='nonce') {
-        wp_send_json(['nonce'=>wp_create_nonce('vf_ops_multilingual_slug_cleaner_action')]);
+        wp_send_json(['nonce'=>wp_create_nonce('vf_ops_multilingual_slug_cleaner_action'),
+            'actor_logged_in'=>is_user_logged_in(),'actor_can_manage_options'=>current_user_can('manage_options')]);
     }
     s01_browser_source();
     $saved=$_POST;
