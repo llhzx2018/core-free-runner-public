@@ -1,0 +1,130 @@
+name: S01 C02 1211102 Exact Candidate Machine
+on:
+  push:
+    branches: [task/s01-c02-1211102-exact-candidate-20261012]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: vf_ops_update
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: vfroot
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -pvfroot"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    env:
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      TARGET_VERSION: '1.21.1102'
+      TARGET_SHA: '65ec2109e35ff10adf94f494955dac5808101b01'
+      TARGET_TREE: '404d8c49904a961069a5455f26bad9da938cc52a'
+      SOURCE_VERSION: '1.21.1100'
+      SUPPORTED_SOURCE_VERSIONS: '1.21.1100,1.21.1101'
+      MARIADB_ROOT_PASSWORD: vfroot
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout registered public Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Validate exact candidate lane identity and trigger
+        run: |
+          set -Eeuo pipefail
+          python3 runner/scripts/ephemeral_lane_spec.py validate --spec runner/lanes/s01-c02-1211102/spec.json
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-c02-1211102/spec.json --input runner/.github/workflows/s01-c02-1211102-candidate-machine.yml
+          bash -n runner/lanes/s01-c02-1211102/candidate.sh
+      - name: Checkout exact product candidate without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Install Linux WordPress testing dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client php8.3-mysql php8.3-zip php8.3-xml php8.3-mbstring php8.3-curl unzip jq curl
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          php -v | head -n 2
+          wp --info
+          mysql --protocol=tcp -h127.0.0.1 -uvf -pvf -e 'SELECT 1' vf_ops_update
+      - name: Verify, package and exercise WordPress native upgrade/recovery
+        run: |
+          set -Eeuo pipefail
+          bash runner/lanes/s01-c02-1211102/candidate.sh product "$GITHUB_WORKSPACE/proof"
+      - name: Checkout licensed Pro harness at the proven public revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: b2768c0393ad9780f102d60e04de2042b226f0f5
+          persist-credentials: false
+          path: pro-runner
+      - name: Execute actual licensed Pro gate on the final package source
+        env:
+          LICENSED_INPUT_REPO: llhzx2018/core-free-runner-private
+          LICENSED_INPUT_COMMIT: 066e4ae4464abcc5bff533b1bf94fcbd5cabf3e2
+          LICENSED_INPUT_PATH: test-inputs/s01-c02-polylang-pro/polylang-pro-3.8.2.zip
+          LICENSED_INPUT_BLOB: 991672def19dcf82aa8c2c5697c8a8d00d38c6e5
+          ASSET_SHA: e766c9c30b008195b4f84e7a3337e5db69ef2c8d43051305262c35aac8857ba7
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api "repos/$LICENSED_INPUT_REPO" --jq '.private')" = true
+          actual_blob="$(gh api "repos/$LICENSED_INPUT_REPO/git/trees/$LICENSED_INPUT_COMMIT?recursive=1" --jq ".tree[] | select(.path == \"$LICENSED_INPUT_PATH\") | .sha")"
+          test "$actual_blob" = "$LICENSED_INPUT_BLOB"
+          license_work="$RUNNER_TEMP/s01-final-license"
+          mkdir -p "$license_work"
+          gh api "repos/$LICENSED_INPUT_REPO/git/blobs/$LICENSED_INPUT_BLOB" --jq '.content' | base64 --decode > "$license_work/polylang-pro.zip"
+          test "$(sha256sum "$license_work/polylang-pro.zip" | awk '{print $1}')" = "$ASSET_SHA"
+          ln -s "$GITHUB_WORKSPACE/product" "$license_work/target"
+          ln -s "$GITHUB_WORKSPACE/pro-runner" "$license_work/runner"
+          cd "$license_work"
+          POLYLANG_PRO_ZIP_PATH="$license_work/polylang-pro.zip" PRODUCT_SHA="$TARGET_SHA" bash runner/lanes/s01-c02-polylang-archive-guard/integration.sh
+          cp proof/WORDPRESS.json "$GITHUB_WORKSPACE/proof/PRO_STAGING.json"
+          python3 - "$GITHUB_WORKSPACE/proof" <<'PY'
+          import json,pathlib,sys,os
+          p=pathlib.Path(sys.argv[1]);licensed=json.loads((p/'PRO_STAGING.json').read_text())
+          assert licensed['status']=='PASS' and licensed['polylang_pro_gate']=='PASS'
+          assert licensed['candidate_sha']==os.environ['TARGET_SHA']
+          assert licensed['production']=='NOT_EXECUTED'
+          result=json.loads((p/'RESULT.json').read_text())
+          assert result['result']=='PASS' and result['source_sha']==os.environ['TARGET_SHA']
+          result.update(licensed_pro='PASS',licensed_pro_version='3.8.2',owner_preview_runtime='POST_RELEASE_REQUIRED',owner_real_use='POST_PRODUCTION_REQUIRED')
+          (p/'RESULT.json').write_text(json.dumps(result,indent=2)+'\n')
+          print('FINAL_CANDIDATE_LICENSED_PRO_PASS')
+          PY
+      - name: Upload public-safe receipts only (no product ZIP or secret)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-1211102-candidate-receipts-${{ github.run_id }}
+          path: |
+            proof/stage.txt
+            proof/regression.txt
+            proof/PRO_STAGING.json
+            proof/candidate.json
+            proof/SHA256SUMS.txt
+            proof/formal-upgrade.txt
+            proof/RESULT.json
+            proof/native/candidate.json
+            proof/native/FINAL_EVIDENCE.json
+            proof/native/browser-e2e.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Cleanup private source and licensed input
+        if: always()
+        run: rm -rf product pro-runner "$RUNNER_TEMP/s01-final-license"
+
