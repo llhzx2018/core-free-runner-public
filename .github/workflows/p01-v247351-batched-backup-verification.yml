@@ -1,0 +1,91 @@
+name: P01 V247351 Bounded Backup Verification Native Gate (No Release)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-v247351-batched-backup-verification.yml']
+permissions:
+  contents: read
+jobs:
+  verify-bounded:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact product main candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: dad2712bfc1e0ab2d4204631b45cab63340af0c6
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Prepare PHP and SQLite
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Install disposable site with mock administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = dad2712bfc1e0ab2d4204631b45cab63340af0c6
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.47.351'
+          mkdir -p /tmp/p01-v247351-preview
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-v247351-preview/server.pid
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-preview-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-preview-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup CSRF not available'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Isolated Backup Proof' \
+            --data-urlencode 'admin_password=PreviewOnly-NotProduction!59' \
+            --data-urlencode 'admin_password_confirm=PreviewOnly-NotProduction!59' >/tmp/p01-preview-setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_PREVIEW_DISPOSABLE_INSTALL=PASS
+
+
+      - name: Checkout immutable V2.47.350 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: f992f2257d55bffc0854e25288135dbe8900aec3
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: stable
+          persist-credentials: false
+      - name: Exact branch syntax and bounded real SQLite test
+        shell: bash
+        env:
+          VF_ISOLATED_TEST_ONLY: '1'
+        run: |
+          set -Eeuo pipefail
+          php -l product/src/app/JobManager.php
+          php -l product/tests/unit/backup_verify_bounded_batch_native.php
+          php product/tests/unit/backup_verify_bounded_batch_native.php
+          echo P01_247351_NATIVE_BOUNDED_BACKUP_VERIFICATION=PASS
+      - name: Full canonical regression zero-debt against V2.47.350
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd product && bash tests/canonical_release_regression.sh . ../stable --require-zero-debt)
+          echo P01_247351_CANONICAL_NONPUBLISHING=PASS
+      - name: Verify exact source unchanged and no publication action
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C product diff --quiet
+          git -C product diff --cached --quiet
+          git -C stable diff --quiet
+          git -C stable diff --cached --quiet
+          echo P01_247351_EXACT_SOURCE_UNMODIFIED=PASS
+          echo P01_247351_TEST_ONLY_NONPUBLISHING=PASS
