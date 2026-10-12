@@ -6,12 +6,21 @@ on:
       - '.github/workflows/p01-v247349-interactive-owner-preview.yml'
 permissions:
   contents: read
+  pull-requests: write
+  actions: write
 jobs:
   preview-evidence:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 85
+    timeout-minutes: 60
     steps:
+      - name: Stop superseded temporary test tunnel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/38190410631/cancel" >/dev/null 2>&1 || true
+          echo 'P01_SUPERSEDED_PREVIEW_CANCEL_REQUESTED=PASS'
       - name: Checkout exact product main candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -145,6 +154,9 @@ jobs:
           python3 /tmp/p01-preview-browser.py
       - name: Start ephemeral password-protected HTTPS preview
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -Eeuo pipefail
           cat >/tmp/p01-preview-basic-proxy.py <<'PY'
@@ -237,26 +249,60 @@ jobs:
             -o /tmp/p01-preview-remote-response.html "$url/login.php"
           test -s /tmp/p01-preview-remote-response.html
           echo "P01_OWNER_PREVIEW_HTTPS_BASIC_AUTH=PASS"
-          echo "::notice title=V2.47.349 Temporary Preview URL::$url/data-safety.php"
-          echo "::notice title=Temporary Basic Auth user::preview"
-          echo "::notice title=Temporary synthetic-site password::$(cat /tmp/p01-v247349-preview/login-password)"
-          echo "P01_OWNER_PREVIEW_INTERACTIVE_URL=$url/data-safety.php"
-          echo "P01_OWNER_PREVIEW_BASIC_USER=preview"
-          echo "P01_OWNER_PREVIEW_PASSWORD=$(cat /tmp/p01-v247349-preview/login-password)"
+          # Encrypt the short-lived credentials to the current operator's one-off
+          # public key before recording anything in the PUBLIC Runner PR.
+          cat >/tmp/p01-preview-operator-public.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvGC+10Hp/PGv6UR7PuSr
+          r3ayt+8oSkPcP4ReMPxvo19LWRyn0+2bOIZTZN8Ed9098sV4qCoOHbABCZ9jnZ5Z
+          BPZF3hzNvy7eVU/BAq2G2MzqSq0/eqTBzX2HGsIp2REjPR/3d/kJbGjS+I2P5Jv7
+          c0umf19Cs77RtkLE6INoDF012Cce7P62Fic+5fdO8QAxgOVspQfPi+FktBGhWh1V
+          p4fLKQh9P0W1huMlVkoyXk2LKxzwSizO6u0IxTUFA2EtAzn+mq9wQgfwLPlKz7ym
+          J2O/g+04aD1E/F+acOf1BrnF26NGXabLkaveUBUlx90FJ9KBxVrnWqJuEcjiXYEj
+          NwIDAQAB
+          -----END PUBLIC KEY-----
+          PEM
+          ciphertext="$(printf '%s\n%s' "$url/data-safety.php" "$(cat /tmp/p01-v247349-preview/login-password)" \
+            | openssl pkeyutl -encrypt -pubin -inkey /tmp/p01-preview-operator-public.pem \
+              -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 | base64 -w0)"
+          comment_id="$(gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PREVIEW_PR_NUMBER/comments" \
+            -f body="P01_247349_TEMPORARY_PREVIEW_ENCRYPTED=$ciphertext (RSA-OAEP-SHA256). Synthetic data only. Runtime expires in 45 min." \
+            --jq '.id')"
+          echo "$comment_id" >/tmp/p01-v247349-preview/comment-id
+          echo "P01_OWNER_PREVIEW_ENCRYPTED_COMMENT_ID=$comment_id"
+          echo "P01_OWNER_PREVIEW_URL_AND_LOGIN_SHARED_PRIVATELY=READY"
       - name: Keep disposable preview live for Owner review
         shell: bash
-        timeout-minutes: 70
+        timeout-minutes: 50
         run: |
           set -Eeuo pipefail
           echo "P01_OWNER_PREVIEW_TEMPORARY_RUNTIME=ACTIVE"
-          echo "P01_OWNER_PREVIEW_EXPIRES_AFTER=65_MINUTES"
-          for n in $(seq 1 390); do
+          echo "P01_OWNER_PREVIEW_EXPIRES_AFTER=45_MINUTES"
+          for n in $(seq 1 270); do
             kill -0 "$(cat /tmp/p01-v247349-preview/server.pid)"
             kill -0 "$(cat /tmp/p01-v247349-preview/proxy.pid)"
             kill -0 "$(cat /tmp/p01-v247349-preview/tunnel.pid)"
             sleep 10
           done
           echo "P01_OWNER_PREVIEW_TEMPORARY_RUNTIME=EXPIRED"
+      - name: Redact temporary access after review window
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if test -s /tmp/p01-v247349-preview/comment-id; then
+            comment_id="$(cat /tmp/p01-v247349-preview/comment-id)"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+              -f body='P01 V2.47.349 temporary preview expired; credentials redacted. No Production data used.'
+          fi
+          for role in tunnel proxy server; do
+            f="/tmp/p01-v247349-preview/$role.pid"
+            if test -s "$f"; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done
+          echo 'P01_OWNER_PREVIEW_EXPIRED_AND_REDACTED=PASS'
       - name: Preserve only sanitized screenshot and status
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
