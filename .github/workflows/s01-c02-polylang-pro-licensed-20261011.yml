@@ -9,14 +9,20 @@ on:
 permissions:
   contents: read
 env:
-  PRODUCT_SHA: '429f53dbadef5c3cfead35422de95d954b23b613'
-  PRODUCT_VERSION: '1.21.1099'
+  PRODUCT_SHA: 'e1879a8813480ebb70e2d4bba54dceb9e621beb6'
+  PRODUCT_VERSION: '1.21.1100'
+  LICENSED_INPUT_REPO: 'llhzx2018/core-free-runner-private'
+  LICENSED_INPUT_COMMIT: '066e4ae4464abcc5bff533b1bf94fcbd5cabf3e2'
+  LICENSED_INPUT_PATH: 'test-inputs/s01-c02-polylang-pro/polylang-pro-3.8.2.zip'
+  LICENSED_INPUT_BLOB: '991672def19dcf82aa8c2c5697c8a8d00d38c6e5'
+  LICENSED_INPUT_SHA256: 'e766c9c30b008195b4f84e7a3337e5db69ef2c8d43051305262c35aac8857ba7'
 jobs:
   preflight:
     runs-on: ubuntu-24.04
     timeout-minutes: 4
     outputs:
       licensed_asset_ready: ${{ steps.license.outputs.ready }}
+      licensed_asset_source: ${{ steps.license.outputs.source }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -41,7 +47,16 @@ jobs:
             [[ "$ASSET_NAME" == *.zip && "$ASSET_NAME" != */* ]]
             [[ "$ASSET_SHA" =~ ^[a-fA-F0-9]{64}$ ]]
             echo 'ready=true' >> "$GITHUB_OUTPUT"
+            echo 'source=private_release' >> "$GITHUB_OUTPUT"
             echo 'S01_C02_PRO_GATE_LICENSED_ASSET_CONFIGURED'
+          elif [[ -n "$PRIVATE_TOKEN" ]]; then
+            # OWNER-uploaded test input stays in the existing PRIVATE Runner.
+            # No licensed bytes or credentials are stored in public Git/artifacts.
+            export GH_TOKEN="$PRIVATE_TOKEN"
+            test "$(gh api "repos/$LICENSED_INPUT_REPO" --jq '.private')" = true
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+            echo 'source=private_input' >> "$GITHUB_OUTPUT"
+            echo 'S01_C02_PRO_GATE_OWNER_PRIVATE_INPUT_CONFIGURED'
           else
             echo 'ready=false' >> "$GITHUB_OUTPUT"
             echo 'S01_C02_PRO_GATE_DEFERRED_LICENSED_ASSET_ABSENT'
@@ -49,12 +64,13 @@ jobs:
       - name: Store public-safe capability receipt
         env:
           READY: ${{ steps.license.outputs.ready }}
+          LICENSED_SOURCE: ${{ steps.license.outputs.source }}
         run: |
           mkdir -p proof
           python3 - <<'PY'
           import json,os,pathlib
           ready=os.environ.get('READY')=='true'
-          x={'scope':'S01-C02 licensed Polylang Pro isolated staging','status':'READY_TO_TEST' if ready else 'DEFERRED','reason':'WAITING_FOR_LICENSED_ASSET' if not ready else 'LICENSED_ASSET_CONFIGURED_NOT_YET_TESTED','production_mutated':False,'free_plugin_test_is_not_pro_proof':True,'candidate_sha':os.environ['PRODUCT_SHA'],'product_version':os.environ['PRODUCT_VERSION']}
+          x={'scope':'S01-C02 licensed Polylang Pro isolated staging','status':'READY_TO_TEST' if ready else 'DEFERRED','reason':'WAITING_FOR_LICENSED_ASSET' if not ready else 'LICENSED_ASSET_CONFIGURED_NOT_YET_TESTED','production_mutated':False,'free_plugin_test_is_not_pro_proof':True,'candidate_sha':os.environ['PRODUCT_SHA'],'product_version':os.environ['PRODUCT_VERSION'],'licensed_source':os.environ.get('LICENSED_SOURCE','NONE')}
           pathlib.Path('proof/PRO_GATE.json').write_text(json.dumps(x,indent=2)+'\n')
           print('S01_C02_PRO_GATE_RECEIPT',json.dumps(x))
           PY
@@ -97,39 +113,57 @@ jobs:
       - name: Retrieve owned licensed asset into disposable runner
         env:
           GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          LICENSED_ASSET_SOURCE: ${{ needs.preflight.outputs.licensed_asset_source }}
           ASSET_REPO: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_REPO }}
           ASSET_TAG: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_RELEASE_TAG }}
           ASSET_NAME: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_ASSET_NAME }}
           ASSET_SHA: ${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_SHA256 }}
         run: |
           set -Eeuo pipefail
-          [[ "$ASSET_REPO" == llhzx2018/* ]]
-          [[ "$ASSET_NAME" == *.zip && "$ASSET_NAME" != */* ]]
-          [[ "$ASSET_SHA" =~ ^[a-fA-F0-9]{64}$ ]]
-          # Licensed bytes must come from an owned PRIVATE repository.
-          # Print neither repository identity nor package contents.
-          test "$(gh api "repos/$ASSET_REPO" --jq '.private')" = true
           mkdir -p "$RUNNER_TEMP/s01-pro"
-          gh release download "$ASSET_TAG" -R "$ASSET_REPO" -p "$ASSET_NAME" -D "$RUNNER_TEMP/s01-pro"
-          PRO_ZIP_PATH="$RUNNER_TEMP/s01-pro/$ASSET_NAME"
-          export PRO_ZIP_PATH
+          PRO_ZIP_PATH="$RUNNER_TEMP/s01-pro/polylang-pro.zip"
+          if [[ "$LICENSED_ASSET_SOURCE" == private_input ]]; then
+            [[ "$LICENSED_INPUT_REPO" == llhzx2018/core-free-runner-private ]]
+            [[ "$LICENSED_INPUT_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+            [[ "$LICENSED_INPUT_BLOB" =~ ^[a-f0-9]{40}$ ]]
+            test "$(gh api "repos/$LICENSED_INPUT_REPO" --jq '.private')" = true
+            actual_blob="$(gh api "repos/$LICENSED_INPUT_REPO/git/trees/$LICENSED_INPUT_COMMIT?recursive=1" --jq ".tree[] | select(.path == \"$LICENSED_INPUT_PATH\") | .sha")"
+            test "$actual_blob" = "$LICENSED_INPUT_BLOB"
+            gh api "repos/$LICENSED_INPUT_REPO/git/blobs/$LICENSED_INPUT_BLOB" --jq '.content' | base64 --decode > "$PRO_ZIP_PATH"
+            ASSET_SHA="$LICENSED_INPUT_SHA256"
+          elif [[ "$LICENSED_ASSET_SOURCE" == private_release ]]; then
+            [[ "$ASSET_REPO" == llhzx2018/* ]]
+            [[ "$ASSET_NAME" == *.zip && "$ASSET_NAME" != */* ]]
+            test "$(gh api "repos/$ASSET_REPO" --jq '.private')" = true
+            gh release download "$ASSET_TAG" -R "$ASSET_REPO" -p "$ASSET_NAME" -D "$RUNNER_TEMP/s01-pro"
+            mv "$RUNNER_TEMP/s01-pro/$ASSET_NAME" "$PRO_ZIP_PATH"
+          else
+            echo 'S01_C02_PRO_LICENSED_SOURCE_NOT_CONFIGURED'
+            exit 1
+          fi
+          [[ "$ASSET_SHA" =~ ^[a-fA-F0-9]{64}$ ]]
+          export PRO_ZIP_PATH ASSET_SHA
           python3 - <<'PY'
-          import hashlib,os,zipfile
+          import hashlib,os,zipfile,stat,re
           path=os.environ['PRO_ZIP_PATH']
           actual=hashlib.file_digest(open(path,'rb'),'sha256').hexdigest()
           if actual.lower()!=os.environ['ASSET_SHA'].lower(): raise SystemExit('Licensed asset checksum mismatch')
           with zipfile.ZipFile(path) as z:
             names=z.namelist()
-            if not names or not any(n=='polylang-pro/polylang.php' for n in names):
+            if not names or 'polylang-pro/polylang.php' not in names:
               raise SystemExit('Expected original licensed polylang-pro plugin archive')
-            for n in names:
-              if n.startswith('/') or '..' in n.split('/'):
-                raise SystemExit('Unsafe ZIP traversal detected')
+            for item in z.infolist():
+              n=item.filename
+              if not n.startswith('polylang-pro/') or n.startswith('/') or '..' in n.split('/') or chr(92) in n or stat.S_ISLNK(item.external_attr>>16):
+                raise SystemExit('Unsafe ZIP entry detected')
+            header=z.read('polylang-pro/polylang.php').decode('utf-8')
+            version=re.search(r'^\s*\*?\s*Version:\s*(\S+)',header,re.M)
+            if not version or version.group(1)!='3.8.2': raise SystemExit('Expected Polylang Pro 3.8.2 package')
           print('S01_C02_PRO_OWNED_ARCHIVE_VALIDATED')
           PY
       - name: Execute real licensed Pro shared slug and rollback tests
         env:
-          POLYLANG_PRO_ZIP_PATH: ${{ runner.temp }}/s01-pro/${{ secrets.VF_S01_POLYLANG_PRO_LICENSED_ASSET_NAME }}
+          POLYLANG_PRO_ZIP_PATH: ${{ runner.temp }}/s01-pro/polylang-pro.zip
         run: |
           set -Eeuo pipefail
           test "$(git -C target rev-parse HEAD)" = "$PRODUCT_SHA"
