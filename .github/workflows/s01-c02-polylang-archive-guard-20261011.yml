@@ -66,6 +66,40 @@ jobs:
           pathlib.Path('proof/BUILD_PREPARATION.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print('S01_C02_BUILD_PREPARATION_PASS',json.dumps(receipt))
           PY
+      - name: Retrieve immutable published baseline and prepare transient install contract
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download v1.21.1096 -R llhzx2018/vf-tools-ops -p vf-tools-ops_V1.21.1096.zip -D "$RUNNER_TEMP/s01-build" >/dev/null
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,zipfile
+          folder=pathlib.Path(os.environ['RUNNER_TEMP'])/'s01-build'
+          baseline=folder/'vf-tools-ops_V1.21.1096.zip'
+          if hashlib.sha256(baseline.read_bytes()).hexdigest()!='cc89270652c29afce736f609c4097fad8c9050559bd9cd570f344f3e2d0f3fa8':
+              raise SystemExit('Published baseline checksum mismatch')
+          contract={}
+          for label,path in [('baseline',baseline),('candidate',folder/'first.zip')]:
+              files={}
+              with zipfile.ZipFile(path) as z:
+                  for name in z.namelist():
+                      if name.endswith('/'): continue
+                      if not name.startswith('vf-ops/') or '..' in name.split('/'):
+                          raise SystemExit('Unexpected package path')
+                      rel=name[len('vf-ops/'):]
+                      files[rel]=hashlib.sha256(z.read(name)).hexdigest()
+              h=hashlib.sha256()
+              for rel,sha in sorted(files.items()):
+                  h.update((rel+'\0'+sha+'\n').encode())
+              contract[label]={'files':files,'runtime_fingerprint':h.hexdigest()}
+          build=json.loads((folder/'first.json').read_text())
+          if contract['baseline']['runtime_fingerprint']!='b8a107b961961d7aeee2da932f534345cb608ff65b3d98ae7e6f1968166d35db':
+              raise SystemExit('Published baseline runtime fingerprint mismatch')
+          if contract['candidate']['runtime_fingerprint']!=build['runtime_fingerprint']:
+              raise SystemExit('Candidate installation contract differs from built exact source')
+          (folder/'install-contract.json').write_text(json.dumps(contract))
+          print('S01_C02_TRANSIENT_INSTALL_CONTRACT_READY')
+          PY
       - name: Checkout public integration lane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -79,6 +113,12 @@ jobs:
           php -l runner/lanes/s01-c02-polylang-archive-guard/rank-math-fixture.php
           bash runner/lanes/s01-c02-polylang-archive-guard/integration.sh
           test "$(grep -c 'S01_C02_HTTP_PROBE_RACE_BLOCK_PASS' /tmp/s01-rankmath.log)" = 3
+      - name: Execute full installed package and actual endpoint security tests
+        run: |
+          set -Eeuo pipefail
+          php -l runner/.github/testing/s01-c02-polylang-package-install.php
+          bash -n runner/.github/testing/s01-c02-polylang-package-install.sh
+          bash runner/.github/testing/s01-c02-polylang-package-install.sh
       - name: Upload public-safe receipt only
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -88,6 +128,7 @@ jobs:
             proof/FINAL.json
             proof/WORDPRESS.json
             proof/BUILD_PREPARATION.json
+            proof/INSTALL_REPLACE_ROLLBACK.json
           if-no-files-found: error
           retention-days: 7
       - name: Cleanup transient private source
