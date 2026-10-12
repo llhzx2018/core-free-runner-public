@@ -1,0 +1,148 @@
+name: P01 V247349 Isolated Owner Preview Evidence (No Release)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247349-owner-preview-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  preview-evidence:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact product main candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Prepare PHP and browser
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Install disposable site with mock administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = c7acc9757ae7eb29272ca9454b3cdac2fe35746a
+          test "$(tr -d '\r\n' < product/VERSION)" = '2.47.349'
+          mkdir -p /tmp/p01-v247349-preview
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-v247349-preview/server.pid
+          for n in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-preview-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-preview-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m,'setup CSRF not available'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Start Isolated Preview' \
+            --data-urlencode 'admin_password=PreviewOnly-NotProduction!59' \
+            --data-urlencode 'admin_password_confirm=PreviewOnly-NotProduction!59' >/tmp/p01-preview-setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_PREVIEW_DISPOSABLE_INSTALL=PASS
+      - name: Create four entirely fictional backup states
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-preview-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getenv('GITHUB_WORKSPACE').'/product/src/app/bootstrap.php';
+          $db=vf_db();
+          vf_prepare_private_dirs();
+          $dir=VF_BACKUP_DIR;
+          $safe=$dir.'/fixture-present-protected.sqlite';
+          $db->exec("VACUUM INTO '".str_replace("'","''",$safe)."'");
+          $alias=$dir.'/fixture-linked-protected.sqlite';
+          if(!symlink($safe,$alias))throw new RuntimeException('Fixture symlink failed');
+          $unprotected=$dir.'/fixture-present-unprotected.sqlite';
+          if(!copy($safe,$unprotected))throw new RuntimeException('Fixture copy failed');
+          $now=gmdate('c');
+          $add=$db->prepare('INSERT INTO backup_records(backup_key,file_name,reason,backup_type,source_version,byte_size,sha256,integrity_status,foreign_key_errors,validation_status,validation_error,object_summary,is_protected,created_at,verified_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+          $fixtures=[
+            ['fixture-present-unprotected','fixture-present-unprotected.sqlite',0,$unprotected],
+            ['fixture-present-protected','fixture-present-protected.sqlite',1,$safe],
+            ['fixture-linked-protected','fixture-linked-protected.sqlite',1,$alias],
+            ['fixture-missing-protected','fixture-missing-protected.sqlite',1,null],
+          ];
+          foreach($fixtures as [$key,$file,$protected,$path]){
+            $size=$path?filesize($path):8192;
+            $sha=$path?hash_file('sha256',$path):str_repeat('1',64);
+            $add->execute([$key,$file,'ISOLATED FAKE DATA','snapshot','2.47.349',
+              $size,$sha,'ok',0,'valid','','{"categories":1,"links":1}',
+              $protected,$now,$now]);
+          }
+          echo "P01_PREVIEW_ONLY_SYNTHETIC_BACKUPS=PASS\n";
+          PHP
+          php /tmp/p01-preview-seed.php
+          echo P01_PREVIEW_NO_PRODUCTION_ASSETS=PASS
+      - name: Install isolated browser harness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --quiet --break-system-packages 'playwright==1.55.0'
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1; then
+            python3 -m playwright install chromium
+          fi
+      - name: Render current product page and prove safe actions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-preview-browser.py <<'PY'
+          import json, pathlib, shutil
+          from playwright.sync_api import sync_playwright
+          base='http://127.0.0.1:18541/'
+          out=pathlib.Path('/tmp/p01-v247349-preview')
+          out.mkdir(exist_ok=True)
+          with sync_playwright() as pw:
+              browser_path=shutil.which('google-chrome') or shutil.which('google-chrome-stable')
+              browser=pw.chromium.launch(executable_path=browser_path,headless=True,args=['--no-sandbox'])
+              context=browser.new_context(viewport={'width':1440,'height':1040},device_scale_factor=1)
+              response=context.request.post(base+'api.php?action=login',data={'password':'PreviewOnly-NotProduction!59'})
+              assert response.ok and response.json().get('ok'), 'Disposable preview admin login failed'
+              page=context.new_page()
+              page.goto(base+'data-safety.php',wait_until='domcontentloaded')
+              page.locator('[data-protect="fixture-missing-protected"]').wait_for(timeout=15000)
+              page.locator('details.vf-data-row-more').first.locator('summary').click()
+              states={}
+              for key in ['fixture-missing-protected','fixture-linked-protected','fixture-present-protected','fixture-present-unprotected']:
+                  button=page.locator('[data-protect="'+key+'"]')
+                  states[key]={'disabled':button.is_disabled(),'text':button.inner_text()}
+              assert states['fixture-missing-protected']['disabled'],states
+              assert states['fixture-linked-protected']['disabled'],states
+              assert not states['fixture-present-protected']['disabled'],states
+              assert not states['fixture-present-unprotected']['disabled'],states
+              page.screenshot(path=str(out/'V247349_BACKUP_PROTECTION_ISOLATED_PREVIEW.png'),full_page=True)
+              (out/'PREVIEW_STATUS.json').write_text(json.dumps({
+                  'product_version':'2.47.349','source_sha':'c7acc9757ae7eb29272ca9454b3cdac2fe35746a',
+                  'environment':'isolated runner disposable SQLite with synthetic records only',
+                  'safe_actions':states,'owner_preview_runtime':'NOT_PROVEN',
+                  'owner_real_use':'NOT_PROVEN','production':'NOT_TOUCHED'
+              },indent=2,ensure_ascii=False),encoding='utf-8')
+              browser.close()
+          print('P01_247349_REAL_BROWSER_ISOLATED_PREVIEW=PASS')
+          PY
+          python3 /tmp/p01-preview-browser.py
+      - name: Preserve only sanitized screenshot and status
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: P01-V247349-Isolated-Preview-Evidence
+          path: |
+            /tmp/p01-v247349-preview/V247349_BACKUP_PROTECTION_ISOLATED_PREVIEW.png
+            /tmp/p01-v247349-preview/PREVIEW_STATUS.json
+          if-no-files-found: error
+          retention-days: 7
