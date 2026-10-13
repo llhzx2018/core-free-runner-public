@@ -1,0 +1,282 @@
+name: P01 V2.47.357 Owner Ready-Link Preview Retry
+# Draft creation is preparation only. The Owner authorized this precise preview,
+# so only the deliberate Draft -> Ready transition launches the temporary tunnel.
+on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247357-owner-singleuse-preview.yml'
+      - '.github/scripts/p01_v247357_preview_proxy.py'
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  owner-preview:
+    if: github.event.action == 'ready_for_review' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'preview/p01-v247357-owner-retry-20261013'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Checkout exact product without credentials persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 903af33de73fe7a9211b68e785e65836e2566918
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Checkout reviewed preview scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner-preview
+          persist-credentials: false
+      - name: Install disposable PHP/SQLite environment
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Exact source and isolated script gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 903af33de73fe7a9211b68e785e65836e2566918
+          test "$(tr -d '\r\n ' < product/VERSION)" = 2.47.357
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = 2.47.357
+          grep -Fq "define('VF_VERSION', '2.47.357');" product/src/app/bootstrap.php
+          python3 -m py_compile runner-preview/.github/scripts/p01_v247357_preview_proxy.py
+          node --check product/src/assets/browser-helper.js
+          echo P01_247357_PREVIEW_EXACT_SOURCE=PASS
+      - name: Create fresh isolated install with synthetic administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v247357-preview
+          chmod 700 /tmp/p01-v247357-preview
+          python3 - <<'PY'
+          import secrets,pathlib
+          p=pathlib.Path('/tmp/p01-v247357-preview/admin-password')
+          p.write_text('DisposableOnly!'+secrets.token_urlsafe(26),encoding='utf-8')
+          p.chmod(0o600)
+          PY
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-v247357-preview/php.log 2>&1 &
+          echo $! >/tmp/p01-v247357-preview/server.pid
+          for n in $(seq 1 35); do
+            if curl -fsS --max-time 3 -c /tmp/p01-v247357-preview/admin-cookies.txt -b /tmp/p01-v247357-preview/admin-cookies.txt 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-v247357-preview/setup.html; then break; fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import re,pathlib
+          s=pathlib.Path('/tmp/p01-v247357-preview/setup.html').read_text(encoding='utf-8')
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m, 'Disposal setup CSRF unavailable'
+          pathlib.Path('/tmp/p01-v247357-preview/setup-csrf').write_text(m.group(1))
+          PY
+          curl -fsS --max-time 20 \
+            -c /tmp/p01-v247357-preview/admin-cookies.txt -b /tmp/p01-v247357-preview/admin-cookies.txt \
+            -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$(cat /tmp/p01-v247357-preview/setup-csrf)" \
+            --data-urlencode 'site_title=VF Start V2.47.357 SIMULATED PREVIEW' \
+            --data-urlencode "admin_password=$(cat /tmp/p01-v247357-preview/admin-password)" \
+            --data-urlencode "admin_password_confirm=$(cat /tmp/p01-v247357-preview/admin-password)" \
+            -o /tmp/p01-v247357-preview/setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          python3 - <<'PY'
+          import json,pathlib
+          password=pathlib.Path('/tmp/p01-v247357-preview/admin-password').read_text()
+          pathlib.Path('/tmp/p01-v247357-preview/login.json').write_text(json.dumps({'password':password}))
+          PY
+          chmod 600 /tmp/p01-v247357-preview/login.json
+          curl -fsS --max-time 20 \
+            -H 'Content-Type: application/json' \
+            -b /tmp/p01-v247357-preview/admin-cookies.txt -c /tmp/p01-v247357-preview/admin-cookies.txt \
+            --data-binary @/tmp/p01-v247357-preview/login.json \
+            'http://127.0.0.1:18541/api.php?action=login' \
+            -o /tmp/p01-v247357-preview/login-result.json
+          python3 - <<'PY'
+          import json,pathlib
+          result=json.loads(pathlib.Path('/tmp/p01-v247357-preview/login-result.json').read_text())
+          assert result.get('ok') is True, 'Synthetic admin login did not succeed'
+          cookie=pathlib.Path('/tmp/p01-v247357-preview/admin-cookies.txt').read_text()
+          assert 'vfnav_session' in cookie, 'Synthetic PHP session cookie absent'
+          PY
+          curl -fsS --max-time 10 -b /tmp/p01-v247357-preview/admin-cookies.txt \
+            'http://127.0.0.1:18541/browser-helper.php' \
+            -o /tmp/p01-v247357-preview/browser-helper.html
+          grep -Fq '浏览器助手' /tmp/p01-v247357-preview/browser-helper.html
+          echo P01_247357_DISPOSABLE_ADMIN_SQLITE=PASS
+          echo P01_247357_NO_PRODUCTION_OR_USER_TOKENS=PASS
+      - name: Run exact-source real-browser UI regression on mock install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --quiet --break-system-packages 'playwright==1.55.0'
+          python3 -m playwright install --with-deps chromium >/dev/null
+          cat >/tmp/p01-v247357-preview/verify-ui.py <<'PY'
+          import asyncio,json,pathlib
+          from playwright.async_api import async_playwright
+          home=pathlib.Path('/tmp/p01-v247357-preview')
+          cookies={}
+          for line in (home/'admin-cookies.txt').read_text().splitlines():
+              if not line or (line.startswith('#') and not line.startswith('#HttpOnly_')):continue
+              cols=line.replace('#HttpOnly_','',1).split('\t')
+              if len(cols)>=7:cookies[cols[5]]=cols[6]
+          assert cookies.get('vfnav_session'), 'No synthetic PHP login cookie'
+          async def main():
+              async with async_playwright() as pw:
+                  browser=await pw.chromium.launch(headless=True,args=['--no-sandbox'])
+                  ctx=await browser.new_context(viewport={'width':1350,'height':980},device_scale_factor=1)
+                  await ctx.add_cookies([{'name':'vfnav_session','value':cookies['vfnav_session'],'url':'http://127.0.0.1:18541'}])
+                  page=await ctx.new_page()
+                  await page.goto('http://127.0.0.1:18541/browser-helper.php',wait_until='domcontentloaded')
+                  await page.locator('#generateHelperToken').wait_for()
+                  assert '浏览器助手' in await page.locator('body').inner_text()
+                  await page.screenshot(path=str(home/'V247357_BROWSER_HELPER_SANITIZED.png'),full_page=True)
+                  await page.evaluate("""()=>{
+                    window.__fakeCopied=[];
+                    window.confirm=()=>true;
+                    Object.defineProperty(navigator,'clipboard',{configurable:true,value:{
+                      writeText:async v=>{window.__fakeCopied.push(v);}
+                    }});
+                  }""")
+                  await page.locator('#generateHelperToken').click()
+                  await page.locator('#helperTokenDialog').wait_for(state='visible',timeout=12000)
+                  assert len(await page.locator('#newHelperToken').input_value())>20, 'Mock modal failed to generate token'
+                  await page.locator('[data-copy-token]').click()
+                  assert not await page.locator('[data-token-done]').is_disabled()
+                  await page.keyboard.press('Escape')
+                  assert not await page.locator('#helperTokenDialog').evaluate('(d)=>d.open')
+                  assert await page.locator('#newHelperToken').input_value()=='', 'One-time token survived Escape'
+                  assert await page.locator('[data-token-done]').is_disabled()
+                  print('P01_247357_DISPOSABLE_SITE_REAL_CHROMIUM_ESCAPE=PASS')
+                  await ctx.close()
+                  await browser.close()
+          asyncio.run(main())
+          PY
+          python3 /tmp/p01-v247357-preview/verify-ui.py
+          echo P01_247357_SCREENSHOT_TOKEN_FREE=PASS
+      - name: Start password-hash-only restricted preview proxy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          nohup python3 runner-preview/.github/scripts/p01_v247357_preview_proxy.py \
+            >/tmp/p01-v247357-preview/proxy.log 2>&1 &
+          echo $! >/tmp/p01-v247357-preview/proxy.pid
+          for n in $(seq 1 35); do
+            code=$(curl --max-time 3 -s -o /dev/null -w '%{http_code}' \
+              http://127.0.0.1:18542/browser-helper.php || true)
+            [[ "$code" == "401" ]] && break
+            sleep 1
+          done
+          test "$code" = "401"
+          for deny in '/app/bootstrap.php' '/setup.php' '/login.php' '/.vfnav-data/' '/api.php?action=import_data' '/assets/../app/bootstrap.php'; do
+            code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:18542$deny")
+            test "$code" = "401"
+          done
+          echo P01_247357_PROXY_REQUIRES_AUTH_AND_DENIES_PRIVATE_ROUTING=PASS
+      - name: Assert repaired canonical asset routing before exposing preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import importlib.util,pathlib
+          p=pathlib.Path("runner-preview/.github/scripts/p01_v247357_preview_proxy.py")
+          spec=importlib.util.spec_from_file_location("vf_p01_isolated_proxy",str(p))
+          module=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          h=module.PreviewProxy.__new__(module.PreviewProxy)
+          for target in ("/asset.php?file=admin.css&v=2.47.357",
+                         "/asset.php?file=browser-helper.js&v=2.47.357",
+                         "/asset.php?file=admin-shell.css&v=2.47.357"):
+              h.path=target;h.command="GET"
+              assert h.safe_target()==target, "canonical CSS or JS rejected"
+          for target in ("/asset.php?file=admin.css&v=2.47.356",
+                         "/asset.php?file=../app/bootstrap.php&v=2.47.357",
+                         "/asset.php?file=admin.css&v=2.47.357&extra=x",
+                         "/setup.php"):
+              h.path=target;h.command="GET"
+              assert h.safe_target() is None, "unsafe preview route unexpectedly permitted"
+          print("P01_247357_CANONICAL_ASSET_PROXY_POLICY=PASS")
+          PY
+      - name: Establish Owner-authorized authenticated HTTPS preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error --location --max-time 90 \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            --output /tmp/p01-v247357-preview/cloudflared
+          chmod 700 /tmp/p01-v247357-preview/cloudflared
+          nohup /tmp/p01-v247357-preview/cloudflared tunnel \
+            --url http://127.0.0.1:18542 --no-autoupdate \
+            >/tmp/p01-v247357-preview/tunnel.log 2>&1 &
+          echo $! >/tmp/p01-v247357-preview/tunnel.pid
+          URL=''
+          for n in $(seq 1 90); do
+            URL=$(grep -oE 'https://[a-z0-9-]+[.]trycloudflare[.]com' \
+              /tmp/p01-v247357-preview/tunnel.log | head -1 || true)
+            [[ -n "$URL" ]] && break
+            sleep 2
+          done
+          test -n "$URL"
+          printf '%s' "$URL" >/tmp/p01-v247357-preview/preview-url
+          for n in $(seq 1 40); do
+            CODE=$(curl -s --max-time 15 -o /dev/null -w '%{http_code}' "$URL/browser-helper.php" || true)
+            [[ "$CODE" == "401" ]] && break
+            sleep 2
+          done
+          test "$CODE" = "401"
+          echo 'P01_247357_ISOLATED_HTTPS_BASIC_AUTH=PASS'
+          echo "P01_247357_OWNER_PREVIEW_URL=$URL/browser-helper.php"
+          echo 'P01_247357_PREVIEW_LOGIN_USERNAME=preview'
+          echo 'P01_247357_PREVIEW_PASSWORD=DELIVERED_IN_OWNER_PRIVATE_CHAT_NOT_GITHUB'
+          echo 'P01_247357_PREVIEW_RUNTIME_LIMIT=75_MINUTES'
+          echo 'P01_247357_OWNER_PREVIEW_RUNTIME=PENDING_OWNER'
+          echo 'P01_247357_OWNER_REAL_USE=PENDING_OWNER'
+          echo 'P01_247357_PRODUCTION=UNTOUCHED'
+      - name: Publish verified preview entry to PR for immediate Owner delivery
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          URL="$(cat /tmp/p01-v247357-preview/preview-url)"
+          test -n "$URL"
+          MESSAGE="$(printf 'P01 V2.47.357 Owner preview READY.\n\nURL: %s/browser-helper.php\nUser: preview\nPassword: delivered only in Owner ChatGPT conversation (never in GitHub).\n\nExpires around 75 minutes after this comment. This is disposable synthetic data, never Production. Machine PASS != Owner PASS.\n' "$URL")"
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/${{ github.event.pull_request.number }}/comments" \
+            -f body="$MESSAGE" | jq -e '.html_url' >/dev/null
+          echo P01_247357_OWNER_PREVIEW_ENTRY_POSTED_TO_PR=PASS
+      - name: Keep disposable preview active while Owner reviews
+        shell: bash
+        timeout-minutes: 80
+        run: |
+          set -Eeuo pipefail
+          for n in $(seq 1 450); do
+            for role in server proxy tunnel; do
+              kill -0 "$(cat "/tmp/p01-v247357-preview/$role.pid")"
+            done
+            sleep 10
+          done
+          echo P01_247357_PREVIEW_REVIEW_WINDOW_EXPIRED=PASS
+      - name: Kill temporary servers, tunnel and erase credentials
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for role in tunnel proxy server; do
+            f="/tmp/p01-v247357-preview/$role.pid"
+            if test -f "$f"; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done
+          rm -f /tmp/p01-v247357-preview/admin-password \
+            /tmp/p01-v247357-preview/admin-cookies.txt \
+            /tmp/p01-v247357-preview/login.json \
+            /tmp/p01-v247357-preview/login-result.json \
+            /tmp/p01-v247357-preview/setup-csrf
+          echo P01_247357_PREVIEW_STOPPED_AND_AUTH_ERASED=PASS
+      - name: Save sanitized nonsecret preview screenshot
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: P01-V247357-Isolated-Owner-Preview-Sanitized
+          path: /tmp/p01-v247357-preview/V247357_BROWSER_HELPER_SANITIZED.png
+          if-no-files-found: warn
+          retention-days: 2
