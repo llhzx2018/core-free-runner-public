@@ -1,0 +1,122 @@
+name: S01 Three Component WP Real DB Readback
+on:
+  push:
+    branches: [task/s01-three-component-settings-consistency-20261013]
+    paths: [.github/workflows/s01-three-component-real-wp-readback.yml]
+permissions:
+  contents: read
+jobs:
+  s01-real-readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: s01_three_component
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+        ports: [3306:3306]
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 7ab8bbbf22fedc149a024f0c1d5ea3290c4dd8de
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 0bbb9b0fcc05e7d912de15fe5edb8e7dccd12181
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - name: Provision disposable WordPress 7.1.3 with three components
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3u8 rev-parse HEAD)" = 7ab8bbbf22fedc149a024f0c1d5ea3290c4dd8de
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl >/dev/null
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          wpdir="$RUNNER_TEMP/s01-three-wp"
+          mkdir -p "$wpdir"
+          wp core download --path="$wpdir" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$wpdir" --dbname=s01_three_component --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wpdir" --url=http://127.0.0.1:18873 --title='S01 Synthetic Integration' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          cp -a m3u8/src "$wpdir/wp-content/plugins/vf-tool-m3u8"
+          mkdir -p "$wpdir/wp-content/plugins/vf-ops"
+          cp -a ops/. "$wpdir/wp-content/plugins/vf-ops/"
+          cp -a theme/src "$wpdir/wp-content/themes/vf-tools-theme"
+          wp plugin activate vf-tool-m3u8 --path="$wpdir" --allow-root
+          wp plugin activate vf-ops --path="$wpdir" --allow-root
+          wp theme activate vf-tools-theme --path="$wpdir" --allow-root
+          echo "WP_DIR=$wpdir" >> "$GITHUB_ENV"
+          echo S01_THREE_COMPONENT_WP_ACTIVATION_PASS
+      - name: Provider authoritative DB readback to Ops facade and Theme host
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/s01-readback.php" <<'PHP'
+          <?php
+          function ensure(bool $ok,string $msg):void {
+             if(!$ok){fwrite(STDERR,"FAIL ".$msg."\n");exit(1);}
+             echo "PASS ".$msg."\n";
+          }
+          require_once WP_PLUGIN_DIR.'/vf-ops/includes/s01/tool-workbench.php';
+          require_once WP_PLUGIN_DIR.'/vf-tool-m3u8/includes/download-task-settings.php';
+          require_once WP_PLUGIN_DIR.'/vf-tool-m3u8/includes/settings-frontend.php';
+          require_once get_template_directory().'/inc/services/provider-widget-host-service.php';
+          ensure(function_exists('m3u8_settings_readback'),'Provider canonical settings readback available');
+          ensure(function_exists('vf_ops_s01_m3u8_daily_settings_v3'),'Ops tool workbench settings view available');
+          ensure(function_exists('vf_tool_m3u8_operational_profile'),'Provider operational presentation available');
+          ensure(function_exists('vf_tools_theme_widget_host_api_context'),'Theme widget host contract available');
+          $rb=m3u8_settings_readback();
+          ensure(is_array($rb['data']['engineSettings']??null),'Provider canonical engine settings stored in real WordPress');
+          $ops=vf_ops_s01_m3u8_daily_settings_v3();
+          ensure(!empty($ops['available']),'Ops reads active Provider settings');
+          ensure($ops['revision']===(int)$rb['revision'],'Ops shows exact Provider revision');
+          foreach(['downloader_auto_part_enabled','downloader_part_size_mb','downloader_retry_count','downloader_wake_lock_enabled','downloader_filename_pattern','downloader_allow_user_override'] as $key) {
+              ensure(array_key_exists($key,$ops['values']),'Ops facade displays '.$key);
+          }
+          $baseline=vf_tool_m3u8_operational_profile('downloader','en',$rb['data']);
+          $preview=$rb['data'];
+          $preview['engineSettings']=array_merge((array)$preview['engineSettings'],[
+              'downloader_auto_part_enabled'=>false,
+              'downloader_part_size_mb'=>'512',
+              'downloader_retry_count'=>4,
+              'downloader_wake_lock_enabled'=>false,
+              'downloader_filename_pattern'=>'{quality}-{part}',
+              'downloader_allow_user_override'=>false
+          ]);
+          $projected=vf_tool_m3u8_operational_profile('downloader','en',$preview);
+          $task=$projected['taskConfig'];
+          ensure($task['download']['retries']===4,'real WP preview uses same revision retry');
+          ensure($task['record']['partSizeMb']===512,'real WP preview uses same revision part size');
+          ensure($task['record']['autoPartEnabled']===false,'real WP preview auto-part disabled');
+          ensure($task['record']['wakeLockEnabled']===false,'real WP preview wake-lock disabled');
+          ensure($task['filenamePattern']==='{quality}-{part}','real WP preview filename displayed correctly');
+          ensure($task['allowUserOverride']===false,'real WP preview override policy enforced');
+          ensure($baseline['taskConfigHash']!==$projected['taskConfigHash'],'real WP preview hash changes with task settings');
+          $after=m3u8_settings_readback();
+          ensure($after['revision']===$rb['revision'],'preview makes no canonical database write');
+          $host=vf_tools_theme_widget_host_api_context(['pageUid'=>'synthetic-s01-page'],['widgetKey'=>'m3u8-downloader']);
+          ensure($host['componentId']==='S01-C01'&&$host['pageShellOwnership']===false,'Theme owns rendering, never Ops shell');
+          ensure($host['adminCredentialAccess']===false,'Theme runtime never exposes admin credentials');
+          echo "S01_THREE_COMPONENT_REAL_WORDPRESS_READBACK_PASS\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/s01-readback.php" --path="$WP_DIR" --allow-root
+      - name: Cleanup isolated WordPress and private checkouts
+        if: always()
+        run: rm -rf m3u8 ops theme "$RUNNER_TEMP/s01-three-wp" "$RUNNER_TEMP/s01-readback.php"
