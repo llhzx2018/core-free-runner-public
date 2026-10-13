@@ -1,0 +1,113 @@
+name: S01 Ops 1.21.1111 exact package and rollback gate
+on:
+  push:
+    branches: [task/s01-ops1111-publish-20261013]
+    paths: [.github/workflows/s01-c02-1211111-exact-package-gate.yml]
+permissions:
+  contents: read
+jobs:
+  ops-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: s01_ops1110
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+        ports: [3306:3306]
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 63dfb6ca94668dea3098b0a51fb84cb83b7a6750
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Exact source regression and no protected PR content
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          test "$(git -C candidate rev-parse HEAD)" = 63dfb6ca94668dea3098b0a51fb84cb83b7a6750
+          test "$(cat candidate/VERSION)" = 1.21.1111
+          grep -q 'Version: 1.21.1111' candidate/vf-ops.php
+          grep -q 'CONTENT_SCAN_SCOPE_EXCEEDED' candidate/includes/content-workflow/scanner.php
+          grep -q 'CONTENT_MEDIA_SCOPE_EXCEEDED' candidate/includes/content-workflow/scanner.php
+          grep -q 'reconcile_domain_verdict' candidate/includes/acceptance-o11/acceptance-overview-product.php
+          grep -q 'currentCheckRecord' candidate/includes/publish-o10/publish-zip-product.php
+          grep -q 'A saved in-progress receipt is only a displayable fact' candidate/includes/plugins-governance/dependency-scan-batches-v1211086.php
+          grep -q 'An omitted or invalid optimistic-lock value' candidate/includes/s01/tool-workbench.php
+          php -l candidate/vf-ops.php
+          php -l candidate/includes/content-workflow/scanner.php
+          php -l candidate/includes/plugins-governance/dependency-scan-batches-v1211086.php
+          php -l candidate/includes/acceptance-o11/acceptance-overview-product.php
+          php -l candidate/includes/publish-o10/publish-zip-product.php
+          php -l candidate/includes/s01/tool-workbench.php
+          php candidate/tests/s01-c02-content-scan-coverage-limit-unit.php
+          php candidate/tests/s01-c02-1211086-dependency-scan-batches.php
+          php candidate/tests/s01-c02-quality-verdict-count-consistency-unit.php
+          php candidate/tests/s01-c02-publish-current-job-evidence-unit.php
+          echo S01_OPS_1111_FOUR_TRUTH_FIXES_PLUS_REVISION_GUARD_PASS
+      - name: Exact canonical ZIP twice and readback digest
+        run: |
+          set -Eeuo pipefail
+          python3 candidate/.github/release/build-ops-package.py --source candidate --output proof/vf-tools-ops_V1.21.1111.zip > proof/candidate.json
+          python3 candidate/.github/release/build-ops-package.py --source candidate --output proof/rebuild.zip > proof/rebuild.json
+          cmp proof/vf-tools-ops_V1.21.1111.zip proof/rebuild.zip
+          python3 - <<'PY'
+          import hashlib,json,zipfile,pathlib
+          p=pathlib.Path('proof/vf-tools-ops_V1.21.1111.zip')
+          j=json.loads(pathlib.Path('proof/candidate.json').read_text())
+          assert j['version']=='1.21.1111'
+          assert j['asset_sha256']==hashlib.sha256(p.read_bytes()).hexdigest()
+          with zipfile.ZipFile(p) as z:
+           assert z.testzip() is None
+           assert len(z.namelist())==j['runtime_files']
+           assert all(n.startswith('vf-ops/') and '..' not in n for n in z.namelist())
+           assert 'vf-ops/vf-ops.php' in z.namelist()
+           assert 'vf-ops/includes/s01/tool-workbench.php' in z.namelist()
+          print('S01_OPS_1111_DETERMINISTIC_PACKAGE_PASS',json.dumps(j,sort_keys=True))
+          PY
+      - name: Build disposable WordPress and install formal baseline components
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl >/dev/null
+          curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/s01-1111-wp.phar
+          sudo install -m 0755 /tmp/s01-1111-wp.phar /usr/local/bin/wp
+          mkdir -p baseline
+          gh release download v1.21.1110 --repo llhzx2018/vf-tools-ops --pattern vf-tools-ops_V1.21.1110.zip --dir baseline
+          gh release download v1.25.90 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.90.zip --dir baseline
+          gh release download v1.35.112 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.112.zip --dir baseline
+          echo "WP_DIR=$RUNNER_TEMP/s01-ops-1111-wp" >> "$GITHUB_ENV"
+          wp core download --path="$RUNNER_TEMP/s01-ops-1111-wp" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$RUNNER_TEMP/s01-ops-1111-wp" --dbname=s01_ops1110 --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$RUNNER_TEMP/s01-ops-1111-wp" --url=http://127.0.0.1:18920 --title='S01 Exact Candidate' --admin_user=admin --admin_password='synthetic-ci-only' --admin_email=test@example.invalid --skip-email --allow-root >/dev/null
+          wp theme install baseline/vf-tools-theme_V1.35.112.zip --activate --path="$RUNNER_TEMP/s01-ops-1111-wp" --allow-root >/dev/null
+          wp plugin install baseline/vf-tools-m3u8_V1.25.90.zip --activate --path="$RUNNER_TEMP/s01-ops-1111-wp" --allow-root >/dev/null
+          wp plugin install baseline/vf-tools-ops_V1.21.1110.zip --activate --path="$RUNNER_TEMP/s01-ops-1111-wp" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$RUNNER_TEMP/s01-ops-1111-wp" --allow-root)" = 1.21.1110
+          wp eval 'update_option("s01_ops_1110_synthetic_keep",["receipt"=>"keep", "value"=>42]); echo "PRESERVE_OPTION_SET";' --path="$RUNNER_TEMP/s01-ops-1111-wp" --allow-root
+          echo S01_OPS_1111_REAL_WP_BASELINE_PASS
+      - name: Candidate upgrade rollback reapply and preserve synthetic data
+        run: |
+          set -Eeuo pipefail
+          wp plugin install proof/vf-tools-ops_V1.21.1111.zip --force --path="$WP_DIR" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$WP_DIR" --allow-root)" = 1.21.1111
+          wp plugin install baseline/vf-tools-ops_V1.21.1110.zip --force --path="$WP_DIR" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$WP_DIR" --allow-root)" = 1.21.1110
+          wp plugin install proof/vf-tools-ops_V1.21.1111.zip --force --path="$WP_DIR" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$WP_DIR" --allow-root)" = 1.21.1111
+          wp eval 'if(get_option("s01_ops_1110_synthetic_keep")!==["receipt"=>"keep","value"=>42])throw new Exception("SYNTHETIC_PRESERVE_FAIL"); echo "S01_OPS_1111_STATE_PRESERVED";' --path="$WP_DIR" --allow-root
+          wp eval 'require_once WP_PLUGIN_DIR."/vf-ops/includes/s01/tool-workbench.php"; require_once WP_PLUGIN_DIR."/vf-ops/includes/content-workflow/scanner.php"; require_once WP_PLUGIN_DIR."/vf-ops/includes/acceptance-o11/acceptance-overview-product.php"; require_once WP_PLUGIN_DIR."/vf-ops/includes/publish-o10/publish-zip-product.php"; if(!function_exists("vf_ops_s01_m3u8_daily_settings_v3") || !function_exists("vf_ops_acceptance_overview_model_v121426") || !function_exists("vf_ops_publish_zip_model_v121423"))throw new Exception("MISSING_SERVICES"); echo "S01_OPS_1111_THREE_COMPONENT_SERVICE_PASS";' --path="$WP_DIR" --allow-root
+          echo S01_OPS_1111_REAL_WP_UPGRADE_ROLLBACK_REAPPLY_PASS
+      - name: Erase temporary private checkout and WP
+        if: always()
+        run: rm -rf candidate proof baseline "$RUNNER_TEMP/s01-ops-1111-wp" /tmp/s01-1111-wp.phar
