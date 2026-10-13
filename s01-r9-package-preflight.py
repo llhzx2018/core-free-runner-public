@@ -5,7 +5,7 @@ import hashlib, json, re, sys, zipfile, subprocess
 ROOT=Path.cwd()
 PROOF=ROOT/"proof"
 PROOF.mkdir(exist_ok=True)
-SHA={"ops":"5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e","m3u8":"72cc556ec2480562850cf064e2b5fa559aa23775","theme":"0bbb9b0fcc05e7d912de15fe5edb8e7dccd12181"}
+SHA={"ops":"5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e","m3u8":"4f519654f1b5a1d1214f660b899a27b7f4e0c72c","theme":"04898fe0cde2ff1dad045615fc1acca906411ed9"}
 def sha(data): return hashlib.sha256(data).hexdigest()
 def ident(name):
     value=subprocess.check_output(["git","-C",name,"rev-parse","HEAD"],text=True).strip()
@@ -52,7 +52,7 @@ for name in SHA: ident(name)
 ops_version=(ROOT/"ops/VERSION").read_text().strip()
 m3_version=(ROOT/"m3u8/VERSION").read_text().strip()
 theme_version=(ROOT/"theme/VERSION").read_text().strip()
-assert (ops_version,m3_version,theme_version)==("1.21.1109","1.25.89","1.35.111")
+assert (ops_version,m3_version,theme_version)==("1.21.1109","1.25.90","1.35.112")
 opsfiles=files_runtime(ROOT/"ops",lambda p:p in {"vf-ops.php","uninstall.php"} or p.split("/")[0] in ("includes","assets","languages","config"))
 assert re.search(r"(?m)^\s*\*\s*Version:\s*"+re.escape(ops_version)+r"\s*$",opsfiles["vf-ops.php"].decode())
 # Match current Provider packaged runtime allowlist; never ship tests/internal receipts.
@@ -64,6 +64,8 @@ def m3allow(p):
     return parts[0] in {"admin","config","includes","public","templates","tools"}
 m3files=files_runtime(ROOT/"m3u8/src",m3allow)
 assert f"Version: {m3_version}" in m3files["vf-tool-m3u8.php"].decode()
+assert json.loads(m3files["plugin-manifest.json"])["version"]==m3_version
+assert json.loads((ROOT/"m3u8/src/PACKAGE_PROFILE.json").read_text())["pluginVersion"]==m3_version
 assert ("src/public/js/modules/browser-stream-test.js" not in m3files)
 browser_source=(ROOT/"m3u8/src/public/js/modules/browser-stream-test.js").read_text()
 bundle=(ROOT/"m3u8/src/public/dist/browser-stream-test.js").read_text()
