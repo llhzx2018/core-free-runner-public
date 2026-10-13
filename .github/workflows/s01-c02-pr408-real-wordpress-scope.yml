@@ -1,0 +1,89 @@
+name: S01 C02 PR408 real WordPress content coverage
+on:
+  push:
+    branches: [task/s01-c02-pr408-content-scan-cap-20261013]
+    paths: [.github/workflows/s01-c02-pr408-real-wordpress-scope.yml]
+permissions:
+  contents: read
+jobs:
+  content-scope-real-wp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: vf_ops_scan_scope
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-root-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-root-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout PR408 exact private source temporarily
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 71e30fd1b64943de732f49b23f4081304542553b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-source
+      - name: Initialize disposable WordPress and install exact Ops source
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-source rev-parse HEAD)" = 71e30fd1b64943de732f49b23f4081304542553b
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl mariadb-client >/dev/null
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          wp_dir="$RUNNER_TEMP/pr408-wordpress"
+          mkdir -p "$wp_dir"
+          wp core download --path="$wp_dir" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$wp_dir" --dbname=vf_ops_scan_scope --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wp_dir" --url=http://127.0.0.1:18208 --title='Synthetic coverage gate' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          python3 private-source/.github/release/build-ops-package.py --source private-source --output "$RUNNER_TEMP/ops-pr408.zip" >/dev/null
+          wp plugin install "$RUNNER_TEMP/ops-pr408.zip" --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = 1.21.1109
+          echo "WP_DIR=$wp_dir" >> "$GITHUB_ENV"
+          echo PR408_REAL_WP_EXACT_INSTALL_PASS
+      - name: Verify real WordPress database inventory overflow
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/pr408-check.php" <<'PHP'
+          <?php
+          global $wpdb;
+          function require_true(bool $v,string $m):void {
+              if (!$v) { fwrite(STDERR,"FAIL ".$m."\n"); exit(1); }
+              echo "PASS ".$m."\n";
+          }
+          require_true(function_exists('vf_ops_content_workflow_post_ids_v121456'), 'real installed content scanner exists');
+          $table=$wpdb->posts;
+          $n=$wpdb->query("INSERT INTO `$table` (post_author, post_date, post_date_gmt, post_content, post_title, post_status, post_type, post_name)
+             SELECT 1, '2026-10-13 01:00:00', '2026-10-13 01:00:00', 'Synthetic test content',
+                    CONCAT('Synthetic post ',seq), 'publish', 'post', CONCAT('synthetic-',seq) FROM seq_1_to_1002");
+          require_true($n===1002,'1002 synthetic posts inserted into actual MariaDB');
+          $registry=[['postType'=>'post']];
+          $posts=vf_ops_content_workflow_post_ids_v121456($registry,true);
+          require_true(count($posts)===1001,'real get_posts returns cap + 1');
+          $scan=['generatedAt'=>'2026-10-13 01:04:00','scanHash'=>'synthetic','rows'=>[],'media'=>['rows'=>[]]];
+          $state=vf_ops_content_workflow_scan_freshness_v1211025($scan,['corePageRegistry'=>$registry]);
+          require_true(($state['code']??'')==='CONTENT_SCAN_SCOPE_EXCEEDED','real wp post overflow produces STALE');
+          $wpdb->query($wpdb->prepare("DELETE FROM `$table` WHERE post_type=%s AND post_name LIKE %s",'post','synthetic-%'));
+          $n=$wpdb->query("INSERT INTO `$table` (post_author, post_date, post_date_gmt, post_content, post_title, post_status, post_type, post_name)
+             SELECT 1, '2026-10-13 01:00:00', '2026-10-13 01:00:00', 'Synthetic attachment',
+                    CONCAT('Synthetic media ',seq), 'inherit', 'attachment', CONCAT('synthetic-media-',seq) FROM seq_1_to_501");
+          require_true($n===501,'501 synthetic attachments inserted into actual MariaDB');
+          $mediaIds=vf_ops_content_workflow_media_ids_v121457(501);
+          require_true(count($mediaIds)===501,'real WP attachment ID reader probes 501');
+          $mediaState=vf_ops_content_workflow_scan_freshness_v1211025($scan,['corePageRegistry'=>$registry]);
+          require_true(($mediaState['code']??'')==='CONTENT_MEDIA_SCOPE_EXCEEDED','real media overflow produces STALE');
+          echo "PASS_PR408_REAL_WORDPRESS_MARIADB_BOUNDARY\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/pr408-check.php" --path="$WP_DIR" --allow-root
+      - name: Cleanup transient source and disposable WordPress
+        if: always()
+        run: |
+          rm -rf private-source "$RUNNER_TEMP/pr408-wordpress" "$RUNNER_TEMP/ops-pr408.zip" "$RUNNER_TEMP/pr408-check.php"
