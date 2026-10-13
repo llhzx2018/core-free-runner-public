@@ -1,0 +1,90 @@
+name: S01 Ops PR407 real WordPress HTTP save safety
+on:
+  push:
+    branches: [task/s01-ops407-realpost-20261013]
+    paths: [.github/workflows/s01-ops407-real-http-post-20261013.yml]
+permissions:
+  contents: read
+jobs:
+  real-post-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: task/s01-ops407-realpost-20261013
+          persist-credentials: false
+          path: harness
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: fc2fedc0734fede3cfe1a8b962fb1c7a278710c2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 75560304915d2085302f6ac09c4ee57d105dc81c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 2fd200573cf58d3cf87d81d95bf922e7a5cb4e87
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - name: Exact PR407 source identity and syntax
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          test "$(git -C ops rev-parse HEAD)" = fc2fedc0734fede3cfe1a8b962fb1c7a278710c2
+          test "$(git -C m3u8 rev-parse HEAD)" = 75560304915d2085302f6ac09c4ee57d105dc81c
+          test "$(git -C theme rev-parse HEAD)" = 2fd200573cf58d3cf87d81d95bf922e7a5cb4e87
+          php -l ops/includes/s01/tool-workbench.php
+          python3 -m py_compile harness/lanes/s01-ops407-20261013/real-post.py
+          echo S01_OPS407_EXACT_SOURCE_SYNTAX_PASS
+      - name: Start synthetic WordPress and MariaDB with three real components
+        run: |
+          set -Eeuo pipefail
+          NET="s01-ops407-$GITHUB_RUN_ID"
+          DB="$NET-db"
+          WP="$NET-wp"
+          echo "NET=$NET" >> "$GITHUB_ENV"
+          echo "DB=$DB" >> "$GITHUB_ENV"
+          echo "WP=$WP" >> "$GITHUB_ENV"
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=synthetic-root -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=synthetic-db mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 60); do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psynthetic-root --silent >/dev/null 2>&1 && break; sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=synthetic-db wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
+          curl -fsSLo /tmp/wp-s01-ops407.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp /tmp/wp-s01-ops407.phar "$WP:/usr/local/bin/wp"
+          docker exec "$WP" chmod 0755 /usr/local/bin/wp
+          cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          cli core install --url=http://127.0.0.1:18880 --title='S01 Synthetic Security Test' --admin_user=admin --admin_password='Synthetic-Only-PR407!' --admin_email=test@example.invalid --skip-email >/dev/null
+          cli user create subscriber sub@example.invalid --role=subscriber --user_pass='Synthetic-Only-Reader!' >/dev/null
+          docker exec "$WP" mkdir -p /var/www/html/wp-content/plugins/vf-ops /var/www/html/wp-content/plugins/vf-tool-m3u8 /var/www/html/wp-content/themes/vf-tools-theme
+          docker cp ops/. "$WP:/var/www/html/wp-content/plugins/vf-ops"
+          docker cp m3u8/src/. "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8"
+          docker cp theme/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme"
+          cli theme activate vf-tools-theme >/dev/null
+          cli plugin activate vf-tool-m3u8 >/dev/null
+          cli plugin activate vf-ops >/dev/null
+          cli eval 'if(!function_exists("m3u8_settings_readback"))throw new Exception("PROVIDER_NOT_READY");echo "S01_PR407_SERVICES_READY";'
+          echo S01_OPS407_WORDPRESS_MARIADB_READY
+      - name: Real authenticated and denied HTTP POST, revision and DB readback
+        run: |
+          set -Eeuo pipefail
+          python3 harness/lanes/s01-ops407-20261013/real-post.py
+          test -s proof/ops-407-http-post.json
+          echo S01_OPS407_REAL_HTTP_GATE_PASS
+      - name: Erase synthetic site and transient private checkout
+        if: always()
+        run: |
+          docker rm -fv "${WP:-missing}" "${DB:-missing}" >/dev/null 2>&1 || true
+          docker network rm "${NET:-missing}" >/dev/null 2>&1 || true
+          rm -rf harness ops m3u8 theme proof /tmp/wp-s01-ops407.phar
