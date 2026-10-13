@@ -5,7 +5,7 @@ import hashlib, json, re, sys, zipfile, subprocess
 ROOT=Path.cwd()
 PROOF=ROOT/"proof"
 PROOF.mkdir(exist_ok=True)
-SHA={"ops":"5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e","m3u8":"4f519654f1b5a1d1214f660b899a27b7f4e0c72c","theme":"04898fe0cde2ff1dad045615fc1acca906411ed9"}
+SHA={"ops":"5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e","m3u8":"75560304915d2085302f6ac09c4ee57d105dc81c","theme":"2fd200573cf58d3cf87d81d95bf922e7a5cb4e87"}
 def sha(data): return hashlib.sha256(data).hexdigest()
 def ident(name):
     value=subprocess.check_output(["git","-C",name,"rev-parse","HEAD"],text=True).strip()
