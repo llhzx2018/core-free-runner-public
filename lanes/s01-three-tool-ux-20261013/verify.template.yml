@@ -1,0 +1,101 @@
+name: S01 three-tool guidance and fallback exact source proof
+on:
+  push:
+    branches: [task/s01-three-tool-ux-20261013]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      M3_BASE_SHA: '{{M3_BASE_SHA}}'
+      THEME_REPO: '{{THEME_REPO}}'
+      THEME_SHA: '{{THEME_SHA}}'
+      THEME_TREE: '{{THEME_TREE}}'
+      THEME_BASE_SHA: '{{THEME_BASE_SHA}}'
+      THEME_VERSION: '{{THEME_VERSION}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target-owned identity preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/verify.template.yml --output /tmp/rendered.yml >/dev/null
+          cmp /tmp/rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/identity.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.THEME_REPO }}
+          ref: ${{ env.THEME_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.M3_BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3base
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.THEME_REPO }}
+          ref: ${{ env.THEME_BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: themebase
+      - name: Exact PHP rendering, negative baseline and three-tool regressions
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3 rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C m3 rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(git -C theme rev-parse HEAD)" = "$THEME_SHA"
+          test "$(git -C theme rev-parse HEAD^{tree})" = "$THEME_TREE"
+          test "$(tr -d '[:space:]' < m3/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '[:space:]' < theme/VERSION)" = "$THEME_VERSION"
+          php -l m3/src/includes/public-shortcode-registry.php
+          php -l theme/src/inc/module-system/module-system-render.php
+          php -l theme/src/inc/modules/module-cta.php
+          cp m3/tests/playlist-checker-launchbar-contract.php m3base/tests/playlist-checker-launchbar-contract.php
+          cp theme/tests/three-tool-next-route-rendering.php themebase/tests/three-tool-next-route-rendering.php
+          if php m3base/tests/playlist-checker-launchbar-contract.php zh >/tmp/m3-negative.txt 2>&1; then echo 'BASELINE_NOT_REPRODUCED'; exit 1; fi
+          if php themebase/tests/three-tool-next-route-rendering.php zh >/tmp/theme-negative.txt 2>&1; then echo 'BASELINE_NOT_REPRODUCED'; exit 1; fi
+          for locale in en zh; do
+            php m3/tests/playlist-checker-launchbar-contract.php "$locale" > "proof/m3-render-$locale.json"
+            php theme/tests/three-tool-next-route-rendering.php "$locale" > "proof/theme-render-$locale.json"
+          done
+          node m3/tests/three-tool-recovery.node.cjs > proof/three-tool-recovery.json
+          node m3/tests/playlist-checker-completion-state.node.cjs > /tmp/completion.txt
+          node m3/tests/browser-stream-safety.node.cjs > /tmp/stream-safety.txt
+          node m3/tests/playlist-checker-diagnostic-safety.node.cjs > /tmp/checker-safety.txt
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          r=json.loads(Path('proof/three-tool-recovery.json').read_text())
+          print('PUBLIC_SAFE_THREE_TOOL_UX '+json.dumps({'status':'PASS','m3Sha':os.environ['TARGET_SHA'],'themeSha':os.environ['THEME_SHA'],'baselineDefectsReproduced':True,'threeToolRecovery':r,'phpRendering':[json.loads(p.read_text()) for p in sorted(Path('proof').glob('*-render-*.json'))],'release':'NOT_EXECUTED','productionWrites':0},separators=(',',':')))
+          PY
+      - name: Remove transient private checkouts
+        if: always()
+        run: rm -rf m3 theme m3base themebase
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: s01-three-tool-ux-proof
+          path: proof/*.json
+          retention-days: 14
+          if-no-files-found: error
