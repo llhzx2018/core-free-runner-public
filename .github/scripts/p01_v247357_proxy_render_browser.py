@@ -24,7 +24,14 @@ async def main():
         page.on("response", lambda res: asset_responses.append(
             (res.url, res.status, res.headers.get("content-type", ""))
         ) if "/asset.php?" in res.url else None)
-        response = await page.goto(URL, wait_until="networkidle", timeout=30000)
+        response = await page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+        # VF admin pages can poll for status. Never wait for whole-network idle:
+        # gate on actual link stylesheet readiness instead.
+        await page.wait_for_function(
+            "() => [...document.querySelectorAll('link[rel=stylesheet]')].length >= 2 && "
+            "[...document.querySelectorAll('link[rel=stylesheet]')].every(x => !!x.sheet)",
+            timeout=18000,
+        )
         assert response is not None and response.status == 200, "Authenticated browser-helper page not 200"
         assert "浏览器助手" in await page.locator("body").inner_text(), "Missing real product browser helper content"
         css_links = await page.locator("link[rel='stylesheet']").evaluate_all(
