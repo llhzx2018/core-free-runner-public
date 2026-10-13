@@ -1,0 +1,85 @@
+name: S01 Theme Renderer Lazy-load Real WordPress DB
+on:
+  push:
+    branches: [task/s01-c01-renderer-lazyload-20261013]
+    paths: [.github/workflows/s01-c01-renderer-lazyload-real-wp-20261013.yml]
+permissions:
+  contents: read
+jobs:
+  theme-real-wp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: vf_theme_renderer_gate
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Exact transient private Theme checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: c5e6f052b534f948a459f557093400d7d7d09319
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-source
+      - name: Install synthetic WordPress and Theme exact source
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-source rev-parse HEAD)" = c5e6f052b534f948a459f557093400d7d7d09319
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl >/dev/null
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          wpdir="$RUNNER_TEMP/theme-renderer-wordpress"
+          mkdir -p "$wpdir"
+          wp core download --path="$wpdir" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$wpdir" --dbname=vf_theme_renderer_gate --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wpdir" --url=http://127.0.0.1:18211 --title='Synthetic Theme Renderer Gate' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          cp -a private-source/src "$wpdir/wp-content/themes/vf-tools-theme"
+          wp theme activate vf-tools-theme --path="$wpdir" --allow-root >/dev/null
+          echo "WP_DIR=$wpdir" >> "$GITHUB_ENV"
+          echo THEME_REAL_WP_ACTIVATED
+      - name: Real MySQL option revision and frontend consumer
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/theme-lazyload-wp.php" <<'PHP'
+          <?php
+          function gate(bool $ok,string $message):void {
+              if(!$ok){fwrite(STDERR,"FAIL ".$message."\n");exit(1);}
+              echo "PASS ".$message."\n";
+          }
+          gate(function_exists('vf_tools_theme_renderer_readback'),'real Theme Renderer service loaded');
+          gate(function_exists('vf_tools_theme_renderer_presentation_settings'),'real public presentation consumer loaded');
+          $before=vf_tools_theme_renderer_readback();
+          $candidate=vf_tools_theme_renderer_defaults();
+          $candidate['lazyLoadRuntime']='unrecognized-value';
+          $bad=vf_tools_theme_renderer_save($candidate,(string)$before['revision']);
+          gate(($bad['failureCode']??'')==='VALIDATION_FAILED','real WP rejects malformed toggle');
+          gate(isset($bad['errors']['lazyLoadRuntime']),'real WP returns field validation error');
+          gate((string)vf_tools_theme_renderer_readback()['revision']===(string)$before['revision'],'real database unchanged after invalid toggle');
+          $candidate['lazyLoadRuntime']='0';
+          $saved=vf_tools_theme_renderer_save($candidate,(string)$before['revision']);
+          gate(!empty($saved['ok']),'real WordPress transaction saves valid disabled flag');
+          gate(vf_tools_theme_renderer_readback()['renderer']['lazyLoadRuntime']===false,'real MariaDB readback disabled flag');
+          gate(vf_tools_theme_renderer_presentation_settings()['lazyLoadRuntime']===false,'real Theme frontend consumer sees disabled flag');
+          $current=vf_tools_theme_renderer_readback();
+          $candidate['lazyLoadRuntime']='1';
+          $saved=vf_tools_theme_renderer_save($candidate,(string)$current['revision']);
+          gate(!empty($saved['ok']),'real WordPress transaction saves reenabled flag');
+          gate(vf_tools_theme_renderer_readback()['renderer']['lazyLoadRuntime']===true,'real MariaDB readback enabled flag');
+          gate(vf_tools_theme_renderer_presentation_settings()['lazyLoadRuntime']===true,'real Theme frontend consumer sees enabled flag');
+          echo "S01_C01_THEME_REAL_WP_RENDERER_SAVE_CONSUME_PASS\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/theme-lazyload-wp.php" --path="$WP_DIR" --allow-root
+      - name: Cleanup transient source and synthetic database
+        if: always()
+        run: rm -rf private-source "$RUNNER_TEMP/theme-renderer-wordpress" "$RUNNER_TEMP/theme-lazyload-wp.php"
