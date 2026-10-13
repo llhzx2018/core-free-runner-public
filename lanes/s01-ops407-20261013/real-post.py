@@ -13,7 +13,7 @@ class Inputs(html.parser.HTMLParser):
         a=dict(attrs)
         if tag=="form" and "vf-v6-tools-settings-form" in a.get("class","").split():
             self.open=True;self.action=a.get("action","")
-        elif self.open and tag=="input" and "name" in a:
+        elif self.open and tag in ("input","select") and "name" in a:
             self.fields[a["name"]]=a.get("value","")
     def handle_endtag(self,tag):
         if tag=="form" and self.open:self.open=False
