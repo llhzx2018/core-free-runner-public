@@ -1,0 +1,182 @@
+name: P01 V247357 Local Proxy Full Render and Token E2E (Nonpublishing)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247357-local-proxy-e2e.yml'
+      - '.github/scripts/p01_v247357_proxy_render_browser.py'
+permissions:
+  contents: read
+jobs:
+  local-render-and-token:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact product (read-only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 903af33de73fe7a9211b68e785e65836e2566918
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: product
+          persist-credentials: false
+      - name: Checkout local-only repaired proxy and test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner-local
+          persist-credentials: false
+      - name: Set up disposable PHP and SQLite
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd
+          coverage: none
+      - name: Check exact product and repaired proxy identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 903af33de73fe7a9211b68e785e65836e2566918
+          test "$(tr -d '\r\n ' < product/VERSION)" = 2.47.357
+          test "$(tr -d '\r\n ' < product/src/VERSION.txt)" = 2.47.357
+          grep -Fq "define('VF_VERSION', '2.47.357');" product/src/app/bootstrap.php
+          grep -Fq 'if path == "/asset.php"' runner-local/.github/scripts/p01_v247357_preview_proxy.py
+          node --check product/src/assets/browser-helper.js
+          python3 -m py_compile runner-local/.github/scripts/p01_v247357_preview_proxy.py runner-local/.github/scripts/p01_v247357_proxy_render_browser.py
+          echo P01_247357_E2E_SOURCE_AND_PROXY=PASS
+      - name: Create fresh isolated install with synthetic administrator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v247357-preview
+          chmod 700 /tmp/p01-v247357-preview
+          python3 - <<'PY'
+          import secrets,pathlib
+          p=pathlib.Path('/tmp/p01-v247357-preview/admin-password')
+          p.write_text('DisposableOnly!'+secrets.token_urlsafe(26),encoding='utf-8')
+          p.chmod(0o600)
+          PY
+          php -S 127.0.0.1:18541 -t product/src >/tmp/p01-v247357-preview/php.log 2>&1 &
+          echo $! >/tmp/p01-v247357-preview/server.pid
+          for n in $(seq 1 35); do
+            if curl -fsS --max-time 3 -c /tmp/p01-v247357-preview/admin-cookies.txt -b /tmp/p01-v247357-preview/admin-cookies.txt 'http://127.0.0.1:18541/setup.php' -o /tmp/p01-v247357-preview/setup.html; then break; fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import re,pathlib
+          s=pathlib.Path('/tmp/p01-v247357-preview/setup.html').read_text(encoding='utf-8')
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m, 'Disposal setup CSRF unavailable'
+          pathlib.Path('/tmp/p01-v247357-preview/setup-csrf').write_text(m.group(1))
+          PY
+          curl -fsS --max-time 20 \
+            -c /tmp/p01-v247357-preview/admin-cookies.txt -b /tmp/p01-v247357-preview/admin-cookies.txt \
+            -X POST 'http://127.0.0.1:18541/setup.php' \
+            --data-urlencode "setup_csrf=$(cat /tmp/p01-v247357-preview/setup-csrf)" \
+            --data-urlencode 'site_title=VF Start V2.47.357 SIMULATED PREVIEW' \
+            --data-urlencode "admin_password=$(cat /tmp/p01-v247357-preview/admin-password)" \
+            --data-urlencode "admin_password_confirm=$(cat /tmp/p01-v247357-preview/admin-password)" \
+            -o /tmp/p01-v247357-preview/setup-response.html
+          (cd product/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          python3 - <<'PY'
+          import json,pathlib
+          password=pathlib.Path('/tmp/p01-v247357-preview/admin-password').read_text()
+          pathlib.Path('/tmp/p01-v247357-preview/login.json').write_text(json.dumps({'password':password}))
+          PY
+          chmod 600 /tmp/p01-v247357-preview/login.json
+          curl -fsS --max-time 20 \
+            -H 'Content-Type: application/json' \
+            -b /tmp/p01-v247357-preview/admin-cookies.txt -c /tmp/p01-v247357-preview/admin-cookies.txt \
+            --data-binary @/tmp/p01-v247357-preview/login.json \
+            'http://127.0.0.1:18541/api.php?action=login' \
+            -o /tmp/p01-v247357-preview/login-result.json
+          python3 - <<'PY'
+          import json,pathlib
+          result=json.loads(pathlib.Path('/tmp/p01-v247357-preview/login-result.json').read_text())
+          assert result.get('ok') is True, 'Synthetic admin login did not succeed'
+          cookie=pathlib.Path('/tmp/p01-v247357-preview/admin-cookies.txt').read_text()
+          assert 'vfnav_session' in cookie, 'Synthetic PHP session cookie absent'
+          PY
+          curl -fsS --max-time 10 -b /tmp/p01-v247357-preview/admin-cookies.txt \
+            'http://127.0.0.1:18541/browser-helper.php' \
+            -o /tmp/p01-v247357-preview/browser-helper.html
+          grep -Fq '浏览器助手' /tmp/p01-v247357-preview/browser-helper.html
+          echo P01_247357_DISPOSABLE_ADMIN_SQLITE=PASS
+          echo P01_247357_NO_PRODUCTION_OR_USER_TOKENS=PASS
+      - name: Start local-only exact repaired preview proxy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib,secrets
+          p=pathlib.Path('/tmp/p01-v247357-preview/proxy-password')
+          p.write_text(secrets.token_urlsafe(32),encoding='utf-8')
+          p.chmod(0o600)
+          PY
+          cat >/tmp/p01-v247357-preview/launch-proxy.py <<'PY'
+          import hashlib,importlib.util,pathlib
+          src='runner-local/.github/scripts/p01_v247357_preview_proxy.py'
+          spec=importlib.util.spec_from_file_location('vfp_proxy',src)
+          module=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          password=pathlib.Path('/tmp/p01-v247357-preview/proxy-password').read_text(encoding='utf-8')
+          module.EXPECTED_SHA256=hashlib.sha256(password.encode('utf-8')).hexdigest()
+          module.ThreadingHTTPServer(('127.0.0.1',18542),module.PreviewProxy).serve_forever()
+          PY
+          nohup python3 /tmp/p01-v247357-preview/launch-proxy.py >/tmp/p01-v247357-preview/proxy.log 2>&1 &
+          echo $! >/tmp/p01-v247357-preview/proxy.pid
+          for n in $(seq 1 30); do
+            CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18542/browser-helper.php' || true)
+            [[ "$CODE" == "401" ]] && break
+            sleep 1
+          done
+          test "$CODE" = "401"
+          for FILE in admin-pages.css admin-shell.css admin-consolidation.css browser-helper.js; do
+            CODE=$(curl -s --max-time 7 -u "preview:$(cat /tmp/p01-v247357-preview/proxy-password)" \
+              -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:18542/asset.php?file=$FILE&v=2.47.357")
+            test "$CODE" = "200" || { echo "CANONICAL_ASSET_NOT_200=$FILE:$CODE"; exit 1; }
+          done
+          CODE=$(curl -s --max-time 5 -u "preview:$(cat /tmp/p01-v247357-preview/proxy-password)" \
+            -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18542/setup.php')
+          test "$CODE" = "404"
+          echo P01_247357_E2E_AUTH_AND_CANONICAL_ASSET_HTTP=PASS
+      - name: Real Chromium through restricted local proxy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m pip install --quiet --break-system-packages 'playwright==1.55.0'
+          python3 -m playwright install --with-deps chromium >/dev/null
+          python3 runner-local/.github/scripts/p01_v247357_proxy_render_browser.py | tee /tmp/p01-v247357-preview/e2e-proof.log
+          for MARKER in \
+            P01_247357_E2E_CANONICAL_ASSETS_HTTP200=PASS \
+            P01_247357_E2E_REAL_RENDER_STYLES_AND_NAV_ICONS=PASS \
+            P01_247357_E2E_DISPOSABLE_REAL_API_COPY_ESCAPE_WIPE=PASS \
+            P01_247357_E2E_NO_EXTERNAL_DEPLOYMENT=PASS; do
+            grep -Fx "$MARKER" /tmp/p01-v247357-preview/e2e-proof.log
+          done
+          echo P01_247357_E2E_LOCAL_PROXY_FULL_RENDER=PASS
+      - name: Stop disposable local servers and remove credentials
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for role in proxy server; do
+            file="/tmp/p01-v247357-preview/$role.pid"
+            if test -f "$file"; then kill "$(cat "$file")" 2>/dev/null || true; fi
+          done
+          rm -f /tmp/p01-v247357-preview/admin-password \
+            /tmp/p01-v247357-preview/proxy-password \
+            /tmp/p01-v247357-preview/admin-cookies.txt \
+            /tmp/p01-v247357-preview/login.json \
+            /tmp/p01-v247357-preview/login-result.json \
+            /tmp/p01-v247357-preview/setup-csrf
+          echo P01_247357_E2E_LOCAL_ONLY_CLEANUP=PASS
+      - name: Store pre-token nonsecret render screenshot
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: P01-V247357-Local-Proxy-Render-Only
+          path: /tmp/p01-v247357-preview/V247357_LOCAL_PROXY_STYLED_NO_TOKEN.png
+          if-no-files-found: ignore
+          retention-days: 2
