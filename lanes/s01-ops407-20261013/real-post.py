@@ -56,6 +56,9 @@ def request(jar, f, *, revision="CURRENT", nonce="CURRENT", updates=None):
       "downloader_part_size_mb":"512","downloader_retry_count":"4",
       "downloader_filename_pattern":"{source}-{date}-{time}",
       "downloader_wake_lock_enabled":"on","downloader_allow_user_override":"on"}
+    if revision in ("MISSING","ARRAY"):
+        posted.pop("vf_s01_settings_revision",None)
+        if revision=="ARRAY":posted["vf_s01_settings_revision[]"]="1"
     if updates:posted.update(updates)
     opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar),DoNotFollow())
     data=urllib.parse.urlencode(posted).encode()
@@ -71,7 +74,7 @@ admin,web=login("admin","Synthetic-Only-PR407!")
 f=form(web)
 check(int(f.fields["vf_s01_settings_revision"])==start["revision"],"Ops form revision matches real Provider DB")
 # PHP $_POST absent revision is distinct from supplied malformed strings.
-for bad in ("","0","-1","1.3","garbage","999999999999999999999999999"):
+for bad in ("MISSING","ARRAY","","0","-1","1.3","garbage","999999999999999999999999999"):
   status,loc=request(admin,f,revision=bad)
   check(status==302 and "settings_conflict" in loc,"malformed revision rejected: "+repr(bad))
   check(snap()==start,"malformed revision leaves canonical DB intact: "+repr(bad))
