@@ -1,0 +1,112 @@
+name: S01 M3U8 real WordPress native update discovery
+on:
+  push:
+    branches: [task/s01-three-tools89-native-20261013]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_REPO: 'llhzx2018/core-updates'
+      TARGET_VERSION: '1.3.0'
+      TARGET_SHA: 'e68b79ec070929e21544bd1d73fc1c02a5f808db'
+      TARGET_TREE: '2f0bb936b47cf745235e43d7d2089e8a1e900245'
+      CHANNEL_SHA: 'e68b79ec070929e21544bd1d73fc1c02a5f808db'
+      M3_SOURCE_VERSION: '1.25.88'
+      M3_LEGACY_SOURCE_VERSION: '1.25.87'
+      M3_VERSION: '1.25.89'
+      M3_SHA: '4e293f94f40e0c5a2beccacf40b50b7f7cc4c46b'
+      M3_TREE: '7750db4f5366f2030b4b1573aed62f47d3df70ee'
+      M3_ASSET_SHA: 'ae775da6115ae20fb77aa9473bfa5ecda3998b4324a491a5b1f2a5ea2fa445a6'
+      M3_SOURCE_BYTES: '3576706'
+      M3_SOURCE_SHA256: 'f3beacffa7fbd893e1b4aba9a497565d697c8e72b967b0c645ad55de0fb8e6f1'
+      M3_LEGACY_BYTES: '3576140'
+      M3_LEGACY_SHA256: '95e72cb7e00d221dbdb5d625e5230f427fbe7d7e3d11f715fb73ce3b293f6da6'
+      THEME_VERSION: '1.35.111'
+      THEME_BYTES: '1793880'
+      THEME_ASSET_SHA: '4587f95fe006606adf059e03c6452436fc79f8cfc616097f80657e9dc5091bd9'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Exact discovery spec audit
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-three-tools89-native-20261013/spec.json --template runner/lanes/s01-three-tools89-native-20261013/discovery.template.yml --output /tmp/native-render.yml >/dev/null
+          cmp /tmp/native-render.yml runner/.github/workflows/s01-three-tools89-native-20261013.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-three-tools89-native-20261013/spec.json --input runner/.github/workflows/s01-three-tools89-native-20261013.yml > proof/lane-identity.json
+          cp -a runner/lanes/s01-three-tools89-native-20261013 lane
+          bash -n lane/native.sh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: task/s01-c03-embed78-20261010-discovery
+          persist-credentials: false
+          path: historic-m3
+      - name: Exact merged channel original CI commands
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          python3 scripts/check_manifest_contract.py
+          php -v
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l
+          php update-core/php/tests/run.php
+          python3 - <<'PY'
+          import json,os,pathlib
+          pathlib.Path('../proof/merged-core-ci.json').write_text(json.dumps({'status':'PASS','source_sha':os.environ['TARGET_SHA'],'native_commands':4}))
+          PY
+      - name: Real old SDK native discovery and private asset download
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: bash lane/native.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        id: receipt
+        with:
+          name: three-tools89-native-discovery-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Uploaded receipt reverse readback
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/native-meta.json
+          for attempt in 1 2 3 4 5 6; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/native-receipt.zip; then break; fi
+            test "$attempt" != 6
+            sleep 2
+          done
+          python3 - <<'PY'
+          import os,json,pathlib,hashlib,zipfile
+          m=json.loads(pathlib.Path('/tmp/native-meta.json').read_text());b=pathlib.Path('/tmp/native-receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert m['size_in_bytes']==len(b) and m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/native-receipt.zip') as z:
+           assert z.testzip() is None and set(z.namelist())=={'lane-identity.json','merged-core-ci.json','native-m3-current.json','native-m3-legacy.json','FINAL_DISCOVERY.json'}
+           for n in z.namelist():assert json.loads(z.read(n))==json.loads((pathlib.Path('proof')/n).read_text())
+           assert json.loads(z.read('FINAL_DISCOVERY.json'))['status']=='PASS'
+          print('PUBLIC_SAFE_NATIVE_READBACK',json.dumps({'status':'PASS','artifact_id':m['id'],'digest':m['digest'],'bytes':len(b),'run_id':os.environ['GITHUB_RUN_ID']}))
+          PY
+      - name: Private source cleanup
+        if: always()
+        run: rm -rf target historic-m3 /tmp/theme-host.zip /tmp/m3-source.zip /tmp/m3-legacy.zip /tmp/m3-channel.json /tmp/m3-channel-main.json /tmp/wp-native.phar
+
