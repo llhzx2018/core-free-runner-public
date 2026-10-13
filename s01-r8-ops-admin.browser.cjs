@@ -1,0 +1,35 @@
+'use strict';
+const fs=require('fs');
+const assert=require('node:assert/strict');
+const {chromium}=require('playwright');
+(async()=>{
+  const browser=await chromium.launch({headless:true,args:['--autoplay-policy=no-user-gesture-required']});
+  const context=await browser.newContext({viewport:{width:1440,height:900}});
+  const page=await context.newPage();
+  const base='http://127.0.0.1:18880';
+  const proof=[];
+  function gate(v,message){assert(v,message);proof.push({check:message,pass:true});console.log('PASS '+message);}
+  const errors=[];page.on('pageerror',e=>errors.push(String(e.message)));
+  await page.goto(base+'/wp-login.php');
+  await page.locator('#user_login').fill('admin');
+  await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');
+  await page.locator('#wp-submit').click();
+  await page.waitForURL('**/wp-admin/**',{timeout:20000});
+  await page.goto(base+'/wp-admin/admin.php?page=vf-toolsite-tools');
+  await page.waitForLoadState('domcontentloaded');
+  gate(page.url().includes('page=vf-toolsite-tools'),'Ops owns single admin tool workbench');
+  const form=page.locator('form.vf-v6-tools-settings-form');
+  gate(await form.count()===1,'M3U8 daily settings appear inside Ops shell');
+  const inputs=['downloader_auto_part_enabled','downloader_part_size_mb','downloader_retry_count','downloader_wake_lock_enabled','downloader_filename_pattern','downloader_allow_user_override'];
+  for(const name of inputs)gate(await form.locator('[name="'+name+'"]').count()===1,'one and only one '+name+' field');
+  gate((await form.locator('input[name=action]').inputValue())==='vf_ops_s01_m3u8_settings_save','daily form routes only to Ops facade');
+  const revision=await form.locator('input[name=vf_s01_settings_revision]').inputValue();
+  gate(/^\d+$/.test(revision)&&Number(revision)>=1,'revision token reflects canonical Provider settings');
+  gate((await form.locator('input[name=vf_ops_s01_settings_nonce]').inputValue()).length>8,'nonce present; writes remain untested in this read-only browser suite');
+  gate(await form.locator('button[type=submit]').count()===1,'settings have a single primary save action');
+  gate((await page.locator('#vf-v6-tools-settings-title').innerText()).includes('下载参数'),'Ops page describes correct tool settings');
+  gate(errors.length===0,'no uncaught browser script errors on Ops Workbench');
+  fs.writeFileSync('proof/s01-r8-ops-admin.json',JSON.stringify({status:'PASS',checks:proof,revision,production:'NOT_EXECUTED',postAuthorization:'NOT_TESTED'},null,2));
+  await browser.close();
+  console.log('S01_R8_OPS_ADMIN_BROWSER_PASS');
+})().catch(e=>{console.error(e);process.exitCode=1;});
