@@ -77,7 +77,10 @@ class PreviewProxy(BaseHTTPRequestHandler):
         # vf_asset_url() routes all static files through asset.php?file=...&v=VERSION.
         # The former proxy blocked this and displayed giant unstyled SVG icons.
         if path == "/asset.php" and self.command in ("GET", "HEAD"):
-            params = parse_qs(raw.query, keep_blank_values=True, strict_parsing=True)
+            try:
+                params = parse_qs(raw.query, keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                return None
             if (set(params) == {"file", "v"}
                 and len(params["file"]) == 1 and len(params["v"]) == 1
                 and params["v"][0] == "2.47.357"
@@ -85,7 +88,10 @@ class PreviewProxy(BaseHTTPRequestHandler):
                 return self.path
             return None
         if path == "/api.php" and self.command == "POST":
-            params = parse_qs(raw.query, strict_parsing=True)
+            try:
+                params = parse_qs(raw.query, strict_parsing=True)
+            except ValueError:
+                return None
             if params.get("action") in (["plugin_token_regenerate"], ["plugin_token_revoke"]) and len(params) == 1:
                 return self.path
         if (self.command in ("GET", "HEAD") and path.startswith("/assets/")
