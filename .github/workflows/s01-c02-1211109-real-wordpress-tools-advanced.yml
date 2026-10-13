@@ -1,0 +1,163 @@
+name: S01 C02 Ops 1.21.1109 Advanced Real WordPress
+on:
+  push:
+    branches: [task/s01-c02-1211106-real-wp-tools-css-20261012]
+    paths: [.github/workflows/s01-c02-1211109-real-wordpress-tools-advanced.yml]
+permissions:
+  contents: read
+jobs:
+  real-admin-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: vf_tools_ui
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-root-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-root-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout public runner workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Checkout exact private Ops fix
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 7b58592732f8e4d47d473c2b2d71e1bffcd6232a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Prepare disposable real WordPress and MariaDB
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 7b58592732f8e4d47d473c2b2d71e1bffcd6232a
+          php -l product/includes/s01/tool-workbench.php
+          node --check product/tests/s01-c02-1211106-tools-live-wordpress-admin-browser.js
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/wp-cli.phar
+          sudo install -m 0755 /tmp/wp-cli.phar /usr/local/bin/wp
+          wp_dir="$RUNNER_TEMP/tools-wordpress"
+          mkdir -p "$wp_dir"
+          wp core download --path="$wp_dir" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$wp_dir" --dbname=vf_tools_ui --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wp_dir" --url=http://127.0.0.1:18096 --title='Isolated VF Tools Browser Proof' --admin_user=admin --admin_password=synthetic-ci-admin-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          python3 product/.github/release/build-ops-package.py --source product --output "$RUNNER_TEMP/vf-ops-tools-candidate.zip" >/dev/null
+          test "$(unzip -p "$RUNNER_TEMP/vf-ops-tools-candidate.zip" vf-ops/vf-ops.php | sed -n 's/.*Version: //p' | head -1 | tr -d '\r')" = 1.21.1109
+          gh release download v1.21.1108 --repo llhzx2018/vf-tools-ops --pattern 'vf-tools-ops_V1.21.1108.zip' --dir "$RUNNER_TEMP" --clobber
+          echo '8376a23dd52f187e9f1c3cb484c6f3d5fd3552d00b2a4955361220043e3d1ea6  '$RUNNER_TEMP'/vf-tools-ops_V1.21.1108.zip' | sha256sum --check
+          wp plugin install "$RUNNER_TEMP/vf-tools-ops_V1.21.1108.zip" --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = "1.21.1108"
+          wp option update vf_ops_ci_lifecycle_marker isolated-1108-1109-rollback --path="$wp_dir" --allow-root >/dev/null
+          echo "wp_dir=$wp_dir" >> "$GITHUB_ENV"
+          echo "REAL_WORDPRESS_RELEASE_1108_BASELINE_INSTALL=PASS"
+      - name: Verify 1109 exact runtime delta and reproducible release packaging
+        run: |
+          set -Eeuo pipefail
+          python3 product/.github/release/build-ops-package.py --source product --output "$RUNNER_TEMP/vf-ops-tools-candidate-rebuild.zip" > "$RUNNER_TEMP/ops-1109-package-metadata.json"
+          cmp -s "$RUNNER_TEMP/vf-ops-tools-candidate.zip" "$RUNNER_TEMP/vf-ops-tools-candidate-rebuild.zip"
+          python3 - <<'PY'
+          import os,zipfile,hashlib,json
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])
+          previous=root/'vf-tools-ops_V1.21.1108.zip'
+          candidate=root/'vf-ops-tools-candidate.zip'
+          with zipfile.ZipFile(previous) as a, zipfile.ZipFile(candidate) as b:
+              old={name:a.read(name) for name in a.namelist() if not name.endswith('/')}
+              new={name:b.read(name) for name in b.namelist() if not name.endswith('/')}
+          assert set(old)==set(new), f'Unexpected runtime file addition/removal: {sorted(set(old)^set(new))}'
+          changed=sorted(name for name in old if old[name]!=new[name])
+          allowed=['vf-ops/assets/css/current/admin-s01-tools-r17.css','vf-ops/vf-ops.php']
+          assert changed==allowed, f'Unexpected runtime delta: {changed}'
+          meta=json.loads((root/'ops-1109-package-metadata.json').read_text())
+          assert meta['version']=='1.21.1109' and meta['package_slug']=='vf-ops'
+          assert meta['root_contract']=='PASS_SINGLE_VF_OPS_ROOT'
+          assert meta['asset_sha256']==hashlib.sha256(candidate.read_bytes()).hexdigest()
+          print('OPS_1109_REPRODUCIBLE_ZIP_BUILD=PASS')
+          print('OPS_1108_TO_1109_RUNTIME_DELTA_EXACT=PASS')
+          print('OPS_1109_CANDIDATE_PACKAGE='+json.dumps(meta,sort_keys=True))
+          PY
+      - name: Upload unsigned isolated candidate package (not release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-1109-candidate-exact-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/vf-ops-tools-candidate.zip
+            ${{ runner.temp }}/ops-1109-package-metadata.json
+          retention-days: 3
+          if-no-files-found: error
+      - name: Install official M3U8 Provider in disposable WordPress
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download v1.25.84 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.84.zip --dir "$RUNNER_TEMP" --clobber
+          echo '54406bc99cec5bdfddace9e940ddd2303ebf020a3ce3532ac43375df118e21b4  '$RUNNER_TEMP'/vf-tools-m3u8_V1.25.84.zip' | sha256sum --check
+          wp plugin install "$RUNNER_TEMP/vf-tools-m3u8_V1.25.84.zip" --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$wp_dir" --allow-root)" = 1.25.84
+          # Read-only snapshot of the entire M3U8 canonical data, not just
+          # a synthetic WordPress option marker.
+          wp eval 'if (!function_exists("m3u8_settings_readback")) { throw new RuntimeException("canonical readback missing"); } echo hash("sha256", wp_json_encode(m3u8_settings_readback()["data"] ?? []));' --path="$wp_dir" --allow-root > "$RUNNER_TEMP/m3u8-canonical-baseline.sha"
+          test -s "$RUNNER_TEMP/m3u8-canonical-baseline.sha"
+          echo "M3U8_CANONICAL_BASELINE_READBACK=PASS"
+      - name: Verify exact-source Ops 1108 to 1109 upgrade rollback and re-upgrade
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 7b58592732f8e4d47d473c2b2d71e1bffcd6232a
+          assert_lifecycle_marker() {
+            test "$(wp option get vf_ops_ci_lifecycle_marker --path="$wp_dir" --allow-root)" = isolated-1108-1109-rollback
+            wp plugin is-active vf-tool-m3u8 --path="$wp_dir" --allow-root >/dev/null
+            test "$(wp plugin get vf-tool-m3u8 --field=version --path="$wp_dir" --allow-root)" = 1.25.84
+            wp eval 'echo hash("sha256", wp_json_encode(m3u8_settings_readback()["data"] ?? []));' --path="$wp_dir" --allow-root > "$RUNNER_TEMP/m3u8-canonical-current.sha"
+            cmp -s "$RUNNER_TEMP/m3u8-canonical-baseline.sha" "$RUNNER_TEMP/m3u8-canonical-current.sha"
+          }
+          assert_lifecycle_marker
+          wp plugin install "$RUNNER_TEMP/vf-ops-tools-candidate.zip" --force --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = 1.21.1109
+          assert_lifecycle_marker
+          echo "REAL_WORDPRESS_OPS_1108_TO_1109_UPGRADE=PASS"
+          wp plugin install "$RUNNER_TEMP/vf-tools-ops_V1.21.1108.zip" --force --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = 1.21.1108
+          assert_lifecycle_marker
+          echo "REAL_WORDPRESS_OPS_1109_TO_1108_ROLLBACK=PASS"
+          wp plugin install "$RUNNER_TEMP/vf-ops-tools-candidate.zip" --force --activate --path="$wp_dir" --allow-root >/dev/null
+          test "$(wp plugin get vf-ops --field=version --path="$wp_dir" --allow-root)" = 1.21.1109
+          assert_lifecycle_marker
+          echo "REAL_WORDPRESS_OPS_1108_TO_1109_REUPGRADE=PASS"
+          echo "M3U8_CANONICAL_READBACK_PRESERVED_THROUGH_UPGRADE_ROLLBACK_REUPGRADE=PASS"
+          echo "LIFECYCLE_EXACT_SOURCE_PROVENANCE=7b58592732f8e4d47d473c2b2d71e1bffcd6232a"
+      - name: Run real wp-admin Chromium including CSS HTTP response
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          npm install --no-save --no-package-lock playwright@1.56.1
+          npx playwright install --with-deps chromium
+          php -S 127.0.0.1:18096 -t "$wp_dir" > "$RUNNER_TEMP/tools-php-http.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" || true' EXIT
+          for i in $(seq 1 30); do if curl --fail -s -o /dev/null http://127.0.0.1:18096/wp-login.php; then break; fi; sleep 1; done
+          TOOLS_BASE_URL=http://127.0.0.1:18096 node tests/s01-c02-1211106-tools-live-wordpress-admin-browser.js
+          node tests/s01-c02-1211105-m3u8-tools-r17-browser-proof.js
+          echo S01_C02_SYNTHETIC_TOOLS_R17_EIGHT_VARIANTS_PASS
+          echo S01_C02_REAL_WORDPRESS_ADMIN_R17_CSS_PASS
+      - name: Upload synthetic screenshots and diagnostic only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-c02-real-wp-tools-ui-${{ github.run_id }}
+          path: |
+            /tmp/s01-c02-tools-real-1440.png
+            /tmp/s01-c02-tools-real-390.png
+          if-no-files-found: warn
+          retention-days: 3
