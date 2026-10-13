@@ -4,7 +4,7 @@ assert subprocess.check_output(['git','-C','target','rev-parse','HEAD'],text=Tru
 assert subprocess.check_output(['git','-C','target','rev-parse','HEAD^{tree}'],text=True).strip()==os.environ['TARGET_TREE']
 assert pathlib.Path('target/VERSION').read_text().strip()==os.environ['TARGET_VERSION']
 changed_src=set(subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['M3_BASE_SHA'],'HEAD','--','src'],text=True).splitlines())
-assert changed_src=={'src/vf-tool-m3u8.php','src/public/js/modules/playlist-checker.js','src/public/dist/playlist-checker.js'},changed_src
+assert changed_src=={'src/vf-tool-m3u8.php','src/public/js/modules/playlist-checker.js','src/public/dist/playlist-checker.js','src/public/js/modules/browser-stream-test.js','src/public/dist/browser-stream-test.js','src/public/js/modules/embed.js','src/public/dist/embed.js'},changed_src
 header=(root/'vf-tool-m3u8.php').read_text()
 assert 'Version: '+os.environ['TARGET_VERSION'] in header
 assert "VF_TOOL_M3U8_VERSION', '"+os.environ['TARGET_VERSION']+"'" in header
