@@ -1,0 +1,111 @@
+name: S01 checker completion state focused browser proof
+on:
+  push:
+    branches: [task/s01-checker-state-20261013]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-m3u8'
+      TARGET_VERSION: '1.25.86'
+      TARGET_SHA: '64fc8ded964e6caaef9eeae7549a73290aacad27'
+      TARGET_TREE: 'd90f7de8ca9144a1ad64c52b83016d39a40497d2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Exact rendered lane identity
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-checker-state-20261013/spec.json --template runner/lanes/s01-checker-state-20261013/proof.template.yml --output /tmp/state-proof.yml >/dev/null
+          cmp /tmp/state-proof.yml runner/.github/workflows/s01-checker-state-20261013.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-checker-state-20261013/spec.json --input runner/.github/workflows/s01-checker-state-20261013.yml > proof/lane-identity.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: target
+          persist-credentials: false
+      - name: Exact source and focused runtime regressions
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '[:space:]' < target/VERSION)" = "$TARGET_VERSION"
+          php -v
+          node --check target/src/public/js/modules/playlist-checker.js
+          node --check target/src/public/dist/playlist-checker.js
+          node target/tests/playlist-checker-completion-state.node.cjs
+          node target/tests/playlist-checker-diagnostic-safety.node.cjs
+      - name: Isolated browser runtime
+        run: |
+          set -Eeuo pipefail
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+      - name: Actual PHP renderer EN ZH source dist and three widths
+        run: node target/tests/playlist-checker-result-copy.browser.cjs > proof/result-copy-browser.json
+      - name: Actual clipboard denial fallback export and retry
+        run: node target/tests/playlist-checker-clipboard.browser.cjs > proof/clipboard-browser.json
+      - name: Seal public-safe focused result
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('proof')
+          browser=json.loads((p/'result-copy-browser.json').read_text())
+          clipboard=json.loads((p/'clipboard-browser.json').read_text())
+          assert len(browser['cases'])==12 and all(x['state']=='PASS' for x in browser['cases'])
+          assert len(clipboard['cases'])==8 and all(x['state']=='PASS' for x in clipboard['cases'])
+          final={'status':'PASS','scope':'checker completion error warning success; actual PHP renderer and Chromium; clipboard regression','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'source_version':os.environ['TARGET_VERSION'],'node_cases':28,'browser_cases':12,'clipboard_cases':8,'production':'NOT_EXECUTED'}
+          (p/'FINAL_EVIDENCE.json').write_text(json.dumps(final,indent=2))
+          print('FINAL_STATE_PROOF',json.dumps(final))
+          PY
+      - name: Public-safe JSON evidence
+        if: always()
+        id: receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: checker-state-proof-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Reverse download exact uploaded evidence
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/state-meta.json
+          for attempt in 1 2 3; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/state-receipt.zip; then break; fi
+            test "$attempt" != 3
+            sleep 2
+          done
+          python3 - <<'PY'
+          import hashlib,zipfile,json,os,pathlib,stat
+          m=json.loads(pathlib.Path('/tmp/state-meta.json').read_text())
+          d=pathlib.Path('/tmp/state-receipt.zip').read_bytes()
+          assert m['id']==int(os.environ['ARTIFACT_ID']) and m['workflow_run']['head_sha']==os.environ['GITHUB_SHA']
+          assert m['digest']=='sha256:'+hashlib.sha256(d).hexdigest() and m['size_in_bytes']==len(d)
+          with zipfile.ZipFile('/tmp/state-receipt.zip') as z:
+            assert z.testzip() is None
+            for f in z.infolist():
+              p=pathlib.PurePosixPath(f.filename)
+              assert not p.is_absolute() and '..' not in p.parts and not stat.S_ISLNK(f.external_attr>>16) and p.suffix=='.json'
+              saved=json.loads(z.read(f))
+              assert saved==json.loads((pathlib.Path('proof')/p.name).read_text())
+            final=json.loads(z.read('FINAL_EVIDENCE.json'))
+            assert final['status']=='PASS' and final['source_sha']==os.environ['TARGET_SHA']
+          print('PUBLIC_SAFE_STATE_RECEIPT',json.dumps({'status':'PASS','id':m['id'],'bytes':len(d),'digest':m['digest'],'run_id':os.environ['GITHUB_RUN_ID'],'source_sha':os.environ['TARGET_SHA']}))
+          PY
+      - name: Private source cleanup
+        if: always()
+        run: rm -rf target
+
