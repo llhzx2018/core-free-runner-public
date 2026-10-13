@@ -81,7 +81,7 @@ class PreviewProxy(BaseHTTPRequestHandler):
             if (set(params) == {"file", "v"}
                 and len(params["file"]) == 1 and len(params["v"]) == 1
                 and params["v"][0] == "2.47.357"
-                and re.fullmatch(r"[A-Za-z0-9_.-]+\\.(?:css|js|png|jpe?g|webp|gif|svg|ico)", params["file"][0], re.IGNORECASE)):
+                and re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:css|js|png|jpe?g|webp|gif|svg|ico)", params["file"][0], re.IGNORECASE)):
                 return self.path
             return None
         if path == "/api.php" and self.command == "POST":
