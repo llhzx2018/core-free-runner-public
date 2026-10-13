@@ -1,0 +1,109 @@
+name: S01 R10 exact M3U8 90 and Theme 112 candidate install
+on:
+  push:
+    branches: [task/s01-r10-candidate-20261013]
+    paths: [.github/workflows/s01-r10-candidate-20261013.yml]
+permissions:
+  contents: read
+jobs:
+  package-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: s01_r9_package
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+        ports: [3306:3306]
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: task/s01-r10-candidate-20261013
+          persist-credentials: false
+          path: harness
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 5e3c331b20ec72e82c91c8cd3cd0b5a9d0d5e89e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 4f519654f1b5a1d1214f660b899a27b7f4e0c72c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 04898fe0cde2ff1dad045615fc1acca906411ed9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - name: Exact canonical source and deterministic runtime ZIPs
+        run: |
+          set -Eeuo pipefail
+          python3 harness/s01-r9-package-preflight.py
+          python3 ops/.github/release/build-ops-package.py --source ops --output proof/ops-canonical.zip > /tmp/s01-r9-ops-build.json
+          python3 - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('proof/ops-canonical.zip') as canon,zipfile.ZipFile('proof/vf-tools-ops-preflight.zip') as pre:
+           assert set(canon.namelist())==set(pre.namelist()),'Ops canonical ZIP filenames differ'
+           assert all(canon.read(p)==pre.read(p) for p in canon.namelist()),'Ops canonical ZIP bytes differ'
+          print('S01_R9_OPS_CANONICAL_BUILD_CONTENT_PARITY_PASS')
+          PY
+          php -l ops/vf-ops.php
+          php -l m3u8/src/vf-tool-m3u8.php
+          php -l theme/src/functions.php
+          php theme/tests/s01-c01-renderer-lazyload-saved-frontend-truth.php
+          php m3u8/tests/s01-c03-ops-downloader-front-config-consistency.php
+          node m3u8/tests/browser-stream-safety.node.cjs
+          node m3u8/tests/three-tool-recovery.node.cjs
+          node m3u8/tests/playlist-checker-completion-state.node.cjs
+          echo S01_R9_EXACT_ZIP_BUILD_PASS
+      - name: Install built ZIPs into fresh disposable WordPress
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl >/dev/null
+          curl --fail --silent --show-error --location 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar' -o /tmp/s01-r9-wp.phar
+          sudo install -m 0755 /tmp/s01-r9-wp.phar /usr/local/bin/wp
+          wpdir="$RUNNER_TEMP/s01-r9-wordpress"
+          mkdir -p "$wpdir"
+          wp core download --path="$wpdir" --version=7.1.3 --allow-root >/dev/null
+          wp config create --path="$wpdir" --dbname=s01_r9_package --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wpdir" --url=http://127.0.0.1:18919 --title='Synthetic S01 Package Smoke' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          wp theme install proof/vf-tools-theme-preflight.zip --activate --path="$wpdir" --allow-root >/dev/null
+          wp plugin install proof/vf-tools-m3u8-preflight.zip --activate --path="$wpdir" --allow-root >/dev/null
+          wp plugin install proof/vf-tools-ops-preflight.zip --activate --path="$wpdir" --allow-root >/dev/null
+          test "$(wp theme get vf-tools-theme --field=version --path="$wpdir" --allow-root)" = 1.35.112
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$wpdir" --allow-root)" = 1.25.90
+          test "$(wp plugin get vf-ops --field=version --path="$wpdir" --allow-root)" = 1.21.1109
+          # WP-CLI is not a browser/admin request; own-domain services are lazy loaded.
+          # Resolve the same owning modules explicitly in this disposable CLI fixture.
+          cat > "$RUNNER_TEMP/s01-r9-services.php" <<'PHP'
+          <?php
+          require_once WP_PLUGIN_DIR.'/vf-ops/includes/s01/tool-workbench.php';
+          require_once WP_PLUGIN_DIR.'/vf-tool-m3u8/includes/settings-frontend.php';
+          require_once get_template_directory().'/inc/services/provider-widget-host-service.php';
+          if (!function_exists('vf_ops_s01_m3u8_daily_settings_v3') ||
+              !function_exists('m3u8_settings_readback') ||
+              !function_exists('vf_tools_theme_widget_host_api_context')) {
+              throw new Exception('MISSING_THREE_COMPONENT_SERVICE');
+          }
+          echo "S01_R9_PACKAGED_RUNTIME_THREE_COMPONENTS_PASS\\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/s01-r9-services.php" --path="$wpdir" --allow-root
+          echo S01_R9_REAL_WORDPRESS_ZIP_INSTALL_PASS
+      - name: Cleanup transient private sources and package bytes
+        if: always()
+        run: rm -rf harness ops m3u8 theme proof "$RUNNER_TEMP/s01-r9-wordpress" /tmp/s01-r9-ops-build.json /tmp/s01-r9-wp.phar
