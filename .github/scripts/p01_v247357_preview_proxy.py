@@ -13,7 +13,7 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-EXPECTED_SHA256 = "aa763a70a432a6296459c8eeda9e35970f67caa02b8538307e3435a368f5ed95"
+EXPECTED_SHA256 = "6a58716461e99b6324af683d5b25e6f147a7e08acca95bd0717ed1f957d90d7d"
 COOKIE_JAR = pathlib.Path("/tmp/p01-v247357-preview/admin-cookies.txt")
 APP_HOST, APP_PORT = "127.0.0.1", 18541
 MAX_BODY = 65536
