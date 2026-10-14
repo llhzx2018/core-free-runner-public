@@ -1,0 +1,94 @@
+name: P01 GOV-BOOK Nine-Asset Exact Reader Gate
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-govbook-nine-asset-gate.yml'
+permissions:
+  contents: read
+jobs:
+  exact-books:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'test/p01-govbook-nine-zip-cover-20261014'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Exact GOV-BOOK private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-book
+          ref: dd4cf1fb76051e903336b6bb12a16add296ed219
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov-book
+      - name: Exact VF Start private consumer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 61fcccea26c26311bb6449a00c9a3e27afdfd517
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: PHP native reader prerequisites
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: zip,mbstring,gd,pdo_sqlite,sqlite3,curl
+          coverage: none
+      - name: Check nine exact versioned files, CRC, SHA, private scope and image identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C gov-book rev-parse HEAD)" = dd4cf1fb76051e903336b6bb12a16add296ed219
+          test "$(git -C product rev-parse HEAD)" = 61fcccea26c26311bb6449a00c9a3e27afdfd517
+          python3 - <<'PY'
+          import json,hashlib,pathlib,zipfile
+          root=pathlib.Path('gov-book')
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text(encoding='utf-8'))
+          assert catalog['schema']=='gov-book-p01-reader/v1'
+          assert catalog['source_repository']=='llhzx2018/gov-book'
+          assert catalog['canonical_branch']=='main'
+          canonical=json.loads((root/'BOOK_CATALOG.json').read_text(encoding='utf-8'))
+          selected=[x for x in canonical['books'] if x.get('qualification')=='PASS' and x.get('download_status')=='REMOTE_EXACT_VERIFIED']
+          assert len(selected)==9 and len(catalog['books'])==9
+          assert [x['book_id'] for x in catalog['books']]==[x['book_id'] for x in selected]
+          count=0
+          for book,source in zip(catalog['books'],selected):
+              assert book['book_version']==source['book_version']
+              assert book['qualification']=='PASS'
+              assert book['page_count']>=1
+              for key in ('zip','cover'):
+                  info=book[key];p=root/info['path']
+                  assert p.is_file() and p.stat().st_size==info['bytes']
+                  assert hashlib.sha256(p.read_bytes()).hexdigest()==info['sha256']
+              with zipfile.ZipFile(root/book['zip']['path']) as z:
+                  assert z.testzip() is None
+                  names=z.namelist()
+                  assert len(names)==book['page_count']
+                  assert len(names)==len(set(names))
+                  for path in names:
+                      assert path.endswith('.md') and not path.startswith('/') and '..' not in pathlib.PurePosixPath(path).parts
+                      z.read(path).decode('utf-8','strict')
+              count+=1
+          print('P01_GOVBOOK_NINE_EXACT_READER_SHA_CRC=PASS books='+str(count))
+          PY
+          php -r '
+          require "product/src/app/CoursePackageStore.php";
+          $catalog=json_decode(file_get_contents("gov-book/distribution/p01/catalog.json"),true,32,JSON_THROW_ON_ERROR);
+          foreach ($catalog["books"] as $b) {
+              $zip="gov-book/".$b["zip"]["path"];
+              $check=VfCoursePackageStore::inspectArchive($zip);
+              if ((int)$check["page_count"]!==(int)$b["page_count"]) throw new RuntimeException("Reader ZIP mismatch ".$b["book_id"]);
+              $bytes=file_get_contents("gov-book/".$b["cover"]["path"]);
+              $info=getimagesizefromstring($bytes);
+              if (!is_array($info) || ($info["mime"]??"")!=="image/png"
+                  || $info[0]!==$b["cover"]["width"]
+                  || $info[1]!==$b["cover"]["height"]) throw new RuntimeException("Cover PNG mismatch ".$b["book_id"]);
+          }
+          echo "P01_GOVBOOK_NINE_NATIVE_ZIP_COVER=PASS\n";
+          '
+          php product/tests/unit/gov_book_sync_contract_native.php |
+            tee /tmp/p01-govbook-contract.txt
+          grep -Fx 'P01_GOV_BOOK_CATALOG_STRICT_IDENTITY=PASS' /tmp/p01-govbook-contract.txt
+          grep -Fx 'P01_GOV_BOOK_VERSION_MONOTONIC_AND_HASH=PASS' /tmp/p01-govbook-contract.txt
+          echo P01_GOVBOOK_NINE_EXACT_SOURCE_GATE=PASS
