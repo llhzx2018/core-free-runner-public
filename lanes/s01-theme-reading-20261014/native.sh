@@ -24,6 +24,8 @@ cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php"
 cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
+docker cp lane/urls.php "$WP:/tmp/urls.php"
+cli eval-file /tmp/urls.php > proof/seed.json
 docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
 docker cp lane/template-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/s01-template-fixture.php"
 docker cp lane/state.php "$WP:/tmp/state.php"

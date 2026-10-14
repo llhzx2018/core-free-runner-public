@@ -2,7 +2,7 @@
 const fs=require('fs'),assert=require('node:assert/strict'),{chromium}=require('playwright');
 const phase=process.argv[2],candidate=phase==='candidate',rows=[],checks=[],errors=[];
 const seed=JSON.parse(fs.readFileSync('proof/seed.json'));
-const fixtureURL=(locale,kind,extra='')=>{const u=new URL(seed.urls[locale][kind]);u.searchParams.set('vf_template_fixture',kind);for(const [k,v] of new URLSearchParams(extra))u.searchParams.set(k,v);return u.href;};
+const fixtureURL=(locale,kind,extra='')=>{const u=new URL(seed.urls[locale][kind]);const hub={guide_detail:'guides',article_detail:'blog',problem_detail:'problems',glossary_detail:'glossary'};u.pathname=(locale==='zh'?'/zh/':'/')+hub[kind]+'/s01-reading-fixture/';u.search='';u.searchParams.set('vf_template_fixture',kind);for(const [k,v] of new URLSearchParams(extra))u.searchParams.set(k,v);return u.href;};
 const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,label+' '+JSON.stringify(detail));};
 (async()=>{
  const browser=await chromium.launch({headless:true}),page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));

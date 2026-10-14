@@ -38,6 +38,7 @@ add_action('template_redirect', static function(): void {
     $wp_query->is_single = true;
     $wp_query->is_singular = true;
     $wp_query->posts=[$post]; $wp_query->post_count=1; $wp_query->current_post=-1;
+    $wp_query->post=$post; $wp_query->in_the_loop=false;
     $wp_query->queried_object = $post;
     $wp_query->queried_object_id = (int)$post->ID;
     $GLOBALS['post']=$post;
@@ -52,6 +53,7 @@ add_action('template_redirect', static function(): void {
     $context=['route'=>$route,'family'=>vf_theme_template_family_for_route($route),'title'=>$post->post_title,'description'=>'Synthetic template summary: browser tasks and reading content.','module_key'=>$kind==='tool'?'browser_stream_test':'','field_data'=>['title'=>$post->post_title,'description'=>'Synthetic template summary: browser tasks and reading content.','module_key'=>$kind==='tool'?'browser_stream_test':'']];
     status_header(200);
     get_header();
+    $wp_query->posts=[$post]; $wp_query->post_count=1; $wp_query->post=$post; $wp_query->rewind_posts(); $GLOBALS['post']=$post;
     echo '<div data-vf-fixture-context="'.esc_attr($kind).'">';
     vf_theme_render_module_stack($context,$kind);
     echo '</div>';
