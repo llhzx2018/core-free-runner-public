@@ -11,6 +11,8 @@ for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php
 curl -fsSLo /tmp/wp-cli-s01.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 docker exec "$WP" sh -c 'echo "Listen 18880" >> /etc/apache2/ports.conf;sed -i "s/<VirtualHost \*:80>/<VirtualHost *:80 *:18880>/" /etc/apache2/sites-enabled/000-default.conf;apachectl graceful' >/dev/null
 docker cp /tmp/wp-cli-s01.phar "$WP:/usr/local/bin/wp"; docker exec "$WP" chmod 0755 /usr/local/bin/wp
+# Direct test-only source copies must never execute stale baseline PHP opcodes.
+docker exec "$WP" sh -c 'echo "opcache.enable=0" > /usr/local/etc/php/conf.d/s01-reading-no-opcache.ini;apachectl graceful' >/dev/null
 cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set DISABLE_WP_CRON true --raw >/dev/null
