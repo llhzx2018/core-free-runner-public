@@ -26,7 +26,7 @@ const html = (family, lang) => `<!doctype html><html lang="${lang}"><head><meta 
               const i=input.getBoundingClientRect(), l=label.getBoundingClientRect(), s=svg.getBoundingClientRect(), f=form.getBoundingClientRect();
               return {overflow,inputWidth:i.width,labelWidth:l.width,formWidth:f.width,inputHeight:i.height,inputRatio:i.width/f.width,centerDelta:Math.abs((i.y+i.height/2)-(s.y+s.height/2)),labelFlex:getComputedStyle(label).flexGrow,name:input.getAttribute('aria-label'),method:form.method};
             }, {family,title});
-            if(phase==='candidate') {
+            if(['baseline','candidate'].includes(phase)) {
               assert.equal(value.overflow,false,JSON.stringify({width,family,lang,value}));
               if(family==='home') {
                 if(lang==='zh-CN'){assert.equal(value.title,title);assert.equal(value.phraseSameLine,true);assert.equal(value.wordBreak,'keep-all');}
@@ -52,7 +52,7 @@ const html = (family, lang) => `<!doctype html><html lang="${lang}"><head><meta 
         }
       }
     }
-    assert.ok(rows.filter(r=>r.phase==='baseline'&&r.family==='tool_hub').some(r=>r.inputRatio<.5||r.centerDelta>1),'must reproduce baseline label/layout defect');
+    assert.ok(rows.filter(r=>r.phase==='baseline'&&r.family==='tool_hub').every(r=>r.inputRatio>.8&&r.centerDelta<1),'formal116 search fix retained in baseline');
     const proof={status:'PASS',source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE,scope:'Exact shipped CSS bundle applied to public markup-shaped isolated fixture; not full WordPress, mobile, Production or domain-function acceptance',desktop_widths:[1024,1280,1440,1920],rows,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_MODIFIED'};
     fs.writeFileSync('proof/desktop.json',JSON.stringify(proof,null,2));
     console.log('DESKTOP_PROOF',JSON.stringify({status:proof.status,source_sha:proof.source_sha,source_tree:proof.source_tree,rows:rows.length,mobile:proof.mobile}));
