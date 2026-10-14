@@ -2,6 +2,9 @@
 // Isolated synthetic WordPress only. This file is never part of the theme ZIP.
 add_action('template_redirect', static function(): void {
     if (!isset($_GET['vf_template_fixture'])) { return; }
+    if (function_exists('vf_theme_public_runtime_require_template_stack')) {
+        vf_theme_public_runtime_require_template_stack();
+    }
     $kind = sanitize_key((string)$_GET['vf_template_fixture']);
     if (!function_exists('vf_theme_available_contexts') || !in_array($kind, vf_theme_available_contexts(), true)) {
         status_header(404); exit;
@@ -35,4 +38,4 @@ add_action('template_redirect', static function(): void {
     echo '</div>';
     get_footer();
     exit;
-}, -100);
+}, -1000003);

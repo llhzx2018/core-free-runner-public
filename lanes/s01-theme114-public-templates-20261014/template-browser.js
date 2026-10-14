@@ -33,7 +33,8 @@ function gate(ok,label,detail){checks.push({label,pass:!!ok,detail});assert(ok,l
    const title=await page.locator('#content h1').evaluate(e=>parseFloat(getComputedStyle(e).fontSize));gate(title<=50,'native first-version title '+path,title);
   }
  }
- await page.goto(base+'/tools/');const search=page.locator('[data-vf-directory-search]').first();
+ await page.goto(base+'/tools/');const search=page.locator('[data-vf-directory-query]').first();
+ gate(await search.count()===1,'native catalogue search registered');
  if(await search.count()){
   const before=await page.locator('.vf-directory-tool-card:visible').count();gate(before>0,'actual tool catalogue has results');
   await search.fill('unmatched-synthetic-term-12345');await page.waitForTimeout(200);gate(await page.locator('.vf-directory-tool-card:visible').count()===0,'actual keyword empty state');

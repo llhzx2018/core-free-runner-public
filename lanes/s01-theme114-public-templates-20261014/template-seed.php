@@ -1,4 +1,7 @@
 <?php
+if (!function_exists('vf_theme_available_contexts')) {
+    require_once get_template_directory().'/inc/options/options-structure.php';
+}
 foreach(vf_theme_available_contexts() as $kind) {
     $slug='s01-template-'.$kind;
     if (get_page_by_path($slug,OBJECT,'post')) { continue; }
