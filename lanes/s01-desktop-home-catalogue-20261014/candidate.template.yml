@@ -1,0 +1,94 @@
+name: S01 focused desktop hero and catalogue CSS verification
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      BASE_SHA: '{{BASE_SHA}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: runner
+          persist-credentials: false
+      - name: Target-owned identity preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/candidate.template.yml --output /tmp/rendered.yml >/dev/null
+          cmp /tmp/rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-identity.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - name: Exact source and bundle contract
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '[:space:]' < target/VERSION)" = "$TARGET_VERSION"
+          pip install tinycss2 --quiet
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,json,hashlib,subprocess,re,tinycss2
+          owners=['src/assets/css/public/pages/families/public-family-01-shell-home-operations-closure.css','src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css']
+          bundle='src/assets/css/public/vf-theme-public-runtime.css';registry='src/inc/public-css-owner-registry.php'
+          changed=subprocess.check_output(['git','-C','target','diff','--name-only',os.environ['BASE_SHA'],os.environ['TARGET_SHA']],text=True).splitlines()
+          assert sorted(changed)==sorted(owners+[bundle,registry]),changed
+          old=(Path('baseline')/bundle).read_text()
+          for path in owners:
+           b=(Path('baseline')/path).read_text().rstrip();n=(Path('target')/path).read_text().rstrip()
+           assert old.count(b)==1,path
+           old=old.replace(b,n)
+           errors=[r.message for r in tinycss2.parse_stylesheet(n,skip_comments=True,skip_whitespace=True) if r.type=='error'];assert not errors,(path,errors)
+          raw=(Path('target')/bundle).read_bytes();assert old.rstrip()+'\n\n\n'==raw.decode()
+          digest=hashlib.sha256(raw).hexdigest();r=(Path('target')/registry).read_text();assert "'sha256' => '"+digest+"'" in r
+          oldr=(Path('baseline')/registry).read_text();oldhash=hashlib.sha256((Path('baseline')/bundle).read_bytes()).hexdigest();assert oldr.replace(oldhash,digest)==r
+          assert "'sourceCount' => 43" in r
+          proof={'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'changed_files':changed,'bundle_sha256':digest,'source_count':43,'version_changed':False,'release':'NOT_EXECUTED'}
+          Path('proof/source.json').write_text(json.dumps(proof,indent=2))
+          print('DESKTOP_SOURCE',json.dumps(proof))
+          PY
+      - name: Focused Chromium layout and keyboard checks
+        run: |
+          set -Eeuo pipefail
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 2 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+          node runner/lanes/{{LANE_ID}}/browser.cjs
+      - name: Public-safe evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: s01-desktop-css-proof-${{ github.run_id }}
+          path: |
+            proof/*.json
+            proof/*.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove transient private source
+        if: always()
+        run: rm -rf target baseline /tmp/rendered.yml
