@@ -16,7 +16,7 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
    return {article:a?{...rect(a),font:getComputedStyle(a).fontSize,line:getComputedStyle(a).lineHeight,text:a.textContent.trim()}:null,
     scroll:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth,
     index:document.querySelectorAll('[data-vf-reading-section-index] a').length,fullTOC:document.querySelectorAll('[data-vf-native-toc]').length,
-    support:[...document.querySelectorAll('.vf-theme-module-frame--steps,.vf-theme-module-frame--related_tools,.vf-theme-module-frame--faq,.vf-theme-module-frame--related_posts,.vf-theme-module-frame--cta')].map(e=>{const inner=e.querySelector('.vf-reading-support-shell,.container-wide');return {key:e.dataset.vfThemeModuleFrame,...rect(inner||e),frame:rect(e),children:e.children.length};}),
+    support:[...document.querySelectorAll('.vf-theme-module-frame--steps,.vf-theme-module-frame--related_tools,.vf-theme-module-frame--faq,.vf-theme-module-frame--related_posts,.vf-theme-module-frame--cta')].map(e=>{const inner=e.querySelector('.vf-reading-support-shell,.container-wide'),title=e.querySelector('h2');return {key:e.dataset.vfThemeModuleFrame,...rect(inner||e),frame:rect(e),children:e.children.length,titleFont:title?getComputedStyle(title).fontSize:null};}),
     hero:document.querySelector('.vf-reading-entry a')?.getAttribute('href'),headings:a?[...a.querySelectorAll('h2,h3')].map(e=>({id:e.id,text:e.textContent.trim()})):[],
     bodyClasses:document.body.className,missingBody:a?null:document.querySelector('#content')?.textContent,url:location.href,probe:JSON.parse(document.getElementById('s01-reading-query-probe')?.textContent||'null'),
     moduleOrder:[...document.querySelectorAll('.vf-theme-module-stack>.vf-theme-module-frame')].map(e=>e.className),share:document.querySelectorAll('[data-vf-share-copy]').length};
@@ -26,6 +26,7 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
   gate(data.support.length>=3&&data.support.every(s=>s.children>0),'support modules remain rendered',data.support);
   if(candidate){
    gate(data.index===4&&data.fullTOC===0,'short content compact index only',data);
+   gate(await page.locator('.vf-guide-step-navigation').count()===0,'short content does not add a second footer index');
    gate(data.article.font==='18px'&&Math.abs(parseFloat(data.article.line)-32.4)<.1,'desktop reading typography',data.article);
    gate(data.hero==='#vf-reading-content','hero targets the real body',data.hero);
    gate(data.support.every(s=>Math.abs(s.x-data.article.x)<2&&Math.abs(s.width-data.article.width)<2),'support aligns with saved reading width',data);
@@ -44,6 +45,7 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
    await page.goto(fixtureURL(locale,kind,'&reading_variant='+variant));
    gate(await page.locator('[data-vf-reading-section-index]').count()===0,'suppressed or long content has no duplicate index',{locale,kind,variant});
    const full=await page.locator('[data-vf-native-toc]').count();gate(full===(variant==='long'?1:0),'full TOC eligibility and disabled states',{locale,kind,variant,full});
+   if(variant!=='long')gate(await page.locator('.vf-guide-step-navigation').count()===0,'suppressed short content retains footer navigation state',{locale,kind,variant});
   }
   for(const kind of ['problem_detail','glossary_detail']){
    await page.goto(fixtureURL('en',kind));
