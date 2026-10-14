@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 NET="s01-tools-$GITHUB_RUN_ID";DB="$NET-db";WP="$NET-wp";export WP
-cleanup(){ docker rm -fv "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+cleanup(){ docker logs "$WP" 2>&1 | grep 'module render skipped' | tail -12 || true; docker rm -fv "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 docker network create "$NET" >/dev/null
 docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
@@ -20,6 +20,7 @@ docker cp provider/vf-tools-m3u8_V1.25.91.zip "$WP:/tmp/provider.zip"
 cli theme activate vf-tools-theme >/dev/null
 cli plugin install /tmp/provider.zip --activate >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
+cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/seed.php "$WP:/tmp/seed.php"
 cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null

@@ -1,12 +1,14 @@
 'use strict';
 const fs=require('fs'),assert=require('node:assert/strict'),{chromium}=require('playwright');
 const phase=process.argv[2],candidate=phase==='candidate',rows=[],checks=[],errors=[];
+const seed=JSON.parse(fs.readFileSync('proof/seed.json'));
+const fixtureURL=(locale,kind,extra='')=>{const u=new URL(seed.urls[locale][kind]);u.searchParams.set('vf_template_fixture',kind);for(const [k,v] of new URLSearchParams(extra))u.searchParams.set(k,v);return u.href;};
 const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,label+' '+JSON.stringify(detail));};
 (async()=>{
  const browser=await chromium.launch({headless:true}),page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));
  for(const locale of ['en','zh'])for(const width of [1024,1280,1440,1920])for(const kind of ['guide_detail','article_detail'])for(const readingWidth of ['focused','balanced','relaxed']){
   await page.setViewportSize({width,height:1000});
-  const url='http://127.0.0.1:18880'+(locale==='zh'?'/zh/':'/')+'?vf_template_fixture='+kind+'&reading_width='+readingWidth;
+  const url=fixtureURL(locale,kind,'&reading_width='+readingWidth);
   const response=await page.goto(url);await page.waitForLoadState('networkidle');
   gate(response.status()===200,'actual WordPress response',{locale,width,kind,readingWidth});
   const data=await page.evaluate(()=>{
@@ -15,7 +17,8 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
     scroll:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth,
     index:document.querySelectorAll('[data-vf-reading-section-index] a').length,fullTOC:document.querySelectorAll('[data-vf-native-toc]').length,
     support:[...document.querySelectorAll('.vf-theme-module-frame--steps,.vf-theme-module-frame--related_tools,.vf-theme-module-frame--faq,.vf-theme-module-frame--related_posts,.vf-theme-module-frame--cta')].map(e=>({key:e.dataset.vfThemeModule,...rect(e),children:e.children.length})),
-    hero:document.querySelector('.vf-reading-entry a')?.getAttribute('href'),headings:[...a.querySelectorAll('h2,h3')].map(e=>({id:e.id,text:e.textContent.trim()})),
+    hero:document.querySelector('.vf-reading-entry a')?.getAttribute('href'),headings:a?[...a.querySelectorAll('h2,h3')].map(e=>({id:e.id,text:e.textContent.trim()})):[],
+    bodyClasses:document.body.className,missingBody:a?null:document.querySelector('#content')?.textContent,
     moduleOrder:[...document.querySelectorAll('.vf-theme-module-stack>.vf-theme-module-frame')].map(e=>e.className),share:document.querySelectorAll('[data-vf-share-copy]').length};
   });
   gate(data.article&&data.scroll<=data.viewport+1,'body rendered without horizontal overflow',data);
@@ -38,12 +41,12 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
  }
  if(candidate){
   for(const locale of ['en','zh'])for(const kind of ['guide_detail','article_detail'])for(const variant of ['long','off','disabled','context-off','levels-off','legacy']){
-   await page.goto('http://127.0.0.1:18880'+(locale==='zh'?'/zh/':'/')+'?vf_template_fixture='+kind+'&reading_variant='+variant);
+   await page.goto(fixtureURL(locale,kind,'&reading_variant='+variant));
    gate(await page.locator('[data-vf-reading-section-index]').count()===0,'suppressed or long content has no duplicate index',{locale,kind,variant});
    const full=await page.locator('[data-vf-native-toc]').count();gate(full===(variant==='long'?1:0),'full TOC eligibility and disabled states',{locale,kind,variant,full});
   }
   for(const kind of ['problem_detail','glossary_detail']){
-   await page.goto('http://127.0.0.1:18880/?vf_template_fixture='+kind);
+   await page.goto(fixtureURL('en',kind));
    gate(await page.locator('[data-vf-reading-section-index]').count()===0,'other reading contexts unchanged',kind);
   }
  }
