@@ -67,7 +67,7 @@ class PreviewProxy(BaseHTTPRequestHandler):
 
     def safe_target(self):
         raw = urlsplit(self.path)
-        path = unquote(unquote(raw.path)).replace("\\\\", "/")
+        path = unquote(unquote(raw.path)).replace("\\", "/")
         if any(p in (".", "..") or p.startswith(".") for p in path.split("/") if p):
             return None
         if path == "/courses.php" and self.command in ("GET","HEAD") and not raw.query:
@@ -87,7 +87,7 @@ class PreviewProxy(BaseHTTPRequestHandler):
             if (set(params) == {"file", "v"}
                 and len(params["file"]) == 1 and len(params["v"]) == 1
                 and params["v"][0] == "2.47.360"
-                and re.fullmatch(r"[A-Za-z0-9_.-]+\\.(?:css|js|png|jpe?g|webp|gif|svg|ico)", params["file"][0], re.IGNORECASE)):
+                and re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:css|js|png|jpe?g|webp|gif|svg|ico)", params["file"][0], re.IGNORECASE)):
                 return self.path
         if self.command in ("GET","HEAD") and path.startswith("/assets/") and re.fullmatch(r"/assets/[A-Za-z0-9_./-]+",path) and path.lower().endswith((".css",".js",".png",".svg",".webp",".ico",".jpg")):
             return self.path
