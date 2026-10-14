@@ -1,0 +1,122 @@
+name: S01 Theme118 exact catalogue copy and native lifecycle proof
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      M3_SHA: '{{M3_SHA}}'
+      M3_TREE: '{{M3_TREE}}'
+      M3_VERSION: '{{M3_VERSION}}'
+      THEME_BASE_BYTES: '{{THEME_BASE_BYTES}}'
+      THEME_BASE_SHA256: '{{THEME_BASE_SHA256}}'
+      M3_BASE_BYTES: '{{M3_BASE_BYTES}}'
+      M3_BASE_SHA256: '{{M3_BASE_SHA256}}'
+      BUNDLE_SHA: '{{BUNDLE_SHA}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Target owned identity preflight
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/candidate.template.yml --output /tmp/rendered.yml
+          cmp /tmp/rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-identity.json
+          cp -a runner/lanes/{{LANE_ID}} lane
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.BASE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3target
+      - name: Actual PHP regressions and deterministic package
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(git -C m3target rev-parse HEAD)" = "$M3_SHA"
+          test "$(git -C m3target rev-parse HEAD^{tree})" = "$M3_TREE"
+          php -l target/src/inc/content-provider/copy-cards.php
+          php -l target/src/inc/content-provider/copy-core.php
+          php -l target/src/inc/modules/module-tool-grid.php
+          php target/tests/catalogue-copy-polish.php zh > proof/copy-zh.json
+          php target/tests/catalogue-copy-polish.php en > proof/copy-en.json
+          VF_PROVIDER_SOURCE_ROOT="$PWD/m3target/src" php target/tests/public-directory-provider-contract.php > proof/directory-provider.json
+          php target/tests/public-detail-heading-contract.php > proof/heading.json
+          php target/tests/reading-short-section-index.php > proof/reading-functions.json
+          php target/tests/public-reading-final-owner-contract.php
+          node --check lane/catalogue-browser.cjs
+          bash -n lane/native.sh
+          python3 lane/theme-build.py
+          python3 - <<'PYFREEZE'
+          import pathlib,hashlib,os,json
+          for path in ['header.php','footer.php','inc/services/navigation-footer-output-service.php','assets/js/main.js','inc/theme-native-toc.php','inc/content-reading-system.php','assets/css/public/public-reading-final-owner.css']:
+            assert (pathlib.Path('target/src')/path).read_bytes()==(pathlib.Path('baseline/src')/path).read_bytes(),path
+          bundle=pathlib.Path('target/src/assets/css/public/vf-theme-public-runtime.css').read_bytes()
+          assert hashlib.sha256(bundle).hexdigest()==os.environ['BUNDLE_SHA']
+          pathlib.Path('proof/frozen-source.json').write_text(json.dumps({'status':'PASS','source_sha':os.environ['TARGET_SHA'],'header_menu_footer':'UNCHANGED','reading_engine':'UNCHANGED','provider_source_sha':os.environ['M3_SHA']}))
+          PYFREEZE
+      - name: Authenticated baseline package identities
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          mkdir provider
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$SOURCE_VERSION.zip" --dir provider
+          gh release download "v$M3_VERSION" --repo llhzx2018/vf-tools-m3u8 --pattern "vf-tools-m3u8_V$M3_VERSION.zip" --dir provider
+          python3 - <<'PYBASE'
+          import pathlib,os,hashlib,zipfile
+          for n,b,h in [('vf-tools-theme_V'+os.environ['SOURCE_VERSION']+'.zip','THEME_BASE_BYTES','THEME_BASE_SHA256'),('vf-tools-m3u8_V'+os.environ['M3_VERSION']+'.zip','M3_BASE_BYTES','M3_BASE_SHA256')]:
+            p=pathlib.Path('provider')/n;data=p.read_bytes();assert len(data)==int(os.environ[b]) and hashlib.sha256(data).hexdigest()==os.environ[h]
+            with zipfile.ZipFile(p) as z:assert z.testzip() is None
+          PYBASE
+      - name: Browser runtime
+        run: |
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 3 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Actual WordPress catalogue reading install upgrade rollback and state preservation
+        run: bash lane/native.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: s01-theme118-proof-${{ github.run_id }}
+          path: |
+            proof/*.json
+            proof/*.png
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private transient source and packages
+        if: always()
+        run: rm -rf target baseline m3target provider proof/*.zip /tmp/wp-cli-s01.phar
