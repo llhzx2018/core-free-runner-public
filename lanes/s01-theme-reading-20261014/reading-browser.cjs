@@ -32,8 +32,9 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
    gate(data.support.every(s=>Math.abs(s.x-data.article.x)<2&&Math.abs(s.width-data.article.width)<2),'support aligns with saved reading width',data);
    const links=page.locator('[data-vf-reading-section-index] a');
    await links.nth(1).focus();await page.keyboard.press('Enter');
+   await page.waitForFunction(()=>{const e=document.getElementById(decodeURIComponent(location.hash.slice(1)));if(!e)return false;const r=e.getBoundingClientRect();return document.activeElement===e&&r.top>=0&&r.top<200;},null,{timeout:5000});
    const jump=await page.evaluate(()=>{const id=decodeURIComponent(location.hash.slice(1)),e=document.getElementById(id);return {id,heading:!!e&&/^H[23]$/.test(e.tagName),focus:document.activeElement===e,y:e?.getBoundingClientRect().y};});
-   gate(jump.heading&&jump.focus&&jump.y>=0&&jump.y<1000,'keyboard chapter jump and focus',jump);
+   gate(jump.heading&&jump.focus&&jump.y>=0&&jump.y<200,'keyboard chapter jump and focus after smooth scroll',jump);
   }else gate(data.index===0,'original short content has no compact index',data.index);
   const faq=page.locator('.vf-reading-faq-list details').first();
   if(await faq.count()){const before=await faq.getAttribute('open');await faq.locator('summary').click();gate((await faq.getAttribute('open'))!==before,'FAQ toggle remains usable');}
