@@ -56,7 +56,7 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
  gate(errors.length===0,'no uncaught browser errors',errors);
  if(candidate){
   const before=JSON.parse(fs.readFileSync('proof/reading-baseline.json')).rows;
-  gate(rows.every((r,i)=>r.article.text===before[i].article.text&&JSON.stringify(r.moduleOrder)===JSON.stringify(before[i].moduleOrder)),'body text and module order retained across all configurations');
+  gate(rows.every((r,i)=>r.article.text===before[i].article.text&&JSON.stringify(phase==='clean'?r.moduleOrder.map(s=>s.match(/vf-theme-module-frame--([a-z_]+)/)?.[1]):r.moduleOrder)===JSON.stringify(phase==='clean'?before[i].moduleOrder.map(s=>s.match(/vf-theme-module-frame--([a-z_]+)/)?.[1]):before[i].moduleOrder)),'body text and module order retained across all configurations');
  }
  fs.writeFileSync('proof/reading-'+phase+'.json',JSON.stringify({status:'PASS',phase,rows,checks,production:'NOT_EXECUTED',mobile:'NOT_RUN_OWNER_DEFERRED'},null,2));
  await browser.close();

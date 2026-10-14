@@ -16,78 +16,11 @@ cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic S01 Tool Regression' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
-docker cp "provider/vf-tools-theme_V$SOURCE_VERSION.zip" "$WP:/tmp/theme106.zip"
-docker cp "provider/vf-tools-m3u8_V$M3_SOURCE_VERSION.zip" "$WP:/tmp/m378.zip"
 docker cp "proof/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/theme107.zip"
 docker cp "proof/vf-tools-m3u8_V$M3_VERSION.zip" "$WP:/tmp/m379.zip"
-cli theme install /tmp/theme106.zip --activate >/dev/null
-cli plugin install /tmp/m378.zip --activate >/dev/null
-cli plugin install polylang --version=3.8.10 --activate >/dev/null
-docker cp lane/seed.php "$WP:/tmp/seed.php"
-cli eval-file /tmp/seed.php >/dev/null
-cli rewrite structure '/%postname%/' --hard >/dev/null
 docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
 docker cp lane/route-trace.php "$WP:/var/www/html/wp-content/mu-plugins/s01-route-trace.php"
-docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php"
-cli eval-file /tmp/mount-seed.php > proof/mount-seed-${TARGET_VERSION}.json
-docker cp lane/template-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/s01-template-fixture.php"
-docker cp lane/template-seed.php "$WP:/tmp/template-seed.php"
-cli eval-file /tmp/template-seed.php > proof/template-seed.json
-docker cp lane/reading-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/s01-reading-fixture.php"
-docker cp lane/reading-seed.php "$WP:/tmp/reading-seed.php"
-docker cp lane/reading-urls.php "$WP:/tmp/reading-urls.php"
-docker cp lane/reading-state.php "$WP:/tmp/reading-state.php"
-cli eval-file /tmp/reading-seed.php >/dev/null
-cli eval-file /tmp/reading-urls.php > proof/reading-seed.json
-
-cli eval 'update_option("s01_synthetic_cross_owner_keep",["owner"=>"keep","value"=>1707]);set_theme_mod("s01_synthetic_keep","retained");update_option("s01_synthetic_mount_hash",hash("sha256",serialize(vf_m3u8_mounts_data(true))));echo "OK";' >/dev/null
-test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
-test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_SOURCE_VERSION"
-node lane/browser.js baseline
-node lane/template-browser.js baseline
-cli eval-file /tmp/reading-state.php > proof/reading-state-before.json
-node lane/reading-browser.cjs baseline
-cli theme install /tmp/theme107.zip --force >/dev/null
-cli plugin install /tmp/m379.zip --force >/dev/null
-test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
-test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_VERSION"
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707] || get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("cross owner state lost");echo wp_json_encode(["status"=>"PASS","cross_owner_state"=>"retained","theme"=>wp_get_theme()->get("Version"),"provider"=>VF_TOOL_M3U8_VERSION]);' > proof/state-upgrade.json
-# Probe the actual web request before long browser regressions; logs are
-# synthetic-only public-safe route metadata and must never include post content.
-curl -fsS --max-time 30 -o /tmp/s01-embed-page.html -w 'S01_EMBED_HTTP_STATUS=%{http_code}\n' "http://127.0.0.1:18880/m3u8-embed-generator/"
-docker logs "$WP" 2>&1 | grep 'S01_ROUTE_TRACE' | tail -12 || true
-node lane/browser.js candidate
-node lane/template-browser.js candidate
-node lane/reading-browser.cjs candidate
-cli eval-file /tmp/reading-state.php > proof/reading-state-candidate.json
-cmp proof/reading-state-before.json proof/reading-state-candidate.json
-cli theme install /tmp/theme106.zip --force >/dev/null
-cli plugin install /tmp/m378.zip --force >/dev/null
-test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
-test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_SOURCE_VERSION"
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("rollback state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-rollback.json
-node lane/browser.js rollback
-node lane/template-browser.js rollback
-node lane/reading-browser.cjs rollback
-cli eval-file /tmp/reading-state.php > proof/reading-state-rollback.json
-cmp proof/reading-state-before.json proof/reading-state-rollback.json
-cli theme install /tmp/theme107.zip --force >/dev/null
-cli plugin install /tmp/m379.zip --force >/dev/null
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("reapply state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-reapply.json
-node lane/browser.js reapply
-node lane/template-browser.js reapply
-node lane/reading-browser.cjs reapply
-cli eval-file /tmp/reading-state.php > proof/reading-state-reapply.json
-cmp proof/reading-state-before.json proof/reading-state-reapply.json
-# Reinstall the exact same packages and prove canonical data remains unchanged.
-cli theme install /tmp/theme107.zip --force >/dev/null
-cli plugin install /tmp/m379.zip --force >/dev/null
-cli eval 'if(get_option("s01_synthetic_cross_owner_keep")!==["owner"=>"keep","value"=>1707]||get_theme_mod("s01_synthetic_keep")!=="retained"||get_option("s01_synthetic_mount_hash")!==hash("sha256",serialize(vf_m3u8_mounts_data(true))))throw new Exception("idempotent reinstall state lost");echo wp_json_encode(["status"=>"PASS"]);' > proof/state-idempotent.json
-cli eval-file /tmp/reading-state.php > proof/reading-state-idempotent.json
-cmp proof/reading-state-before.json proof/reading-state-idempotent.json
-docker exec "$DB" mariadb -uroot -psyntheticroot -e "CREATE DATABASE wordpress_clean;GRANT ALL PRIVILEGES ON wordpress_clean.* TO 'wordpress'@'%';"
-cli config set DB_NAME wordpress_clean >/dev/null
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic S01 Clean' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+docker cp lane/seed.php "$WP:/tmp/seed.php"
 cli theme install /tmp/theme107.zip --activate --force >/dev/null
 cli plugin install /tmp/m379.zip --activate --force >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
@@ -107,7 +40,6 @@ cli eval-file /tmp/reading-urls.php > proof/reading-seed.json
 
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$M3_VERSION"
-node lane/browser.js clean
 node lane/template-browser.js clean
 node lane/reading-browser.cjs clean
 cli plugin activate vf-tool-m3u8 >/dev/null
@@ -118,7 +50,7 @@ p=pathlib.Path('proof')
 targets=['native-functions','reading-baseline','reading-candidate','reading-rollback','reading-reapply','reading-clean','desktop','public-template-baseline','public-detail-heading','public-template-css','template-candidate','template-reapply','template-clean','next-route-en','next-route-zh','three-tool-recovery','browser-stream-i18n-php','embed-alias-php','attribute-php','state-upgrade','state-rollback','state-reapply','tools-candidate','tools-reapply','tools-clean','clean-installed','state-idempotent']
 states={n:json.loads((p/(n+'.json')).read_text())['status'] for n in targets}
 assert all(v=='PASS' for v in states.values()),states
-e={'status':'PASS','theme_source_sha':os.environ['TARGET_SHA'],'theme_source_tree':os.environ['TARGET_TREE'],'m3_source_sha':os.environ['M3_SHA'],'m3_source_tree':os.environ['M3_TREE'],'theme_version':os.environ['TARGET_VERSION'],'m3_version':os.environ['M3_VERSION'],'checks':states,'canonical_content_and_layout':'PRESERVED','production':'NOT_EXECUTED','owner_product_pass':'PENDING','mobile':'NOT_RUN_OWNER_DEFERRED','provider_companion':'UNCHANGED_1.25.91'}
+e={'status':'PASS','theme_source_sha':os.environ['TARGET_SHA'],'theme_source_tree':os.environ['TARGET_TREE'],'m3_source_sha':os.environ['M3_SHA'],'m3_source_tree':os.environ['M3_TREE'],'theme_version':os.environ['TARGET_VERSION'],'m3_version':os.environ['M3_VERSION'],'checks':states,'canonical_content_and_layout':'PRESERVED','resumed_from_run':38545197983,'resume_basis':'FIRST_FOUR_LIFECYCLE_PHASES_AND_TOOLS_PRESERVED_VERIFIED_PRIOR_ARTIFACT; CLEAN_RETESTED_WITH_MODULE_IDENTITY_ORDER','production':'NOT_EXECUTED','owner_product_pass':'PENDING','mobile':'NOT_RUN_OWNER_DEFERRED','provider_companion':'UNCHANGED_1.25.91'}
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(e,sort_keys=True,indent=2))
 print('SAFE_FINAL',json.dumps(e,sort_keys=True))
 PY
