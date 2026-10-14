@@ -49,13 +49,17 @@ add_action('template_redirect', static function(): void {
         return $classes;
     }, 999);
     $routes=['home'=>'','tool'=>'m3u8-browser-stream-test','tool_hub'=>'tools','blog_index'=>'blog','guide_index'=>'guides','problem_index'=>'problems','archive_list'=>'archive','glossary_index'=>'glossary','html_sitemap'=>'sitemap','faq_page'=>'faq','legal'=>'privacy-policy','contact_page'=>'contact','about_page'=>'about','search'=>'search','not_found'=>'404'];
-    $route=$routes[$kind] ?? 's01-template-'.$kind;
+    $route=['guide_detail'=>'guides/s01-reading-fixture','article_detail'=>'blog/s01-reading-fixture','problem_detail'=>'problems/s01-reading-fixture','glossary_detail'=>'glossary/s01-reading-fixture'][$kind] ?? ($routes[$kind] ?? 's01-template-'.$kind);
+    $GLOBALS['vf_toolsite_render_route']=$route;
     $context=['route'=>$route,'family'=>vf_theme_template_family_for_route($route),'title'=>$post->post_title,'description'=>'Synthetic template summary: browser tasks and reading content.','module_key'=>$kind==='tool'?'browser_stream_test':'','field_data'=>['title'=>$post->post_title,'description'=>'Synthetic template summary: browser tasks and reading content.','module_key'=>$kind==='tool'?'browser_stream_test':'']];
     status_header(200);
     get_header();
     $wp_query->posts=[$post]; $wp_query->post_count=1; $wp_query->post=$post; $wp_query->rewind_posts(); $GLOBALS['post']=$post;
+    $probe=['current_post'=>$wp_query->current_post,'post_count'=>$wp_query->post_count,'raw_bytes'=>strlen($post->post_content),'filtered_bytes'=>strlen((string)apply_filters('the_content',$post->post_content)),'get_content_bytes'=>strlen((string)get_the_content(null,false,$post))];
     echo '<div data-vf-fixture-context="'.esc_attr($kind).'">';
     vf_theme_render_module_stack($context,$kind);
+    $probe['after_current_post']=$wp_query->current_post;
+    echo '<script type="application/json" id="s01-reading-query-probe">'.wp_json_encode($probe).'</script>';
     echo '</div>';
     get_footer();
     exit;
