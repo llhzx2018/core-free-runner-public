@@ -16,7 +16,7 @@ const gate=(ok,label,detail)=>{checks.push({pass:!!ok,label,detail});assert(ok,l
    return {article:a?{...rect(a),font:getComputedStyle(a).fontSize,line:getComputedStyle(a).lineHeight,text:a.textContent.trim()}:null,
     scroll:document.documentElement.scrollWidth,viewport:document.documentElement.clientWidth,
     index:document.querySelectorAll('[data-vf-reading-section-index] a').length,fullTOC:document.querySelectorAll('[data-vf-native-toc]').length,
-    support:[...document.querySelectorAll('.vf-theme-module-frame--steps,.vf-theme-module-frame--related_tools,.vf-theme-module-frame--faq,.vf-theme-module-frame--related_posts,.vf-theme-module-frame--cta')].map(e=>({key:e.dataset.vfThemeModule,...rect(e),children:e.children.length})),
+    support:[...document.querySelectorAll('.vf-theme-module-frame--steps,.vf-theme-module-frame--related_tools,.vf-theme-module-frame--faq,.vf-theme-module-frame--related_posts,.vf-theme-module-frame--cta')].map(e=>{const inner=e.querySelector('.vf-reading-support-shell,.container-wide');return {key:e.dataset.vfThemeModuleFrame,...rect(inner||e),frame:rect(e),children:e.children.length};}),
     hero:document.querySelector('.vf-reading-entry a')?.getAttribute('href'),headings:a?[...a.querySelectorAll('h2,h3')].map(e=>({id:e.id,text:e.textContent.trim()})):[],
     bodyClasses:document.body.className,missingBody:a?null:document.querySelector('#content')?.textContent,url:location.href,probe:JSON.parse(document.getElementById('s01-reading-query-probe')?.textContent||'null'),
     moduleOrder:[...document.querySelectorAll('.vf-theme-module-stack>.vf-theme-module-frame')].map(e=>e.className),share:document.querySelectorAll('[data-vf-share-copy]').length};

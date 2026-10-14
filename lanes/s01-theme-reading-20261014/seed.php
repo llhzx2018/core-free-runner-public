@@ -5,7 +5,8 @@ foreach ([['en','en_US','English','us'],['zh','zh_CN','中文','cn']] as $l) {
     if (!$model->get_language($l[0])) { $model->add_language(['slug'=>$l[0],'locale'=>$l[1],'name'=>$l[2],'flag'=>$l[3],'rtl'=>0,'term_group'=>0]); }
 }
 $o=get_option('polylang',[]); $o['default_lang']='en'; $o['hide_default']=1; $o['force_lang']=1; update_option('polylang',$o);
-$layout=['articleReading'=>['sidebarMode'=>'off'],'guideReading'=>['sidebarMode'=>'off']];
+require_once get_template_directory().'/inc/theme-native-toc.php';
+$layout=['toc'=>vf_theme_native_toc_defaults(),'articleReading'=>['sidebarMode'=>'off'],'guideReading'=>['sidebarMode'=>'off']];
 update_option('vf_theme_layout',$layout);
 $urls=[];
 foreach (['guide_detail','article_detail','problem_detail','glossary_detail'] as $kind) foreach (['en','zh'] as $lang) {
