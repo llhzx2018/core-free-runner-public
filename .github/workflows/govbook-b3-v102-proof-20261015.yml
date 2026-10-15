@@ -1,0 +1,92 @@
+name: GOV-BOOK B3 v1.0.2 single-claim exact reader gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/govbook-b3-v102-proof-20261015.yml'
+permissions:
+  contents: read
+jobs:
+  exact:
+    if: >-
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Prepare pinned private exact candidate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          umask 077
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-book.git" book
+          git -C book checkout -q 04e93f947a57b80c15880e2b25a13bbdda093862
+          git -C book fetch -q origin draft/b3-skill-book-v58-depth-20261015
+          test "$(git -C book rev-parse HEAD)" = 04e93f947a57b80c15880e2b25a13bbdda093862
+          echo B3_EXACT_GIT=PASS
+      - name: Validate unchanged 18 lessons, revised chapter and all ZIP bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib,json,hashlib,zipfile,subprocess
+          root=pathlib.Path('book')
+          sha=lambda b:hashlib.sha256(b).hexdigest()
+          base=root/'distribution/p01/books/B3'
+          old,new=base/'v1.0.1',base/'v1.0.2'
+          prior=json.loads((old/'asset.json').read_text('utf-8'))
+          meta=json.loads((new/'asset.json').read_text('utf-8'))
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text('utf-8'))
+          rows={x['book_id']:x for x in catalog['internal_revisions']}
+          source=json.loads((root/'books/B3/revisions/skill-book-v5.8-r4/SOURCE_MANIFEST.json').read_text('utf-8'))
+          assert len(catalog['books'])==9 and len(catalog['internal_books'])==2 and len(rows)==8
+          assert rows['B3']['book_version']=='v1.0.2'
+          assert rows['A1']['book_version']=='v1.0.2' and rows['C1']['book_version']=='v1.0.3'
+          assert meta['qualification']=='INTERNAL' and meta['publication_status']=='NOT_PUBLISHED'
+          assert meta['base_book_version']=='v1.0.0'
+          assert meta['source_commit']==source['source_commit']=='6e3b3f0532615b99bb39166481be7fbf6fccb256'
+          assert prior['book_version']=='v1.0.1'
+          assert sha((old/'reader.zip').read_bytes())==prior['zip']['sha256']
+          assert sha((new/'cover.png').read_bytes())==meta['cover']['sha256']==prior['cover']['sha256']
+          archive_bytes=(new/'reader.zip').read_bytes()
+          assert len(archive_bytes)==meta['zip']['bytes'] and sha(archive_bytes)==meta['zip']['sha256']
+          assert len(source['entries'])==19
+          differences=[]
+          with zipfile.ZipFile(new/'reader.zip') as archive:
+            assert archive.testzip() is None
+            infos=archive.infolist()
+            assert len(infos)==19 and {i.filename for i in infos}=={e['name'] for e in source['entries']}
+            for info in infos:
+              assert info.compress_type==zipfile.ZIP_STORED and info.flag_bits & 0x800
+              assert info.filename.endswith('.md') and not info.filename.startswith('/')
+              assert '..' not in pathlib.PurePosixPath(info.filename).parts
+            for row in source['entries']:
+              filename=row['name']
+              content=(root/row['source']).read_bytes()
+              assert archive.read(filename)==content and len(content)==row['bytes']
+              assert (zipfile.crc32(content)&0xffffffff)==int(row['crc32'],16)
+              previous=subprocess.check_output(['git','-C','book','show','FETCH_HEAD:books/B3/revisions/skill-book-v5.8-r3/p01_course/md/'+filename])
+              if previous!=content:differences.append(filename)
+          assert differences==['09_第09章.md']
+          chapter=(root/'books/B3/revisions/skill-book-v5.8-r4/p01_course/md/09_第09章.md').read_text('utf-8')
+          complete=(root/'books/B3/revisions/skill-book-v5.8-r4/00_FULL_MANUSCRIPT_R4.md').read_text('utf-8')
+          exact='Sweepstakes 等带有奖励的活动可能吸引更多提交，但并不自动代表提交者有服务意图。'
+          assert exact in chapter and exact in complete
+          assert 'Sweepstakes 能显著提高提交量' not in complete
+          assert 'LEGAL_REVIEW_REQUIRED' in chapter and 'CHANGED CASE' in chapter
+          assert sum(t.startswith('# ') for t in chapter.splitlines())==1
+          print('GOVBOOK_B3_19_MD_EXACT_SOURCE=PASS')
+          print('GOVBOOK_B3_18_PRESERVED_ONE_CORRECTED=PASS')
+          print('GOVBOOK_B3_CLAIM_CROSS_SOURCE_CONSISTENCY=PASS')
+          print('GOVBOOK_B3_ZIP_SHA_CRC_COVER_IDENTITY=PASS')
+          print('GOVBOOK_B3_QUALIFICATION_PRESERVED=PASS')
+          PY
+      - name: Destroy private checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf book
+          echo PRIVATE_SOURCE_PERSISTED=NO
