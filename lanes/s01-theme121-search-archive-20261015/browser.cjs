@@ -54,6 +54,8 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   await p.goto(seed.languages[lang].category+'?vf_fixture_sort=1');gate((await p.locator('.vf-archive-context-facts').innerText()).includes(lang==='en'?'Title A–Z':'标题 A–Z'),'archive sort description matches configured sort',{lang});
   await p.goto(base+(lang==='zh'?'/zh/':'/')+'blog/?vf_q=Needleword');await p.waitForLoadState('networkidle');gate(await p.locator('.vf-theme-post-list--blog_index .vf-directory-grid a:visible').count()===1,'synthetic blog searches full native content',{lang});
   await p.goto(seed.languages[lang].category+'?vf_q=zz-no-match-8349');gate((await p.locator('[data-vf-directory-empty]').innerText()).includes(lang==='en'?'No matching':'没有匹配'),'archive query-empty is distinct from no published content',{lang});
+  gate(!(await p.locator('.vf-theme-system-recovery--archive').innerText()).includes(lang==='en'?'no published content':'还没有已发布内容'),'filtered archive recovery stays truthful',{lang});
+  await p.goto(seed.languages[lang].category+'?vf_q=zz-no-match-8349&vf_fixture_recovery=1');gate((await p.locator('.vf-theme-system-recovery--archive h2').innerText())==='Owner Recovery Heading'&&(await p.locator('.vf-theme-system-recovery--archive .vf-theme-recovery-workspace-head p').innerText())==='Owner Recovery Description','custom authored recovery copy retained',{lang});
   });
   await scenario(lang+'-desktop',async()=>{
   for(const width of [1920,1440,1319,1024]){
