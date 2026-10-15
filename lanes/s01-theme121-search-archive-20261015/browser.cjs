@@ -24,7 +24,7 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   gate(new URL(p.url()).searchParams.get('type')==='article'&&!new URL(p.url()).searchParams.has('paged')&&(await p.locator('.vf-theme-search-results-grid').innerText()).includes('Needleword'),'resubmit keeps type and returns to first page',{lang});
   await p.goto(search(lang,'Searchwork Atlas','guide'));gate(await p.locator('.vf-theme-search-results-grid a').count()===3&&(await p.locator('.vf-theme-search-results-grid').innerText()).includes('Guide'),'real guide type filter',{lang});
   await p.goto(search(lang,'m3u8','tool'));await p.waitForLoadState('networkidle');
-  const tools=await p.locator('.vf-theme-search-results-grid a').evaluateAll(a=>a.map(x=>x.href));gate(tools.length===3,'route-backed tool search honors page size',{lang});
+  const tools=await p.locator('.vf-theme-search-results-grid a').evaluateAll(a=>a.map(x=>x.href));gate(tools.length===3,'route-backed tool search honors page size',{lang,count:tools.length,urls:tools,text:(await p.locator('.vf-theme-search-results').innerText()).slice(0,500)});
   gate(await p.locator('.vf-theme-pagination--search .next').count()===1,'real tool routes expose next page',{lang});
   await p.locator('.vf-theme-pagination--search .next').click();const tools2=await p.locator('.vf-theme-search-results-grid a').evaluateAll(a=>a.map(x=>x.href));gate(tools2.length>0&&!tools2.some(x=>tools.includes(x)),'tool page two slices the route set',{lang});
   gate(await p.locator('[data-vf-theme-system-recovery="search"]').count()===0,'matching tools do not show contradictory recovery',{lang});

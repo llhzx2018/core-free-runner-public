@@ -22,12 +22,13 @@ cli theme install /tmp/source.zip --activate >/dev/null
 docker cp provider/vf-tools-m3u8_V1.25.91.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/frontpages-fixture.php"
-docker cp lane/languages.php "$WP:/tmp/languages.php";docker cp lane/seed.php "$WP:/tmp/seed.php";docker cp lane/state.php "$WP:/tmp/state.php"
+docker cp lane/languages.php "$WP:/tmp/languages.php";docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";docker cp lane/seed.php "$WP:/tmp/seed.php";docker cp lane/state.php "$WP:/tmp/state.php"
 docker cp target/tests/search-archive-wordpress-check.php "$WP:/tmp/check.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
 cli eval-file /tmp/languages.php >/dev/null
+cli eval-file /tmp/mount-seed.php > proof/mounts.json
 cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
 
@@ -61,7 +62,8 @@ cli theme install /tmp/target.zip --force --activate >/dev/null
 cli plugin install /tmp/provider.zip --force --activate >/dev/null
 cli plugin install polylang --version=3.8.10 --force --activate >/dev/null
 cli eval-file /tmp/languages.php >/dev/null
-cli eval-file /tmp/seed.php >/dev/null
+cli eval-file /tmp/mount-seed.php >/dev/null
+cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
 cli eval-file /tmp/check.php > proof/wordpress-clean.json
 node lane/browser.cjs warm
