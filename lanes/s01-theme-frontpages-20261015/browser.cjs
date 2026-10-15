@@ -20,7 +20,7 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){
   gate(await summary.locator('..').getAttribute('open')!==null,'keyboard opens state checks',{width});await page.keyboard.press('Enter');
   gate(await summary.locator('..').getAttribute('open')===null,'keyboard closes state checks',{width});
  }
- const filters=page.locator('form[method="get"]');await filters.locator('[name="vf_pages_q"]').fill('搜索');await filters.getByRole('button',{name:'查看',exact:true}).click();await page.waitForLoadState('networkidle');
+ const filters=page.locator('form[method="get"]');await filters.locator('[name="vf_pages_q"]').fill('搜索结果');await filters.getByRole('button',{name:'查看',exact:true}).click();await page.waitForLoadState('networkidle');
  gate(await page.locator('[data-vf-page-context]').count()===1 && await page.locator('[data-vf-page-context="search"]').count()===1,'native keyword search isolates matching type');
  await page.goto(base+path+'&vf_pages_q=does-not-exist');gate(await page.getByRole('heading',{name:'没有匹配的页型'}).count()===1,'filter empty state');
  await page.getByRole('link',{name:'恢复全部页型'}).click();gate(await page.locator('[data-vf-page-context]').count()===20,'reset restores directory');
