@@ -59,7 +59,7 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){
  await checkbox.click();await page.waitForFunction(()=>document.querySelector('[data-vf-layout-page]')?.classList.contains('is-dirty'));
  await page.getByRole('link',{name:'前台页面',exact:true}).click();
  gate(await page.locator('[data-vf-layout-navigation-dialog]:visible').count()===1,'returning to directory reuses existing unsaved-change dialog');
- await page.locator('[data-vf-layout-navigation-cancel]').click();gate(await page.locator('[data-vf-layout-page].is-dirty').count()===1,'cancel keeps unsaved layout input');
+ await page.locator('[data-vf-layout-navigation-cancel]').last().click();gate(await page.locator('[data-vf-layout-page].is-dirty').count()===1,'cancel keeps unsaved layout input');
  await page.locator('[data-vf-layout-discard]').click();
  await page.getByRole('link',{name:'前台页面',exact:true}).click();gate(await page.locator('[data-vf-frontend-pages]').count()===1,'layout editor returns to permanent directory');
  const nojs=await browser.newContext({javaScriptEnabled:false}),native=await nojs.newPage();await login(native);await native.goto(base+path);await native.locator('[data-vf-frontend-content-form] [name="vf_content_type"]').selectOption('vf_guide');await native.getByRole('button',{name:'加载已发布内容'}).click();await native.waitForLoadState('domcontentloaded');gate(await native.locator('.vf-frontend-pages__content-list li').count()===20,'native content query works without JavaScript');await nojs.close();
