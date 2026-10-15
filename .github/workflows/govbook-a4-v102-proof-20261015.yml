@@ -1,0 +1,104 @@
+name: GOV-BOOK A4 v1.0.2 monthly review exact reader gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/govbook-a4-v102-proof-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  exact:
+    if: >-
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Fetch pinned private candidate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          umask 077
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-book.git" book
+          git -C book fetch -q origin draft/a4-v58-r3-monthly-review-do-20261015
+          git -C book checkout -q 0fd65744935d54d46fb5a4de1c0ddb61011c020f
+          test "$(git -C book rev-parse HEAD)" = 0fd65744935d54d46fb5a4de1c0ddb61011c020f
+          echo A4_PINNED=PASS
+      - name: Exact 17 legacy chapters plus one new practical appendix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib,hashlib,json,re,zipfile,subprocess,posixpath
+          root=pathlib.Path('book')
+          sha=lambda x:hashlib.sha256(x).hexdigest()
+          base=root/'distribution/p01/books/A4'
+          old,new=base/'v1.0.1',base/'v1.0.2'
+          meta=json.loads((new/'asset.json').read_text('utf8'))
+          oldmeta=json.loads((old/'asset.json').read_text('utf8'))
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text('utf8'))
+          manifest=json.loads((root/'books/A4/revisions/skill-book-v5.8-r3/SOURCE_MANIFEST.json').read_text('utf8'))
+          rows={x['book_id']:x for x in catalog['internal_revisions']}
+          assert len(catalog['books'])==9 and len(catalog['internal_books'])==2 and len(rows)==8
+          assert rows['A4']['book_version']=='v1.0.2' and rows['A5']['book_version']=='v1.0.2'
+          assert meta['book_version']=='v1.0.2' and meta['base_book_version']=='v1.0.0'
+          assert meta['qualification']=='INTERNAL' and meta['publication_status']=='NOT_PUBLISHED'
+          assert meta['source_commit']==manifest['source_commit']=='90d02be2f66bcc62818e96fd155916d07a03ad86'
+          assert oldmeta['book_version']=='v1.0.1'
+          assert sha((old/'reader.zip').read_bytes())==oldmeta['zip']['sha256']
+          assert sha((new/'cover.png').read_bytes())==oldmeta['cover']['sha256']==meta['cover']['sha256']
+          compressed=(new/'reader.zip').read_bytes()
+          assert len(compressed)==meta['zip']['bytes']==81085
+          assert sha(compressed)==meta['zip']['sha256']=='fd1d3b9926613311da9ab68b0265072b89643531b2ab05f9cabf00e4e5244420'
+          original='books/A4/revisions/skill-book-v5.8-r2/p01_course/md/'
+          assert len(manifest['entries'])==18
+          altered=[]
+          with zipfile.ZipFile(new/'reader.zip') as z:
+            assert z.testzip() is None
+            infos=z.infolist()
+            assert len(infos)==18 and len({x.filename for x in infos})==18
+            names=set(z.namelist())
+            for info in infos:
+              assert info.compress_type==zipfile.ZIP_STORED and info.flag_bits & 0x800
+              assert not info.filename.startswith('/') and '..' not in pathlib.PurePosixPath(info.filename).parts
+              assert info.filename.endswith('.md')
+            for item in manifest['entries']:
+              name=item['name']
+              body=(root/item['source']).read_bytes()
+              assert z.read(name)==body and len(body)==item['bytes']
+              assert (zipfile.crc32(body)&0xffffffff)==int(item['crc32'],16)
+              assert hashlib.sha1(f"blob {len(body)}".encode()+bytes([0])+body).hexdigest()==item['git_blob']
+              text=body.decode('utf8')
+              assert sum(x.startswith('# ') for x in text.splitlines())==1
+              for href in re.findall(r'\]\(([^)\s]+)\)',text):
+                href=href.split('#')[0]
+                if not href or href.startswith(('http://','https://','mailto:')):continue
+                dest=posixpath.normpath(posixpath.join(posixpath.dirname(name),href))
+                assert dest in names and not dest.startswith('../'),(name,href)
+              prior=subprocess.check_output(['git','-C','book','show','77f4967dc8c89c6ac5fd1f0c5222bf8576007c08:'+original+name])
+              if prior!=body:altered.append(name)
+            assert altered==['15_附录C.md']
+            appendix=z.read('15_附录C.md').decode('utf8')
+            for key in ('ASSESSMENT_STATE','BUSINESS_DECISION','BANK_AVAILABLE','FUNDING_GAP','REOPEN_TRIGGER','FIRST ATTEMPT','FIRST FEEDBACK','CHANGED CASE','SECOND FEEDBACK','REAL_ACTION_STATUS'):
+              assert key in appendix,key
+            assert 'SIMULATED' in appendix and 'REAL_READER_NOT_RUN' in appendix
+            assert 'USD 800' in appendix and '1600、1000、2000' in appendix
+            assert set(['08_第08章.md','12_第12章.md','R2_RAIN_GARDEN_CASHFLOW_CORRECTED.md']).issubset(names)
+          print('A4_18_MARKDOWN_ZIP_SOURCE_CRC_SHA=PASS')
+          print('A4_17_UNCHANGED_ONE_EXPANDED=PASS')
+          print('A4_MONTHLY_REVIEW_DO_AND_CHANGED_CASE=PASS')
+          print('A4_INTERNAL_LINKS_AND_QUALIFICATION=PASS')
+          print('A4_FORMAL_AND_PRIOR_VERSION_IMMUTABLE=PASS')
+          PY
+      - name: All eight internal reader version regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 book/tools/verify_p01_internal_revisions.py
+          echo GOVBOOK_EIGHT_REVISIONS=PASS
+      - name: Remove private source
+        if: always()
+        shell: bash
+        run: rm -rf book
