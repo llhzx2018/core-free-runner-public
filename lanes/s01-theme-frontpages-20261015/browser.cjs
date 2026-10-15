@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('fs'),{chromium}=require('
 const base='http://127.0.0.1:18880',path='/wp-admin/themes.php?page=vf-theme-modules&tab=layout',checks=[],errors=[];
 function gate(value,label,detail){checks.push({label,pass:!!value,detail});assert(value,label+' '+JSON.stringify(detail));}
 async function login(page,user='admin',password='Synthetic-Only-Update-54!'){
-  await page.goto(base+'/wp-login.php');await page.locator('#user_login').fill(user);await page.locator('#user_pass').fill(password);await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
+  await page.goto(base+'/wp-login.php?redirect_to='+encodeURIComponent(base+path));await page.locator('#user_login').fill(user);await page.locator('#user_pass').fill(password);await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
 }
 (async()=>{
  const browser=await chromium.launch({headless:true}),context=await browser.newContext(),page=await context.newPage();
