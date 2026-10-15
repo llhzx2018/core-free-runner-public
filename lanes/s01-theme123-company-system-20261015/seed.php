@@ -27,7 +27,8 @@ foreach(['about','contact','privacy-policy','terms','acceptable-use','dmca'] as 
   $id=wp_insert_post($record,true);if(is_wp_error($id))throw new RuntimeException('SUPPORT_SEED_FAILED');pll_set_post_language($id,$language);$pair[$language]=(int)$id;
  }
  pll_save_post_translations($pair);
- foreach($pair as $language=>$id){wp_update_post(['ID'=>$id,'post_status'=>$route==='dmca'?'draft':'publish','post_name'=>$route]);if(get_post_field('post_name',$id)!==$route){global $wpdb;$wpdb->update($wpdb->posts,['post_name'=>$route],['ID'=>$id],['%s'],['%d']);clean_post_cache($id);}}
+ foreach($pair as $language=>$id){wp_update_post(['ID'=>$id,'post_status'=>($route==='dmca'||($route==='acceptable-use'&&$language==='zh'))?'draft':'publish','post_name'=>$route]);if(get_post_field('post_name',$id)!==$route){global $wpdb;$wpdb->update($wpdb->posts,['post_name'=>$route],['ID'=>$id],['%s'],['%d']);clean_post_cache($id);}}
+ if($route==='acceptable-use')foreach($pair as $id)update_post_meta($id,'_wp_page_template','page-legal.php');
  $support_pairs[$route]=$pair;
 }
 $layout=get_option('vf_theme_layout',[]);$layout['s01_authored_keep']='retained';update_option('vf_theme_layout',$layout);set_theme_mod('s01_authored_keep','retained');

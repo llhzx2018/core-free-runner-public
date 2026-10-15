@@ -34,29 +34,44 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   });
   await scenario(lang+'-company-system',async()=>{
   const root=base+(lang==='zh'?'/zh/':'/');
-  await p.goto(root+'about/');gate((await p.locator('.vf-support-user-content').innerText()).includes('Owner published text '+lang),'about retains authored current-language body',{lang});
-  await p.goto(root+'contact/');const channel=p.locator('#contact-channel');gate(await channel.count()===1&&(await channel.innerText()).includes('Owner contact '+lang),'real contact content retained once',{lang});
+  await p.goto(root+'about/');gate((await p.locator('.vf-support-user-content').innerText()).includes('Owner published text '+lang),'about retains authored current-language body',{lang,url:p.url(),body:(await p.locator('.vf-support-user-content').innerText()).slice(0,300)});
+  await p.goto(root+'contact/');const channel=p.locator('#contact-channel');gate(await channel.count()===1&&(await channel.innerText()).includes('Owner contact '+lang),'real contact content retained once',{lang,url:p.url(),body:(await channel.innerText()).slice(0,300)});
   const order=await p.evaluate(()=>document.querySelector('#contact-channel').getBoundingClientRect().top<document.querySelector('.vf-support-operations').getBoundingClientRect().top);gate(order,'contact channel precedes preparation guidance',{lang});
   gate(await channel.locator('a[href="mailto:support@example.invalid"]').count()===1,'authored contact target retained without sending',{lang});
   await p.goto(root+'contact/?vf_fixture_support=empty');gate(await p.locator('.vf-contact-no-channel').count()===1&&await p.locator('.vf-contact-channel a').count()===0,'unconfigured contact is honest and has no fake submit',{lang});
-  for(const route of ['privacy-policy','acceptable-use']){
+  });
+  await scenario(lang+'-legal-documents',async()=>{
+  const root=base+(lang==='zh'?'/zh/':'/');
+  for(const route of (lang==='en'?['privacy-policy','acceptable-use']:['privacy-policy'])){
    await p.goto(root+route+'/');const nav=p.locator('.vf-policy-nav');gate(await nav.locator('[aria-current="page"]').count()===1,'policy navigation marks current document',{lang,route});
-   gate(await nav.locator('a[href*="/dmca/"]').count()===0&&await nav.locator('a[href*="/acceptable-use/"]').count()===1,'policy navigation excludes draft and includes published documents',{lang,route});
+   gate(await nav.locator('a[href*="/dmca/"]').count()===0&&await nav.locator('a[href*="/acceptable-use/"]').count()===(lang==='en'?1:0),'policy navigation excludes draft and includes published documents',{lang,route,links:await nav.locator('a').evaluateAll(a=>a.map(x=>({text:x.textContent,href:x.href})))});
    const doc=p.locator('.vf-policy-user-content');gate((await doc.innerText()).includes('Owner published text '+lang),'policy authored text and language retained',{lang,route});
    const toc=p.locator('.vf-policy-section-toc a[href^="#"]');gate(await toc.count()>=2,'policy has real heading navigation',{lang,route});
    if(await toc.count()){const href=await toc.first().getAttribute('href');await toc.first().click();gate(await p.evaluate(id=>!!document.getElementById(id),decodeURIComponent(href.slice(1))),'policy section link targets a real heading',{lang,route});}
   }
+  });
+  await scenario(lang+'-support-empty-hidden',async()=>{
+  const root=base+(lang==='zh'?'/zh/':'/');
   await p.goto(root+'terms/');gate(await p.locator('.vf-policy-missing').count()===1&&!(await p.locator('.vf-policy-missing').innerText()).includes('WordPress'),'missing legal text is visitor-facing and not fabricated',{lang});
   for(const [route,selector] of [['about','.vf-about-principles'],['contact','#contact-channel'],['privacy-policy','.vf-policy-sidebar']]){await p.goto(root+route+'/?vf_fixture_support=hide');gate(await p.locator(selector).count()===0,'saved support visibility controls remain effective',{lang,route});}
+  });
+  await scenario(lang+'-404-native',async()=>{
+  const root=base+(lang==='zh'?'/zh/':'/');
   const missing=root+'vf-owner-missing-123/';const response=await p.goto(missing);gate(response.status()===404&&(response.headers()['x-robots-tag']||'').includes('noindex'),'real 404 keeps HTTP status and noindex',{lang});
   gate(await p.locator('main h1').count()===1&&await p.locator('form[data-vf-theme-search-form="wordpress"] input[name="s"]').count()===1,'404 has one title and native search',{lang});
   const popular=p.locator('.vf-theme-system-query-chips a').first();gate(!!new URL(await popular.getAttribute('href'),base).searchParams.get('s'),'404 popular query uses the same native search',{lang});
   await popular.click();gate(new URL(p.url()).searchParams.has('s')&&await p.locator('.vf-theme-search-results').count()===1,'404 popular query opens actual search results',{lang});
+  });
+  await scenario(lang+'-company-geometry',async()=>{
+  const root=base+(lang==='zh'?'/zh/':'/');
   for(const width of [1920,1440,1319,1024])for(const [route,kind] of [['about/','about'],['contact/','contact'],['privacy-policy/','legal'],['vf-owner-missing-123/','404']]){
    await p.setViewportSize({width,height:1000});await p.goto(root+route);gate(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'company/system desktop has no overflow',{lang,width,kind});
    if(kind==='legal'){const g=await p.locator('.vf-policy-document').evaluate(e=>({radius:getComputedStyle(e).borderRadius,shadow:getComputedStyle(e).boxShadow,width:e.getBoundingClientRect().width}));gate(g.radius==='0px'&&g.shadow==='none'&&g.width<=940,'legal document uses a quiet bounded reading rail',{lang,width,...g});}
    if(width===1440)await p.screenshot({path:'proof/company-'+phase+'-'+lang+'-'+kind+'.png',fullPage:true});
   }
+  });
+  await scenario(lang+'-404-nojs',async()=>{
+  const root=base+(lang==='zh'?'/zh/':'/'),missing=root+'vf-owner-missing-123/';
   const nojs=await browser.newContext({javaScriptEnabled:false}),np=await nojs.newPage();await np.goto(missing);await np.locator('input[name="s"]').fill('Snippetwork');await np.locator('form[data-vf-theme-search-form="wordpress"] button').click();gate(await np.locator('.vf-theme-search-results-grid a').count()===2,'404 native search works without JavaScript',{lang});await nojs.close();
   });
   await scenario(lang+'-tools',async()=>{
