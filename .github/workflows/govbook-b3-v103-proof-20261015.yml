@@ -1,0 +1,101 @@
+name: GOV-BOOK B3 v1.0.3 workbook exact-source gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/govbook-b3-v103-proof-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  exact-source:
+    if: >-
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private book candidate with exact SHA
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          umask 077
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-book.git" book
+          git -C book fetch -q origin draft/b3-v58-r5-workbook-inline-20261015
+          git -C book checkout -q 28e6f92b1a95bfbcbeb6e7afe10a87ee13cc875c
+          test "$(git -C book rev-parse HEAD)" = 28e6f92b1a95bfbcbeb6e7afe10a87ee13cc875c
+          echo GOVBOOK_B3_EXACT_GIT=PASS
+      - name: Verify original workbook source, ZIP bytes, links and legal boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,zipfile,pathlib,hashlib
+          root=pathlib.Path('book')
+          sha=lambda x:hashlib.sha256(x).hexdigest()
+          base=root/'distribution/p01/books/B3'
+          previous,new=base/'v1.0.2',base/'v1.0.3'
+          pm=json.loads((previous/'asset.json').read_text('utf-8'))
+          m=json.loads((new/'asset.json').read_text('utf-8'))
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text('utf-8'))
+          sm=json.loads((root/'books/B3/revisions/skill-book-v5.8-r5/SOURCE_MANIFEST.json').read_text('utf-8'))
+          revisions={r['book_id']:r for r in catalog['internal_revisions']}
+          assert len(catalog['books'])==9 and len(catalog['internal_books'])==2 and len(revisions)==8
+          assert revisions['B3']['book_version']=='v1.0.3' and revisions['A3']['book_version']=='v1.0.2'
+          assert m['book_version']=='v1.0.3' and m['source_commit']==sm['source_commit']=='b2ddd364114be9f593eb9f019df84832984ef663'
+          assert m['base_book_version']=='v1.0.0' and m['qualification']=='INTERNAL' and m['publication_status']=='NOT_PUBLISHED'
+          assert sha((previous/'reader.zip').read_bytes())==pm['zip']['sha256']
+          assert sha((new/'cover.png').read_bytes())==m['cover']['sha256']==pm['cover']['sha256']
+          payload=(new/'reader.zip').read_bytes()
+          assert len(payload)==m['zip']['bytes']==72567
+          assert sha(payload)==m['zip']['sha256']=='5b04870c51950b0bb1811bedca2ff981c8bedfb7434e09024f9bc7e111907356'
+          original=root/'books/B3/revisions/skill-book-v5.8-r4/p01_course/md'
+          workbook=(root/'books/B3/versions/v1.0.0/reader/01_WORKBOOK/B3_OPERATING_WORKBOOK.md').read_bytes()
+          source_root=root/'books/B3/revisions/skill-book-v5.8-r5/p01_course/md'
+          assert len(sm['entries'])==20
+          changed=[]
+          with zipfile.ZipFile(new/'reader.zip') as z:
+            assert z.testzip() is None
+            infos=z.infolist()
+            assert len(infos)==20 and len({i.filename for i in infos})==20
+            for info in infos:
+              assert info.compress_type==zipfile.ZIP_STORED and info.flag_bits & 0x800
+              assert info.filename.endswith('.md') and not info.filename.startswith('/')
+              assert '..' not in pathlib.PurePosixPath(info.filename).parts
+            for row in sm['entries']:
+              path=row['name']
+              data=(root/row['source']).read_bytes()
+              assert data==z.read(path) and len(data)==row['bytes']
+              assert (zipfile.crc32(data)&0xffffffff)==int(row['crc32'],16)
+              assert hashlib.sha1(f"blob {len(data)}".encode()+bytes([0])+data).hexdigest()==row['git_blob']
+              if path=='B3_OPERATING_WORKBOOK.md':
+                assert data==workbook
+                continue
+              prior=(original/path).read_bytes()
+              if prior!=data:
+                expected=prior.replace('正式版随书的`01_WORKBOOK/B3_OPERATING_WORKBOOK.md`已经提供12个工作区'.encode(),
+                  '本课程随附的[《B3 实操工作簿》](B3_OPERATING_WORKBOOK.md)沿用正式版的12个工作区'.encode())
+                assert data==expected
+                changed.append(path)
+            assert changed==['13_第13章.md']
+            doc=z.read('13_第13章.md').decode('utf-8')
+            assert '[《B3 实操工作簿》](B3_OPERATING_WORKBOOK.md)' in doc
+            work=z.read('B3_OPERATING_WORKBOOK.md').decode('utf-8')
+            for n in range(1,13):assert f'## Sheet {n} ' in work
+            assert work.count('# B3 Operating Workbook')==1
+            assert 'NOT_RUN / UNKNOWN' in work
+          print('GOVBOOK_B3_20_MD_ZIP_CRC_SHA256=PASS')
+          print('GOVBOOK_B3_18_UNCHANGED_ONE_LINK_ONLY=PASS')
+          print('GOVBOOK_B3_12_SHEET_WORKBOOK_EXACT=PASS')
+          print('GOVBOOK_B3_LINK_AND_QUALIFICATION=PASS')
+          PY
+      - name: Regression for all private P01 book versions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 book/tools/verify_p01_internal_revisions.py
+          echo GOVBOOK_ALL_REVISIONS_REGRESSION=PASS
+      - name: Remove private source
+        if: always()
+        run: rm -rf book
