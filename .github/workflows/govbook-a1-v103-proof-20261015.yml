@@ -1,0 +1,103 @@
+name: GOV-BOOK A1 v1.0.3 fourteen-template exact reader gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/govbook-a1-v103-proof-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  exact-source:
+    if: >-
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private exact A1 candidate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          umask 077
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-book.git" book
+          git -C book fetch -q origin draft/a1-v58-r4-templates-online-20261015
+          git -C book checkout -q 3c6d3804dbcfce319c0d0bd6bb207491a40d7dd7
+          test "$(git -C book rev-parse HEAD)" = 3c6d3804dbcfce319c0d0bd6bb207491a40d7dd7
+          echo GOVBOOK_A1_V103_PINNED=PASS
+      - name: Verify all original template content and exact ZIP page identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib,hashlib,re,zipfile
+          root=pathlib.Path('book')
+          sha=lambda b:hashlib.sha256(b).hexdigest()
+          base=root/'distribution/p01/books/A1'
+          old,new=base/'v1.0.2',base/'v1.0.3'
+          prev=json.loads((old/'asset.json').read_text('utf-8'))
+          a=json.loads((new/'asset.json').read_text('utf-8'))
+          c=json.loads((root/'distribution/p01/catalog.json').read_text('utf-8'))
+          sm=json.loads((root/'books/A1/revisions/skill-book-v5.8-r4/SOURCE_MANIFEST.json').read_text('utf-8'))
+          rows={r['book_id']:r for r in c['internal_revisions']}
+          assert len(rows)==8 and len(c['books'])==9 and len(c['internal_books'])==2
+          assert rows['A1']['book_version']=='v1.0.3'
+          assert rows['A3']['book_version']=='v1.0.2' and rows['B3']['book_version']=='v1.0.3'
+          assert a['qualification']=='INTERNAL' and a['publication_status']=='NOT_PUBLISHED'
+          assert a['base_book_version']=='v1.0.0' and a['source_commit']==sm['source_commit']=='277a3188dc8861b2e6dee4dbe96cc401d5426e20'
+          assert sha((old/'reader.zip').read_bytes())==prev['zip']['sha256']
+          assert sha((new/'cover.png').read_bytes())==prev['cover']['sha256']==a['cover']['sha256']
+          packed=(new/'reader.zip').read_bytes()
+          assert len(packed)==a['zip']['bytes']==114320
+          assert sha(packed)==a['zip']['sha256']=='a2c73b4d12d82c82ce1cabb67870f0a515ad56fd8b395da67ed3779e25e3f575'
+          assert len(sm['entries'])==24 and len(sm['template_sources'])==14
+          course=root/'books/A1/revisions/skill-book-v5.8-r4/p01_course/md'
+          old_course=root/'books/A1/revisions/skill-book-v5.8-r3/p01_course/md'
+          appendix=(course/'A1_OPERATING_TEMPLATES.md').read_text('utf-8')
+          def shift(source):
+            fence=False;out=[]
+            for line in source.rstrip().split('\n'):
+              if re.match(r'^\s*\x60\x60\x60',line):fence=not fence;out.append(line)
+              elif not fence and re.match(r'^#{1,5} ',line):out.append('#'+line)
+              else:out.append(line)
+            return '\n'.join(out)
+          for original in sm['template_sources']:
+            p=root/original['path']
+            b=p.read_bytes()
+            assert hashlib.sha1(f"blob {len(b)}".encode()+bytes([0])+b).hexdigest()==original['git_blob']
+            assert shift(b.decode('utf-8')) in appendix
+          with zipfile.ZipFile(new/'reader.zip') as z:
+            assert z.testzip() is None
+            info=z.infolist()
+            assert len(info)==24 and len({x.filename for x in info})==24
+            assert all(x.compress_type==zipfile.ZIP_STORED and x.flag_bits & 0x800 for x in info)
+            assert z.read('A1_OPERATING_TEMPLATES.md')==appendix.encode('utf-8')
+            changed=[]
+            for item in sm['entries']:
+              name=item['name'];content=(root/item['source']).read_bytes()
+              assert z.read(name)==content and len(content)==item['bytes']
+              assert (zipfile.crc32(content)&0xffffffff)==int(item['crc32'],16)
+              if name=='A1_OPERATING_TEMPLATES.md':continue
+              previous=(old_course/name).read_bytes()
+              if previous!=content:
+                assert name=='16_第16章.md'
+                assert '[《14张可复制的随书运营模板》](A1_OPERATING_TEMPLATES.md)' in content.decode('utf-8')
+                changed.append(name)
+            assert changed==['16_第16章.md']
+          assert appendix.count('## Template ')==14
+          assert appendix.count('\n# ')==0
+          print('GOVBOOK_A1_14_EXACT_SOURCE_TEMPLATES=PASS')
+          print('GOVBOOK_A1_22_PRESERVED_ONE_LINK_ONLY=PASS')
+          print('GOVBOOK_A1_V103_ZIP_SHA_CRC_COVER=PASS')
+          print('GOVBOOK_A1_INTERNAL_VERSION_AND_QUALIFICATION=PASS')
+          PY
+      - name: Recheck all eight internal reader versions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 book/tools/verify_p01_internal_revisions.py
+          echo GOVBOOK_EIGHT_REVISIONS_REGRESSION=PASS
+      - name: Cleanup private checkout
+        if: always()
+        run: rm -rf book
