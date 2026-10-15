@@ -1,0 +1,20 @@
+<?php
+$options=get_option('polylang',[]);$options['post_types']=['vf_guide','vf_problem','vf_glossary'];update_option('polylang',$options);
+$out=[];
+foreach(['en'=>13,'zh'=>5] as $language=>$total){
+ $term=wp_insert_term($language==='en'?'Video Fixture':'视频示例','category',['slug'=>'video-fixture-'.$language,'description'=>$language==='en'?'Owner authored category description.':'作者填写的分类说明。']);
+ $cat=is_wp_error($term)?get_term_by('slug','video-fixture-'.$language,'category')->term_id:$term['term_id'];pll_set_term_language($cat,$language);
+ $tag=wp_insert_term('Atlas '.$language,'post_tag',['slug'=>'atlas-'.$language]);$tag=is_wp_error($tag)?get_term_by('slug','atlas-'.$language,'post_tag')->term_id:$tag['term_id'];pll_set_term_language($tag,$language);
+ $empty=wp_insert_term('Empty '.$language,'category',['slug'=>'empty-'.$language]);$empty=is_wp_error($empty)?get_term_by('slug','empty-'.$language,'category')->term_id:$empty['term_id'];pll_set_term_language($empty,$language);
+ $ids=[];
+ for($i=1;$i<=$total;$i++){
+  $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_title'=>'Searchwork Atlas '.strtoupper($language).' '.sprintf('%02d',$i).($i===1?' Needleword':''),'post_name'=>'searchwork-'.$language.'-'.$i,'post_content'=>'<h2>Original heading</h2><p>Original authored content '.$language.' '.$i.'</p>','post_excerpt'=>'Owner authored summary '.$language.' '.$i,'post_date'=>'2024-01-'.sprintf('%02d',$i).' 12:00:00','post_category'=>[$cat]]);pll_set_post_language($id,$language);if($i<=6)wp_set_post_tags($id,[$tag]);$ids[]=$id;
+ }
+ foreach(['draft','private'] as $status){$id=wp_insert_post(['post_type'=>'post','post_status'=>$status,'post_title'=>'Searchwork Atlas HIDDEN '.$language,'post_content'=>'Must never be a result']);pll_set_post_language($id,$language);}
+ for($i=1;$i<=3;$i++){$id=wp_insert_post(['post_type'=>'vf_guide','post_status'=>'publish','post_title'=>'Searchwork Atlas Guide '.strtoupper($language).' '.$i,'post_name'=>'atlas-guide-'.$language.'-'.$i,'post_content'=>'<p>Original guide content.</p>']);pll_set_post_language($id,$language);}
+ $out[$language]=['category'=>get_category_link($cat),'tag'=>get_tag_link($tag),'empty'=>get_category_link($empty),'ids'=>$ids];
+}
+pll_save_term_translations(['en'=>get_term_by('slug','video-fixture-en','category')->term_id,'zh'=>get_term_by('slug','video-fixture-zh','category')->term_id]);
+pll_save_post_translations(['en'=>$out['en']['ids'][0],'zh'=>$out['zh']['ids'][0]]);
+$layout=get_option('vf_theme_layout',[]);$layout['s01_authored_keep']='retained';update_option('vf_theme_layout',$layout);set_theme_mod('s01_authored_keep','retained');
+echo wp_json_encode(['status'=>'SEEDED','languages'=>$out]);
