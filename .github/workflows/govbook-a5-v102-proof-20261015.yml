@@ -1,0 +1,118 @@
+name: GOV-BOOK A5 v1.0.2 seventeen-template exact-reader proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/govbook-a5-v102-proof-20261015.yml']
+permissions:
+  contents: read
+jobs:
+  exact:
+    if: >-
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout pinned private candidate transiently
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          umask 077
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/gov-book.git" book
+          git -C book fetch -q origin draft/a5-v58-r2-self-contained-templates-20261015
+          git -C book fetch -q origin draft/a5-skill-book-v58-depth-20261015
+          git -C book checkout -q 2becb9e8b997b985585bd9c3358ee2bbed0fa278
+          test "$(git -C book rev-parse HEAD)" = 2becb9e8b997b985585bd9c3358ee2bbed0fa278
+          echo A5_PINNED=PASS
+      - name: Prove A5 17 exact templates, chapter links and old edition safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, pathlib, hashlib, zipfile, re, posixpath, subprocess
+          root=pathlib.Path('book')
+          sha=lambda b:hashlib.sha256(b).hexdigest()
+          base=root/'distribution/p01/books/A5'
+          old,new=base/'v1.0.1',base/'v1.0.2'
+          prev=json.loads((old/'asset.json').read_text('utf8'))
+          meta=json.loads((new/'asset.json').read_text('utf8'))
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text('utf8'))
+          manifest=json.loads((root/'books/A5/revisions/skill-book-v5.8-r2/SOURCE_MANIFEST.json').read_text('utf8'))
+          revisions={x['book_id']:x for x in catalog['internal_revisions']}
+          assert len(catalog['books'])==9 and len(catalog['internal_books'])==2 and len(revisions)==8
+          assert revisions['A5']['book_version']=='v1.0.2' and revisions['B1']['book_version']=='v1.0.2'
+          assert meta['book_id']=='A5' and meta['book_version']=='v1.0.2'
+          assert meta['base_book_version']=='v1.0.0' and meta['qualification']=='INTERNAL' and meta['publication_status']=='NOT_PUBLISHED'
+          assert meta['source_commit']==manifest['source_commit']=='d2516f503dad14834eb04438c3a6566f64bbe452'
+          assert prev['book_version']=='v1.0.1'
+          assert sha((old/'reader.zip').read_bytes())==prev['zip']['sha256']
+          assert sha((old/'cover.png').read_bytes())==sha((new/'cover.png').read_bytes())==meta['cover']['sha256']
+          zipped=(new/'reader.zip').read_bytes()
+          assert len(zipped)==179859==meta['zip']['bytes'] and sha(zipped)==meta['zip']['sha256']=='163c8863ff09640a7462eb9d018a56e57ff2173b3682f59066e3221670c02ceb'
+          assert len(manifest['entries'])==38 and len({x['name'] for x in manifest['entries']})==38
+          names={x['name'] for x in manifest['entries']}
+          original_root='books/A5/revisions/skill-book-v5.8-r1/p01_course/md/'
+          exact_templates=0
+          revised_chapters=0
+          unchanged_chapters=0
+          with zipfile.ZipFile(new/'reader.zip') as archive:
+            assert archive.testzip() is None
+            entries=archive.infolist()
+            assert len(entries)==38 and {x.filename for x in entries}==names
+            for info in entries:
+              assert info.compress_type==zipfile.ZIP_STORED and info.flag_bits & 0x800
+              assert not info.filename.startswith('/') and not info.filename.startswith('../')
+              assert '\\' not in info.filename and '..' not in pathlib.PurePosixPath(info.filename).parts
+              assert info.filename.endswith('.md')
+            for item in manifest['entries']:
+              filename=item['name']
+              body=(root/item['source']).read_bytes()
+              assert archive.read(filename)==body and len(body)==item['bytes']
+              assert (zipfile.crc32(body)&0xffffffff)==int(item['crc32'],16)
+              assert hashlib.sha1(f"blob {len(body)}".encode()+bytes([0])+body).hexdigest()==item['git_blob']
+              s=body.decode('utf8')
+              assert sum(x.startswith('# ') for x in s.splitlines())==1,filename
+              for link in re.findall(r'\]\(([^)\s]+)\)',s):
+                link=link.split('#')[0]
+                if not link or link.startswith(('http://','https://','mailto:')):continue
+                resolved=posixpath.normpath(posixpath.join(posixpath.dirname(filename),link))
+                assert resolved in names and not resolved.startswith('../'),(filename,link)
+              if filename.startswith('templates/'):
+                source=root/'books/A5/versions/v1.0.0/reader/templates'/filename.split('/',1)[1]
+                assert body==source.read_bytes()
+                exact_templates+=1
+              else:
+                orig=subprocess.check_output(['git','-C','book','show','1a7ab57a7cb849ef8b66d60e78389dea04f1d811:'+original_root+filename])
+                if filename=='00_课程导读.md':
+                  assert 'P01 在线阅读版是 Markdown 教材' in s
+                  assert '没有' in s and 'examples/lane-dash/' in s
+                  assert sum(f'](templates/{f.name})' in s for f in (root/'books/A5/versions/v1.0.0/reader/templates').glob('*.md'))==17
+                  assert 'REAL_ACTION_NOT_RUN' in s
+                elif body==orig:
+                  unchanged_chapters+=1
+                else:
+                  oldtext=orig.decode('utf8')
+                  expected=re.sub(r'`(templates/[a-z0-9_-]+\.md)`',lambda m:'[打开随书执行模板]('+m.group(1)+')',oldtext)
+                  if filename=='17_第17章.md':expected=expected.replace('`operator_reference/QUICK_REFERENCE.md`','[在线快速参考](18_快速参考.md)')
+                  assert expected==s,filename
+                  revised_chapters+=1
+          assert exact_templates==17 and revised_chapters==13 and unchanged_chapters==7
+          print('A5_38_MD_EXACT_SOURCE_CRC_SHA256=PASS')
+          print('A5_17_ORIGINAL_TEMPLATE_GIT_BYTES=PASS')
+          print('A5_13_CHAPTERS_LINK_ONLY_7_ORIGINAL=PASS')
+          print('A5_INTRO_SCOPE_AND_35_INTERNAL_LINKS=PASS')
+          print('A5_OLD_VERSION_AND_COVER_PRESERVED=PASS')
+          PY
+      - name: Regression of all eight internal reader editions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 book/tools/verify_p01_internal_revisions.py
+          echo GOVBOOK_EIGHT_INTERNAL_REVISIONS=PASS
+      - name: Destroy private checkout
+        if: always()
+        shell: bash
+        run: rm -rf book
