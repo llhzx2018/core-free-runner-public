@@ -9,6 +9,7 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){
  const browser=await chromium.launch({headless:true}),context=await browser.newContext(),page=await context.newPage();
  page.on('pageerror',error=>errors.push(error.message));await login(page);
  await page.goto(base+path);await page.waitForLoadState('networkidle');
+ if(process.argv[2]==='warm'){fs.writeFileSync('proof/warm.json',JSON.stringify({status:'WARMED',queryCount:(await page.content()).match(/s01-directory-queries:(\d+)/)?.[1]}));await browser.close();return;}
  gate(await page.locator('[data-vf-frontend-pages]').count()===1,'layout opens permanent frontend page directory');
  gate(await page.locator('[data-vf-page-context]').count()===20,'all 20 page types present');
  gate((await page.content()).includes('s01-directory-queries:0'),'ordinary GET does not query content');

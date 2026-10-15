@@ -29,6 +29,8 @@ cli rewrite structure '/%postname%/' --hard >/dev/null
 cli eval-file /tmp/check.php > proof/wordpress.json
 # Warm lazy WordPress defaults before the readonly browser comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
+cli eval-file /tmp/state.php > proof/state-cold.json
+node lane/browser.cjs warm
 cli eval-file /tmp/state.php > proof/state-before.json
 node lane/browser.cjs
 cli eval-file /tmp/state.php > proof/state-after.json
