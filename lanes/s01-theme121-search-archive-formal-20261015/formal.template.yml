@@ -1,0 +1,106 @@
+name: S01 Theme121 search archive formal release
+on:
+  push:
+    branches: [task/{{LANE_ID}}]
+concurrency:
+  group: s01-c01-theme121-formal
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  formal:
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'task/{{LANE_ID}}')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PUBLIC_RUNNER_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      TARGET_MAIN_SHA: '{{TARGET_MAIN_SHA}}'
+      SOURCE_VERSION: '{{SOURCE_VERSION}}'
+      BASE_SHA: '{{BASE_SHA}}'
+      M3_VERSION: '{{M3_VERSION}}'
+      M3_SHA: '{{M3_SHA}}'
+      M3_TREE: '{{M3_TREE}}'
+      TESTED_SHA: '{{TESTED_SHA}}'
+      M3_SOURCE_VERSION: '{{M3_SOURCE_VERSION}}'
+      CANDIDATE_RUN: '{{CANDIDATE_RUN}}'
+      CANDIDATE_SHA: '{{CANDIDATE_SHA}}'
+      CANDIDATE_ARTIFACT: '{{CANDIDATE_ARTIFACT}}'
+      CANDIDATE_DIGEST: '{{CANDIDATE_DIGEST}}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+          ref: ${{ env.PUBLIC_RUNNER_HEAD }}
+      - name: Exact formal spec audit
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/{{LANE_ID}}/spec.json --template runner/lanes/{{LANE_ID}}/formal.template.yml --output /tmp/formal-rendered.yml
+          cmp /tmp/formal-rendered.yml runner/.github/workflows/{{LANE_ID}}.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/{{LANE_ID}}/spec.json --input runner/.github/workflows/{{LANE_ID}}.yml > proof/lane-audit.json
+          cp -a runner/lanes/{{LANE_ID}} lane
+          cp lane/release-authority.json proof/release-authority.json
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Reverse exact uploaded candidate proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 lane/reverse.py
+      - name: Deterministic Theme rebuild and tested asset equality
+        run: bash lane/build.sh
+      - name: Publish authorized Theme formal release and authenticated remote readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: python3 lane/publish.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        id: receipt
+        with:
+          name: s01-theme-public-template-formal-${{ github.run_id }}
+          path: proof/*.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Artifact reverse readback
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          set -Eeuo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > /tmp/formal-meta.json; then break; fi
+            if [ "$attempt" = 6 ]; then exit 1; fi
+            sleep 2
+          done
+          for attempt in 1 2 3 4 5 6; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/formal-receipt.zip; then break; fi
+            if [ "$attempt" = 6 ]; then exit 1; fi
+            sleep 2
+          done
+          python3 - <<'PY'
+          import pathlib,json,zipfile,hashlib,os
+          m=json.loads(pathlib.Path('/tmp/formal-meta.json').read_text());b=pathlib.Path('/tmp/formal-receipt.zip').read_bytes()
+          assert m['workflow_run']['head_sha']==os.environ['PUBLIC_RUNNER_HEAD'] and m['size_in_bytes']==len(b)
+          assert m['digest']=='sha256:'+hashlib.sha256(b).hexdigest()
+          with zipfile.ZipFile('/tmp/formal-receipt.zip') as z:
+              assert z.testzip() is None
+              assert all(pathlib.PurePosixPath(n).suffix=='.json' for n in z.namelist())
+              for n in ['theme-FINAL_RELEASE.json','candidate-reverse.json']:
+                  assert json.loads(z.read(n))['status']=='PASS'
+          print('PUBLIC_SAFE_FORMAL_RECEIPT',json.dumps({'status':'PASS','id':m['id'],'bytes':len(b),'digest':m['digest']}))
+          PY
+      - name: Remove transient private sources and release packages
+        if: always()
+        run: rm -rf target m3target m3run readback proof/*.zip /tmp/checker-candidate-proof.zip
