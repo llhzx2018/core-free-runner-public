@@ -55,6 +55,12 @@ async function login(page,user='admin',password='Synthetic-Only-Update-54!'){
  await page.setViewportSize({width:1440,height:1000});await page.screenshot({path:'proof/frontend-pages-content.png',fullPage:true});
  await page.goto(base+path);await page.screenshot({path:'proof/frontend-pages-directory.png',fullPage:true});
  await page.locator('[data-vf-page-context="home"] a').filter({hasText:'调整布局'}).click();await page.waitForLoadState('networkidle');gate(await page.locator('[data-vf-layout-context-catalog-open]').count()===1,'existing layout editor remains reachable');
+ const checkbox=page.locator('[data-vf-layout-page] input[type="checkbox"]:enabled:visible').first();
+ await checkbox.click();await page.waitForFunction(()=>document.querySelector('[data-vf-layout-page]')?.classList.contains('is-dirty'));
+ await page.getByRole('link',{name:'前台页面',exact:true}).click();
+ gate(await page.locator('[data-vf-layout-navigation-dialog]:visible').count()===1,'returning to directory reuses existing unsaved-change dialog');
+ await page.locator('[data-vf-layout-navigation-cancel]').click();gate(await page.locator('[data-vf-layout-page].is-dirty').count()===1,'cancel keeps unsaved layout input');
+ await page.locator('[data-vf-layout-discard]').click();
  await page.getByRole('link',{name:'前台页面',exact:true}).click();gate(await page.locator('[data-vf-frontend-pages]').count()===1,'layout editor returns to permanent directory');
  const nojs=await browser.newContext({javaScriptEnabled:false}),native=await nojs.newPage();await login(native);await native.goto(base+path);await native.locator('[data-vf-frontend-content-form] [name="vf_content_type"]').selectOption('vf_guide');await native.getByRole('button',{name:'加载已发布内容'}).click();await native.waitForLoadState('domcontentloaded');gate(await native.locator('.vf-frontend-pages__content-list li').count()===20,'native content query works without JavaScript');await nojs.close();
  const denied=await browser.newContext(),sub=await denied.newPage();await login(sub,'subscriber','Synthetic-Subscriber-47!');const res=await sub.goto(base+path);gate(res.status()===403,'unprivileged browser denied theme workspace');await denied.close();
