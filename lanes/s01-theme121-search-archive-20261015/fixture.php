@@ -16,3 +16,5 @@ $layout_fixture=static function($raw){
 };
 add_filter('option_vf_theme_layout',$layout_fixture,9999);
 add_filter('default_option_vf_theme_layout',$layout_fixture,9999);
+
+add_action('wp_footer',static function(): void {global $wp_query;$state=function_exists('vf_theme_directory_request_state')?vf_theme_directory_request_state('archive_list'):[];echo '<!-- search-archive-diag:'.wp_json_encode(['uri'=>$_SERVER['REQUEST_URI']??'','s'=>$wp_query->get('s'),'paged'=>$wp_query->get('paged'),'found'=>(int)$wp_query->found_posts,'post_count'=>(int)$wp_query->post_count,'is_archive'=>is_archive(),'is_search'=>is_search(),'directory'=>$state,'titles'=>wp_list_pluck((array)$wp_query->posts,'post_title')]).' -->';});
