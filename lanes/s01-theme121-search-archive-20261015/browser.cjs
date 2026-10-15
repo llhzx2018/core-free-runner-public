@@ -58,9 +58,10 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   await scenario(lang+'-desktop',async()=>{
   for(const width of [1920,1440,1319,1024]){
    await p.setViewportSize({width,height:1000});await p.goto(search(lang));await p.waitForLoadState('networkidle');
-   const geom=await p.locator('.vf-theme-search-results').evaluate(el=>({overflow:document.documentElement.scrollWidth>innerWidth+1,width:el.getBoundingClientRect().width,formY:el.querySelector('form').getBoundingClientRect().top,action:el.querySelector('.vf-directory-card-action').getBoundingClientRect().height}));gate(!geom.overflow&&geom.action>=44&&geom.formY<700,'desktop search geometry and action size',{lang,width,...geom});
+   const geom=await p.locator('.vf-theme-search-results').evaluate(el=>({columns:getComputedStyle(el.querySelector('.vf-theme-search-results-grid')).gridTemplateColumns.split(' ').length,overflow:document.documentElement.scrollWidth>innerWidth+1,width:el.getBoundingClientRect().width,formY:el.querySelector('form').getBoundingClientRect().top,action:el.querySelector('.vf-directory-card-action').getBoundingClientRect().height}));gate(!geom.overflow&&geom.columns===1&&geom.action>=44&&geom.formY<700,'desktop search geometry and action size',{lang,width,...geom});
    if(width===1440)await p.screenshot({path:'proof/search-'+phase+'-'+lang+'.png',fullPage:true});
    await p.goto(seed.languages[lang].category);gate(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'desktop category has no overflow',{lang,width});
+   const cardGeometry=await p.locator('.vf-theme-post-list--archive_list .vf-directory-card').first().evaluate(el=>({height:el.getBoundingClientRect().height,radius:getComputedStyle(el).borderRadius,shadow:getComputedStyle(el).boxShadow}));gate(cardGeometry.height<220&&cardGeometry.radius==='0px'&&cardGeometry.shadow==='none','archive uses compact rows instead of oversized cards',{lang,width,...cardGeometry});
    if(width===1440)await p.screenshot({path:'proof/archive-'+phase+'-'+lang+'.png',fullPage:true});
   }
   await p.goto(base+(lang==='zh'?'/zh/':'/')+'search/?q=m3u8&type=tool');await p.waitForLoadState('networkidle');gate(await p.locator('[data-vf-static-search-catalog] [data-vf-search-type="tool"]:visible').count()>0,'existing static local search remains functional',{lang});
