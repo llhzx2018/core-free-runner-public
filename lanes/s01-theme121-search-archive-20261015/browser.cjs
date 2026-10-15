@@ -20,7 +20,7 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   const first=await grid.locator('a').evaluateAll(a=>a.map(x=>x.href));const nav=p.locator('.vf-theme-pagination--search');
   gate(await nav.locator('.current').count()===1&&await nav.locator('.next').count()===1,'current and next page exposed',{lang});
   await nav.locator('.next').click();await p.waitForLoadState('networkidle');
-  const next=await p.locator('.vf-theme-search-results-grid a').evaluateAll(a=>a.map(x=>x.href));gate(next.length===3&&!next.some(x=>first.includes(x)),'actual native next page has no repeated objects',{lang});
+  const next=await p.locator('.vf-theme-search-results-grid a').evaluateAll(a=>a.map(x=>x.href));gate(next.length===Math.min(3,seed.languages[lang].ids.length-3)&&!next.some(x=>first.includes(x)),'actual native next page has no repeated objects',{lang});
   gate(new URL(p.url()).searchParams.get('type')==='article'&&new URL(p.url()).searchParams.get('s')==='Searchwork Atlas','search pagination preserves keyword and type',{lang});
   await p.locator('form[data-vf-theme-search-form="wordpress"] input[type="search"]').fill('Needleword');await p.locator('form[data-vf-theme-search-form="wordpress"] button').click();await p.waitForLoadState('networkidle');
   gate(new URL(p.url()).searchParams.get('type')==='article'&&!new URL(p.url()).searchParams.has('paged')&&(await p.locator('.vf-theme-search-results-grid').innerText()).includes('Needleword'),'resubmit keeps type and returns to first page',{lang});
@@ -41,6 +41,9 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
   await scenario(lang+'-archive',async()=>{
   await p.goto(seed.languages[lang].category+'?vf_fixture_count=1');await p.waitForLoadState('networkidle');
   const cards=p.locator('[data-vf-post-list-context="archive_list"] .vf-directory-grid a');gate(await cards.count()===3,'native category count bounded',{lang});
+  const seen=[];for(let walk=0;walk<10;walk++) {const current=await p.locator('.vf-theme-post-list--archive_list .vf-directory-grid a').evaluateAll(a=>a.map(x=>x.href));seen.push(...current);const more=p.locator('.vf-theme-post-list--archive_list .pagination .next');if(!await more.count())break;await more.click();await p.waitForLoadState('networkidle');}
+  gate(seen.length===seed.languages[lang].ids.length&&new Set(seen).size===seen.length,'every native archive object is reachable across all pages',{lang,seen:seen.length,expected:seed.languages[lang].ids.length});
+  await p.goto(seed.languages[lang].category+'?vf_fixture_count=1');await p.waitForLoadState('networkidle');
   gate((await p.locator('.vf-archive-context-description').innerText()).includes(lang==='en'?'Owner authored':'作者填写'),'authored category description preserved',{lang});
   gate((await p.locator('.vf-content-list-summary').innerText()).includes(lang==='en'?'On this page':'本页'),'archive count clearly page-scoped',{lang});
   const anav=p.locator('.vf-theme-post-list--archive_list .pagination .nav-links');await anav.locator('.next').click();await p.waitForLoadState('networkidle');
