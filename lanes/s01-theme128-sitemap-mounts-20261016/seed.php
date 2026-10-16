@@ -73,7 +73,7 @@ foreach(['en','zh'] as $language){
 $mount_cases=[];
 foreach(['en','zh'] as $language){
  $cases=[];$pure=[];$preserved=[];
- foreach(vf_theme_toolsite_active_contract_tools('', $language) as $tool){$cases['pure-'.$tool['slug']]=['body'=>"<!-- vf-m3u8:mount:start -->\n".$tool['shortcode']."\n<!-- vf-m3u8:mount:end -->",'pure'=>true];}
+ foreach((require get_template_directory().'/inc/data/tool-contracts/m3u8.php')['tools'] as $tool){$cases['pure-'.$tool['slug']]=['body'=>"<!-- vf-m3u8:mount:start -->\n".$tool['shortcode']."\n<!-- vf-m3u8:mount:end -->",'pure'=>true];}
  foreach(['prose'=>'<p>Owner explanation retained.</p>[vf_m3u8_player]','attrs'=>'[vf_m3u8_player source="custom"]','multi'=>'[vf_m3u8_player][vf_m3u8_playlist_checker]','unknown'=>'[unknown_provider_tool]','suffix'=>'<p>Independent player-2 page.</p>','excerpt'=>'[vf_m3u8_player]'] as $key=>$body)$cases[$key]=['body'=>$body,'pure'=>false];
  foreach($cases as $key=>$case){$id=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>'mountwork-'.$key.'-'.$language,'post_title'=>'Mountwork '.$key.' '.$language,'post_content'=>$case['body'],'post_excerpt'=>$key==='excerpt'?'Owner distinct summary':'']);pll_set_post_language($id,$language);if($case['pure'])$pure[]=get_permalink($id);else $preserved[]=get_permalink($id);}
  $mount_cases[$language]=['pure'=>$pure,'preserved'=>$preserved];
