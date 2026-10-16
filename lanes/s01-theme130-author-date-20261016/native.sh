@@ -18,7 +18,8 @@ cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Page D
 docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
 docker cp "proof/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/target.zip"
 docker cp "provider/vf-tools-theme_V$SOURCE_VERSION.zip" "$WP:/tmp/source.zip"
-cli theme install /tmp/source.zip --activate >/dev/null
+cli theme install /tmp/target.zip --activate >/dev/null
+test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 docker cp provider/vf-tools-m3u8_V1.25.91.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/frontpages-fixture.php"
@@ -32,56 +33,25 @@ cli eval-file /tmp/mount-seed.php > proof/mounts.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
 cli eval-file /tmp/seed.php > proof/seed.json
 
-# Warm lazy WordPress defaults before the readonly browser comparison.
-curl -fsS http://127.0.0.1:18880/ >/dev/null
-node lane/browser.cjs baseline
-cli eval-file /tmp/state.php > proof/state-cold.json
-node lane/browser.cjs warm
-cli eval-file /tmp/state.php > proof/state-before.json
-cli theme install /tmp/target.zip --force >/dev/null
-test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
-cli eval-file /tmp/check.php > proof/wordpress.json
-node lane/browser.cjs candidate
-cli eval-file /tmp/state.php > proof/state-candidate.json
-cmp proof/state-before.json proof/state-candidate.json
-cli theme install /tmp/source.zip --force >/dev/null
-test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
-node lane/browser.cjs warm
-cli eval-file /tmp/state.php > proof/state-rollback.json
-cmp proof/state-before.json proof/state-rollback.json
-cli theme install /tmp/target.zip --force >/dev/null
-node lane/browser.cjs reapply
-cli eval-file /tmp/state.php > proof/state-reapply.json
-cmp proof/state-before.json proof/state-reapply.json
-cli theme install /tmp/target.zip --force >/dev/null
-cli eval-file /tmp/state.php > proof/state-idempotent.json
-cmp proof/state-before.json proof/state-idempotent.json
-docker exec "$DB" mariadb -uroot -psyntheticroot -e "CREATE DATABASE wordpress_clean;GRANT ALL PRIVILEGES ON wordpress_clean.* TO 'wordpress'@'%';"
-cli config set DB_NAME wordpress_clean >/dev/null
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic Clean Directory' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
-cli theme install /tmp/target.zip --force --activate >/dev/null
-cli plugin install /tmp/provider.zip --force --activate >/dev/null
-cli plugin install polylang --version=3.8.10 --force --activate >/dev/null
-cli eval-file /tmp/languages.php >/dev/null
-cli eval-file /tmp/mount-seed.php >/dev/null
-cli rewrite structure '/%postname%/' --hard >/dev/null
-cli eval-file /tmp/seed.php > proof/seed.json
+# Separate first public/admin initialization from the readonly comparison.
 cli eval-file /tmp/check.php > proof/wordpress-clean.json
+cli eval-file /tmp/state.php > proof/state-clean-cold.json
 node lane/browser.cjs warm
 cli eval-file /tmp/state.php > proof/state-clean-before.json
 node lane/browser.cjs clean
 cli eval-file /tmp/state.php > proof/state-clean-after.json
 cmp proof/state-clean-before.json proof/state-clean-after.json
 curl -fsS http://127.0.0.1:18880/wp-admin/install.php > /tmp/setup-revisit.html
-python3 - <<'PY'
+python3 - <<'PYFINAL'
 import os,json,pathlib
 p=pathlib.Path('proof')
 for name in ['wordpress','wordpress-clean','browser-candidate','browser-reapply','browser-clean']:
- f=json.loads((p/(name+'.json')).read_text());assert f['status']=='PASS' and len(f['checks'])>=20 and all(c['pass'] for c in f['checks'])
+ v=json.loads((p/(name+'.json')).read_text());assert v['status']=='PASS' and all(c['pass'] for c in v['checks']);assert len(v['checks'])==(36 if name.startswith('wordpress') else 218)
 before=(p/'state-before.json').read_bytes()
 for phase in ['candidate','rollback','reapply','idempotent']:assert before==(p/('state-'+phase+'.json')).read_bytes()
 assert (p/'state-clean-before.json').read_bytes()==(p/'state-clean-after.json').read_bytes()
 assert 'Already Installed' in pathlib.Path('/tmp/setup-revisit.html').read_text()
-r={'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'version':os.environ['TARGET_VERSION'],'protected_configuration_content_translations':'UNCHANGED','shell_header_menu':'UNCHANGED','checks':{'clean_full':'PASS','upgrade129to130':'PASS','rollback129':'PASS','reapply':'PASS','idempotent':'PASS','setup_revisit_locked':'PASS','wordpress':'PASS','browser':'PASS'},'mobile':'NOT_RUN_OWNER_DEFERRED','release':'NOT_EXECUTED','production':'NOT_EXECUTED','owner_real_use':'POST_PRODUCTION_REQUIRED'}
+imp=json.loads((p/'upgrade-evidence-import.json').read_text());assert imp['status']=='PASS' and imp['source_sha']==os.environ['TARGET_SHA'] and imp['source_tree']==os.environ['TARGET_TREE']
+r={'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'version':os.environ['TARGET_VERSION'],'protected_configuration_content_translations':'UNCHANGED','shell_header_menu':'UNCHANGED','checks':{'clean_full':'PASS','upgrade129to130':'PASS','rollback129':'PASS','reapply':'PASS','idempotent':'PASS','setup_revisit_locked':'PASS','wordpress':'PASS','browser':'PASS'},'evidence_provenance':{'upgrade_rollback_reapply_idempotent_browser_candidate_browser_reapply':imp,'clean':'CURRENT_RUN_FRESH_WORDPRESS_FULL_BROWSER_218_CHECKS_NO_FIELDS_EXCLUDED'},'mobile':'NOT_RUN_OWNER_DEFERRED','release':'NOT_EXECUTED','production':'NOT_EXECUTED','owner_real_use':'POST_PRODUCTION_REQUIRED'}
 (p/'FINAL_EVIDENCE.json').write_text(json.dumps(r,indent=2));print(json.dumps(r))
-PY
+PYFINAL

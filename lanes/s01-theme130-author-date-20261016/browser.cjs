@@ -14,6 +14,7 @@ function gate(ok,label,detail){checks.push({pass:!!ok,label,detail});}
   const author_walk=[];for(const lang of ['en','zh']){const actual=[];await visit(withArgs(seed.archives[lang].author.url));for(let n=0;n<10;n++){actual.push(...await cards().evaluateAll(a=>a.map(x=>x.href)));const next=p.locator(scope+' .pagination .next');if(!await next.count())break;await next.click();await p.waitForLoadState('networkidle');}author_walk.push({lang,actual,expected:seed.archives[lang].author.urls,unique:new Set(actual).size,total:actual.length,complete:new Set(actual).size===actual.length&&actual.every(x=>seed.archives[lang].author.urls.includes(x))});}
   fs.writeFileSync('proof/baseline-observation.json',JSON.stringify({status:'OBSERVED',version:'1.35.129',observations,author_walk},null,2));await browser.close();return;
  }
+ if(phase==='warm'){await visit(base+'/');await visit(base+'/zh/');}
  if(phase!=='warm'){
   for(const lang of ['en','zh'])for(const kind of ['author','year','month','day'])await scenario(lang+'-'+kind,async()=>{
    const row=seed.archives[lang][kind],url=withArgs(row.url);gate(await visit(url)===200,'archive first page resolves',{lang,kind});
