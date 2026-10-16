@@ -4,7 +4,7 @@
 Last reconciled: 2026-10-16  
 原则：`NOT_RUN / UNKNOWN / DEFERRED / BLOCKED_ENV / SYNTHETIC_PASS / MACHINE_PASS != REAL_PASS`
 
-Current canonical Machine evidence:
+Historical / retained Machine evidence (exact source only):
 
 - `docs/evidence/P07_GUIDED_INIT16_R2_ONBOARDING_MACHINE_CLOSURE_20260911.md`
 - `docs/evidence/P07_GUIDED_INIT12_REAL_R1_DBADD_CLOSURE_20260911.md` — retained Restore-As DB remediation evidence
@@ -22,7 +22,7 @@ Release current comes from product `main/BUILD_ID=0.1.0-release85` and the live 
 | Network Node | 0.1.0-rc13 | routed public installer | **PUBLIC_DISTRIBUTED** |
 | VPS audit | V2.1.0 / 2.1.0-rc7-field | pinned public script, not the old V2.2.2 snapshot | **PUBLIC_DISTRIBUTED** |
 | Slot 3 Website/Data | 0.1.0-release85 | official MariaDB 10.11 default + installed-engine refusal | **PUBLISHED / EXACT_SOURCE_SYNTHETIC_PASS** |
-| System Care | 0.1.0-rc54 | public install/smoke PASS; real mutation workflow historically failed on stale success message | **MIXED / REAL_MUTATION_CI_NON_PASS** |
+| System Care | 0.1.0-rc54 | public install/smoke PASS; corrected real-mutation GitHub Runner [38914624486](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38914624486) covers APT/journal cleanup and negative safety gates | **MACHINE_PASS / OWNER_REAL_PARTIAL** |
 | New VPS MariaDB bootstrap | release85 | actual clean-VPS install and first-admin/database test | **NOT_RUN** |
 | New VPS TARGET_PULL MySQL/Percona → MariaDB 10.11 | release85 | real SQL import, DDL/data equivalence, user-site function and cutover recovery | **NOT_RUN** |
 | 16-site whole-server real path | release68 only | 2026-10-05 old-engine 16/16 + DNS Owner handoff | **HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE** |
