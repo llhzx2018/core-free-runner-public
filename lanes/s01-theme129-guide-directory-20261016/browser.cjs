@@ -69,7 +69,7 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
    const seen=[];
    for(let walk=0;walk<5;walk++){
     const rows=await surface.locator('[data-vf-directory-item]').evaluateAll(a=>a.map(e=>e.href));seen.push(...rows);
-    const next=p.locator('.vf-theme-pagination--guide_index .next');if(!await next.count())break;
+    const next=p.locator('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next');if(!await next.count())break;
     const href=await next.getAttribute('href');gate(href.includes('paged=')&&!href.includes('/page/'),'guide pagination stays on exact public route',{lang,href});
     const response=await Promise.all([p.waitForNavigation(),next.click()]);gate(response[0].status()===200,'guide next page returns200',{lang,url:p.url()});
    }
@@ -80,12 +80,12 @@ const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh
    gate(await surface.locator('[data-vf-directory-item]').count()===0&&await surface.locator('[data-vf-directory-empty]').isVisible()&&await surface.locator('.vf-directory-reset').isVisible(),'guide empty search offers visible recovery',{lang});
    await surface.locator('.vf-directory-reset').click();gate(await surface.locator('[data-vf-directory-item]').count()===3&&!await surface.locator('.vf-directory-toolbar-actions').isVisible()&&!new URL(p.url()).searchParams.has('paged'),'guide reset returns to first unfiltered page',{lang});
    await p.goto(url+'&vf_filter=inspect');const matched=[];
-   for(let walk=0;walk<3;walk++){matched.push(...await surface.locator('[data-vf-directory-item]').evaluateAll(a=>a.map(e=>e.href)));const next=p.locator('.vf-theme-pagination--guide_index .next');if(!await next.count())break;await next.click();gate(new URL(p.url()).searchParams.get('vf_filter')==='inspect','guide pagination keeps selected task',{lang});}
+   for(let walk=0;walk<3;walk++){matched.push(...await surface.locator('[data-vf-directory-item]').evaluateAll(a=>a.map(e=>e.href)));const next=p.locator('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next');if(!await next.count())break;await next.click();gate(new URL(p.url()).searchParams.get('vf_filter')==='inspect','guide pagination keeps selected task',{lang});}
    gate(matched.length===4&&new Set(matched).size===4,'guide task filter spans every matching page',{lang});
    const nc=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),np=await nc.newPage();await np.goto(url);
    await np.locator('.vf-theme-post-list--guide_index .vf-directory-filter-group a[data-vf-directory-filter-button="inspect"]').click();
    const ns=np.locator('.vf-theme-post-list--guide_index');gate(await ns.locator('[data-vf-directory-item]').count()===3&&new URL(np.url()).searchParams.get('vf_filter')==='inspect','guide task filters work without JavaScript',{lang});
-   await np.locator('.vf-theme-pagination--guide_index .next').click();gate(await ns.locator('[data-vf-directory-item]').count()===1&&new URL(np.url()).searchParams.get('paged')==='2','guide filtered second page works without JavaScript',{lang});
+   await np.locator('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next').click();gate(await ns.locator('[data-vf-directory-item]').count()===1&&new URL(np.url()).searchParams.get('paged')==='2','guide filtered second page works without JavaScript',{lang});
    await ns.locator('input[name="vf_q"]').fill('Beyondguide');await ns.locator('form[data-vf-directory-server-search] button').click();gate(await ns.locator('[data-vf-directory-item]').count()===1&&!new URL(np.url()).searchParams.has('paged'),'guide no-JS search retains task and resets pagination',{lang});await nc.close();
   });
 
