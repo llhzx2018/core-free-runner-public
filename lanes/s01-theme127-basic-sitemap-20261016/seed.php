@@ -67,7 +67,7 @@ $basic=[];
 foreach(['en','zh'] as $language){
  foreach(['basicwork','basicempty','basiclong'] as $kind){
   $body=$kind==='basicempty'?'':($kind==='basicwork'?'<h2>Owner page heading</h2><p>Owner basic body '.$language.' retained.</p>':'<h2>Owner long section</h2><p>'.str_repeat('Owner long page text '.$language.'. ',250).'</p><h2>Owner table</h2><table><tr><th>Setting</th><th>Value</th></tr><tr><td>Address</td><td>https://example.invalid/'.str_repeat('long-public-path-',20).'</td></tr></table><pre><code>Owner preserved code</code></pre>');
-  $id=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>$kind.'-'.$language,'post_title'=>'Owner '.ucfirst($kind).' '.strtoupper($language),'post_content'=>$body,'post_excerpt'=>$kind==='basicempty'?'':'Owner summary '.$language.' [vf_summary_probe] retained.']);pll_set_post_language($id,$language);update_post_meta($id,'_wp_page_template','page-basic.php');$basic[$language][$kind]=get_permalink($id);
+  $id=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>$kind.'-'.$language,'post_title'=>'Owner '.ucfirst($kind).' '.strtoupper($language),'post_content'=>$body,'post_excerpt'=>$kind==='basicempty'?'':'Owner summary '.$language.' [vf_summary_probe] retained.']);pll_set_post_language($id,$language);if($kind!=='basicwork')update_post_meta($id,'_wp_page_template','page-basic.php');$basic[$language][$kind]=get_permalink($id);
  }
 }
 echo wp_json_encode(['status'=>'SEEDED','languages'=>$out,'help'=>$help,'basic'=>$basic]);
