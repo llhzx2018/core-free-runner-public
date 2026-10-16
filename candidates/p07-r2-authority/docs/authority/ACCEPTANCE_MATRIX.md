@@ -1,0 +1,220 @@
+# P07 · VF Server Ops · Acceptance Matrix V1.5
+
+状态：CURRENT  
+Last reconciled: 2026-10-16  
+原则：`NOT_RUN / UNKNOWN / DEFERRED / BLOCKED_ENV / SYNTHETIC_PASS / MACHINE_PASS != REAL_PASS`
+
+Current canonical Machine evidence:
+
+- `docs/evidence/P07_GUIDED_INIT16_R2_ONBOARDING_MACHINE_CLOSURE_20260911.md`
+- `docs/evidence/P07_GUIDED_INIT12_REAL_R1_DBADD_CLOSURE_20260911.md` — retained Restore-As DB remediation evidence
+- `docs/evidence/P07_GUIDED_INIT10_CLOUDPANEL_FOUNDATION_MACHINE_CLOSURE_20260911.md` — retained CloudPanel foundation evidence
+- `docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md` — historical Real engineering closure for its exact older identities
+- `docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md` — current Owner real 16-site full-server migration Production closure on release68
+
+## Current release85 identity and acceptance · 2026-10-16
+
+Release current comes from product `main/BUILD_ID=0.1.0-release85` and the live public Toolbox / immutable distribution. The earlier guided-init16 / release28–release69 rows below are **historical / exact-source evidence**, not a blanket claim about current release85 or a new MariaDB VPS.
+
+| Area | Released identity | Acceptance scope | State |
+|---|---|---|---|
+| Public toolbox | V0.1.0; five visible entries / four modules | live public installer and entry smoke | **PUBLISHED / MACHINE_SMOKE_PASS** |
+| Network Node | 0.1.0-rc13 | routed public installer | **PUBLIC_DISTRIBUTED** |
+| VPS audit | V2.1.0 / 2.1.0-rc7-field | pinned public script, not the old V2.2.2 snapshot | **PUBLIC_DISTRIBUTED** |
+| Slot 3 Website/Data | 0.1.0-release85 | official MariaDB 10.11 default + installed-engine refusal | **PUBLISHED / EXACT_SOURCE_SYNTHETIC_PASS** |
+| System Care | 0.1.0-rc54 | public install/smoke PASS; real mutation workflow historically failed on stale success message | **MIXED / REAL_MUTATION_CI_NON_PASS** |
+| New VPS MariaDB bootstrap | release85 | actual clean-VPS install and first-admin/database test | **NOT_RUN** |
+| New VPS TARGET_PULL MySQL/Percona → MariaDB 10.11 | release85 | real SQL import, DDL/data equivalence, user-site function and cutover recovery | **NOT_RUN** |
+| 16-site whole-server real path | release68 only | 2026-10-05 old-engine 16/16 + DNS Owner handoff | **HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE** |
+| R1 MariaDB hardening | product PR #196, unmerged | independent isolated proof [143/143](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38912471080) | **CANDIDATE_MACHINE_PASS / RELEASE_NOT_CHANGED** |
+| P07 Owner real whole product | current | backup/restore/cloud storage/scheduler all capabilities | **PARTIAL / NOT_BLANKET_PASS** |
+
+**Next independent gates**: System Care corrected real-mutation CI proof; R2 authority/identity regression; formal release/upgrade; Owner real MariaDB 10.11 VPS migration. A gate remains NON-PASS until its own evidence is observed.
+
+## Historical guided-init16 acceptance layer
+
+This section records guided-init16 historical contract/evidence. It is not the current release85 distribution or current MariaDB runtime. Historical Real engineering evidence remains valid only for exact identities and does not grant present-day Owner/User `REAL_PASS`.
+
+| ID | Capability | Acceptance | Evidence | Current |
+|---|---|---|---|---|
+| B01 | guided-init16 Source Identity | Current preparation-first Google+B2 onboarding; correct Device OAuth secret contract; Recovery auto-generation; existing safety/import paths retained | source PR #19; runtime merge `78691699d3b5186ff902550ec65facf0976c89a1`; exact blobs in init16 evidence | **PASS** |
+| B02 | Public Distribution Identity | Public main distributes source-exact init16 through existing stable `p07.sh`; no second ordinary-user entry | public PR #846; main `fd02a3db860a0773a3587bf5d78de0daf4875861` | **PASS** |
+| B03 | Preparation-first Onboarding | UI tells user all Google/B2 prerequisites before configuration; embedded Google/B2 tutorial is available before secret input | `test_storage_onboarding_ux.py`; dedicated R2 gate PR/main | **MACHINE_PASS** |
+| B04 | Google Device OAuth Contract | device-code request uses `client_id`; token polling uses `client_id + client_secret`; Secret is hidden input via stdin and not argv/log output | `google_device_oauth.py`; OAuth tests; secret-boundary gate | **MACHINE_PASS** |
+| B05 | Recovery Key UX | P07 auto-generates high-entropy Recovery Key; user does not pre-create it; plaintext is revealed once only after Google+B2+crypt health PASS and is not persisted | onboarding UX gate + static contract | **MACHINE_PASS** |
+| B06 | Backblaze B2 Guided Setup | tutorial covers Bucket + Application Key ID + Application Key; read/write and Bucket-list requirement; runtime discovers/selects Bucket and verifies access | onboarding runtime + tests | **MACHINE_PASS** |
+| B07 | Dual Crypt Remote Protection | Google/B2 crypt remotes derive from the same auto-generated Recovery Key; P07 does not expose naked ordinary-user rclone config | storage setup regression + safety contract | **MACHINE_PASS** |
+| B08 | Current-site-set First Verification Guard | current CloudPanel site inventory must be refreshed; previous PASS cannot cover newly added sites; scheduler remains blocked until current first verify | `test_auto_backup.py` + `test_auto_backup_run_now_ux.py` in init16 gate | **MACHINE_PASS** |
+| B09 | Install / Upgrade / Exact Rollback | fixed init15 baseline; exact init16 blob validation; injected init16 failure restores pre-run init15 tree; normal upgrade reaches init16 | PR run `34670251605`; main run `34670304430` | **MACHINE_PASS** |
+| B10 | Permanent Toolbox Routing | permanent Toolbox expects init16 internally while public Slot3 remains `V0.1.0 / 测试中`; System Care RC12 unchanged | init16 route gate; Toolbox blob `69be6c8623addd6251e8f7fac596d1e93bc34789`; System Care main PASS | **MACHINE_PASS** |
+| B11 | CloudPanel Platform Foundation | details/health, five site-create types, DB add/export/import, SSL, permissions/Varnish, Panel security/users, safe admin functions retained | guided-init10 closure + unchanged runtime blobs | **MACHINE_PASS** |
+| B12 | Restore-As Transaction | verified backup → auto TARGET create → DB create/import/verify → app remap → local Host/SNI verification; existing TARGET refused | retained Restore-As Machine evidence; init12 DB remediation | **MACHINE_PASS** |
+| B13 | Secret Boundary | no Google account password, no Google Client Secret argv/echo, no plaintext Recovery persistence, no secret output in ordinary logs | init16 OAuth/onboarding tests + static gate | **MACHINE_PASS** |
+| B14 | Stable Public Installer | stable `p07.sh` pins init16 installer blob `4a7889ea606fa2353f194abbb2c6b27345f35050` over fixed init15 main | dedicated init16 route + transaction gate | **MACHINE_PASS** |
+| B15 | System Care Isolation | Menu4 remains RC12 and available while Slot3 evolves | post-merge run `34670304410` | **MACHINE_PASS / UNCHANGED** |
+> B16–B31 Machine Evidence：Public Runner exact-private-source fallback，`vf-server-ops@3b717a9de58d0d46af6d12422ad35646b9a4129d`，Run `36087195784` / Machine Gate #13 = PASS；Bash / Python compile / Identity / Smoke / native-CI mirrored Units / tracked-source Secret Scan 全 PASS。`EXACT_SOURCE_SYNTHETIC` 仅表示独立机器执行的 synthetic/fixture 证明，不表示真实 Production Migration、DNS Cutover 或 Production Data Proof。
+| B16 | Full-server Migration Orchestrator | automatic all/selected-site plan → low-disk direct prepare → cutover → finalize state machine; no N-site source package accumulation | feature source + `test_server_migration.py` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B17 | Two-phase Runtime Isolation | TARGET Cron/PM2 deferred during live prepare; `/etc/cron.d` is automated only when every real job belongs to selected Site Users; SOURCE remains live until explicit cutover; from cutover through DNS wait/final proof, SOURCE Nginx + system Cron + user Cron + PM2 must remain frozen or Production FAILs | staged Runtime + exclusive system-Cron ownership + final source-runtime tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B18 | Whole-home Data Completeness | direct site-root rsync plus centralized external-asset discovery across Site User Home, Web-Root sibling `.vf*`/`.press*`, and `.local/share/vf-*`; discovery reason retained; whole Site User Home SQLite online backup + target quick_check | `server_migration.py` discovery/snapshot tests + release68 real VF Press runtime closure | **IMPLEMENTED / REAL_FIELD_PROVEN on release68 path** |
+| B19 | Final Delta / Database Consistency | source freeze → final rsync delta → prove migration-owned TARGET DB marker → reset/recreate DB with same private TARGET identity → import frozen SOURCE dump; exact SQL fingerprint first, MariaDB→MySQL cross-engine logical data/object fingerprint fallback; final authoritative SQLite snapshot | server migration cutover engine + verify/final-DB tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B20 | DB Identity Compatibility | single-site restore preserves source DB identity then falls back on rejection; full-server direct mode creates target-compatible DB user and atomically remaps WordPress/dotenv config | `app_config.py`; restore-new + server-migration regression | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B21 | DNS Manual Gate / Public Route Proof | P07 never edits DNS; after Owner DNS action, random TARGET-only proof must reach every domain before Production verification | server migration finalize engine + tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B22 | Automatic Cutover Rollback | SOURCE freeze persists Intent before destructive actions and Completed only after success; resume must finish incomplete system-Cron/user-Cron/PM2 intents; pre-ready failure deactivates migration-owned TARGET runtime and restores saved SOURCE Cron/PM2/Nginx; no source/target delete | crash-window freeze-resume + state-machine rollback tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B23 | Resumable Beginner UX | `整机迁移（推荐）`; prepare checkpoint state; resume; one DNS Gate; old server retained | `vfops-migrate-ui`; modular menu gate | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B24 | Guarded Empty-target Bootstrap | reachable root SSH + supported empty OS/arch + >=1 Core / 2 GB-class RAM / 10 GB disk can auto-install checksum-verified official CloudPanel + MySQL 8.4; non-empty target refused | server migration bootstrap + UX + bootstrap tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B25 | Capacity / Runtime Prerequisite Automation | low-disk SOURCE reserve + TARGET free-space preflight; missing SOURCE rsync can auto-install after confirmation; PM2 exact Site User NVM version is migrated automatically | server migration preflight + PM2 tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B26 | Source External-service Decommission Guard | public non-standard listeners are surfaced and keep `source_decommission_safe=false`; website migration never pretends proxy/VPN/other services were moved | listener parser + migration UX | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B27 | New-server Web Contract Readback | immediately after local `site:add`, current NEW server inventory must prove site_user/site_root/document_root/runtime and all OLD-server domains are reproducible; mismatch cleans only the new transaction-owned site before bulk pull | local target-site readback helper + tests | **IMPLEMENTED / GATE_PENDING** |
+| B28 | New-server Collision Guard | Plan rejects selected domain, Site User, `/home/<user>`, or database-name collisions on the current NEW server before business-data pull | local target preflight + tests | **IMPLEMENTED / GATE_PENDING** |
+| B29 | Managed Old-server SSH Key Boundary | first authorization may create a dedicated P07-managed key on NEW and authorize it on OLD; user-owned keys are never marked managed or deleted; Production PASS retains the P07 key/helper only as a Recovery channel unless a later explicit cleanup contract is executed | guided migration UX + static/security tests | **IMPLEMENTED / GATE_PENDING** |
+| B30 | Post-DNS Rollback Safety Boundary | Runtime-only rollback is allowed only before Owner DNS handoff; once `DNS_UPDATED` is declared (`WAITING_DNS` / `PRODUCTION_VERIFY_FAILED`) or after `PRODUCTION_PASS`, rollback to OLD is DENIED because NEW may contain newer writes; future rollback requires NEW→OLD data reconciliation | pull rollback guard + negative tests | **IMPLEMENTED / GATE_PENDING** |
+| B31 | Production Proof / Recovery Preservation | public proof file must exist only on NEW; HTTPS/TLS + public route + OLD-runtime-frozen verification must PASS before `PRODUCTION_PASS`; OLD and its Recovery Point/helper remain preserved, and P07 never deletes OLD | pull finalize + recovery-retention tests | **IMPLEMENTED / GATE_PENDING** |
+| B32 | Target-owned Pull Direction | ordinary migration must be launched on NEW, ask for OLD server IP, and transfer business data OLD→NEW by NEW-initiated pull; ordinary UX must not ask for target IP | `server_migration_pull.py` + migration UI direction tests | **IMPLEMENTED / GATE_PENDING** |
+| B33 | Target-owned Migration State | Migration ID, primary private state, resume state and target transaction markers live on NEW; OLD only holds subordinate recovery/staging state | state ownership tests | **IMPLEMENTED / GATE_PENDING** |
+| B34 | Pull Asset Completeness | site files, centrally discovered external VF/Press Runtime/Storage, MySQL dumps, whole-home SQLite, Cron/PM2 and required NVM runtime are read OLD→NEW; release69 refreshes live source truth and reconciles completeness before SOURCE freeze | pull orchestration + release68 real closure + release69 regressions | **IMPLEMENTED / REAL_FIELD_PROVEN + release69 HARDENING_CANDIDATE** |
+| B35 | Old-server Recovery Before Freeze | final synchronization must create OLD-side Recovery Point before stopping Nginx/Cron/PM2; pre-DNS failure stops NEW runtime and restores OLD runtime; OLD is never deleted | source recovery root + freeze/restore tests | **IMPLEMENTED / GATE_PENDING** |
+| B36 | Role-intuitive Chinese Migration UX | ordinary screen says “当前服务器：新服务器 / 接收端”, “旧服务器 IP”, “整机迁入 / 单站迁入 / 继续未完成迁移”; SOURCE/TARGET are not required user concepts | migration UI gate | **IMPLEMENTED / GATE_PENDING** |
+| B37 | Migration-only Lazy Dependencies | OpenSSH client + rsync are checked only after entering migration; OLD rsync may be installed only after migration approval; Toolbox/other Slots do not preinstall them | migration UI + engine tests | **IMPLEMENTED / GATE_PENDING** |
+| B38 | Legacy Push Not Ordinary Route | old push engine may remain as internal compatibility primitive, but `vfops server-migrate` and ordinary migration UI route only to the target-owned pull engine | CLI routing gate | **IMPLEMENTED / GATE_PENDING** |
+| B39 | Pre-cutover Reconciliation + Source HTTP Baseline | refresh live SOURCE asset/runtime truth; backfill newly discovered external/SQLite assets while SOURCE is live; prove target completeness before maintenance; compare NEW local/public HTTP behavior against OLD baseline so 200→404 cannot pass | release69 `pre_cutover_reconcile`, source-baseline and regression tests | **IMPLEMENTED / RELEASE69_CANDIDATE** |
+| B32 | Target-owned Pull Migration | ordinary migration runs on NEW/current server; asks only for old-server IP; current server owns Migration ID/state; SSH/rsync/MySQL/SQLite data direction is OLD(remote) → NEW(local); DNS remains manual; old server retained; existing target overwrite denied; legacy push engine not exposed as ordinary UX | `server_migration_pull.py` + `test_server_migration_pull.py` + Menu3 contract + exact-source public Runner #36563032316 against candidate `a30d32318dea53e5838f9216f532096d24021f5e` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B33 | Main Menu Visible Feedback | Slot 3 menu routes 1–7 are wired; empty-site / empty-backup / module-failure states remain visibly readable before TTY redraw; child non-zero exit does not kill parent menu | `test_main_menu_routes.py` + full Slot3 regressions + exact-source public Runner `36580337400` against candidate `7b5a7e2e1f596c6ee5f2ba57005727a271820e45` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B34 | Terminal UX System V2 | interactive Slot 3 surfaces use one-screen-one-task page isolation; main menu is cleared before child entry; overview/backup/restore/migration/auto-backup/site/admin use page primitives; empty/error/result states are isolated; machine/non-TTY output remains stable | `terminal_ui.sh` + full Slot3 regressions + exact-source public Runner `36651107701` against candidate `c6feba4bcd6002f8baf8e332d7388e78ca71cc16` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B35 | Ops Diagnostics Center | read-only diagnostics cover P07/CloudPanel/Nginx/MySQL/PHP-FPM/disk/memory/swap/latest verified backup; main menu exposes a lightweight summary | `ops_diagnostics.py` + `vfops-diagnostics-ui` + `test_ops_console_r9.py` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC · RUN 36654984844** |
+| B36 | Local Operation History | P07 records action/result/non-sensitive summary to 0600 JSONL and exposes recent history UI | `ops_history.py` + `vfops-history-ui` + `test_ops_console_r9.py` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC · RUN 36654984844** |
+| B37 | Unified Safety Model | read/write/migration/danger tiers and exact-token helper exist; migration cutover, remote-backup disable, DB import and CloudPanel security writes adopt it | `terminal_ui.sh` + focused regressions | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC · RUN 36654984844** |
+| B38 | P07 Self Check / Repair | self-check validates runtime identity/files; repair reinstalls current official runtime only after exact REPAIR token | `vfops-selfcheck-ui` + tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC · RUN 36654984844** |
+| B39 | New VPS Initialization | guided preflight + guarded low-risk baseline + guarded CloudPanel bootstrap + explicit completion checklist; no DNS or destructive server action | `vfops-init-ui` + tests | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC · RUN 36654984844** |
+| B40 | Beginner Chinese Menu | ordinary menus use Chinese task language; technical terms move to explanatory parentheses/details; Toolbox home removes per-row version/status columns; Slot3 site/backup/migration/init/admin menus follow same contract | final exact-source Runner `36677009690` against candidate `d2b19735be3985388506c16bcf0a3480d60faa00` + release10 Distribution Gate `36677155521` + Toolbox Smoke `36677155588` + System Care Smoke `36677155502` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| R1-A1 | Real Restore-As attempt #1 | Owner VPS guided-init10 attempt preserved | `MYSQL_CREATE_IMPORT_VERIFY / CloudPanelError`; SOURCE retained; DNS unchanged | **REAL_FAIL / RETRY_REQUIRED** |
+| R1-A2 | Real Restore-As attempt #2 | Owner VPS guided-init11 attempt preserved | `P07_CLOUDPANEL_OPERATION=db_add`; `P07_CLOUDPANEL_EXIT=1`; SOURCE retained; DNS unchanged | **REAL_FAIL / RETRY_REQUIRED** |
+| R1 | Current Real Restore-As New Domain | genuine current permanent-Toolbox run on brand-new TARGET through create/import/remap/Host/SNI/private evidence | Current Real evidence still required; previous failures are not PASS | **RETRY_REQUIRED / NOT_PASS** |
+| R2 | Current Full Local + Google + B2 First Verify | current CloudPanel site inventory; required current sites successfully protected and verified on Local+Google+B2 using guided-init16 onboarding | Owner VPS Real evidence required | **NOT_RUN** |
+| R3 | Current Guarded Scheduler Real Gate | scheduler installed only after current R2 first-verification PASS; collision/readback verified | Owner VPS Real evidence required | **NOT_RUN** |
+| R4 | Current Guided Cross-VPS Restore/Migration | brand-new TARGET, source retained, cross-server verification PASS, DNS unchanged | genuine cross-VPS Real evidence required | **NOT_RUN** |
+| R5 | Current Full-server TARGET_PULL Production Migration | existing real 16-site SOURCE → new TARGET; same-task resume; 16/16 local verify; Owner manual DNS; public Production verify; SOURCE retained | `P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md`; migration `pull-20261005T062015Z-04275579`; release68 | **REAL_PASS / PRODUCTION_PASS** |
+
+### Current guided-init16 safety invariants
+
+```text
+DNS automatic mutation                        DENY
+SOURCE / old-server automatic deletion        DENY
+TARGET existing same-domain overwrite         DENY
+SOURCE-domain certificate reuse on Restore-As DENY
+site / DB / panel-user delete in ordinary UX  DENY / NOT EXPOSED
+manual empty CloudPanel TARGET prerequisite   DENY
+normal-user naked rclone config UX             DENY
+Google account password request               DENY
+Google Client Secret argv exposure            DENY
+Google Client Secret terminal echo            DENY
+plaintext Recovery Key persistence             DENY
+secret output in logs                          DENY
+scheduler before required first verification  DENY
+old PASS covering newly added sites            DENY
+runtime self-claim of REAL_PASS                DENY
+```
+
+### Current evidence classification
+
+```text
+GUIDED_INIT16_SOURCE                         CURRENT / MERGED_TO_CANDIDATE
+PUBLIC_GUIDED_INIT16_DISTRIBUTION            MAIN / TESTING
+GUIDED_INIT16_R2_ONBOARDING_MACHINE_GATE     PASS
+GUIDED_INIT16_TRANSACTION_ROLLBACK_GATE      PASS
+GUIDED_INIT16_STABLE_TOOLBOX_ROUTING_GATE    PASS
+SYSTEM_CARE_RC12                             PASS / UNCHANGED
+CLOUDPANEL_FOUNDATION_COMPLETE               MACHINE_PASS
+RESTORE_AS_IMPLEMENTATION                    MACHINE_PASS
+R1_ATTEMPT_1_GUIDED_INIT10                   REAL_FAIL / RETRY_REQUIRED
+R1_ATTEMPT_2_GUIDED_INIT11                   REAL_FAIL / DB_ADD_EXIT_1 / RETRY_REQUIRED
+CURRENT_RESTORE_AS_NEW_DOMAIN_REAL_VPS       RETRY_REQUIRED / NOT_PASS
+CURRENT_GOOGLE_B2_ALL_SITE_FIRST_VERIFY      NOT_RUN
+CURRENT_GUARDED_SCHEDULER_REAL_GATE          NOT_RUN
+CURRENT_CROSS_VPS_GUIDED_MIGRATION_REAL      REAL_PASS / PRODUCTION_PASS (full-server TARGET_PULL path)
+CURRENT_RC3_REAL_OWNER_USER_PASS             NOT_PROVEN
+MENU3_PUBLIC_STATUS                          TESTING
+FORMAL_TAG_RELEASE                           NOT_AUTHORIZED
+PRODUCTION_CUTOVER                           OWNER_MANUAL_PASS for recorded release68 full-server migration
+```
+
+Older P07 workflows can still contain previous current-BUILD assertions (for example guided-init14) and may fail before behavioral steps execute after the current identity advances. Such runs are identity-migration debt, not current Product/Real evidence. Repository-global Public Runner Trigger/Workflow Archive findings remain separate pre-existing S01 governance debt.
+
+---
+
+## Historical A01-A20 engineering acceptance
+
+The following historical matrix remains valid only for the exact identities recorded in the historical closure evidence.
+
+| ID | Capability | Current |
+|---|---|---|
+| A01 | Repository Bootstrap / CLI Entry | **PASS** |
+| A02 | Inventory | **REAL_PASS** |
+| A03 | Manifest | **PASS** |
+| A04 | Local Backup | **REAL_PASS** |
+| A05 | Google Drive Pool | **REAL_PASS** |
+| A06 | Backblaze B2 | **REAL_PASS** |
+| A07 | Encryption | **REAL_PASS** |
+| A08 | MySQL Consistency | **REAL_PASS** |
+| A09 | SQLite Consistency | **REAL_PASS** |
+| A10 | Backup Verify | **REAL_PASS** |
+| A11 | Restore Dry-run | **PASS** |
+| A12 | Site Restore | **REAL_PASS** |
+| A13 | Migration | **REAL_PASS** |
+| A14 | Cross-server Verify | **REAL_PASS** |
+| A15 | Cutover Safety | **REAL_TECHNICAL_READY / OWNER_CUTOVER_NOT_RUN** |
+| A16 | Destructive Guard | **REAL_PASS** |
+| A17 | Secret Boundary | **REAL_PASS** |
+| A18 | Disaster Recovery | **REAL_PASS** |
+| A19 | Settings / Retention / Automation Policy | **REAL_PASS** |
+| A20 | Runtime Activation | **REAL_PASS** |
+
+Historical Real closure identity and detailed evidence remain canonical in `docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md`; the compact table above does not change or reclassify those historical results.
+
+## Completion boundary
+
+Current full-server TARGET_PULL migration now has genuine Owner Real Production evidence for the recorded release68 16-site run. This does **not** promote unrelated Restore-As, remote-storage, scheduler, Formal Tag/Release, old-server decommission, or existing Production overwrite paths to Owner Real PASS.
+
+The full-server migration path no longer waits on an additional R4-style proof; its current real evidence is R5. Other outstanding Real gates remain independent and must not inherit R5 PASS.
+
+### Current Machine Gate Blocker
+
+- Current full-server migration rows B16–B31 retain their previously recorded exact-source synthetic evidence; B32 Target-owned Pull Migration passed exact-source public Runner `36563032316` against candidate `a30d32318dea53e5838f9216f532096d24021f5e`. Production migration remains NOT_RUN.
+- GitHub Actions classification: **BLOCKED_ENV_ACTIONS_START** — job objects are created but return `steps=null` / `logs_url=null`, so no Bash/Python/unit-test step executes.
+- This condition predates PR #24: develop had successful bootstrap-ci through 2026-09-06; develop Runs #497/#498 on 2026-09-10 already exhibit the same pre-step failure.
+- Therefore the blocker is not promoted to Machine FAIL and must not be promoted to Machine PASS. Merge/Release/Production remain gated.
+
+
+## Terminal UI Color Contract
+
+| Gate | Requirement | PASS condition |
+|---|---|---|
+| Terminal UI hierarchy | Interactive P07 pages must not degrade into full-screen plain white text | Titles, sections, actions and statuses follow the RPD canonical semantic color map |
+| Semantic status color | PASS/READY/KEEP/normal vs attention/review vs fail/block/risk must be visually distinct | Green / Yellow / Red semantics match RPD |
+| High-risk action color | Apply/Rollback/Uninstall/destructive actions must not look like ordinary safe actions | High-risk entry/action uses Red semantics plus existing explicit confirmation gate |
+| NO_COLOR compatibility | Color must remain optional | `NO_COLOR` output is plain text and semantically complete |
+| Non-TTY compatibility | Machine workflows must not depend on ANSI | Non-TTY output remains parseable/plain unless a documented PTY wrapper is intentionally used |
+| Machine-output integrity | JSON / machine-readable formats must never receive ANSI escapes | Parser/regression Gate PASS |
+| Shared implementation | New pages must reuse the P07 color helpers / canonical map | No ad-hoc conflicting color vocabulary |
+| Product-wide Chinese-first terminal copy | Toolbox + Slot 1/2/3/4 + ordinary sub-pages must not require understanding internal English engineering tokens | 普通界面统一中文优先；TARGET/SOURCE/READY/PASS/Runtime/Gate 等仅保留为内部机器合同；CloudPanel/DNS/SSH/IP/MySQL/SQLite/Cron/PM2/HTTPS 等通用技术名可保留并配中文说明 |
+| Lazy loading / current-runtime install | Toolbox and Slot entry must not replay historical installer chains or preinstall unrelated feature dependencies | Toolbox only loads selected Slot; current Slot runs locally; upgrade installs current runtime directly; rclone/OpenSSH are installed only when their feature is entered; Production install does not rerun full unit suite |
+
+| B41 | Menu 3 / 4 IA Separation | Slot3 contains only website/data/backup/migration/site/panel tasks; diagnostics/history/selfcheck/init move to Slot4; backup/restore/auto-backup grouped under one submenu | release11 exact-source Gate `36684513855` + Distribution Gate `36686124730` + Toolbox Smoke `36686124599` + System Care Smoke `36686124872` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B42 | Immutable Backup Metadata | backup metadata symlinks are dereferenced into private snapshots; package writer/verify rejects external symlinks; restore list requires fresh package verification | backup symlink regression + release11 exact-source Gate `36684513855` | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B43 | Beginner Selfcheck / Restore Failure UX | selfcheck validates only installed runtime files, uses Chinese repair confirmation, and restore failure hides raw engineering output behind actionable Chinese guidance | release11 exact-source Gate `36684513855` + Beginner Menu Gate PASS | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC** |
+| B44 | Backup Freshness / Restore Visibility | MySQL export must be quiescent and fully gzip-readable before checksum; committed backup is fresh-verified again before success; restore list must expose blocked backup reason instead of silently treating it as absent; current-runtime install must include the current inventory renderer | exact-source Gate `36699115238` + Distribution Gate `36701825127` + Toolbox Smoke `36701825096` + isolated inventory renderer proof | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC / PUBLIC_DISTRIBUTED · OWNER_REAL_USE_PENDING** |
+| B45 | Package-owned MySQL Snapshot | CloudPanel/export-provider work path is never checksummed directly; P07 waits for stable valid gzip, copies to a separate package-owned fsynced snapshot, rechecks source stability/digest, then checksums only the immutable snapshot; real backup errors render Chinese stage/reason instead of machine tokens | Owner real release12 backup = `FRESH_VERIFY_NOT_PASS`; exact-source Gate `36705735350` + Distribution Gate `36707407078` + Toolbox Smoke `36707407264` + isolated release13 install | **IMPLEMENTED / MACHINE_PASS · EXACT_SOURCE_SYNTHETIC / PUBLIC_DISTRIBUTED · OWNER_REAL_RELEASE12_FAIL · RELEASE13_OWNER_REAL_USE_PENDING** |
+| B46 | Stable Final Verification / Exact Beginner Diagnosis | post-commit verification uses a bounded stability window and requires two consecutive full PASS results; persistent failure remains fail-closed and is classified into a fixed safe component category rendered as Chinese reason instead of generic machine token | Owner real release13 backup = final verify fail; exact-source Gate `36708781490` + Distribution Gate `36710551712` + Toolbox Smoke `36710551825` + isolated release14 install | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_RELEASE13_FAIL · RELEASE14_OWNER_REAL_USE_PENDING** |
+| B47 | SQLite WAL Snapshot / Manifest-only Verification | live WAL SQLite is captured through Backup API, normalized to DELETE journal, sidecars removed, and only manifest-declared SQLite snapshots are immutable-read verified; undeclared sqlite auxiliary files fail closed with beginner Chinese diagnosis | Owner real release14 backup = SQLite integrity fail; release15 exact-source Gate `36724452422` + Distribution Gate `36726942820`; 2026-10-01 Owner real new backup `123.kewaro.com_20261001T024818Z` = 已验证、可恢复; exact installed release15 Build readback not present in this screenshot | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_BACKUP_PASS · RESTORE_LIST_PENDING** |
+| B48 | Restore-As Canonical SQLite / Safe Stage Diagnosis | Restore-As must replace archived live SQLite/WAL/SHM copies with manifest-declared canonical sqlite snapshots before file/SQLite verification; ordinary file verification excludes SQLite main+sidecars; failures expose only fixed beginner-Chinese stage/reason while preserving rollback/DNS/source safety | Owner real 2026-10-01 restore list = PASS; Restore-As-New to `455.kewaro.com` = fail-closed with source retained and DNS unchanged; release16 exact-source Gate `36808626280` + Distribution Gate `36809546508` + Toolbox Smoke `36809546788`; Public main `850e41b8aeb4d58f930e5e0f9ba432840c8f962e` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_RESTORE_LIST_PASS / RELEASE15_ERA_RESTORE_AS_FAIL · RELEASE16_OWNER_REAL_USE_PENDING** |
+| B49 | Restore-As Direct Local HTTP Probe | local HTTP/SNI verification must bypass proxy settings, use loopback resolution, retry transient reload races, and distinguish target vhost PRESENT vs MISSING while preserving fail-closed rollback | Owner real release16-era Restore-As reached final local verification but failed `本机 HTTP 路由验证没有通过`; release17 exact-source Gate `36810512935` + Distribution Gate `36811305606` + Toolbox Smoke `36811305815`; Public main `7240858005bc29bb4a705a95ab1e8126862c940c` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_RELEASE16_ERA_HTTP_FAIL · RELEASE17_OWNER_REAL_USE_PENDING** |
+| B50 | Restore-As Target Nginx Listener Discovery | final local HTTP/SNI verification must parse only the target domain's Nginx server block, derive actual listen addresses instead of assuming 127.0.0.1, probe them directly with no proxy and bounded retries, and fail closed as listener MISSING vs UNREACHABLE | Owner real release17-era Restore-As to `112.kewaro.com` = target vhost PRESENT but fixed-loopback HTTP probe failed and rollback invoked; release18 exact-source Gate `36812999690` + Distribution Gate `36813781522` + Toolbox Smoke `36813781495`; Public main `f618aad35da7df05fb298455be186691d4b5362b` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_RELEASE17_ERA_FIXED_LOOPBACK_FAIL · RELEASE18_OWNER_REAL_USE_PENDING** |
+| B51 | Restore-As Guarded Nginx Reload / Transport Diagnosis | after CloudPanel creates a new site, Restore-As must run `nginx -t`, reload running Nginx only on syntax PASS, then verify target listeners; local transport failure must classify connect / timeout / empty reply without exposing raw network details; any failure remains rollback-only | Owner real release18-era Restore-As to `113.kewaro.com` = target listener discovered but local HTTP unreachable; release19 exact-source Gate `36815000676` + Distribution Gate `36816117494` + Toolbox Smoke `36816117429`; Owner real release19-era Restore-As to `114.kewaro.com` = `nginx -t` PASS but reload REAL_FAIL, rollback invoked, DNS/source unchanged | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_RELEASE19_ERA_NGINX_RELOAD_FAIL / RESTORE_AS_NOT_PASS** |
+| B52 | Restore-As Systemd-first Nginx Reload | after `nginx -t` PASS, an active systemd-managed Nginx must reload through `systemctl reload nginx`; direct `nginx -s reload` is only a compatibility fallback when systemd is inactive/unavailable; an active-systemd reload failure remains fail-closed and must not silently fall back; successful results record the actual reload mode | Owner real release19-era Restore-As to `114.kewaro.com` = config test PASS / reload REAL_FAIL; release20 Candidate Gate `36818650825` PASS; source merge `2b0fc8b51b66a0d01b2e96bc7b91a385004628f6`; source main CI `36819895048` PASS; Distribution Gate `36820647201` + Toolbox `36820647232` + System Care `36820647145` + Beginner Menu `36820647193`; Public main `25f192fb6d54242515e007a5b4ffa34c98bad8d7` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · RELEASE20_OWNER_REAL_USE_PENDING** |
+| B53 | Restore-As Systemd Main-process HUP Fallback | when `nginx -t` passes and active-systemd `systemctl reload nginx` fails for a non-permission/non-bus reason, P07 may re-check service activity and ask systemd to send HUP only to the tracked Nginx main process; service must remain active before route verification; restart is forbidden and any failure remains rollback-only | Owner real release20-era Restore-As to `116.kewaro.com` = Nginx reload REAL_FAIL with rollback, DNS/source unchanged; release21 candidate Gate `36826060883` PASS; source merge `71f5089e42e56b0f432ee59d7cfc7a70854da2f0`; source main CI `36826817099` PASS; Distribution Gate `36827256710` + Toolbox `36827256562` + System Care `36827256673` + Beginner Menu `36827256645`; Public main `32703dc47e2ae8a0f344e1525f44be946be77b62` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · RELEASE21_OWNER_REAL_USE_PENDING** |
+| B54 | Restore-As Live Nginx Instance Binding | P07 must discover the single root Nginx master actually running on the target, bind its live `-p/-c` args to config test/dump, and when systemd is inactive revalidate and HUP only that exact master PID; ambiguous/changed/missing master states fail closed; restart remains forbidden | Owner release21 readback: Build `0.1.0-release21`; `nginx.service` inactive/dead, MainPID=0; live master PID 856 launched with `-c /home/clp/services/nginx/nginx.conf`; default PID files empty; release22 Candidate Gate `36833721873` PASS; source merge `0db20d21100aac2099484468fd7ab8d647e0fa12`; Distribution Gate `36836662878` + Toolbox `36836662810` + System Care `36836663188` + Beginner Menu `36836663039`; Public main `3eeda218ab2f7d8fea6f498ba71c97265cc7d738` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · RELEASE22_OWNER_REAL_USE_PENDING** |
+| B55 | Restore-As Live Nginx Stabilization Window | after CloudPanel restore/create completes, P07 must wait for two consecutive matching live-master observations before binding runtime args; when systemd is inactive and no stable live master is found it must fail closed instead of using default direct reload; the same master identity must be re-confirmed before and after HUP | Owner release22 exact readback = Build `0.1.0-release22`; live master PID 856 / `-c /home/clp/services/nginx/nginx.conf`; systemd inactive; standalone release22 `_reload_nginx` = `LIVE_MASTER_HUP` PASS, while Restore-As to `118.kewaro.com` still returned Nginx reload REAL_FAIL and rolled back; release23 Candidate Gate `36844904239` PASS; source merge `0f8d5175fdd425668021b6c1d106dbee9d1ed6a9`; Distribution Gate `36847242129` + Toolbox `36847242134` + System Care `36847242061` + Beginner Menu `36847242180`; Public main `b063d07c7c1bb807ad1ada51becc46030cb40c3e` | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · RELEASE23_OWNER_REAL_USE_PENDING** |
+| B56 | Restore-As Site-serving Nginx Role Separation | Restore-As must distinguish website Nginx from CloudPanel control-plane Nginx by each live master's own config/listener role; only an instance exposing website listener 80/443 may be treated as site-serving when nginx.service is inactive; no qualifying site Nginx must fail before target creation; panel-only Nginx must never be HUPed as a website reload | Owner release23-era Restore-As reached post-reload `target_vhost=MISSING`; release24 Candidate Gate `36854715322` PASS; source main `2a57a0c32a44cb30f15a49dece253ec917c901ca`; source closure `b5beec4133acede30ad8a40de067df505b2fd141`; release24 Distribution Gate `36858661463` PASS; Public main `9151216074fd3dc4bf049f575657d44e460ae085`; Toolbox/System Care/Current Self Test PASS | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · RELEASE24_OWNER_REAL_USE_PENDING** |
+| B57 | Restore-As Offline Recovery Verification | when website Nginx is intentionally stopped, Restore-As may proceed only after static `nginx -t`; post-restore verification must prove files / DB / app / target vhost + configured 80/443 listener state without starting, restarting or reloading website Nginx; Host / SNI must remain NOT_RUN and offline success must use a distinct result identity | release25 exact-source CI `36878240140` PASS; Distribution Gate `36883195967` PASS; Public main `c817251bf4374a69eb27ea6e563e52d67e40d838`; Owner real Restore-As on preserved Linode Recovery Copy from `123.kewaro.com` to `444.ke.com` = offline verification PASS, Host/SNI NOT_RUN, Nginx start/restart/reload NOT_RUN, DNS/source unchanged | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED · OWNER_REAL_OFFLINE_RECOVERY_PASS / FULL_ONLINE_PASS_NOT_YET_PROVEN** |
+| B58 | Migration Old-server Website Nginx Manual Control | backend must safely control the old server's website service as one whole-server switch, while ordinary UI stays beginner-first: only show current website state + “开启旧服务器全部网站 / 停止旧服务器全部网站”; engineering terms such as `nginx.service`, `clp-nginx.service`, `systemctl`, `nginx -t`, 80/443, 8443 and machine confirmation tokens must remain hidden from the ordinary surface; backend start still requires config PASS and may control only `nginx.service`; no DNS/source-delete/overwrite side effect | feature source merge `a4efc4be853bbf0b79ee3c53cbd37eb3b9bad21e` + main CI `36894317890` PASS; release26 Candidate exact-source CI `36897336937` PASS; release26 source main `b48f14273f06357b2e7fb8abb223486c80302270` + main CI `36898401114` PASS; beginner UI PR `#118` CI `36902397147` PASS; main merge `2a4a0065b247f5ba8d5614053c8a6275068155cd` + main CI `36903446105` PASS | **IMPLEMENTED / MACHINE_PASS · SOURCE_CANDIDATE / BEGINNER_UI_FROZEN / PUBLIC_DISTRIBUTION_NOT_RUN / OWNER_REAL_USE_NOT_RUN** |
+| B59 | First-level Server Initialization + Standard Y/N | P07 Toolbox must expose standalone “初始化服务器” as first-level item 5; migration must not bootstrap/install CloudPanel and must redirect uninitialized servers back to item 5; ordinary website switch and initialization confirmations use Y/N only; System Care must not duplicate initialization entry | release28 source PR #121 CI `36914704500` PASS; source main `2265bd2b69c0ddd82ebc07eb01ad7c156ef78507` + CI `36915934302` PASS; Public PR #1706; Distribution Gate `36917500446`, Toolbox `36917500367`, System Care `36917500505`, Beginner Menu `36917500523`, Stable Installer `36917500600` PASS; Public main `03b0549c52ba10ced6eb1e92e4655b34004b11db` + post-merge smokes PASS | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED / OWNER_REAL_USE_PENDING** |
+| B60 | Beginner Menu / Naming Closure | ordinary UI must use purpose-first beginner names and hide internal project code as a menu/page identity; Menu 3 must group site actions into Website Overview / Health / Database / Website Certificate / Permissions & Cache; Create Website belongs to Website Management; migration dependencies must load only after selecting migration work; Menu 4 uses Server Health / Daily Maintenance / Security / Tool Check / History; Menu 5 contains only Base Settings + CloudPanel; ordinary write confirmations use Y/N | source PR #123 + candidate CI `36988875935` PASS; source main `ce51e3effe51df3627bd0cc5149b34af1eae3cfd` + CI `36993188227` PASS; Public PR #1731; Release29 Gate `37000577393`, Toolbox `37000577542`, Beginner Menu `37000577592`, Stable Installer `37000577524`, Runner Scope `37000577467`, Archive Integrity `37000577403` PASS; Public main `717fd9e84cbb3bbb947f7f485942af4ce8ff60b5`; post-merge Toolbox `37000742894`, Stable Installer `37000742917`, Current Self Test `37000742928` PASS | **IMPLEMENTED / MACHINE_PASS · PUBLIC_DISTRIBUTED / MENU_3_4_5_FROZEN / OWNER_REAL_USE_PENDING** |
