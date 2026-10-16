@@ -43,7 +43,7 @@ $layout_fixture=static function($raw){
   $raw['moduleSettings']['basic_page']['content_block']['show_page_summary']=$mode!=='hide';
   if($mode==='default')$raw['moduleSettings']['basic_page']['content_block']['show_wordpress_content']=false;
   if($mode==='hide'){$raw['moduleSettings']['basic_page']['content_block']['show_empty_state']=false;$raw['moduleSettings']['basic_page']['content_block']['show_wordpress_content']=false;}
-  if($mode==='basic_custom'){foreach(['cta','related_tools'] as $module)$raw['moduleSettings']['basic_page'][$module]['override']=true;$raw['moduleSettings']['basic_page']['cta']['title']='Owner custom continuation';$raw['moduleSettings']['basic_page']['cta']['description']='Owner custom continuation description';$raw['moduleSettings']['basic_page']['related_tools']['description']='Owner custom related tools description';}
+  if($mode==='basic_custom'){foreach(['cta','tool_grid'] as $module)$raw['moduleSettings']['basic_page'][$module]['override']=true;$raw['moduleSettings']['basic_page']['cta']['title']='Owner custom continuation';$raw['moduleSettings']['basic_page']['cta']['description']='Owner custom continuation description';$raw['moduleSettings']['basic_page']['tool_grid']['description']='Owner custom related tools description';}
   if($mode==='no_paths')$raw['moduleSettings']['html_sitemap']['post_list']['show_sitemap_release_paths']=false;
  }
  return $raw;
