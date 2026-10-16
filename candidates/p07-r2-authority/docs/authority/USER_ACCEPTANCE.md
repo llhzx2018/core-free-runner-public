@@ -17,7 +17,7 @@ P07 User Acceptance                          PARTIAL / NOT_BLANKET_PASS
 release69+ Hardening Owner Real               NOT_RUN
 release85 MariaDB 10.11 new VPS Owner Real     NOT_RUN
 release85 MySQL 8.4 -> MariaDB 10.11 Owner Real NOT_RUN
-System Care rc54 real-mutation workflow        HISTORICAL_FAILURE / R2_FIX_PENDING_PROOF
+System Care rc54 real-mutation workflow        MACHINE_PASS / GitHub-hosted runner 38914624486
 ```
 
 ## Release85 identity and evidence separation · 2026-10-16
@@ -28,7 +28,7 @@ The 2026-10-05 **release68** real 16-site migration remains a genuine historical
 
 Round 1 hardening work is an **unmerged candidate** on product PR #196, with 143/143 isolated exact-source regressions PASS. Candidate PASS does not update released byte identities or Owner Real status.
 
-System Care real-mutation workflow failure on release85 is a distinct CI finding, not an assertion that cleanup actually failed; its release85 workflow checks obsolete success wording. Keep this non-PASS until rerun evidence confirms the corrected workflow.
+System Care rc54 real-mutation workflow previously failed because CI expected retired success wording. The corrected **workflow-only** public main change (PR #2757) ran on GitHub-hosted Ubuntu 24.04 and passed [run 38914624486](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38914624486), including real APT cache cleanup, journal cleanup and negative safety gates. This is independent machine evidence, **not** an Owner VPS approval or a new System Care binary release.
 
 ## Current real Owner result · 2026-10-05
 

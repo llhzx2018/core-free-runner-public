@@ -29,7 +29,7 @@ Release current comes from product `main/BUILD_ID=0.1.0-release85` and the live 
 | R1 MariaDB hardening | product PR #196, unmerged | independent isolated proof [143/143](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38912471080) | **CANDIDATE_MACHINE_PASS / RELEASE_NOT_CHANGED** |
 | P07 Owner real whole product | current | backup/restore/cloud storage/scheduler all capabilities | **PARTIAL / NOT_BLANKET_PASS** |
 
-**Next independent gates**: System Care corrected real-mutation CI proof; R2 authority/identity regression; formal release/upgrade; Owner real MariaDB 10.11 VPS migration. A gate remains NON-PASS until its own evidence is observed.
+**Next independent gates**: R2 authority/identity regression; formal release/upgrade; Owner real MariaDB 10.11 VPS migration. Corrected System Care real-mutation CI is PASS (workflow-only). A gate remains NON-PASS until its own evidence is observed.
 
 ## Historical guided-init16 acceptance layer
 

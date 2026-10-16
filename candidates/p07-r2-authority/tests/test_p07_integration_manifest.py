@@ -151,7 +151,8 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertIn("NOT_RUN", acceptance)
         self.assertIn("## Historical guided-init16 acceptance layer", matrix)
         self.assertIn("HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE", matrix)
-        self.assertIn("REAL_MUTATION_CI_NON_PASS", matrix)
+        self.assertIn("MACHINE_PASS / OWNER_REAL_PARTIAL", matrix)
+        self.assertEqual(self.data["release"]["system_care_real_mutation_ci"], "PASS_WORKFLOW_ONLY_2026-10-16")
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]
