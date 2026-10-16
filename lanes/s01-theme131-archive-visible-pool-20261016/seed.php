@@ -122,7 +122,7 @@ foreach(['en','zh'] as $language){
  for($n=1;$n<=10;$n++){
   $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_author'=>$mixed_author,'post_name'=>'archive-mixed-'.$language.'-'.$n,'post_title'=>'Mixed archive '.$n,'post_content'=>$n<=3?'A complete public article.':$markers[$n%4],'post_excerpt'=>'Original authored excerpt','post_date'=>($n<=3?'2021-01-04':'2021-01-03').' 12:00:00']);pll_set_post_language($id,$language);if($n<=3)$mixed[]=$id;
  }
- $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_author'=>$shell_author,'post_name'=>'archive-shell-only-'.$language,'post_title'=>'Retained shell-only author','post_content'=>'Redirecting...','post_date'=>'2021-01-03 12:00:00']);pll_set_post_language($id,$language);
+ $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_author'=>$shell_author,'post_name'=>'archive-shell-only-'.$language,'post_title'=>'Retained shell-only author','post_content'=>'Redirecting...','post_date'=>'2019-01-03 12:00:00']);pll_set_post_language($id,$language);
  $author_path=wp_parse_url(get_author_posts_url($mixed_author),PHP_URL_PATH);$only_path=wp_parse_url(get_author_posts_url($shell_author),PHP_URL_PATH);
  $archive_cases[$language]['mixed']=['url'=>rtrim($home,'/').'/'.ltrim(preg_replace('#^/zh/#','/',$author_path),'/'),'ids'=>$mixed,'urls'=>array_map('get_permalink',$mixed)];
  $archive_cases[$language]['only_shells']=rtrim($home,'/').'/'.ltrim(preg_replace('#^/zh/#','/',$only_path),'/');

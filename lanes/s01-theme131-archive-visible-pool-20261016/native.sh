@@ -34,12 +34,14 @@ cli eval-file /tmp/seed.php > proof/seed.json
 
 # Warm lazy WordPress defaults before the readonly browser comparison.
 node lane/browser.cjs baseline
+node lane/perf.cjs baseline
 cli eval-file /tmp/state.php > proof/state-cold.json
 node lane/browser.cjs warm
 cli eval-file /tmp/state.php > proof/state-before.json
 cli theme install /tmp/target.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 cli eval-file /tmp/check.php > proof/wordpress.json
+node lane/perf.cjs candidate
 node lane/browser.cjs candidate
 cli eval-file /tmp/state.php > proof/state-candidate.json
 cmp proof/state-before.json proof/state-candidate.json
@@ -75,8 +77,8 @@ curl -fsS http://127.0.0.1:18880/wp-admin/install.php > /tmp/setup-revisit.html
 python3 - <<'PY'
 import os,json,pathlib
 p=pathlib.Path('proof')
-for name in ['wordpress','wordpress-clean','browser-candidate','browser-reapply','browser-clean']:
- f=json.loads((p/(name+'.json')).read_text());assert f['status']=='PASS' and len(f['checks'])>=20 and all(c['pass'] for c in f['checks'])
+for name in ['wordpress','wordpress-clean','browser-candidate','browser-reapply','browser-clean','performance-candidate']:
+ f=json.loads((p/(name+'.json')).read_text());assert f['status']=='PASS' and len(f['checks'])>=(14 if name=='performance-candidate' else 20) and all(c['pass'] for c in f['checks'])
 before=(p/'state-before.json').read_bytes()
 for phase in ['candidate','rollback','reapply','idempotent']:assert before==(p/('state-'+phase+'.json')).read_bytes()
 assert (p/'state-clean-before.json').read_bytes()==(p/'state-clean-after.json').read_bytes()

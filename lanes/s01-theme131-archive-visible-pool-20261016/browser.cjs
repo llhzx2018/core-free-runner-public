@@ -53,6 +53,7 @@ function gate(ok,label,detail){checks.push({pass:!!ok,label,detail});}
   });
   for(const lang of ['en','zh'])await scenario(lang+'-negative-date',async()=>{
    const home=base+(lang==='zh'?'/zh/':'/');
+   gate(await visit(withArgs(home+'2019/',{vf_q:'zz-no-archive-match-9037'}))===404,'shell-only date scope cannot create a filtered-empty public archive',{lang});
    gate(await visit(withArgs(home+'2020/',{vf_q:'Needlescope'}))===404,'missing date archive stays 404 even with a filter',{lang});
    gate(await visit(withArgs(home+'2022/page/9999/',{vf_q:'Needlescope'}))===404,'out-of-range date pagination stays 404',{lang});
    gate(await visit(withArgs(home+'2022/13/03/',{vf_q:'Needlescope'}))===404,'invalid date stays 404',{lang});

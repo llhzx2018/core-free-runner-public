@@ -66,3 +66,6 @@ add_action('template_redirect',static function(){
  if(function_exists('vf_theme_public_runtime_require_template_stack'))vf_theme_public_runtime_require_template_stack();
  get_header();vf_theme_render_module_stack(['route'=>'basicwork','family'=>'basic-page-template','title'=>get_the_title(),'field_data'=>['title'=>get_the_title(),'body'=>'Owner fallback body retained.']],'basic_page');get_footer();exit;
 },0);
+
+add_filter('posts_results', static function($posts,$query){if($query->get('vf_theme_archive_shell_probe')===true){$GLOBALS['archive_probe_batches'][]=['rows'=>count($posts),'offset'=>(int)$query->get('offset')];}return $posts;},10,2);
+add_action('wp_footer',static function(){echo '<!-- archive-probe-batches:'.wp_json_encode($GLOBALS['archive_probe_batches']??[]).' -->';});
