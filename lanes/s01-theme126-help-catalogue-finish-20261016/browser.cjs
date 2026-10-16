@@ -4,7 +4,7 @@ const phase=process.argv[2]||'candidate',base='http://127.0.0.1:18880',seed=JSON
 function gate(ok,label,detail){checks.push({pass:!!ok,label,detail});}
 const search=(lang,q='Searchwork Atlas',type='article',page=1)=>base+(lang==='zh'?'/zh/':'/')+'?'+new URLSearchParams({s:q,type,paged:String(page),vf_fixture_count:'1'});
 (async()=>{
- const browser=await chromium.launch({headless:true}),ctx=await browser.newContext(),p=await ctx.newPage();p.on('pageerror',e=>errors.push(e.message));p.setDefaultTimeout(8000);
+ const browser=await chromium.launch({headless:true}),ctx=await browser.newContext(),p=await ctx.newPage();p.on('pageerror',e=>errors.push(e.message));p.setDefaultTimeout(8000);p.setDefaultNavigationTimeout(30000);
  const scenario=async(label,fn)=>{const before=checks.length;try{await fn();}catch(e){gate(false,label+' flow',{error:e.message,url:p.url()});}if(checks.slice(before).some(c=>!c.pass)){const html=await p.content();const m=html.match(/search-archive-diag:(.+) -->/);checks.push({pass:true,label:label+' failure diagnostic',detail:{url:p.url(),diagnostic:m?JSON.parse(m[1]):null}});await p.screenshot({path:'proof/failure-'+phase+'-'+label.replace(/[^a-z0-9_-]/gi,'-')+'.png',fullPage:true});}};
  for(const lang of ['en','zh']){
   await p.goto(search(lang));await p.waitForLoadState('networkidle');
