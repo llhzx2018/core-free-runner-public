@@ -38,6 +38,12 @@ function gate(ok,label,detail){checks.push({pass:!!ok,label,detail});}
   for(const lang of ['en','zh'])await scenario(lang+'-empty-author',async()=>{
    const status=await visit(withArgs(seed.archives[lang].empty_author));gate(status===200&&await p.locator(scope).count()===1,'existing author with no published content renders an empty archive',{lang,status});if(await p.locator(scope).count()){gate(await cards().count()===0&&(await p.locator(scope+' [data-vf-directory-empty]').innerText()).includes(lang==='zh'?'当前目录暂无内容':'No content'),'unfiltered empty is distinct from a search miss',{lang});gate(!(await p.locator('.vf-theme-system-recovery--archive').innerText()).includes('当前分类'),'empty recovery does not call an author a category',{lang});}
   });
+  for(const lang of ['en','zh'])await scenario(lang+'-negative-date',async()=>{
+   const home=base+(lang==='zh'?'/zh/':'/');
+   gate(await visit(withArgs(home+'2020/',{vf_q:'Needlescope'}))===404,'missing date archive stays 404 even with a filter',{lang});
+   gate(await visit(withArgs(home+'2022/page/9999/',{vf_q:'Needlescope'}))===404,'out-of-range date pagination stays 404',{lang});
+   gate(await visit(withArgs(home+'2022/13/03/',{vf_q:'Needlescope'}))===404,'invalid date stays 404',{lang});
+  });
   for(const lang of ['en','zh'])await scenario(lang+'-desktop',async()=>{
    for(const width of [1920,1440,1319,1024])for(const kind of ['author','month']){
     await p.setViewportSize({width,height:1000});await visit(withArgs(seed.archives[lang][kind].url));const geom=await p.locator(scope).evaluate(el=>({overflow:document.documentElement.scrollWidth>innerWidth+1,rows:[...el.querySelectorAll('.vf-directory-card')].map(x=>({height:x.getBoundingClientRect().height,radius:getComputedStyle(x).borderRadius,shadow:getComputedStyle(x).boxShadow})),form:el.querySelector('form').getBoundingClientRect().width}));gate(!geom.overflow&&geom.rows.every(x=>x.height<240&&x.radius==='0px'&&x.shadow==='none')&&geom.form>350,'archive compact rows and search fit desktop width',{lang,kind,width,...geom});

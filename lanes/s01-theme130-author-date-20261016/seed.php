@@ -90,6 +90,7 @@ foreach(['en','zh'] as $language){
   $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_author'=>$n<=10?$author:$other,'post_name'=>'archivework-'.$language.'-'.$n,'post_title'=>'Archivework '.strtoupper($language).' '.sprintf('%02d',$n).($n%2?' Needlescope':''),'post_content'=>'<p>Original archive body '.$language.' '.$n.' retained.</p>','post_excerpt'=>'Owner archive summary '.$language.' '.$n,'post_date'=>$date.' 12:00:00']);pll_set_post_language($id,$language);$bydate[$date][]=$id;if($n<=10)$ids[]=$id;
  }
  foreach(['draft','private'] as $status){$id=wp_insert_post(['post_type'=>'post','post_status'=>$status,'post_author'=>$author,'post_title'=>'Archivework HIDDEN '.strtoupper($language),'post_content'=>'Must never be a public archive card','post_date'=>'2022-01-03 12:00:00']);pll_set_post_language($id,$language);}
+ $id=wp_insert_post(['post_type'=>'post','post_status'=>'private','post_author'=>$author,'post_title'=>'Archivework HIDDEN PRIVATE ONLY '.strtoupper($language),'post_content'=>'Cannot establish a public date archive','post_date'=>'2020-01-03 12:00:00']);pll_set_post_language($id,$language);
  $home=pll_home_url($language);
  $author_url=(string)get_author_posts_url($author);$empty_url=(string)get_author_posts_url($empty_author);
  $author_path=wp_parse_url($author_url,PHP_URL_PATH);$empty_path=wp_parse_url($empty_url,PHP_URL_PATH);
