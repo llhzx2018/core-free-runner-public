@@ -29,8 +29,8 @@ cli theme activate vf-tools-theme >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
 cli eval-file /tmp/languages.php >/dev/null
 cli eval-file /tmp/mount-seed.php > proof/mounts.json
-cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
+cli eval-file /tmp/seed.php > proof/seed.json
 
 # Warm lazy WordPress defaults before the readonly browser comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
@@ -64,8 +64,8 @@ cli plugin install /tmp/provider.zip --force --activate >/dev/null
 cli plugin install polylang --version=3.8.10 --force --activate >/dev/null
 cli eval-file /tmp/languages.php >/dev/null
 cli eval-file /tmp/mount-seed.php >/dev/null
-cli eval-file /tmp/seed.php > proof/seed.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
+cli eval-file /tmp/seed.php > proof/seed.json
 cli eval-file /tmp/check.php > proof/wordpress-clean.json
 node lane/browser.cjs warm
 cli eval-file /tmp/state.php > proof/state-clean-before.json
