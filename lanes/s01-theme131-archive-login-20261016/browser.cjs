@@ -1,0 +1,73 @@
+'use strict';
+const fs=require('node:fs'),assert=require('node:assert/strict'),{chromium}=require('playwright');
+const phase=process.argv[2]||'candidate',base='http://127.0.0.1:18880',seed=JSON.parse(fs.readFileSync('proof/seed.json')),checks=[],errors=[];
+const titles=(lang,kind)=>kind==='category'?(lang==='zh'?'Archive category ZH 分类':'Archive category EN category'):kind==='tag'?(lang==='zh'?'标签：Archive tag ZH':'Tagged: Archive tag EN'):kind==='author'?(lang==='zh'?'Owner Atlas & Co 的文章':'Articles by Owner Atlas & Co'):kind==='year'?(lang==='zh'?'2022年 发布的内容':'Published in 2022'):kind==='month'?(lang==='zh'?'2022年1月 发布的内容':'Published in January 2022'):(lang==='zh'?'2022年1月3日 发布的内容':'Published on January 3, 2022');
+const withArgs=(url,args={})=>{const u=new URL(url);u.searchParams.set('vf_fixture_count','1');for(const[k,v]of Object.entries(args))u.searchParams.set(k,v);return u.href;};
+function gate(ok,label,detail){checks.push({pass:!!ok,label,detail});}
+(async()=>{
+ const browser=await chromium.launch({headless:true}),ctx=await browser.newContext({viewport:{width:1440,height:1000}}),p=await ctx.newPage();p.setDefaultTimeout(6500);p.on('pageerror',e=>errors.push(e.message));
+ const visit=async(url,page=p)=>{const r=await page.goto(url);await page.waitForLoadState('networkidle');return r.status();};
+ const scope='.vf-theme-post-list--archive_list',cards=()=>p.locator(scope+' .vf-directory-grid a');
+ const scenario=async(label,fn)=>{const start=checks.length;try{await fn();}catch(e){gate(false,label+' flow',{error:e.message,url:p.url()});}if(checks.slice(start).some(x=>!x.pass)){const m=(await p.content()).match(/search-archive-diag:(.+) -->/);gate(true,label+' diagnostic',{diagnostic:m?JSON.parse(m[1]):null});await p.screenshot({path:'proof/failure-'+phase+'-'+label+'.png',fullPage:true});}};
+ if(phase==='baseline'){
+  const observations=[];for(const lang of ['en','zh']){const status=await visit(seed.archives[lang].mixed.url);observations.push({lang,status,rendered:await cards().count(),total:await p.locator('[data-vf-archive-total]').innerText(),next:await p.locator(scope+' .pagination .next').count()});const next=p.locator(scope+' .pagination .next');if(await next.count()){await next.click();await p.waitForLoadState('networkidle');observations.push({lang,page_two_cards:await cards().count(),page_two_text:await p.locator(scope).innerText()});}}
+  fs.writeFileSync('proof/baseline-observation.json',JSON.stringify({status:'OBSERVED',version:'1.35.130',observations},null,2));await browser.close();return;
+ }
+ if(phase==='warm'){await visit(base+'/');await visit(base+'/zh/');}
+ if(phase!=='warm'){
+  for(const lang of ['en','zh'])for(const kind of ['author','year','month','day','category','tag'])await scenario(lang+'-'+kind,async()=>{
+   const row=seed.archives[lang][kind],url=withArgs(row.url);gate(await visit(url)===200,'archive first page resolves',{lang,kind});
+   gate(await p.locator('main h1').count()===1&&(await p.locator('main h1').innerText())===titles(lang,kind),'one scope-specific archive heading',{lang,kind});
+   gate(await cards().count()===3,'saved page count enforced',{lang,kind});
+   gate(await p.locator('[data-vf-archive-total]').innerText()===String(row.ids.length),'unfiltered total is real complete archive count',{lang,kind});
+   gate(await p.locator(scope+' .vf-directory-toolbar-actions:visible').count()===0&&await p.locator(scope+' .vf-directory-more:visible').count()===0,'inactive archive controls remain hidden',{lang,kind});
+   const seen=[];for(let n=0;n<10;n++){seen.push(...await cards().evaluateAll(a=>a.map(x=>x.href)));const more=p.locator(scope+' .pagination .next');if(!await more.count())break;gate(await more.getAttribute('href')!==p.url(),'next page changes target',{lang,kind});await more.click();await p.waitForLoadState('networkidle');gate(await p.locator(scope+' .pagination .current').count()===1,'one current archive page',{lang,kind});}
+   gate(seen.length===row.urls.length&&new Set(seen).size===seen.length&&seen.every(x=>row.urls.includes(x)),'all and only correct author/date/language posts are reachable',{lang,kind,seen:seen.length,expected:row.urls.length,actual_urls:seen,expected_urls:row.urls});
+   gate(!(await p.locator(scope).innerText()).includes('HIDDEN')&&!(await p.locator(scope).innerText()).includes(lang==='zh'?'Archivework EN':'Archivework ZH'),'draft/private and other language remain excluded',{lang,kind});
+   await visit(url);await p.locator(scope+' .pagination .next').click();await p.waitForLoadState('networkidle');const form=p.locator(scope+' form');gate(!/\/page\/\d+/.test(await form.getAttribute('action')),'page-two search targets the same scope page one',{lang,kind});
+   await form.locator('input[type="search"]').fill('Needlescope');await form.locator('.vf-directory-submit').click();await p.waitForLoadState('networkidle');
+   gate((await p.locator('main h1').innerText())===titles(lang,kind)&&!/\/page\/\d+/.test(new URL(p.url()).pathname),'search retains scope and resets pagination',{lang,kind});
+   gate((await p.locator('.vf-archive-context-facts').innerText()).includes(lang==='zh'?'匹配内容':'Matching'),'filtered count is labelled as matching',{lang,kind});
+   const expected=row.urls.filter(x=>{const m=new URL(x).pathname.match(/archivework-(?:en|zh)-(\d+)/);return m&&Number(m[1])%2;});const filtered=[];for(let n=0;n<10;n++){filtered.push(...await cards().evaluateAll(a=>a.map(x=>x.href)));const next=p.locator(scope+' .pagination .next');if(!await next.count())break;await next.click();await p.waitForLoadState('networkidle');gate(new URL(p.url()).searchParams.get('vf_q')==='Needlescope','archive pagination retains keyword',{lang,kind});}
+   gate(filtered.length===expected.length&&new Set(filtered).size===filtered.length&&filtered.every(x=>expected.includes(x)),'whole-archive matching crosses pages without scope leaks',{lang,kind,filtered:filtered.length,expected:expected.length});
+   await visit(withArgs(row.url,{vf_q:'Bodyonlyneedle'}));gate(await p.locator(scope+' .vf-directory-grid a:visible').count()===1&&(await p.locator(scope+' .vf-directory-grid a').first().getAttribute('href')).includes('archivework-'+lang+'-1/'),'native body-only match remains visible with authored excerpt',{lang,kind});
+   const emptyStatus=await visit(withArgs(row.url,{vf_q:'zz-no-archive-match-9037'}));gate(emptyStatus===200&&await p.locator(scope).count()===1&&(await p.locator('main h1').allTextContents()).includes(titles(lang,kind)),'filtered empty keeps archive and exact scope identity',{lang,kind,status:emptyStatus,h1:await p.locator('main h1').allTextContents()});
+   if(await p.locator(scope).count()){
+    gate(await cards().count()===0&&(await p.locator(scope+' [data-vf-directory-empty]').innerText()).includes(lang==='zh'?'没有匹配':'No matching'),'filtered zero is truthful and has no unrelated fallback',{lang,kind});
+    await p.locator(scope+' a.vf-directory-reset').click();await p.waitForLoadState('networkidle');gate(!new URL(p.url()).searchParams.has('vf_q')&&(await p.locator('main h1').innerText())===titles(lang,kind)&&await cards().count()>0,'clear returns to the same archive',{lang,kind});
+   }
+  });
+  for(const lang of ['en','zh'])await scenario(lang+'-mixed',async()=>{
+   const row=seed.archives[lang].mixed;gate(await visit(row.url)===200,'production-shaped mixed author resolves',{lang});
+   gate(await cards().count()===3&&await p.locator('[data-vf-archive-total]').innerText()==='3','3 public articles and 7 retained shells count as 3 visible records',{lang});
+   gate(await p.locator(scope+' .pagination').count()===0&&await p.locator(scope+' [data-vf-content-result-count]').innerText()==='3','no phantom next page or false page count',{lang});
+   gate((await cards().evaluateAll(a=>a.map(x=>x.href))).every(x=>row.urls.includes(x)),'mixed author renders all and only real articles',{lang});
+   await p.screenshot({path:'proof/mixed-'+phase+'-'+lang+'.png',fullPage:true});
+   const only=seed.archives[lang].only_shells;gate(await visit(only)===200,'existing shell-only author stays a real empty author',{lang});
+   gate(await cards().count()===0&&await p.locator('[data-vf-archive-total]').innerText()==='0','shell-only author has zero count and zero cards',{lang});
+   const empty=await p.locator(scope+' [data-vf-directory-empty]').innerText();gate(empty.includes(lang==='zh'?'当前目录暂无内容':'No content in this directory yet')&&!empty.includes('No matching'),'unfiltered empty never claims a keyword miss',{lang,empty});
+   gate(await p.locator(scope+' .pagination').count()===0,'empty author has no phantom pagination',{lang});
+  });
+  for(const lang of ['en','zh'])await scenario(lang+'-empty-author',async()=>{
+   const status=await visit(withArgs(seed.archives[lang].empty_author));gate(status===200&&await p.locator(scope).count()===1,'existing author with no published content renders an empty archive',{lang,status});if(await p.locator(scope).count()){gate(await cards().count()===0&&(await p.locator(scope+' [data-vf-directory-empty]').innerText()).includes(lang==='zh'?'当前目录暂无内容':'No content'),'unfiltered empty is distinct from a search miss',{lang});gate(!(await p.locator('.vf-theme-system-recovery--archive').innerText()).includes('当前分类'),'empty recovery does not call an author a category',{lang});}
+  });
+  for(const lang of ['en','zh'])await scenario(lang+'-negative-date',async()=>{
+   const home=base+(lang==='zh'?'/zh/':'/');
+   gate(await visit(withArgs(home+'2019/',{vf_q:'zz-no-archive-match-9037'}))===404,'shell-only date scope cannot create a filtered-empty public archive',{lang});
+   gate(await visit(withArgs(home+'2020/',{vf_q:'Needlescope'}))===404,'missing date archive stays 404 even with a filter',{lang});
+   gate(await visit(withArgs(home+'2022/page/9999/',{vf_q:'Needlescope'}))===404,'out-of-range date pagination stays 404',{lang});
+   gate(await visit(withArgs(home+'2022/13/03/',{vf_q:'Needlescope'}))===404,'invalid date stays 404',{lang});
+  });
+  for(const lang of ['en','zh'])await scenario(lang+'-desktop',async()=>{
+   for(const width of [1920,1440,1319,1024])for(const kind of ['author','month']){
+    await p.setViewportSize({width,height:1000});await visit(withArgs(seed.archives[lang][kind].url));const geom=await p.locator(scope).evaluate(el=>({overflow:document.documentElement.scrollWidth>innerWidth+1,rows:[...el.querySelectorAll('.vf-directory-card')].map(x=>({height:x.getBoundingClientRect().height,radius:getComputedStyle(x).borderRadius,shadow:getComputedStyle(x).boxShadow})),form:el.querySelector('form').getBoundingClientRect().width}));gate(!geom.overflow&&geom.rows.every(x=>x.height<240&&x.radius==='0px'&&x.shadow==='none')&&geom.form>350,'archive compact rows and search fit desktop width',{lang,kind,width,...geom});
+    if(width===1440)await p.screenshot({path:'proof/'+kind+'-'+phase+'-'+lang+'.png',fullPage:true});
+   }
+  });
+  await scenario('nojs',async()=>{const nc=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nc.newPage();n.setDefaultTimeout(6500);for(const lang of ['en','zh'])for(const kind of ['author','year','month','day','category','tag']){await visit(withArgs(seed.archives[lang][kind].url),n);await n.locator(scope+' .pagination .next').click();await n.waitForLoadState('networkidle');await n.locator(scope+' form input[type="search"]').fill('Needlescope');await n.locator(scope+' form .vf-directory-submit').click();await n.waitForLoadState('networkidle');gate((await n.locator('main h1').innerText())===titles(lang,kind)&&await n.locator(scope+' .vf-directory-grid a').count()>0,'native archive search and pagination work without JS',{lang,kind});await n.locator(scope+' a.vf-directory-reset').click();await n.waitForLoadState('networkidle');gate(!new URL(n.url()).searchParams.has('vf_q'),'native archive clear works without JS',{lang,kind});}for(const lang of ['en','zh']){await visit(seed.archives[lang].mixed.url,n);gate(await n.locator(scope+' .vf-directory-grid a').count()===3&&await n.locator('[data-vf-archive-total]').innerText()==='3'&&await n.locator(scope+' .pagination').count()===0,'mixed visibility counts and pagination agree without JavaScript',{lang});await visit(seed.archives[lang].only_shells,n);gate((await n.locator(scope+' [data-vf-directory-empty]').innerText()).includes(lang==='zh'?'当前目录暂无内容':'No content in this directory yet'),'shell-only empty copy is truthful without JavaScript',{lang});}await nc.close();});
+  await scenario('guide-regression',async()=>{for(const lang of ['en','zh']){const path=base+(lang==='zh'?'/zh/':'/')+'guides/?vf_fixture_pages=guide';gate(await visit(path)===200&&await p.locator('.vf-theme-post-list--guide_index .vf-directory-grid a').count()===3,'guide first page retained',{lang});await p.locator('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next').click();await p.waitForLoadState('networkidle');gate(await p.locator('.vf-theme-post-list--guide_index .vf-directory-grid a').count()===3&&!/\/page\/\d/.test(new URL(p.url()).pathname),'Theme129 guide pagination correction retained',{lang});}});
+  gate(errors.length===0,'no uncaught browser errors',errors);
+ }
+ const admin=await ctx.newPage(),dest=base+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout';await admin.goto(base+'/wp-login.php?redirect_to='+encodeURIComponent(dest));await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto(dest);await admin.waitForLoadState('networkidle');gate(await admin.locator('[data-vf-frontend-pages]').count()===1,'actual admin login and existing frontend directory remain available');await admin.close();
+ const failed=checks.filter(c=>!c.pass);fs.writeFileSync('proof/browser-'+phase+'.json',JSON.stringify({status:failed.length?'FAIL':'PASS',phase,checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED'},null,2));await browser.close();assert(!failed.length,JSON.stringify(failed));
+})().catch(e=>{fs.writeFileSync('proof/browser-'+phase+'-failure.json',JSON.stringify({status:'FAIL',error:e.message,checks,errors},null,2));console.error(e);process.exit(1)});
