@@ -277,7 +277,7 @@ exit 0
         )
         self._write_executable("ssh", ssh)
         self._write_executable("ssh-copy-id", f"#!/usr/bin/env bash\ntouch '{marker}'\nexit 0\n")
-        proc = self._run("5\n1\n203.0.113.10\nn\n0\n0\n")
+        proc = self._run("5\n1\n203.0.113.10\ny\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("这台新服务器还没有旧服务器的远程登录权限（SSH 密钥）", proc.stdout)
         self.assertIn("如果系统询问 root 密码，请输入“旧服务器”的 root 密码", proc.stdout)
@@ -302,7 +302,7 @@ exit 0
     def test_migration_target_collision_fails_during_new_server_plan(self) -> None:
         self._ready_ssh()
         proc = self._run(
-            "5\n1\n203.0.113.10\n\n0\n0\n",
+            "5\n1\n203.0.113.10\ny\n\n0\n0\n",
             {"VFOPS_TEST_MIGRATION_PLAN": "conflict"},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -313,9 +313,19 @@ exit 0
         self.assertIn("server-migrate plan --source-ip 203.0.113.10", log)
         self.assertNotIn("server-migrate prepare", log)
 
+    def test_migration_plan_rejects_temporary_old_host_helper_when_not_consented(self) -> None:
+        self._ready_ssh()
+        proc = self._run("5\n1\n203.0.113.10\nn\n0\n0\n")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("允许此次在旧服务器临时放置并清理辅助程序？", proc.stdout)
+        self.assertIn("已取消，旧服务器没有执行临时辅助程序写入", proc.stdout)
+        log = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("server-migrate plan", log)
+        self.assertNotIn("server-migrate prepare", log)
+
     def test_migration_ready_shows_pull_plan_and_dns_boundary(self) -> None:
         self._ready_ssh()
-        proc = self._run("5\n1\n203.0.113.10\ny\nn\n0\n0\n")
+        proc = self._run("5\n1\n203.0.113.10\ny\ny\nn\n0\n0\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("服务器迁移", proc.stdout)
         self.assertIn("当前：这台新服务器（接收数据）", proc.stdout)
